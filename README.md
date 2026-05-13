@@ -2,7 +2,9 @@
   <img src="assets/pggraph-banner.png" alt="pgGraph Banner" />
 </p>
 
-<h1 align="center">pgGraph</h1>
+<h1 align="center">pgGraph    <a href="https://docs.evokoa.com/pggraph/user_guide">
+    <img src="https://img.shields.io/badge/docs-pgGraph-0ea5e9?style=flat-square" alt="pgGraph documentation">
+  </a></h1>
 
 <p align="center">
   <strong>Graph database superpowers for your existing Postgres data.</strong>
@@ -24,9 +26,6 @@
 </p>
 
 <p align="center">
-  <a href="https://docs.evokoa.com/pggraph/user_guide">
-    <img src="https://img.shields.io/badge/docs-pgGraph-0ea5e9?style=flat-square" alt="pgGraph documentation">
-  </a>
   <a href="https://github.com/evokoa/pggraph/issues">
     <img src="https://img.shields.io/github/issues/evokoa/pggraph?style=flat-square&logo=github&label=issues" alt="GitHub issues">
   </a>
@@ -39,18 +38,31 @@
 </p>
 
 <p align="center">
-  <a href="https://evokoa.com">
-    <img src="https://img.shields.io/badge/built%20by-Evokoa-ff6b35?style=flat-square" alt="Built by Evokoa">
+  <a href="https://evokoa.com" target="_blank" rel="noreferrer">
+  <img
+    src="https://img.shields.io/badge/Built%20by-Evokoa-ff6b35?style=for-the-badge"
+    alt="Built by Evokoa"
+  >
   </a>
-  <a href="https://x.com/evokoa_ai">
-    <img src="https://img.shields.io/badge/X-follow-000000?style=flat-square&logo=x&logoColor=white" alt="Follow on X">
+  <a href="https://x.com/evokoa_ai" target="_blank" rel="noreferrer">
+    <img
+      src="https://img.shields.io/badge/Follow%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white"
+      alt="Follow on X"
+    >
   </a>
-<a class="footer-discord-badge" href="https://discord.gg/GnHR8ezuwG" target="_blank" rel="noreferrer" aria-label="Join the Evokoa Discord"><img src="https://img.shields.io/discord/1496159762704896022?label=Discord&amp;logo=discord&amp;logoColor=white&amp;color=5865F2" alt="Evokoa Discord member count" width="118" height="20"></a>
-  <a href="https://www.producthunt.com/@evokoa">
-    <img src="https://img.shields.io/badge/Product%20Hunt-follow-DA552E?style=flat-square&logo=product-hunt&logoColor=white" alt="Follow on Product Hunt">
+  <a href="https://discord.gg/GnHR8ezuwG" target="_blank" rel="noreferrer">
+    <img
+      src="https://img.shields.io/discord/1496159762704896022?style=for-the-badge&label=Join%20Discord&logo=discord&logoColor=white&color=5865F2"
+      alt="Join the Evokoa Discord"
+    >
+  </a>
+  <a href="https://www.producthunt.com/@evokoa" target="_blank" rel="noreferrer">
+    <img
+      src="https://img.shields.io/badge/Follow%20on%20Product%20Hunt-DA552E?style=for-the-badge&logo=product-hunt&logoColor=white"
+      alt="Follow on Product Hunt"
+    >
   </a>
 </p>
-
 pgGraph is a PostgreSQL extension for running graph search, traversal, shortest
 path, and relationship queries directly against ordinary PostgreSQL tables.
 
