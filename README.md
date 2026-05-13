@@ -138,6 +138,77 @@ More information is available in the pgGraph docs:
 **[Querying](https://docs.evokoa.com/pggraph/user_guide/querying)** ·
 **[SQL API](https://docs.evokoa.com/pggraph/user_guide/api-reference)**
 
+## pgGraph: High-Speed Graph Execution Inside PostgreSQL
+
+pgGraph is not "Postgres plus graph syntax." It is a blazing-fast,
+cache-friendly graph execution layer for data that already lives in your
+ordinary relational tables.
+
+The core idea is simple but powerful: keep PostgreSQL as your system of record,
+but build a highly optimized, read-heavy graph runtime from that relational
+metadata. The result is closer to a graph index than a graph database, built
+from Postgres tables, operated with Postgres controls, but traversing
+relationships at memory speed.
+
+### The Tech: Why It's So Fast
+
+Graph traversals usually die on recursive SQL queries or endless joins. pgGraph
+bypasses this by compiling your relational data into a specialized memory
+structure.
+
+- **O(1) adjacency via CSR.** `graph.build()` compiles your relationships into
+  forward and reverse compressed sparse row (CSR) edge stores. A node's
+  neighbors are stored as a contiguous array slice. Instead of rediscovering
+  relationships via SQL, traversals are executed as raw, graph-native memory
+  scans.
+- **A blazing-fast hot loop.** SQL-facing calls resolve coordinates, labels,
+  filters, and tenant scopes before entering the traversal loop. Once inside,
+  the engine streams CSR neighbors, checking compact `u8` edge-label IDs,
+  typed `FilterIndex` values, tenant bitmaps, active bits, and sync overlays.
+- **The OS is the cache (`mmap`).** We do not use a slow, shared Rust heap.
+  Persisted `.pggraph` artifacts are written atomically. When a new Postgres
+  backend spins up, it validates and mmaps the forward graph arrays and
+  resolution index. The graph cache is powered by the OS page cache, letting
+  isolated PostgreSQL backends start quickly without copying the base graph into
+  a shared extension heap.
+- **Predictable and safe.** Unbounded graph expansion can crash a database.
+  pgGraph includes explicit circuit breakers: depth limits, visited-node
+  tracking, frontier limits, pagination, and strict OOM/memory safeguards.
+
+### PostgreSQL Remains Authoritative
+
+Your application data does not move. Source tables, constraints, indexes, ACLs,
+RLS, backups, and app writes remain 100% standard PostgreSQL concerns.
+
+pgGraph is strictly derived state. You run the algorithms over internal node
+indexes, and the engine returns source table coordinates or hydrates the raw
+PostgreSQL rows on the fly. Build, sync, vacuum, and maintenance operations are
+fully visible and SQL-callable.
+
+### How pgGraph Compares
+
+#### vs. Apache AGE: Execution Layer vs. Storage Layer
+
+Apache AGE is a property graph database inside Postgres. It uses graph
+namespaces, vertex and edge tables, `agtype`, and openCypher.
+
+pgGraph does not ask you to move your data or learn Cypher. You keep your
+existing schema and accelerate it with SQL functions like `graph.search()` and
+`graph.shortest_path()`. Use AGE for a dedicated property graph model; use
+pgGraph to add bounded, high-speed graph traversal to an existing relational
+schema.
+
+#### vs. PostgreSQL 19 SQL/PGQ: Runtime Engine vs. Language Syntax
+
+SQL:2023 and PostgreSQL 19 introduce `CREATE PROPERTY GRAPH`, `GRAPH_TABLE`,
+and standard graph syntax. This is a language interoperability layer that
+rewrites graph pattern queries into ordinary relational queries.
+
+pgGraph is an execution layer. It precomputes graph-native CSR stores and
+memory-mapped artifacts to fundamentally change how the query executes. They
+are complementary: future adapters could map PostgreSQL 19 syntax directly onto
+pgGraph's runtime.
+
 ## Community
 
 pgGraph is built by [Evokoa](https://evokoa.com). 
