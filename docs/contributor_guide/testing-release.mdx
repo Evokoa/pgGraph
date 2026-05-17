@@ -193,6 +193,28 @@ PG_VERSION_FEATURE=pg17 DBNAME=pggraph_pgbench CLIENTS=16 JOBS=4 TIME=120 \
 `RATE` keeps the workload bounded so the release gate measures sync behavior
 instead of turning `graph.apply_sync()` into an accidental soak test.
 
+### Read Latency Under Sync Backlog
+
+`read_latency_under_sync.sh` captures baseline read latency before changing
+query-time sync semantics. It builds a line graph, enables trigger sync, then
+records p50/p95/p99 latency for traversal, shortest path, and weighted shortest
+path reads across four scenarios: no pending sync, a small pending backlog, a
+large pending backlog, and concurrent writers appending to `graph._sync_log`.
+
+Useful knobs:
+
+```bash
+cd graph
+DBNAME=pggraph_read_latency NODE_COUNT=10000 SAMPLES=25 \
+  SMALL_BACKLOG=100 LARGE_BACKLOG=5000 CLIENTS=4 JOBS=2 TIME=30 RATE=100 \
+  ./tests/heavy/read_latency_under_sync.sh
+```
+
+The script writes `read-latency-samples.csv` and
+`read-latency-summary.csv` in the current directory. Keep those outputs with
+milestone evidence when deciding whether topology-read auto-sync can become the
+default.
+
 ### Crash Recovery
 
 `crash_recovery.sh` must run only against a disposable PostgreSQL instance. It

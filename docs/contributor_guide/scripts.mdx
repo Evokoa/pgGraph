@@ -177,6 +177,7 @@ concurrency, memory, and synthetic release evidence.
 | `function_metadata_audit.sh` | SQL metadata contract check | Audits SQL function volatility, security, cost, rows, and parallel-safety metadata. |
 | `run_sqlstate_acl_boundary.sh` | Client-visible errors and ACLs | Runs `sqlstate_acl_boundary.sql` through `psql` and asserts SQLSTATE/role behavior at the client boundary. |
 | `run_pgbench_sync.sh` | Trigger sync stress | Uses `pgbench_sync.sql` to drive concurrent DML and validate explicit sync apply behavior. |
+| `read_latency_under_sync.sh` | Read-latency baseline | Measures traversal and path p50/p95/p99 latency with no backlog, pending sync backlog, and concurrent sync writers. |
 | `backup_restore_validate.sh` | Dump/restore behavior | Validates source tables, graph catalog state, sync state, and persisted graph behavior across backup and restore. |
 | `pg_upgrade_validate.sh` | Upgrade compatibility | Runs `pg_upgrade --check` for a database containing pgGraph. |
 | `crash_recovery.sh` | Disposable-cluster crash behavior | Kills a disposable postmaster, restarts it, checks persisted graph reload, and verifies corrupt artifact rejection. |
