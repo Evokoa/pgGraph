@@ -87,9 +87,11 @@ that was pending when the call started; the bound is an internal memory and
 latency control, not a change to the public admin contract.
 
 `graph.query_freshness = 'apply_pending_sync'` opts wired topology reads into the
-same high-water replay primitive before they execute. The current rollout wires
-single-start `graph.traverse()` first; other topology read entrypoints remain on
-the compatibility path until the broader rollout stage.
+same high-water replay primitive before they execute. The wired topology-read
+entrypoints are traversal variants, shortest-path queries, weighted shortest-path
+queries, component APIs, and `graph.traverse_search()` before its traversal
+phase. `graph.search()` remains separate because it reads source-table
+properties through SQL rather than graph topology.
 
 ## Node Changes
 

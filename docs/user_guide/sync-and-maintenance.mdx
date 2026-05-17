@@ -89,9 +89,12 @@ while auto-sync rollout continues.
 | `apply_pending_sync` | Opted-in topology reads apply rows up to a captured `_sync_log` high-water mark before reading. |
 | `error_on_pending` | Opted-in topology reads fail when pending sync rows exist. |
 
-At this stage, only the single-start `graph.traverse()` path is wired through
-the opt-in freshness helper. `graph.apply_sync()` remains the explicit
-operator/admin path for all pending sync rows.
+The opted-in topology reads are `graph.traverse()` variants, shortest-path
+queries, weighted shortest-path queries, component APIs, and
+`graph.traverse_search()` before it traverses from search matches. Primitive
+`graph.search()` remains source-table SQL search and does not use the topology
+freshness helper. `graph.apply_sync()` remains the explicit operator/admin path
+for all pending sync rows.
 
 ## Edge Buffer Limits
 

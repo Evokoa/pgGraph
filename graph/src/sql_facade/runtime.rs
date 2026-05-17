@@ -27,7 +27,7 @@ fn reset() {
 fn largest_component_id() -> safety::GraphResult<i64> {
     check_enabled_result()?;
     require_graph_admin_result()?;
-    ensure_current_graph()?;
+    ensure_current_graph_for_query(current_query_freshness()?)?;
     ENGINE.with(|e| {
         let eng = e.borrow();
         let cc_result = eng.connected_components()?;
@@ -58,7 +58,7 @@ fn component_rows(
     }
     check_enabled_result()?;
     require_graph_admin_result()?;
-    ensure_current_graph()?;
+    ensure_current_graph_for_query(current_query_freshness()?)?;
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
 

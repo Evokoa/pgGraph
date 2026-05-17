@@ -123,7 +123,8 @@ fn traverse_many(
 > {
     with_panic_boundary("traverse_many()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let tenant_scope =
             resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
         if start_tables.len() != start_ids.len() {
@@ -206,7 +207,8 @@ fn shortest_path(
         acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
         acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
 
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let steps = ENGINE
             .with(|e| {
@@ -259,7 +261,8 @@ fn weighted_shortest_path(
         acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
         acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
 
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();

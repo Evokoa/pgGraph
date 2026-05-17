@@ -22,7 +22,8 @@ fn connected_components() -> Result<
     with_panic_boundary("connected_components()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
@@ -70,7 +71,8 @@ fn component_stats() -> Result<
     with_panic_boundary("component_stats()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let result = ENGINE.with(|e| {
             let eng = e.borrow();
@@ -123,7 +125,8 @@ fn components(
     with_panic_boundary("components()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
@@ -244,7 +247,8 @@ fn isolated_nodes(
     with_panic_boundary("isolated_nodes()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let row_offset =
             usize_from_nonnegative(row_offset, "row_offset").unwrap_or_else(|err| err.report());
         let max_rows =

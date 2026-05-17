@@ -638,6 +638,267 @@ fn traverse_auto_sync_replay_error_fails_closed() {
 }
 
 #[pg_test]
+fn topology_reads_auto_sync_remaining_entrypoints() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SET graph.query_freshness = 'apply_pending_sync'")
+        .expect("set query freshness failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_topology_auto_sync_pgtest CASCADE")
+        .expect("drop topology auto sync table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_topology_auto_sync_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_topology_auto_sync_pgtest(id),
+                name TEXT NOT NULL,
+                cost INT NOT NULL DEFAULT 1
+            )",
+    )
+    .expect("create topology auto sync table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES
+                ('root', NULL, 'Root', 0),
+                ('base-child', 'root', 'Base Child', 3)",
+    )
+    .expect("insert topology base rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id', 'cost']
+            )",
+    )
+    .expect("add topology table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                from_column := 'parent_id',
+                to_table := 'graph_test_topology_auto_sync_pgtest'::regclass,
+                to_column := 'id',
+                label := 'parent',
+                bidirectional := true,
+                weight_column := 'cost'
+            )",
+    )
+    .expect("add topology edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+
+    let base_component_count = Spi::get_one::<i64>("SELECT count(*) FROM graph.components()")
+        .expect("base components failed")
+        .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('multi-start-child', 'root', 'Multi Start Child', 7)",
+    )
+    .expect("insert pending multi-start child failed");
+    let multi_start_sees_child = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                ARRAY['graph_test_topology_auto_sync_pgtest'::regclass],
+                ARRAY['multi-start-child'::text],
+                0,
+                hydrate := false
+             )
+             WHERE node_id = 'multi-start-child'",
+    )
+    .expect("multi-start traverse failed")
+    .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('shortest-node', NULL, 'Shortest Node', 1)",
+    )
+    .expect("insert pending shortest node failed");
+    let shortest_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.shortest_path(
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                'shortest-node',
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                'shortest-node',
+                20,
+                hydrate := false
+             )",
+    )
+    .expect("shortest path failed")
+    .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('weighted-node', NULL, 'Weighted Node', 1)",
+    )
+    .expect("insert pending weighted node failed");
+    let weighted_cost = Spi::get_one::<i32>(
+        "SELECT total_cost
+             FROM graph.weighted_shortest_path(
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                'weighted-node',
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                'weighted-node'
+             )",
+    )
+    .expect("weighted path failed")
+    .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('stats-node', NULL, 'Stats Node', 1)",
+    )
+    .expect("insert pending stats node failed");
+    let total_active_nodes = Spi::get_one::<i32>("SELECT total_active_nodes FROM graph.component_stats()")
+        .expect("component stats failed")
+        .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('connected-node', NULL, 'Connected Node', 1)",
+    )
+    .expect("insert pending connected node failed");
+    let connected_components_sees_node = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.connected_components()
+             WHERE node_id = 'connected-node'
+               AND component_size = 1",
+    )
+    .expect("connected_components failed")
+    .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('summary-node', NULL, 'Summary Node', 1)",
+    )
+    .expect("insert pending summary node failed");
+    let component_count_after_isolate = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.components()",
+    )
+    .expect("components failed")
+    .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('isolated-node', NULL, 'Isolated Node', 1)",
+    )
+    .expect("insert pending isolated node failed");
+    let isolated_nodes_sees_node = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.isolated_nodes(hydrate := false)
+             WHERE node_id = 'isolated-node'",
+    )
+    .expect("isolated_nodes failed")
+    .unwrap_or(0);
+
+    let root_component_id = Spi::get_one::<i64>(
+        "SELECT component_id
+             FROM graph.connected_components()
+             WHERE node_id = 'root'",
+    )
+    .expect("root component lookup failed")
+    .expect("root component id missing");
+    let child_component_rows = Spi::get_one::<i64>(
+        &format!(
+            "SELECT count(*)
+                 FROM graph.component({root_component_id}, hydrate := false)
+                 WHERE node_id = 'root'"
+        ),
+    )
+    .expect("component failed")
+    .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('search-node', NULL, 'Search Node', 1)",
+    )
+    .expect("insert pending search node failed");
+    let traverse_search_sees_child = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse_search(
+                'name',
+                'Search Node',
+                table_filter := 'graph_test_topology_auto_sync_pgtest'::regclass,
+                search_mode := 'exact',
+                max_depth := 0,
+                hydrate := false
+             )
+             WHERE node_id = 'search-node'",
+    )
+    .expect("traverse_search failed")
+    .unwrap_or(0);
+
+    assert_eq!(multi_start_sees_child, 1);
+    assert_eq!(shortest_rows, 1);
+    assert_eq!(weighted_cost, 0);
+    assert_eq!(total_active_nodes, 6);
+    assert_eq!(connected_components_sees_node, 1);
+    assert!(component_count_after_isolate > base_component_count);
+    assert_eq!(isolated_nodes_sees_node, 1);
+    assert_eq!(child_component_rows, 1);
+    assert_eq!(traverse_search_sees_child, 1);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('error-node', NULL, 'Error Node', 1)",
+    )
+    .expect("insert pending error node failed");
+    Spi::run("SET graph.query_freshness = 'error_on_pending'")
+        .expect("set error_on_pending failed");
+    assert!(sql_raises(
+        "SELECT * FROM graph.traverse(
+            ARRAY['graph_test_topology_auto_sync_pgtest'::regclass],
+            ARRAY['error-node'::text],
+            0,
+            hydrate := false
+         )"
+    ));
+    assert!(sql_raises(
+        "SELECT * FROM graph.shortest_path(
+            'graph_test_topology_auto_sync_pgtest'::regclass,
+            'error-node',
+            'graph_test_topology_auto_sync_pgtest'::regclass,
+            'error-node',
+            20,
+            hydrate := false
+         )"
+    ));
+    assert!(sql_raises(
+        "SELECT * FROM graph.weighted_shortest_path(
+            'graph_test_topology_auto_sync_pgtest'::regclass,
+            'error-node',
+            'graph_test_topology_auto_sync_pgtest'::regclass,
+            'error-node'
+         )"
+    ));
+    assert!(sql_raises("SELECT * FROM graph.component_stats()"));
+    assert!(sql_raises("SELECT * FROM graph.connected_components()"));
+    assert!(sql_raises("SELECT * FROM graph.components()"));
+    assert!(sql_raises("SELECT * FROM graph.isolated_nodes(hydrate := false)"));
+    assert!(sql_raises("SELECT * FROM graph.largest_component(hydrate := false)"));
+    assert!(sql_raises(&format!(
+        "SELECT * FROM graph.component({root_component_id}, hydrate := false)"
+    )));
+    assert!(sql_raises(
+        "SELECT * FROM graph.traverse_search(
+            'name',
+            'Error Node',
+            table_filter := 'graph_test_topology_auto_sync_pgtest'::regclass,
+            search_mode := 'exact',
+            max_depth := 0,
+            hydrate := false
+         )"
+    ));
+    assert!(!sql_raises(
+        "SELECT * FROM graph.search(
+            'name',
+            'Error Node',
+            table_filter := 'graph_test_topology_auto_sync_pgtest'::regclass,
+            mode := 'exact'
+         )"
+    ));
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+}
+
+#[pg_test]
 fn tenant_scope_filters_search_and_traversal() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
