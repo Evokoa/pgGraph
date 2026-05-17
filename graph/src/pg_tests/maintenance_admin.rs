@@ -201,6 +201,39 @@ fn apply_sync_drains_trigger_log_across_multiple_batches() {
 }
 
 #[pg_test]
+fn apply_sync_until_stops_at_captured_high_watermark() {
+    reset_and_create_fixtures();
+    super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)
+        .expect("insert registered users table failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+             VALUES ('before-high-water', 'Before', 1)",
+    )
+    .expect("insert before high-water row failed");
+    let high_water = Spi::get_one::<i64>("SELECT max(id) FROM graph._sync_log")
+        .expect("sync max id failed")
+        .unwrap_or(0);
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+             VALUES ('after-high-water', 'After', 2)",
+    )
+    .expect("insert after high-water row failed");
+
+    let stats = super::sql_sync::apply_sync_until(Some(high_water), 10)
+        .expect("apply until high-water failed");
+    let applied = Spi::get_one::<i64>("SELECT applied_sync_id FROM graph.status()")
+        .expect("status failed")
+        .unwrap_or(0);
+    let pending = super::sql_sync::pending_sync_rows(applied).expect("pending read failed");
+
+    assert_eq!(stats.inserts, 1);
+    assert_eq!(applied, high_water);
+    assert_eq!(pending, 1);
+}
+
+#[pg_test]
 fn maintenance_rebuilds_persisted_graph_from_source_with_pending_sync() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
@@ -507,6 +540,101 @@ fn maintenance_applies_trigger_sync_without_query_time_mutation() {
     assert_eq!(maintenance_status, "completed");
     assert_eq!(found, 1);
     assert!(applied > 0);
+}
+
+#[pg_test]
+fn traverse_auto_sync_opt_in_applies_pending_edge_insert() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SET graph.query_freshness = 'apply_pending_sync'")
+        .expect("set query freshness failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_traverse_auto_sync_pgtest CASCADE")
+        .expect("drop traverse auto sync table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_traverse_auto_sync_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_traverse_auto_sync_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create traverse auto sync table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_traverse_auto_sync_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root')",
+    )
+    .expect("insert traverse auto sync root failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_traverse_auto_sync_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add traverse auto sync table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_traverse_auto_sync_pgtest'::regclass,
+                'parent_id',
+                'graph_test_traverse_auto_sync_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add traverse auto sync edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_traverse_auto_sync_pgtest (id, parent_id, name)
+             VALUES ('child', 'root', 'Child')",
+    )
+    .expect("insert pending child failed");
+
+    let reaches_root = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_traverse_auto_sync_pgtest'::regclass,
+                'child',
+                1,
+                hydrate := false
+             )
+             WHERE node_id = 'root'",
+    )
+    .expect("auto-sync traversal failed")
+    .unwrap_or(0);
+    let pending = Spi::get_one::<i64>("SELECT pending_sync_rows FROM graph.status()")
+        .expect("status failed")
+        .unwrap_or(-1);
+
+    assert_eq!(reaches_root, 1);
+    assert_eq!(pending, 0);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+}
+
+#[pg_test]
+fn traverse_auto_sync_replay_error_fails_closed() {
+    reset_and_create_fixtures();
+    super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)
+        .expect("insert registered users table failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SET graph.query_freshness = 'apply_pending_sync'")
+        .expect("set query freshness failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "INSERT INTO graph._sync_log (op, table_oid, table_name, new_pk)
+             VALUES (
+                'X',
+                'public.graph_test_users_pgtest'::regclass,
+                'public.graph_test_users_pgtest',
+                'bad'
+             )",
+    )
+    .expect("insert invalid sync row failed");
+
+    assert!(sql_raises(
+        "SELECT count(*)
+             FROM graph.traverse('graph_test_users_pgtest'::regclass, 'u1', 1, hydrate := false)"
+    ));
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
 }
 
 #[pg_test]

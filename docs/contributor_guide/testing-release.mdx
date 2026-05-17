@@ -210,6 +210,9 @@ DBNAME=pggraph_read_latency NODE_COUNT=10000 SAMPLES=25 \
   ./tests/heavy/read_latency_under_sync.sh
 ```
 
+Set `QUERY_FRESHNESS=apply_pending_sync` to compare opt-in query-time catch-up
+against the default compatibility mode.
+
 The script writes `read-latency-samples.csv` and
 `read-latency-summary.csv` in the current directory. Keep those outputs with
 milestone evidence when deciding whether topology-read auto-sync can become the

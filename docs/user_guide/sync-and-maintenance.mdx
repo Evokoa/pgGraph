@@ -65,12 +65,33 @@ Current apply behavior includes:
 | Edge mutations | Stored in edge overlay buffer until rebuild/vacuum |
 | Truncate | Marks rebuild/vacuum need |
 
+`graph.apply_sync()` drains the durable sync rows that were pending when the
+call started. Internally, replay is bounded by `graph.sync_batch_size`, so large
+backlogs are processed in smaller batches without changing the public admin
+contract.
+
 <Callout type="warning">
 The base CSR store is immutable. Edge changes use overlay buffers for query
 visibility in the backend that applies sync, but `graph.vacuum()` or
 `graph.maintenance()` is the normal path for merging them into a clean base
 graph.
 </Callout>
+
+## Query Freshness
+
+`graph.query_freshness` controls whether opted-in topology reads apply pending
+trigger-sync rows before executing. The default is `off`, preserving compatibility
+while auto-sync rollout continues.
+
+| Value | Behavior |
+|---|---|
+| `off` | Reads keep current compatibility behavior and do not apply pending sync rows. |
+| `apply_pending_sync` | Opted-in topology reads apply rows up to a captured `_sync_log` high-water mark before reading. |
+| `error_on_pending` | Opted-in topology reads fail when pending sync rows exist. |
+
+At this stage, only the single-start `graph.traverse()` path is wired through
+the opt-in freshness helper. `graph.apply_sync()` remains the explicit
+operator/admin path for all pending sync rows.
 
 ## Edge Buffer Limits
 

@@ -64,8 +64,8 @@ use sql_jobs::{
 };
 use sql_search::{source_table_search_rows, validate_search_request};
 use sql_sync::{
-    apply_sync_internal, current_sync_mode, disabled_graph_trigger_count, install_sync_triggers,
-    pending_sync_rows, resolve_tenant_scope,
+    apply_sync_internal, apply_sync_until, current_sync_mode, disabled_graph_trigger_count,
+    install_sync_triggers, max_sync_log_id, pending_sync_rows, resolve_tenant_scope,
 };
 use sql_traversal::{
     canonical_node_ref_string, execute_traverse_candidates, execute_traverse_rows,

@@ -104,6 +104,11 @@ pub static DATA_DIR: GucSetting<Option<std::ffi::CString>> =
 pub static SYNC_MODE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
+/// Query freshness policy for topology reads.
+/// Default: "off".
+pub static QUERY_FRESHNESS: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
 /// OOM action: 'error' (return SQL error) or 'readonly' (degrade gracefully).
 /// Default: "error".
 pub static OOM_ACTION: GucSetting<Option<std::ffi::CString>> =
@@ -151,6 +156,14 @@ pub enum SyncMode {
     Manual,
     Trigger,
     Wal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryFreshness {
+    #[default]
+    Off,
+    ApplyPendingSync,
+    ErrorOnPending,
 }
 
 impl SyncMode {
@@ -229,6 +242,25 @@ pub fn parsed_sync_mode() -> Option<SyncMode> {
     parse_sync_mode(raw)
 }
 
+pub fn query_freshness() -> String {
+    QUERY_FRESHNESS
+        .get()
+        .as_ref()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("off")
+        .to_string()
+}
+
+pub fn parsed_query_freshness() -> Option<QueryFreshness> {
+    let binding = QUERY_FRESHNESS.get();
+    let raw = binding
+        .as_ref()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("off");
+
+    parse_query_freshness(raw)
+}
+
 pub fn sync_batch_size() -> usize {
     SYNC_BATCH_SIZE.get().max(1) as usize
 }
@@ -272,6 +304,15 @@ fn parse_sync_mode(raw: &str) -> Option<SyncMode> {
         "manual" => Some(SyncMode::Manual),
         "trigger" => Some(SyncMode::Trigger),
         "wal" => Some(SyncMode::Wal),
+        _ => None,
+    }
+}
+
+fn parse_query_freshness(raw: &str) -> Option<QueryFreshness> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "compat" | "compatibility" => Some(QueryFreshness::Off),
+        "apply_pending_sync" | "apply" | "auto" | "on" => Some(QueryFreshness::ApplyPendingSync),
+        "error_on_pending" | "error" => Some(QueryFreshness::ErrorOnPending),
         _ => None,
     }
 }
@@ -464,6 +505,15 @@ pub fn register_gucs() {
     );
 
     GucRegistry::define_string_guc(
+        c"graph.query_freshness",
+        c"Topology-read freshness policy.",
+        c"off: compatibility mode. apply_pending_sync: apply trigger sync rows before opted-in topology reads. error_on_pending: fail when pending rows exist.",
+        &QUERY_FRESHNESS,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
         c"graph.oom_action",
         c"Action on OOM: 'error' or 'readonly'.",
         c"'error': return SQL ERROR. 'readonly': degrade to read-only mode.",
@@ -506,8 +556,8 @@ mod tests {
     //! semantics for invalid GUC input.
 
     use super::{
-        parse_build_scan_mode, parse_oom_action, parse_sync_mode, BuildScanMode, OomAction,
-        SyncMode,
+        parse_build_scan_mode, parse_oom_action, parse_query_freshness, parse_sync_mode,
+        BuildScanMode, OomAction, QueryFreshness, SyncMode,
     };
 
     #[test]
@@ -553,5 +603,24 @@ mod tests {
     fn parse_sync_mode_rejects_unknown_modes() {
         assert_eq!(parse_sync_mode("async"), None);
         assert_eq!(parse_sync_mode(""), None);
+    }
+
+    #[test]
+    fn parse_query_freshness_accepts_supported_modes() {
+        assert_eq!(parse_query_freshness("off"), Some(QueryFreshness::Off));
+        assert_eq!(
+            parse_query_freshness(" APPLY_PENDING_SYNC "),
+            Some(QueryFreshness::ApplyPendingSync)
+        );
+        assert_eq!(
+            parse_query_freshness("error_on_pending"),
+            Some(QueryFreshness::ErrorOnPending)
+        );
+    }
+
+    #[test]
+    fn parse_query_freshness_rejects_unknown_modes() {
+        assert_eq!(parse_query_freshness("fresh"), None);
+        assert_eq!(parse_query_freshness(""), None);
     }
 }

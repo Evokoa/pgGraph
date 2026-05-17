@@ -12,6 +12,7 @@ CLIENTS="${CLIENTS:-4}"
 JOBS="${JOBS:-2}"
 TIME="${TIME:-30}"
 RATE="${RATE:-100}"
+QUERY_FRESHNESS="${QUERY_FRESHNESS:-off}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
 KEEP_WORKDIR="${KEEP_WORKDIR:-0}"
 WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-read-latency.XXXXXX")"
@@ -38,13 +39,21 @@ if ! command -v pgbench >/dev/null 2>&1; then
   exit 2
 fi
 
+case "$QUERY_FRESHNESS" in
+  off | apply_pending_sync | error_on_pending) ;;
+  *)
+    echo "QUERY_FRESHNESS must be off, apply_pending_sync, or error_on_pending"
+    exit 2
+    ;;
+esac
+
 if [[ "$CREATE_DB" == "1" && "$DBNAME" != "postgres" ]]; then
   dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
   createdb "$DBNAME"
 fi
 
-echo "label,query_kind,sample,latency_ms,rows_seen,backlog_rows" >"$SAMPLES_CSV"
-echo "label,query_kind,samples,p50_ms,p95_ms,p99_ms,min_ms,max_ms,backlog_rows" >"$SUMMARY_CSV"
+echo "label,query_kind,query_freshness,sample,latency_ms,rows_seen,backlog_rows" >"$SAMPLES_CSV"
+echo "label,query_kind,query_freshness,samples,p50_ms,p95_ms,p99_ms,min_ms,max_ms,backlog_rows" >"$SUMMARY_CSV"
 
 psql -X -v ON_ERROR_STOP=1 \
   -v node_count="$NODE_COUNT" \
@@ -160,6 +169,7 @@ measure_query() {
     result="$(
       psql -X -q -v ON_ERROR_STOP=1 -tA "$DBNAME" <<SQL
 SET graph.auto_load = on;
+SET graph.query_freshness = '$QUERY_FRESHNESS';
 WITH started AS (SELECT clock_timestamp() AS ts),
      measured AS (
        $sql
@@ -174,7 +184,7 @@ SQL
     local latency_ms rows_seen
     IFS='|' read -r latency_ms rows_seen <<<"$result"
     echo "$latency_ms" >>"$values_file"
-    echo "$label,$query_kind,$sample,$latency_ms,$rows_seen,$backlog" >>"$SAMPLES_CSV"
+    echo "$label,$query_kind,$QUERY_FRESHNESS,$sample,$latency_ms,$rows_seen,$backlog" >>"$SAMPLES_CSV"
   done
 
   sort -n "$values_file" -o "$values_file"
@@ -186,26 +196,24 @@ SQL
   min="$(head -n 1 "$values_file")"
   max="$(tail -n 1 "$values_file")"
 
-  echo "$label,$query_kind,$samples,$p50,$p95,$p99,$min,$max,$backlog" >>"$SUMMARY_CSV"
-  printf '%-22s %-24s samples=%s backlog=%s p50=%sms p95=%sms p99=%sms min=%sms max=%sms\n' \
-    "$label" "$query_kind" "$samples" "$backlog" "$p50" "$p95" "$p99" "$min" "$max"
+  echo "$label,$query_kind,$QUERY_FRESHNESS,$samples,$p50,$p95,$p99,$min,$max,$backlog" >>"$SUMMARY_CSV"
+  printf '%-22s %-24s freshness=%s samples=%s backlog=%s p50=%sms p95=%sms p99=%sms min=%sms max=%sms\n' \
+    "$label" "$query_kind" "$QUERY_FRESHNESS" "$samples" "$backlog" "$p50" "$p95" "$p99" "$min" "$max"
 }
 
 measure_suite() {
   local label="$1"
   local samples="$2"
-  local backlog
-  backlog="$(pending_rows)"
 
   measure_query "$label" "traverse" "$samples" \
     "SELECT count(*) AS rows_seen FROM graph.traverse('public.graph_read_latency_nodes'::regclass, '1', 3, hydrate := false)" \
-    "$backlog"
+    "$(pending_rows)"
   measure_query "$label" "shortest_path" "$samples" \
     "SELECT count(*) AS rows_seen FROM graph.shortest_path('public.graph_read_latency_nodes'::regclass, '1', 'public.graph_read_latency_nodes'::regclass, '$NODE_COUNT', 20, hydrate := false)" \
-    "$backlog"
+    "$(pending_rows)"
   measure_query "$label" "weighted_shortest_path" "$samples" \
     "SELECT count(*) AS rows_seen FROM graph.weighted_shortest_path('public.graph_read_latency_nodes'::regclass, '1', 'public.graph_read_latency_nodes'::regclass, '$NODE_COUNT')" \
-    "$backlog"
+    "$(pending_rows)"
 }
 
 measure_suite "no_pending_sync" "$SAMPLES"

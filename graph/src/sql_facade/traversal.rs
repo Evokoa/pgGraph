@@ -41,7 +41,8 @@ fn traverse(
 > {
     with_panic_boundary("traverse()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let tenant_scope =
             resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
         let (direction, strategy, uniqueness) =

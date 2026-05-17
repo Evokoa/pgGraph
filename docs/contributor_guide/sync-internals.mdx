@@ -86,6 +86,11 @@ replayed in one internal batch. `graph.apply_sync()` still drains the durable lo
 that was pending when the call started; the bound is an internal memory and
 latency control, not a change to the public admin contract.
 
+`graph.query_freshness = 'apply_pending_sync'` opts wired topology reads into the
+same high-water replay primitive before they execute. The current rollout wires
+single-start `graph.traverse()` first; other topology read entrypoints remain on
+the compatibility path until the broader rollout stage.
+
 ## Node Changes
 
 Mmap-backed node stores cannot be mutated. Before node mutation, the engine
