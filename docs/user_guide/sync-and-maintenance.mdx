@@ -79,18 +79,19 @@ graph.
 
 ## Query Freshness
 
-`graph.query_freshness` controls whether opted-in topology reads apply pending
-trigger-sync rows before executing. The default is `off`, preserving compatibility
-while auto-sync rollout continues.
+`graph.query_freshness` controls whether topology reads apply pending
+trigger-sync rows before executing. The default is `apply_pending_sync`, so
+topology reads catch up to a captured `_sync_log` high-water mark before reading
+when `graph.sync_mode = 'trigger'`.
 
 | Value | Behavior |
 |---|---|
-| `off` | Reads keep current compatibility behavior and do not apply pending sync rows. |
-| `apply_pending_sync` | Opted-in topology reads apply rows up to a captured `_sync_log` high-water mark before reading. |
-| `error_on_pending` | Opted-in topology reads fail when pending sync rows exist. |
+| `apply_pending_sync` | Topology reads apply rows up to a captured `_sync_log` high-water mark before reading. |
+| `off` | Compatibility mode; reads do not apply pending sync rows automatically. |
+| `error_on_pending` | Topology reads fail when pending sync rows exist. |
 
-The opted-in topology reads are `graph.traverse()` variants, shortest-path
-queries, weighted shortest-path queries, component APIs, and
+The topology reads covered by query freshness are `graph.traverse()` variants,
+shortest-path queries, weighted shortest-path queries, component APIs, and
 `graph.traverse_search()` before it traverses from search matches. Primitive
 `graph.search()` remains source-table SQL search and does not use the topology
 freshness helper. `graph.apply_sync()` remains the explicit operator/admin path

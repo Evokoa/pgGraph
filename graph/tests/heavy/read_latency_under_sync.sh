@@ -12,7 +12,7 @@ CLIENTS="${CLIENTS:-4}"
 JOBS="${JOBS:-2}"
 TIME="${TIME:-30}"
 RATE="${RATE:-100}"
-QUERY_FRESHNESS="${QUERY_FRESHNESS:-off}"
+QUERY_FRESHNESS="${QUERY_FRESHNESS:-default}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
 KEEP_WORKDIR="${KEEP_WORKDIR:-0}"
 WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-read-latency.XXXXXX")"
@@ -40,9 +40,9 @@ if ! command -v pgbench >/dev/null 2>&1; then
 fi
 
 case "$QUERY_FRESHNESS" in
-  off | apply_pending_sync | error_on_pending) ;;
+  default | off | apply_pending_sync | error_on_pending) ;;
   *)
-    echo "QUERY_FRESHNESS must be off, apply_pending_sync, or error_on_pending"
+    echo "QUERY_FRESHNESS must be default, off, apply_pending_sync, or error_on_pending"
     exit 2
     ;;
 esac
@@ -166,10 +166,16 @@ measure_query() {
   : >"$values_file"
   for sample in $(seq 1 "$samples"); do
     local result
+    local freshness_sql
+    if [[ "$QUERY_FRESHNESS" == "default" ]]; then
+      freshness_sql="RESET graph.query_freshness;"
+    else
+      freshness_sql="SET graph.query_freshness = '$QUERY_FRESHNESS';"
+    fi
     result="$(
       psql -X -q -v ON_ERROR_STOP=1 -tA "$DBNAME" <<SQL
 SET graph.auto_load = on;
-SET graph.query_freshness = '$QUERY_FRESHNESS';
+$freshness_sql
 WITH started AS (SELECT clock_timestamp() AS ts),
      measured AS (
        $sql

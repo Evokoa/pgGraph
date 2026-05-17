@@ -105,7 +105,7 @@ pub static SYNC_MODE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
 /// Query freshness policy for topology reads.
-/// Default: "off".
+/// Default: "apply_pending_sync".
 pub static QUERY_FRESHNESS: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
@@ -160,8 +160,8 @@ pub enum SyncMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueryFreshness {
-    #[default]
     Off,
+    #[default]
     ApplyPendingSync,
     ErrorOnPending,
 }
@@ -247,7 +247,7 @@ pub fn query_freshness() -> String {
         .get()
         .as_ref()
         .and_then(|c| c.to_str().ok())
-        .unwrap_or("off")
+        .unwrap_or("apply_pending_sync")
         .to_string()
 }
 
@@ -256,7 +256,7 @@ pub fn parsed_query_freshness() -> Option<QueryFreshness> {
     let raw = binding
         .as_ref()
         .and_then(|c| c.to_str().ok())
-        .unwrap_or("off");
+        .unwrap_or("apply_pending_sync");
 
     parse_query_freshness(raw)
 }
@@ -507,7 +507,7 @@ pub fn register_gucs() {
     GucRegistry::define_string_guc(
         c"graph.query_freshness",
         c"Topology-read freshness policy.",
-        c"off: compatibility mode. apply_pending_sync: apply trigger sync rows before opted-in topology reads. error_on_pending: fail when pending rows exist.",
+        c"Default apply_pending_sync: apply trigger sync rows before topology reads. off: compatibility mode. error_on_pending: fail when pending rows exist.",
         &QUERY_FRESHNESS,
         GucContext::Userset,
         GucFlags::default(),
@@ -607,6 +607,7 @@ mod tests {
 
     #[test]
     fn parse_query_freshness_accepts_supported_modes() {
+        assert_eq!(QueryFreshness::default(), QueryFreshness::ApplyPendingSync);
         assert_eq!(parse_query_freshness("off"), Some(QueryFreshness::Off));
         assert_eq!(
             parse_query_freshness(" APPLY_PENDING_SYNC "),

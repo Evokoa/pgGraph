@@ -86,12 +86,13 @@ replayed in one internal batch. `graph.apply_sync()` still drains the durable lo
 that was pending when the call started; the bound is an internal memory and
 latency control, not a change to the public admin contract.
 
-`graph.query_freshness = 'apply_pending_sync'` opts wired topology reads into the
-same high-water replay primitive before they execute. The wired topology-read
-entrypoints are traversal variants, shortest-path queries, weighted shortest-path
-queries, component APIs, and `graph.traverse_search()` before its traversal
-phase. `graph.search()` remains separate because it reads source-table
-properties through SQL rather than graph topology.
+`graph.query_freshness = 'apply_pending_sync'` is the default and routes topology
+reads through the same high-water replay primitive before they execute. The wired
+topology-read entrypoints are traversal variants, shortest-path queries,
+weighted shortest-path queries, component APIs, and `graph.traverse_search()`
+before its traversal phase. `graph.query_freshness = 'off'` keeps the
+compatibility/manual catch-up path available. `graph.search()` remains separate
+because it reads source-table properties through SQL rather than graph topology.
 
 ## Node Changes
 

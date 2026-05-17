@@ -37,7 +37,7 @@ data into another system.
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |
 | mmap sharing | Forward graph arrays and resolution bytes are mmap-backed; reverse CSR and bincode metadata are per-backend heap |
-| Query catch-up | Default query behavior does not apply pending sync rows; `graph.query_freshness = 'apply_pending_sync'` opts topology reads into bounded catch-up |
+| Query catch-up | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; set `graph.query_freshness = 'off'` for compatibility/manual catch-up |
 | Search | Search runs against registered source-table columns through PostgreSQL, not against a full-text graph artifact |
 | Hydration | Hydrated rows come from source tables and require source-table privileges |
 | Components | Connected component functions are global admin operations and touch the whole active graph |

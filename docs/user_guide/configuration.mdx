@@ -35,7 +35,7 @@ SELECT pg_reload_conf();
 | `graph.default_search_mode` | string | `contains` | `USERSET` | `contains`, `exact`, `prefix`, `token` | `graph.traverse_search()`, workflow wrappers |
 | `graph.default_case_sensitive` | bool | `false` | `USERSET` | `on`, `off` | Search wrappers |
 | `graph.default_hydrate` | bool | `true` | `USERSET` | `on`, `off` | `graph.traverse_search()` hydrate default |
-| `graph.query_freshness` | string | `off` | `USERSET` | `off`, `apply_pending_sync`, `error_on_pending` | Topology-read pending sync policy |
+| `graph.query_freshness` | string | `apply_pending_sync` | `USERSET` | `apply_pending_sync`, `off`, `error_on_pending` | Topology-read pending sync policy |
 | `graph.max_nodes` | int | `100000` | `USERSET` | `1` to `10000000` | Traversal circuit breaker |
 | `graph.max_frontier` | int | `100000` | `USERSET` | `1` to `10000000` | BFS/DFS frontier circuit breaker |
 | `graph.max_exact_path_count` | int | `100000` | `USERSET` | `1` to `10000000` | `graph.path_count_estimate()`, `graph.aggregate()` |
@@ -112,7 +112,7 @@ graph.max_frontier = 100000
 graph.default_max_depth = 5
 graph.default_search_mode = 'contains'
 graph.default_hydrate = on
-graph.query_freshness = 'off'
+graph.query_freshness = 'apply_pending_sync'
 graph.sync_mode = 'manual'
 ```
 

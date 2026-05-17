@@ -611,6 +611,72 @@ fn traverse_auto_sync_opt_in_applies_pending_edge_insert() {
 }
 
 #[pg_test]
+fn topology_reads_auto_sync_by_default() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_default_auto_sync_pgtest CASCADE")
+        .expect("drop default auto sync table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_default_auto_sync_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_default_auto_sync_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create default auto sync table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_default_auto_sync_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root')",
+    )
+    .expect("insert default auto sync root failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_default_auto_sync_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add default auto sync table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_default_auto_sync_pgtest'::regclass,
+                'parent_id',
+                'graph_test_default_auto_sync_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add default auto sync edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_default_auto_sync_pgtest (id, parent_id, name)
+             VALUES ('default-child', 'root', 'Default Child')",
+    )
+    .expect("insert pending default child failed");
+
+    let sees_child = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_default_auto_sync_pgtest'::regclass,
+                'default-child',
+                0,
+                hydrate := false
+             )
+             WHERE node_id = 'default-child'",
+    )
+    .expect("default auto-sync traversal failed")
+    .unwrap_or(0);
+    let pending = Spi::get_one::<i64>("SELECT pending_sync_rows FROM graph.status()")
+        .expect("status failed")
+        .unwrap_or(-1);
+
+    assert_eq!(sees_child, 1);
+    assert_eq!(pending, 0);
+}
+
+#[pg_test]
 fn traverse_auto_sync_replay_error_fails_closed() {
     reset_and_create_fixtures();
     super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)
