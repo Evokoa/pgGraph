@@ -81,6 +81,10 @@ pub static AUTO_LOAD: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Default: 100000. Range: 1000–10000000.
 pub static EDGE_BUFFER_SIZE: GucSetting<i32> = GucSetting::<i32>::new(100_000);
 
+/// Maximum sync-log rows replayed in one internal batch.
+/// Default: 1000. Range: 1–100000.
+pub static SYNC_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1_000);
+
 /// Reserved maintenance interval in seconds.
 /// Registered for future scheduling work; current code does not schedule vacuum.
 /// Default: 60. Range: 5–86400.
@@ -223,6 +227,10 @@ pub fn parsed_sync_mode() -> Option<SyncMode> {
         .unwrap_or("manual");
 
     parse_sync_mode(raw)
+}
+
+pub fn sync_batch_size() -> usize {
+    SYNC_BATCH_SIZE.get().max(1) as usize
 }
 
 /// Parse an OOM action string into a typed policy.
@@ -409,6 +417,17 @@ pub fn register_gucs() {
         &EDGE_BUFFER_SIZE,
         1_000,
         10_000_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.sync_batch_size",
+        c"Maximum sync-log rows replayed in one internal batch.",
+        c"Bounds graph.apply_sync() and future query-time sync catch-up replay memory.",
+        &SYNC_BATCH_SIZE,
+        1,
+        100_000,
         GucContext::Suset,
         GucFlags::default(),
     );

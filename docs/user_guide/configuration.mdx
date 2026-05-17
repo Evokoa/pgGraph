@@ -88,6 +88,7 @@ $PGDATA/graph/main.pggraph.sync
 |---|---:|---:|---|---|---|
 | `graph.sync_mode` | string | `manual` | `SUSET` | `manual`, `trigger`, `wal` | Sync strategy selector |
 | `graph.edge_buffer_size` | int | `100000` | `SUSET` | `1000` to `10000000` | Maximum pending edge mutations before read-only mode |
+| `graph.sync_batch_size` | int | `1000` | `SUSET` | `1` to `100000` | Maximum sync-log rows replayed in one internal batch |
 | `graph.vacuum_interval_secs` | int | `60` | `SUSET` | `5` to `86400` | Reserved maintenance interval setting; not scheduled by current code |
 
 <Callout type="warning">
@@ -104,6 +105,7 @@ graph.memory_limit_mb = 4096
 graph.persist_on_build = on
 graph.auto_load = on
 graph.build_batch_size = 10000
+graph.sync_batch_size = 1000
 graph.max_nodes = 100000
 graph.max_frontier = 100000
 graph.default_max_depth = 5

@@ -133,6 +133,74 @@ fn edge_buffer_overflow_from_sql_sync_enters_read_only_mode() {
 }
 
 #[pg_test]
+fn sync_log_batch_reader_respects_limit_and_high_watermark() {
+    reset_and_create_fixtures();
+    super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)
+        .expect("insert registered users table failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+             SELECT 'batch-' || n::text, 'Batch ' || n::text, n
+             FROM generate_series(1, 5) AS n",
+    )
+    .expect("insert batched users failed");
+
+    let first_two = super::sql_sync::read_sync_log_entries_after(0, 2, None)
+        .expect("limited sync read failed");
+    let high_water = first_two[1].id;
+    let bounded = super::sql_sync::read_sync_log_entries_after(0, 10, Some(high_water))
+        .expect("high-water sync read failed");
+
+    assert_eq!(first_two.len(), 2);
+    assert_eq!(bounded.len(), 2);
+    assert_eq!(bounded.last().map(|entry| entry.id), Some(high_water));
+}
+
+#[pg_test]
+fn apply_sync_drains_trigger_log_across_multiple_batches() {
+    reset_and_create_fixtures();
+    super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)
+        .expect("insert registered users table failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SET graph.sync_batch_size = 2").expect("set sync batch size failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+             SELECT 'multi-' || n::text, 'Multi ' || n::text, n
+             FROM generate_series(1, 5) AS n",
+    )
+    .expect("insert multi-batch users failed");
+    let max_id = Spi::get_one::<i64>("SELECT max(id) FROM graph._sync_log")
+        .expect("sync max id failed")
+        .unwrap_or(0);
+
+    let inserts = Spi::get_one::<i64>("SELECT inserts_applied FROM graph.apply_sync()")
+        .expect("apply sync failed")
+        .unwrap_or(0);
+    let (pending, applied) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT pending_sync_rows, applied_sync_id FROM graph.status()",
+                None,
+                &[],
+            )
+            .expect("status query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)?.unwrap_or(0),
+            row.get::<i64>(2)?.unwrap_or(0),
+        ))
+    })
+    .expect("status read failed");
+
+    assert_eq!(inserts, 5);
+    assert_eq!(pending, 0);
+    assert_eq!(applied, max_id);
+    Spi::run("RESET graph.sync_batch_size").expect("reset sync batch size failed");
+}
+
+#[pg_test]
 fn maintenance_rebuilds_persisted_graph_from_source_with_pending_sync() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");

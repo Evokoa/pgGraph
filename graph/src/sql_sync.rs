@@ -153,6 +153,84 @@ pub(crate) struct SyncLogEntry {
     pub(crate) new_row: Option<String>,
 }
 
+pub(crate) struct SyncReplayContext {
+    tables: Vec<builder::RegisteredTable>,
+    edges: Vec<builder::RegisteredEdge>,
+    filters: Vec<builder::RegisteredFilterColumn>,
+    table_oids: HashMap<String, u32>,
+    all_table_oids: Vec<u32>,
+    edge_source_tables: HashSet<String>,
+    edge_source_oids: HashSet<u32>,
+}
+
+impl SyncReplayContext {
+    fn load() -> safety::GraphResult<Self> {
+        let (tables, edges, filters) = read_catalog()?;
+        let mut table_oids = HashMap::new();
+
+        for table in &tables {
+            if let Ok(oid) = table_oid_from_name(&table.table_name) {
+                table_oids.insert(table.table_name.clone(), oid);
+            }
+        }
+        for edge in &edges {
+            if !table_oids.contains_key(&edge.from_table) {
+                if let Ok(oid) = table_oid_from_name(&edge.from_table) {
+                    table_oids.insert(edge.from_table.clone(), oid);
+                }
+            }
+            if !table_oids.contains_key(&edge.to_table) {
+                if let Ok(oid) = table_oid_from_name(&edge.to_table) {
+                    table_oids.insert(edge.to_table.clone(), oid);
+                }
+            }
+        }
+
+        let all_table_oids = table_oids.values().copied().collect::<Vec<_>>();
+        let edge_source_tables = edges
+            .iter()
+            .map(|edge| edge.from_table.clone())
+            .collect::<HashSet<_>>();
+        let edge_source_oids = edges
+            .iter()
+            .filter_map(|edge| table_oids.get(&edge.from_table).copied())
+            .collect::<HashSet<_>>();
+
+        Ok(Self {
+            tables,
+            edges,
+            filters,
+            table_oids,
+            all_table_oids,
+            edge_source_tables,
+            edge_source_oids,
+        })
+    }
+
+    fn table_oid(&self, table_name: &str) -> Option<u32> {
+        self.table_oids.get(table_name).copied()
+    }
+
+    fn table_oid_or_lookup(&mut self, table_name: &str) -> safety::GraphResult<u32> {
+        if let Some(oid) = self.table_oid(table_name) {
+            return Ok(oid);
+        }
+        let oid = table_oid_from_name(table_name)?;
+        self.table_oids.insert(table_name.to_string(), oid);
+        self.all_table_oids.push(oid);
+        Ok(oid)
+    }
+}
+
+struct LegacySyncEntry {
+    id: i64,
+    op: String,
+    table_name: String,
+    old_pk: String,
+    new_pk: String,
+    properties: Option<String>,
+}
+
 fn required_sync_i64(value: Option<i64>, column: &str) -> safety::GraphResult<i64> {
     value.ok_or_else(|| {
         safety::GraphError::Internal(format!("sync row missing required column {column}"))
@@ -166,24 +244,16 @@ fn required_sync_string(value: Option<String>, column: &str) -> safety::GraphRes
 }
 
 pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
-    let mut stats = SyncApplyStats::default();
-    let applied_sync_id = ENGINE.with(|e| {
+    ENGINE.with(|e| {
         let eng = e.borrow();
         if eng.built {
-            Ok(eng.applied_sync_id)
+            Ok(())
         } else {
             Err(safety::GraphError::NotBuilt)
         }
     })?;
-
-    let log_entries = read_sync_log_entries(applied_sync_id)?;
-    guard_edge_buffer_capacity_for_sync(&log_entries)?;
-    for entry in log_entries {
-        apply_sync_log_entry(&entry, &mut stats)?;
-        ENGINE.with(|e| {
-            e.borrow_mut().applied_sync_id = entry.id;
-        });
-    }
+    let target_sync_id = max_sync_log_id()?;
+    let mut stats = apply_sync_until(Some(target_sync_id), config::sync_batch_size())?;
 
     apply_legacy_sync_buffer(&mut stats)?;
 
@@ -196,22 +266,40 @@ pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
     Ok(stats)
 }
 
+pub(crate) fn apply_sync_until(
+    target_sync_id: Option<i64>,
+    batch_size: usize,
+) -> safety::GraphResult<SyncApplyStats> {
+    let batch_size = batch_size.max(1);
+    let mut stats = SyncApplyStats::default();
+    let mut context = SyncReplayContext::load()?;
+
+    loop {
+        let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
+        let log_entries = read_sync_log_entries_after(applied_sync_id, batch_size, target_sync_id)?;
+        if log_entries.is_empty() {
+            break;
+        }
+        guard_edge_buffer_capacity_for_sync(&context, &log_entries)?;
+        for entry in log_entries {
+            apply_sync_log_entry_with_context(&entry, &mut stats, &mut context)?;
+            ENGINE.with(|e| {
+                e.borrow_mut().applied_sync_id = entry.id;
+            });
+        }
+    }
+
+    Ok(stats)
+}
+
 pub(crate) fn guard_edge_buffer_capacity_for_sync(
+    context: &SyncReplayContext,
     entries: &[SyncLogEntry],
 ) -> safety::GraphResult<()> {
     if entries.is_empty() {
         return Ok(());
     }
-    let (_tables, edges, _filters) = read_catalog()?;
-    let edge_source_tables = edges
-        .iter()
-        .map(|edge| edge.from_table.as_str())
-        .collect::<HashSet<_>>();
-    let edge_source_oids = edges
-        .iter()
-        .filter_map(|edge| table_oid_from_name(&edge.from_table).ok())
-        .collect::<HashSet<_>>();
-    if edge_source_tables.is_empty() && edge_source_oids.is_empty() {
+    if context.edge_source_tables.is_empty() && context.edge_source_oids.is_empty() {
         return Ok(());
     }
     let estimated_edge_deltas = entries
@@ -219,8 +307,10 @@ pub(crate) fn guard_edge_buffer_capacity_for_sync(
         .filter(|entry| {
             entry
                 .table_oid
-                .is_some_and(|oid| edge_source_oids.contains(&oid))
-                || edge_source_tables.contains(entry.table_name.as_str())
+                .is_some_and(|oid| context.edge_source_oids.contains(&oid))
+                || context
+                    .edge_source_tables
+                    .contains(entry.table_name.as_str())
         })
         .map(|entry| match entry.op.trim() {
             "U" => 2usize,
@@ -244,22 +334,29 @@ pub(crate) fn guard_edge_buffer_capacity_for_sync(
     })
 }
 
-pub(crate) fn read_sync_log_entries(
+pub(crate) fn read_sync_log_entries_after(
     applied_sync_id: i64,
+    limit: usize,
+    high_watermark: Option<i64>,
 ) -> safety::GraphResult<Vec<SyncLogEntry>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     Spi::connect(|client| {
-        let query = format!(
-            "SELECT id, op::text, table_oid::oid::integer, table_name,
+        let rows = client
+            .select(
+                "SELECT id, op::text, table_oid::oid::integer, table_name,
                     old_pk, new_pk, properties::text, old_row::text, new_row::text
              FROM graph._sync_log
-             WHERE id > {}
-             ORDER BY id",
-            applied_sync_id
-        );
-        let result = client.select(&query, None, &[]);
-        let Ok(rows) = result else {
-            return Ok(Vec::new());
-        };
+             WHERE id > $1
+               AND ($3::bigint IS NULL OR id <= $3)
+             ORDER BY id
+             LIMIT $2",
+                None,
+                &[applied_sync_id.into(), limit.into(), high_watermark.into()],
+            )
+            .map_err(|e| safety::GraphError::Internal(format!("sync log read failed: {e}")))?;
         let mut entries = Vec::new();
         for row in rows {
             let table_oid = row
@@ -309,20 +406,20 @@ pub(crate) fn read_sync_log_entries(
     })
 }
 
-pub(crate) fn apply_sync_log_entry(
+fn apply_sync_log_entry_with_context(
     entry: &SyncLogEntry,
     stats: &mut SyncApplyStats,
+    context: &mut SyncReplayContext,
 ) -> safety::GraphResult<()> {
     let table_oid = match entry.table_oid {
         Some(oid) => oid,
-        None => table_oid_from_name(&entry.table_name)?,
+        None => context.table_oid_or_lookup(&entry.table_name)?,
     };
     let parsed = parse_sync_properties(entry.properties.as_deref());
-    let tenant = tenant_from_properties(table_oid, &parsed)?;
+    let tenant = tenant_from_properties_with_context(table_oid, &parsed, context)?;
 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
-        let (tables, edges, filters) = read_catalog()?;
         match entry.op.trim() {
             "I" => {
                 let pk = entry
@@ -336,11 +433,17 @@ pub(crate) fn apply_sync_log_entry(
                         ))
                     })?;
                 sync::sync_insert(&mut eng, table_oid, pk, tenant.as_deref())?;
-                refresh_filter_index_from_sync(&mut eng, table_oid, pk, &filters, entry)?;
+                refresh_filter_index_from_sync(
+                    &mut eng,
+                    table_oid,
+                    pk,
+                    &context.filters,
+                    &context.table_oids,
+                    entry,
+                )?;
                 apply_row_edge_mutations(
                     &mut eng,
-                    &tables,
-                    &edges,
+                    context,
                     table_oid,
                     entry.new_row.as_deref(),
                     engine::MutationKind::Insert,
@@ -356,23 +459,35 @@ pub(crate) fn apply_sync_log_entry(
                 })?;
                 apply_row_edge_mutations(
                     &mut eng,
-                    &tables,
-                    &edges,
+                    context,
                     table_oid,
                     entry.old_row.as_deref(),
                     engine::MutationKind::Delete,
                 )?;
                 if old_pk == new_pk {
                     sync::sync_update(&mut eng, table_oid, new_pk, tenant.as_deref())?;
-                    refresh_filter_index_from_sync(&mut eng, table_oid, new_pk, &filters, entry)?;
+                    refresh_filter_index_from_sync(
+                        &mut eng,
+                        table_oid,
+                        new_pk,
+                        &context.filters,
+                        &context.table_oids,
+                        entry,
+                    )?;
                 } else {
                     sync::sync_replace_pk(&mut eng, table_oid, old_pk, new_pk, tenant.as_deref())?;
-                    refresh_filter_index_from_sync(&mut eng, table_oid, new_pk, &filters, entry)?;
+                    refresh_filter_index_from_sync(
+                        &mut eng,
+                        table_oid,
+                        new_pk,
+                        &context.filters,
+                        &context.table_oids,
+                        entry,
+                    )?;
                 }
                 apply_row_edge_mutations(
                     &mut eng,
-                    &tables,
-                    &edges,
+                    context,
                     table_oid,
                     entry.new_row.as_deref(),
                     engine::MutationKind::Insert,
@@ -392,8 +507,7 @@ pub(crate) fn apply_sync_log_entry(
                     })?;
                 apply_row_edge_mutations(
                     &mut eng,
-                    &tables,
-                    &edges,
+                    context,
                     table_oid,
                     entry.old_row.as_deref(),
                     engine::MutationKind::Delete,
@@ -421,6 +535,7 @@ fn refresh_filter_index_from_sync(
     table_oid: u32,
     pk: &str,
     filters: &[builder::RegisteredFilterColumn],
+    table_oids: &HashMap<String, u32>,
     entry: &SyncLogEntry,
 ) -> safety::GraphResult<()> {
     let Some(node_idx) = eng.resolve(table_oid, pk) else {
@@ -435,7 +550,7 @@ fn refresh_filter_index_from_sync(
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
 
     for filter in filters {
-        if table_oid_from_name(&filter.table_name)? != table_oid {
+        if table_oids.get(&filter.table_name).copied() != Some(table_oid) {
             continue;
         }
         let Some(column_idx) = eng.filter_index.find_column(&filter.column_name) else {
@@ -537,8 +652,7 @@ fn json_value_bool(raw: &serde_json::Value) -> safety::GraphResult<bool> {
 
 pub(crate) fn apply_row_edge_mutations(
     eng: &mut engine::Engine,
-    tables: &[builder::RegisteredTable],
-    edges: &[builder::RegisteredEdge],
+    context: &SyncReplayContext,
     table_oid: u32,
     row_json: Option<&str>,
     kind: engine::MutationKind,
@@ -549,17 +663,13 @@ pub(crate) fn apply_row_edge_mutations(
     let row: serde_json::Value = serde_json::from_str(row_json).map_err(|e| {
         safety::GraphError::Internal(format!("sync row JSON parse failed for edge deltas: {}", e))
     })?;
-    let all_oids = tables
-        .iter()
-        .filter_map(|table| table_oid_from_name(&table.table_name).ok())
-        .collect::<Vec<_>>();
-
-    for edge in edges {
-        let from_oid = table_oid_from_name(&edge.from_table).ok();
+    for edge in &context.edges {
+        let from_oid = context.table_oid(&edge.from_table);
         if from_oid != Some(table_oid) {
             continue;
         }
-        let Some(from_table) = tables
+        let Some(from_table) = context
+            .tables
             .iter()
             .find(|table| table.table_name == edge.from_table)
         else {
@@ -578,9 +688,9 @@ pub(crate) fn apply_row_edge_mutations(
             .filter(|label| !label.trim().is_empty())
             .unwrap_or_else(|| edge.label.clone());
         let type_id = eng.register_edge_type(&edge_label)?;
-        let source = resolve_sync_endpoint(eng, from_oid, &from_pk, &all_oids);
-        let target_oid = table_oid_from_name(&edge.to_table).ok();
-        let target = resolve_sync_endpoint(eng, target_oid, &to_pk, &all_oids);
+        let source = resolve_sync_endpoint(eng, from_oid, &from_pk, &context.all_table_oids);
+        let target_oid = context.table_oid(&edge.to_table);
+        let target = resolve_sync_endpoint(eng, target_oid, &to_pk, &context.all_table_oids);
         if let (Some(source), Some(target)) = (source, target) {
             push_sync_edge_delta(eng, source, target, type_id, kind)?;
             if edge.bidirectional {
@@ -646,37 +756,88 @@ pub(crate) fn row_text_value(row: &serde_json::Value, column: &str) -> Option<St
 }
 
 pub(crate) fn apply_legacy_sync_buffer(stats: &mut SyncApplyStats) -> safety::GraphResult<()> {
-    type LegacySyncEntry = (i64, String, String, String, String, Option<String>);
-    let entries: Vec<LegacySyncEntry> = Spi::connect(|client| {
-        let result = client.select(
-            "SELECT id, op::text, table_name,
+    let batch_size = config::sync_batch_size();
+    let mut context = SyncReplayContext::load()?;
+
+    loop {
+        let entries = read_legacy_sync_entries(batch_size)?;
+        if entries.is_empty() {
+            break;
+        }
+
+        let mut applied_ids = Vec::new();
+        for legacy in entries {
+            let table_oid = context.table_oid_or_lookup(&legacy.table_name)?;
+            let entry = SyncLogEntry {
+                id: legacy.id,
+                op: legacy.op,
+                table_oid: Some(table_oid),
+                table_name: legacy.table_name,
+                old_pk: Some(legacy.old_pk),
+                new_pk: Some(legacy.new_pk),
+                properties: legacy.properties,
+                old_row: None,
+                new_row: None,
+            };
+            match apply_sync_log_entry_with_context(&entry, stats, &mut context) {
+                Ok(()) => applied_ids.push(entry.id),
+                Err(err) => {
+                    pgrx::warning!(
+                        "graph.apply_sync(): legacy sync row {} failed and remains buffered: {}",
+                        entry.id,
+                        err
+                    );
+                }
+            }
+        }
+
+        if applied_ids.is_empty() {
+            break;
+        }
+
+        delete_legacy_sync_entries(&applied_ids)?;
+    }
+
+    Ok(())
+}
+
+fn read_legacy_sync_entries(limit: usize) -> safety::GraphResult<Vec<LegacySyncEntry>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT id, op::text, table_name,
                     COALESCE(old_pk, pk) AS old_pk,
                     COALESCE(new_pk, pk) AS new_pk,
                     properties::text
              FROM graph._sync_buffer
-             ORDER BY id",
-            None,
-            &[],
-        );
-        let Ok(rows) = result else {
-            return Ok(Vec::new());
-        };
+             ORDER BY id
+             LIMIT $1",
+                None,
+                &[limit.into()],
+            )
+            .map_err(|e| {
+                safety::GraphError::Internal(format!("legacy sync buffer read failed: {e}"))
+            })?;
         let mut entries = Vec::new();
         for row in rows {
-            entries.push((
-                required_sync_i64(
+            entries.push(LegacySyncEntry {
+                id: required_sync_i64(
                     row.get::<i64>(1).map_err(|e| {
                         safety::GraphError::Internal(format!("legacy sync id read failed: {e}"))
                     })?,
                     "id",
                 )?,
-                required_sync_string(
+                op: required_sync_string(
                     row.get::<String>(2).map_err(|e| {
                         safety::GraphError::Internal(format!("legacy sync op read failed: {e}"))
                     })?,
                     "op",
                 )?,
-                required_sync_string(
+                table_name: required_sync_string(
                     row.get::<String>(3).map_err(|e| {
                         safety::GraphError::Internal(format!(
                             "legacy sync table_name read failed: {e}"
@@ -684,79 +845,48 @@ pub(crate) fn apply_legacy_sync_buffer(stats: &mut SyncApplyStats) -> safety::Gr
                     })?,
                     "table_name",
                 )?,
-                required_sync_string(
+                old_pk: required_sync_string(
                     row.get::<String>(4).map_err(|e| {
                         safety::GraphError::Internal(format!("legacy sync old_pk read failed: {e}"))
                     })?,
                     "old_pk",
                 )?,
-                required_sync_string(
+                new_pk: required_sync_string(
                     row.get::<String>(5).map_err(|e| {
                         safety::GraphError::Internal(format!("legacy sync new_pk read failed: {e}"))
                     })?,
                     "new_pk",
                 )?,
-                row.get::<String>(6).map_err(|e| {
+                properties: row.get::<String>(6).map_err(|e| {
                     safety::GraphError::Internal(format!("legacy sync properties read failed: {e}"))
                 })?,
-            ));
+            });
         }
         Ok::<_, safety::GraphError>(entries)
-    })?;
-
-    let mut applied_ids = Vec::new();
-    for (id, op, table_name, old_pk, new_pk, properties) in entries {
-        let entry = SyncLogEntry {
-            id,
-            op,
-            table_oid: Some(table_oid_from_name(&table_name)?),
-            table_name,
-            old_pk: Some(old_pk),
-            new_pk: Some(new_pk),
-            properties,
-            old_row: None,
-            new_row: None,
-        };
-        match apply_sync_log_entry(&entry, stats) {
-            Ok(()) => applied_ids.push(id),
-            Err(err) => {
-                pgrx::warning!(
-                    "graph.apply_sync(): legacy sync row {} failed and remains buffered: {}",
-                    id,
-                    err
-                );
-            }
-        }
-    }
-
-    if !applied_ids.is_empty() {
-        let ids = applied_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        Spi::run(&format!(
-            "DELETE FROM graph._sync_buffer WHERE id IN ({})",
-            ids
-        ))
-        .map_err(|e| {
-            safety::GraphError::Internal(format!("legacy sync buffer cleanup failed: {}", e))
-        })?;
-    }
-
-    Ok(())
+    })
 }
 
-pub(crate) fn tenant_from_properties(
+fn delete_legacy_sync_entries(applied_ids: &[i64]) -> safety::GraphResult<()> {
+    if applied_ids.is_empty() {
+        return Ok(());
+    }
+    Spi::run_with_args(
+        "DELETE FROM graph._sync_buffer WHERE id = ANY($1)",
+        &[applied_ids.to_vec().into()],
+    )
+    .map_err(|e| safety::GraphError::Internal(format!("legacy sync buffer cleanup failed: {}", e)))
+}
+
+fn tenant_from_properties_with_context(
     table_oid: u32,
     properties: &[(String, String)],
+    context: &SyncReplayContext,
 ) -> safety::GraphResult<Option<String>> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
-    let Some(table) = tables.iter().find(|table| {
-        table_oid_from_name(&table.table_name)
-            .map(|oid| oid == table_oid)
-            .unwrap_or(false)
-    }) else {
+    let Some(table) = context
+        .tables
+        .iter()
+        .find(|table| context.table_oid(&table.table_name) == Some(table_oid))
+    else {
         return Ok(None);
     };
     let Some(tenant_column) = &table.tenant_column else {
