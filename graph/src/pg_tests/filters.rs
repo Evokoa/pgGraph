@@ -110,6 +110,93 @@ fn traverse_verifies_unindexed_filters_during_hydration_before_pagination() {
 }
 
 #[pg_test]
+fn traverse_hydration_filters_compare_large_numbers_exactly() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest
+                ADD COLUMN exact_score BIGINT,
+                ADD COLUMN score_text TEXT",
+    )
+    .expect("add exact score columns failed");
+    Spi::run(
+        "UPDATE public.graph_test_users_pgtest
+	             SET exact_score = CASE
+	                    WHEN id = 'u1' THEN 9007199254740992
+	                    ELSE 9007199254740993
+	                 END,
+	                 score_text = CASE
+	                    WHEN id = 'u1' THEN '9007199254740992'
+	                    ELSE '9007199254740993'
+	                 END",
+    )
+    .expect("update exact score columns failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age', 'exact_score', 'score_text']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add edge-table edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+
+    let exact_numeric_match = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass,
+                'u1',
+                1,
+                filter := '{\"node\":{\"where\":{\"exact_score\":{\"eq\":9007199254740993}}}}'::jsonb,
+                hydrate := false
+             )
+             WHERE node_id = 'u2'",
+    )
+    .expect("exact numeric filter traverse failed")
+    .unwrap_or(0);
+    let rounded_numeric_miss = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass,
+                'u1',
+                1,
+                filter := '{\"node\":{\"where\":{\"exact_score\":{\"eq\":9007199254740992}}}}'::jsonb,
+                hydrate := false
+             )
+             WHERE node_id = 'u2'",
+    )
+    .expect("rounded numeric filter traverse failed")
+    .unwrap_or(0);
+    let string_numeric_miss = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass,
+                'u1',
+                1,
+                filter := '{\"node\":{\"where\":{\"score_text\":{\"eq\":9007199254740993}}}}'::jsonb,
+                hydrate := false
+             )
+             WHERE node_id = 'u2'",
+    )
+    .expect("string numeric mismatch traverse failed")
+    .unwrap_or(0);
+
+    assert_eq!(exact_numeric_match, 1);
+    assert_eq!(rounded_numeric_miss, 0);
+    assert_eq!(string_numeric_miss, 0);
+}
+
+#[pg_test]
 fn traverse_pushes_registered_typed_filters_into_memory_index() {
     reset_and_create_fixtures();
     Spi::run(
@@ -473,4 +560,3 @@ fn traverse_rejects_ambiguous_raw_jsonb_filter_columns() {
 
     assert!(ambiguous_column);
 }
-
