@@ -34,7 +34,6 @@ production use.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Edge endpoint validation | Edge-store construction can silently drop out-of-range edge endpoints in internal constructors. | Make invalid endpoints a hard structural error and update tests/callers accordingly. |
 | Hydration numeric comparisons | JSON hydration filters currently rely on floating-point coercion for some numeric comparisons. | Preserve exact integer and decimal behavior where practical, with documented string-number rules. |
 
 ### SQL Contract and Query Semantics

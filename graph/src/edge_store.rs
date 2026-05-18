@@ -22,6 +22,8 @@
 //!
 //! See: `docs/contributor_guide/memory-model.mdx`
 
+use crate::safety::{GraphError, GraphResult};
+
 const EMPTY_U32_SLICE: [u32; 0] = [];
 const EMPTY_U8_SLICE: [u8; 0] = [];
 
@@ -134,13 +136,11 @@ impl SortedEdgeStoreBuilder {
         }
     }
 
-    pub fn push(&mut self, edge: RawEdge) {
-        if edge.source >= self.node_count || edge.target >= self.node_count {
-            return;
-        }
+    pub fn try_push(&mut self, edge: RawEdge) -> GraphResult<()> {
+        validate_raw_edge(self.node_count, &edge)?;
         let key = (edge.source, edge.target, edge.type_id);
         if self.previous == Some(key) {
-            return;
+            return Ok(());
         }
         while self.current_node < edge.source {
             self.current_node += 1;
@@ -152,6 +152,7 @@ impl SortedEdgeStoreBuilder {
             self.weights.push(edge.weight.unwrap_or(1));
         }
         self.previous = Some(key);
+        Ok(())
     }
 
     pub fn finish(mut self) -> EdgeStore {
@@ -205,12 +206,20 @@ impl EdgeStore {
     }
 
     /// Build a CSR EdgeStore from unsorted raw edges.
-    pub fn from_edges(node_count: u32, mut edges: Vec<RawEdge>, has_weights: bool) -> Self {
-        // Builder/discovery code should only provide valid node indexes, but
-        // keep this boundary defensive so malformed input cannot poison CSR
-        // slices and crash traversal later.
-        edges.retain(|edge| edge.source < node_count && edge.target < node_count);
+    pub fn from_edges(node_count: u32, edges: Vec<RawEdge>, has_weights: bool) -> Self {
+        Self::try_from_edges(node_count, edges, has_weights)
+            .expect("trusted edge store input has valid endpoints")
+    }
 
+    /// Build a CSR EdgeStore from unsorted raw edges, rejecting invalid endpoints.
+    pub fn try_from_edges(
+        node_count: u32,
+        mut edges: Vec<RawEdge>,
+        has_weights: bool,
+    ) -> GraphResult<Self> {
+        for edge in &edges {
+            validate_raw_edge(node_count, edge)?;
+        }
         // Sort by source, then target, then type_id
         edges.sort_unstable_by(|a, b| {
             a.source
@@ -250,19 +259,32 @@ impl EdgeStore {
         }
         edge_offsets.push(targets.len() as u32);
 
-        Self {
+        Ok(Self {
             backing: EdgeBacking::Owned {
                 edge_offsets,
                 targets,
                 type_ids,
                 weights,
             },
-        }
+        })
     }
 
     /// Build a CSR EdgeStore from already sorted raw edges without retaining the
     /// raw edge list. Input must be ordered by `(source, target, type_id)`.
     pub fn from_sorted_edges<I>(node_count: u32, edges: I, has_weights: bool) -> Self
+    where
+        I: IntoIterator<Item = RawEdge>,
+    {
+        Self::try_from_sorted_edges(node_count, edges, has_weights)
+            .expect("trusted sorted edge store input has valid endpoints")
+    }
+
+    /// Build a CSR EdgeStore from sorted raw edges, rejecting invalid endpoints.
+    pub fn try_from_sorted_edges<I>(
+        node_count: u32,
+        edges: I,
+        has_weights: bool,
+    ) -> GraphResult<Self>
     where
         I: IntoIterator<Item = RawEdge>,
     {
@@ -275,9 +297,7 @@ impl EdgeStore {
 
         edge_offsets.push(0);
         for edge in edges {
-            if edge.source >= node_count || edge.target >= node_count {
-                continue;
-            }
+            validate_raw_edge(node_count, &edge)?;
             let key = (edge.source, edge.target, edge.type_id);
             if previous == Some(key) {
                 continue;
@@ -297,14 +317,14 @@ impl EdgeStore {
             edge_offsets.push(targets.len() as u32);
         }
 
-        Self {
+        Ok(Self {
             backing: EdgeBacking::Owned {
                 edge_offsets,
                 targets,
                 type_ids,
                 weights,
             },
-        }
+        })
     }
 
     /// Build a reverse CSR from this store's directed edge contents.
@@ -529,6 +549,22 @@ impl EdgeStore {
     }
 }
 
+fn validate_raw_edge(node_count: u32, edge: &RawEdge) -> GraphResult<()> {
+    if edge.source >= node_count {
+        return Err(GraphError::Internal(format!(
+            "edge source {} is outside node range 0..{}",
+            edge.source, node_count
+        )));
+    }
+    if edge.target >= node_count {
+        return Err(GraphError::Internal(format!(
+            "edge target {} is outside node range 0..{}",
+            edge.target, node_count
+        )));
+    }
+    Ok(())
+}
+
 impl Default for EdgeStore {
     fn default() -> Self {
         Self::new()
@@ -718,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_edges_outside_node_range_are_ignored() {
+    fn unsorted_edges_outside_node_range_are_rejected() {
         let edges = vec![
             RawEdge {
                 source: 0,
@@ -740,11 +776,51 @@ mod tests {
             },
         ];
 
-        let store = EdgeStore::from_edges(2, edges, false);
+        let result = EdgeStore::try_from_edges(2, edges, false);
 
-        assert_eq!(store.edge_count(), 1);
-        assert_eq!(store.neighbors(0).0, &[1]);
-        assert_eq!(store.neighbors(1).0, &[] as &[u32]);
+        assert!(
+            matches!(result, Err(GraphError::Internal(reason)) if reason.contains("outside node range"))
+        );
+    }
+
+    #[test]
+    fn sorted_edges_outside_node_range_are_rejected() {
+        let edges = vec![
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: 1,
+                weight: None,
+            },
+        ];
+
+        let result = EdgeStore::try_from_sorted_edges(2, edges, false);
+
+        assert!(
+            matches!(result, Err(GraphError::Internal(reason)) if reason.contains("edge target 2"))
+        );
+    }
+
+    #[test]
+    fn incremental_sorted_builder_rejects_out_of_range_endpoint() {
+        let mut builder = SortedEdgeStoreBuilder::new(2, false);
+
+        let result = builder.try_push(RawEdge {
+            source: 2,
+            target: 0,
+            type_id: 1,
+            weight: None,
+        });
+
+        assert!(
+            matches!(result, Err(GraphError::Internal(reason)) if reason.contains("edge source 2"))
+        );
     }
 
     #[test]
@@ -842,17 +918,35 @@ mod tests {
                     weight,
                 })
                 .collect::<Vec<_>>();
-            let unsorted = EdgeStore::from_edges(node_count, edges.clone(), has_weights);
+            let has_invalid_edge = edges
+                .iter()
+                .any(|edge| edge.source >= node_count || edge.target >= node_count);
+            if has_invalid_edge {
+                prop_assert!(EdgeStore::try_from_edges(node_count, edges.clone(), has_weights).is_err());
+
+                let mut sorted = edges;
+                sorted.sort_unstable_by(|a, b| {
+                    a.source
+                        .cmp(&b.source)
+                        .then(a.target.cmp(&b.target))
+                        .then(a.type_id.cmp(&b.type_id))
+                });
+                prop_assert!(EdgeStore::try_from_sorted_edges(node_count, sorted, has_weights).is_err());
+                return Ok(());
+            }
+
+            let unsorted = EdgeStore::try_from_edges(node_count, edges.clone(), has_weights)
+                .expect("valid generated edges should build unsorted CSR");
 
             let mut sorted = edges;
-            sorted.retain(|edge| edge.source < node_count && edge.target < node_count);
             sorted.sort_unstable_by(|a, b| {
                 a.source
                     .cmp(&b.source)
                     .then(a.target.cmp(&b.target))
                     .then(a.type_id.cmp(&b.type_id))
             });
-            let sorted = EdgeStore::from_sorted_edges(node_count, sorted, has_weights);
+            let sorted = EdgeStore::try_from_sorted_edges(node_count, sorted, has_weights)
+                .expect("valid generated edges should build sorted CSR");
 
             prop_assert_eq!(sorted.offsets_slice(), unsorted.offsets_slice());
             prop_assert_eq!(sorted.targets_slice(), unsorted.targets_slice());
@@ -901,7 +995,9 @@ mod tests {
         let unsorted = EdgeStore::from_edges(node_count, edges.clone(), has_weights);
         let mut builder = SortedEdgeStoreBuilder::new(node_count, has_weights);
         for edge in edges {
-            builder.push(edge);
+            builder
+                .try_push(edge)
+                .expect("test fixture edges are in range");
         }
         let sorted = builder.finish();
 
