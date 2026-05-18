@@ -7,7 +7,7 @@ All functions live in the `graph` schema.
 
 | Category | Functions |
 |---|---|
-| Availability | `test_enabled`, `status`, `reset` |
+| Availability | `test_enabled`, `status`, `sync_health`, `reset` |
 | Registration | `add_table`, `add_edge`, `add_filter_column`, `registered_tables`, `registered_edges`, `remove_table`, `remove_edge`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables` |
 | Build jobs | `build`, `build_status` |
@@ -60,6 +60,33 @@ RETURNS TABLE (
 ```
 
 Reports backend-local engine state and current catalog/sync validity.
+
+### `graph.sync_health()`
+
+```sql
+graph.sync_health()
+RETURNS TABLE (
+  sync_mode text,
+  query_freshness text,
+  sync_batch_size int,
+  applied_sync_id bigint,
+  max_sync_log_id bigint,
+  pending_sync_rows bigint,
+  disabled_trigger_count int,
+  edge_buffer_used int,
+  edge_buffer_size int,
+  needs_vacuum boolean,
+  needs_rebuild boolean,
+  read_only boolean,
+  apply_sync_recommended boolean,
+  maintenance_recommended boolean
+)
+```
+
+Reports the sync and compaction signals most useful to schedulers and external
+monitors. Use `apply_sync_recommended` to decide when a lightweight replay is
+useful, and `maintenance_recommended` to decide when overlay/read-only/rebuild
+state should be folded back into the base graph.
 
 ### `graph.reset()`
 

@@ -94,6 +94,11 @@ before its traversal phase. `graph.query_freshness = 'off'` keeps the
 compatibility/manual catch-up path available. `graph.search()` remains separate
 because it reads source-table properties through SQL rather than graph topology.
 
+`graph.sync_health()` is the operator-facing read model for this state. It
+combines backend-local replay progress, durable `_sync_log` high-water state,
+freshness configuration, trigger health, and overlay pressure into one row for
+external schedulers and monitoring checks.
+
 ## Node Changes
 
 Mmap-backed node stores cannot be mutated. Before node mutation, the engine

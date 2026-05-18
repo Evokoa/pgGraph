@@ -1150,6 +1150,144 @@ fn status_exposes_v1_contract_field_names() {
 }
 
 #[pg_test]
+fn sync_health_exposes_operator_contract_field_names() {
+    reset_and_create_fixtures();
+    let signature_matches = Spi::get_one::<bool>(
+            "WITH expected(result_type) AS (
+                VALUES (
+                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, apply_sync_recommended boolean, maintenance_recommended boolean)'
+                )
+             )
+             SELECT pg_get_function_result(p.oid) = expected.result_type
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             CROSS JOIN expected
+             WHERE n.nspname = 'graph'
+               AND p.proname = 'sync_health'",
+        )
+        .expect("sync_health signature inspection failed")
+        .unwrap_or(false);
+
+    assert!(signature_matches);
+}
+
+#[pg_test]
+fn sync_health_recommends_apply_then_maintenance_for_edge_overlay() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("set query freshness failed");
+    Spi::run("SET graph.sync_batch_size = 3").expect("set sync batch size failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_sync_health_pgtest CASCADE")
+        .expect("drop sync health table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_sync_health_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_sync_health_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create sync health table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_sync_health_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root')",
+    )
+    .expect("insert sync health root failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_sync_health_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add sync health table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_sync_health_pgtest'::regclass,
+                from_column := 'parent_id',
+                to_table := 'graph_test_sync_health_pgtest'::regclass,
+                to_column := 'id',
+                label := 'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add sync health edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_sync_health_pgtest (id, parent_id, name)
+             VALUES ('child', 'root', 'Child')",
+    )
+    .expect("insert pending sync health child failed");
+
+    let (pending_before, apply_before, maintenance_before, batch_size, freshness) =
+        Spi::connect(|client| {
+            let result = client
+                .select(
+                    "SELECT pending_sync_rows,
+                            apply_sync_recommended,
+                            maintenance_recommended,
+                            sync_batch_size,
+                            query_freshness
+                       FROM graph.sync_health()",
+                    None,
+                    &[],
+                )
+                .expect("sync health query failed");
+            let row = result.first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<i64>(1)?.unwrap_or(0),
+                row.get::<bool>(2)?.unwrap_or(false),
+                row.get::<bool>(3)?.unwrap_or(true),
+                row.get::<i32>(4)?.unwrap_or(0),
+                row.get::<String>(5)?.unwrap_or_default(),
+            ))
+        })
+        .expect("sync health read failed");
+
+    assert_eq!(pending_before, 1);
+    assert!(apply_before);
+    assert!(!maintenance_before);
+    assert_eq!(batch_size, 3);
+    assert_eq!(freshness, "off");
+
+    let inserts = Spi::get_one::<i64>("SELECT inserts_applied FROM graph.apply_sync()")
+        .expect("apply sync failed")
+        .unwrap_or(0);
+    let (pending_after, apply_after, maintenance_after, edge_buffer_used, needs_vacuum) =
+        Spi::connect(|client| {
+            let result = client
+                .select(
+                    "SELECT pending_sync_rows,
+                            apply_sync_recommended,
+                            maintenance_recommended,
+                            edge_buffer_used,
+                            needs_vacuum
+                       FROM graph.sync_health()",
+                    None,
+                    &[],
+                )
+                .expect("sync health after apply query failed");
+            let row = result.first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<i64>(1)?.unwrap_or(-1),
+                row.get::<bool>(2)?.unwrap_or(true),
+                row.get::<bool>(3)?.unwrap_or(false),
+                row.get::<i32>(4)?.unwrap_or(0),
+                row.get::<bool>(5)?.unwrap_or(false),
+            ))
+        })
+        .expect("sync health after apply read failed");
+
+    assert_eq!(inserts, 1);
+    assert_eq!(pending_after, 0);
+    assert!(!apply_after);
+    assert!(maintenance_after);
+    assert!(edge_buffer_used > 0);
+    assert!(needs_vacuum);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+    Spi::run("RESET graph.sync_batch_size").expect("reset sync batch size failed");
+}
+
+#[pg_test]
 fn admin_remove_apis_update_catalog_side_effects() {
     reset_and_create_fixtures();
     Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")

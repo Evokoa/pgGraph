@@ -97,6 +97,32 @@ shortest-path queries, weighted shortest-path queries, component APIs, and
 freshness helper. `graph.apply_sync()` remains the explicit operator/admin path
 for all pending sync rows.
 
+## Sync Health
+
+```sql
+SELECT *
+FROM graph.sync_health();
+```
+
+`graph.sync_health()` returns one row of scheduler-friendly signals:
+
+| Column | Meaning |
+|---|---|
+| `query_freshness` | Current topology-read freshness mode |
+| `sync_batch_size` | Maximum durable sync rows replayed per internal batch |
+| `applied_sync_id` | Last durable sync log row applied by this backend-local engine |
+| `max_sync_log_id` | Current high-water row in `graph._sync_log` |
+| `pending_sync_rows` | Durable sync rows newer than `applied_sync_id` |
+| `disabled_trigger_count` | Registered graph triggers currently disabled |
+| `edge_buffer_used` | Pending edge overlay mutations |
+| `edge_buffer_size` | Configured edge overlay capacity |
+| `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` |
+| `maintenance_recommended` | Overlay, read-only, vacuum, or rebuild state should be compacted |
+
+Use this from `pg_cron`, an external scheduler, or monitoring checks when you
+need a single query that decides whether to call `graph.apply_sync()` or
+`graph.maintenance(concurrently := true)`. It does not schedule work by itself.
+
 ## Edge Buffer Limits
 
 `graph.edge_buffer_size` limits pending edge mutations. When the buffer is full,
@@ -221,7 +247,7 @@ High-write graph:
 
 ```text
 Use trigger sync for visibility.
-Run graph.apply_sync() on a schedule for lightweight overlay updates.
-Run graph.maintenance() during maintenance windows to rebuild CSR.
-Watch edge_buffer_used, needs_vacuum, pending_sync_rows, and read_only.
+Run graph.apply_sync() when graph.sync_health().apply_sync_recommended is true.
+Run graph.maintenance(concurrently := true) when maintenance_recommended is true.
+Watch edge_buffer_used, pending_sync_rows, disabled_trigger_count, and read_only.
 ```

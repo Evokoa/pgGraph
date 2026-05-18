@@ -91,76 +91,132 @@ fn status() -> TableIterator<
     ),
 > {
     with_panic_boundary("status()", || {
-        let disabled_trigger_count = disabled_graph_trigger_count().unwrap_or(0);
-        let catalog_state = current_catalog_state();
-        ENGINE.with(|e| {
-            let mut eng = e.borrow_mut();
-            let pending_sync_rows = pending_sync_rows(eng.applied_sync_id).unwrap_or(0);
-            eng.disabled_trigger_count = disabled_trigger_count;
-            eng.pending_sync_rows = pending_sync_rows;
-            if disabled_trigger_count > 0
-                && matches!(eng.schema_state, engine::SchemaState::Current)
-            {
-                eng.schema_state = engine::SchemaState::Stale;
-                eng.invalid_reason = Some(format!(
-                    "{} graph sync trigger(s) are disabled",
-                    disabled_trigger_count
-                ));
-            }
-            if eng.built {
-                match &catalog_state {
-                    Ok((_current_fingerprint, Some(reason))) => {
-                        eng.needs_rebuild = true;
-                        eng.schema_state = engine::SchemaState::Invalid;
-                        eng.invalid_reason = Some(reason.clone());
-                    }
-                    Ok((current_fingerprint, None))
-                        if eng.catalog_fingerprint.is_some()
-                            && eng.catalog_fingerprint != Some(*current_fingerprint) =>
-                    {
-                        eng.needs_rebuild = true;
-                        eng.schema_state = engine::SchemaState::Invalid;
-                        eng.invalid_reason = Some(
-                            "registered graph catalog changed since graph.build(); rebuild required"
-                                .to_string(),
-                        );
-                    }
-                    Err(err) => {
-                        eng.needs_rebuild = true;
-                        eng.schema_state = engine::SchemaState::Invalid;
-                        eng.invalid_reason = Some(format!(
-                            "registered graph schema validation failed: {}",
-                            err
-                        ));
-                    }
-                    _ => {}
+        let s = refreshed_engine_status().unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            s.node_count,
+            s.edge_count,
+            s.memory_used_mb,
+            s.memory_limit_mb,
+            s.sync_mode,
+            s.sync_status,
+            s.last_build,
+            s.last_vacuum,
+            s.edge_types,
+            s.edge_buffer_used,
+            s.has_unidirectional_edges,
+            s.schema_state,
+            s.sync_lag,
+            s.edge_buffer_used,
+            s.needs_vacuum,
+            s.needs_rebuild,
+            s.applied_sync_id,
+            s.pending_sync_rows,
+            s.invalid_reason,
+            s.disabled_trigger_count,
+            s.read_only,
+        )])
+    })
+}
+
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn sync_health() -> TableIterator<
+    'static,
+    (
+        name!(sync_mode, String),
+        name!(query_freshness, String),
+        name!(sync_batch_size, i32),
+        name!(applied_sync_id, i64),
+        name!(max_sync_log_id, i64),
+        name!(pending_sync_rows, i64),
+        name!(disabled_trigger_count, i32),
+        name!(edge_buffer_used, i32),
+        name!(edge_buffer_size, i32),
+        name!(needs_vacuum, bool),
+        name!(needs_rebuild, bool),
+        name!(read_only, bool),
+        name!(apply_sync_recommended, bool),
+        name!(maintenance_recommended, bool),
+    ),
+> {
+    with_panic_boundary("sync_health()", || {
+        let s = refreshed_engine_status().unwrap_or_else(|err| err.report());
+        let max_sync_log_id = max_sync_log_id().unwrap_or_else(|err| err.report());
+        let edge_buffer_size = config::EDGE_BUFFER_SIZE.get();
+        let apply_sync_recommended =
+            s.pending_sync_rows > 0 && s.disabled_trigger_count == 0 && !s.needs_rebuild;
+        let maintenance_recommended =
+            s.read_only || s.needs_rebuild || s.needs_vacuum || s.edge_buffer_used > 0;
+
+        TableIterator::new(vec![(
+            s.sync_mode,
+            config::query_freshness(),
+            config::sync_batch_size().min(i32::MAX as usize) as i32,
+            s.applied_sync_id,
+            max_sync_log_id,
+            s.pending_sync_rows,
+            s.disabled_trigger_count,
+            s.edge_buffer_used,
+            edge_buffer_size,
+            s.needs_vacuum,
+            s.needs_rebuild,
+            s.read_only,
+            apply_sync_recommended,
+            maintenance_recommended,
+        )])
+    })
+}
+
+fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> {
+    let disabled_trigger_count = disabled_graph_trigger_count()?;
+    let catalog_state = current_catalog_state();
+    let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
+    let pending = pending_sync_rows(applied_sync_id)?;
+
+    ENGINE.with(|e| {
+        let mut eng = e.borrow_mut();
+        eng.disabled_trigger_count = disabled_trigger_count;
+        eng.pending_sync_rows = pending;
+        if disabled_trigger_count > 0 && matches!(eng.schema_state, engine::SchemaState::Current) {
+            eng.schema_state = engine::SchemaState::Stale;
+            eng.invalid_reason = Some(format!(
+                "{} graph sync trigger(s) are disabled",
+                disabled_trigger_count
+            ));
+        }
+        if eng.built {
+            match &catalog_state {
+                Ok((_current_fingerprint, Some(reason))) => {
+                    eng.needs_rebuild = true;
+                    eng.schema_state = engine::SchemaState::Invalid;
+                    eng.invalid_reason = Some(reason.clone());
                 }
+                Ok((current_fingerprint, None))
+                    if eng.catalog_fingerprint.is_some()
+                        && eng.catalog_fingerprint != Some(*current_fingerprint) =>
+                {
+                    eng.needs_rebuild = true;
+                    eng.schema_state = engine::SchemaState::Invalid;
+                    eng.invalid_reason = Some(
+                        "registered graph catalog changed since graph.build(); rebuild required"
+                            .to_string(),
+                    );
+                }
+                Err(err) => {
+                    eng.needs_rebuild = true;
+                    eng.schema_state = engine::SchemaState::Invalid;
+                    eng.invalid_reason = Some(format!(
+                        "registered graph schema validation failed: {}",
+                        err
+                    ));
+                }
+                _ => {}
             }
-            let s = eng.status();
-            TableIterator::new(vec![(
-                s.node_count,
-                s.edge_count,
-                s.memory_used_mb,
-                s.memory_limit_mb,
-                s.sync_mode,
-                s.sync_status,
-                s.last_build,
-                s.last_vacuum,
-                s.edge_types,
-                s.edge_buffer_used,
-                s.has_unidirectional_edges,
-                s.schema_state,
-                s.sync_lag,
-                s.edge_buffer_used,
-                s.needs_vacuum,
-                s.needs_rebuild,
-                s.applied_sync_id,
-                s.pending_sync_rows,
-                s.invalid_reason,
-                s.disabled_trigger_count,
-                s.read_only,
-            )])
-        })
+        }
+        Ok(eng.status())
     })
 }
 
