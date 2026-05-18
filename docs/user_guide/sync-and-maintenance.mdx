@@ -116,7 +116,7 @@ FROM graph.sync_health();
 | `disabled_trigger_count` | Registered graph triggers currently disabled |
 | `edge_buffer_used` | Pending edge overlay mutations |
 | `edge_buffer_size` | Configured edge overlay capacity |
-| `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` |
+| `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` while the engine is writable |
 | `maintenance_recommended` | Overlay, read-only, vacuum, or rebuild state should be compacted |
 
 Use this from `pg_cron`, an external scheduler, or monitoring checks when you

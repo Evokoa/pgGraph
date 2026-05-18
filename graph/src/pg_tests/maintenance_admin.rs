@@ -130,6 +130,24 @@ fn edge_buffer_overflow_from_sql_sync_enters_read_only_mode() {
     assert!(read_only);
     assert_eq!(sync_status, "read_only");
     assert_eq!(edge_buffer_used, 0);
+    let (apply_recommended, maintenance_recommended) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT apply_sync_recommended, maintenance_recommended
+                 FROM graph.sync_health()",
+                None,
+                &[],
+            )
+            .expect("sync health query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<bool>(1)?.unwrap_or(true),
+            row.get::<bool>(2)?.unwrap_or(false),
+        ))
+    })
+    .expect("sync health read failed");
+    assert!(!apply_recommended);
+    assert!(maintenance_recommended);
     Spi::run("SET graph.edge_buffer_size = 100000").expect("restore edge buffer size failed");
 }
 
@@ -704,8 +722,7 @@ fn traverse_auto_sync_replay_error_fails_closed() {
     Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
 }
 
-#[pg_test]
-fn topology_reads_auto_sync_remaining_entrypoints() {
+fn setup_topology_auto_sync_fixture() -> i64 {
     reset_and_create_fixtures();
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
     Spi::run("SET graph.query_freshness = 'apply_pending_sync'")
@@ -753,6 +770,27 @@ fn topology_reads_auto_sync_remaining_entrypoints() {
     let base_component_count = Spi::get_one::<i64>("SELECT count(*) FROM graph.components()")
         .expect("base components failed")
         .unwrap_or(0);
+
+    base_component_count
+}
+
+fn insert_topology_auto_sync_node(id: &str, parent_id: Option<&str>, name: &str) {
+    let parent_sql = parent_id
+        .map(super::sql_literal)
+        .unwrap_or_else(|| "NULL".to_string());
+    Spi::run(&format!(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ({}, {}, {}, 1)",
+        super::sql_literal(id),
+        parent_sql,
+        super::sql_literal(name)
+    ))
+    .expect("insert pending topology node failed");
+}
+
+#[pg_test]
+fn topology_reads_auto_sync_traversal_and_paths() {
+    setup_topology_auto_sync_fixture();
 
     Spi::run(
         "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
@@ -810,71 +848,6 @@ fn topology_reads_auto_sync_remaining_entrypoints() {
 
     Spi::run(
         "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
-             VALUES ('stats-node', NULL, 'Stats Node', 1)",
-    )
-    .expect("insert pending stats node failed");
-    let total_active_nodes = Spi::get_one::<i32>("SELECT total_active_nodes FROM graph.component_stats()")
-        .expect("component stats failed")
-        .unwrap_or(0);
-
-    Spi::run(
-        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
-             VALUES ('connected-node', NULL, 'Connected Node', 1)",
-    )
-    .expect("insert pending connected node failed");
-    let connected_components_sees_node = Spi::get_one::<i64>(
-        "SELECT count(*)
-             FROM graph.connected_components()
-             WHERE node_id = 'connected-node'
-               AND component_size = 1",
-    )
-    .expect("connected_components failed")
-    .unwrap_or(0);
-
-    Spi::run(
-        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
-             VALUES ('summary-node', NULL, 'Summary Node', 1)",
-    )
-    .expect("insert pending summary node failed");
-    let component_count_after_isolate = Spi::get_one::<i64>(
-        "SELECT count(*)
-             FROM graph.components()",
-    )
-    .expect("components failed")
-    .unwrap_or(0);
-
-    Spi::run(
-        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
-             VALUES ('isolated-node', NULL, 'Isolated Node', 1)",
-    )
-    .expect("insert pending isolated node failed");
-    let isolated_nodes_sees_node = Spi::get_one::<i64>(
-        "SELECT count(*)
-             FROM graph.isolated_nodes(hydrate := false)
-             WHERE node_id = 'isolated-node'",
-    )
-    .expect("isolated_nodes failed")
-    .unwrap_or(0);
-
-    let root_component_id = Spi::get_one::<i64>(
-        "SELECT component_id
-             FROM graph.connected_components()
-             WHERE node_id = 'root'",
-    )
-    .expect("root component lookup failed")
-    .expect("root component id missing");
-    let child_component_rows = Spi::get_one::<i64>(
-        &format!(
-            "SELECT count(*)
-                 FROM graph.component({root_component_id}, hydrate := false)
-                 WHERE node_id = 'root'"
-        ),
-    )
-    .expect("component failed")
-    .unwrap_or(0);
-
-    Spi::run(
-        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
              VALUES ('search-node', NULL, 'Search Node', 1)",
     )
     .expect("insert pending search node failed");
@@ -896,12 +869,81 @@ fn topology_reads_auto_sync_remaining_entrypoints() {
     assert_eq!(multi_start_sees_child, 1);
     assert_eq!(shortest_rows, 1);
     assert_eq!(weighted_cost, 0);
-    assert_eq!(total_active_nodes, 6);
+    assert_eq!(traverse_search_sees_child, 1);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+}
+
+#[pg_test]
+fn topology_reads_auto_sync_component_entrypoints() {
+    let base_component_count = setup_topology_auto_sync_fixture();
+
+    insert_topology_auto_sync_node("stats-node", None, "Stats Node");
+    let total_active_nodes = Spi::get_one::<i32>("SELECT total_active_nodes FROM graph.component_stats()")
+        .expect("component stats failed")
+        .unwrap_or(0);
+
+    insert_topology_auto_sync_node("connected-node", None, "Connected Node");
+    let connected_components_sees_node = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.connected_components()
+             WHERE node_id = 'connected-node'
+               AND component_size = 1",
+    )
+    .expect("connected_components failed")
+    .unwrap_or(0);
+
+    insert_topology_auto_sync_node("summary-node", None, "Summary Node");
+    let component_count_after_isolate = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.components()",
+    )
+    .expect("components failed")
+    .unwrap_or(0);
+
+    insert_topology_auto_sync_node("isolated-node", None, "Isolated Node");
+    let isolated_nodes_sees_node = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.isolated_nodes(hydrate := false)
+             WHERE node_id = 'isolated-node'",
+    )
+    .expect("isolated_nodes failed")
+    .unwrap_or(0);
+
+    let root_component_id = Spi::get_one::<i64>(
+        "SELECT component_id
+             FROM graph.connected_components()
+             WHERE node_id = 'root'",
+    )
+    .expect("root component lookup failed")
+    .expect("root component id missing");
+    let root_component_rows = Spi::get_one::<i64>(
+        &format!(
+            "SELECT count(*)
+                 FROM graph.component({root_component_id}, hydrate := false)
+                 WHERE node_id = 'root'"
+        ),
+    )
+    .expect("component failed")
+    .unwrap_or(0);
+
+    assert_eq!(total_active_nodes, 3);
     assert_eq!(connected_components_sees_node, 1);
     assert!(component_count_after_isolate > base_component_count);
     assert_eq!(isolated_nodes_sees_node, 1);
-    assert_eq!(child_component_rows, 1);
-    assert_eq!(traverse_search_sees_child, 1);
+    assert_eq!(root_component_rows, 1);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+}
+
+#[pg_test]
+fn topology_reads_error_on_pending_covers_topology_but_not_search() {
+    setup_topology_auto_sync_fixture();
+    let root_component_id = Spi::get_one::<i64>(
+        "SELECT component_id
+             FROM graph.connected_components()
+             WHERE node_id = 'root'",
+    )
+    .expect("root component lookup failed")
+    .expect("root component id missing");
 
     Spi::run(
         "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)

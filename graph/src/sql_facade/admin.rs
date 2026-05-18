@@ -146,8 +146,10 @@ fn sync_health() -> TableIterator<
         let s = refreshed_engine_status().unwrap_or_else(|err| err.report());
         let max_sync_log_id = max_sync_log_id().unwrap_or_else(|err| err.report());
         let edge_buffer_size = config::EDGE_BUFFER_SIZE.get();
-        let apply_sync_recommended =
-            s.pending_sync_rows > 0 && s.disabled_trigger_count == 0 && !s.needs_rebuild;
+        let apply_sync_recommended = s.pending_sync_rows > 0
+            && s.disabled_trigger_count == 0
+            && !s.needs_rebuild
+            && !s.read_only;
         let maintenance_recommended =
             s.read_only || s.needs_rebuild || s.needs_vacuum || s.edge_buffer_used > 0;
 

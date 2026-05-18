@@ -200,6 +200,8 @@ query-time sync semantics. It builds a line graph, enables trigger sync, then
 records p50/p95/p99 latency for traversal, shortest path, and weighted shortest
 path reads across four scenarios: no pending sync, a small pending backlog, a
 large pending backlog, and concurrent writers appending to `graph._sync_log`.
+For fixed-backlog scenarios, each query kind is measured from a rebuilt graph
+with a fresh backlog, and backlog counts come from `graph.sync_health()`.
 
 Useful knobs:
 

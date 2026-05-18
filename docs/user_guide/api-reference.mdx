@@ -85,8 +85,9 @@ RETURNS TABLE (
 
 Reports the sync and compaction signals most useful to schedulers and external
 monitors. Use `apply_sync_recommended` to decide when a lightweight replay is
-useful, and `maintenance_recommended` to decide when overlay/read-only/rebuild
-state should be folded back into the base graph.
+useful for a writable backend-local engine, and `maintenance_recommended` to
+decide when overlay/read-only/rebuild state should be folded back into the base
+graph.
 
 ### `graph.reset()`
 

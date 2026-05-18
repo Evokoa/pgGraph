@@ -103,8 +103,32 @@ SELECT graph.enable_sync();
 SQL
 
 pending_rows() {
-  psql -X -q -v ON_ERROR_STOP=1 -tA "$DBNAME" \
-    -c "SELECT count(*) FROM graph._sync_log"
+  psql -X -q -v ON_ERROR_STOP=1 -tA "$DBNAME" <<'SQL'
+SET graph.auto_load = on;
+SELECT pending_sync_rows FROM graph.sync_health();
+SQL
+}
+
+reset_sync_backlog() {
+  psql -X -q -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
+SET graph.persist_on_build = on;
+SELECT * FROM graph.build();
+TRUNCATE graph._sync_log RESTART IDENTITY;
+SELECT graph.enable_sync();
+SQL
+}
+
+wait_for_pending_rows() {
+  local minimum="$1"
+
+  for _ in $(seq 1 30); do
+    if (( "$(pending_rows)" >= minimum )); then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
 }
 
 append_backlog() {
@@ -160,8 +184,18 @@ measure_query() {
   local query_kind="$2"
   local samples="$3"
   local sql="$4"
-  local backlog="$5"
+  local backlog_setup="$5"
   local values_file="$WORKDIR/${label}-${query_kind}.latencies"
+
+  if [[ "$backlog_setup" != "live" ]]; then
+    reset_sync_backlog
+    if (( backlog_setup > 0 )); then
+      append_backlog "$backlog_setup"
+    fi
+  fi
+
+  local backlog
+  backlog="$(pending_rows)"
 
   : >"$values_file"
   for sample in $(seq 1 "$samples"); do
@@ -210,25 +244,26 @@ SQL
 measure_suite() {
   local label="$1"
   local samples="$2"
+  local backlog_setup="$3"
 
   measure_query "$label" "traverse" "$samples" \
     "SELECT count(*) AS rows_seen FROM graph.traverse('public.graph_read_latency_nodes'::regclass, '1', 3, hydrate := false)" \
-    "$(pending_rows)"
+    "$backlog_setup"
   measure_query "$label" "shortest_path" "$samples" \
     "SELECT count(*) AS rows_seen FROM graph.shortest_path('public.graph_read_latency_nodes'::regclass, '1', 'public.graph_read_latency_nodes'::regclass, '$NODE_COUNT', 20, hydrate := false)" \
-    "$(pending_rows)"
+    "$backlog_setup"
   measure_query "$label" "weighted_shortest_path" "$samples" \
     "SELECT count(*) AS rows_seen FROM graph.weighted_shortest_path('public.graph_read_latency_nodes'::regclass, '1', 'public.graph_read_latency_nodes'::regclass, '$NODE_COUNT')" \
-    "$(pending_rows)"
+    "$backlog_setup"
 }
 
-measure_suite "no_pending_sync" "$SAMPLES"
+measure_suite "no_pending_sync" "$SAMPLES" 0
 
-append_backlog "$SMALL_BACKLOG"
-measure_suite "small_pending_backlog" "$SAMPLES"
+measure_suite "small_pending_backlog" "$SAMPLES" "$SMALL_BACKLOG"
 
-append_backlog "$LARGE_BACKLOG"
-measure_suite "large_pending_backlog" "$SAMPLES"
+measure_suite "large_pending_backlog" "$SAMPLES" "$LARGE_BACKLOG"
+
+reset_sync_backlog
 
 writer_sql="$WORKDIR/read-latency-writer.sql"
 cp "$SCRIPT_DIR/pgbench_sync.sql" "$writer_sql"
@@ -243,7 +278,13 @@ pgbench "$DBNAME" \
   >"$WORKDIR/concurrent-writers.log" 2>&1 &
 writer_pid=$!
 
-measure_suite "concurrent_writers" "$CONCURRENT_SAMPLES"
+wait_for_pending_rows 1 || {
+  cat "$WORKDIR/concurrent-writers.log"
+  echo "concurrent writer did not create pending sync rows"
+  exit 1
+}
+
+measure_suite "concurrent_writers" "$CONCURRENT_SAMPLES" live
 
 wait "$writer_pid" || {
   cat "$WORKDIR/concurrent-writers.log"
