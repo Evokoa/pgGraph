@@ -120,9 +120,37 @@ FROM graph.sync_health();
 | `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` while the engine is writable |
 | `maintenance_recommended` | Overlay, read-only, vacuum, or rebuild state should be compacted |
 
-Use this from `pg_cron`, an external scheduler, or monitoring checks when you
-need a single query that decides whether to call `graph.apply_sync()` or
-`graph.maintenance(concurrently := true)`. It does not schedule work by itself.
+Use `graph.run_scheduled_maintenance()` from `pg_cron` or an external scheduler
+when you want one call that applies sync if recommended and then starts
+background maintenance when compaction or rebuild work remains:
+
+```sql
+SELECT * FROM graph.run_scheduled_maintenance();
+```
+
+For PostgreSQL installations that use `pg_cron`:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+SELECT cron.schedule(
+  'pggraph-maintenance',
+  '*/1 * * * *',
+  $$SELECT * FROM graph.run_scheduled_maintenance();$$
+);
+```
+
+Use a slower cadence when write volume is low:
+
+```sql
+SELECT cron.schedule(
+  'pggraph-maintenance',
+  '*/5 * * * *',
+  $$SELECT * FROM graph.run_scheduled_maintenance();$$
+);
+```
+
+The extension does not run an always-on internal scheduler or background loop.
 
 ## Edge Buffer Limits
 

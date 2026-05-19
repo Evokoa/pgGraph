@@ -1378,6 +1378,76 @@ fn sync_health_exposes_operator_contract_field_names() {
 }
 
 #[pg_test]
+fn scheduled_maintenance_exposes_operator_contract_field_names() {
+    reset_and_create_fixtures();
+    let signature_matches = Spi::get_one::<bool>(
+            "WITH expected(result_type) AS (
+                VALUES (
+                    'TABLE(applied_sync boolean, maintenance_started boolean, maintenance_job_id text, pending_sync_rows bigint, edge_buffer_used integer, message text)'
+                )
+             )
+             SELECT pg_get_function_result(p.oid) = expected.result_type
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             CROSS JOIN expected
+             WHERE n.nspname = 'graph'
+               AND p.proname = 'run_scheduled_maintenance'",
+        )
+        .expect("run_scheduled_maintenance signature inspection failed")
+        .unwrap_or(false);
+
+    assert!(signature_matches);
+}
+
+#[pg_test]
+fn scheduled_maintenance_noops_when_graph_is_healthy() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+
+    let (applied_sync, maintenance_started, job_id, pending, edge_buffer_used, message) =
+        Spi::connect(|client| {
+            let result = client
+                .select(
+                    "SELECT applied_sync,
+                            maintenance_started,
+                            maintenance_job_id,
+                            pending_sync_rows,
+                            edge_buffer_used,
+                            message
+                       FROM graph.run_scheduled_maintenance()",
+                    None,
+                    &[],
+                )
+                .expect("scheduled maintenance query failed");
+            let row = result.first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<bool>(1)?.unwrap_or(true),
+                row.get::<bool>(2)?.unwrap_or(true),
+                row.get::<String>(3)?,
+                row.get::<i64>(4)?.unwrap_or(-1),
+                row.get::<i32>(5)?.unwrap_or(-1),
+                row.get::<String>(6)?.unwrap_or_default(),
+            ))
+        })
+        .expect("scheduled maintenance row read failed");
+
+    assert!(!applied_sync);
+    assert!(!maintenance_started);
+    assert!(job_id.is_none());
+    assert_eq!(pending, 0);
+    assert_eq!(edge_buffer_used, 0);
+    assert_eq!(message, "no scheduled graph maintenance needed");
+}
+
+#[pg_test]
 fn sync_health_recommends_apply_then_maintenance_for_edge_overlay() {
     reset_and_create_fixtures();
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");

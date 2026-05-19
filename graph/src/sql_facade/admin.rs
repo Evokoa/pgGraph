@@ -176,6 +176,72 @@ fn sync_health() -> TableIterator<
     })
 }
 
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn run_scheduled_maintenance() -> TableIterator<
+    'static,
+    (
+        name!(applied_sync, bool),
+        name!(maintenance_started, bool),
+        name!(maintenance_job_id, Option<String>),
+        name!(pending_sync_rows, i64),
+        name!(edge_buffer_used, i32),
+        name!(message, String),
+    ),
+> {
+    with_panic_boundary("run_scheduled_maintenance()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let mut status = refreshed_engine_status().unwrap_or_else(|err| err.report());
+        let mut applied_sync = false;
+
+        let apply_sync_recommended = status.pending_sync_rows > 0
+            && status.disabled_trigger_count == 0
+            && !status.needs_rebuild
+            && !status.read_only;
+        if apply_sync_recommended {
+            apply_sync_internal().unwrap_or_else(|err| err.report());
+            applied_sync = true;
+            status = refreshed_engine_status().unwrap_or_else(|err| err.report());
+        }
+
+        let maintenance_recommended = status.read_only
+            || status.needs_rebuild
+            || status.needs_vacuum
+            || status.edge_buffer_used > 0;
+        let mut maintenance_job_id = None;
+        if maintenance_recommended {
+            let job_id = create_maintenance_job().unwrap_or_else(|err| err.report());
+            if let Err(err) = launch_maintenance_worker(&job_id) {
+                let _ = update_maintenance_job_failed(&job_id, &err.to_string());
+                err.report();
+            }
+            maintenance_job_id = Some(job_id);
+            status = refreshed_engine_status().unwrap_or_else(|err| err.report());
+        }
+
+        let maintenance_started = maintenance_job_id.is_some();
+        let message = match (applied_sync, maintenance_started) {
+            (true, true) => "applied sync and started maintenance",
+            (true, false) => "applied sync",
+            (false, true) => "started maintenance",
+            (false, false) => "no scheduled graph maintenance needed",
+        }
+        .to_string();
+
+        TableIterator::new(vec![(
+            applied_sync,
+            maintenance_started,
+            maintenance_job_id,
+            status.pending_sync_rows,
+            status.edge_buffer_used,
+            message,
+        )])
+    })
+}
+
 fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> {
     let disabled_trigger_count = disabled_graph_trigger_count()?;
     let catalog_state = current_catalog_state();

@@ -11,7 +11,7 @@ All functions live in the `graph` schema.
 | Registration | `add_table`, `add_edge`, `add_filter_column`, `registered_tables`, `registered_edges`, `remove_table`, `remove_edge`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables` |
 | Build jobs | `build`, `build_status` |
-| Sync and maintenance | `enable_sync`, `apply_sync`, `vacuum`, `maintenance`, `maintenance_status` |
+| Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `vacuum`, `maintenance`, `maintenance_status` |
 | Search | `search`, `search_nodes` |
 | Traversal | `traverse`, `traverse_search`, `node_ref`, `node_ref_string`, `format_path` |
 | Filters | `equals`, `eq`, `not_equals`, `neq`, `greater_than`, `gt`, `at_least`, `gte`, `less_than`, `lt`, `at_most`, `lte`, `between`, `on_node`, `all` |
@@ -327,6 +327,24 @@ RETURNS TABLE (
 ```
 
 Admin-only. Applies pending sync rows to the backend-local engine.
+
+### `graph.run_scheduled_maintenance()`
+
+```sql
+graph.run_scheduled_maintenance()
+RETURNS TABLE (
+  applied_sync boolean,
+  maintenance_started boolean,
+  maintenance_job_id text,
+  pending_sync_rows bigint,
+  edge_buffer_used int,
+  message text
+)
+```
+
+Admin-only. Applies pending sync when `graph.sync_health()` says it is safe,
+then starts `graph.maintenance(concurrently := true)` when refreshed health
+still recommends compaction or rebuild work.
 
 ### `graph.vacuum()`
 
