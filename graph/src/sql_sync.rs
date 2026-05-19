@@ -814,41 +814,46 @@ pub(crate) fn row_text_value(row: &serde_json::Value, column: &str) -> Option<St
 pub(crate) fn apply_legacy_sync_buffer(stats: &mut SyncApplyStats) -> safety::GraphResult<()> {
     let batch_size = config::sync_batch_size();
     let mut context = SyncReplayContext::load()?;
+    let max_legacy_id = max_legacy_sync_id()?;
+    let mut after_id = 0;
 
     loop {
-        let entries = read_legacy_sync_entries(batch_size)?;
+        let entries = read_legacy_sync_entries_after(after_id, max_legacy_id, batch_size)?;
         if entries.is_empty() {
             break;
         }
+        after_id = entries.last().map(|entry| entry.id).unwrap_or(after_id);
 
         let mut applied_ids = Vec::new();
         for legacy in entries {
-            let table_oid = context.table_oid_or_lookup(&legacy.table_name)?;
-            let entry = SyncLogEntry {
-                id: legacy.id,
-                op: legacy.op,
-                table_oid: Some(table_oid),
-                table_name: legacy.table_name,
-                old_pk: Some(legacy.old_pk),
-                new_pk: Some(legacy.new_pk),
-                properties: legacy.properties,
-                old_row: None,
-                new_row: None,
-            };
-            match apply_sync_log_entry_with_context(&entry, stats, &mut context) {
-                Ok(()) => applied_ids.push(entry.id),
+            let legacy_id = legacy.id;
+            let result = (|| {
+                let table_oid = context.table_oid_or_lookup(&legacy.table_name)?;
+                let entry = SyncLogEntry {
+                    id: legacy.id,
+                    op: legacy.op,
+                    table_oid: Some(table_oid),
+                    table_name: legacy.table_name,
+                    old_pk: Some(legacy.old_pk),
+                    new_pk: Some(legacy.new_pk),
+                    properties: legacy.properties,
+                    old_row: None,
+                    new_row: None,
+                };
+                apply_sync_log_entry_with_context(&entry, stats, &mut context)?;
+                applied_ids.push(entry.id);
+                Ok::<_, safety::GraphError>(())
+            })();
+            match result {
+                Ok(()) => {}
                 Err(err) => {
                     pgrx::warning!(
                         "graph.apply_sync(): legacy sync row {} failed and remains buffered: {}",
-                        entry.id,
+                        legacy_id,
                         err
                     );
                 }
             }
-        }
-
-        if applied_ids.is_empty() {
-            break;
         }
 
         delete_legacy_sync_entries(&applied_ids)?;
@@ -857,7 +862,19 @@ pub(crate) fn apply_legacy_sync_buffer(stats: &mut SyncApplyStats) -> safety::Gr
     Ok(())
 }
 
-fn read_legacy_sync_entries(limit: usize) -> safety::GraphResult<Vec<LegacySyncEntry>> {
+fn max_legacy_sync_id() -> safety::GraphResult<i64> {
+    Spi::get_one::<i64>("SELECT COALESCE(max(id), 0) FROM graph._sync_buffer")
+        .map_err(|e| {
+            safety::GraphError::Internal(format!("legacy sync high-water read failed: {e}"))
+        })
+        .map(|max_id| max_id.unwrap_or(0))
+}
+
+fn read_legacy_sync_entries_after(
+    after_id: i64,
+    max_id: i64,
+    limit: usize,
+) -> safety::GraphResult<Vec<LegacySyncEntry>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -870,10 +887,12 @@ fn read_legacy_sync_entries(limit: usize) -> safety::GraphResult<Vec<LegacySyncE
                     COALESCE(new_pk, pk) AS new_pk,
                     properties::text
              FROM graph._sync_buffer
+             WHERE id > $1
+               AND id <= $2
              ORDER BY id
-             LIMIT $1",
+             LIMIT $3",
                 None,
-                &[limit.into()],
+                &[after_id.into(), max_id.into(), limit.into()],
             )
             .map_err(|e| {
                 safety::GraphError::Internal(format!("legacy sync buffer read failed: {e}"))

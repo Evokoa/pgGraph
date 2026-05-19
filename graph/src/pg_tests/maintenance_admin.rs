@@ -1038,6 +1038,63 @@ fn topology_reads_auto_sync_traversal_and_paths() {
 }
 
 #[pg_test]
+fn topology_reads_auto_sync_aggregation_entrypoints() {
+    setup_topology_auto_sync_fixture();
+
+    insert_topology_auto_sync_node("aggregate-node", None, "Aggregate Node");
+    let aggregate_count = Spi::get_one::<pgrx::JsonB>(
+        "WITH req AS (
+            SELECT jsonb_build_object(
+                'starts',
+                jsonb_build_array(graph.node_ref_string('graph_test_topology_auto_sync_pgtest'::regclass, 'aggregate-node')),
+                'direction', 'out',
+                'min_depth', 0,
+                'max_depth', 0,
+                'node_tables', jsonb_build_array('graph_test_topology_auto_sync_pgtest')
+            ) AS traversal
+         )
+         SELECT graph.aggregate(
+            traversal,
+            '{\"count\":[{\"table\":\"graph_test_topology_auto_sync_pgtest\",\"column\":\"id\",\"as\":\"node_count\"}]}'::jsonb
+         )
+         FROM req",
+    )
+    .expect("auto-sync aggregate failed")
+    .expect("aggregate result missing")
+    .0
+    .get("node_count")
+    .and_then(|value| value.as_i64())
+    .unwrap_or(0);
+
+    insert_topology_auto_sync_node("path-count-node", None, "Path Count Node");
+    let exact_path_count = Spi::get_one::<i64>(
+        "WITH req AS (
+            SELECT jsonb_build_object(
+                'starts',
+                jsonb_build_array(graph.node_ref_string('graph_test_topology_auto_sync_pgtest'::regclass, 'path-count-node')),
+                'direction', 'out',
+                'min_depth', 0,
+                'max_depth', 0,
+                'node_tables', jsonb_build_array('graph_test_topology_auto_sync_pgtest')
+            ) AS traversal
+         )
+         SELECT estimated_paths
+         FROM graph.path_count_estimate((SELECT traversal FROM req))
+         WHERE exact AND NOT capped",
+    )
+    .expect("auto-sync path_count_estimate failed")
+    .unwrap_or(0);
+    let pending = Spi::get_one::<i64>("SELECT pending_sync_rows FROM graph.status()")
+        .expect("status failed")
+        .unwrap_or(-1);
+
+    assert_eq!(aggregate_count, 1);
+    assert_eq!(exact_path_count, 1);
+    assert_eq!(pending, 0);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+}
+
+#[pg_test]
 fn topology_reads_auto_sync_component_entrypoints() {
     let base_component_count = setup_topology_auto_sync_fixture();
 
@@ -1150,6 +1207,37 @@ fn topology_reads_error_on_pending_covers_topology_but_not_search() {
     assert!(sql_raises(&format!(
         "SELECT * FROM graph.component({root_component_id}, hydrate := false)"
     )));
+    assert!(sql_raises(
+        "WITH req AS (
+            SELECT jsonb_build_object(
+                'starts',
+                jsonb_build_array(graph.node_ref_string('graph_test_topology_auto_sync_pgtest'::regclass, 'error-node')),
+                'direction', 'out',
+                'min_depth', 0,
+                'max_depth', 0,
+                'node_tables', jsonb_build_array('graph_test_topology_auto_sync_pgtest')
+            ) AS traversal
+         )
+         SELECT graph.aggregate(
+            traversal,
+            '{\"count\":[{\"table\":\"graph_test_topology_auto_sync_pgtest\",\"column\":\"id\",\"as\":\"node_count\"}]}'::jsonb
+         )
+         FROM req"
+    ));
+    assert!(sql_raises(
+        "WITH req AS (
+            SELECT jsonb_build_object(
+                'starts',
+                jsonb_build_array(graph.node_ref_string('graph_test_topology_auto_sync_pgtest'::regclass, 'error-node')),
+                'direction', 'out',
+                'min_depth', 0,
+                'max_depth', 0,
+                'node_tables', jsonb_build_array('graph_test_topology_auto_sync_pgtest')
+            ) AS traversal
+         )
+         SELECT *
+         FROM graph.path_count_estimate((SELECT traversal FROM req))"
+    ));
     assert!(sql_raises(
         "SELECT * FROM graph.traverse_search(
             'name',
@@ -1733,4 +1821,47 @@ fn failed_apply_sync_rows_remain_buffered() {
 
     assert_eq!(updates, 0);
     assert_eq!(remaining, 1);
+}
+
+#[pg_test]
+fn failed_legacy_sync_rows_do_not_block_later_valid_rows() {
+    reset_and_create_fixtures();
+    super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)
+        .expect("insert registered users table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run("DELETE FROM graph._sync_buffer").expect("clear sync buffer failed");
+    Spi::run("SET graph.sync_batch_size = 1").expect("set sync batch size failed");
+    Spi::run(
+        "INSERT INTO graph._sync_buffer (op, table_name, pk, old_pk, new_pk, properties)
+             VALUES
+                ('U', 'public.graph_test_users_pgtest', 'missing', 'missing', 'missing',
+                 '{\"name\":\"Nobody\"}'::jsonb),
+                ('U', 'public.graph_test_users_pgtest', 'u1', 'u1', 'u1',
+                 '{\"name\":\"Alice Updated\"}'::jsonb)",
+    )
+    .expect("insert mixed legacy sync rows failed");
+
+    let updates = Spi::get_one::<i64>("SELECT updates_applied FROM graph.apply_sync()")
+        .expect("apply sync failed")
+        .unwrap_or(0);
+    let remaining_missing = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph._sync_buffer
+             WHERE COALESCE(new_pk, pk) = 'missing'",
+    )
+    .expect("remaining missing count failed")
+    .unwrap_or(0);
+    let remaining_valid = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph._sync_buffer
+             WHERE COALESCE(new_pk, pk) = 'u1'",
+    )
+    .expect("remaining valid count failed")
+    .unwrap_or(0);
+
+    assert_eq!(updates, 1);
+    assert_eq!(remaining_missing, 1);
+    assert_eq!(remaining_valid, 0);
+    Spi::run("RESET graph.sync_batch_size").expect("reset sync batch size failed");
 }

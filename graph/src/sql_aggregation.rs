@@ -11,10 +11,7 @@ use crate::sql_traversal::{
     optional_string_array, parse_node_ref_json_string, path_node_field, required_string_field,
     usize_from_nonnegative,
 };
-use crate::{
-    acl, check_enabled_result, edge_store, engine, ensure_current_graph, safety, types, Engine,
-    ENGINE,
-};
+use crate::{acl, check_enabled_result, edge_store, engine, safety, types, Engine, ENGINE};
 use std::collections::{HashMap, HashSet};
 
 type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
@@ -28,7 +25,6 @@ pub(crate) fn aggregate_impl(
     path_limit: i32,
 ) -> safety::GraphResult<serde_json::Value> {
     check_enabled_result()?;
-    ensure_current_graph()?;
     let request = parse_aggregation_traversal_request(traversal)?;
     let specs = parse_aggregation_specs(aggregations)?;
     let path_limit = usize_from_nonnegative(path_limit, "path_limit")?;
@@ -140,7 +136,6 @@ pub(crate) fn path_count_estimate_impl(
     path_limit: i32,
 ) -> safety::GraphResult<(i64, bool, bool)> {
     check_enabled_result()?;
-    ensure_current_graph()?;
     let request = parse_aggregation_traversal_request(traversal)?;
     let path_limit = usize_from_nonnegative(path_limit, "graph.max_exact_path_count")?;
     path_count_for_request(&request, path_limit)
