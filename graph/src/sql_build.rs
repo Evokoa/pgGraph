@@ -12,7 +12,7 @@ fn persist_and_reload_engine(
     operation: &str,
     source: &engine::Engine,
 ) -> safety::GraphResult<engine::Engine> {
-    let path = persistence::graph_file_path();
+    let path = persistence::graph_file_path()?;
     persistence::write_graph_file(source, &path).map_err(|err| {
         safety::GraphError::Internal(format!("graph.{operation}(): persistence failed: {err}"))
     })?;

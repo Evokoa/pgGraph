@@ -29,7 +29,7 @@ fn sql_raises(statement: &str) -> bool {
 
 fn explain_source_search_query(property_value: &str, mode: &str, table_oid: u32) -> String {
     let search_mode = super::types::SearchMode::parse(mode).expect("valid search mode");
-    let query = super::sql_search::source_table_search_sql_for_test(
+    let (query, params) = super::sql_search::source_table_search_sql_and_params_for_test(
         "name",
         property_value,
         Some(table_oid),
@@ -44,8 +44,12 @@ fn explain_source_search_query(property_value: &str, mode: &str, table_oid: u32)
     .expect("source search SQL missing");
 
     Spi::connect(|client| {
+        let params = params
+            .iter()
+            .map(|param| param.as_str().into())
+            .collect::<Vec<_>>();
         let result = client
-            .select(&format!("EXPLAIN {}", query), None, &[])
+            .select(&format!("EXPLAIN {}", query), None, &params)
             .expect("explain source search query failed");
         let mut lines = Vec::new();
         for row in result {

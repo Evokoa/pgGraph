@@ -5,7 +5,7 @@ use crate::catalog::{
     primary_key_expr, read_catalog, regclass_text, sql_table_name_from_catalog,
     table_oid_from_name, validate_column_exists,
 };
-use crate::quote::{quote_ident, quote_literal};
+use crate::quote::quote_ident;
 use crate::{acl, safety, types};
 use pgrx::prelude::*;
 use std::collections::HashSet;
@@ -14,6 +14,7 @@ struct SourceSearchStatement {
     table_oid: u32,
     table_name: String,
     query: String,
+    params: Vec<String>,
 }
 
 pub(crate) fn validate_search_request(
@@ -78,17 +79,22 @@ fn source_table_search_statements(
         } else {
             "NULL::jsonb"
         };
+        let mut params = Vec::new();
+        let (search_predicate, mut search_params) =
+            search_sql_predicate(&value_expr, property_value, mode, case_sensitive, 1);
+        params.append(&mut search_params);
         let mut predicates = vec![
             format!("src.{} IS NOT NULL", quote_ident(property_key)),
-            search_sql_predicate(&value_expr, property_value, mode, case_sensitive),
+            search_predicate,
         ];
         if let (Some(tenant), Some(tenant_column)) = (tenant, table.tenant_column.as_deref()) {
             validate_column_exists(table_oid, tenant_column)?;
             predicates.push(format!(
-                "src.{}::text = {}",
+                "src.{}::text = ${}",
                 quote_ident(tenant_column),
-                quote_literal(tenant)
+                params.len() + 1
             ));
+            params.push(tenant.to_string());
         }
 
         let query = format!(
@@ -107,10 +113,36 @@ fn source_table_search_statements(
             table_oid,
             table_name: table_name.as_sql().to_string(),
             query,
+            params,
         });
     }
 
     Ok(statements)
+}
+
+#[cfg(feature = "pg_test")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_table_search_sql_and_params_for_test(
+    property_key: &str,
+    property_value: &str,
+    table_filter: Option<u32>,
+    mode: types::SearchMode,
+    case_sensitive: bool,
+    tenant: Option<&str>,
+    hydrate: bool,
+) -> safety::GraphResult<Vec<(String, Vec<String>)>> {
+    Ok(source_table_search_statements(
+        property_key,
+        property_value,
+        table_filter,
+        mode,
+        case_sensitive,
+        tenant,
+        hydrate,
+    )?
+    .into_iter()
+    .map(|statement| (statement.query, statement.params))
+    .collect())
 }
 
 #[cfg(feature = "pg_test")]
@@ -167,12 +199,19 @@ pub(crate) fn source_table_search_rows(
 
     for statement in statements {
         Spi::connect(|client| {
-            let result = client.select(&statement.query, None, &[]).map_err(|e| {
-                safety::GraphError::Internal(format!(
-                    "source-table search failed for {}: {}",
-                    statement.table_name, e
-                ))
-            })?;
+            let params = statement
+                .params
+                .iter()
+                .map(|param| param.as_str().into())
+                .collect::<Vec<_>>();
+            let result = client
+                .select(&statement.query, None, &params)
+                .map_err(|e| {
+                    safety::GraphError::Internal(format!(
+                        "source-table search failed for {}: {}",
+                        statement.table_name, e
+                    ))
+                })?;
             for row in result {
                 let node_id = row
                     .get::<String>(1)
@@ -225,7 +264,8 @@ fn search_sql_predicate(
     property_value: &str,
     mode: types::SearchMode,
     case_sensitive: bool,
-) -> String {
+    first_param: usize,
+) -> (String, Vec<String>) {
     let comparable_expr = if case_sensitive {
         value_expr.to_string()
     } else {
@@ -238,42 +278,50 @@ fn search_sql_predicate(
     };
 
     match mode {
-        types::SearchMode::Exact => {
-            format!("{} = {}", comparable_expr, quote_literal(&comparable_value))
-        }
+        types::SearchMode::Exact => (
+            format!("{} = ${}", comparable_expr, first_param),
+            vec![comparable_value],
+        ),
         types::SearchMode::Prefix => {
             let pattern = format!("{}%", escape_like_pattern(&comparable_value));
-            format!(
-                "{} LIKE {} ESCAPE '\\'",
-                comparable_expr,
-                quote_literal(&pattern)
+            (
+                format!("{} LIKE ${} ESCAPE '\\'", comparable_expr, first_param),
+                vec![pattern],
             )
         }
         types::SearchMode::Contains => {
             let pattern = format!("%{}%", escape_like_pattern(&comparable_value));
-            format!(
-                "{} LIKE {} ESCAPE '\\'",
-                comparable_expr,
-                quote_literal(&pattern)
+            (
+                format!("{} LIKE ${} ESCAPE '\\'", comparable_expr, first_param),
+                vec![pattern],
             )
         }
         types::SearchMode::Token => {
-            let predicates = comparable_value
+            let tokens = comparable_value
                 .split(|ch: char| !ch.is_alphanumeric())
                 .filter(|token| !token.is_empty())
-                .map(|token| {
-                    let pattern = format!("%{}%", escape_like_pattern(token));
+                .collect::<Vec<_>>();
+            let predicates = tokens
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| {
                     format!(
-                        "{} LIKE {} ESCAPE '\\'",
+                        "{} LIKE ${} ESCAPE '\\'",
                         comparable_expr,
-                        quote_literal(&pattern)
+                        first_param + idx
                     )
                 })
                 .collect::<Vec<_>>();
             if predicates.is_empty() {
-                "TRUE".to_string()
+                ("TRUE".to_string(), Vec::new())
             } else {
-                predicates.join(" AND ")
+                (
+                    predicates.join(" AND "),
+                    tokens
+                        .into_iter()
+                        .map(|token| format!("%{}%", escape_like_pattern(token)))
+                        .collect(),
+                )
             }
         }
     }

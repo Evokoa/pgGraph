@@ -49,7 +49,7 @@ use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 
-use crate::edge_store::{EdgeStore, MmapEdgeArrays};
+use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
 use crate::engine::{Engine, ResolutionStore};
 use crate::filter_index::FilterIndex;
 use crate::node_store::{MmapNodeArrayParts, MmapNodeArrays, NodeStore};
@@ -59,7 +59,7 @@ use crate::safety::{GraphError, GraphResult};
 /// Magic bytes for .pggraph files.
 const MAGIC: &[u8; 4] = b"PGGH";
 /// Current file format version.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Header size in bytes.
 const HEADER_SIZE: usize = 128;
 /// Number of sections.
@@ -252,6 +252,17 @@ fn validate_persisted_contents(
                 ),
             });
         }
+        let start = previous_pk as usize;
+        let end = current as usize;
+        std::str::from_utf8(&mmap[ranges[8].0 + start..ranges[8].0 + end]).map_err(|err| {
+            GraphError::CorruptFile {
+                reason: format!(
+                    "primary key at node index {} is not valid UTF-8: {}",
+                    idx - 1,
+                    err
+                ),
+            }
+        })?;
         previous_pk = current;
     }
 
@@ -627,6 +638,8 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     // byte count before NodeStore receives pointer metadata.
     let node_arrays = unsafe {
         MmapNodeArrays::new(MmapNodeArrayParts {
+            region_ptr: mmap.as_ptr(),
+            region_len: mmap.len(),
             active_ptr,
             oid_ptr,
             pk_offsets_ptr,
@@ -653,7 +666,9 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     // SAFETY: validate_section_layout has checked CSR bounds and monotonicity.
     // MmapEdgeArrays validates pointer presence and alignment.
     let edge_arrays = unsafe {
-        MmapEdgeArrays::new(
+        MmapEdgeArrays::new(MmapEdgeArrayParts {
+            region_ptr: mmap.as_ptr(),
+            region_len: mmap.len(),
             offsets_ptr,
             targets_ptr,
             type_ids_ptr,
@@ -661,7 +676,7 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
             node_count,
             edge_count,
             has_weights,
-        )
+        })
     }
     .ok_or_else(|| GraphError::CorruptFile {
         reason: "invalid mmap edge section metadata".to_string(),
@@ -732,12 +747,38 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
 /// Get the default .pggraph file path under $PGDATA/{data_dir}/.
 ///
 /// Uses the `graph.data_dir` GUC (default: "graph").
-pub fn graph_file_path() -> PathBuf {
-    let pgdata = std::env::var("PGDATA").unwrap_or_else(|_| "/tmp".to_string());
-    let subdir = crate::config::data_dir();
+pub fn graph_file_path() -> GraphResult<PathBuf> {
+    let pgdata = std::env::var("PGDATA").map_err(|_| {
+        GraphError::Internal(
+            "PGDATA is not set; cannot determine durable graph artifact path".to_string(),
+        )
+    })?;
+    if pgdata.trim().is_empty() {
+        return Err(GraphError::Internal(
+            "PGDATA is empty; cannot determine durable graph artifact path".to_string(),
+        ));
+    }
+    let subdir = graph_data_dir();
     let dir = PathBuf::from(&pgdata).join(&subdir);
-    fs::create_dir_all(&dir).ok();
-    dir.join("main.pggraph")
+    fs::create_dir_all(&dir).map_err(|e| {
+        GraphError::Internal(format!(
+            "Cannot create graph data directory {}: {}",
+            dir.display(),
+            e
+        ))
+    })?;
+    Ok(dir.join("main.pggraph"))
+}
+
+fn graph_data_dir() -> String {
+    #[cfg(all(test, not(feature = "pg_test")))]
+    {
+        "graph".to_string()
+    }
+    #[cfg(any(not(test), feature = "pg_test"))]
+    {
+        crate::config::data_dir()
+    }
 }
 
 fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -755,6 +796,39 @@ mod tests {
     use crate::edge_store::RawEdge;
     use crate::types::FilterOp;
 
+    #[cfg(not(feature = "pg_test"))]
+    use std::sync::Mutex;
+
+    #[cfg(not(feature = "pg_test"))]
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(not(feature = "pg_test"))]
+    struct EnvRestore {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    #[cfg(not(feature = "pg_test"))]
+    impl EnvRestore {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                value: std::env::var(key).ok(),
+            }
+        }
+    }
+
+    #[cfg(not(feature = "pg_test"))]
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(value) = &self.value {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     fn artifact_sidecar_paths_append_to_pggraph_filename() {
         let path = PathBuf::from("/tmp/graph/main.pggraph");
@@ -771,6 +845,38 @@ mod tests {
             append_path_suffix(&sync_checkpoint_path(&path), ".tmp"),
             PathBuf::from("/tmp/graph/main.pggraph.sync.tmp")
         );
+    }
+
+    #[cfg(not(feature = "pg_test"))]
+    #[test]
+    fn graph_file_path_requires_pgdata() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture("PGDATA");
+        std::env::remove_var("PGDATA");
+
+        let result = graph_file_path();
+
+        assert!(matches!(result, Err(GraphError::Internal(message)) if message.contains("PGDATA")));
+    }
+
+    #[cfg(not(feature = "pg_test"))]
+    #[test]
+    fn graph_file_path_creates_pgdata_subdir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture("PGDATA");
+        let pgdata = std::env::temp_dir().join(format!(
+            "graph-pgdata-path-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::remove_dir_all(&pgdata);
+        std::env::set_var("PGDATA", &pgdata);
+
+        let path = graph_file_path().unwrap();
+
+        assert_eq!(path, pgdata.join("graph").join("main.pggraph"));
+        assert!(path.parent().unwrap().exists());
+        let _ = std::fs::remove_dir_all(&pgdata);
     }
 
     #[test]
@@ -1170,7 +1276,7 @@ mod tests {
         use std::io::{Seek, Write};
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.seek(std::io::SeekFrom::Start(4)).unwrap();
-        file.write_all(&2u32.to_le_bytes()).unwrap();
+        file.write_all(&(VERSION + 1).to_le_bytes()).unwrap();
         file.seek(std::io::SeekFrom::Start(20)).unwrap();
         file.write_all(&u64::MAX.to_le_bytes()).unwrap();
         file.flush().unwrap();
@@ -1427,5 +1533,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
         assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_invalid_primary_key_utf8() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-pk-utf8");
+        write_graph_file(&engine, &path).unwrap();
+
+        let pk_bytes = read_section_offset(&path, 8);
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        use std::io::{Seek, Write};
+        file.seek(std::io::SeekFrom::Start(pk_bytes)).unwrap();
+        file.write_all(&[0xFF]).unwrap();
+        file.flush().unwrap();
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("valid UTF-8")
+        ));
     }
 }

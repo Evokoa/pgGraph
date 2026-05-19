@@ -186,12 +186,9 @@ pub fn build_benchmark_graph_from_fixture(fixture: GeneratedBenchmarkGraph) -> B
         node_store.add_node(node.table_oid, node.pk);
     }
 
-    let edge_store = EdgeStoreBuilder::try_from_edges(
-        node_store.node_count(),
-        fixture.raw_edges,
-        false,
-    )
-    .expect("benchmark generator emits in-range edge endpoints");
+    let edge_store =
+        EdgeStoreBuilder::try_from_edges(node_store.node_count(), fixture.raw_edges, false)
+            .expect("benchmark generator emits in-range edge endpoints");
 
     let filter_index = FilterIndexBuilder::new();
 

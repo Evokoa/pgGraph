@@ -8,7 +8,7 @@ fn reset() {
         });
 
         // Remove persisted file
-        let path = persistence::graph_file_path();
+        let path = persistence::graph_file_path().unwrap_or_else(|err| err.report());
         if path.exists() {
             std::fs::remove_file(&path).ok();
             pgrx::notice!("graph: removed persisted file {}", path.display());
@@ -136,7 +136,13 @@ fn maybe_auto_load() {
         drop(eng); // Release borrow before mutating
 
         // Check if persisted file exists
-        let path = persistence::graph_file_path();
+        let path = match persistence::graph_file_path() {
+            Ok(path) => path,
+            Err(err) => {
+                pgrx::warning!("graph: auto-load skipped: {}", err);
+                return;
+            }
+        };
         if !path.exists() {
             return;
         }

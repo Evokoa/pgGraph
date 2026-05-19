@@ -39,6 +39,29 @@ pub struct MmapEdgeArrays {
     has_weights: bool,
 }
 
+/// Raw mmap-backed edge array pointers and lengths.
+#[derive(Clone, Copy, Debug)]
+pub struct MmapEdgeArrayParts {
+    /// Pointer to the start of the mmap region that owns every array section.
+    pub region_ptr: *const u8,
+    /// Length in bytes of the mmap region.
+    pub region_len: usize,
+    /// Pointer to `node_count + 1` initialized CSR offsets.
+    pub offsets_ptr: *const u32,
+    /// Pointer to `edge_count` initialized target node indexes.
+    pub targets_ptr: *const u32,
+    /// Pointer to `edge_count` initialized edge type identifiers.
+    pub type_ids_ptr: *const u8,
+    /// Pointer to `edge_count` initialized weights when `has_weights` is true.
+    pub weights_ptr: *const u32,
+    /// Number of nodes represented by the CSR offset table.
+    pub node_count: u32,
+    /// Number of edges represented by the parallel edge arrays.
+    pub edge_count: u32,
+    /// Whether the weights section is present.
+    pub has_weights: bool,
+}
+
 impl MmapEdgeArrays {
     /// Create validated mmap pointer metadata.
     ///
@@ -46,38 +69,85 @@ impl MmapEdgeArrays {
     ///
     /// The caller must ensure all pointers reference initialized sections in a
     /// mmap region that outlives every [`EdgeStore`] created from this metadata.
-    pub unsafe fn new(
-        offsets_ptr: *const u32,
-        targets_ptr: *const u32,
-        type_ids_ptr: *const u8,
-        weights_ptr: *const u32,
-        node_count: u32,
-        edge_count: u32,
-        has_weights: bool,
-    ) -> Option<Self> {
-        if offsets_ptr.is_null() || targets_ptr.is_null() || type_ids_ptr.is_null() {
+    pub unsafe fn new(parts: MmapEdgeArrayParts) -> Option<Self> {
+        if parts.offsets_ptr.is_null()
+            || parts.targets_ptr.is_null()
+            || parts.type_ids_ptr.is_null()
+        {
             return None;
         }
-        if has_weights && weights_ptr.is_null() {
+        if parts.has_weights && parts.weights_ptr.is_null() {
             return None;
         }
-        if !(offsets_ptr as usize).is_multiple_of(std::mem::align_of::<u32>())
-            || !(targets_ptr as usize).is_multiple_of(std::mem::align_of::<u32>())
-            || (has_weights && !(weights_ptr as usize).is_multiple_of(std::mem::align_of::<u32>()))
+        let offset_bytes = (parts.node_count as usize)
+            .checked_add(1)?
+            .checked_mul(std::mem::size_of::<u32>())?;
+        let target_bytes = (parts.edge_count as usize).checked_mul(std::mem::size_of::<u32>())?;
+        let type_id_bytes = parts.edge_count as usize;
+        let weight_bytes = (parts.edge_count as usize).checked_mul(std::mem::size_of::<u32>())?;
+        if !ptr_range_in_region(
+            parts.offsets_ptr.cast::<u8>(),
+            offset_bytes,
+            parts.region_ptr,
+            parts.region_len,
+        ) || !ptr_range_in_region(
+            parts.targets_ptr.cast::<u8>(),
+            target_bytes,
+            parts.region_ptr,
+            parts.region_len,
+        ) || !ptr_range_in_region(
+            parts.type_ids_ptr,
+            type_id_bytes,
+            parts.region_ptr,
+            parts.region_len,
+        ) || (parts.has_weights
+            && !ptr_range_in_region(
+                parts.weights_ptr.cast::<u8>(),
+                weight_bytes,
+                parts.region_ptr,
+                parts.region_len,
+            ))
+        {
+            return None;
+        }
+        if !(parts.offsets_ptr as usize).is_multiple_of(std::mem::align_of::<u32>())
+            || !(parts.targets_ptr as usize).is_multiple_of(std::mem::align_of::<u32>())
+            || (parts.has_weights
+                && !(parts.weights_ptr as usize).is_multiple_of(std::mem::align_of::<u32>()))
         {
             return None;
         }
 
         Some(Self {
-            offsets_ptr,
-            targets_ptr,
-            type_ids_ptr,
-            weights_ptr,
-            node_count,
-            edge_count,
-            has_weights,
+            offsets_ptr: parts.offsets_ptr,
+            targets_ptr: parts.targets_ptr,
+            type_ids_ptr: parts.type_ids_ptr,
+            weights_ptr: parts.weights_ptr,
+            node_count: parts.node_count,
+            edge_count: parts.edge_count,
+            has_weights: parts.has_weights,
         })
     }
+}
+
+fn ptr_range_in_region(
+    ptr: *const u8,
+    byte_len: usize,
+    region_ptr: *const u8,
+    region_len: usize,
+) -> bool {
+    if ptr.is_null() || region_ptr.is_null() {
+        return false;
+    }
+    let start = ptr as usize;
+    let region_start = region_ptr as usize;
+    let Some(end) = start.checked_add(byte_len) else {
+        return false;
+    };
+    let Some(region_end) = region_start.checked_add(region_len) else {
+        return false;
+    };
+    start >= region_start && end <= region_end
 }
 
 /// Backing store for edge data.
@@ -757,6 +827,73 @@ mod tests {
         assert_eq!(types, &[1]);
         assert!(weights.is_empty());
         assert!(!store.has_weights());
+    }
+
+    #[test]
+    fn mmap_edge_arrays_validate_region_bounds_and_alignment() {
+        let region = [0u64; 8];
+        let base = region.as_ptr().cast::<u8>();
+        let valid = MmapEdgeArrayParts {
+            region_ptr: base,
+            region_len: std::mem::size_of_val(&region),
+            offsets_ptr: base.cast::<u32>(),
+            // SAFETY: Offsets are within the local byte region used only for
+            // constructor validation in this test.
+            targets_ptr: unsafe { base.add(16).cast::<u32>() },
+            // SAFETY: See above.
+            type_ids_ptr: unsafe { base.add(24) },
+            // SAFETY: See above.
+            weights_ptr: unsafe { base.add(32).cast::<u32>() },
+            node_count: 1,
+            edge_count: 1,
+            has_weights: true,
+        };
+
+        // SAFETY: Pointers are into the local region and are not dereferenced.
+        assert!(unsafe { MmapEdgeArrays::new(valid) }.is_some());
+        assert!(unsafe {
+            MmapEdgeArrays::new(MmapEdgeArrayParts {
+                region_len: 24,
+                ..valid
+            })
+        }
+        .is_none());
+        assert!(unsafe {
+            MmapEdgeArrays::new(MmapEdgeArrayParts {
+                targets_ptr: base.wrapping_add(1).cast::<u32>(),
+                ..valid
+            })
+        }
+        .is_none());
+        assert!(unsafe {
+            MmapEdgeArrays::new(MmapEdgeArrayParts {
+                offsets_ptr: std::ptr::null(),
+                ..valid
+            })
+        }
+        .is_none());
+    }
+
+    #[test]
+    fn mmap_edge_arrays_reject_pointer_overflow() {
+        let region = [0u64; 1];
+        let base = region.as_ptr().cast::<u8>();
+        let near_usize_end = usize::MAX as *const u32;
+
+        assert!(unsafe {
+            MmapEdgeArrays::new(MmapEdgeArrayParts {
+                region_ptr: base,
+                region_len: std::mem::size_of_val(&region),
+                offsets_ptr: near_usize_end,
+                targets_ptr: base.cast::<u32>(),
+                type_ids_ptr: base,
+                weights_ptr: base.cast::<u32>(),
+                node_count: 1,
+                edge_count: 0,
+                has_weights: false,
+            })
+        }
+        .is_none());
     }
 
     #[test]

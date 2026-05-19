@@ -331,6 +331,20 @@ mod tests {
         Engine::new()
     }
 
+    fn test_region_for_slices(slices: &[(*const u8, usize)]) -> (*const u8, usize) {
+        let start = slices
+            .iter()
+            .map(|(ptr, _)| *ptr as usize)
+            .min()
+            .expect("test region requires at least one slice");
+        let end = slices
+            .iter()
+            .map(|(ptr, len)| (*ptr as usize) + len)
+            .max()
+            .expect("test region requires at least one slice");
+        (start as *const u8, end - start)
+    }
+
     #[test]
     fn generate_trigger_sql_quotes_mixed_case_and_reserved_identifiers() {
         let qt = QualifiedTable {
@@ -561,9 +575,20 @@ mod tests {
         let oids = [0u32];
         let pk_offsets = [0u64];
         let pk_bytes = [0u8];
+        let (region_ptr, region_len) = test_region_for_slices(&[
+            (active.as_ptr(), 0),
+            (oids.as_ptr().cast::<u8>(), 0),
+            (
+                pk_offsets.as_ptr().cast::<u8>(),
+                pk_offsets.len() * std::mem::size_of::<u64>(),
+            ),
+            (pk_bytes.as_ptr(), 0),
+        ]);
         // SAFETY: Pointers reference local arrays that outlive this test store.
         let arrays = unsafe {
             crate::node_store::MmapNodeArrays::new(crate::node_store::MmapNodeArrayParts {
+                region_ptr,
+                region_len,
                 active_ptr: active.as_ptr(),
                 oid_ptr: oids.as_ptr(),
                 pk_offsets_ptr: pk_offsets.as_ptr(),
@@ -590,9 +615,20 @@ mod tests {
         let oids = [0u32];
         let pk_offsets = [0u64];
         let pk_bytes = [0u8];
+        let (region_ptr, region_len) = test_region_for_slices(&[
+            (active.as_ptr(), 0),
+            (oids.as_ptr().cast::<u8>(), 0),
+            (
+                pk_offsets.as_ptr().cast::<u8>(),
+                pk_offsets.len() * std::mem::size_of::<u64>(),
+            ),
+            (pk_bytes.as_ptr(), 0),
+        ]);
         // SAFETY: Pointers reference local arrays that outlive this test store.
         let arrays = unsafe {
             crate::node_store::MmapNodeArrays::new(crate::node_store::MmapNodeArrayParts {
+                region_ptr,
+                region_len,
                 active_ptr: active.as_ptr(),
                 oid_ptr: oids.as_ptr(),
                 pk_offsets_ptr: pk_offsets.as_ptr(),

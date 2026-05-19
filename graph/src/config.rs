@@ -179,6 +179,7 @@ impl SyncMode {
 // ─── String GUC Helpers ───
 
 /// Get the data_dir setting as a String.
+#[cfg_attr(all(test, not(feature = "pg_test")), allow(dead_code))]
 pub fn data_dir() -> String {
     DATA_DIR
         .get()

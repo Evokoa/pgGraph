@@ -365,6 +365,39 @@ fn dynamic_sql_values_are_bound_for_search_and_hydration() {
 }
 
 #[pg_test]
+fn generated_source_search_sql_uses_placeholders_for_user_values() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add_table failed");
+
+    let malicious_name = "Mallory' OR 'x'='x\\trail";
+    let queries = crate::sql_search::source_table_search_sql_for_test(
+        "name",
+        malicious_name,
+        None,
+        crate::types::SearchMode::Contains,
+        false,
+        None,
+        true,
+    )
+    .expect("search SQL generation failed");
+
+    assert!(!queries.is_empty());
+    for query in queries {
+        assert!(query.contains("LIKE $1 ESCAPE"));
+        assert!(!query.contains(malicious_name));
+        assert!(!query.contains("Mallory"));
+        assert!(!query.contains("OR 'x'='x"));
+    }
+}
+
+#[pg_test]
 fn public_add_edge_supports_fk_style_registered_source_tables() {
     reset_and_create_fixtures();
     Spi::run(
@@ -484,4 +517,3 @@ fn add_filter_column_rejects_non_numeric_columns() {
     let result = super::validate_numeric_column(table_oid as u32, "note");
     assert!(result.is_err());
 }
-

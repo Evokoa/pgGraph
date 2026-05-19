@@ -215,25 +215,29 @@ impl Engine {
     /// - Finalized: binary search on sorted array (post-build)
     /// - MmapBacked: binary search on mmap'd bytes (file-loaded)
     pub fn resolve(&self, table_oid: u32, pk: &str) -> Option<u32> {
-        let idx = self.resolve_any(table_oid, pk)?;
-        self.node_store.is_active(idx).then_some(idx)
-    }
-
-    fn resolve_any(&self, table_oid: u32, pk: &str) -> Option<u32> {
-        if let Some(idx) = self.resolution_delta.resolve(table_oid, pk) {
+        let verify = |idx: u32| {
+            idx < self.node_store.node_count()
+                && self.node_store.is_active(idx)
+                && self.node_store.table_oid(idx) == table_oid
+                && self.node_store.primary_key(idx) == pk
+        };
+        if let Some(idx) = self
+            .resolution_delta
+            .resolve_verified(table_oid, pk, verify)
+        {
             return Some(idx);
         }
         match &self.resolution_store {
-            ResolutionStore::Builder(builder) => builder.resolve(table_oid, pk),
+            ResolutionStore::Builder(builder) => builder.resolve_verified(table_oid, pk, verify),
             ResolutionStore::Finalized(bytes) => {
-                ResolutionIndex::from_bytes(bytes)?.resolve(table_oid, pk)
+                ResolutionIndex::from_bytes(bytes)?.resolve_verified(table_oid, pk, verify)
             }
             ResolutionStore::MmapBacked => {
                 let mmap = self._mmap.as_ref()?;
                 let start = self.mmap_resolution_offset;
                 let end = start + self.mmap_resolution_len;
                 let data = &mmap[start..end];
-                ResolutionIndex::from_bytes(data)?.resolve(table_oid, pk)
+                ResolutionIndex::from_bytes(data)?.resolve_verified(table_oid, pk, verify)
             }
         }
     }

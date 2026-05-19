@@ -26,7 +26,7 @@ pub struct ResolutionEntry {
 }
 
 /// Build-time resolution index. Uses compact append-only entries and converts
-/// them to a sorted, duplicate-collapsed array for persistence/query.
+/// them to a sorted array for persistence/query.
 pub struct ResolutionIndexBuilder {
     entries: Vec<ResolutionEntry>,
 }
@@ -54,6 +54,10 @@ impl ResolutionIndexBuilder {
     /// Insert a (table_oid, pk) → node_idx mapping.
     pub fn insert(&mut self, table_oid: u32, pk: &str, node_idx: u32) {
         let pk_hash = Self::hash_pk(pk);
+        self.insert_hashed(table_oid, pk_hash, node_idx);
+    }
+
+    fn insert_hashed(&mut self, table_oid: u32, pk_hash: u64, node_idx: u32) {
         self.entries.push(ResolutionEntry {
             table_oid,
             pk_hash,
@@ -61,7 +65,29 @@ impl ResolutionIndexBuilder {
         });
     }
 
+    /// Resolve a verified (table_oid, pk) → node_idx from recent delta entries.
+    pub fn resolve_verified(
+        &self,
+        table_oid: u32,
+        pk: &str,
+        mut verify: impl FnMut(u32) -> bool,
+    ) -> Option<u32> {
+        let pk_hash = Self::hash_pk(pk);
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.table_oid == table_oid && entry.pk_hash == pk_hash && verify(entry.node_idx)
+            })
+            .map(|entry| entry.node_idx)
+    }
+
     /// Resolve a (table_oid, pk) → node_idx from recent delta entries.
+    ///
+    /// This hash-only helper is kept for direct index tests. Engine lookups use
+    /// [`Self::resolve_verified`] so hash collisions cannot resolve the wrong
+    /// primary key.
+    #[cfg(any(test, feature = "development"))]
     pub fn resolve(&self, table_oid: u32, pk: &str) -> Option<u32> {
         let pk_hash = Self::hash_pk(pk);
         self.entries
@@ -77,19 +103,7 @@ impl ResolutionIndexBuilder {
         entries.sort_by(|left, right| {
             (left.table_oid, left.pk_hash).cmp(&(right.table_oid, right.pk_hash))
         });
-        let mut deduped: Vec<ResolutionEntry> = Vec::with_capacity(entries.len());
-        for entry in entries {
-            match deduped.last_mut() {
-                Some(previous)
-                    if previous.table_oid == entry.table_oid
-                        && previous.pk_hash == entry.pk_hash =>
-                {
-                    previous.node_idx = entry.node_idx;
-                }
-                _ => deduped.push(entry),
-            }
-        }
-        deduped
+        entries
     }
 
     /// Serialize sorted entries to bytes for writing to the .pggraph file.
@@ -114,6 +128,11 @@ impl ResolutionIndexBuilder {
     #[cfg(any(test, feature = "development"))]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    #[cfg(test)]
+    fn insert_hashed_for_test(&mut self, table_oid: u32, pk_hash: u64, node_idx: u32) {
+        self.insert_hashed(table_oid, pk_hash, node_idx);
     }
 }
 
@@ -179,16 +198,54 @@ impl<'a> ResolutionIndex<'a> {
     /// Resolve a (table_oid, pk) → node_idx via binary search.
     ///
     /// O(log n) — ~23 comparisons for 10M entries, ~115ns.
+    #[cfg(any(test, feature = "development"))]
     pub fn resolve(&self, table_oid: u32, pk: &str) -> Option<u32> {
+        self.resolve_verified(table_oid, pk, |_| true)
+    }
+
+    /// Resolve a verified (table_oid, pk) → node_idx via binary search.
+    ///
+    /// The persisted index is keyed by a 64-bit primary-key hash, so callers
+    /// must verify each same-hash candidate against the authoritative
+    /// [`NodeStore`](crate::node_store::NodeStore) primary-key bytes.
+    pub fn resolve_verified(
+        &self,
+        table_oid: u32,
+        pk: &str,
+        mut verify: impl FnMut(u32) -> bool,
+    ) -> Option<u32> {
         let pk_hash = ResolutionIndexBuilder::hash_pk(pk);
         let mut lo = 0usize;
         let mut hi = self.entry_count as usize;
 
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let (t, h, idx) = self.entry_at(mid);
+            let (t, h, _) = self.entry_at(mid);
             match (t, h).cmp(&(table_oid, pk_hash)) {
-                std::cmp::Ordering::Equal => return Some(idx),
+                std::cmp::Ordering::Equal => {
+                    let mut first = mid;
+                    while first > 0 {
+                        let (prev_table, prev_hash, _) = self.entry_at(first - 1);
+                        if (prev_table, prev_hash) != (table_oid, pk_hash) {
+                            break;
+                        }
+                        first -= 1;
+                    }
+
+                    let mut last = mid + 1;
+                    while last < self.entry_count as usize {
+                        let (next_table, next_hash, _) = self.entry_at(last);
+                        if (next_table, next_hash) != (table_oid, pk_hash) {
+                            break;
+                        }
+                        last += 1;
+                    }
+
+                    return (first..last).rev().find_map(|idx| {
+                        let (_, _, node_idx) = self.entry_at(idx);
+                        verify(node_idx).then_some(node_idx)
+                    });
+                }
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
             }
@@ -280,8 +337,28 @@ mod tests {
         let bytes = builder.to_bytes();
         let index = ResolutionIndex::from_bytes(&bytes).unwrap();
 
-        assert_eq!(builder.len(), 1);
+        assert_eq!(builder.len(), 2);
         assert_eq!(index.resolve(10, "A"), Some(42));
+    }
+
+    #[test]
+    fn same_hash_candidates_are_not_collapsed_and_are_verified() {
+        let mut builder = ResolutionIndexBuilder::new();
+        let hash = ResolutionIndexBuilder::hash_pk("left");
+        builder.insert_hashed_for_test(10, hash, 0);
+        builder.insert_hashed_for_test(10, hash, 1);
+
+        let bytes = builder.to_bytes();
+        let index = ResolutionIndex::from_bytes(&bytes).unwrap();
+
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.resolve_verified(10, "left", |idx| idx == 0), Some(0));
+        assert_eq!(index.resolve_verified(10, "left", |idx| idx == 1), Some(1));
+        assert_eq!(index.resolve_verified(10, "left", |_| false), None);
+        assert_eq!(
+            builder.resolve_verified(10, "left", |idx| idx == 0),
+            Some(0)
+        );
     }
 
     #[test]
@@ -350,7 +427,7 @@ mod tests {
             let bytes = builder.to_bytes();
             let index = ResolutionIndex::from_bytes(&bytes).unwrap();
 
-            assert_eq!(index.len() as usize, expected.len());
+            assert_eq!(index.len() as usize, entries.len());
 
             for ((table_oid, pk), expected_idx) in expected {
                 assert_eq!(index.resolve(table_oid, &pk), Some(expected_idx));

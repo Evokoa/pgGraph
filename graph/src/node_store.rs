@@ -45,6 +45,10 @@ pub struct MmapNodeArrays {
 /// not pass several same-typed pointer and length arguments positionally.
 #[derive(Clone, Copy, Debug)]
 pub struct MmapNodeArrayParts {
+    /// Pointer to the start of the mmap region that owns every array section.
+    pub region_ptr: *const u8,
+    /// Length in bytes of the mmap region.
+    pub region_len: usize,
     /// Pointer to `active_byte_count` initialized packed active-bit bytes.
     pub active_ptr: *const u8,
     /// Pointer to `node_count` initialized source table OIDs.
@@ -81,6 +85,33 @@ impl MmapNodeArrays {
         if parts.active_byte_count != (parts.node_count as usize).div_ceil(8) {
             return None;
         }
+        let oid_bytes = (parts.node_count as usize).checked_mul(std::mem::size_of::<u32>())?;
+        let pk_offsets_bytes = (parts.node_count as usize)
+            .checked_add(1)?
+            .checked_mul(std::mem::size_of::<u64>())?;
+        if !ptr_range_in_region(
+            parts.active_ptr,
+            parts.active_byte_count,
+            parts.region_ptr,
+            parts.region_len,
+        ) || !ptr_range_in_region(
+            parts.oid_ptr.cast::<u8>(),
+            oid_bytes,
+            parts.region_ptr,
+            parts.region_len,
+        ) || !ptr_range_in_region(
+            parts.pk_offsets_ptr.cast::<u8>(),
+            pk_offsets_bytes,
+            parts.region_ptr,
+            parts.region_len,
+        ) || !ptr_range_in_region(
+            parts.pk_bytes_ptr,
+            parts.pk_bytes_len,
+            parts.region_ptr,
+            parts.region_len,
+        ) {
+            return None;
+        }
         if !(parts.oid_ptr as usize).is_multiple_of(std::mem::align_of::<u32>())
             || !(parts.pk_offsets_ptr as usize).is_multiple_of(std::mem::align_of::<u64>())
         {
@@ -97,6 +128,26 @@ impl MmapNodeArrays {
             pk_bytes_len: parts.pk_bytes_len,
         })
     }
+}
+
+fn ptr_range_in_region(
+    ptr: *const u8,
+    byte_len: usize,
+    region_ptr: *const u8,
+    region_len: usize,
+) -> bool {
+    if ptr.is_null() || region_ptr.is_null() {
+        return false;
+    }
+    let start = ptr as usize;
+    let region_start = region_ptr as usize;
+    let Some(end) = start.checked_add(byte_len) else {
+        return false;
+    };
+    let Some(region_end) = region_start.checked_add(region_len) else {
+        return false;
+    };
+    start >= region_start && end <= region_end
 }
 
 /// Backing store for array data: either owned Vecs or mmap-backed sections.
@@ -377,6 +428,20 @@ mod tests {
 
     use super::*;
 
+    fn test_region_for_slices(slices: &[(*const u8, usize)]) -> (*const u8, usize) {
+        let start = slices
+            .iter()
+            .map(|(ptr, _)| *ptr as usize)
+            .min()
+            .expect("test region requires at least one slice");
+        let end = slices
+            .iter()
+            .map(|(ptr, len)| (*ptr as usize) + len)
+            .max()
+            .expect("test region requires at least one slice");
+        (start as *const u8, end - start)
+    }
+
     #[test]
     fn add_and_retrieve_node() {
         let mut store = NodeStore::new();
@@ -527,10 +592,24 @@ mod tests {
         let oids = [0u32];
         let pk_offsets = [0u64, 0u64];
         let pk_bytes = [0u8];
+        let (region_ptr, region_len) = test_region_for_slices(&[
+            (active.as_ptr(), active.len()),
+            (
+                oids.as_ptr().cast::<u8>(),
+                oids.len() * std::mem::size_of::<u32>(),
+            ),
+            (
+                pk_offsets.as_ptr().cast::<u8>(),
+                pk_offsets.len() * std::mem::size_of::<u64>(),
+            ),
+            (pk_bytes.as_ptr(), 0),
+        ]);
         // SAFETY: Pointers reference local arrays that outlive the store within
         // this test, and no mmap data is dereferenced before the expected panic.
         let arrays = unsafe {
             MmapNodeArrays::new(MmapNodeArrayParts {
+                region_ptr,
+                region_len,
                 active_ptr: active.as_ptr(),
                 oid_ptr: oids.as_ptr(),
                 pk_offsets_ptr: pk_offsets.as_ptr(),
@@ -544,6 +623,73 @@ mod tests {
         // SAFETY: The validated metadata above outlives this test store.
         let mut store = unsafe { NodeStore::from_mmap(arrays) };
         store.add_node(1, "crash".to_string());
+    }
+
+    #[test]
+    fn mmap_node_arrays_validate_region_bounds_and_alignment() {
+        let region = [0u64; 8];
+        let base = region.as_ptr().cast::<u8>();
+        let valid = MmapNodeArrayParts {
+            region_ptr: base,
+            region_len: std::mem::size_of_val(&region),
+            active_ptr: base,
+            // SAFETY: Offsets are within the local byte region used only for
+            // constructor validation in this test.
+            oid_ptr: unsafe { base.add(8).cast::<u32>() },
+            // SAFETY: See above.
+            pk_offsets_ptr: unsafe { base.add(16).cast::<u64>() },
+            // SAFETY: See above.
+            pk_bytes_ptr: unsafe { base.add(32) },
+            node_count: 1,
+            active_byte_count: 1,
+            pk_bytes_len: 4,
+        };
+
+        // SAFETY: Pointers are into the local region and are not dereferenced.
+        assert!(unsafe { MmapNodeArrays::new(valid) }.is_some());
+        assert!(unsafe {
+            MmapNodeArrays::new(MmapNodeArrayParts {
+                region_len: 16,
+                ..valid
+            })
+        }
+        .is_none());
+        assert!(unsafe {
+            MmapNodeArrays::new(MmapNodeArrayParts {
+                oid_ptr: base.wrapping_add(1).cast::<u32>(),
+                ..valid
+            })
+        }
+        .is_none());
+        assert!(unsafe {
+            MmapNodeArrays::new(MmapNodeArrayParts {
+                active_ptr: std::ptr::null(),
+                ..valid
+            })
+        }
+        .is_none());
+    }
+
+    #[test]
+    fn mmap_node_arrays_reject_pointer_overflow() {
+        let region = [0u64; 1];
+        let base = region.as_ptr().cast::<u8>();
+        let near_usize_end = usize::MAX as *const u8;
+
+        assert!(unsafe {
+            MmapNodeArrays::new(MmapNodeArrayParts {
+                region_ptr: base,
+                region_len: std::mem::size_of_val(&region),
+                active_ptr: near_usize_end,
+                oid_ptr: base.cast::<u32>(),
+                pk_offsets_ptr: base.cast::<u64>(),
+                pk_bytes_ptr: base,
+                node_count: 1,
+                active_byte_count: 1,
+                pk_bytes_len: 0,
+            })
+        }
+        .is_none());
     }
 
     #[test]

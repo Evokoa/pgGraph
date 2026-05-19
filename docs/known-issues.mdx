@@ -53,17 +53,12 @@ production use.
 |---|---|---|
 | Dynamic table SQL | Some build queries interpolate catalog-derived table names directly. | Use validated regclass/catalog fragments for identifiers and parameters for values. |
 | Discovery SQL | Some discovery queries still use formatted OIDs or generated `IN (...)` lists. | Standardize on parameters, temp tables, or validated fragments depending on query shape. |
-| Search predicates | Search predicates embed literal values and patterns into generated SQL. | Return SQL plus SPI parameters from predicate builders. |
 
 ### Persistence and File Format
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Resolution index collisions | Persisted lookup keys store table OID, a 64-bit hash, and node index without enough collision verification. | Add collision detection, wider keys, or collision buckets before artifacts are treated as stable. |
-| Mmap edge validation | Mmap edge-array metadata validates pointer presence and alignment but not the full backing region bounds at the API boundary. | Pass region bounds into validation and verify every slice fits inside the mapped artifact. |
-| Persisted primary keys | Persisted primary-key bytes need explicit UTF-8 validation before constructing mmap-backed stores. | Reject corrupt artifacts with `CorruptFile` before exposing invalid strings. |
 | Artifact writes | `.pggraph` writes build a full in-memory artifact buffer. | Move toward direct section writers or streaming writes while keeping load validation strict. |
-| Missing `PGDATA` | The graph artifact path can fall back to `/tmp` when `PGDATA` is unavailable. | Fail closed and require an explicit durable PostgreSQL data location. |
 
 ### Sync, Jobs, and Operator Semantics
 

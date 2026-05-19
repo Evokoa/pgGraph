@@ -57,6 +57,62 @@ fn sql_trigger_sync_handles_primary_key_changes() {
 }
 
 #[pg_test]
+fn apply_sync_replays_trigger_update_and_delete_rows() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    build_friendship_fixture_graph();
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+
+    Spi::run("UPDATE public.graph_test_users_pgtest SET name = 'Alice Updated' WHERE id = 'u1'")
+        .expect("update user failed");
+    Spi::run("DELETE FROM public.graph_test_friendships_pgtest WHERE friend_id = 'u2'")
+        .expect("delete source friendship failed");
+    Spi::run("DELETE FROM public.graph_test_users_pgtest WHERE id = 'u2'")
+        .expect("delete user failed");
+
+    let (updates, deletes) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT updates_applied, deletes_applied FROM graph.apply_sync()",
+                None,
+                &[],
+            )
+            .expect("apply sync failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)?.unwrap_or(0),
+            row.get::<i64>(2)?.unwrap_or(0),
+        ))
+    })
+    .expect("apply sync read failed");
+    assert_eq!(updates, 1);
+    assert_eq!(deletes, 1);
+
+    let pending_sync_rows = Spi::get_one::<i64>("SELECT pending_sync_rows FROM graph.status()")
+        .expect("status read failed")
+        .unwrap_or(-1);
+    assert_eq!(pending_sync_rows, 0);
+
+    let active_seed_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+         FROM graph.traverse('graph_test_users_pgtest'::regclass, 'u1', 0, hydrate := false)
+         WHERE node_id = 'u1'",
+    )
+    .expect("active seed traverse failed")
+    .unwrap_or(0);
+    assert_eq!(active_seed_count, 1);
+
+    let deleted_neighbor_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+         FROM graph.traverse('graph_test_users_pgtest'::regclass, 'u1', 1, hydrate := false)
+         WHERE node_id = 'u2'",
+    )
+    .expect("deleted neighbor traverse failed")
+    .unwrap_or(0);
+    assert_eq!(deleted_neighbor_count, 0);
+}
+
+#[pg_test]
 fn edge_buffer_overflow_from_sql_sync_enters_read_only_mode() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
@@ -388,10 +444,10 @@ fn maintenance_rebuilds_persisted_graph_from_source_with_pending_sync() {
     Spi::run("DELETE FROM public.graph_test_crash_replay_pgtest WHERE id = 'predelete'")
         .expect("delete prebuild row failed");
     Spi::run("SELECT * FROM graph.build()").expect("build failed");
-    let checkpoint =
-        crate::persistence::read_sync_checkpoint(&crate::persistence::graph_file_path())
-            .expect("checkpoint read failed")
-            .unwrap_or(0);
+    let graph_path = crate::persistence::graph_file_path().expect("graph path failed");
+    let checkpoint = crate::persistence::read_sync_checkpoint(&graph_path)
+        .expect("checkpoint read failed")
+        .unwrap_or(0);
     assert!(checkpoint >= 1);
     Spi::run(
         "INSERT INTO public.graph_test_crash_replay_pgtest (id, name)
@@ -940,7 +996,7 @@ fn topology_reads_auto_sync_traversal_and_paths() {
              VALUES ('weighted-node', NULL, 'Weighted Node', 1)",
     )
     .expect("insert pending weighted node failed");
-    let weighted_cost = Spi::get_one::<i32>(
+    let weighted_cost = Spi::get_one::<i64>(
         "SELECT total_cost
              FROM graph.weighted_shortest_path(
                 'graph_test_topology_auto_sync_pgtest'::regclass,

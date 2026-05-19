@@ -180,7 +180,9 @@ pub extern "C-unwind" fn _PG_init() {
     config::register_gucs();
 
     // Eagerly pre-warm the OS page cache for the .pggraph file.
-    let path = persistence::graph_file_path();
+    let Ok(path) = persistence::graph_file_path() else {
+        return;
+    };
     if path.exists() {
         match std::fs::File::open(&path) {
             Ok(file) => {
