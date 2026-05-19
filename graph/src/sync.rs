@@ -66,9 +66,7 @@ pub fn sync_insert(
     tenant: Option<&str>,
 ) -> GraphResult<()> {
     if engine.is_read_only {
-        return Err(GraphError::EdgeBufferFull {
-            size: engine.edge_buffer.len(),
-        });
+        return Err(engine.read_only_error());
     }
     engine.materialize_mmap_node_store_for_sync();
 
@@ -101,9 +99,7 @@ pub fn sync_update(
     tenant: Option<&str>,
 ) -> GraphResult<()> {
     if engine.is_read_only {
-        return Err(GraphError::EdgeBufferFull {
-            size: engine.edge_buffer.len(),
-        });
+        return Err(engine.read_only_error());
     }
     engine.materialize_mmap_node_store_for_sync();
 
@@ -152,9 +148,7 @@ pub fn sync_replace_pk(
 /// The node slot remains allocated until the next vacuum/rebuild.
 pub fn sync_delete(engine: &mut Engine, table_oid: u32, pk: &str) -> GraphResult<()> {
     if engine.is_read_only {
-        return Err(GraphError::EdgeBufferFull {
-            size: engine.edge_buffer.len(),
-        });
+        return Err(engine.read_only_error());
     }
     engine.materialize_mmap_node_store_for_sync();
 
@@ -179,9 +173,7 @@ pub fn sync_delete(engine: &mut Engine, table_oid: u32, pk: &str) -> GraphResult
 /// Apply a table-level TRUNCATE event.
 pub fn sync_truncate(engine: &mut Engine, table_oid: u32) -> GraphResult<u64> {
     if engine.is_read_only {
-        return Err(GraphError::EdgeBufferFull {
-            size: engine.edge_buffer.len(),
-        });
+        return Err(engine.read_only_error());
     }
     engine.materialize_mmap_node_store_for_sync();
     let mut tombstoned = 0;
@@ -606,6 +598,19 @@ mod tests {
         assert!(result.is_ok());
         assert!(!eng.node_store.is_mmap_backed());
         assert!(eng.resolve(42, "U-1").is_some());
+    }
+
+    #[test]
+    fn sync_insert_on_read_only_engine_reports_read_only_reason() {
+        let mut eng = test_engine();
+        eng.mark_read_only(crate::engine::ReadOnlyReason::MemoryLimit);
+
+        let result = sync_insert(&mut eng, 42, "U-1", None);
+
+        assert!(matches!(
+            result,
+            Err(GraphError::ReadOnly { reason }) if reason == "memory_limit"
+        ));
     }
 
     #[test]

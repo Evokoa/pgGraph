@@ -361,6 +361,25 @@ impl NodeStore {
         matches!(self.backing, ArrayBacking::Mmap { .. })
     }
 
+    /// Estimate heap bytes owned directly by this store.
+    ///
+    /// Mmap-backed arrays are accounted as shared file mappings, not Rust heap.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        match &self.backing {
+            ArrayBacking::Owned {
+                is_active,
+                table_oids,
+                primary_keys,
+            } => {
+                is_active.capacity().div_ceil(8)
+                    + table_oids.capacity() * std::mem::size_of::<u32>()
+                    + primary_keys.capacity() * std::mem::size_of::<String>()
+                    + primary_keys.iter().map(String::capacity).sum::<usize>()
+            }
+            ArrayBacking::Mmap { .. } => 0,
+        }
+    }
+
     /// Return an owned, mutable copy of this store.
     ///
     /// Sync overlays use this to accept node tombstones and inserts after a

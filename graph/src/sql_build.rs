@@ -33,6 +33,7 @@ fn persist_and_reload_engine(
     })?;
     loaded.catalog_fingerprint = source.catalog_fingerprint;
     loaded.is_read_only = source.is_read_only;
+    loaded.read_only_reason = source.read_only_reason;
     loaded.sync_status = source.sync_status;
     loaded.last_build = source.last_build;
     loaded.last_vacuum = source.last_vacuum;
@@ -66,8 +67,7 @@ pub(crate) fn execute_build(force_persist: bool) -> safety::GraphResult<BuildExe
 
     let mut new_engine = builder::build_graph(&tables, &edges, &filter_columns)?;
     if force_read_only {
-        new_engine.is_read_only = true;
-        new_engine.sync_status = engine::SyncStatus::ReadOnly;
+        new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
     }
     new_engine.catalog_fingerprint = Some(catalog_fingerprint(&tables, &edges, &filter_columns));
     new_engine.applied_sync_id = max_sync_log_id()?;
@@ -158,8 +158,7 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
 
     let mut new_engine = builder::build_graph(&tables, &edges, &filter_columns)?;
     if force_read_only {
-        new_engine.is_read_only = true;
-        new_engine.sync_status = engine::SyncStatus::ReadOnly;
+        new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
     }
     new_engine.catalog_fingerprint = Some(catalog_fingerprint(&tables, &edges, &filter_columns));
     new_engine.applied_sync_id = max_sync_log_id()?;

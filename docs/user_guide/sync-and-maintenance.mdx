@@ -116,6 +116,7 @@ FROM graph.sync_health();
 | `disabled_trigger_count` | Registered graph triggers currently disabled |
 | `edge_buffer_used` | Pending edge overlay mutations |
 | `edge_buffer_size` | Configured edge overlay capacity |
+| `read_only_reason` | Typed reason such as `memory_limit` or `edge_buffer_full` when read-only |
 | `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` while the engine is writable |
 | `maintenance_recommended` | Overlay, read-only, vacuum, or rebuild state should be compacted |
 
@@ -126,7 +127,8 @@ need a single query that decides whether to call `graph.apply_sync()` or
 ## Edge Buffer Limits
 
 `graph.edge_buffer_size` limits pending edge mutations. When the buffer is full,
-the engine enters read-only mode and reports `PG008`.
+the engine enters read-only mode, reports `PG008` at the capacity breach, and
+exposes `read_only_reason = 'edge_buffer_full'`.
 
 ```sql
 ALTER SYSTEM SET graph.edge_buffer_size = 500000;
@@ -249,5 +251,5 @@ High-write graph:
 Use trigger sync for visibility.
 Run graph.apply_sync() when graph.sync_health().apply_sync_recommended is true.
 Run graph.maintenance(concurrently := true) when maintenance_recommended is true.
-Watch edge_buffer_used, pending_sync_rows, disabled_trigger_count, and read_only.
+Watch edge_buffer_used, pending_sync_rows, disabled_trigger_count, read_only, and read_only_reason.
 ```

@@ -466,7 +466,9 @@ pub fn build_graph(
 
     // Mark as built
     engine.built = true;
-    engine.is_read_only = graph_mode == GraphMode::ReadOnly;
+    if graph_mode == GraphMode::ReadOnly {
+        engine.mark_read_only(crate::engine::ReadOnlyReason::MemoryLimit);
+    }
     engine.last_build = Some(pgrx::datetime::transaction_timestamp());
 
     let elapsed = start.elapsed();

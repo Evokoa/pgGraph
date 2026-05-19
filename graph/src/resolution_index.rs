@@ -125,6 +125,11 @@ impl ResolutionIndexBuilder {
         self.to_sorted_entries().len()
     }
 
+    /// Estimate heap bytes owned by build-time resolution entries.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.entries.capacity() * std::mem::size_of::<ResolutionEntry>()
+    }
+
     #[cfg(any(test, feature = "development"))]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

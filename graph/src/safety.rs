@@ -41,6 +41,9 @@ pub enum GraphError {
     #[error("Edge mutation buffer full ({size} entries). Graph is in read-only mode.")]
     EdgeBufferFull { size: usize }, // PG008
 
+    #[error("Graph is read-only: {reason}")]
+    ReadOnly { reason: String }, // PG012
+
     #[error("Corrupt .pggraph file: {reason}")]
     CorruptFile { reason: String }, // PG009
 
@@ -70,6 +73,7 @@ impl GraphError {
             GraphError::InvalidFilter { .. } => "PG005",
             GraphError::BuildLocked => "PG006",
             GraphError::EdgeBufferFull { .. } => "PG008",
+            GraphError::ReadOnly { .. } => "PG012",
             GraphError::CorruptFile { .. } => "PG009",
             GraphError::IncompatibleVersion(_) => "PG011",
             GraphError::NodeNotFound { .. } => "PG010",
@@ -105,6 +109,12 @@ impl GraphError {
             GraphError::EdgeBufferFull { .. } => {
                 "Run graph.vacuum() to merge pending mutations, or increase graph.edge_buffer_size.".to_string()
             }
+            GraphError::ReadOnly { reason } if reason == "memory_limit" => {
+                "Increase graph.memory_limit_mb, set graph.oom_action = 'error', or run graph.build() after reducing graph size.".to_string()
+            }
+            GraphError::ReadOnly { .. } => {
+                "Inspect graph.status().read_only_reason, then run graph.maintenance(), graph.vacuum(), or graph.build() as appropriate.".to_string()
+            }
             GraphError::CorruptFile { .. } => {
                 "Run graph.build() to reconstruct the graph from source tables.".to_string()
             }
@@ -131,13 +141,22 @@ impl GraphError {
     /// - HINT with actionable fix guidance
     ///
     /// SQL facade functions call this at the PostgreSQL error boundary.
+    #[track_caller]
     pub fn report(self) -> ! {
         let sqlstate = self.sqlstate();
         let hint = self.hint();
         let detail = format!("SQLSTATE: {}", sqlstate);
         let msg = self.to_string();
+        let location = std::panic::Location::caller();
 
-        raise_graph_error(make_sqlstate(sqlstate), msg, detail, hint);
+        raise_graph_error(
+            make_sqlstate(sqlstate),
+            msg,
+            detail,
+            hint,
+            location.file().to_string(),
+            location.line() as c_int,
+        );
     }
 }
 
@@ -157,10 +176,16 @@ fn make_sqlstate(code: &str) -> c_int {
         | (encode(b[4]) << 24)
 }
 
-fn raise_graph_error(sqlerrcode: c_int, message: String, detail: String, hint: String) -> ! {
+fn raise_graph_error(
+    sqlerrcode: c_int,
+    message: String,
+    detail: String,
+    hint: String,
+    file: String,
+    line: c_int,
+) -> ! {
     const PERCENT_S: *const c_char = c"%s".as_ptr();
-    const FILE: *const c_char = c"graph/src/safety.rs".as_ptr();
-    const FUNCTION: *const c_char = c"GraphError::report".as_ptr();
+    const FUNCTION: *const c_char = c"GraphError::report caller".as_ptr();
     const DEFAULT_DOMAIN: *const c_char = std::ptr::null();
 
     #[cfg_attr(target_os = "windows", link(name = "postgres"))]
@@ -176,6 +201,7 @@ fn raise_graph_error(sqlerrcode: c_int, message: String, detail: String, hint: S
     let message = message.as_pg_cstr();
     let detail = detail.as_pg_cstr();
     let hint = hint.as_pg_cstr();
+    let file = file.as_pg_cstr();
 
     // SAFETY: These calls mirror pgrx's internal ErrorReport emission path, but
     // keep the SQLSTATE as a raw Postgres `MAKE_SQLSTATE` integer instead of
@@ -188,7 +214,7 @@ fn raise_graph_error(sqlerrcode: c_int, message: String, detail: String, hint: S
             errmsg(PERCENT_S, message);
             errdetail(PERCENT_S, detail);
             errhint(PERCENT_S, hint);
-            errfinish(FILE, line!() as c_int, FUNCTION);
+            errfinish(file, line, FUNCTION);
         }
     }
 
@@ -252,6 +278,14 @@ mod tests {
     fn edge_buffer_full_maps_to_pg008() {
         let err = GraphError::EdgeBufferFull { size: 100000 };
         assert_eq!(err.sqlstate(), "PG008");
+    }
+
+    #[test]
+    fn read_only_maps_to_pg012() {
+        let err = GraphError::ReadOnly {
+            reason: "memory_limit".to_string(),
+        };
+        assert_eq!(err.sqlstate(), "PG012");
     }
 
     #[test]

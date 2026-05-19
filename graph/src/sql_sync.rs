@@ -326,8 +326,7 @@ pub(crate) fn guard_edge_buffer_capacity_for_sync(
         let used = eng.edge_buffer.len();
         let limit = crate::config::EDGE_BUFFER_SIZE.get() as usize;
         if used.saturating_add(estimated_edge_deltas) > limit {
-            eng.is_read_only = true;
-            eng.sync_status = engine::SyncStatus::ReadOnly;
+            eng.mark_read_only(engine::ReadOnlyReason::EdgeBufferFull);
             return Err(safety::GraphError::EdgeBufferFull { size: used });
         }
         Ok(())

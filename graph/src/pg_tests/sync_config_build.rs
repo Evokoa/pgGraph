@@ -237,15 +237,21 @@ fn oom_action_error_and_readonly_are_applied_by_build() {
     let nodes = Spi::get_one::<i64>("SELECT nodes_loaded FROM graph.build()")
         .expect("readonly build failed")
         .unwrap_or(0);
-    let read_only = Spi::get_one::<bool>("SELECT read_only FROM graph.status()")
-        .expect("status read_only failed")
-        .unwrap_or(false);
+    let (read_only, read_only_reason) = Spi::connect(|client| {
+        let result = client
+            .select("SELECT read_only, read_only_reason FROM graph.status()", None, &[])
+            .expect("status read_only failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((row.get::<bool>(1)?, row.get::<String>(2)?))
+    })
+    .expect("status read failed");
 
     Spi::run("SET graph.oom_action = 'error'").expect("restore oom action failed");
     Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
 
     assert_eq!(nodes, 1);
-    assert!(read_only);
+    assert_eq!(read_only, Some(true));
+    assert_eq!(read_only_reason.as_deref(), Some("memory_limit"));
 }
 
 #[pg_test]

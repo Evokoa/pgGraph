@@ -55,6 +55,7 @@ fn source_table_search_statements(
     case_sensitive: bool,
     tenant: Option<&str>,
     hydrate: bool,
+    candidate_limit: Option<usize>,
 ) -> safety::GraphResult<Vec<SourceSearchStatement>> {
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let mut statements = Vec::new();
@@ -97,16 +98,20 @@ fn source_table_search_statements(
             params.push(tenant.to_string());
         }
 
+        let limit_clause = candidate_limit
+            .map(|limit| format!("\n             LIMIT {}", limit))
+            .unwrap_or_default();
         let query = format!(
             "SELECT {} AS graph_node_id, {} AS graph_value, {} AS graph_node
              FROM {} src
              WHERE {}
-             ORDER BY graph_node_id",
+             ORDER BY graph_node_id{}",
             pk_expr,
             value_expr,
             node_select,
             table_name.as_sql(),
-            predicates.join(" AND ")
+            predicates.join(" AND "),
+            limit_clause
         );
 
         statements.push(SourceSearchStatement {
@@ -139,6 +144,7 @@ pub(crate) fn source_table_search_sql_and_params_for_test(
         case_sensitive,
         tenant,
         hydrate,
+        None,
     )?
     .into_iter()
     .map(|statement| (statement.query, statement.params))
@@ -164,6 +170,7 @@ pub(crate) fn source_table_search_sql_for_test(
         case_sensitive,
         tenant,
         hydrate,
+        None,
     )?
     .into_iter()
     .map(|statement| statement.query)
@@ -186,6 +193,12 @@ pub(crate) fn source_table_search_rows(
         return Ok(Vec::new());
     }
 
+    let candidate_limit =
+        offset
+            .checked_add(limit)
+            .ok_or_else(|| safety::GraphError::InvalidFilter {
+                reason: "row_offset + max_rows overflows".to_string(),
+            })?;
     let statements = source_table_search_statements(
         property_key,
         property_value,
@@ -194,6 +207,7 @@ pub(crate) fn source_table_search_rows(
         case_sensitive,
         tenant,
         hydrate,
+        Some(candidate_limit),
     )?;
     let mut rows = Vec::new();
 
@@ -248,15 +262,23 @@ pub(crate) fn source_table_search_rows(
         })?;
     }
 
+    sort_search_rows(&mut rows);
+    dedupe_search_rows(&mut rows);
+
+    Ok(rows.into_iter().skip(offset).take(limit).collect())
+}
+
+fn sort_search_rows(rows: &mut [SearchOutputRow]) {
     rows.sort_by(|left, right| {
         left.0
             .to_u32()
             .cmp(&right.0.to_u32())
             .then_with(|| left.1.cmp(&right.1))
     });
-    rows.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+}
 
-    Ok(rows.into_iter().skip(offset).take(limit).collect())
+fn dedupe_search_rows(rows: &mut Vec<SearchOutputRow>) {
+    rows.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
 }
 
 fn search_sql_predicate(

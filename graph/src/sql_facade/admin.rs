@@ -88,6 +88,7 @@ fn status() -> TableIterator<
         name!(invalid_reason, Option<String>),
         name!(disabled_trigger_count, i32),
         name!(read_only, bool),
+        name!(read_only_reason, Option<String>),
     ),
 > {
     with_panic_boundary("status()", || {
@@ -114,6 +115,7 @@ fn status() -> TableIterator<
             s.invalid_reason,
             s.disabled_trigger_count,
             s.read_only,
+            s.read_only_reason,
         )])
     })
 }
@@ -138,6 +140,7 @@ fn sync_health() -> TableIterator<
         name!(needs_vacuum, bool),
         name!(needs_rebuild, bool),
         name!(read_only, bool),
+        name!(read_only_reason, Option<String>),
         name!(apply_sync_recommended, bool),
         name!(maintenance_recommended, bool),
     ),
@@ -166,6 +169,7 @@ fn sync_health() -> TableIterator<
             s.needs_vacuum,
             s.needs_rebuild,
             s.read_only,
+            s.read_only_reason,
             apply_sync_recommended,
             maintenance_recommended,
         )])

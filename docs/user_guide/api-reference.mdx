@@ -55,11 +55,14 @@ RETURNS TABLE (
   pending_sync_rows bigint,
   invalid_reason text,
   disabled_trigger_count int,
-  read_only boolean
+  read_only boolean,
+  read_only_reason text
 )
 ```
 
-Reports backend-local engine state and current catalog/sync validity.
+Reports backend-local engine state and current catalog/sync validity. When
+`read_only` is true, `read_only_reason` is `memory_limit`,
+`edge_buffer_full`, or another typed reason.
 
 ### `graph.sync_health()`
 
@@ -78,6 +81,7 @@ RETURNS TABLE (
   needs_vacuum boolean,
   needs_rebuild boolean,
   read_only boolean,
+  read_only_reason text,
   apply_sync_recommended boolean,
   maintenance_recommended boolean
 )
@@ -406,6 +410,10 @@ RETURNS TABLE (
 ```
 
 Searches registered source-table columns.
+
+Results are deduplicated by `(node_table, node_id)`, ordered by table OID then
+node ID, and paginated after the global merge. Per-table source scans are
+bounded to `row_offset + max_rows` candidates.
 
 ### `graph.search_nodes()`
 

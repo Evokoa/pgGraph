@@ -209,6 +209,7 @@ pub struct EngineStatus {
     pub invalid_reason: Option<String>,
     pub disabled_trigger_count: i32,
     pub read_only: bool,
+    pub read_only_reason: Option<String>,
 }
 
 /// Edge type filter for traversal.

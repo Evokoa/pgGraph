@@ -112,7 +112,9 @@ The base `EdgeStore` remains immutable. Edge mutations are appended to
 into insert and delete overlays for the selected direction.
 
 When the buffer reaches `graph.edge_buffer_size`, the engine enters read-only
-mode and returns `EdgeBufferFull`.
+mode with `read_only_reason = 'edge_buffer_full'` and returns
+`EdgeBufferFull`. Later sync mutations against an already read-only engine
+return `ReadOnly` with the stored reason.
 
 ## Filter And Tenant Refresh
 

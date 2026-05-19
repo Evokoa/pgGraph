@@ -40,8 +40,6 @@ production use.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | Traversal uniqueness | The public `uniqueness` option is parsed but not fully reflected in result semantics. | Implement the advertised behavior or reject/remove unsupported values before the API is documented as stable. |
-| Search pagination | Source search can materialize broad candidate sets before applying stable page boundaries. | Define and implement a bounded ordering, deduplication, limit, and offset contract. |
-| Traversal pagination | Hydration filters and full candidate sorting can happen before pagination. | Make pagination, ordering, hydration, and filter semantics explicit before users rely on page contents. |
 | Path aggregation | `all_possible_paths` can clone and materialize path sets aggressively near configured caps. | Preserve documented path-count semantics while reducing avoidable materialization. |
 | Filter model | Legacy raw filters and structured typed filters still have separate paths. | Remove, deprecate, or unify the legacy path so public filter behavior has one source of truth. |
 | Legacy numeric filters | Legacy unsigned filter paths can lose signed values if re-exposed. | Keep signed values out of unsigned-only paths, or remove the legacy public path. |
@@ -86,11 +84,8 @@ running larger graphs or higher sync volume.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | Build and vacuum progress | Long build, vacuum, and persistence operations can use clearer progress and failure diagnostics. | Add more detailed status, sizing, and recovery guidance around build, vacuum, persistence, and reload. |
-| Memory estimates | Some memory estimates rely on rough constants instead of store-specific heap accounting. | Add `estimated_heap_bytes()` style accounting for node, edge, filter, and resolution stores. |
 | Sync backlog behavior | Sync replay is designed around explicit apply, but large backlogs need better operator feedback. | Improve batching visibility, backlog reporting, and recovery instructions. |
 | Persistence I/O | Persistence uses synchronous filesystem operations from PostgreSQL backend work. | Preserve durability while improving progress reporting, cancellation awareness, and background-worker ergonomics. |
-| Read-only state messages | Some sync paths can report `EdgeBufferFull` even when the engine is read-only for another reason. | Add a clearer `EngineReadOnly` or `GraphReadOnly` error class while preserving the capacity breach error. |
-| Error locations | PostgreSQL error reports can point at the reporting helper rather than the most useful graph call site. | Carry better construction or report-site context into SQLSTATE reporting. |
 
 ## P1: Query Performance Follow-Ups
 

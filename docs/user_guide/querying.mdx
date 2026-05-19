@@ -39,6 +39,11 @@ Return columns:
 
 `graph.search_nodes()` returns the same coordinate data without `node`.
 
+Search results are verified against source rows, deduplicated by
+`(node_table, node_id)`, sorted by table OID then node ID, and then paginated.
+Each source-table scan is bounded to `row_offset + max_rows` candidates before
+the final global merge.
+
 ## Search Modes
 
 | Mode | SQL predicate shape |
@@ -86,6 +91,11 @@ Return columns:
 | `node` | Hydrated source row when requested |
 | `root_table_name`, `node_table_name` | Regclass text names |
 
+Traversal applies graph traversal limits first, then table filters and
+hydration filters, then sorts by depth, node table, and node ID for a single
+root before applying `row_offset` and `max_rows`. Multi-start traversal sorts by
+root table, root ID, depth, node table, and node ID before pagination.
+
 ### Direction
 
 | Direction | Behavior |
@@ -132,9 +142,6 @@ FROM graph.traverse(
   hydrate := false
 );
 ```
-
-Multi-start results are globally sorted by root table, root ID, depth, node
-table, and node ID before pagination.
 
 ## Workflow API
 

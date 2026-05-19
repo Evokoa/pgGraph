@@ -20,11 +20,14 @@ SQLSTATE emission, ACL checks, schema validation, and narrow unsafe boundaries.
 | `CorruptFile` | `PG009` |
 | `NodeNotFound` | `PG010` |
 | `IncompatibleVersion` | `PG011` |
+| `ReadOnly` | `PG012` |
 | `Disabled` | `55000` |
 | `Internal` | `XX000` |
 
 `GraphError::report()` calls PostgreSQL's error reporting API directly so custom
-SQLSTATEs are visible at the client boundary.
+SQLSTATEs are visible at the client boundary. The report path tracks the Rust
+caller so PostgreSQL locations point at the SQL facade boundary that emitted the
+error instead of the shared reporting helper.
 
 ## Panic Boundary
 

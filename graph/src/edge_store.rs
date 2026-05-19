@@ -540,6 +540,26 @@ impl EdgeStore {
         }
     }
 
+    /// Estimate heap bytes owned directly by this store.
+    ///
+    /// Mmap-backed arrays are accounted as shared file mappings, not Rust heap.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        match &self.backing {
+            EdgeBacking::Owned {
+                edge_offsets,
+                targets,
+                type_ids,
+                weights,
+            } => {
+                edge_offsets.capacity() * std::mem::size_of::<u32>()
+                    + targets.capacity() * std::mem::size_of::<u32>()
+                    + type_ids.capacity() * std::mem::size_of::<u8>()
+                    + weights.capacity() * std::mem::size_of::<u32>()
+            }
+            EdgeBacking::Mmap { .. } => 0,
+        }
+    }
+
     /// Degree (number of outgoing edges) for a node.
     #[inline]
     pub fn degree(&self, node_idx: u32) -> u32 {

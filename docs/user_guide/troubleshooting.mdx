@@ -182,12 +182,12 @@ SELECT * FROM graph.build();
 
 ## Edge Buffer Full
 
-Symptom: `PG008`, `read_only = true`, or high `edge_buffer_used`.
+Symptom: `PG008`, `PG012`, `read_only = true`, or high `edge_buffer_used`.
 
 Check:
 
 ```sql
-SELECT edge_buffer_used, needs_vacuum, read_only
+SELECT edge_buffer_used, needs_vacuum, read_only, read_only_reason
 FROM graph.status();
 ```
 

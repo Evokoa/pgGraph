@@ -83,6 +83,8 @@ pub struct Engine {
     /// Sync inserts/updates/deletes are rejected until a rebuild installs a
     /// read-write engine.
     pub is_read_only: bool,
+    /// Operator-facing reason for read-only mode.
+    pub read_only_reason: Option<ReadOnlyReason>,
 
     /// Last durable sync-log row applied by this backend-local engine.
     pub applied_sync_id: i64,
@@ -121,6 +123,22 @@ pub enum SyncStatus {
     Idle,
     Syncing,
     ReadOnly,
+}
+
+/// Reason an engine has entered read-only mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOnlyReason {
+    MemoryLimit,
+    EdgeBufferFull,
+}
+
+impl std::fmt::Display for ReadOnlyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadOnlyReason::MemoryLimit => write!(f, "memory_limit"),
+            ReadOnlyReason::EdgeBufferFull => write!(f, "edge_buffer_full"),
+        }
+    }
 }
 
 /// Schema validity state for registered graph metadata.
@@ -181,6 +199,7 @@ impl Engine {
             mmap_resolution_len: 0,
             edge_buffer: Vec::new(),
             is_read_only: false,
+            read_only_reason: None,
             applied_sync_id: 0,
             needs_vacuum: false,
             needs_rebuild: false,
@@ -435,13 +454,27 @@ impl Engine {
     pub fn reserve_edge_mutation_capacity(&mut self, additional: usize) -> GraphResult<()> {
         let limit = crate::config::EDGE_BUFFER_SIZE.get() as usize;
         if self.edge_buffer.len().saturating_add(additional) > limit {
-            self.is_read_only = true;
-            self.sync_status = SyncStatus::ReadOnly;
+            self.mark_read_only(ReadOnlyReason::EdgeBufferFull);
             return Err(GraphError::EdgeBufferFull {
                 size: self.edge_buffer.len(),
             });
         }
         Ok(())
+    }
+
+    pub fn mark_read_only(&mut self, reason: ReadOnlyReason) {
+        self.is_read_only = true;
+        self.read_only_reason = Some(reason);
+        self.sync_status = SyncStatus::ReadOnly;
+    }
+
+    pub fn read_only_error(&self) -> GraphError {
+        GraphError::ReadOnly {
+            reason: self
+                .read_only_reason
+                .map(|reason| reason.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        }
     }
 
     fn traversal_edge_overlay(&self, direction: TraversalDirection) -> TraversalEdgeOverlay {
@@ -576,37 +609,68 @@ impl Engine {
             invalid_reason: self.invalid_reason.clone(),
             disabled_trigger_count: self.disabled_trigger_count,
             read_only: self.is_read_only,
+            read_only_reason: self.read_only_reason.map(|reason| reason.to_string()),
         }
     }
 
     pub fn estimated_memory_used_mb(&self) -> f64 {
-        let nodes = self.node_store.node_count() as f64;
-        let edges = self.edge_store.edge_count() as f64;
+        self.estimated_heap_bytes()
+            .max(self.estimated_logical_bytes()) as f64
+            / 1_048_576.0
+    }
 
-        // NodeStore: is_active(0.125) + table_oids(4) + pk(~32 avg)
-        let node_bytes = nodes * (0.125 + 4.0 + 32.0);
+    pub fn estimated_heap_bytes(&self) -> usize {
+        let resolution_bytes = match &self.resolution_store {
+            ResolutionStore::Builder(builder) => builder.estimated_heap_bytes(),
+            ResolutionStore::Finalized(bytes) => bytes.capacity(),
+            ResolutionStore::MmapBacked => 0,
+        } + self.resolution_delta.estimated_heap_bytes();
+        let registry_bytes = self.edge_type_registry.capacity() * std::mem::size_of::<String>()
+            + self
+                .edge_type_registry
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>();
+        let edge_buffer_bytes = self.edge_buffer.capacity() * std::mem::size_of::<EdgeMutation>();
+        let tenant_bytes = self.tenant_membership.capacity()
+            * (std::mem::size_of::<String>() + std::mem::size_of::<RoaringBitmap>())
+            + self
+                .tenant_membership
+                .keys()
+                .map(String::capacity)
+                .sum::<usize>();
+        let tenanted_oid_bytes = self.tenanted_table_oids.capacity() * std::mem::size_of::<u32>();
 
-        // EdgeStore: offsets((N+1)*4) + targets(E*4) + type_ids(E*1) + weights(E*4 if present)
-        let weight_factor = if self.edge_store.has_weights() {
-            4.0
-        } else {
-            0.0
-        };
-        let reverse_edges = self.reverse_edge_store.edge_count() as f64;
-        let edge_bytes = ((nodes + 1.0) * 4.0)
-            + edges * (4.0 + 1.0 + weight_factor)
-            + ((nodes + 1.0) * 4.0)
-            + reverse_edges * (4.0 + 1.0 + weight_factor);
+        self.node_store.estimated_heap_bytes()
+            + self.edge_store.estimated_heap_bytes()
+            + self.reverse_edge_store.estimated_heap_bytes()
+            + self.filter_index.estimated_heap_bytes()
+            + resolution_bytes
+            + registry_bytes
+            + edge_buffer_bytes
+            + tenant_bytes
+            + tenanted_oid_bytes
+    }
 
-        // ResolutionIndex: 16 bytes/node
-        let resolution_bytes = nodes * 16.0;
+    fn estimated_logical_bytes(&self) -> usize {
+        let nodes = self.node_store.node_count() as usize;
+        let edges = self.edge_store.edge_count() as usize;
+        let reverse_edges = self.reverse_edge_store.edge_count() as usize;
+        let weight_width = if self.edge_store.has_weights() { 4 } else { 0 };
 
-        let filter_bytes = self.filter_index.estimated_heap_bytes() as f64;
+        let node_bytes = nodes * (4 + 32) + nodes.div_ceil(8);
+        let forward_edge_bytes = (nodes + 1) * 4 + edges * (4 + 1 + weight_width);
+        let reverse_edge_bytes = (nodes + 1) * 4 + reverse_edges * (4 + 1 + weight_width);
+        let resolution_bytes = nodes * crate::resolution_index::ENTRY_SIZE;
+        let filter_bytes = self.filter_index.estimated_heap_bytes();
+        let edge_buffer_bytes = self.edge_buffer.len() * std::mem::size_of::<EdgeMutation>();
 
-        // Edge buffer: ~20 bytes per pending mutation
-        let buffer_bytes = self.edge_buffer.len() as f64 * 20.0;
-
-        (node_bytes + edge_bytes + resolution_bytes + filter_bytes + buffer_bytes) / 1_048_576.0
+        node_bytes
+            + forward_edge_bytes
+            + reverse_edge_bytes
+            + resolution_bytes
+            + filter_bytes
+            + edge_buffer_bytes
     }
 
     /// Compute connected components.

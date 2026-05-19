@@ -166,10 +166,10 @@ fn edge_buffer_overflow_from_sql_sync_enters_read_only_mode() {
     .expect("insert overflowing edge rows failed");
 
     assert!(sql_raises("SELECT * FROM graph.apply_sync()"));
-    let (read_only, sync_status, edge_buffer_used) = Spi::connect(|client| {
+    let (read_only, read_only_reason, sync_status, edge_buffer_used) = Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT read_only, sync_status, edge_buffer_used FROM graph.status()",
+                "SELECT read_only, read_only_reason, sync_status, edge_buffer_used FROM graph.status()",
                 None,
                 &[],
             )
@@ -177,13 +177,15 @@ fn edge_buffer_overflow_from_sql_sync_enters_read_only_mode() {
         let row = result.first();
         Ok::<_, pgrx::spi::Error>((
             row.get::<bool>(1)?.unwrap_or(false),
-            row.get::<String>(2)?.unwrap_or_default(),
-            row.get::<i32>(3)?.unwrap_or(0),
+            row.get::<String>(2)?,
+            row.get::<String>(3)?.unwrap_or_default(),
+            row.get::<i32>(4)?.unwrap_or(0),
         ))
     })
     .expect("status read failed");
 
     assert!(read_only);
+    assert_eq!(read_only_reason.as_deref(), Some("edge_buffer_full"));
     assert_eq!(sync_status, "read_only");
     assert_eq!(edge_buffer_used, 0);
     let (apply_recommended, maintenance_recommended) = Spi::connect(|client| {
@@ -1359,7 +1361,7 @@ fn sync_health_exposes_operator_contract_field_names() {
     let signature_matches = Spi::get_one::<bool>(
             "WITH expected(result_type) AS (
                 VALUES (
-                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, apply_sync_recommended boolean, maintenance_recommended boolean)'
+                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, read_only_reason text, apply_sync_recommended boolean, maintenance_recommended boolean)'
                 )
              )
              SELECT pg_get_function_result(p.oid) = expected.result_type
