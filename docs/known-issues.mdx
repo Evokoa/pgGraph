@@ -32,8 +32,12 @@ production use.
 
 ### Data Correctness and Corruption
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
+<Callout type="info">
+No currently tracked next-update items remain in this category after `v0.1.1`.
+The previously listed edge endpoint validation and hydration numeric comparison
+issues were completed: invalid edge endpoints now fail as structural errors, and
+large JSON integers preserve exactness without implicit string/number matches.
+</Callout>
 
 ### SQL Contract and Query Semantics
 
