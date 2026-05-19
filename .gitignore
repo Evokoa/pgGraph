@@ -64,3 +64,8 @@ sandbox/benchmark/results/
 sandbox/benchmark/datasets/
 sandbox/benchmark/.venv/
 sandbox/playground/.venv/
+
+# Nix devshell (opt-in; see flake.nix)
+.direnv/
+.pgrx/
+.nix-cargo/
