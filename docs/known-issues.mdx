@@ -62,11 +62,9 @@ production use.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Sync replay batching | Large sync backlogs are loaded and replayed in broad batches with limited partial-progress semantics. | Process rows in bounded ID-ordered batches and checkpoint committed progress deliberately. |
-| Sync metadata reuse | Some sync replay paths repeatedly resolve catalog and OID metadata per row. | Resolve batch metadata once and pass typed context through replay helpers. |
 | Truncate handling | Truncate can force a synchronous full-graph scan. | Track table membership, use table epochs, or queue a rebuild instead of scanning every node inline. |
 | Tenant bitmap mutation | Tenant update/delete handling can require broad bitmap work. | Use old and new tenant values from trigger payloads to mutate only affected tenant membership. |
-| Edge buffer capacity | Read-only transitions near edge-buffer capacity need clearer operator status and recovery guidance. | Add clearer status, alerts, and documented recovery paths around capacity limits. |
+| Internal scheduler | pgGraph exposes `graph.run_scheduled_maintenance()` and Docker/pg_cron examples, but does not run an always-on internal scheduler. | Keep scheduler ownership explicit through `pg_cron`, Kubernetes CronJobs, systemd timers, or app-side schedulers unless an internal scheduler is added deliberately. |
 | Background worker metadata | Maintenance worker metadata is encoded as a fragile delimited string. | Pass durable job identity or use validated length-prefixed metadata. |
 | Background job failures | Failure status can be lost if the worker transaction aborts. | Separate job execution and failure-status recording transaction boundaries. |
 
@@ -98,7 +96,7 @@ not changes to the public SQL contract.
 | Connected components | Component helpers recompute sizes and can materialize full row vectors before slicing. | Reuse component size data and delay row materialization until after filtering, sorting, and pagination where possible. |
 | Reverse graph build | Reversing a CSR graph can allocate intermediate edge structs and sort them. | Use a linear two-pass reverse build when measurements show build-time memory pressure. |
 | Build-time SPI setup | Some build and discovery paths open repeated SPI contexts or run per-table metadata queries. | Batch metadata reads and reuse SPI contexts where the query shape is straightforward. |
-| Source search recheck | Token search currently does exact token rechecks in Rust and allocates per candidate row. | Reduce per-row allocation or move exact token semantics into SQL deliberately. |
+| Source search recheck | Search still verifies source-row matches in Rust after SQL candidate filtering and can allocate per candidate row. | Reduce per-row allocation while preserving SQL/Rust predicate parity. |
 | Hydration setup | Batched hydration can resolve all registered table OIDs before knowing which tables are needed. | Resolve only the table OIDs needed by the requested page and reduce SPI context churn. |
 | Aggregation hydration | Some aggregation paths clone node IDs, JSON values, roots, and table names for lookup ownership. | Use borrowed lookup shapes internally where pgrx row lifetimes allow it. |
 | Resolution delta lookups | Post-build sync inserts can accumulate in a delta structure that is scanned before the finalized index. | Add an indexed delta map if sync-delta growth becomes material. |

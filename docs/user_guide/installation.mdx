@@ -104,11 +104,28 @@ Start the container:
 docker run \
   --name pggraph-postgres \
   -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=graph \
   -p 5432:5432 \
   pggraph-postgres:17
 ```
 
-Then create the extension in each database that should use pgGraph:
+The root Docker image starts PostgreSQL with `pg_cron` and `graph` in
+`shared_preload_libraries`, runs
+`docker/init/01-create-extensions-and-schedule.sql` on first database
+initialization, and creates:
+
+| Object | Purpose |
+|---|---|
+| `pg_cron` extension | Enables cron-style scheduling inside the Docker database |
+| `graph` extension | Installs pgGraph in the Docker database |
+| `pggraph-maintenance` cron job | Runs `graph.run_scheduled_maintenance()` every five minutes |
+
+The init SQL runs only when PostgreSQL initializes a new data directory. If you
+reuse an existing Docker volume, recreate the volume before expecting init SQL
+changes to apply.
+
+For databases beyond the initial Docker database, create the extension
+explicitly:
 
 ```sql
 CREATE EXTENSION graph;

@@ -30,8 +30,16 @@ FROM postgres:17-bookworm
 
 ARG PG_MAJOR=17
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        postgresql-${PG_MAJOR}-cron \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /src/graph/target/release/graph-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/graph* /usr/share/postgresql/${PG_MAJOR}/extension/
 COPY --from=builder /src/graph/target/release/graph-pg${PG_MAJOR}/usr/lib/postgresql/${PG_MAJOR}/lib/graph.so /usr/lib/postgresql/${PG_MAJOR}/lib/
 
-RUN mkdir -p /docker-entrypoint-initdb.d \
-    && echo 'CREATE EXTENSION IF NOT EXISTS graph;' > /docker-entrypoint-initdb.d/01-create-extension.sql
+ENV POSTGRES_DB=graph
+
+COPY docker/init/01-create-extensions-and-schedule.sql /docker-entrypoint-initdb.d/
+
+CMD ["postgres", "-c", "shared_preload_libraries=pg_cron,graph", "-c", "cron.database_name=graph"]

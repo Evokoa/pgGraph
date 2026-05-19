@@ -83,8 +83,17 @@ docker compose exec postgres psql -U postgres -d graph
 ```
 
 The Compose service builds the root Docker image and starts PostgreSQL with
-pgGraph available. The rest of this page assumes you are inside that `psql`
-session.
+pgGraph available. On a fresh Compose volume, the image also creates the
+`pg_cron` extension and schedules `graph.run_scheduled_maintenance()` every five
+minutes as `pggraph-maintenance`. Recreate the Compose volume after Docker init
+SQL changes:
+
+```bash
+docker compose down -v
+docker compose up --build -d
+```
+
+The rest of this page assumes you are inside that `psql` session.
 
 ## Create A Small Graph
 

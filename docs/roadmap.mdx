@@ -65,6 +65,22 @@ flowchart LR
 | Query ergonomics | More examples around strict traversal specs, typed filters, workflow helpers, and pagination. |
 | Benchmarks | More end-to-end SQL benchmarks that separate PostgreSQL execution, graph traversal, hydration, and client overhead. |
 
+## Alpha Hardening Status
+
+The critical-path alpha hardening pass has landed the correctness, durability,
+SQL contract, sync freshness, and operator diagnostics work that was blocking a
+clearer public baseline.
+
+| Track | Status | Notes |
+|---|---|---|
+| Data correctness | Complete | Edge endpoint validation and exact hydration numeric comparisons fail closed instead of silently producing wrong answers. |
+| SQL contract | Complete for the critical path | Weighted shortest paths return stable step rows; search and traversal pagination contracts are documented and tested. |
+| Persistence safety | Complete for the critical path | Persisted PK UTF-8, resolution collisions, mmap region bounds, and missing `PGDATA` behavior are validated. |
+| SQL boundary safety | Complete for search | Source search binds user values through SPI parameters and inspects generated SQL in tests. Other catalog-derived dynamic SQL remains tracked in Known Issues. |
+| Sync freshness | Complete for topology reads | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; `graph.query_freshness = 'off'` preserves manual mode. |
+| Scheduler integration | Available | `graph.run_scheduled_maintenance()` is scheduler-safe and documented for `pg_cron` or external schedulers. The Docker image enables `pg_cron` and installs a five-minute maintenance schedule. |
+| Operator diagnostics | Complete for the critical path | `graph.status()`, `graph.sync_health()`, build jobs, and maintenance jobs expose read-only reasons and progress diagnostics. |
+
 ## Continuous Improvement
 
 There is always another way to optimize a graph engine, especially one that
