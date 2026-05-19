@@ -64,6 +64,10 @@ cases, but JSONB values are the general representation.
 
 Filters are ANDed. A node must satisfy every predicate to be included.
 
+JSON numbers compare as numbers. Integer values are compared exactly across the
+signed and unsigned 64-bit range; decimal values use numeric fallback semantics.
+JSON strings remain strings, so `"123"` does not match the number `123`.
+
 Missing or NULL values:
 
 | Operator family | NULL behavior |

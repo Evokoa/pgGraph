@@ -11,7 +11,7 @@ every backend-local engine.
 | Module | Responsibility |
 |---|---|
 | `sync.rs` | Generate trigger functions/triggers and create sync tables |
-| `sql_sync.rs` | Parse sync mode, read durable sync log, apply row changes |
+| `sql_sync.rs` | Parse sync mode, read durable sync log in bounded batches, apply row changes |
 | `sql_build.rs` | Maintenance rebuild and vacuum orchestration |
 | `sql_jobs.rs` | Durable job rows and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
@@ -64,18 +64,40 @@ directly.
 
 ```mermaid
 flowchart TD
-  A["graph._sync_log rows"] --> B["read_sync_log_entries"]
-  B --> C["apply_sync_log_entry"]
-  C --> D{"operation"}
-  D --> E["insert node/update resolution delta"]
-  D --> F["update properties/filter/tenant"]
-  D --> G["tombstone delete"]
-  D --> H["edge overlay mutation"]
-  E --> I["update applied_sync_id"]
-  F --> I
-  G --> I
-  H --> I
+  A["capture max graph._sync_log id"] --> B["read_sync_log_entries_after(applied, batch, high_water)"]
+  B --> C["guard edge buffer capacity for this batch"]
+  C --> D["apply entries with shared catalog context"]
+  D --> E{"operation"}
+  E --> F["insert node/update resolution delta"]
+  E --> G["update properties/filter/tenant"]
+  E --> H["tombstone delete"]
+  E --> I["edge overlay mutation"]
+  F --> J["advance applied_sync_id after each row"]
+  G --> J
+  H --> J
+  I --> J
+  J --> K{"more rows up to high-water?"}
+  K -->|yes| B
+  K -->|no| L["apply bounded legacy buffer batches"]
 ```
+
+`graph.sync_batch_size` controls the maximum durable sync rows fetched and
+replayed in one internal batch. `graph.apply_sync()` still drains the durable log
+that was pending when the call started; the bound is an internal memory and
+latency control, not a change to the public admin contract.
+
+`graph.query_freshness = 'apply_pending_sync'` is the default and routes topology
+reads through the same high-water replay primitive before they execute. The wired
+topology-read entrypoints are traversal variants, shortest-path queries,
+weighted shortest-path queries, component APIs, and `graph.traverse_search()`
+before its traversal phase. `graph.query_freshness = 'off'` keeps the
+compatibility/manual catch-up path available. `graph.search()` remains separate
+because it reads source-table properties through SQL rather than graph topology.
+
+`graph.sync_health()` is the operator-facing read model for this state. It
+combines backend-local replay progress, durable `_sync_log` high-water state,
+freshness configuration, trigger health, and overlay pressure into one row for
+external schedulers and monitoring checks.
 
 ## Node Changes
 

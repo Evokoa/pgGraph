@@ -41,7 +41,8 @@ fn traverse(
 > {
     with_panic_boundary("traverse()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let tenant_scope =
             resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
         let (direction, strategy, uniqueness) =
@@ -122,7 +123,8 @@ fn traverse_many(
 > {
     with_panic_boundary("traverse_many()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let tenant_scope =
             resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
         if start_tables.len() != start_ids.len() {
@@ -205,7 +207,8 @@ fn shortest_path(
         acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
         acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
 
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let steps = ENGINE
             .with(|e| {
@@ -247,18 +250,35 @@ fn shortest_path(
 ///
 /// Returns no rows when no weighted path exists or no weight columns were loaded.
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI exposes each weighted path row column in the return tuple"
+)]
 fn weighted_shortest_path(
     source_table: pgrx::pg_sys::Oid,
     source_id: &str,
     target_table: pgrx::pg_sys::Oid,
     target_id: &str,
-) -> TableIterator<'static, (name!(path_nodes, Vec<String>), name!(total_cost, i32))> {
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(node_table, pgrx::pg_sys::Oid),
+        name!(node_table_name, String),
+        name!(node_id, String),
+        name!(edge_label, Option<String>),
+        name!(edge_weight, Option<i64>),
+        name!(step_cost, i64),
+        name!(total_cost, i64),
+    ),
+> {
     with_panic_boundary("weighted_shortest_path()", || {
         check_enabled();
         acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
         acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
 
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
@@ -269,11 +289,30 @@ fn weighted_shortest_path(
                 target_id,
             )
             .unwrap_or_else(|err| err.report())
-            .map(|(path, cost)| vec![(path, cost.min(i32::MAX as u64) as i32)])
-            .unwrap_or_default()
+            .into_iter()
+            .map(|step| {
+                (
+                    step.step,
+                    pgrx::pg_sys::Oid::from_u32(step.node_table.0),
+                    regclass_text(step.node_table.0).unwrap_or_else(|err| err.report()),
+                    step.node_id,
+                    step.edge_label,
+                    step.edge_weight.map(i64::from),
+                    u64_to_bigint(step.step_cost).unwrap_or_else(|err| err.report()),
+                    u64_to_bigint(step.total_cost).unwrap_or_else(|err| err.report()),
+                )
+            })
+            .collect::<Vec<_>>()
         });
         TableIterator::new(rows)
     })
+}
+
+fn u64_to_bigint(value: u64) -> safety::GraphResult<i64> {
+    i64::try_from(value).map_err(|_| safety::GraphError::Internal(format!(
+        "weighted path cost {} exceeds SQL bigint range",
+        value
+    )))
 }
 
 /// Aggregate over traversal results without hydrating every row client-side.

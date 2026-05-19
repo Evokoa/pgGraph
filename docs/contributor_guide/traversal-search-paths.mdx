@@ -102,8 +102,9 @@ not assume reverse reachability represents the original directed graph.
 
 Weighted paths use registered edge weights and Dijkstra-style cost expansion.
 The path layer accumulates costs as `u64` values with checked addition so valid
-large path costs do not collide with the unreachable sentinel; the SQL wrapper
-still caps `total_cost` to its documented `integer` return type.
+large path costs do not collide with the unreachable sentinel. The SQL wrapper
+returns one row per path step and exposes `step_cost` and `total_cost` as
+`bigint`; costs outside the SQL `bigint` range fail instead of being capped.
 The SQL wrapper returns no rows when:
 
 | Condition | Reason |

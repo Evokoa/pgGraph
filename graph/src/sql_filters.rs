@@ -619,16 +619,19 @@ pub(crate) fn json_values_equal(actual: &serde_json::Value, expected: &serde_jso
     if actual.is_null() || expected.is_null() {
         return actual.is_null() && expected.is_null();
     }
-    if let (Some(actual), Some(expected)) = (json_value_as_f64(actual), json_value_as_f64(expected))
+    if let (serde_json::Value::Number(actual), serde_json::Value::Number(expected)) =
+        (actual, expected)
     {
-        return actual == expected;
+        return json_number_compare(actual, expected)
+            .is_some_and(|ordering| ordering == std::cmp::Ordering::Equal);
     }
     if let (Some(actual), Some(expected)) = (actual.as_bool(), expected.as_bool()) {
         return actual == expected;
     }
-    json_value_as_text(actual).is_some_and(|actual| {
-        json_value_as_text(expected).is_some_and(|expected| actual == expected)
-    })
+    if let (Some(actual), Some(expected)) = (actual.as_str(), expected.as_str()) {
+        return actual == expected;
+    }
+    false
 }
 
 pub(crate) fn json_value_compare(
@@ -638,28 +641,107 @@ pub(crate) fn json_value_compare(
     if actual.is_null() || expected.is_null() {
         return None;
     }
-    if let (Some(actual), Some(expected)) = (json_value_as_f64(actual), json_value_as_f64(expected))
+    if let (serde_json::Value::Number(actual), serde_json::Value::Number(expected)) =
+        (actual, expected)
     {
-        return actual.partial_cmp(&expected);
+        return json_number_compare(actual, expected);
     }
-    let actual = json_value_as_text(actual)?;
-    let expected = json_value_as_text(expected)?;
-    Some(actual.cmp(&expected))
+    let actual = actual.as_str()?;
+    let expected = expected.as_str()?;
+    Some(actual.cmp(expected))
 }
 
-pub(crate) fn json_value_as_f64(value: &serde_json::Value) -> Option<f64> {
-    match value {
-        serde_json::Value::Number(number) => number.as_f64(),
-        serde_json::Value::String(text) => text.parse::<f64>().ok(),
-        _ => None,
+fn json_number_compare(
+    actual: &serde_json::Number,
+    expected: &serde_json::Number,
+) -> Option<std::cmp::Ordering> {
+    match (
+        actual.as_i64(),
+        actual.as_u64(),
+        expected.as_i64(),
+        expected.as_u64(),
+    ) {
+        (Some(actual), _, Some(expected), _) => Some(actual.cmp(&expected)),
+        (_, Some(actual), _, Some(expected)) => Some(actual.cmp(&expected)),
+        (Some(actual), _, _, Some(expected)) => {
+            if actual < 0 {
+                Some(std::cmp::Ordering::Less)
+            } else {
+                Some((actual as u64).cmp(&expected))
+            }
+        }
+        (_, Some(actual), Some(expected), _) => {
+            if expected < 0 {
+                Some(std::cmp::Ordering::Greater)
+            } else {
+                Some(actual.cmp(&(expected as u64)))
+            }
+        }
+        _ => actual.as_f64()?.partial_cmp(&expected.as_f64()?),
     }
 }
 
-pub(crate) fn json_value_as_text(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(text) => Some(text.clone()),
-        serde_json::Value::Number(number) => Some(number.to_string()),
-        serde_json::Value::Bool(value) => Some(value.to_string()),
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn json_numeric_equality_preserves_large_integer_precision() {
+        assert!(!json_values_equal(
+            &json!(9_007_199_254_740_993_u64),
+            &json!(9_007_199_254_740_992_u64)
+        ));
+    }
+
+    #[test]
+    fn json_numeric_ordering_preserves_i64_boundaries() {
+        assert_eq!(
+            json_value_compare(&json!(i64::MIN), &json!(i64::MAX)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            json_value_compare(&json!(i64::MAX), &json!(i64::MAX - 1)),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn json_numeric_ordering_handles_signed_unsigned_edges() {
+        assert_eq!(
+            json_value_compare(&json!(-1_i64), &json!(0_u64)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            json_value_compare(&json!(i64::MAX), &json!(i64::MAX as u64 + 1)),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn json_strings_do_not_compare_as_numbers() {
+        assert!(!json_values_equal(&json!("123"), &json!(123)));
+        assert!(!json_values_equal(
+            &json!("9007199254740993"),
+            &json!(9_007_199_254_740_993_u64)
+        ));
+        assert_eq!(json_value_compare(&json!("123"), &json!(123)), None);
+    }
+
+    #[test]
+    fn json_decimal_numbers_still_compare_by_numeric_value() {
+        assert!(json_values_equal(&json!(1.25), &json!(1.25)));
+        assert_eq!(
+            json_value_compare(&json!(1.5), &json!(1.25)),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn json_null_only_equals_null_and_is_not_orderable() {
+        assert!(json_values_equal(&json!(null), &json!(null)));
+        assert!(!json_values_equal(&json!(null), &json!(0)));
+        assert_eq!(json_value_compare(&json!(null), &json!(null)), None);
     }
 }

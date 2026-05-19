@@ -27,7 +27,7 @@ fn reset() {
 fn largest_component_id() -> safety::GraphResult<i64> {
     check_enabled_result()?;
     require_graph_admin_result()?;
-    ensure_current_graph()?;
+    ensure_current_graph_for_query(current_query_freshness()?)?;
     ENGINE.with(|e| {
         let eng = e.borrow();
         let cc_result = eng.connected_components()?;
@@ -58,7 +58,7 @@ fn component_rows(
     }
     check_enabled_result()?;
     require_graph_admin_result()?;
-    ensure_current_graph()?;
+    ensure_current_graph_for_query(current_query_freshness()?)?;
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
 
@@ -218,4 +218,50 @@ fn ensure_current_graph() -> safety::GraphResult<()> {
         });
     }
     Ok(())
+}
+
+fn current_query_freshness() -> safety::GraphResult<config::QueryFreshness> {
+    config::parsed_query_freshness().ok_or_else(|| safety::GraphError::InvalidFilter {
+        reason: format!(
+            "unsupported graph.query_freshness '{}'; expected 'off', 'apply_pending_sync', or 'error_on_pending'",
+            config::query_freshness()
+        ),
+    })
+}
+
+fn ensure_current_graph_for_query(
+    freshness: config::QueryFreshness,
+) -> safety::GraphResult<()> {
+    ensure_current_graph()?;
+
+    if !matches!(current_sync_mode()?, config::SyncMode::Trigger) {
+        return Ok(());
+    }
+
+    let pending = ENGINE.with(|e| e.borrow().pending_sync_rows);
+    if pending <= 0 {
+        return Ok(());
+    }
+
+    match freshness {
+        config::QueryFreshness::Off => Ok(()),
+        config::QueryFreshness::ErrorOnPending => Err(safety::GraphError::InvalidFilter {
+            reason: format!(
+                "topology read has {pending} pending sync row(s); call graph.apply_sync() or set graph.query_freshness = 'apply_pending_sync'"
+            ),
+        }),
+        config::QueryFreshness::ApplyPendingSync => {
+            let high_watermark = max_sync_log_id()?;
+            apply_sync_until(Some(high_watermark), config::sync_batch_size())?;
+            let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;
+            ENGINE.with(|e| {
+                let mut eng = e.borrow_mut();
+                eng.pending_sync_rows = pending;
+                if pending == 0 && !eng.is_read_only {
+                    eng.sync_status = engine::SyncStatus::Idle;
+                }
+            });
+            Ok(())
+        }
+    }
 }

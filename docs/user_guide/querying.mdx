@@ -275,8 +275,14 @@ Weighted path return columns:
 
 | Column | Type | Meaning |
 |---|---|---|
-| `path_nodes` | `TEXT[]` | Node primary keys in path order |
-| `total_cost` | `INTEGER` | Sum of registered edge weights, capped to `i32::MAX` for SQL output |
+| `step` | `INTEGER` | Zero-based path step |
+| `node_table` | `OID` | Node table OID for this step |
+| `node_table_name` | `TEXT` | Readable table name for this step |
+| `node_id` | `TEXT` | Node primary key for this step |
+| `edge_label` | `TEXT` | Incoming edge label, NULL for step `0` |
+| `edge_weight` | `BIGINT` | Incoming edge weight, NULL for step `0` |
+| `step_cost` | `BIGINT` | Cumulative cost at this step |
+| `total_cost` | `BIGINT` | Total path cost repeated on each row |
 
 ## Components
 

@@ -12,7 +12,7 @@ use roaring::RoaringBitmap;
 
 use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
-use crate::types::{PathStep, TableOid};
+use crate::types::{PathStep, TableOid, WeightedPathStep};
 
 /// Find the shortest unweighted path between two nodes using bidirectional BFS.
 ///
@@ -315,8 +315,8 @@ pub fn weighted_shortest_path(
     edge_store: &EdgeStore,
     source: u32,
     target: u32,
-    _edge_type_registry: &[String],
-) -> Option<(Vec<String>, u64)> {
+    edge_type_registry: &[String],
+) -> Option<Vec<WeightedPathStep>> {
     if source >= node_store.node_count() || target >= node_store.node_count() {
         return None;
     }
@@ -328,6 +328,8 @@ pub fn weighted_shortest_path(
     let node_count = node_store.node_count() as usize;
     let mut dist = vec![u64::MAX; node_count];
     let mut parent = vec![u32::MAX; node_count];
+    let mut parent_edge_type = vec![0u8; node_count];
+    let mut parent_edge_weight = vec![0u32; node_count];
     let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
 
     dist[source as usize] = 0;
@@ -342,17 +344,20 @@ pub fn weighted_shortest_path(
             continue; // Stale entry
         }
 
-        let (targets, _type_ids, weights) = edge_store.neighbors_weighted(current);
+        let (targets, type_ids, weights) = edge_store.neighbors_weighted(current);
         for i in 0..targets.len() {
             let neighbor = targets[i];
-            let edge_weight = u64::from(weights[i]);
-            let Some(new_cost) = cost.checked_add(edge_weight) else {
+            let edge_weight = weights[i];
+            let edge_cost = u64::from(edge_weight);
+            let Some(new_cost) = cost.checked_add(edge_cost) else {
                 continue;
             };
 
             if new_cost < dist[neighbor as usize] && node_store.is_active(neighbor) {
                 dist[neighbor as usize] = new_cost;
                 parent[neighbor as usize] = current;
+                parent_edge_type[neighbor as usize] = type_ids[i];
+                parent_edge_weight[neighbor as usize] = edge_weight;
                 heap.push(Reverse((new_cost, neighbor)));
             }
         }
@@ -362,19 +367,45 @@ pub fn weighted_shortest_path(
         return None;
     }
 
-    // Reconstruct path
-    let mut path = Vec::new();
+    let total_cost = dist[target as usize];
+    let mut nodes = Vec::new();
     let mut current = target;
     loop {
-        path.push(node_store.primary_key(current).to_string());
+        nodes.push(current);
         if current == source {
             break;
         }
         current = parent[current as usize];
     }
-    path.reverse();
+    nodes.reverse();
 
-    Some((path, dist[target as usize]))
+    Some(
+        nodes
+            .into_iter()
+            .enumerate()
+            .map(|(step, node)| {
+                let edge_type = parent_edge_type[node as usize];
+                WeightedPathStep {
+                    step: step as i32,
+                    node_table: TableOid(node_store.table_oid(node)),
+                    node_id: node_store.primary_key(node).to_string(),
+                    edge_label: if step == 0 {
+                        None
+                    } else {
+                        Some(
+                            edge_type_registry
+                                .get(edge_type as usize)
+                                .cloned()
+                                .unwrap_or_else(|| format!("type_{}", edge_type)),
+                        )
+                    },
+                    edge_weight: (step != 0).then_some(parent_edge_weight[node as usize]),
+                    step_cost: dist[node as usize],
+                    total_cost,
+                }
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -505,10 +536,29 @@ mod tests {
         let es = EdgeStore::from_edges(4, edges, true);
         let registry = vec!["".to_string(), "weighted".to_string()];
 
-        let (path, cost) = weighted_shortest_path(&ns, &es, 0, 3, &registry).unwrap();
+        let path = weighted_shortest_path(&ns, &es, 0, 3, &registry).unwrap();
 
-        assert_eq!(path, vec!["A", "C", "D"]);
-        assert_eq!(cost, 10);
+        assert_eq!(
+            path.iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "C", "D"]
+        );
+        assert_eq!(
+            path.iter()
+                .map(|step| step.edge_label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None, Some("weighted"), Some("weighted")]
+        );
+        assert_eq!(
+            path.iter().map(|step| step.edge_weight).collect::<Vec<_>>(),
+            vec![None, Some(5), Some(5)]
+        );
+        assert_eq!(
+            path.iter().map(|step| step.step_cost).collect::<Vec<_>>(),
+            vec![0, 5, 10]
+        );
+        assert!(path.iter().all(|step| step.total_cost == 10));
     }
 
     #[test]
@@ -535,10 +585,15 @@ mod tests {
         let es = EdgeStore::from_edges(3, edges, true);
         let registry = vec!["".to_string(), "weighted".to_string()];
 
-        let (path, cost) = weighted_shortest_path(&ns, &es, 0, 2, &registry).unwrap();
+        let path = weighted_shortest_path(&ns, &es, 0, 2, &registry).unwrap();
 
-        assert_eq!(path, vec!["A", "B", "C"]);
-        assert_eq!(cost, u64::from(u32::MAX));
+        assert_eq!(
+            path.iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "C"]
+        );
+        assert_eq!(path.last().unwrap().total_cost, u64::from(u32::MAX));
     }
 
     #[test]

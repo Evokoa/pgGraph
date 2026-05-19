@@ -283,7 +283,7 @@ fn edge_and_weighted_path_v1_acceptance() {
     Spi::run("SELECT * FROM graph.build()").expect("build failed");
 
     let weighted = Spi::get_one::<String>(
-        "SELECT array_to_string(path_nodes, '->') || ':' || total_cost::text
+        "SELECT string_agg(node_id, '->' ORDER BY step) || ':' || max(total_cost)::text
              FROM graph.weighted_shortest_path(
                 'graph_test_weighted_nodes_pgtest'::regclass,
                 'a',
@@ -293,6 +293,36 @@ fn edge_and_weighted_path_v1_acceptance() {
     )
     .expect("weighted shortest path failed")
     .expect("weighted shortest path returned no rows");
+    let weighted_steps = Spi::get_one::<String>(
+        "SELECT string_agg(
+                    step::text || ':' || node_id || ':' ||
+                    coalesce(edge_label, '<start>') || ':' ||
+                    coalesce(edge_weight::text, '<start>') || ':' ||
+                    step_cost::text || ':' || total_cost::text,
+                    ',' ORDER BY step
+                )
+             FROM graph.weighted_shortest_path(
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                'a',
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                'd'
+             )",
+    )
+    .expect("weighted path step detail failed")
+    .expect("weighted path step detail missing");
+    let weighted_table_identity_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.weighted_shortest_path(
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                'a',
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                'd'
+             )
+             WHERE node_table = 'graph_test_weighted_nodes_pgtest'::regclass::oid
+               AND node_table_name = 'graph_test_weighted_nodes_pgtest'::regclass::text",
+    )
+    .expect("weighted path table identity check failed")
+    .unwrap_or(0);
     let fallback_label = Spi::get_one::<String>(
         "SELECT edge_path->>0
              FROM graph.traverse(
@@ -356,7 +386,7 @@ fn edge_and_weighted_path_v1_acceptance() {
     .unwrap_or(false);
     let weighted_shape = Spi::get_one::<bool>(
         "SELECT pg_get_function_result(p.oid) =
-                    'TABLE(path_nodes text[], total_cost integer)'
+                    'TABLE(step integer, node_table oid, node_table_name text, node_id text, edge_label text, edge_weight bigint, step_cost bigint, total_cost bigint)'
              FROM pg_proc p
              JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE n.nspname = 'graph'
@@ -364,14 +394,28 @@ fn edge_and_weighted_path_v1_acceptance() {
     )
     .expect("weighted result shape inspection failed")
     .unwrap_or(false);
+    let no_weighted_path_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.weighted_shortest_path(
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                'd',
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                'a'
+             )",
+    )
+    .expect("weighted empty path inspection failed")
+    .unwrap_or(-1);
 
     assert_eq!(weighted, "a->c->d:2");
+    assert_eq!(weighted_steps, "0:a:<start>:<start>:0:2,1:c:route:1:1:2,2:d:cheap:1:2:2");
+    assert_eq!(weighted_table_identity_rows, 3);
     assert_eq!(fallback_label, "route");
     assert_eq!(null_fallback_label, "route");
     assert_eq!(reverse_out_count, 0);
     assert_eq!(inbound_count, 2);
     assert!(no_weight_param);
     assert!(weighted_shape);
+    assert_eq!(no_weighted_path_rows, 0);
 }
 
 #[pg_test]

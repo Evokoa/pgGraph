@@ -131,6 +131,18 @@ pub struct PathStep {
     pub edge_label: Option<String>,
 }
 
+/// Result of a single step in a weighted shortest path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightedPathStep {
+    pub step: i32,
+    pub node_table: TableOid,
+    pub node_id: String,
+    pub edge_label: Option<String>,
+    pub edge_weight: Option<u32>,
+    pub step_cost: u64,
+    pub total_cost: u64,
+}
+
 /// Search matching strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {

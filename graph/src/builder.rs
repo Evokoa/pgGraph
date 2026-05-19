@@ -802,7 +802,7 @@ fn load_edge_store_from_spool(
                     GraphError::Internal(format!("edge weight read failed: {}", err))
                 })?;
 
-                builder.push(RawEdge {
+                builder.try_push(RawEdge {
                     source: u32::try_from(source).map_err(|_| {
                         GraphError::Internal(format!("edge source out of range: {}", source))
                     })?,
@@ -819,7 +819,7 @@ fn load_edge_store_from_spool(
                             })
                         })
                         .transpose()?,
-                });
+                })?;
             }
         }
 

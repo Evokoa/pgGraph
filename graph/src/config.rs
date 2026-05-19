@@ -81,6 +81,10 @@ pub static AUTO_LOAD: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Default: 100000. Range: 1000–10000000.
 pub static EDGE_BUFFER_SIZE: GucSetting<i32> = GucSetting::<i32>::new(100_000);
 
+/// Maximum sync-log rows replayed in one internal batch.
+/// Default: 1000. Range: 1–100000.
+pub static SYNC_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1_000);
+
 /// Reserved maintenance interval in seconds.
 /// Registered for future scheduling work; current code does not schedule vacuum.
 /// Default: 60. Range: 5–86400.
@@ -98,6 +102,11 @@ pub static DATA_DIR: GucSetting<Option<std::ffi::CString>> =
 /// Sync mode: 'manual', 'trigger', or reserved 'wal'.
 /// Default: "manual".
 pub static SYNC_MODE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
+/// Query freshness policy for topology reads.
+/// Default: "apply_pending_sync".
+pub static QUERY_FRESHNESS: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
 /// OOM action: 'error' (return SQL error) or 'readonly' (degrade gracefully).
@@ -147,6 +156,14 @@ pub enum SyncMode {
     Manual,
     Trigger,
     Wal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryFreshness {
+    Off,
+    #[default]
+    ApplyPendingSync,
+    ErrorOnPending,
 }
 
 impl SyncMode {
@@ -225,6 +242,29 @@ pub fn parsed_sync_mode() -> Option<SyncMode> {
     parse_sync_mode(raw)
 }
 
+pub fn query_freshness() -> String {
+    QUERY_FRESHNESS
+        .get()
+        .as_ref()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("apply_pending_sync")
+        .to_string()
+}
+
+pub fn parsed_query_freshness() -> Option<QueryFreshness> {
+    let binding = QUERY_FRESHNESS.get();
+    let raw = binding
+        .as_ref()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("apply_pending_sync");
+
+    parse_query_freshness(raw)
+}
+
+pub fn sync_batch_size() -> usize {
+    SYNC_BATCH_SIZE.get().max(1) as usize
+}
+
 /// Parse an OOM action string into a typed policy.
 fn parse_oom_action(raw: &str) -> OomAction {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -264,6 +304,15 @@ fn parse_sync_mode(raw: &str) -> Option<SyncMode> {
         "manual" => Some(SyncMode::Manual),
         "trigger" => Some(SyncMode::Trigger),
         "wal" => Some(SyncMode::Wal),
+        _ => None,
+    }
+}
+
+fn parse_query_freshness(raw: &str) -> Option<QueryFreshness> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "compat" | "compatibility" => Some(QueryFreshness::Off),
+        "apply_pending_sync" | "apply" | "auto" | "on" => Some(QueryFreshness::ApplyPendingSync),
+        "error_on_pending" | "error" => Some(QueryFreshness::ErrorOnPending),
         _ => None,
     }
 }
@@ -414,6 +463,17 @@ pub fn register_gucs() {
     );
 
     GucRegistry::define_int_guc(
+        c"graph.sync_batch_size",
+        c"Maximum sync-log rows replayed in one internal batch.",
+        c"Bounds graph.apply_sync() and future query-time sync catch-up replay memory.",
+        &SYNC_BATCH_SIZE,
+        1,
+        100_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c"graph.vacuum_interval_secs",
         c"Reserved maintenance interval in seconds.",
         c"Registered for future scheduling work; current code does not schedule vacuum. Default: 60.",
@@ -441,6 +501,15 @@ pub fn register_gucs() {
         c"Manual: no trigger install. Trigger: trigger-backed sync log. WAL: reserved.",
         &SYNC_MODE,
         GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"graph.query_freshness",
+        c"Topology-read freshness policy.",
+        c"Default apply_pending_sync: apply trigger sync rows before topology reads. off: compatibility mode. error_on_pending: fail when pending rows exist.",
+        &QUERY_FRESHNESS,
+        GucContext::Userset,
         GucFlags::default(),
     );
 
@@ -487,8 +556,8 @@ mod tests {
     //! semantics for invalid GUC input.
 
     use super::{
-        parse_build_scan_mode, parse_oom_action, parse_sync_mode, BuildScanMode, OomAction,
-        SyncMode,
+        parse_build_scan_mode, parse_oom_action, parse_query_freshness, parse_sync_mode,
+        BuildScanMode, OomAction, QueryFreshness, SyncMode,
     };
 
     #[test]
@@ -534,5 +603,25 @@ mod tests {
     fn parse_sync_mode_rejects_unknown_modes() {
         assert_eq!(parse_sync_mode("async"), None);
         assert_eq!(parse_sync_mode(""), None);
+    }
+
+    #[test]
+    fn parse_query_freshness_accepts_supported_modes() {
+        assert_eq!(QueryFreshness::default(), QueryFreshness::ApplyPendingSync);
+        assert_eq!(parse_query_freshness("off"), Some(QueryFreshness::Off));
+        assert_eq!(
+            parse_query_freshness(" APPLY_PENDING_SYNC "),
+            Some(QueryFreshness::ApplyPendingSync)
+        );
+        assert_eq!(
+            parse_query_freshness("error_on_pending"),
+            Some(QueryFreshness::ErrorOnPending)
+        );
+    }
+
+    #[test]
+    fn parse_query_freshness_rejects_unknown_modes() {
+        assert_eq!(parse_query_freshness("fresh"), None);
+        assert_eq!(parse_query_freshness(""), None);
     }
 }

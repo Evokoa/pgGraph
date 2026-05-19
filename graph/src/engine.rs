@@ -422,15 +422,21 @@ impl Engine {
     }
 
     pub fn push_edge_mutation(&mut self, mutation: EdgeMutation) -> GraphResult<()> {
-        if self.edge_buffer.len() >= crate::config::EDGE_BUFFER_SIZE.get() as usize {
+        self.reserve_edge_mutation_capacity(1)?;
+        self.edge_buffer.push(mutation);
+        self.needs_vacuum = true;
+        Ok(())
+    }
+
+    pub fn reserve_edge_mutation_capacity(&mut self, additional: usize) -> GraphResult<()> {
+        let limit = crate::config::EDGE_BUFFER_SIZE.get() as usize;
+        if self.edge_buffer.len().saturating_add(additional) > limit {
             self.is_read_only = true;
             self.sync_status = SyncStatus::ReadOnly;
             return Err(GraphError::EdgeBufferFull {
                 size: self.edge_buffer.len(),
             });
         }
-        self.edge_buffer.push(mutation);
-        self.needs_vacuum = true;
         Ok(())
     }
 
@@ -514,7 +520,7 @@ impl Engine {
         source_id: &str,
         target_table_oid: u32,
         target_id: &str,
-    ) -> GraphResult<Option<(Vec<String>, u64)>> {
+    ) -> GraphResult<Vec<WeightedPathStep>> {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
@@ -540,6 +546,7 @@ impl Engine {
             target,
             &self.edge_type_registry,
         ))
+        .map(|path| path.unwrap_or_default())
     }
 
     /// Get engine status.
@@ -1162,7 +1169,7 @@ mod tests {
     fn weighted_shortest_path_unweighted_graph_returns_none() {
         let eng = build_test_engine(); // unweighted
         let result = eng.weighted_shortest_path(100, "A", 100, "D").unwrap();
-        assert!(result.is_none());
+        assert!(result.is_empty());
     }
 
     // ─── connected_components() ───
