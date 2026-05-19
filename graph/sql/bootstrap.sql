@@ -115,6 +115,8 @@ CREATE TABLE IF NOT EXISTS graph._build_jobs (
     build_time_ms  DOUBLE PRECISION,
     memory_used_mb DOUBLE PRECISION,
     sync_mode      TEXT NOT NULL DEFAULT 'manual',
+    progress_phase TEXT NOT NULL DEFAULT 'queued',
+    progress_message TEXT,
     started_at     TIMESTAMPTZ,
     finished_at    TIMESTAMPTZ,
     error          TEXT,
@@ -122,6 +124,10 @@ CREATE TABLE IF NOT EXISTS graph._build_jobs (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE graph._build_jobs
+    ADD COLUMN IF NOT EXISTS progress_phase TEXT NOT NULL DEFAULT 'queued',
+    ADD COLUMN IF NOT EXISTS progress_message TEXT;
 
 CREATE INDEX IF NOT EXISTS _build_jobs_status_idx
     ON graph._build_jobs (status, created_at);
@@ -133,6 +139,8 @@ CREATE TABLE IF NOT EXISTS graph._maintenance_jobs (
     nodes_after       BIGINT,
     edges_after       BIGINT,
     vacuum_time_ms    DOUBLE PRECISION,
+    progress_phase    TEXT NOT NULL DEFAULT 'queued',
+    progress_message  TEXT,
     started_at        TIMESTAMPTZ,
     finished_at       TIMESTAMPTZ,
     error             TEXT,
@@ -140,6 +148,10 @@ CREATE TABLE IF NOT EXISTS graph._maintenance_jobs (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE graph._maintenance_jobs
+    ADD COLUMN IF NOT EXISTS progress_phase TEXT NOT NULL DEFAULT 'queued',
+    ADD COLUMN IF NOT EXISTS progress_message TEXT;
 
 CREATE INDEX IF NOT EXISTS _maintenance_jobs_status_idx
     ON graph._maintenance_jobs (status, created_at);

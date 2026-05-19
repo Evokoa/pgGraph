@@ -448,6 +448,8 @@ fn build_with_concurrently(
                     sync_mode: current_sync_mode()
                         .map(|mode| mode.as_str().to_string())
                         .unwrap_or_else(|_| "manual".to_string()),
+                    progress_phase: "queued".to_string(),
+                    progress_message: Some("queued for background build".to_string()),
                     started_at: None,
                     finished_at: None,
                     error: None,
@@ -498,6 +500,8 @@ fn build_status(
         name!(edges_loaded, Option<i64>),
         name!(build_time_ms, Option<f64>),
         name!(memory_used_mb, Option<f64>),
+        name!(progress_phase, String),
+        name!(progress_message, Option<String>),
         name!(started_at, Option<TimestampWithTimeZone>),
         name!(finished_at, Option<TimestampWithTimeZone>),
         name!(error, Option<String>),
@@ -512,6 +516,8 @@ fn build_status(
                 row.edges_loaded,
                 row.build_time_ms,
                 row.memory_used_mb,
+                row.progress_phase,
+                row.progress_message,
                 row.started_at,
                 row.finished_at,
                 row.error,
@@ -531,6 +537,8 @@ fn build_status(
             None,
             None,
             None,
+            None,
+            status.to_string(),
             None,
             None,
             None,
@@ -1188,6 +1196,8 @@ fn maintenance(
                     nodes_after: None,
                     edges_after: None,
                     vacuum_time_ms: None,
+                    progress_phase: "queued".to_string(),
+                    progress_message: Some("queued for background maintenance".to_string()),
                     started_at: None,
                     finished_at: None,
                     error: None,
@@ -1232,6 +1242,8 @@ fn maintenance_status(
         name!(nodes_after, Option<i64>),
         name!(edges_after, Option<i64>),
         name!(vacuum_time_ms, Option<f64>),
+        name!(progress_phase, String),
+        name!(progress_message, Option<String>),
         name!(started_at, Option<TimestampWithTimeZone>),
         name!(finished_at, Option<TimestampWithTimeZone>),
         name!(error, Option<String>),
@@ -1247,6 +1259,8 @@ fn maintenance_status(
                     row.nodes_after,
                     row.edges_after,
                     row.vacuum_time_ms,
+                    row.progress_phase,
+                    row.progress_message,
                     row.started_at,
                     row.finished_at,
                     row.error,
@@ -1259,6 +1273,8 @@ fn maintenance_status(
                 None,
                 None,
                 None,
+                "not_found".to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -1268,7 +1284,8 @@ fn maintenance_status(
         let rows = Spi::connect(|client| {
             let selected = client.select(
                 "SELECT job_id, status, sync_rows_applied, nodes_after, edges_after,
-                        vacuum_time_ms, started_at, finished_at, error
+                        vacuum_time_ms, progress_phase, progress_message,
+                        started_at, finished_at, error
                  FROM graph._maintenance_jobs
                  ORDER BY created_at DESC
                  LIMIT 50",
@@ -1285,9 +1302,12 @@ fn maintenance_status(
                     row.get::<i64>(4)?,
                     row.get::<i64>(5)?,
                     row.get::<f64>(6)?,
-                    row.get::<TimestampWithTimeZone>(7)?,
-                    row.get::<TimestampWithTimeZone>(8)?,
-                    row.get::<String>(9)?,
+                    row.get::<String>(7)?
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    row.get::<String>(8)?,
+                    row.get::<TimestampWithTimeZone>(9)?,
+                    row.get::<TimestampWithTimeZone>(10)?,
+                    row.get::<String>(11)?,
                 ));
             }
             Ok::<_, pgrx::spi::SpiError>(out)

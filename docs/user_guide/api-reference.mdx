@@ -295,6 +295,8 @@ RETURNS TABLE (
   edges_loaded bigint,
   build_time_ms double precision,
   memory_used_mb double precision,
+  progress_phase text,
+  progress_message text,
   started_at timestamp with time zone,
   finished_at timestamp with time zone,
   error text
@@ -391,6 +393,8 @@ RETURNS TABLE (
   nodes_after bigint,
   edges_after bigint,
   vacuum_time_ms double precision,
+  progress_phase text,
+  progress_message text,
   started_at timestamp with time zone,
   finished_at timestamp with time zone,
   error text

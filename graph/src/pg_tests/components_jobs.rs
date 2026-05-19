@@ -111,12 +111,24 @@ fn build_status_reads_durable_concurrent_job_rows() {
     .expect("add table failed");
 
     let build_id = super::create_build_job().expect("create build job failed");
-    let queued_status = Spi::get_one::<String>(&format!(
-        "SELECT status FROM graph.build_status({})",
-        super::sql_literal(&build_id)
-    ))
-    .expect("queued build_status failed")
-    .unwrap_or_default();
+    let (queued_status, queued_phase) = Spi::connect(|client| {
+        let result = client
+            .select(
+                &format!(
+                    "SELECT status, progress_phase FROM graph.build_status({})",
+                    super::sql_literal(&build_id)
+                ),
+                None,
+                &[],
+            )
+            .expect("queued build_status failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)?.unwrap_or_default(),
+            row.get::<String>(2)?.unwrap_or_default(),
+        ))
+    })
+    .expect("queued build_status failed");
 
     let result = super::BuildExecutionResult {
         nodes_loaded: 2,
@@ -134,6 +146,8 @@ fn build_status_reads_durable_concurrent_job_rows() {
                     AND edges_loaded = 0
                     AND build_time_ms = 12.5
                     AND memory_used_mb = 1.25
+                    AND progress_phase = 'completed'
+                    AND progress_message = 'build completed'
                     AND started_at IS NOT NULL
                     AND finished_at IS NOT NULL
                     AND pg_typeof(started_at) = 'timestamp with time zone'::regtype
@@ -145,6 +159,7 @@ fn build_status_reads_durable_concurrent_job_rows() {
     .unwrap_or(false);
 
     assert_eq!(queued_status, "queued");
+    assert_eq!(queued_phase, "queued");
     assert!(completed);
 }
 
@@ -152,12 +167,24 @@ fn build_status_reads_durable_concurrent_job_rows() {
 fn maintenance_status_reads_durable_job_rows() {
     reset_and_create_fixtures();
     let job_id = super::create_maintenance_job().expect("create maintenance job failed");
-    let queued_status = Spi::get_one::<String>(&format!(
-        "SELECT status FROM graph.maintenance_status({})",
-        super::sql_literal(&job_id)
-    ))
-    .expect("queued maintenance_status failed")
-    .unwrap_or_default();
+    let (queued_status, queued_phase) = Spi::connect(|client| {
+        let result = client
+            .select(
+                &format!(
+                    "SELECT status, progress_phase FROM graph.maintenance_status({})",
+                    super::sql_literal(&job_id)
+                ),
+                None,
+                &[],
+            )
+            .expect("queued maintenance_status failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)?.unwrap_or_default(),
+            row.get::<String>(2)?.unwrap_or_default(),
+        ))
+    })
+    .expect("queued maintenance_status failed");
 
     let result = super::MaintenanceExecutionResult {
         sync_rows_applied: 3,
@@ -175,6 +202,8 @@ fn maintenance_status_reads_durable_job_rows() {
                     AND nodes_after = 7
                     AND edges_after = 11
                     AND vacuum_time_ms = 2.5
+                    AND progress_phase = 'completed'
+                    AND progress_message = 'maintenance completed'
                     AND started_at IS NOT NULL
                     AND finished_at IS NOT NULL
                     AND pg_typeof(started_at) = 'timestamp with time zone'::regtype
@@ -186,6 +215,7 @@ fn maintenance_status_reads_durable_job_rows() {
     .unwrap_or(false);
 
     assert_eq!(queued_status, "queued");
+    assert_eq!(queued_phase, "queued");
     assert!(completed);
 }
 

@@ -60,6 +60,8 @@ SQL call reports the error.
 | `status` | `queued`, `running`, `completed`, or `failed` |
 | `nodes_loaded`, `edges_loaded`, `build_time_ms`, `memory_used_mb` | Populated after completion |
 | `sync_mode` | Sync mode captured for the job |
+| `progress_phase` | Coarse operator phase such as `queued`, `building`, `completed`, or `failed` |
+| `progress_message` | Short operator-readable progress or failure detail |
 
 ## Build Pipeline
 

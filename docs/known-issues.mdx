@@ -83,8 +83,6 @@ running larger graphs or higher sync volume.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Build and vacuum progress | Long build, vacuum, and persistence operations can use clearer progress and failure diagnostics. | Add more detailed status, sizing, and recovery guidance around build, vacuum, persistence, and reload. |
-| Sync backlog behavior | Sync replay is designed around explicit apply, but large backlogs need better operator feedback. | Improve batching visibility, backlog reporting, and recovery instructions. |
 | Persistence I/O | Persistence uses synchronous filesystem operations from PostgreSQL backend work. | Preserve durability while improving progress reporting, cancellation awareness, and background-worker ergonomics. |
 
 ## P1: Query Performance Follow-Ups

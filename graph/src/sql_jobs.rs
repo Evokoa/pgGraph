@@ -26,6 +26,7 @@ pub(crate) fn build_job_row(build_id: &str) -> safety::GraphResult<Option<BuildJ
         let rows = client.select(
             "SELECT build_id, status, nodes_loaded, edges_loaded,
                     build_time_ms, memory_used_mb, sync_mode,
+                    progress_phase, progress_message,
                     started_at, finished_at, error
              FROM graph._build_jobs
              WHERE build_id = $1",
@@ -47,9 +48,13 @@ pub(crate) fn build_job_row(build_id: &str) -> safety::GraphResult<Option<BuildJ
                 sync_mode: row
                     .get::<String>(7)?
                     .unwrap_or_else(|| "manual".to_string()),
-                started_at: row.get::<TimestampWithTimeZone>(8)?,
-                finished_at: row.get::<TimestampWithTimeZone>(9)?,
-                error: row.get::<String>(10)?,
+                progress_phase: row
+                    .get::<String>(8)?
+                    .unwrap_or_else(|| "unknown".to_string()),
+                progress_message: row.get::<String>(9)?,
+                started_at: row.get::<TimestampWithTimeZone>(10)?,
+                finished_at: row.get::<TimestampWithTimeZone>(11)?,
+                error: row.get::<String>(12)?,
             }));
         }
         Ok(None)
@@ -61,6 +66,8 @@ pub(crate) fn update_build_job_started(build_id: &str) -> safety::GraphResult<()
     Spi::run_with_args(
         "UPDATE graph._build_jobs
          SET status = 'running',
+             progress_phase = 'building',
+             progress_message = 'building graph from registered source tables',
              started_at = COALESCE(started_at, now()),
              worker_pid = pg_backend_pid(),
              updated_at = now()
@@ -82,6 +89,8 @@ pub(crate) fn update_build_job_completed(
              build_time_ms = $4,
              memory_used_mb = $5,
              sync_mode = $6,
+             progress_phase = 'completed',
+             progress_message = 'build completed',
              finished_at = now(),
              updated_at = now(),
              error = NULL
@@ -104,6 +113,8 @@ pub(crate) fn update_build_job_failed(build_id: &str, error: &str) -> safety::Gr
     Spi::run_with_args(
         "UPDATE graph._build_jobs
          SET status = 'failed',
+             progress_phase = 'failed',
+             progress_message = $2,
              finished_at = now(),
              updated_at = now(),
              error = $2
@@ -145,7 +156,8 @@ pub(crate) fn maintenance_job_row(job_id: &str) -> safety::GraphResult<Option<Ma
     Spi::connect(|client| {
         let rows = client.select(
             "SELECT job_id, status, sync_rows_applied, nodes_after, edges_after,
-                    vacuum_time_ms, started_at, finished_at, error
+                    vacuum_time_ms, progress_phase, progress_message,
+                    started_at, finished_at, error
              FROM graph._maintenance_jobs
              WHERE job_id = $1",
             None,
@@ -161,9 +173,13 @@ pub(crate) fn maintenance_job_row(job_id: &str) -> safety::GraphResult<Option<Ma
                 nodes_after: row.get::<i64>(4)?,
                 edges_after: row.get::<i64>(5)?,
                 vacuum_time_ms: row.get::<f64>(6)?,
-                started_at: row.get::<TimestampWithTimeZone>(7)?,
-                finished_at: row.get::<TimestampWithTimeZone>(8)?,
-                error: row.get::<String>(9)?,
+                progress_phase: row
+                    .get::<String>(7)?
+                    .unwrap_or_else(|| "unknown".to_string()),
+                progress_message: row.get::<String>(8)?,
+                started_at: row.get::<TimestampWithTimeZone>(9)?,
+                finished_at: row.get::<TimestampWithTimeZone>(10)?,
+                error: row.get::<String>(11)?,
             }));
         }
         Ok(None)
@@ -175,6 +191,8 @@ pub(crate) fn update_maintenance_job_started(job_id: &str) -> safety::GraphResul
     Spi::run_with_args(
         "UPDATE graph._maintenance_jobs
          SET status = 'running',
+             progress_phase = 'rebuilding',
+             progress_message = 'rebuilding graph for maintenance',
              started_at = COALESCE(started_at, now()),
              worker_pid = pg_backend_pid(),
              updated_at = now()
@@ -197,6 +215,8 @@ pub(crate) fn update_maintenance_job_completed(
              nodes_after = $3,
              edges_after = $4,
              vacuum_time_ms = $5,
+             progress_phase = 'completed',
+             progress_message = 'maintenance completed',
              finished_at = now(),
              updated_at = now(),
              error = NULL
@@ -218,6 +238,8 @@ pub(crate) fn update_maintenance_job_failed(job_id: &str, error: &str) -> safety
     Spi::run_with_args(
         "UPDATE graph._maintenance_jobs
          SET status = 'failed',
+             progress_phase = 'failed',
+             progress_message = $2,
              finished_at = now(),
              updated_at = now(),
              error = $2
