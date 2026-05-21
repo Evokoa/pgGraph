@@ -8,10 +8,11 @@
 //! Salsa expectation that `schema_digest()` is stable across calls
 //! within a single check (spec 0001 §11.2).
 //!
-//! Methods that depend on cyrs feature-request items
-//! (`label_unique_props`, `rel_type_unique_props`, `labels_compatible`)
-//! are written but rely on the trait defaults until upstream cyrs
-//! ships them — see
+//! `labels_compatible`, `label_unique_props`, and `rel_type_unique_props`
+//! are implemented directly as `SchemaProvider` trait methods: cyrs
+//! shipped them in 0.1.0 (feat-request §2.2 / §2.3), so `cyrs-sema`
+//! proves MERGE determinism and rejects incompatible label sets
+//! upstream rather than at execution time — see
 //! `docs/contributor_guide/cypher-frontend/080-open-questions.md`.
 
 use std::collections::BTreeMap;
@@ -135,6 +136,38 @@ impl SchemaProvider for PgGraphSchema {
 
     fn schema_digest(&self) -> [u8; 32] {
         self.digest
+    }
+
+    /// Multi-label compatibility. `Some(true)` for a single label or a
+    /// combination registered via `allow_label_set`; `Some(false)`
+    /// otherwise. pgGraph never returns `None` — the catalog is
+    /// authoritative (see Q-IN-2 in 080-open-questions.md).
+    fn labels_compatible(&self, labels: &[SmolStr]) -> Option<bool> {
+        if labels.len() <= 1 {
+            return Some(true);
+        }
+        let mut normalised: Vec<SmolStr> = labels.to_vec();
+        normalised.sort();
+        normalised.dedup();
+        Some(self.label_sets.iter().any(|s| s == &normalised))
+    }
+
+    /// Declared unique-property tuples for a label. `cyrs-sema` uses
+    /// these to prove MERGE pattern determinism against real Postgres
+    /// uniqueness constraints.
+    fn label_unique_props(&self, label: &str) -> Vec<Vec<SmolStr>> {
+        self.unique_props_by_label
+            .get(label)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Relationship-type analogue of `label_unique_props`.
+    fn rel_type_unique_props(&self, rel_type: &str) -> Vec<Vec<SmolStr>> {
+        self.unique_props_by_rel_type
+            .get(rel_type)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -423,42 +456,3 @@ fn compute_digest(
     out
 }
 
-// ──────────────────────────────────────────────────────────────────
-// Accessors for future milestones (M1+ translator)
-// ──────────────────────────────────────────────────────────────────
-
-impl PgGraphSchema {
-    /// Whether a multi-label combination is permitted. `None` = not
-    /// declared in the catalog (we treat as "rejected" at execution
-    /// time — see open question Q-IN-2 in 080-open-questions.md).
-    #[allow(dead_code, reason = "consumed in M3 write-side translation")]
-    pub(crate) fn labels_compatible_check(&self, labels: &[SmolStr]) -> Option<bool> {
-        if labels.len() <= 1 {
-            return Some(true);
-        }
-        let mut normalised: Vec<SmolStr> = labels.to_vec();
-        normalised.sort();
-        normalised.dedup();
-        Some(self.label_sets.iter().any(|s| s == &normalised))
-    }
-
-    /// Declared unique-property tuples for a label. Used in M4 to
-    /// validate MERGE pattern determinism against real Postgres
-    /// uniqueness constraints.
-    #[allow(dead_code, reason = "consumed in M4 MERGE lowering")]
-    pub(crate) fn label_unique_props(&self, label: &str) -> Vec<Vec<SmolStr>> {
-        self.unique_props_by_label
-            .get(label)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Declared unique-property tuples for a relationship type.
-    #[allow(dead_code, reason = "consumed in M4 MERGE lowering")]
-    pub(crate) fn rel_type_unique_props(&self, rel_type: &str) -> Vec<Vec<SmolStr>> {
-        self.unique_props_by_rel_type
-            .get(rel_type)
-            .cloned()
-            .unwrap_or_default()
-    }
-}

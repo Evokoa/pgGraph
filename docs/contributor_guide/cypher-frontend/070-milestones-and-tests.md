@@ -95,8 +95,10 @@ registered tables.
 Scope:
 
 - `cypher_facade/plan_translator/write.rs`.
-- `CreateNode` (single label only; multi-label requires the catalog
-  hook from cyrs §2.3).
+- `CreateNode`, including multi-label `CREATE` —
+  `SchemaProvider::labels_compatible` (cyrs 0.1.0) gates incompatible
+  label sets in sema; pgGraph backs it with the `allow_label_set`
+  catalog.
 - `CreateRel` (both FK-column and junction-table cases).
 - `SetProperty`, `RemoveProperty`.
 - `Delete` (no detach).
@@ -124,9 +126,11 @@ Scope:
 - `on_create` / `on_match` dispatch over the `xmax = 0` flag.
 - Sema gate: `MergeNode` whose key props don't match a registered
   uniqueness tuple → `E4504`.
-- Requires cyrs feat-request §2.1 / §2.2 to be in place; until then
-  use a temporary embedder-side analysis on `MergeNode.props` to
-  extract the candidate key.
+- `WriteOp::MergeNode.key_props` (cyrs 0.1.0, feat-request §2.1)
+  carries the candidate key directly; `cyrs-sema` proves MERGE
+  determinism via `SchemaProvider::label_unique_props` (§2.2). When
+  the pattern's props are not a literal map, `key_props` is empty and
+  the facade rejects with `E4504`.
 
 Tests:
 
@@ -136,13 +140,12 @@ Tests:
 
 ## M5 — Shortest path, hardening, TCK gate (week 8+)
 
-**Goal:** `shortestPath` works (blocked on cyrs §1.1); golden TCK
-subset becomes a CI gate.
+**Goal:** `shortestPath` works (`cyrs_plan::ReadOp::ShortestPath`,
+cyrs 0.1.0); golden TCK subset becomes a CI gate.
 
 Scope:
 
-- `ShortestPath` op → `path_finder.rs`. Lands when cyrs ships the
-  operator.
+- `ShortestPath` op → `path_finder.rs`.
 - All "deferred-to-M5" items from earlier milestones.
 - Function-coverage table cross-checked against
   `cyrs_schema::StandardLibrary` (CI test).

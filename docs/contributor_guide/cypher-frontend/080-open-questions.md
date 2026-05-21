@@ -1,86 +1,50 @@
 # Open questions
 
 Resolve before, or during, implementation. Each question has a
-decision owner and a "needed by" milestone. Items blocked on cyrs
-upstream cite the section of `../../../../cyrs/feat-request.md` they
-depend on.
+decision owner and a "needed by" milestone.
 
-## Upstream (blocking on cyrs)
+## Upstream (cyrs) — all resolved
 
-### Q-UP-1 — `ShortestPath` ReadOp lands in `cyrs-plan`
+Every upstream ask landed in **cyrs 0.1.0** (19 crates published to
+crates.io 2026-05-10; embedder PRs #56 and #58). The detailed problem
+statements live in `../../../../cyrs/feat-request.md`; the table below
+records what shipped. **No `Q-UP-*` item blocks pgGraph any longer.**
 
-- **Status:** awaiting upstream (cyrs `feat-request.md` §1.1).
-- **Needed by:** M5.
-- **Impact if delayed:** `shortestPath` / `allShortestPaths`
-  permanently emit `E4530` until landed. We can ship M0–M4 without
-  it.
+| ID | Ask | Shipped API | § |
+|----|-----|-------------|---|
+| Q-UP-1 | `ShortestPath` ReadOp | `cyrs_plan::ReadOp::ShortestPath { input, from, to, rel, kind, bind_path }` | §1.1 |
+| Q-UP-2 | Path-variable surface | Documented contract: the plan IR has no `Path` type; the embedder owns path materialisation; `cyrs_hir::VarKind::Path` carries the contract | §1.2 |
+| Q-UP-3 | MERGE key surface | `WriteOp::MergeNode` / `MergeRel` gained `key_props: Vec<SmolStr>`, populated by lowering when `props` is a literal `Expr::Map` | §2.1 |
+| Q-UP-4 | Uniqueness on `SchemaProvider` | `label_unique_props` / `rel_type_unique_props`; `cyrs-sema` now proves MERGE determinism upstream | §2.2 |
+| Q-UP-5 | `labels_compatible` | `SchemaProvider::labels_compatible(&[SmolStr]) -> Option<bool>` (`None` = no opinion) | §2.3 |
+| Q-UP-6 | Typed parameters | `PlanStatement::params`, `ParamRef` + `ParamType` (`Unknown` variant for unconstrained params) | §2.4 |
+| Q-UP-7 | Function enumeration | `StandardLibrary::builtin_signature()` — per-function `deterministic` / `null_propagating` metadata; normative builtin enumeration | §1.3 |
+| Q-UP-8 | `lower_*` returns `Result` | `lower_statement` / `lower_parse` → `Result<Statement, HirLowerError>` (`ParseFailed` / `Invariant`) | §4.1 |
+| Q-UP-9 | `HirId → span` | `Statement::span_of(HirId) -> Option<Range<usize>>` — a byte range, ready for `errposition()` | §4.2 |
+| Q-UP-10 | Stable release channel | cyrs 0.1.0 — 19 crates on crates.io | §6.1 |
 
-### Q-UP-2 — Path-variable surface in Plan
+Two further feat-request items resolved (never tracked as `Q-UP`):
+**§3.1** — `E4500..=E4999` is now a formally reserved embedder-owned
+diagnostic range, policed by a `DiagCode::ALL` test, so pgGraph's
+`E4500`–`E4560` codes cannot collide with cyrs's own. **§5.1 / §5.2**
+— the `ReadOp::Filter` 3VL and empty-key `ReadOp::Aggregate`
+semantics pgGraph depends on are documented as stable contracts.
 
-- **Status:** awaiting upstream doc clarification (cyrs §1.2).
-- **Needed by:** M2 (varlen patterns with `RETURN p`).
-- **Workaround:** treat path variables as JSONB shaped like the
-  existing `path` column from `execute_traverse_rows`. If cyrs
-  surfaces a structured form, we adapt.
+### Consequences for the build
 
-### Q-UP-3 — MERGE key surface on `WriteOp::MergeNode/MergeRel`
-
-- **Status:** awaiting upstream (cyrs §2.1).
-- **Needed by:** M4.
-- **Workaround for M4:** embedder-side analysis of `MergeNode.props`
-  to extract the key. Remove the workaround when upstream ships.
-
-### Q-UP-4 — `label_unique_props`, `rel_type_unique_props` on `SchemaProvider`
-
-- **Status:** awaiting upstream (cyrs §2.2).
-- **Needed by:** M4 (so sema can prove MERGE determinism instead of
-  embedder rejecting at exec time).
-- **Workaround:** runtime check in the facade, with `E4504` if the
-  required unique constraint isn't registered.
-
-### Q-UP-5 — `labels_compatible` on `SchemaProvider`
-
-- **Status:** awaiting upstream (cyrs §2.3).
-- **Needed by:** M3 (multi-label CREATE).
-- **Workaround:** v1 rejects every multi-label CREATE with `E4503`
-  until cyrs ships the hook. Single-label CREATE is unaffected.
-
-### Q-UP-6 — Parameter type surface
-
-- **Status:** awaiting upstream (cyrs §2.4).
-- **Needed by:** M1.
-- **Workaround:** treat every param as JSONB. Loses some pg-side
-  type checking; otherwise works. Re-bind once upstream ships.
-
-### Q-UP-7 — Function builtin enumeration
-
-- **Status:** awaiting upstream (cyrs §1.3).
-- **Needed by:** M2 (any RETURN with function calls).
-- **Workaround:** maintain our own bucket table; CI test asserts every
-  name in cyrs's current set is covered. Drift becomes a CI failure,
-  not a silent miss.
-
-### Q-UP-8 — `cyrs-hir::lower_statement` returns `Result`
-
-- **Status:** awaiting upstream (cyrs §4.1).
-- **Needed by:** M1.
-- **Workaround:** catch unwinds from `lower_statement` in a panic
-  boundary and translate to `E0xxx` `42601`. Worse UX than a real
-  result type.
-
-### Q-UP-9 — `HirId → byte span` accessor
-
-- **Status:** awaiting upstream (cyrs §4.2).
-- **Needed by:** M1 (for `errposition`).
-- **Workaround:** omit `errposition`; users get diagnostics without
-  caret positioning. Tolerable for v1.
-
-### Q-UP-10 — Crates.io publication or stable git tag
-
-- **Status:** awaiting upstream (cyrs §6.1).
-- **Needed by:** M0 (cannot pin `Cargo.toml` otherwise).
-- **Workaround:** path dependency in development; flip to a tagged
-  rev before any release.
+- The `graph/Cargo.toml` cyrs dependency stays a `../../cyrs` path
+  dependency through M1–M5 co-development; flip it to the crates.io
+  `0.1.0` release before any pgGraph release (feat-request §6.1).
+- `cypher_facade::schema_provider` now implements `labels_compatible`,
+  `label_unique_props`, and `rel_type_unique_props` as real
+  `SchemaProvider` trait methods, not inherent stubs.
+- Every "until cyrs ships …" workaround in
+  `070-milestones-and-tests.md` is gone: M3 multi-label `CREATE`, M4
+  MERGE-key extraction, and M5 `shortestPath` build straight against
+  the shipped API.
+- `cypher_facade::diag_to_pg` can use `Statement::span_of` for
+  `errposition()` carets from M1 — the "omit errposition" workaround
+  is unnecessary.
 
 ## Internal (no upstream dependency)
 
