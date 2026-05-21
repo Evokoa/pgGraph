@@ -64,3 +64,4 @@ sandbox/benchmark/results/
 sandbox/benchmark/datasets/
 sandbox/benchmark/.venv/
 sandbox/playground/.venv/
+/sandbox/playground/__pycache__
