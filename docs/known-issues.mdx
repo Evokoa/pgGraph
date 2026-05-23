@@ -138,7 +138,6 @@ but they do not change core user behavior.
 | Engine state encapsulation | Some internal fields with invariants are still mutated directly. | Encapsulate state such as `built`, `sync_status`, `is_read_only`, `needs_vacuum`, mmap, and resolution state behind validated helpers. |
 | Mmap mutation API | Direct mutation on mmap-backed stores is not consistently represented. | Route mutations through engine helpers or make direct store mutation fail consistently. |
 | Mmap resolution state | Mmap resolution offsets and backing storage are split across engine fields. | Couple the backing data with the `MmapBacked` variant so invalid states are harder to represent. |
-| Advisory lock keys | Build and vacuum lock keys are hardcoded literals. | Name constants and document their derivation. |
 | Job statuses | Background job status strings are repeated across SQL and Rust mapping code. | Add a small Rust enum and consider a PostgreSQL enum or CHECK constraint if schema validation is useful. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
 | Legacy unsigned filter evaluation | A legacy `FilterOp::check` boundary still accepts typed variants and returns `false`. | Make unsigned-only evaluation explicit so typed variants are impossible at that API. |

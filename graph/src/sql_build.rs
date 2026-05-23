@@ -8,6 +8,20 @@ use crate::sql_sync::{
 use crate::{acl, builder, config, engine, persistence, safety, ENGINE};
 use pgrx::prelude::*;
 
+/// Advisory lock namespace for pgGraph build/vacuum operations.
+///
+/// The two-int PostgreSQL advisory lock API is used so the key remains stable
+/// across 32-bit and 64-bit platforms. The class id `0x7260_8553` is the
+/// reserved pgGraph advisory-lock namespace. The object id `0x6772_6f67`
+/// identifies build/vacuum exclusion within that namespace and must remain
+/// stable so concurrent extension versions do not take different locks.
+pub(crate) const BUILD_LOCK_CLASS_ID: i32 = 1_918_928_211;
+pub(crate) const BUILD_LOCK_OBJECT_ID: i32 = 1_735_552_871;
+
+pub(crate) fn build_lock_query() -> String {
+    format!("SELECT pg_try_advisory_xact_lock({BUILD_LOCK_CLASS_ID}, {BUILD_LOCK_OBJECT_ID})")
+}
+
 fn persist_and_reload_engine(
     operation: &str,
     source: &engine::Engine,
@@ -191,7 +205,7 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
 }
 
 pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
-    let acquired = Spi::get_one::<bool>("SELECT pg_try_advisory_xact_lock(1918928211, 1735552871)")
+    let acquired = Spi::get_one::<bool>(&build_lock_query())
         .map_err(|err| {
             safety::GraphError::Internal(format!(
                 "could not acquire build/vacuum advisory lock: {}",
@@ -259,4 +273,19 @@ pub(crate) fn check_build_acls_result(
         acl::check_table_acl(to_oid)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_lock_query, BUILD_LOCK_CLASS_ID, BUILD_LOCK_OBJECT_ID};
+
+    #[test]
+    fn build_lock_query_uses_named_advisory_lock_keys() {
+        assert_eq!(BUILD_LOCK_CLASS_ID, 1_918_928_211);
+        assert_eq!(BUILD_LOCK_OBJECT_ID, 1_735_552_871);
+        assert_eq!(
+            build_lock_query(),
+            "SELECT pg_try_advisory_xact_lock(1918928211, 1735552871)"
+        );
+    }
 }
