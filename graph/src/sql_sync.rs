@@ -141,9 +141,40 @@ pub(crate) struct SyncApplyStats {
     pub(crate) truncates: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SyncOp {
+    Insert,
+    Update,
+    Delete,
+    Truncate,
+}
+
+impl SyncOp {
+    fn edge_delta_estimate(self) -> usize {
+        match self {
+            Self::Insert | Self::Delete => 1,
+            Self::Update => 2,
+            Self::Truncate => 0,
+        }
+    }
+}
+
+fn parse_sync_op(op: &str) -> safety::GraphResult<SyncOp> {
+    match op.trim() {
+        "I" => Ok(SyncOp::Insert),
+        "U" => Ok(SyncOp::Update),
+        "D" => Ok(SyncOp::Delete),
+        "T" => Ok(SyncOp::Truncate),
+        other => Err(safety::GraphError::Internal(format!(
+            "sync row has unsupported operation '{}'",
+            other
+        ))),
+    }
+}
+
 pub(crate) struct SyncLogEntry {
     pub(crate) id: i64,
-    pub(crate) op: String,
+    pub(crate) op: SyncOp,
     pub(crate) table_oid: Option<u32>,
     pub(crate) table_name: String,
     pub(crate) old_pk: Option<String>,
@@ -224,7 +255,7 @@ impl SyncReplayContext {
 
 struct LegacySyncEntry {
     id: i64,
-    op: String,
+    op: SyncOp,
     table_name: String,
     old_pk: String,
     new_pk: String,
@@ -312,11 +343,7 @@ pub(crate) fn guard_edge_buffer_capacity_for_sync(
                     .edge_source_tables
                     .contains(entry.table_name.as_str())
         })
-        .map(|entry| match entry.op.trim() {
-            "U" => 2usize,
-            "I" | "D" => 1usize,
-            _ => 0usize,
-        })
+        .map(|entry| entry.op.edge_delta_estimate())
         .sum::<usize>();
     if estimated_edge_deltas == 0 {
         return Ok(());
@@ -364,19 +391,22 @@ pub(crate) fn read_sync_log_entries_after(
                     safety::GraphError::Internal(format!("sync table_oid read failed: {e}"))
                 })?
                 .map(|oid| oid as u32);
+            let id = required_sync_i64(
+                row.get::<i64>(1).map_err(|e| {
+                    safety::GraphError::Internal(format!("sync id read failed: {e}"))
+                })?,
+                "id",
+            )?;
+            let raw_op = required_sync_string(
+                row.get::<String>(2).map_err(|e| {
+                    safety::GraphError::Internal(format!("sync op read failed: {e}"))
+                })?,
+                "op",
+            )?;
             entries.push(SyncLogEntry {
-                id: required_sync_i64(
-                    row.get::<i64>(1).map_err(|e| {
-                        safety::GraphError::Internal(format!("sync id read failed: {e}"))
-                    })?,
-                    "id",
-                )?,
-                op: required_sync_string(
-                    row.get::<String>(2).map_err(|e| {
-                        safety::GraphError::Internal(format!("sync op read failed: {e}"))
-                    })?,
-                    "op",
-                )?,
+                id,
+                op: parse_sync_op(&raw_op)
+                    .map_err(|err| safety::GraphError::Internal(format!("sync row {id}: {err}")))?,
                 table_oid,
                 table_name: required_sync_string(
                     row.get::<String>(4).map_err(|e| {
@@ -422,8 +452,8 @@ fn apply_sync_log_entry_with_context(
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
         eng.reserve_edge_mutation_capacity(edge_mutation_reservation)?;
-        match entry.op.trim() {
-            "I" => {
+        match entry.op {
+            SyncOp::Insert => {
                 let pk = entry
                     .new_pk
                     .as_deref()
@@ -452,7 +482,7 @@ fn apply_sync_log_entry_with_context(
                 )?;
                 stats.inserts += 1;
             }
-            "U" => {
+            SyncOp::Update => {
                 let old_pk = entry.old_pk.as_deref().ok_or_else(|| {
                     safety::GraphError::Internal(format!("sync row {} missing old_pk", entry.id))
                 })?;
@@ -496,7 +526,7 @@ fn apply_sync_log_entry_with_context(
                 )?;
                 stats.updates += 1;
             }
-            "D" => {
+            SyncOp::Delete => {
                 let pk = entry
                     .old_pk
                     .as_deref()
@@ -517,15 +547,9 @@ fn apply_sync_log_entry_with_context(
                 sync::sync_delete(&mut eng, table_oid, pk)?;
                 stats.deletes += 1;
             }
-            "T" => {
+            SyncOp::Truncate => {
                 sync::sync_truncate(&mut eng, table_oid)?;
                 stats.truncates += 1;
-            }
-            other => {
-                return Err(safety::GraphError::Internal(format!(
-                    "sync row {} has unsupported operation '{}'",
-                    entry.id, other
-                )));
             }
         }
         Ok::<_, safety::GraphError>(())
@@ -537,15 +561,23 @@ fn sync_entry_edge_mutation_reservation(
     table_oid: u32,
     context: &SyncReplayContext,
 ) -> safety::GraphResult<usize> {
-    match entry.op.trim() {
-        "I" => potential_row_edge_mutation_count(context, table_oid, entry.new_row.as_deref()),
-        "U" => Ok(
-            potential_row_edge_mutation_count(context, table_oid, entry.old_row.as_deref())?
-                + potential_row_edge_mutation_count(context, table_oid, entry.new_row.as_deref())?,
-        ),
-        "D" => potential_row_edge_mutation_count(context, table_oid, entry.old_row.as_deref()),
-        "T" => Ok(0),
-        _ => Ok(0),
+    match entry.op {
+        SyncOp::Insert => {
+            potential_row_edge_mutation_count(context, table_oid, entry.new_row.as_deref())
+        }
+        SyncOp::Update => Ok(potential_row_edge_mutation_count(
+            context,
+            table_oid,
+            entry.old_row.as_deref(),
+        )? + potential_row_edge_mutation_count(
+            context,
+            table_oid,
+            entry.new_row.as_deref(),
+        )?),
+        SyncOp::Delete => {
+            potential_row_edge_mutation_count(context, table_oid, entry.old_row.as_deref())
+        }
+        SyncOp::Truncate => Ok(0),
     }
 }
 
@@ -899,19 +931,23 @@ fn read_legacy_sync_entries_after(
             })?;
         let mut entries = Vec::new();
         for row in rows {
+            let id = required_sync_i64(
+                row.get::<i64>(1).map_err(|e| {
+                    safety::GraphError::Internal(format!("legacy sync id read failed: {e}"))
+                })?,
+                "id",
+            )?;
+            let raw_op = required_sync_string(
+                row.get::<String>(2).map_err(|e| {
+                    safety::GraphError::Internal(format!("legacy sync op read failed: {e}"))
+                })?,
+                "op",
+            )?;
             entries.push(LegacySyncEntry {
-                id: required_sync_i64(
-                    row.get::<i64>(1).map_err(|e| {
-                        safety::GraphError::Internal(format!("legacy sync id read failed: {e}"))
-                    })?,
-                    "id",
-                )?,
-                op: required_sync_string(
-                    row.get::<String>(2).map_err(|e| {
-                        safety::GraphError::Internal(format!("legacy sync op read failed: {e}"))
-                    })?,
-                    "op",
-                )?,
+                id,
+                op: parse_sync_op(&raw_op).map_err(|err| {
+                    safety::GraphError::Internal(format!("legacy sync row {id}: {err}"))
+                })?,
                 table_name: required_sync_string(
                     row.get::<String>(3).map_err(|e| {
                         safety::GraphError::Internal(format!(
@@ -1034,8 +1070,25 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 
 #[cfg(test)]
 mod tests {
-    use super::{required_sync_i64, required_sync_string};
+    use super::{parse_sync_op, required_sync_i64, required_sync_string, SyncOp};
     use crate::safety::GraphError;
+
+    #[test]
+    fn parse_sync_op_accepts_supported_codes() {
+        assert_eq!(parse_sync_op("I").unwrap(), SyncOp::Insert);
+        assert_eq!(parse_sync_op("U").unwrap(), SyncOp::Update);
+        assert_eq!(parse_sync_op("D").unwrap(), SyncOp::Delete);
+        assert_eq!(parse_sync_op("T").unwrap(), SyncOp::Truncate);
+        assert_eq!(parse_sync_op(" I ").unwrap(), SyncOp::Insert);
+    }
+
+    #[test]
+    fn parse_sync_op_rejects_unknown_codes() {
+        let err = parse_sync_op("X").unwrap_err();
+
+        assert!(matches!(err, GraphError::Internal(_)));
+        assert!(err.to_string().contains("unsupported operation 'X'"));
+    }
 
     #[test]
     fn required_sync_i64_rejects_null_structural_values() {
