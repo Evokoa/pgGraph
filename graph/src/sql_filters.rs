@@ -456,16 +456,15 @@ pub(crate) fn encode_date_filter_value(value: &serde_json::Value) -> safety::Gra
             reason: "date filter values must be ISO date text".to_string(),
         })?;
     Spi::connect(|client| {
-        let query = format!(
-            "SELECT (({})::date - DATE '2000-01-01')::bigint",
-            quote_literal(text)
-        );
-        let result =
-            client
-                .select(&query, None, &[])
-                .map_err(|err| safety::GraphError::InvalidFilter {
-                    reason: format!("invalid date filter value '{}': {}", text, err),
-                })?;
+        let result = client
+            .select(
+                "SELECT (($1::text)::date - DATE '2000-01-01')::bigint",
+                None,
+                &[text.into()],
+            )
+            .map_err(|err| safety::GraphError::InvalidFilter {
+                reason: format!("invalid date filter value '{}': {}", text, err),
+            })?;
         result
             .first()
             .get::<i64>(1)
@@ -488,16 +487,15 @@ pub(crate) fn encode_timestamptz_filter_value(
             reason: "timestamptz filter values must be timestamp text".to_string(),
         })?;
     Spi::connect(|client| {
-        let query = format!(
-            "SELECT (EXTRACT(EPOCH FROM ({})::timestamptz) * 1000000)::bigint",
-            quote_literal(text)
-        );
-        let result =
-            client
-                .select(&query, None, &[])
-                .map_err(|err| safety::GraphError::InvalidFilter {
-                    reason: format!("invalid timestamptz filter value '{}': {}", text, err),
-                })?;
+        let result = client
+            .select(
+                "SELECT (EXTRACT(EPOCH FROM ($1::text)::timestamptz) * 1000000)::bigint",
+                None,
+                &[text.into()],
+            )
+            .map_err(|err| safety::GraphError::InvalidFilter {
+                reason: format!("invalid timestamptz filter value '{}': {}", text, err),
+            })?;
         result
             .first()
             .get::<i64>(1)
