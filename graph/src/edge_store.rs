@@ -375,43 +375,11 @@ impl EdgeStore {
     where
         I: IntoIterator<Item = RawEdge>,
     {
-        let mut edge_offsets = Vec::with_capacity(node_count as usize + 1);
-        let mut targets = Vec::new();
-        let mut type_ids = Vec::new();
-        let mut weights = Vec::new();
-        let mut current_node = 0u32;
-        let mut previous: Option<(u32, u32, u8)> = None;
-
-        edge_offsets.push(0);
+        let mut builder = SortedEdgeStoreBuilder::new(node_count, has_weights);
         for edge in edges {
-            validate_raw_edge(node_count, &edge)?;
-            let key = (edge.source, edge.target, edge.type_id);
-            if previous == Some(key) {
-                continue;
-            }
-            while current_node < edge.source {
-                current_node += 1;
-                edge_offsets.push(targets.len() as u32);
-            }
-            targets.push(edge.target);
-            type_ids.push(edge.type_id);
-            if has_weights {
-                weights.push(edge.weight.unwrap_or(1));
-            }
-            previous = Some(key);
+            builder.try_push(edge)?;
         }
-        while edge_offsets.len() < node_count as usize + 1 {
-            edge_offsets.push(targets.len() as u32);
-        }
-
-        Ok(Self {
-            backing: EdgeBacking::Owned {
-                edge_offsets,
-                targets,
-                type_ids,
-                weights,
-            },
-        })
+        Ok(builder.finish())
     }
 
     /// Build a reverse CSR from this store's directed edge contents.
