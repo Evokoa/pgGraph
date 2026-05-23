@@ -62,9 +62,9 @@
               cargo install --locked cargo-pgrx --version ${pgrxVersion}
             fi
 
-            # Initialize pgrx against the nix-provided Postgres on first entry.
+            # Initialize pgrx against the nix-provided Postgres for this major.
             pg_major="$("$PG_CONFIG" --version | awk '{print $2}' | cut -d. -f1)"
-            if [ ! -d "$PGRX_HOME/$pg_major.''${pg_major}" ] && [ ! -f "$PGRX_HOME/config.toml" ]; then
+            if [ ! -f "$PGRX_HOME/config.toml" ] || ! grep -q "^pg$pg_major[[:space:]]*=" "$PGRX_HOME/config.toml"; then
               echo "Running cargo pgrx init --pg$pg_major=$PG_CONFIG ..."
               (cd "$PWD/graph" && cargo pgrx init --pg$pg_major="$PG_CONFIG")
             fi
@@ -81,8 +81,7 @@
           pg15 = mkShell pkgs.postgresql_15;
           pg16 = mkShell pkgs.postgresql_16;
           pg17 = mkShell pkgs.postgresql_17;
-          # pg18 lands in nixpkgs once it's released upstream; uncomment then:
-          # pg18 = mkShell pkgs.postgresql_18;
+          pg18 = mkShell pkgs.postgresql_18;
         };
 
         formatter = pkgs.nixpkgs-fmt;
