@@ -29,7 +29,7 @@ pub struct DiscoveryResult {
 
 /// Info about a discovered table before classification.
 struct DiscoveredTable {
-    table_oid: u32,
+    table_oid: Option<u32>,
     schema_name: String,
     table_name: String,
     pk_columns: Vec<String>,
@@ -188,7 +188,7 @@ pub fn discover_table_set(
 
     for table in &discovered_tables {
         if let Some(column) = tenant_column {
-            validate_column_exists(table.table_oid, column)?;
+            validate_column_exists(required_table_oid(table)?, column)?;
         }
 
         if table.pk_columns.len() == 1 {
@@ -207,7 +207,7 @@ pub fn discover_table_set(
                 &selected_fks,
             )
         {
-            junction_oids.insert(table.table_oid);
+            junction_oids.insert(required_table_oid(table)?);
             pgrx::notice!(
                 "graph: table '{}' has composite PK ({}) where all columns are foreign keys — treated as a junction table (edges only, not a node)",
                 table.table_name,
@@ -244,7 +244,7 @@ pub fn discover_table_set(
     for junction_oid in &junction_oids {
         let junction_fks = selected_fks
             .iter()
-            .filter(|fk| fk.from_oid == *junction_oid)
+            .filter(|fk| fk.from_oid == Some(*junction_oid))
             .collect::<Vec<_>>();
         let Some(first_fk) = junction_fks.first() else {
             continue;
@@ -262,7 +262,7 @@ pub fn discover_table_set(
             edges.push(registered_edge(
                 regclass_text(*junction_oid)?,
                 &first_fk.from_column,
-                regclass_text(fk.to_oid)?,
+                regclass_text(required_fk_oid(fk.to_oid, "junction target")?)?,
                 &fk.from_column,
                 &fk.from_column,
             ));
@@ -271,8 +271,17 @@ pub fn discover_table_set(
 
     for fk in selected_fks
         .iter()
-        .filter(|fk| selected_oids.contains(&fk.from_oid) && selected_oids.contains(&fk.to_oid))
-        .filter(|fk| !junction_oids.contains(&fk.from_oid))
+        .filter(|fk| {
+            fk.from_oid
+                .is_some_and(|from_oid| selected_oids.contains(&from_oid))
+                && fk
+                    .to_oid
+                    .is_some_and(|to_oid| selected_oids.contains(&to_oid))
+        })
+        .filter(|fk| {
+            fk.from_oid
+                .is_none_or(|from_oid| !junction_oids.contains(&from_oid))
+        })
     {
         let label = edge_label(&fk.from_column);
 
@@ -285,9 +294,9 @@ pub fn discover_table_set(
             details: format!("label={}, bidirectional=true", label),
         });
         edges.push(registered_edge(
-            regclass_text(fk.from_oid)?,
+            regclass_text(required_fk_oid(fk.from_oid, "source")?)?,
             &fk.from_column,
-            regclass_text(fk.to_oid)?,
+            regclass_text(required_fk_oid(fk.to_oid, "target")?)?,
             &fk.to_column,
             &fk.from_column,
         ));
@@ -298,10 +307,10 @@ pub fn discover_table_set(
 
 /// A foreign key relationship discovered from the schema.
 struct DiscoveredFk {
-    from_oid: u32,
+    from_oid: Option<u32>,
     from_table: String,
     from_column: String,
-    to_oid: u32,
+    to_oid: Option<u32>,
     to_table: String,
     to_column: String,
 }
@@ -359,7 +368,7 @@ fn discover_tables_with_pks(schema_name: &str) -> GraphResult<Vec<DiscoveredTabl
     for (table_name, pk_columns) in table_map {
         let text_columns = discover_text_columns(schema_name, &table_name, &pk_columns)?;
         discovered.push(DiscoveredTable {
-            table_oid: 0,
+            table_oid: None,
             schema_name: schema_name.to_string(),
             table_name,
             pk_columns,
@@ -461,10 +470,10 @@ fn discover_foreign_keys(schema_name: &str) -> GraphResult<Vec<DiscoveredFk>> {
                 .unwrap_or_default();
 
             fks.push(DiscoveredFk {
-                from_oid: 0,
+                from_oid: None,
                 from_table,
                 from_column,
-                to_oid: 0,
+                to_oid: None,
                 to_table,
                 to_column,
             });
@@ -546,7 +555,7 @@ fn discover_tables_by_oid(table_oids: &[u32]) -> GraphResult<Vec<DiscoveredTable
         let (schema_name, table_name, id_is_primary, pk_columns) = discover_identifier(*oid)?;
         let text_columns = discover_text_columns(&schema_name, &table_name, &pk_columns)?;
         tables.push(DiscoveredTable {
-            table_oid: *oid,
+            table_oid: Some(*oid),
             schema_name,
             table_name,
             pk_columns,
@@ -648,10 +657,13 @@ fn discover_foreign_keys_for_tables(table_oids: &[u32]) -> GraphResult<Vec<Disco
         })?;
         for row in result {
             fks.push(DiscoveredFk {
-                from_oid: row
-                    .get::<i32>(1)
-                    .map_err(|err| GraphError::Internal(format!("from_oid read failed: {}", err)))?
-                    .unwrap_or_default() as u32,
+                from_oid: Some(
+                    row.get::<i32>(1)
+                        .map_err(|err| {
+                            GraphError::Internal(format!("from_oid read failed: {}", err))
+                        })?
+                        .unwrap_or_default() as u32,
+                ),
                 from_table: row
                     .get::<String>(2)
                     .map_err(|err| {
@@ -664,10 +676,13 @@ fn discover_foreign_keys_for_tables(table_oids: &[u32]) -> GraphResult<Vec<Disco
                         GraphError::Internal(format!("from_column read failed: {}", err))
                     })?
                     .unwrap_or_default(),
-                to_oid: row
-                    .get::<i32>(4)
-                    .map_err(|err| GraphError::Internal(format!("to_oid read failed: {}", err)))?
-                    .unwrap_or_default() as u32,
+                to_oid: Some(
+                    row.get::<i32>(4)
+                        .map_err(|err| {
+                            GraphError::Internal(format!("to_oid read failed: {}", err))
+                        })?
+                        .unwrap_or_default() as u32,
+                ),
                 to_table: row
                     .get::<String>(5)
                     .map_err(|err| GraphError::Internal(format!("to_table read failed: {}", err)))?
@@ -744,12 +759,30 @@ fn registered_edge(
     }
 }
 
+fn required_table_oid(table: &DiscoveredTable) -> GraphResult<u32> {
+    table.table_oid.ok_or_else(|| {
+        GraphError::Internal(format!(
+            "OID-based discovery lost table OID for {}.{}",
+            table.schema_name, table.table_name
+        ))
+    })
+}
+
+fn required_fk_oid(oid: Option<u32>, label: &str) -> GraphResult<u32> {
+    oid.ok_or_else(|| {
+        GraphError::Internal(format!(
+            "OID-based discovery lost {} foreign-key OID",
+            label
+        ))
+    })
+}
+
 /// Classify a composite-PK table as a junction table or a composite entity.
 ///
 /// A junction table has ALL of its PK columns participating as FK source columns.
 /// A composite entity has at least one PK column that is NOT a FK.
 fn classify_as_junction(
-    table_oid: u32,
+    table_oid: Option<u32>,
     table_name: &str,
     pk_columns: &[String],
     schema_fks: &[DiscoveredFk],
@@ -757,12 +790,9 @@ fn classify_as_junction(
     // Collect all FK source columns for this specific table
     let fk_source_columns: Vec<&str> = schema_fks
         .iter()
-        .filter(|fk| {
-            if table_oid == 0 {
-                fk.from_table == table_name
-            } else {
-                fk.from_oid == table_oid
-            }
+        .filter(|fk| match (table_oid, fk.from_oid) {
+            (Some(table_oid), Some(from_oid)) => table_oid == from_oid,
+            _ => fk.from_table == table_name,
         })
         .map(|fk| fk.from_column.as_str())
         .collect();
@@ -782,10 +812,10 @@ mod tests {
 
     fn fk(from_table: &str, from_column: &str, to_table: &str, to_column: &str) -> DiscoveredFk {
         DiscoveredFk {
-            from_oid: 0,
+            from_oid: None,
             from_table: from_table.to_string(),
             from_column: from_column.to_string(),
-            to_oid: 0,
+            to_oid: None,
             to_table: to_table.to_string(),
             to_column: to_column.to_string(),
         }
@@ -800,7 +830,7 @@ mod tests {
         ];
 
         assert!(classify_as_junction(
-            0,
+            None,
             "user_groups",
             &pk_columns,
             &schema_fks
@@ -813,7 +843,7 @@ mod tests {
         let schema_fks = vec![fk("order_lines", "order_id", "orders", "id")];
 
         assert!(!classify_as_junction(
-            0,
+            None,
             "order_lines",
             &pk_columns,
             &schema_fks
@@ -829,8 +859,46 @@ mod tests {
         ];
 
         assert!(!classify_as_junction(
-            0,
+            None,
             "junction_table",
+            &pk_columns,
+            &schema_fks
+        ));
+    }
+
+    #[test]
+    fn classify_as_junction_prefers_oid_when_present() {
+        let pk_columns = vec!["user_id".to_string(), "group_id".to_string()];
+        let schema_fks = vec![
+            DiscoveredFk {
+                from_oid: Some(11),
+                from_table: "user_groups".to_string(),
+                from_column: "user_id".to_string(),
+                to_oid: Some(1),
+                to_table: "users".to_string(),
+                to_column: "id".to_string(),
+            },
+            DiscoveredFk {
+                from_oid: Some(11),
+                from_table: "user_groups".to_string(),
+                from_column: "group_id".to_string(),
+                to_oid: Some(2),
+                to_table: "groups".to_string(),
+                to_column: "id".to_string(),
+            },
+            DiscoveredFk {
+                from_oid: Some(22),
+                from_table: "user_groups".to_string(),
+                from_column: "other_id".to_string(),
+                to_oid: Some(3),
+                to_table: "other".to_string(),
+                to_column: "id".to_string(),
+            },
+        ];
+
+        assert!(classify_as_junction(
+            Some(11),
+            "user_groups",
             &pk_columns,
             &schema_fks
         ));

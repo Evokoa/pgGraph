@@ -113,7 +113,6 @@ not block use of the current documented SQL surface.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | Auto-discovery text properties | Auto-discovery currently restricts discovered property columns to string-like values of bounded length. | Document the rule clearly and consider making the policy configurable. |
-| Auto-discovery internals | Name-based discovery uses internal sentinel values for missing OIDs. | Replace sentinels with `Option` or split name-based and OID-based discovery structs. |
 | Structured filter operators | Structured filters currently focus on equality, inequality, range comparisons, and `between`. | Add `in`, `not_in`, text search, and explicit null operators as product requirements demand. |
 | Legacy raw filters | The legacy raw filter parser is intentionally not the preferred public SQL surface. | Delete it or unify it with structured typed-filter construction if it needs to remain. |
 | Date and timestamp filters | Date/timestamptz filter parsing uses SPI casts and dynamic SQL. | Prefer parameterized SPI casts or PostgreSQL-native conversion helpers. |
