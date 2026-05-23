@@ -201,9 +201,9 @@ fn length_prefixed_payload<'a>(
 
 fn read_le_array<const N: usize>(mmap: &[u8], offset: usize) -> [u8; N] {
     let end = offset + N;
-    mmap[offset..end]
-        .try_into()
-        .expect("validated .pggraph scalar read")
+    let mut bytes = [0u8; N];
+    bytes.copy_from_slice(&mmap[offset..end]);
+    bytes
 }
 
 fn read_u32_at(mmap: &[u8], offset: usize) -> u32 {

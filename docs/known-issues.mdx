@@ -30,6 +30,26 @@ The next update is focused on issues that are either hard to change after users
 depend on SQL behavior, or important enough to fix before recommending
 production use.
 
+### Completed In This Hardening Pass
+
+These items were completed and removed from the active limitation tables. The
+remaining sections below are still open work.
+
+| Area | Completion |
+|---|---|
+| Build advisory lock keys | Build and vacuum advisory lock keys now use named constants and a shared SQL helper. |
+| Unsigned filter checks | Unsigned in-memory filter checks are separated from signed typed-filter conversion, with benchmark evidence recorded privately. |
+| Job status values | Build and maintenance job status strings are centralized through a typed `JobStatus` enum. |
+| Discovery edge registration | Auto-discovery and targeted discovery share edge-label and registered-edge construction helpers. |
+| Discovery OID modeling | Discovery internals use explicit optional OIDs instead of a missing-OID sentinel. |
+| Relation lookup errors | Missing relation lookups now report a controlled graph error instead of leaking raw `regclass` behavior. |
+| Test locality | Pure Rust helper tests were moved beside their owning modules and `unit_tests.rs` was removed. |
+| Edge-store builders | Sorted CSR construction now routes through `SortedEdgeStoreBuilder` instead of duplicating the state machine. |
+| Persistence byte decoding | `.pggraph` scalar and length-prefixed payload decoding now use shared helpers. |
+| Internal sync SQL | Sync status, tenant setting, and table-OID SPI reads bind data values through parameters. |
+| Persistence section writing | `.pggraph` section offsets, scalar arrays, and length-prefixed payloads now use writer helpers. |
+| Date and timestamp filters | Date and timestamptz structured-filter casts now bind input text through SPI parameters. |
+
 ### Data Correctness and Corruption
 
 <Callout type="info">

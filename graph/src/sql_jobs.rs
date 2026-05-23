@@ -28,19 +28,6 @@ impl JobStatus {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::JobStatus;
-
-    #[test]
-    fn job_status_as_str_matches_sql_contract_values() {
-        assert_eq!(JobStatus::Queued.as_str(), "queued");
-        assert_eq!(JobStatus::Running.as_str(), "running");
-        assert_eq!(JobStatus::Completed.as_str(), "completed");
-        assert_eq!(JobStatus::Failed.as_str(), "failed");
-    }
-}
-
 pub(crate) fn create_build_job() -> safety::GraphResult<String> {
     let sync_mode = current_sync_mode()?.as_str().to_string();
     let queued = JobStatus::Queued.as_str();
@@ -379,4 +366,17 @@ pub(crate) fn launch_maintenance_worker(job_id: &str) -> safety::GraphResult<()>
                 "could not start graph maintenance worker; check max_worker_processes".to_string(),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobStatus;
+
+    #[test]
+    fn job_status_as_str_matches_sql_contract_values() {
+        assert_eq!(JobStatus::Queued.as_str(), "queued");
+        assert_eq!(JobStatus::Running.as_str(), "running");
+        assert_eq!(JobStatus::Completed.as_str(), "completed");
+        assert_eq!(JobStatus::Failed.as_str(), "failed");
+    }
 }
