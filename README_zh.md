@@ -21,7 +21,7 @@
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
   </a>
   <a href="https://www.postgresql.org/">
-    <img src="https://img.shields.io/badge/PostgreSQL-13--18-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 13-18">
+    <img src="https://img.shields.io/badge/PostgreSQL-14--18-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 14-18">
   </a>
 </p>
 
@@ -111,7 +111,7 @@ scripts/quickstart.sh playground panama
 
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。
 
-基础 Docker 镜像目前运行 PostgreSQL 17。打包脚本可以为 PostgreSQL 13 到 18 构建扩展构建产物。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
+基础 Docker 镜像目前运行 PostgreSQL 17。打包脚本可以为官方支持的 PostgreSQL 14 到 18 目标构建扩展构建产物。PostgreSQL 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
 
 ## 文档
 更多信息可在 pgGraph 文档中找到：

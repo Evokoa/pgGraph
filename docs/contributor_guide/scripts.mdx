@@ -13,7 +13,7 @@ root unless noted otherwise.
 |---|---|---|
 | `check_doc_references.py` | Editing docs or moving files | Validates local Markdown/MDX references so docs do not point at missing local files. |
 | `check_docs_drift.sh` | Before PRs and releases | Runs the aggregate documentation drift suite: local references, SQL API/GUC drift, and Rust source-map drift. |
-| `check_dependency_updates.py` | Before releases and dependency bumps | Checks pinned Cargo, Python, and Docker dependencies against upstream registries. It recommends only releases at least 14 days old by default and never updates files unless called with `--update ... --yes`. |
+| `check_dependency_updates.py` | Before releases and dependency bumps | Checks pinned Cargo, Python, Docker, and Nix flake GitHub inputs against upstream registries. It recommends only releases or commits at least 14 days old by default and never updates files unless called with `--update ... --yes`. |
 | `check_rust_doc_map_drift.py` | Editing contributor internals docs | Checks that Rust source files and contributor documentation stay aligned. Supports `--list` for inventory inspection. |
 | `check_sql_api_drift.py` | Editing SQL APIs, GUCs, or API docs | Compares implemented SQL-facing functions and GUCs against documented API references. Supports `--list-implemented`. |
 | `clean_generated_artifacts.sh` | Before packaging, archiving, or release prep | Deletes generated local artifacts that should not ship: `graph/target/`, `graph/fuzz/target/`, and `.DS_Store` files. Has `--dry-run`. |
@@ -64,6 +64,8 @@ Dependencies are intentionally pinned for release reproducibility:
 - Python sandbox requirements use exact `==` versions;
 - Docker base images use versioned tags plus digests and must be reviewed before
   moving to a new digest or tag.
+- Nix flake inputs are pinned in `flake.lock`; GitHub input updates are reported
+  for manual lockfile review.
 
 Run the dependency checker before a release:
 
@@ -71,9 +73,10 @@ Run the dependency checker before a release:
 python3 scripts/check_dependency_updates.py
 ```
 
-The script queries crates.io, PyPI, and Docker Hub. It reports update candidates
-only when a newer release is at least 14 days old. Releases newer than the age
-gate are flagged for review but are not recommended for release adoption.
+The script queries crates.io, PyPI, Docker Hub, and GitHub for Nix flake inputs.
+It reports update candidates only when a newer release or commit is at least 14
+days old. Newer releases and commits are flagged for review but are not
+recommended for release adoption.
 
 To change a supported manifest, name the dependency explicitly and confirm:
 
@@ -82,8 +85,9 @@ python3 scripts/check_dependency_updates.py --update cargo:serde --yes
 python3 scripts/check_dependency_updates.py --update pypi:streamlit --yes
 ```
 
-Docker updates are reported but not rewritten automatically. Review the upstream
-image, changelog, and digest manually before changing `Dockerfile`.
+Docker and Nix flake input updates are reported but not rewritten automatically.
+Review the upstream image, changelog, digest, or locked Git revision manually
+before changing `Dockerfile` or `flake.lock`.
 
 ## Cleanup Script
 
@@ -200,7 +204,7 @@ concurrency, memory, synthetic release evidence, and playground query stability.
 | Script | Use when | What it does |
 |---|---|---|
 | `run_release_gate.sh` | Final pre-release validation | Aggregates static checks, docs, Rust tests, pgrx tests, cargo-deny, fuzz compile, package validation, install smoke, metadata audit, boundary tests, backup/restore, lock tests, concurrency, synthetic smoke, playground query validation, and pgbench. |
-| `run_pg_matrix.sh` | Local PostgreSQL-major compatibility | Runs Rust and optionally pgrx SQL tests for PostgreSQL 13 through 18 using local `pg_config` binaries. |
+| `run_pg_matrix.sh` | Local PostgreSQL-major compatibility | Runs Rust and optionally pgrx SQL tests for officially supported PostgreSQL 14 through 18 using local `pg_config` binaries. |
 | `run_pg_matrix_docker.sh` | Matrix validation without local headers | Builds the Docker matrix image and runs supported PostgreSQL-major checks in Docker. |
 | `docker_smoke.sh` | Top-level Dockerfile check | Builds the root Docker image, starts Postgres, creates the extension, and runs a small graph workflow. |
 | `package_validate.sh` | Package artifact check | Runs `cargo pgrx package` and verifies control, SQL, shared library, and release companion files. |

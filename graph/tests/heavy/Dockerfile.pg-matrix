@@ -1,7 +1,7 @@
 FROM rust:1-bookworm
 
 ARG PGRX_VERSION=0.18.0
-ARG PG_VERSIONS="13 14 15 16 17 18"
+ARG PG_VERSIONS="14 15 16 17 18"
 ARG RUN_PGRX_SQL=1
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -23,7 +23,6 @@ RUN apt-get update \
         pkg-config \
         postgresql-client-common \
         postgresql-common \
-        postgresql-13 postgresql-server-dev-13 \
         postgresql-14 postgresql-server-dev-14 \
         postgresql-15 postgresql-server-dev-15 \
         postgresql-16 postgresql-server-dev-16 \

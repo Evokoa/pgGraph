@@ -47,10 +47,10 @@ db_name="${4:-postgres}"
 db_user="${5:-postgres}"
 
 case "$pg_major" in
-  13|14|15|16|17|18) ;;
+  14|15|16|17|18) ;;
   *)
     echo "Unsupported PostgreSQL major: $pg_major" >&2
-    echo "Supported versions: 13 14 15 16 17 18" >&2
+    echo "Supported versions: 14 15 16 17 18" >&2
     exit 2
     ;;
 esac

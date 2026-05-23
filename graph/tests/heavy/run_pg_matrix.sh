@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PG_VERSIONS="${PG_VERSIONS:-13 14 15 16 17 18}"
+PG_VERSIONS="${PG_VERSIONS:-14 15 16 17 18}"
 RUN_PGRX_SQL="${RUN_PGRX_SQL:-1}"
 
 missing=()

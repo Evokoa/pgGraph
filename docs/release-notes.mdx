@@ -52,8 +52,8 @@ supply-chain policy.
 - Added a heavy read-latency benchmark for sync backlog scenarios.
 - Added a heavy playground release gate that imports the same query catalog used
   by the Streamlit sidebar and validates fixed Panama dataset result summaries.
-- Added a dependency update checker that reports Cargo, Python, and Docker
-  update candidates without automatically applying them.
+- Added a dependency update checker that reports Cargo, Python, Docker, and Nix
+  flake GitHub input update candidates without automatically applying them.
 
 ### Behavior Changes
 
@@ -121,6 +121,7 @@ Release dependencies are pinned and reviewed before they move:
 - Rust direct dependencies use exact Cargo requirements plus committed lockfiles.
 - Python sandbox dependencies use exact `==` pins.
 - Docker base images use explicit version tags plus digests.
+- Nix flake GitHub inputs are pinned in `flake.lock` and reviewed manually.
 - New dependency versions should not be adopted into a release until they are at
   least 14 days old, unless a security fix requires an explicit exception.
 
@@ -138,8 +139,8 @@ python3 scripts/check_dependency_updates.py --update cargo:serde --yes
 python3 scripts/check_dependency_updates.py --update pypi:streamlit --yes
 ```
 
-Docker updates are report-only and require manual changelog, digest, and
-provenance review.
+Docker and Nix flake input updates are report-only and require manual changelog,
+digest, provenance, or locked revision review.
 
 <Callout type="warning">
   The dependency checker reports update candidates and review items by design.

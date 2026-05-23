@@ -1,17 +1,19 @@
 # Installation
 
 This extension is built from the `graph/` crate with `pgrx` 0.18.0. The crate
-declares PostgreSQL feature flags for PostgreSQL 13 through 18 and defaults to
-`pg17`.
+officially supports PostgreSQL 14 through 18 and defaults to `pg17`. A legacy
+`pg13` pgrx feature remains available on a best-effort basis because pgrx 0.18
+still exposes it, but PostgreSQL 13 has reached upstream EOL and is not part of
+the release support matrix.
 
 ## Requirements
 
 | Requirement | Version or note |
 |---|---|
 | Rust | `1.95`, pinned by `graph/rust-toolchain.toml` |
-| PostgreSQL | 13, 14, 15, 16, 17, or 18 |
+| PostgreSQL | 14, 15, 16, 17, or 18 |
 | pgrx | `0.18.0` |
-| Crate feature | One of `pg13`, `pg14`, `pg15`, `pg16`, `pg17`, `pg18` |
+| Crate feature | One of `pg14`, `pg15`, `pg16`, `pg17`, `pg18` |
 | Extension control | `graph/graph.control` |
 
 <Callout type="info">
@@ -29,12 +31,15 @@ cargo pgrx init --pg17=/path/to/pg_config
 Use the matching flag for another supported major:
 
 ```bash
-cargo pgrx init --pg13=/path/to/pg_config
 cargo pgrx init --pg14=/path/to/pg_config
 cargo pgrx init --pg15=/path/to/pg_config
 cargo pgrx init --pg16=/path/to/pg_config
 cargo pgrx init --pg18=/path/to/pg_config
 ```
+
+For PostgreSQL 13, use the legacy `pg13` pgrx feature only as best-effort
+compatibility. It is not covered by release gates after PostgreSQL 13 upstream
+EOL.
 
 ## Build And Install
 

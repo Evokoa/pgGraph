@@ -76,7 +76,6 @@
       in {
         devShells = {
           default = mkShell pkgs.postgresql_17;
-          pg13 = mkShell pkgs.postgresql_13;
           pg14 = mkShell pkgs.postgresql_14;
           pg15 = mkShell pkgs.postgresql_15;
           pg16 = mkShell pkgs.postgresql_16;

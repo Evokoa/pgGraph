@@ -32,6 +32,9 @@ class Dependency:
     current: str
     file: Path
     update_supported: bool
+    owner: str | None = None
+    repo: str | None = None
+    ref: str | None = None
 
     @property
     def key(self) -> str:
@@ -131,6 +134,37 @@ def docker_dependencies() -> list[Dependency]:
     return deps
 
 
+def flake_dependencies() -> list[Dependency]:
+    lockfile = ROOT / "flake.lock"
+    if not lockfile.exists():
+        return []
+
+    data = json.loads(lockfile.read_text())
+    deps: list[Dependency] = []
+    for name, node in data.get("nodes", {}).items():
+        locked = node.get("locked", {})
+        original = node.get("original", {})
+        if locked.get("type") != "github" or "rev" not in locked:
+            continue
+        owner = locked.get("owner")
+        repo = locked.get("repo")
+        if not owner or not repo:
+            continue
+        deps.append(
+            Dependency(
+                "github",
+                name,
+                locked["rev"],
+                lockfile,
+                False,
+                owner=owner,
+                repo=repo,
+                ref=original.get("ref"),
+            )
+        )
+    return deps
+
+
 def cargo_releases(name: str) -> list[Release]:
     data = request_json(f"https://crates.io/api/v1/crates/{name}")
     releases = []
@@ -163,6 +197,20 @@ def docker_releases(image: str) -> list[Release]:
     return releases
 
 
+def github_releases(dep: Dependency) -> list[Release]:
+    if not dep.owner or not dep.repo:
+        raise ValueError(f"{dep.key} is missing GitHub owner/repo metadata")
+    ref = dep.ref
+    if ref is None:
+        repo_data = request_json(f"https://api.github.com/repos/{dep.owner}/{dep.repo}")
+        ref = repo_data.get("default_branch")
+    if not ref:
+        raise ValueError(f"{dep.key} is missing a GitHub ref")
+    data = request_json(f"https://api.github.com/repos/{dep.owner}/{dep.repo}/commits/{ref}")
+    committed_at = data.get("commit", {}).get("committer", {}).get("date")
+    return [Release(data["sha"], parse_timestamp(committed_at))]
+
+
 def releases_for(dep: Dependency) -> list[Release]:
     if dep.ecosystem == "cargo":
         return cargo_releases(dep.name)
@@ -170,6 +218,8 @@ def releases_for(dep: Dependency) -> list[Release]:
         return pypi_releases(dep.name)
     if dep.ecosystem == "docker":
         return docker_releases(dep.name)
+    if dep.ecosystem == "github":
+        return github_releases(dep)
     raise ValueError(dep.ecosystem)
 
 
@@ -252,7 +302,12 @@ def main() -> int:
     args = parser.parse_args()
 
     cutoff = utc_now() - dt.timedelta(days=args.min_age_days)
-    deps = cargo_dependencies() + python_dependencies() + docker_dependencies()
+    deps = (
+        cargo_dependencies()
+        + python_dependencies()
+        + docker_dependencies()
+        + flake_dependencies()
+    )
     updates = set(args.update)
     if updates and not args.yes:
         print("--update requires --yes; no files changed", file=sys.stderr)
@@ -277,7 +332,12 @@ def main() -> int:
             latest_note = f"; latest {latest.version} is newer than the age gate"
             had_review_items = True
 
-        if version_key(recommended.version) > version_key(dep.current):
+        needs_update = (
+            recommended.version != dep.current
+            if dep.ecosystem == "github"
+            else version_key(recommended.version) > version_key(dep.current)
+        )
+        if needs_update:
             had_review_items = True
             print(
                 f"UPDATE {dep.key}: {dep.current} -> {recommended.version} "

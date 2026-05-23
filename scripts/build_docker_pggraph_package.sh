@@ -17,7 +17,7 @@ Arguments:
 Environment:
   BUILDER_IMAGE_PREFIX  Builder image prefix. Default: pggraph-builder
   PG_VERSIONS           Versions used when PG_MAJOR is "all".
-                        Default: 13 14 15 16 17 18
+                        Default: 14 15 16 17 18
 
 Examples:
   scripts/build_docker_pggraph_package.sh 17
@@ -38,7 +38,7 @@ fi
 pg_major="${1:-17}"
 out_dir="${2:-target/docker-packages}"
 builder_image_prefix="${BUILDER_IMAGE_PREFIX:-pggraph-builder}"
-pg_versions="${PG_VERSIONS:-13 14 15 16 17 18}"
+pg_versions="${PG_VERSIONS:-14 15 16 17 18}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 builder_container=""
 
@@ -51,10 +51,10 @@ trap cleanup EXIT
 
 validate_pg_major() {
   case "$1" in
-    13|14|15|16|17|18) ;;
+    14|15|16|17|18) ;;
     *)
       echo "Unsupported PostgreSQL major: $1" >&2
-      echo "Supported versions: 13 14 15 16 17 18" >&2
+      echo "Supported versions: 14 15 16 17 18" >&2
       exit 2
       ;;
   esac

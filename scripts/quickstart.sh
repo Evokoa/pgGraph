@@ -229,8 +229,8 @@ install_with_local_pgrx() {
     exit 1
   fi
 
-  if [[ ! "${pg_major}" =~ ^(13|14|15|16|17|18)$ ]]; then
-    echo "Error: Unsupported PostgreSQL major ${pg_major}. Supported: 13 14 15 16 17 18." >&2
+  if [[ ! "${pg_major}" =~ ^(14|15|16|17|18)$ ]]; then
+    echo "Error: Unsupported PostgreSQL major ${pg_major}. Supported: 14 15 16 17 18." >&2
     exit 2
   fi
 

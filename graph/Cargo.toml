@@ -10,8 +10,11 @@ license = "Apache-2.0"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# pgrx 0.18 supports PostgreSQL majors 13 through 18. Keep this matrix aligned
-# with docs/user_guide/installation.mdx and .github/workflows/ci.yml.
+# Official support follows PostgreSQL majors that still receive upstream fixes:
+# pg14 through pg18. The pg13 feature remains available as legacy best-effort
+# because pgrx 0.18 still exposes it, but release gates do not cover PG13.
+# Keep the supported matrix aligned with docs/user_guide/installation.mdx and
+# graph/tests/heavy/run_pg_matrix.sh.
 default = ["pg17"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]

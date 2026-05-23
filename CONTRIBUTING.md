@@ -31,7 +31,9 @@ install:
 cargo pgrx init --pg17 $(brew --prefix postgresql@17)/bin/pg_config
 ```
 
-Use PostgreSQL 13 through 18 when validating compatibility-sensitive changes.
+Use PostgreSQL 14 through 18 when validating compatibility-sensitive changes.
+PostgreSQL 13 has reached upstream EOL and is no longer an official support
+target, though the legacy `pg13` pgrx feature remains available best-effort.
 The default local feature is `pg17`.
 
 ### Nix devshell (optional)
@@ -39,7 +41,7 @@ The default local feature is `pg17`.
 A `flake.nix` is provided for contributors who use Nix. It pins the Rust
 toolchain, `cargo-pgrx`, and a Postgres major matching the pgrx feature
 flag, and initializes `cargo pgrx` against the nix-provided Postgres on
-first entry — no system deps to install.
+first entry for the selected major — no system deps to install.
 
 ```bash
 nix develop          # default shell: pg17

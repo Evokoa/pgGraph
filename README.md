@@ -21,7 +21,7 @@
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
   </a>
   <a href="https://www.postgresql.org/">
-    <img src="https://img.shields.io/badge/PostgreSQL-13--18-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 13-18">
+    <img src="https://img.shields.io/badge/PostgreSQL-14--18-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 14-18">
   </a>
 </p>
 
@@ -125,8 +125,10 @@ WSL2 or Git Bash with Docker Desktop. It is not a native PowerShell or Command
 Prompt script.
 
 The root Docker image currently runs PostgreSQL 17. Package scripts can build
-extension artifacts for PostgreSQL 13 through 18. The PostgreSQL major version
-of the extension package must match the target server.
+extension artifacts for officially supported PostgreSQL 14 through 18 targets.
+PostgreSQL 13 is no longer an official support target after upstream EOL, though
+the legacy `pg13` pgrx feature remains available on a best-effort basis. The
+PostgreSQL major version of the extension package must match the target server.
 
 ## Documentation
 More information is available in the pgGraph docs:

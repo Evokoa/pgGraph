@@ -24,8 +24,10 @@ Prompt scripts.
 
 <Callout type="info">
   The root Docker image currently runs PostgreSQL 17. Package scripts can build
-  extension artifacts for PostgreSQL 13 through 18, but the PostgreSQL major
-  version of the extension package must match the target server. See
+  extension artifacts for officially supported PostgreSQL 14 through 18 targets.
+  PostgreSQL 13 has reached upstream EOL and is only best-effort through the
+  legacy pgrx feature. The PostgreSQL major version of the extension package
+  must match the target server. See
   [Installation](/user_guide/installation) for source builds, pgrx setup,
   package builds, and installation into existing servers.
 </Callout>

@@ -8,7 +8,7 @@ beside it in the crate tree.
 
 | Path | Purpose |
 |---|---|
-| `graph/Cargo.toml` | Crate metadata, pgrx features for PostgreSQL 13-18, dependency and lint policy |
+| `graph/Cargo.toml` | Crate metadata, pgrx features for PostgreSQL 14-18 support plus legacy pg13, dependency and lint policy |
 | `graph/Cargo.lock` | Locked dependency set |
 | `graph/rust-toolchain.toml` | Rust toolchain pin |
 | `graph/graph.control` | PostgreSQL extension control file |
@@ -87,7 +87,8 @@ See [SQL Tests](./sql-tests) for SQL test coverage and
 
 | Feature | Purpose |
 |---|---|
-| `pg13` to `pg18` | Select pgrx PostgreSQL major |
+| `pg14` to `pg18` | Select officially supported pgrx PostgreSQL major |
+| `pg13` | Legacy best-effort pgrx PostgreSQL 13 feature; not release-gated after upstream EOL |
 | `pg_test` | Enable pgrx SQL test modules |
 | `fuzzing` | Export fuzz support wrappers |
 | `development` | Enable hidden development/test helper functions and extra internals |

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE="${IMAGE:-pggraph:pg-matrix}"
-PG_VERSIONS="${PG_VERSIONS:-13 14 15 16 17 18}"
+PG_VERSIONS="${PG_VERSIONS:-14 15 16 17 18}"
 RUN_PGRX_SQL="${RUN_PGRX_SQL:-1}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DOCKERFILE="$ROOT_DIR/graph/tests/heavy/Dockerfile.pg-matrix"

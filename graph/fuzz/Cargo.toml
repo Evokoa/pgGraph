@@ -15,7 +15,7 @@ serde_json = "=1.0.149"
 [dependencies.graph]
 path = ".."
 # Fuzzing uses pg17 by default for local harness compatibility. The main crate
-# exposes pg13 through pg18 features for the supported Postgres matrix.
+# supports pg14 through pg18; pg13 remains legacy best-effort only.
 features = ["pg17", "fuzzing"]
 
 [[bin]]
