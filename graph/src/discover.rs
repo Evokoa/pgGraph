@@ -140,11 +140,7 @@ pub fn discover_schema(
 
     // Step 4: Register FK relationships as edges
     for fk in &schema_fks {
-        let label = fk
-            .from_column
-            .trim_end_matches("_id")
-            .trim_end_matches("_fk")
-            .to_string();
+        let label = edge_label(&fk.from_column);
 
         discoveries.push(DiscoveryResult {
             item_type: "edge".to_string(),
@@ -155,20 +151,17 @@ pub fn discover_schema(
             details: format!("label={}, bidirectional=true", label),
         });
 
-        edges.push(RegisteredEdge {
-            from_table: format!(
+        edges.push(registered_edge(
+            format!(
                 "{}.{}",
                 quote_ident(schema_name),
                 quote_ident(&fk.from_table)
             ),
-            from_column: fk.from_column.clone(),
-            to_table: format!("{}.{}", quote_ident(schema_name), quote_ident(&fk.to_table)),
-            to_column: fk.to_column.clone(),
-            label,
-            bidirectional: true,
-            weight_column: None,
-            label_column: None,
-        });
+            &fk.from_column,
+            format!("{}.{}", quote_ident(schema_name), quote_ident(&fk.to_table)),
+            &fk.to_column,
+            &fk.from_column,
+        ));
     }
 
     Ok((tables, edges, discoveries))
@@ -257,11 +250,7 @@ pub fn discover_table_set(
             continue;
         };
         for fk in junction_fks.iter().skip(1) {
-            let label = fk
-                .from_column
-                .trim_end_matches("_id")
-                .trim_end_matches("_fk")
-                .to_string();
+            let label = edge_label(&fk.from_column);
             discoveries.push(DiscoveryResult {
                 item_type: "edge".to_string(),
                 item_name: format!(
@@ -270,16 +259,13 @@ pub fn discover_table_set(
                 ),
                 details: format!("label={}, bidirectional=true", label),
             });
-            edges.push(RegisteredEdge {
-                from_table: regclass_text(*junction_oid)?,
-                from_column: first_fk.from_column.clone(),
-                to_table: regclass_text(fk.to_oid)?,
-                to_column: fk.from_column.clone(),
-                label,
-                bidirectional: true,
-                weight_column: None,
-                label_column: None,
-            });
+            edges.push(registered_edge(
+                regclass_text(*junction_oid)?,
+                &first_fk.from_column,
+                regclass_text(fk.to_oid)?,
+                &fk.from_column,
+                &fk.from_column,
+            ));
         }
     }
 
@@ -288,11 +274,7 @@ pub fn discover_table_set(
         .filter(|fk| selected_oids.contains(&fk.from_oid) && selected_oids.contains(&fk.to_oid))
         .filter(|fk| !junction_oids.contains(&fk.from_oid))
     {
-        let label = fk
-            .from_column
-            .trim_end_matches("_id")
-            .trim_end_matches("_fk")
-            .to_string();
+        let label = edge_label(&fk.from_column);
 
         discoveries.push(DiscoveryResult {
             item_type: "edge".to_string(),
@@ -302,16 +284,13 @@ pub fn discover_table_set(
             ),
             details: format!("label={}, bidirectional=true", label),
         });
-        edges.push(RegisteredEdge {
-            from_table: regclass_text(fk.from_oid)?,
-            from_column: fk.from_column.clone(),
-            to_table: regclass_text(fk.to_oid)?,
-            to_column: fk.to_column.clone(),
-            label,
-            bidirectional: true,
-            weight_column: None,
-            label_column: None,
-        });
+        edges.push(registered_edge(
+            regclass_text(fk.from_oid)?,
+            &fk.from_column,
+            regclass_text(fk.to_oid)?,
+            &fk.to_column,
+            &fk.from_column,
+        ));
     }
 
     Ok((tables, edges, discoveries))
@@ -739,6 +718,32 @@ fn discovery_details(
     )
 }
 
+fn edge_label(label_source_column: &str) -> String {
+    label_source_column
+        .trim_end_matches("_id")
+        .trim_end_matches("_fk")
+        .to_string()
+}
+
+fn registered_edge(
+    from_table: String,
+    from_column: &str,
+    to_table: String,
+    to_column: &str,
+    label_source_column: &str,
+) -> RegisteredEdge {
+    RegisteredEdge {
+        from_table,
+        from_column: from_column.to_string(),
+        to_table,
+        to_column: to_column.to_string(),
+        label: edge_label(label_source_column),
+        bidirectional: true,
+        weight_column: None,
+        label_column: None,
+    }
+}
+
 /// Classify a composite-PK table as a junction table or a composite entity.
 ///
 /// A junction table has ALL of its PK columns participating as FK source columns.
@@ -773,7 +778,7 @@ mod tests {
     //! Covers schema discovery classification, especially junction-table
     //! detection from primary-key and foreign-key relationships.
 
-    use super::{classify_as_junction, DiscoveredFk};
+    use super::{classify_as_junction, edge_label, registered_edge, DiscoveredFk};
 
     fn fk(from_table: &str, from_column: &str, to_table: &str, to_column: &str) -> DiscoveredFk {
         DiscoveredFk {
@@ -829,5 +834,32 @@ mod tests {
             &pk_columns,
             &schema_fks
         ));
+    }
+
+    #[test]
+    fn registered_edge_uses_shared_defaults_and_label_source_column() {
+        let edge = registered_edge(
+            "public.user_groups".to_string(),
+            "user_id",
+            "public.groups".to_string(),
+            "group_id",
+            "group_id",
+        );
+
+        assert_eq!(edge.from_table, "public.user_groups");
+        assert_eq!(edge.from_column, "user_id");
+        assert_eq!(edge.to_table, "public.groups");
+        assert_eq!(edge.to_column, "group_id");
+        assert_eq!(edge.label, "group");
+        assert!(edge.bidirectional);
+        assert_eq!(edge.weight_column, None);
+        assert_eq!(edge.label_column, None);
+    }
+
+    #[test]
+    fn edge_label_strips_supported_fk_suffixes() {
+        assert_eq!(edge_label("user_id"), "user");
+        assert_eq!(edge_label("account_fk"), "account");
+        assert_eq!(edge_label("owner"), "owner");
     }
 }

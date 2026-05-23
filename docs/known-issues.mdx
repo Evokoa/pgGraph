@@ -134,7 +134,6 @@ but they do not change core user behavior.
 | Persistence section writing | Section padding and layout writes are still manual. | Add typed section writer helpers while keeping load-time validation strict. |
 | Persistence byte decoding | Some persisted structures use verbose manual byte decoding. | Use clearer slice conversion helpers without changing the file format casually. |
 | Edge-store builders | `SortedEdgeStoreBuilder` and `from_sorted_edges()` duplicate state-machine logic. | Route sorted-edge construction through one implementation. |
-| Edge registration helpers | Auto-discovery has duplicated edge registration construction for junction and standard foreign-key edges. | Extract a shared helper for registered edge construction. |
 | Engine state encapsulation | Some internal fields with invariants are still mutated directly. | Encapsulate state such as `built`, `sync_status`, `is_read_only`, `needs_vacuum`, mmap, and resolution state behind validated helpers. |
 | Mmap mutation API | Direct mutation on mmap-backed stores is not consistently represented. | Route mutations through engine helpers or make direct store mutation fail consistently. |
 | Mmap resolution state | Mmap resolution offsets and backing storage are split across engine fields. | Couple the backing data with the `MmapBacked` variant so invalid states are harder to represent. |
