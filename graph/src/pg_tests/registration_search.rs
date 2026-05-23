@@ -1,3 +1,5 @@
+use crate::catalog::table_oid_from_name;
+
 #[pg_test]
 fn registered_tables_and_edges_reflect_public_registration_apis() {
     reset_and_create_fixtures();
@@ -586,4 +588,15 @@ fn add_filter_column_rejects_non_numeric_columns() {
 
     let result = super::validate_numeric_column(table_oid as u32, "note");
     assert!(result.is_err());
+}
+
+#[pg_test]
+fn table_oid_lookup_reports_missing_relation_explicitly() {
+    reset_and_create_fixtures();
+
+    let result = table_oid_from_name("public.graph_test_missing_relation_pgtest");
+
+    assert!(
+        matches!(result, Err(super::safety::GraphError::Internal(message)) if message.contains("relation not found"))
+    );
 }

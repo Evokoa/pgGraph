@@ -153,7 +153,7 @@ pub(crate) fn table_oid_from_name(table_name: &str) -> safety::GraphResult<u32> 
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT $1::regclass::oid::integer",
+                "SELECT to_regclass($1)::oid::integer",
                 None,
                 &[table_name.into()],
             )
@@ -167,7 +167,9 @@ pub(crate) fn table_oid_from_name(table_name: &str) -> safety::GraphResult<u32> 
         row.get::<i32>(1)
             .map_err(|e| safety::GraphError::Internal(format!("table OID read failed: {}", e)))?
             .map(|oid| oid as u32)
-            .ok_or_else(|| safety::GraphError::Internal(format!("NULL OID for {}", table_name)))
+            .ok_or_else(|| {
+                safety::GraphError::Internal(format!("relation not found: {}", table_name))
+            })
     })
 }
 
