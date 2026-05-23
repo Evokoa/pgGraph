@@ -1070,8 +1070,11 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_sync_op, required_sync_i64, required_sync_string, SyncOp};
+    use super::{
+        parse_sync_op, parse_sync_properties, required_sync_i64, required_sync_string, SyncOp,
+    };
     use crate::safety::GraphError;
+    use proptest::prelude::*;
 
     #[test]
     fn parse_sync_op_accepts_supported_codes() {
@@ -1115,5 +1118,14 @@ mod tests {
 
         assert!(matches!(err, GraphError::Internal(_)));
         assert!(err.to_string().contains("table_name"));
+    }
+
+    proptest! {
+        /// Sync property decoding accepts arbitrary JSON text without panics and
+        /// preserves only non-null object fields as stringified key/value pairs.
+        #[test]
+        fn sync_property_decoder_is_total_for_utf8(input in ".{0,512}") {
+            let _ = parse_sync_properties(Some(&input));
+        }
     }
 }

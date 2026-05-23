@@ -73,7 +73,7 @@ more supporting implementation modules.
 
 | Path | Scope |
 |---|---|
-| `src/unit_tests.rs` and module-local `#[cfg(test)]` blocks | Pure Rust invariants |
+| Module-local `#[cfg(test)]` blocks | Pure Rust invariants |
 | `src/pg_tests/*.rs` | pgrx SQL integration tests |
 | `tests/pg_regress/` | pg_regress setup smoke |
 | `tests/heavy/` | external SQLSTATE/ACL, crash, stress, packaging, backup/restore, matrix, release gates |

@@ -140,7 +140,6 @@ but they do not change core user behavior.
 | Sync row parsing | Some sync paths parse the same row JSON more than once. | Parse once at the boundary and pass borrowed row values through replay helpers. |
 | Internal sync SQL | Some internal sync queries still interpolate numeric IDs or generated ID lists. | Parameterize where practical or use temp-table cleanup for larger applied ID sets. |
 | Sync mutation coupling | Some edge overlay maintenance relies on caller ordering around node replacement. | Encapsulate node and edge replay behind a typed sync-row operation helper. |
-| Test locality | Some pure Rust helper tests live in a central `unit_tests.rs`. | Move tests beside the modules they exercise while keeping pgrx tests in the pg test module. |
 
 ## Lower-Priority Optimizations
 

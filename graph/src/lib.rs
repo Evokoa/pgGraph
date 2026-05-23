@@ -253,6 +253,3 @@ mod tests {
     include!("pg_tests/workflow_validation.rs");
     include!("pg_tests/synthetic_release.rs");
 }
-
-#[cfg(test)]
-mod unit_tests;

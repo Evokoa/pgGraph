@@ -684,8 +684,54 @@ fn json_number_compare(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safety;
+    use proptest::prelude::*;
     use serde_json::json;
     use std::cmp::Ordering;
+
+    fn test_i64_encoder(value: &serde_json::Value) -> safety::GraphResult<i64> {
+        value
+            .as_i64()
+            .ok_or_else(|| safety::GraphError::InvalidFilter {
+                reason: "expected integer".to_string(),
+            })
+    }
+
+    /// Typed pushdown conversion returns structured filter errors instead of
+    /// relying on prior validation to make malformed operators unreachable.
+    #[test]
+    fn typed_i64_op_rejects_malformed_operator_shapes() {
+        let unsupported = typed_i64_op(0, "contains", &serde_json::json!(1), test_i64_encoder);
+        let malformed_between =
+            typed_i64_op(0, "between", &serde_json::json!([1]), test_i64_encoder);
+
+        assert!(matches!(
+            unsupported,
+            Err(safety::GraphError::InvalidFilter { .. })
+        ));
+        assert!(matches!(
+            malformed_between,
+            Err(safety::GraphError::InvalidFilter { .. })
+        ));
+    }
+
+    proptest! {
+        /// Structured-filter operator validation must reject arbitrary operator
+        /// names unless they are in the documented allow-list, and `between`
+        /// must remain the only shape that requires a two-value array.
+        #[test]
+        fn structured_operator_shape_property(operator in ".{0,32}", value in any::<i64>()) {
+            let scalar = serde_json::json!(value);
+            let result = validate_structured_operator_shape("prop", &operator, &scalar);
+            let allowed_scalar = matches!(operator.as_str(), "eq" | "neq" | "gt" | "gte" | "lt" | "lte");
+            prop_assert_eq!(result.is_ok(), allowed_scalar);
+
+            let bounds = serde_json::json!([value, value.saturating_add(1)]);
+            let result = validate_structured_operator_shape("prop", &operator, &bounds);
+            let allowed_array = allowed_scalar || operator == "between";
+            prop_assert_eq!(result.is_ok(), allowed_array);
+        }
+    }
 
     #[test]
     fn json_numeric_equality_preserves_large_integer_precision() {

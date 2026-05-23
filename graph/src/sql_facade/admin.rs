@@ -103,6 +103,111 @@ pub(crate) fn scheduled_maintenance_decision(
     }
 }
 
+#[cfg(test)]
+mod scheduled_maintenance_tests {
+    use super::{
+        scheduled_maintenance_decision, ScheduledMaintenanceDecision, ScheduledMaintenanceInputs,
+    };
+
+    #[test]
+    fn scheduled_maintenance_decision_recommends_apply_when_trigger_sync_is_safe() {
+        let decision = scheduled_maintenance_decision(ScheduledMaintenanceInputs {
+            pending_sync_rows: 2,
+            disabled_trigger_count: 0,
+            edge_buffer_used: 0,
+            needs_vacuum: false,
+            needs_rebuild: false,
+            read_only: false,
+        });
+
+        assert_eq!(
+            decision,
+            ScheduledMaintenanceDecision {
+                apply_sync: true,
+                start_maintenance: false,
+            }
+        );
+    }
+
+    #[test]
+    fn scheduled_maintenance_decision_blocks_apply_for_rebuild_or_read_only() {
+        for mut inputs in [
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 2,
+                disabled_trigger_count: 1,
+                edge_buffer_used: 0,
+                needs_vacuum: false,
+                needs_rebuild: false,
+                read_only: false,
+            },
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 2,
+                disabled_trigger_count: 0,
+                edge_buffer_used: 0,
+                needs_vacuum: false,
+                needs_rebuild: true,
+                read_only: false,
+            },
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 2,
+                disabled_trigger_count: 0,
+                edge_buffer_used: 0,
+                needs_vacuum: false,
+                needs_rebuild: false,
+                read_only: true,
+            },
+        ] {
+            let decision = scheduled_maintenance_decision(inputs);
+            assert!(!decision.apply_sync);
+
+            inputs.pending_sync_rows = 0;
+            let no_pending_decision = scheduled_maintenance_decision(inputs);
+            assert!(!no_pending_decision.apply_sync);
+        }
+    }
+
+    #[test]
+    fn scheduled_maintenance_decision_starts_for_vacuum_overlay_rebuild_or_read_only() {
+        for inputs in [
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 0,
+                disabled_trigger_count: 0,
+                edge_buffer_used: 1,
+                needs_vacuum: false,
+                needs_rebuild: false,
+                read_only: false,
+            },
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 0,
+                disabled_trigger_count: 0,
+                edge_buffer_used: 0,
+                needs_vacuum: true,
+                needs_rebuild: false,
+                read_only: false,
+            },
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 0,
+                disabled_trigger_count: 0,
+                edge_buffer_used: 0,
+                needs_vacuum: false,
+                needs_rebuild: true,
+                read_only: false,
+            },
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 0,
+                disabled_trigger_count: 0,
+                edge_buffer_used: 0,
+                needs_vacuum: false,
+                needs_rebuild: false,
+                read_only: true,
+            },
+        ] {
+            let decision = scheduled_maintenance_decision(inputs);
+            assert!(decision.start_maintenance);
+        }
+    }
+}
+
 /// Return current engine status.
 ///
 /// See: `docs/user_guide/api-reference.mdx`

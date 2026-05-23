@@ -460,3 +460,16 @@ pub(crate) fn u32_from_nonnegative(value: i32, name: &str) -> safety::GraphResul
     }
     Ok(value as u32)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_node_ref_json_parts;
+
+    #[test]
+    fn node_ref_json_part_parser_rejects_non_contract_shapes() {
+        assert!(parse_node_ref_json_parts(&serde_json::json!("[\"public.users\",\"u1\"]")).is_ok());
+        assert!(parse_node_ref_json_parts(&serde_json::json!(["public.users"])).is_err());
+        assert!(parse_node_ref_json_parts(&serde_json::json!([42, "u1"])).is_err());
+        assert!(parse_node_ref_json_parts(&serde_json::json!({"table": "public.users"})).is_err());
+    }
+}

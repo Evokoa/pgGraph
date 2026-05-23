@@ -112,6 +112,22 @@ pub(crate) fn split_catalog_columns(raw: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::split_catalog_columns;
+
+    /// Covers catalog column-list parsing used by discovery functions and the
+    /// `id_columns` compatibility layer.
+    #[test]
+    fn split_catalog_columns_ignores_empty_segments_and_whitespace() {
+        assert_eq!(
+            split_catalog_columns(" id, , tenant_id "),
+            vec!["id".to_string(), "tenant_id".to_string()]
+        );
+        assert!(split_catalog_columns("").is_empty());
+    }
+}
+
 pub(crate) fn regclass_text(table_oid: u32) -> safety::GraphResult<String> {
     Spi::connect(|client| {
         let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
