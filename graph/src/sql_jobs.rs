@@ -9,18 +9,51 @@ use crate::sql_sync::current_sync_mode;
 use pgrx::bgworkers::{BackgroundWorkerBuilder, BgWorkerStartTime};
 use pgrx::prelude::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JobStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl JobStatus {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            JobStatus::Queued => "queued",
+            JobStatus::Running => "running",
+            JobStatus::Completed => "completed",
+            JobStatus::Failed => "failed",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobStatus;
+
+    #[test]
+    fn job_status_as_str_matches_sql_contract_values() {
+        assert_eq!(JobStatus::Queued.as_str(), "queued");
+        assert_eq!(JobStatus::Running.as_str(), "running");
+        assert_eq!(JobStatus::Completed.as_str(), "completed");
+        assert_eq!(JobStatus::Failed.as_str(), "failed");
+    }
+}
+
 pub(crate) fn create_build_job() -> safety::GraphResult<String> {
     let sync_mode = current_sync_mode()?.as_str().to_string();
+    let queued = JobStatus::Queued.as_str();
     Spi::get_one_with_args::<String>(
         "INSERT INTO graph._build_jobs (
             build_id, status, sync_mode, progress_phase, progress_message
          )
          VALUES (
-            gen_random_uuid()::text, 'queued', $1, 'queued',
+            gen_random_uuid()::text, $2, $1, $2,
             'queued for background build'
          )
          RETURNING build_id",
-        &[sync_mode.into()],
+        &[sync_mode.into(), queued.into()],
     )
     .map_err(|err| safety::GraphError::Internal(format!("build job creation failed: {}", err)))?
     .ok_or_else(|| safety::GraphError::Internal("build job creation returned no id".to_string()))
@@ -68,16 +101,18 @@ pub(crate) fn build_job_row(build_id: &str) -> safety::GraphResult<Option<BuildJ
 }
 
 pub(crate) fn update_build_job_started(build_id: &str) -> safety::GraphResult<()> {
+    let queued = JobStatus::Queued.as_str();
+    let running = JobStatus::Running.as_str();
     Spi::run_with_args(
         "UPDATE graph._build_jobs
-         SET status = 'running',
+         SET status = $2,
              progress_phase = 'building',
              progress_message = 'building graph from registered source tables',
              started_at = COALESCE(started_at, now()),
              worker_pid = pg_backend_pid(),
              updated_at = now()
-         WHERE build_id = $1 AND status = 'queued'",
-        &[build_id.into()],
+         WHERE build_id = $1 AND status = $3",
+        &[build_id.into(), running.into(), queued.into()],
     )
     .map_err(|err| safety::GraphError::Internal(format!("build job start update failed: {}", err)))
 }
@@ -86,15 +121,16 @@ pub(crate) fn update_build_job_completed(
     build_id: &str,
     result: &BuildExecutionResult,
 ) -> safety::GraphResult<()> {
+    let completed = JobStatus::Completed.as_str();
     Spi::run_with_args(
         "UPDATE graph._build_jobs
-         SET status = 'completed',
+         SET status = $7,
              nodes_loaded = $2,
              edges_loaded = $3,
              build_time_ms = $4,
              memory_used_mb = $5,
              sync_mode = $6,
-             progress_phase = 'completed',
+             progress_phase = $7,
              progress_message = 'build completed',
              finished_at = now(),
              updated_at = now(),
@@ -107,6 +143,7 @@ pub(crate) fn update_build_job_completed(
             result.build_time_ms.into(),
             result.memory_used_mb.into(),
             result.sync_mode.clone().into(),
+            completed.into(),
         ],
     )
     .map_err(|err| {
@@ -115,16 +152,17 @@ pub(crate) fn update_build_job_completed(
 }
 
 pub(crate) fn update_build_job_failed(build_id: &str, error: &str) -> safety::GraphResult<()> {
+    let failed = JobStatus::Failed.as_str();
     Spi::run_with_args(
         "UPDATE graph._build_jobs
-         SET status = 'failed',
-             progress_phase = 'failed',
-             progress_message = $2,
+         SET status = $2,
+             progress_phase = $2,
+             progress_message = $3,
              finished_at = now(),
              updated_at = now(),
-             error = $2
+             error = $3
          WHERE build_id = $1",
-        &[build_id.into(), error.into()],
+        &[build_id.into(), failed.into(), error.into()],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("build job failure update failed: {}", err))
@@ -144,15 +182,17 @@ pub(crate) fn run_build_job(build_id: &str) -> safety::GraphResult<()> {
 }
 
 pub(crate) fn create_maintenance_job() -> safety::GraphResult<String> {
-    Spi::get_one::<String>(
+    let queued = JobStatus::Queued.as_str();
+    Spi::get_one_with_args::<String>(
         "INSERT INTO graph._maintenance_jobs (
             job_id, status, progress_phase, progress_message
          )
          VALUES (
-            gen_random_uuid()::text, 'queued', 'queued',
+            gen_random_uuid()::text, $1, $1,
             'queued for background maintenance'
          )
          RETURNING job_id",
+        &[queued.into()],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("maintenance job creation failed: {}", err))
@@ -198,16 +238,18 @@ pub(crate) fn maintenance_job_row(job_id: &str) -> safety::GraphResult<Option<Ma
 }
 
 pub(crate) fn update_maintenance_job_started(job_id: &str) -> safety::GraphResult<()> {
+    let queued = JobStatus::Queued.as_str();
+    let running = JobStatus::Running.as_str();
     Spi::run_with_args(
         "UPDATE graph._maintenance_jobs
-         SET status = 'running',
+         SET status = $2,
              progress_phase = 'rebuilding',
              progress_message = 'rebuilding graph for maintenance',
              started_at = COALESCE(started_at, now()),
              worker_pid = pg_backend_pid(),
              updated_at = now()
-         WHERE job_id = $1 AND status = 'queued'",
-        &[job_id.into()],
+         WHERE job_id = $1 AND status = $3",
+        &[job_id.into(), running.into(), queued.into()],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("maintenance job start update failed: {}", err))
@@ -218,14 +260,15 @@ pub(crate) fn update_maintenance_job_completed(
     job_id: &str,
     result: &MaintenanceExecutionResult,
 ) -> safety::GraphResult<()> {
+    let completed = JobStatus::Completed.as_str();
     Spi::run_with_args(
         "UPDATE graph._maintenance_jobs
-         SET status = 'completed',
+         SET status = $6,
              sync_rows_applied = $2,
              nodes_after = $3,
              edges_after = $4,
              vacuum_time_ms = $5,
-             progress_phase = 'completed',
+             progress_phase = $6,
              progress_message = 'maintenance completed',
              finished_at = now(),
              updated_at = now(),
@@ -237,6 +280,7 @@ pub(crate) fn update_maintenance_job_completed(
             result.nodes_after.into(),
             result.edges_after.into(),
             result.vacuum_time_ms.into(),
+            completed.into(),
         ],
     )
     .map_err(|err| {
@@ -245,16 +289,17 @@ pub(crate) fn update_maintenance_job_completed(
 }
 
 pub(crate) fn update_maintenance_job_failed(job_id: &str, error: &str) -> safety::GraphResult<()> {
+    let failed = JobStatus::Failed.as_str();
     Spi::run_with_args(
         "UPDATE graph._maintenance_jobs
-         SET status = 'failed',
-             progress_phase = 'failed',
-             progress_message = $2,
+         SET status = $2,
+             progress_phase = $2,
+             progress_message = $3,
              finished_at = now(),
              updated_at = now(),
-             error = $2
+             error = $3
          WHERE job_id = $1",
-        &[job_id.into(), error.into()],
+        &[job_id.into(), failed.into(), error.into()],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("maintenance job failure update failed: {}", err))

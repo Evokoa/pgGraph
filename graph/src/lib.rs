@@ -60,7 +60,7 @@ use sql_hydration::{hydrate_node, hydrate_nodes};
 use sql_jobs::{
     build_job_row, create_build_job, create_maintenance_job, launch_build_worker,
     launch_maintenance_worker, maintenance_job_row, run_build_job, run_maintenance_job,
-    update_build_job_failed, update_maintenance_job_failed,
+    update_build_job_failed, update_maintenance_job_failed, JobStatus,
 };
 use sql_search::{source_table_search_rows, validate_search_request};
 use sql_sync::{

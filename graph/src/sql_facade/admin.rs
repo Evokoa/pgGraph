@@ -476,7 +476,7 @@ fn build_with_concurrently(
                 .unwrap_or_else(|err| err.report())
                 .unwrap_or(BuildJobRow {
                     build_id,
-                    status: "queued".to_string(),
+                    status: JobStatus::Queued.as_str().to_string(),
                     nodes_loaded: None,
                     edges_loaded: None,
                     build_time_ms: None,
@@ -484,7 +484,7 @@ fn build_with_concurrently(
                     sync_mode: current_sync_mode()
                         .map(|mode| mode.as_str().to_string())
                         .unwrap_or_else(|_| "manual".to_string()),
-                    progress_phase: "queued".to_string(),
+                    progress_phase: JobStatus::Queued.as_str().to_string(),
                     progress_message: Some("queued for background build".to_string()),
                     started_at: None,
                     finished_at: None,
@@ -508,7 +508,7 @@ fn build_with_concurrently(
         };
         TableIterator::new(vec![(
             "00000000-0000-0000-0000-000000000000".to_string(),
-            "completed".to_string(),
+            JobStatus::Completed.as_str().to_string(),
             Some(nodes_loaded),
             Some(edges_loaded),
             Some(build_time_ms),
@@ -562,7 +562,7 @@ fn build_status(
         let status = ENGINE.with(|e| {
             let eng = e.borrow();
             if eng.built {
-                "completed"
+                JobStatus::Completed.as_str()
             } else {
                 "not_found"
             }
@@ -1227,12 +1227,12 @@ fn maintenance(
                 .unwrap_or_else(|err| err.report())
                 .unwrap_or(MaintenanceJobRow {
                     job_id,
-                    status: "queued".to_string(),
+                    status: JobStatus::Queued.as_str().to_string(),
                     sync_rows_applied: None,
                     nodes_after: None,
                     edges_after: None,
                     vacuum_time_ms: None,
-                    progress_phase: "queued".to_string(),
+                    progress_phase: JobStatus::Queued.as_str().to_string(),
                     progress_message: Some("queued for background maintenance".to_string()),
                     started_at: None,
                     finished_at: None,
@@ -1252,7 +1252,7 @@ fn maintenance(
         let result = execute_maintenance_rebuild(true).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             "00000000-0000-0000-0000-000000000000".to_string(),
-            "completed".to_string(),
+            JobStatus::Completed.as_str().to_string(),
             Some(result.sync_rows_applied),
             Some(result.nodes_after),
             Some(result.edges_after),
