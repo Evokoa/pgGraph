@@ -18,6 +18,19 @@ type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
 type OverlayDeletes = HashSet<(u32, u32, u8)>;
 type AggregationEdgeOverlay = (OverlayInserts, OverlayDeletes);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AggregateScope {
+    ReturnedNodes,
+    ChosenParentPath,
+    AllPossiblePaths,
+}
+
+impl AggregateScope {
+    fn expands_parent_path(self) -> bool {
+        matches!(self, Self::ChosenParentPath)
+    }
+}
+
 pub(crate) fn aggregate_impl(
     traversal: &serde_json::Value,
     aggregations: &serde_json::Value,
@@ -27,10 +40,11 @@ pub(crate) fn aggregate_impl(
     check_enabled_result()?;
     let request = parse_aggregation_traversal_request(traversal)?;
     let specs = parse_aggregation_specs(aggregations)?;
+    let scope = parse_aggregate_scope(scope)?;
     let path_limit = usize_from_nonnegative(path_limit, "path_limit")?;
     match scope {
-        "returned_nodes" | "chosen_parent_path" => {}
-        "all_possible_paths" => {
+        AggregateScope::ReturnedNodes | AggregateScope::ChosenParentPath => {}
+        AggregateScope::AllPossiblePaths => {
             let (paths, _exact, capped) = all_possible_paths_for_request(&request, path_limit)?;
             if capped {
                 return Err(safety::GraphError::InvalidFilter {
@@ -42,14 +56,6 @@ pub(crate) fn aggregate_impl(
             }
             return aggregate_coordinate_paths(&paths, specs);
         }
-        other => {
-            return Err(safety::GraphError::InvalidFilter {
-                reason: format!(
-                    "unsupported aggregate scope '{}'; expected returned_nodes, chosen_parent_path, or all_possible_paths",
-                    other
-                ),
-            });
-        }
     }
 
     let rows = execute_aggregation_traversal(&request, path_limit)?;
@@ -57,7 +63,7 @@ pub(crate) fn aggregate_impl(
         .into_iter()
         .filter(|row| row.4 >= request.min_depth)
         .collect::<Vec<_>>();
-    let aggregate_rows = if scope == "chosen_parent_path" {
+    let aggregate_rows = if scope.expands_parent_path() {
         expand_rows_to_parent_path(rows)?
     } else {
         rows
@@ -672,6 +678,20 @@ pub(crate) fn parse_aggregation_specs(
     Ok(specs)
 }
 
+pub(crate) fn parse_aggregate_scope(scope: &str) -> safety::GraphResult<AggregateScope> {
+    match scope {
+        "returned_nodes" => Ok(AggregateScope::ReturnedNodes),
+        "chosen_parent_path" => Ok(AggregateScope::ChosenParentPath),
+        "all_possible_paths" => Ok(AggregateScope::AllPossiblePaths),
+        other => Err(safety::GraphError::InvalidFilter {
+            reason: format!(
+                "unsupported aggregate scope '{}'; expected returned_nodes, chosen_parent_path, or all_possible_paths",
+                other
+            ),
+        }),
+    }
+}
+
 pub(crate) fn parse_aggregate_spec(
     kind: AggregateKind,
     value: &serde_json::Value,
@@ -699,4 +719,35 @@ pub(crate) fn parse_aggregate_spec(
         column,
         alias,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_aggregate_scope_accepts_supported_values() {
+        assert_eq!(
+            parse_aggregate_scope("returned_nodes").expect("returned_nodes should parse"),
+            AggregateScope::ReturnedNodes
+        );
+        assert_eq!(
+            parse_aggregate_scope("chosen_parent_path").expect("chosen_parent_path should parse"),
+            AggregateScope::ChosenParentPath
+        );
+        assert_eq!(
+            parse_aggregate_scope("all_possible_paths").expect("all_possible_paths should parse"),
+            AggregateScope::AllPossiblePaths
+        );
+    }
+
+    #[test]
+    fn parse_aggregate_scope_rejects_unknown_values() {
+        let err = parse_aggregate_scope("parent_path").expect_err("scope should be rejected");
+
+        assert!(matches!(err, safety::GraphError::InvalidFilter { .. }));
+        assert!(err
+            .to_string()
+            .contains("expected returned_nodes, chosen_parent_path, or all_possible_paths"));
+    }
 }

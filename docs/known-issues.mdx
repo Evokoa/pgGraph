@@ -146,7 +146,6 @@ but they do not change core user behavior.
 | Internal sync SQL | Some internal sync queries still interpolate numeric IDs or generated ID lists. | Parameterize where practical or use temp-table cleanup for larger applied ID sets. |
 | Sync mutation coupling | Some edge overlay maintenance relies on caller ordering around node replacement. | Encapsulate node and edge replay behind a typed sync-row operation helper. |
 | Relation lookup helpers | Some internal table lookup helpers can be clearer about missing relations. | Use parameters and explicit no-row handling for relation lookup races. |
-| Aggregation parser shape | Aggregation scope is matched as raw strings in more than one place. | Parse scope once into an enum at the SQL boundary. |
 | Test locality | Some pure Rust helper tests live in a central `unit_tests.rs`. | Move tests beside the modules they exercise while keeping pgrx tests in the pg test module. |
 
 ## Lower-Priority Optimizations
