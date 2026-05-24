@@ -18,6 +18,11 @@ This page documents known alpha limitations, next-update hardening work, and
 lower-priority follow-up items. The list is ranked by expected user impact, not
 by implementation difficulty.
 
+The tracked execution plan for higher-priority open rows is
+`known-issues-completion-plan.md`. This page remains the authoritative issue
+register; the plan records implementation order, test gates, and regression
+risks for the same rows.
+
 Low-level PostgreSQL extension work involves real tradeoffs. Some optimizations
 make a query faster by keeping more data in memory, while others reduce memory
 pressure by doing more work per request. pgGraph has to weigh those choices
@@ -69,38 +74,38 @@ large JSON integers preserve exactness without implicit string/number matches.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Traversal uniqueness | The public `uniqueness` option is parsed but not fully reflected in result semantics. | Implement the advertised behavior or reject/remove unsupported values before the API is documented as stable. |
-| Path aggregation | `all_possible_paths` can clone and materialize path sets aggressively near configured caps. | Preserve documented path-count semantics while reducing avoidable materialization. |
-| Filter model | Legacy raw filters and structured typed filters still have separate paths. | Remove, deprecate, or unify the legacy path so public filter behavior has one source of truth. |
-| Legacy numeric filters | Legacy unsigned filter paths can lose signed values if re-exposed. | Keep signed values out of unsigned-only paths, or remove the legacy public path. |
+| Traversal uniqueness | The public `uniqueness` option is parsed but not fully reflected in result semantics. | Audit accepted values, then either implement tested semantics for each supported value or reject unsupported values before traversal starts. Completion plan: `known-issues-completion-plan.md`. |
+| Path aggregation | `all_possible_paths` can clone and materialize path sets aggressively near configured caps. | Add cap-boundary tests and replace full path-set cloning with bounded accumulation or iterator-style enumeration while preserving documented counts and ordering. Completion plan: `known-issues-completion-plan.md`. |
+| Filter model | Legacy raw filters and structured typed filters still have separate paths. | Route legacy raw filters through the typed condition model, or reject/deprecate shapes that cannot be translated safely. Completion plan: `known-issues-completion-plan.md`. |
+| Legacy numeric filters | Legacy unsigned filter paths can lose signed values if re-exposed. | Keep signed and unsigned numeric paths separated at the type boundary, with tests for negative and large signed values. Completion plan: `known-issues-completion-plan.md`. |
 
 ### SQL Safety and Schema Plumbing
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Dynamic table SQL | Some build queries interpolate catalog-derived table names directly. | Use validated regclass/catalog fragments for identifiers and parameters for values. |
-| Discovery SQL | Some discovery queries still use formatted OIDs or generated `IN (...)` lists. | Standardize on parameters, temp tables, or validated fragments depending on query shape. |
+| Dynamic table SQL | Some build queries interpolate catalog-derived table names directly. | Route table references through validated catalog, `regclass`, or pgrx-quoted identifier helpers, and keep all data values bound as SPI parameters. Completion plan: `known-issues-completion-plan.md`. |
+| Discovery SQL | Some discovery queries still use formatted OIDs or generated `IN (...)` lists. | Replace generated OID/list shapes with parameters, array bindings, temp tables, or validated catalog fragments based on query size and PostgreSQL version support. Completion plan: `known-issues-completion-plan.md`. |
 
 ### Persistence and File Format
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Artifact writes | `.pggraph` writes build a full in-memory artifact buffer. | Move toward direct section writers or streaming writes while keeping load validation strict. |
+| Artifact writes | `.pggraph` writes build a full in-memory artifact buffer. | Stream sections through a dedicated artifact writer while preserving temp-write, fsync, atomic rename, checksum, and reload-validation behavior. Completion plan: `known-issues-completion-plan.md`. |
 
 ### Sync, Jobs, and Operator Semantics
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Truncate handling | Truncate can force a synchronous full-graph scan. | Track table membership, use table epochs, or queue a rebuild instead of scanning every node inline. |
-| Tenant bitmap mutation | Tenant update/delete handling can require broad bitmap work. | Use old and new tenant values from trigger payloads to mutate only affected tenant membership. |
-| Internal scheduler | pgGraph exposes `graph.run_scheduled_maintenance()` and Docker/pg_cron examples, but does not run an always-on internal scheduler. | Keep scheduler ownership explicit through `pg_cron`, Kubernetes CronJobs, systemd timers, or app-side schedulers unless an internal scheduler is added deliberately. |
-| Background job failures | Failure status can be lost if the worker transaction aborts. | Separate job execution and failure-status recording transaction boundaries. |
+| Truncate handling | Truncate can force a synchronous full-graph scan. | Track table membership or epochs, or queue an explicit rebuild, so truncate work is bounded by affected table metadata instead of all nodes. Completion plan: `known-issues-completion-plan.md`. |
+| Tenant bitmap mutation | Tenant update/delete handling can require broad bitmap work. | Carry old and new tenant values through sync payloads and mutate only affected tenant bitmaps, with a visible fallback for older payloads if needed. Completion plan: `known-issues-completion-plan.md`. |
+| Internal scheduler | pgGraph exposes `graph.run_scheduled_maintenance()` and Docker/pg_cron examples, but does not run an always-on internal scheduler. | Keep scheduler ownership external for this hardening pass and document supported targets before considering an internal background-worker scheduler design. Completion plan: `known-issues-completion-plan.md`. |
+| Background job failures | Failure status can be lost if the worker transaction aborts. | Record worker failure status in a separate transaction or independent SPI context after the work transaction aborts, with an idempotent failure path. Completion plan: `known-issues-completion-plan.md`. |
 
 ### Internal Construction and Performance
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Traversal allocations | BFS and path queries allocate full-graph-sized scratch vectors on some requests. | Benchmark sparse visited metadata, reusable scratch buffers, and other allocation strategies. |
+| Traversal allocations | BFS and path queries allocate full-graph-sized scratch vectors on some requests. | Benchmark sparse visited metadata and reusable scratch buffers, then keep dense or sparse paths per graph shape based on measured memory and latency. Completion plan: `known-issues-completion-plan.md`. |
 
 ## P0: Operational Visibility and Resource Predictability
 
@@ -109,7 +114,7 @@ running larger graphs or higher sync volume.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Persistence I/O | Persistence uses synchronous filesystem operations from PostgreSQL backend work. | Preserve durability while improving progress reporting, cancellation awareness, and background-worker ergonomics. |
+| Persistence I/O | Persistence uses synchronous filesystem operations from PostgreSQL backend work. | Preserve synchronous durability while adding progress phases, safe cancellation checks, and clearer background-worker status around write, fsync, reload, and failure phases. Completion plan: `known-issues-completion-plan.md`. |
 
 ## P1: Query Performance Follow-Ups
 
@@ -118,16 +123,16 @@ not changes to the public SQL contract.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Traversal internals | Some traversal paths still have avoidable per-query or per-node allocation. | Reuse scratch buffers, use sparse metadata where it wins, and benchmark each change. |
-| DFS neighbor expansion | DFS can eagerly allocate neighbor vectors. | Use iterator-based expansion on the DFS path. |
-| Edge overlays | Deleted overlay checks and overlay construction can add hot-path hash lookups. | Use cache-friendly overlay representations or maintain oriented overlays when buffers grow. |
-| Connected components | Component helpers recompute sizes and can materialize full row vectors before slicing. | Reuse component size data and delay row materialization until after filtering, sorting, and pagination where possible. |
-| Reverse graph build | Reversing a CSR graph can allocate intermediate edge structs and sort them. | Use a linear two-pass reverse build when measurements show build-time memory pressure. |
-| Build-time SPI setup | Some build and discovery paths open repeated SPI contexts or run per-table metadata queries. | Batch metadata reads and reuse SPI contexts where the query shape is straightforward. |
-| Source search recheck | Search still verifies source-row matches in Rust after SQL candidate filtering and can allocate per candidate row. | Reduce per-row allocation while preserving SQL/Rust predicate parity. |
-| Hydration setup | Batched hydration can resolve all registered table OIDs before knowing which tables are needed. | Resolve only the table OIDs needed by the requested page and reduce SPI context churn. |
-| Aggregation hydration | Some aggregation paths clone node IDs, JSON values, roots, and table names for lookup ownership. | Use borrowed lookup shapes internally where pgrx row lifetimes allow it. |
-| Resolution delta lookups | Post-build sync inserts can accumulate in a delta structure that is scanned before the finalized index. | Add an indexed delta map if sync-delta growth becomes material. |
+| Traversal internals | Some traversal paths still have avoidable per-query or per-node allocation. | Benchmark sparse metadata and reusable scratch buffers, keeping the dense path where it remains faster. Completion plan: `known-issues-completion-plan.md`. |
+| DFS neighbor expansion | DFS can eagerly allocate neighbor vectors. | Move DFS expansion to iterators while preserving deterministic neighbor order and traversal results. Completion plan: `known-issues-completion-plan.md`. |
+| Edge overlays | Deleted overlay checks and overlay construction can add hot-path hash lookups. | Add cache-friendly or oriented overlay representations only after overlay-size benchmarks define the threshold where they win. Completion plan: `known-issues-completion-plan.md`. |
+| Connected components | Component helpers recompute sizes and can materialize full row vectors before slicing. | Reuse component-size data and delay row materialization until after filtering, sorting, and pagination where possible. Completion plan: `known-issues-completion-plan.md`. |
+| Reverse graph build | Reversing a CSR graph can allocate intermediate edge structs and sort them. | Add a linear two-pass reverse CSR builder only if build-memory benchmarks justify another code path. Completion plan: `known-issues-completion-plan.md`. |
+| Build-time SPI setup | Some build and discovery paths open repeated SPI contexts or run per-table metadata queries. | Batch metadata reads and reuse SPI contexts where query shape remains straightforward and errors stay precise. Completion plan: `known-issues-completion-plan.md`. |
+| Source search recheck | Search still verifies source-row matches in Rust after SQL candidate filtering and can allocate per candidate row. | Reduce per-candidate allocation while preserving SQL/Rust predicate parity through shared fixtures. Completion plan: `known-issues-completion-plan.md`. |
+| Hydration setup | Batched hydration can resolve all registered table OIDs before knowing which tables are needed. | Resolve only table OIDs needed by the requested page and reduce SPI context churn. Completion plan: `known-issues-completion-plan.md`. |
+| Aggregation hydration | Some aggregation paths clone node IDs, JSON values, roots, and table names for lookup ownership. | Use borrowed lookup shapes internally where pgrx row lifetimes allow it, with parity tests for result JSON. Completion plan: `known-issues-completion-plan.md`. |
+| Resolution delta lookups | Post-build sync inserts can accumulate in a delta structure that is scanned before the finalized index. | Add an indexed delta map only if sync-delta growth benchmarks show material lookup cost. Completion plan: `known-issues-completion-plan.md`. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 
