@@ -81,13 +81,11 @@ fn component_stats() -> Result<
                 .unwrap_or_else(|err| err.report());
 
             // Count isolated nodes (component_size == 1)
-            let mut sizes = std::collections::HashMap::new();
-            for &comp in &cc_result.component {
-                if comp != u32::MAX {
-                    *sizes.entry(comp).or_insert(0u32) += 1;
-                }
-            }
-            let isolated = sizes.values().filter(|&&v| v == 1).count() as i32;
+            let isolated = cc_result
+                .component_sizes
+                .values()
+                .filter(|&&v| v == 1)
+                .count() as i32;
             let active = eng.node_store.active_count() as i32;
 
             (
@@ -133,27 +131,17 @@ fn components(
             let cc_result = eng
                 .connected_components()
                 .unwrap_or_else(|err| err.report());
-            let mut sizes = std::collections::HashMap::new();
-            for &comp in &cc_result.component {
-                if comp != u32::MAX {
-                    *sizes.entry(comp).or_insert(0i64) += 1;
-                }
-            }
             let row_offset = usize_from_nonnegative(row_offset, "row_offset")
                 .unwrap_or_else(|err| err.report());
             let max_rows =
                 usize_from_nonnegative(max_rows, "max_rows").unwrap_or_else(|err| err.report());
-            let mut rows = sizes
+            connected_components::component_size_rows(&cc_result)
                 .into_iter()
-                .map(|(component_id, component_size)| (component_id as i64, component_size))
-                .collect::<Vec<_>>();
-            rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-            rows.into_iter()
                 .enumerate()
                 .skip(row_offset)
                 .take(max_rows)
                 .map(|(idx, (component_id, component_size))| {
-                    (component_id, component_size, (idx + 1) as i32)
+                    (component_id as i64, component_size as i64, (idx + 1) as i32)
                 })
                 .collect::<Vec<_>>()
         });
@@ -259,21 +247,12 @@ fn isolated_nodes(
             let cc_result = eng
                 .connected_components()
                 .unwrap_or_else(|err| err.report());
-            let rows = connected_components::to_component_rows(&cc_result, &eng.node_store);
-            let mut rows = rows
-                .into_iter()
-                .filter(|row| row.component_size == 1)
-                .collect::<Vec<_>>();
-            rows.sort_by(|left, right| {
-                left.component_id
-                    .cmp(&right.component_id)
-                    .then_with(|| left.node_table.0.cmp(&right.node_table.0))
-                    .then_with(|| left.node_id.cmp(&right.node_id))
-            });
-            rows.into_iter()
-                .skip(row_offset)
-                .take(max_rows)
-                .collect::<Vec<_>>()
+            connected_components::isolated_rows_page(
+                &cc_result,
+                &eng.node_store,
+                row_offset,
+                max_rows,
+            )
         });
         let rows = hydrate_component_page(page, hydrate).unwrap_or_else(|err| err.report());
 

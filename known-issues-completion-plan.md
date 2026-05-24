@@ -457,8 +457,6 @@ Tracked P1 rows and specific plans:
   buffers; keep the current dense path for cases where it wins.
 - `Edge overlays`: benchmark cache-friendly overlay sets or oriented overlays
   once overlay buffers grow past a measured threshold.
-- `Connected components`: reuse component-size data and delay row materializing
-  until after filtering, sorting, and pagination.
 - `Reverse graph build`: add a linear two-pass reverse CSR builder only if
   build-time memory measurements justify the additional code path.
 - `Build-time SPI setup`: batch metadata reads and reuse SPI contexts where
@@ -483,6 +481,16 @@ Completed P1 rows:
   duplicate checks only when inserted overlay edges exist. Pre/post timing was
   recorded in `/private/tmp/pggraph-dfs-neighbor-expansion-pre-benchmark.md`
   and `/private/tmp/pggraph-dfs-neighbor-expansion-post-benchmark.md`.
+- `Connected components`: completed in
+  `perf(components): reuse component size results`. Component computation now
+  stores active-node counts by component once. `component_stats()` and
+  `components()` reuse those sizes, while `component()` and `isolated_nodes()`
+  filter, sort, and page node indices before constructing component rows for
+  hydration. Regression note: component results retain one size map that used
+  to be recomputed by multiple helpers; paged helper calls allocate fewer row
+  objects before hydration. Pre/post timing was recorded in
+  `/private/tmp/pggraph-connected-components-pre-benchmark.md` and
+  `/private/tmp/pggraph-connected-components-post-benchmark.md`.
 
 Completion criteria:
 

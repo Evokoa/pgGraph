@@ -31,16 +31,11 @@ fn largest_component_id() -> safety::GraphResult<i64> {
     ENGINE.with(|e| {
         let eng = e.borrow();
         let cc_result = eng.connected_components()?;
-        let mut sizes = std::collections::HashMap::new();
-        for &comp in &cc_result.component {
-            if comp != u32::MAX {
-                *sizes.entry(comp).or_insert(0i64) += 1;
-            }
-        }
-        sizes
-            .into_iter()
-            .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
-            .map(|(component_id, _)| component_id as i64)
+        cc_result
+            .component_sizes
+            .iter()
+            .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
+            .map(|(&component_id, _)| component_id as i64)
             .ok_or(safety::GraphError::NotBuilt)
     })
 }
@@ -65,18 +60,13 @@ fn component_rows(
     let page = ENGINE.with(|e| {
         let eng = e.borrow();
         let cc_result = eng.connected_components()?;
-        let rows = connected_components::to_component_rows(&cc_result, &eng.node_store);
-        let mut rows = rows
-            .into_iter()
-            .filter(|row| row.component_id as i64 == component_id)
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| {
-            left.node_table
-                .0
-                .cmp(&right.node_table.0)
-                .then_with(|| left.node_id.cmp(&right.node_id))
-        });
-        Ok::<_, safety::GraphError>(rows.into_iter().skip(offset).take(limit).collect())
+        Ok::<_, safety::GraphError>(connected_components::component_rows_page(
+            &cc_result,
+            &eng.node_store,
+            component_id as u32,
+            offset,
+            limit,
+        ))
     })?;
 
     hydrate_component_page(page, hydrate)

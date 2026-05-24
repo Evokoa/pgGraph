@@ -72,6 +72,7 @@ remaining sections below are still open work.
 | Artifact writes | `.pggraph` writes now stream fixed sections, primary-key offsets, and primary-key bytes through a seekable artifact writer that backpatches the header and CRC while preserving temp-write, fsync, atomic rename, and reload-validation behavior. |
 | Persistence I/O | Background build and maintenance jobs now expose persistence write/fsync and reload-validation phases in status rows, while artifact writes retain synchronous durability and check PostgreSQL interrupts during long section loops. |
 | DFS neighbor expansion | DFS traversal now expands base and overlay neighbors in reverse stack order without materializing a full per-node neighbor vector, while preserving overlay de-duplication and traversal result order. |
+| Connected components | Component computation now stores component sizes once, and component helper APIs page matching rows before hydration instead of materializing every node row first. |
 
 ### Data Correctness and Corruption
 
@@ -136,7 +137,6 @@ not changes to the public SQL contract.
 |---|---|---|
 | Traversal internals | Some traversal paths still have avoidable per-query or per-node allocation. | Benchmark sparse metadata and reusable scratch buffers, keeping the dense path where it remains faster. Completion plan: `known-issues-completion-plan.md`. |
 | Edge overlays | Deleted overlay checks and overlay construction can add hot-path hash lookups. | Add cache-friendly or oriented overlay representations only after overlay-size benchmarks define the threshold where they win. Completion plan: `known-issues-completion-plan.md`. |
-| Connected components | Component helpers recompute sizes and can materialize full row vectors before slicing. | Reuse component-size data and delay row materialization until after filtering, sorting, and pagination where possible. Completion plan: `known-issues-completion-plan.md`. |
 | Reverse graph build | Reversing a CSR graph can allocate intermediate edge structs and sort them. | Add a linear two-pass reverse CSR builder only if build-memory benchmarks justify another code path. Completion plan: `known-issues-completion-plan.md`. |
 | Build-time SPI setup | Some build and discovery paths open repeated SPI contexts or run per-table metadata queries. | Batch metadata reads and reuse SPI contexts where query shape remains straightforward and errors stay precise. Completion plan: `known-issues-completion-plan.md`. |
 | Source search recheck | Search still verifies source-row matches in Rust after SQL candidate filtering and can allocate per candidate row. | Reduce per-candidate allocation while preserving SQL/Rust predicate parity through shared fixtures. Completion plan: `known-issues-completion-plan.md`. |
