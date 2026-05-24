@@ -5,7 +5,7 @@ use crate::catalog::{
 };
 use crate::{acl, safety, types};
 use pgrx::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) fn hydrate_node(
     table_oid: u32,
@@ -57,19 +57,28 @@ pub(crate) fn hydrate_node(
 pub(crate) fn hydrate_nodes(
     rows: &[types::TraversalResult],
 ) -> safety::GraphResult<HashMap<(u32, String), pgrx::JsonB>> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
-    let mut tables_by_oid = HashMap::new();
-    for table in &tables {
-        let oid = table_oid_from_name(&table.table_name)?;
-        tables_by_oid.insert(oid, table);
-    }
-
     let mut ids_by_table: HashMap<u32, Vec<String>> = HashMap::new();
     for row in rows {
         ids_by_table
             .entry(row.node_table.0)
             .or_default()
             .push(row.node_id.clone());
+    }
+    if ids_by_table.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let needed_table_oids = ids_by_table.keys().copied().collect::<HashSet<_>>();
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let mut tables_by_oid = HashMap::with_capacity(needed_table_oids.len());
+    for table in &tables {
+        let oid = table_oid_from_name(&table.table_name)?;
+        if needed_table_oids.contains(&oid) {
+            tables_by_oid.insert(oid, table);
+            if tables_by_oid.len() == needed_table_oids.len() {
+                break;
+            }
+        }
     }
 
     let mut hydrated = HashMap::new();

@@ -461,8 +461,6 @@ Tracked P1 rows and specific plans:
   query shape stays simple and error reporting remains clear.
 - `Source search recheck`: reduce per-candidate allocation while preserving
   SQL/Rust predicate parity.
-- `Hydration setup`: resolve only table OIDs needed by the requested page and
-  reduce SPI context churn.
 - `Aggregation hydration`: use borrowed lookup shapes internally where pgrx row
   lifetimes allow it.
 - `Resolution delta lookups`: add an indexed delta map only if sync-delta
@@ -497,6 +495,15 @@ Completed P1 rows:
   offset cursor and fixed-size output arrays. Pre/post timing was recorded in
   `/private/tmp/pggraph-reverse-graph-build-pre-benchmark.md` and
   `/private/tmp/pggraph-reverse-graph-build-post-benchmark.md`.
+- `Hydration setup`: completed in
+  `perf(hydration): resolve only requested table oids`. Batched hydration now
+  groups the requested rows by table before reading registered table metadata,
+  then resolves and stores only table OIDs that appear in the hydration page.
+  Regression note: empty hydration pages skip catalog reads, and normal pages
+  add one small needed-OID set while avoiding OID resolution for unrelated
+  registered tables. Pre/post timing was recorded in
+  `/private/tmp/pggraph-hydration-setup-pre-benchmark.md` and
+  `/private/tmp/pggraph-hydration-setup-post-benchmark.md`.
 
 Completion criteria:
 

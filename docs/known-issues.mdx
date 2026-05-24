@@ -74,6 +74,7 @@ remaining sections below are still open work.
 | DFS neighbor expansion | DFS traversal now expands base and overlay neighbors in reverse stack order without materializing a full per-node neighbor vector, while preserving overlay de-duplication and traversal result order. |
 | Connected components | Component computation now stores component sizes once, and component helper APIs page matching rows before hydration instead of materializing every node row first. |
 | Reverse graph build | Reverse CSR construction now uses a linear two-pass count/fill builder, avoiding an intermediate reversed `RawEdge` vector and sort. |
+| Hydration setup | Batched hydration now groups the requested page first and resolves only registered table OIDs that are actually present in that page. |
 
 ### Data Correctness and Corruption
 
@@ -140,7 +141,6 @@ not changes to the public SQL contract.
 | Edge overlays | Deleted overlay checks and overlay construction can add hot-path hash lookups. | Add cache-friendly or oriented overlay representations only after overlay-size benchmarks define the threshold where they win. Completion plan: `known-issues-completion-plan.md`. |
 | Build-time SPI setup | Some build and discovery paths open repeated SPI contexts or run per-table metadata queries. | Batch metadata reads and reuse SPI contexts where query shape remains straightforward and errors stay precise. Completion plan: `known-issues-completion-plan.md`. |
 | Source search recheck | Search still verifies source-row matches in Rust after SQL candidate filtering and can allocate per candidate row. | Reduce per-candidate allocation while preserving SQL/Rust predicate parity through shared fixtures. Completion plan: `known-issues-completion-plan.md`. |
-| Hydration setup | Batched hydration can resolve all registered table OIDs before knowing which tables are needed. | Resolve only table OIDs needed by the requested page and reduce SPI context churn. Completion plan: `known-issues-completion-plan.md`. |
 | Aggregation hydration | Some aggregation paths clone node IDs, JSON values, roots, and table names for lookup ownership. | Use borrowed lookup shapes internally where pgrx row lifetimes allow it, with parity tests for result JSON. Completion plan: `known-issues-completion-plan.md`. |
 | Resolution delta lookups | Post-build sync inserts can accumulate in a delta structure that is scanned before the finalized index. | Add an indexed delta map only if sync-delta growth benchmarks show material lookup cost. Completion plan: `known-issues-completion-plan.md`. |
 
