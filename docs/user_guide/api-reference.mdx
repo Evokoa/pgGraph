@@ -529,6 +529,9 @@ graph.traverse(
 ```
 
 `start_tables[i]` pairs with `start_ids[i]`.
+With `uniqueness := 'node_global'`, duplicate reached nodes are removed across
+the merged multi-start result before final pagination. With
+`uniqueness := 'node_per_root'`, a reached node may appear once per root.
 
 ### `graph.traverse()` node-ref array
 
@@ -581,6 +584,8 @@ RETURNS TABLE (
 ```
 
 Searches start nodes, then traverses from verified matches.
+`uniqueness` has the same merged-result behavior as multi-start
+`graph.traverse()`.
 
 ### `graph.format_path()`
 

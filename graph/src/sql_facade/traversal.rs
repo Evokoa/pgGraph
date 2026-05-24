@@ -45,7 +45,7 @@ fn traverse(
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let tenant_scope =
             resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
-        let (direction, strategy, uniqueness) =
+        let (direction, strategy, _uniqueness) =
             crate::sql_traversal::validate_traverse_options(
                 direction,
                 tenant_scope.as_deref(),
@@ -63,7 +63,6 @@ fn traverse(
             tenant: tenant_scope.as_deref(),
             direction,
             strategy,
-            uniqueness,
             include_start,
             hydrate,
             limit: max_rows,
@@ -154,7 +153,6 @@ fn traverse_many(
                 tenant: tenant_scope.as_deref(),
                 direction,
                 strategy,
-                uniqueness,
                 include_start,
                 hydrate,
                 limit: max_rows,
@@ -168,6 +166,7 @@ fn traverse_many(
             candidates.append(&mut start_candidates);
         }
         sort_traverse_candidates_for_many(&mut candidates);
+        apply_traversal_uniqueness(&mut candidates, uniqueness);
         let rows =
             paginate_and_format_traverse_candidates(candidates, hydrate, row_offset, max_rows)
                 .unwrap_or_else(|err| err.report());

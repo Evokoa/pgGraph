@@ -124,6 +124,155 @@ fn multi_start_traverse_applies_limit_after_global_merge() {
 }
 
 #[pg_test]
+fn multi_start_traverse_honors_node_global_uniqueness() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+             VALUES ('u3', 'Carol', 29)",
+    )
+    .expect("insert converging user failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+             VALUES ('f2', 'u1', 'u3'), ('f3', 'u2', 'u3')",
+    )
+    .expect("insert converging friendships failed");
+    Spi::run("UPDATE public.graph_test_users_pgtest SET name = 'Root' WHERE id IN ('u1', 'u2')")
+        .expect("set searchable roots failed");
+    build_friendship_fixture_graph();
+
+    let counts = Spi::connect(|client| {
+        let per_root = client
+            .select(
+                "SELECT count(*)::bigint
+                     FROM graph.traverse(
+                        ARRAY[
+                            'graph_test_users_pgtest'::regclass,
+                            'graph_test_users_pgtest'::regclass
+                        ],
+                        ARRAY['u1'::text, 'u2'::text],
+                        max_depth := 1,
+                        uniqueness := 'node_per_root',
+                        include_start := false,
+                        hydrate := false
+                     )
+                     WHERE node_id = 'u3'",
+                None,
+                &[],
+            )
+            .expect("node_per_root traversal failed")
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let global = client
+            .select(
+                "SELECT count(*)::bigint
+                     FROM graph.traverse(
+                        ARRAY[
+                            'graph_test_users_pgtest'::regclass,
+                            'graph_test_users_pgtest'::regclass
+                        ],
+                        ARRAY['u1'::text, 'u2'::text],
+                        max_depth := 1,
+                        uniqueness := 'node_global',
+                        include_start := false,
+                        hydrate := false
+                     )
+                     WHERE node_id = 'u3'",
+                None,
+                &[],
+            )
+            .expect("node_global traversal failed")
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let default_global = client
+            .select(
+                "SELECT count(*)::bigint
+                     FROM graph.traverse(
+                        ARRAY[
+                            'graph_test_users_pgtest'::regclass,
+                            'graph_test_users_pgtest'::regclass
+                        ],
+                        ARRAY['u1'::text, 'u2'::text],
+                        max_depth := 1,
+                        include_start := false,
+                        hydrate := false
+                     )
+                     WHERE node_id = 'u3'",
+                None,
+                &[],
+            )
+            .expect("default traversal failed")
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let search_per_root = client
+            .select(
+                "SELECT count(*)::bigint
+                     FROM graph.traverse_search(
+                        'name',
+                        'Root',
+                        table_filter := 'graph_test_users_pgtest'::regclass,
+                        search_mode := 'exact',
+                        max_depth := 1,
+                        uniqueness := 'node_per_root',
+                        include_start := false,
+                        hydrate := false
+                     )
+                     WHERE node_id = 'u3'",
+                None,
+                &[],
+            )
+            .expect("node_per_root traverse_search failed")
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let search_global = client
+            .select(
+                "SELECT count(*)::bigint
+                     FROM graph.traverse_search(
+                        'name',
+                        'Root',
+                        table_filter := 'graph_test_users_pgtest'::regclass,
+                        search_mode := 'exact',
+                        max_depth := 1,
+                        uniqueness := 'node_global',
+                        include_start := false,
+                        hydrate := false
+                     )
+                     WHERE node_id = 'u3'",
+                None,
+                &[],
+            )
+            .expect("node_global traverse_search failed")
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((
+            per_root,
+            global,
+            default_global,
+            search_per_root,
+            search_global,
+        ))
+    })
+    .expect("multi-start uniqueness counts failed");
+    let (
+        per_root_count,
+        global_count,
+        default_count,
+        search_per_root_count,
+        search_global_count,
+    ) = counts;
+
+    assert_eq!(per_root_count, 2);
+    assert_eq!(global_count, 1);
+    assert_eq!(default_count, 1);
+    assert_eq!(search_per_root_count, 2);
+    assert_eq!(search_global_count, 1);
+}
+
+#[pg_test]
 fn format_path_formats_traversal_path_and_edge_path() {
     let formatted = Spi::get_one::<String>(
         "SELECT graph.format_path(

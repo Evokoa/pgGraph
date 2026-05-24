@@ -96,6 +96,13 @@ hydration filters, then sorts by depth, node table, and node ID for a single
 root before applying `row_offset` and `max_rows`. Multi-start traversal sorts by
 root table, root ID, depth, node table, and node ID before pagination.
 
+`uniqueness := 'node_global'` returns each reached node at most once across the
+merged multi-start result set. When more than one root reaches the same node,
+the row that sorts first by the multi-start ordering is kept. Use
+`uniqueness := 'node_per_root'` when the same reached node should be returned
+once for each root that found it. For a single start node, both modes produce
+the same node-level result set.
+
 ### Direction
 
 | Direction | Behavior |

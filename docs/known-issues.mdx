@@ -60,6 +60,7 @@ remaining sections below are still open work.
 | Node reference input | Traversal node-reference parsing now accepts normal JSON arrays and objects while preserving `graph.node_ref_string()` text compatibility. |
 | Native identifier quoting | Dynamic identifier fragments now use pgrx's PostgreSQL-backed identifier quoting outside pure Rust tests. |
 | PostgreSQL API boundary wrappers | Background-worker notify PID access now goes through a small wrapper, and remaining direct `pg_sys` usage is limited to extension ABI, ACL, OID, mmap, and PostgreSQL data-directory boundaries. |
+| Traversal uniqueness | Multi-start `graph.traverse()` and `graph.traverse_search()` now honor `node_global` by de-duplicating reached nodes across roots before final pagination, while `node_per_root` keeps per-root results. |
 
 ### Data Correctness and Corruption
 
@@ -74,7 +75,6 @@ large JSON integers preserve exactness without implicit string/number matches.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Traversal uniqueness | The public `uniqueness` option is parsed but not fully reflected in result semantics. | Audit accepted values, then either implement tested semantics for each supported value or reject unsupported values before traversal starts. Completion plan: `known-issues-completion-plan.md`. |
 | Path aggregation | `all_possible_paths` can clone and materialize path sets aggressively near configured caps. | Add cap-boundary tests and replace full path-set cloning with bounded accumulation or iterator-style enumeration while preserving documented counts and ordering. Completion plan: `known-issues-completion-plan.md`. |
 | Filter model | Legacy raw filters and structured typed filters still have separate paths. | Route legacy raw filters through the typed condition model, or reject/deprecate shapes that cannot be translated safely. Completion plan: `known-issues-completion-plan.md`. |
 | Legacy numeric filters | Legacy unsigned filter paths can lose signed values if re-exposed. | Keep signed and unsigned numeric paths separated at the type boundary, with tests for negative and large signed values. Completion plan: `known-issues-completion-plan.md`. |

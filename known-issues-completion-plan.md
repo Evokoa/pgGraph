@@ -61,30 +61,34 @@ surface.
 ### Traversal Uniqueness
 
 Tracked row: `Traversal uniqueness`
+Status: completed in `fix(traversal): honor global uniqueness`
 
 Plan:
 
-- Audit accepted `uniqueness` values at the SQL option parser and the traversal
-  engine boundary.
-- Choose one stable contract before implementation: either implement each
-  accepted value, or reject unsupported values before traversal starts.
-- Prefer explicit rejection for values that are parsed but not documented in a
-  tested example. Preserve any value already shown in docs or examples by
-  implementing its semantics.
-- Add pgrx tests for converging paths and multi-root traversals so `node_global`
-  and any per-root/path semantics are distinguishable.
+- Accepted values were audited at the SQL option parser: `node_global` and
+  `node_per_root` are accepted; other values are rejected before traversal.
+- Multi-start `graph.traverse()` and `graph.traverse_search()` now apply
+  `node_global` after deterministic merged-result sorting and before final
+  pagination.
+- `node_per_root` remains the mode for returning the same reached node once per
+  root.
+- pgrx coverage now uses converging roots for both multi-start traversal and
+  `traverse_search`.
 
 Regression risk:
 
-- Implementing additional uniqueness modes may allocate more visited state per
-  root or per path.
-- Rejection is safer for memory and speed, but can break callers already using
-  parsed-but-unsupported values.
+- `node_global` allocates a `HashSet` of reached node identities for merged
+  multi-start results. This is proportional to the already-materialized result
+  page candidates and avoids adding per-root traversal state.
+- Default multi-start behavior now removes duplicate reached nodes before final
+  pagination because the public default is `node_global`.
 
 Completion criteria:
 
 - Every accepted `uniqueness` value either changes result semantics in a tested
   way or fails with a stable SQLSTATE and documented message.
+- Completed with pgrx coverage for `node_global`, `node_per_root`, and the
+  default multi-start mode.
 
 ### Path Aggregation
 

@@ -197,7 +197,7 @@ fn traverse_search(
         )
         .collect::<Vec<_>>();
 
-        let mut rows = Vec::new();
+        let mut candidates = Vec::new();
         for (root_table, root_id, _match_type, _score, verified, _node, _node_table_name) in starts
         {
             if !verified {
@@ -213,7 +213,6 @@ fn traverse_search(
                 tenant: tenant_scope.as_deref(),
                 direction,
                 strategy,
-                uniqueness,
                 include_start,
                 hydrate,
                 limit: max_rows,
@@ -222,18 +221,15 @@ fn traverse_search(
                 max_frontier: config::MAX_FRONTIER.get(),
                 filter_condition: None,
             };
-            let mut start_rows = execute_traverse_rows(&request).unwrap_or_else(|err| err.report());
-            rows.append(&mut start_rows);
+            let mut start_candidates =
+                execute_traverse_candidates(&request).unwrap_or_else(|err| err.report());
+            candidates.append(&mut start_candidates);
         }
-        rows.sort_by(|left, right| {
-            left.0
-                .to_u32()
-                .cmp(&right.0.to_u32())
-                .then_with(|| left.1.cmp(&right.1))
-                .then_with(|| left.4.cmp(&right.4))
-                .then_with(|| left.2.to_u32().cmp(&right.2.to_u32()))
-                .then_with(|| left.3.cmp(&right.3))
-        });
+        sort_traverse_candidates_for_many(&mut candidates);
+        apply_traversal_uniqueness(&mut candidates, uniqueness);
+        let rows =
+            paginate_and_format_traverse_candidates(candidates, hydrate, row_offset, max_rows)
+                .unwrap_or_else(|err| err.report());
         TableIterator::new(rows)
     })
 }

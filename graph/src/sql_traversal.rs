@@ -69,7 +69,6 @@ pub(crate) fn execute_traverse_candidates(
     request: &TraverseRequest<'_>,
 ) -> safety::GraphResult<Vec<TraverseCandidate>> {
     acl::check_table_acl(request.root_table.to_u32())?;
-    let _uniqueness = request.uniqueness;
 
     let table_filter = request
         .node_tables
@@ -178,6 +177,20 @@ pub(crate) fn sort_traverse_candidates_for_many(rows: &mut [TraverseCandidate]) 
             .then_with(|| left.row.depth.cmp(&right.row.depth))
             .then_with(|| left.row.node_table.cmp(&right.row.node_table))
             .then_with(|| left.row.node_id.cmp(&right.row.node_id))
+    });
+}
+
+pub(crate) fn apply_traversal_uniqueness(
+    candidates: &mut Vec<TraverseCandidate>,
+    uniqueness: types::TraversalUniqueness,
+) {
+    if uniqueness == types::TraversalUniqueness::NodePerRoot {
+        return;
+    }
+
+    let mut seen = HashSet::new();
+    candidates.retain(|candidate| {
+        seen.insert((candidate.row.node_table.0, candidate.row.node_id.clone()))
     });
 }
 

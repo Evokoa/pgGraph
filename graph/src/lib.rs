@@ -68,9 +68,9 @@ use sql_sync::{
     install_sync_triggers, max_sync_log_id, pending_sync_rows, resolve_tenant_scope,
 };
 use sql_traversal::{
-    canonical_node_ref_string, execute_traverse_candidates, execute_traverse_rows,
-    format_path_value, paginate_and_format_traverse_candidates, sort_traverse_candidates_for_many,
-    usize_from_nonnegative,
+    apply_traversal_uniqueness, canonical_node_ref_string, execute_traverse_candidates,
+    execute_traverse_rows, format_path_value, paginate_and_format_traverse_candidates,
+    sort_traverse_candidates_for_many, usize_from_nonnegative,
 };
 
 #[cfg(feature = "pg_test")]

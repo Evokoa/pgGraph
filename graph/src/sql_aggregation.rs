@@ -506,7 +506,6 @@ pub(crate) fn execute_aggregation_traversal(
             tenant: None,
             direction: request.direction,
             strategy: types::TraversalStrategy::Bfs,
-            uniqueness: types::TraversalUniqueness::NodeGlobal,
             include_start: true,
             hydrate: true,
             limit: limit.min(i32::MAX as usize) as i32,

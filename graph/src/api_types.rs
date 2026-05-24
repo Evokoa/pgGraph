@@ -1,6 +1,6 @@
 //! Shared SQL-facing row, request, and result types.
 
-use crate::types::{PathCoordinate, TraversalDirection, TraversalStrategy, TraversalUniqueness};
+use crate::types::{PathCoordinate, TraversalDirection, TraversalStrategy};
 use pgrx::prelude::*;
 
 pub(crate) type TraverseRow = (
@@ -84,7 +84,6 @@ pub(crate) struct TraverseRequest<'a> {
     pub(crate) tenant: Option<&'a str>,
     pub(crate) direction: TraversalDirection,
     pub(crate) strategy: TraversalStrategy,
-    pub(crate) uniqueness: TraversalUniqueness,
     pub(crate) include_start: bool,
     pub(crate) hydrate: bool,
     pub(crate) limit: i32,
