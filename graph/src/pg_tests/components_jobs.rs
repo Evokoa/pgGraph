@@ -140,6 +140,19 @@ fn build_status_reads_durable_concurrent_job_rows() {
         sync_mode: "manual".to_string(),
     };
     super::update_build_job_started(&build_id).expect("mark build job running failed");
+    super::update_build_job_progress(&build_id, "persisting", "writing and fsyncing graph artifact")
+        .expect("mark build job progress failed");
+    let progress_visible = Spi::get_one::<bool>(&format!(
+        "SELECT status = 'running'
+                AND progress_phase = 'persisting'
+                AND progress_message = 'writing and fsyncing graph artifact'
+         FROM graph._build_jobs
+         WHERE build_id = {}",
+        super::sql_literal(&build_id)
+    ))
+    .expect("build progress status failed")
+    .unwrap_or(false);
+    assert!(progress_visible);
     super::update_build_job_completed(&build_id, &result).expect("mark build job completed failed");
 
     let completed = Spi::get_one::<bool>(&format!(
@@ -198,6 +211,23 @@ fn maintenance_status_reads_durable_job_rows() {
         vacuum_time_ms: 2.5,
     };
     super::update_maintenance_job_started(&job_id).expect("mark maintenance job running failed");
+    super::update_maintenance_job_progress(
+        &job_id,
+        "validating_persistence",
+        "validating persisted graph artifact",
+    )
+    .expect("mark maintenance job progress failed");
+    let progress_visible = Spi::get_one::<bool>(&format!(
+        "SELECT status = 'running'
+                AND progress_phase = 'validating_persistence'
+                AND progress_message = 'validating persisted graph artifact'
+         FROM graph._maintenance_jobs
+         WHERE job_id = {}",
+        super::sql_literal(&job_id)
+    ))
+    .expect("maintenance progress status failed")
+    .unwrap_or(false);
+    assert!(progress_visible);
     super::update_maintenance_job_completed(&job_id, &result)
         .expect("mark maintenance job completed failed");
 

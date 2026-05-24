@@ -22,12 +22,29 @@ pub(crate) fn build_lock_query() -> String {
     format!("SELECT pg_try_advisory_xact_lock({BUILD_LOCK_CLASS_ID}, {BUILD_LOCK_OBJECT_ID})")
 }
 
+pub(crate) type ProgressCallback<'a> =
+    dyn FnMut(&'static str, &'static str) -> safety::GraphResult<()> + 'a;
+
+fn report_progress(
+    progress: &mut ProgressCallback<'_>,
+    phase: &'static str,
+    message: &'static str,
+) -> safety::GraphResult<()> {
+    progress(phase, message)
+}
+
 fn persist_and_reload_engine(
     operation: &str,
     source: &engine::Engine,
+    progress: &mut ProgressCallback<'_>,
 ) -> safety::GraphResult<engine::Engine> {
     let path = persistence::graph_file_path()?;
-    persistence::write_graph_file(source, &path).map_err(|err| {
+    report_progress(
+        progress,
+        "persisting",
+        "writing and fsyncing graph artifact",
+    )?;
+    persistence::write_graph_file_with_interrupt_checks(source, &path).map_err(|err| {
         safety::GraphError::Internal(format!("graph.{operation}(): persistence failed: {err}"))
     })?;
 
@@ -40,6 +57,11 @@ fn persist_and_reload_engine(
         file_size
     );
 
+    report_progress(
+        progress,
+        "validating_persistence",
+        "validating persisted graph artifact",
+    )?;
     let mut loaded = persistence::load_graph_file(&path).map_err(|err| {
         safety::GraphError::Internal(format!(
             "graph.{operation}(): persisted mmap reload failed: {err}"
@@ -58,6 +80,28 @@ fn persist_and_reload_engine(
 }
 
 pub(crate) fn execute_build(force_persist: bool) -> safety::GraphResult<BuildExecutionResult> {
+    let mut progress = |_, _| Ok(());
+    execute_build_with_progress(force_persist, &mut progress)
+}
+
+pub(crate) fn execute_build_with_progress(
+    force_persist: bool,
+    progress: &mut ProgressCallback<'_>,
+) -> safety::GraphResult<BuildExecutionResult> {
+    execute_build_inner(
+        force_persist,
+        "building",
+        "building graph from registered source tables",
+        progress,
+    )
+}
+
+fn execute_build_inner(
+    force_persist: bool,
+    build_phase: &'static str,
+    build_message: &'static str,
+    progress: &mut ProgressCallback<'_>,
+) -> safety::GraphResult<BuildExecutionResult> {
     let start = std::time::Instant::now();
     let sync_mode = current_sync_mode()?;
 
@@ -79,6 +123,7 @@ pub(crate) fn execute_build(force_persist: bool) -> safety::GraphResult<BuildExe
     check_build_acls_result(&tables, &edges)?;
     let force_read_only = guard_build_memory_headroom(&tables, &edges)?;
 
+    report_progress(progress, build_phase, build_message)?;
     let mut new_engine = builder::build_graph(&tables, &edges, &filter_columns)?;
     if force_read_only {
         new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
@@ -92,7 +137,7 @@ pub(crate) fn execute_build(force_persist: bool) -> safety::GraphResult<BuildExe
     let memory_used_mb = new_engine.estimated_memory_used_mb();
 
     let persisted_engine = if force_persist || config::PERSIST_ON_BUILD.get() {
-        Some(persist_and_reload_engine("build", &new_engine)?)
+        Some(persist_and_reload_engine("build", &new_engine, progress)?)
     } else {
         None
     };
@@ -125,8 +170,21 @@ pub(crate) fn execute_build(force_persist: bool) -> safety::GraphResult<BuildExe
 pub(crate) fn execute_maintenance_rebuild(
     force_persist: bool,
 ) -> safety::GraphResult<MaintenanceExecutionResult> {
+    let mut progress = |_, _| Ok(());
+    execute_maintenance_rebuild_with_progress(force_persist, &mut progress)
+}
+
+pub(crate) fn execute_maintenance_rebuild_with_progress(
+    force_persist: bool,
+    progress: &mut ProgressCallback<'_>,
+) -> safety::GraphResult<MaintenanceExecutionResult> {
     let previous_applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
-    let build = execute_build(force_persist)?;
+    let build = execute_build_inner(
+        force_persist,
+        "rebuilding",
+        "rebuilding graph for maintenance",
+        progress,
+    )?;
     let after = max_sync_log_id()?;
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
@@ -184,7 +242,12 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     new_engine.last_vacuum = Some(pgrx::datetime::transaction_timestamp());
 
     let persisted_engine = if force_persist || config::PERSIST_ON_BUILD.get() {
-        Some(persist_and_reload_engine("vacuum", &new_engine)?)
+        let mut progress = |_, _| Ok(());
+        Some(persist_and_reload_engine(
+            "vacuum",
+            &new_engine,
+            &mut progress,
+        )?)
     } else {
         None
     };

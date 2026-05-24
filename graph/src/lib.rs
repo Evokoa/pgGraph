@@ -83,7 +83,8 @@ use quote::quote_literal as sql_literal;
 use sql_filters::validate_structured_operator_shape;
 #[cfg(feature = "pg_test")]
 use sql_jobs::{
-    update_build_job_completed, update_build_job_started, update_maintenance_job_completed,
+    update_build_job_completed, update_build_job_progress, update_build_job_started,
+    update_maintenance_job_completed, update_maintenance_job_progress,
     update_maintenance_job_started,
 };
 #[cfg(any(test, feature = "fuzzing"))]

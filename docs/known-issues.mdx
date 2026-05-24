@@ -70,6 +70,7 @@ remaining sections below are still open work.
 | Internal scheduler | Scheduler ownership is documented as external: pgGraph exposes the admin-only `graph.run_scheduled_maintenance()` target, while pg_cron, Kubernetes CronJobs, systemd timers, Docker init SQL, or app schedulers own cadence and lifecycle. |
 | Background job failures | Build and maintenance workers now record failed status and error detail from a fresh worker transaction after the work transaction returns, and failure recording does not overwrite completed jobs. |
 | Artifact writes | `.pggraph` writes now stream fixed sections, primary-key offsets, and primary-key bytes through a seekable artifact writer that backpatches the header and CRC while preserving temp-write, fsync, atomic rename, and reload-validation behavior. |
+| Persistence I/O | Background build and maintenance jobs now expose persistence write/fsync and reload-validation phases in status rows, while artifact writes retain synchronous durability and check PostgreSQL interrupts during long section loops. |
 
 ### Data Correctness and Corruption
 
@@ -120,9 +121,10 @@ ownership and background-job failure handling were completed.
 These are the highest-priority public follow-ups because they affect operators
 running larger graphs or higher sync volume.
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| Persistence I/O | Persistence uses synchronous filesystem operations from PostgreSQL backend work. | Preserve synchronous durability while adding progress phases, safe cancellation checks, and clearer background-worker status around write, fsync, reload, and failure phases. Completion plan: `known-issues-completion-plan.md`. |
+<Callout type="info">
+No currently tracked P0 items remain after persistence status phases and
+interrupt checks were added while preserving synchronous durability.
+</Callout>
 
 ## P1: Query Performance Follow-Ups
 

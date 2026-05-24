@@ -408,28 +408,37 @@ Completion criteria:
 
 Tracked row: `Persistence I/O`
 
+Status: completed in `fix(persistence): expose persistence progress phases`
+
 Plan:
 
-- Add progress phases for build, write, fsync, reload validation, and failure.
-- Check PostgreSQL interrupts during long loops where pgrx exposes safe
-  cancellation points.
-- Keep synchronous durability unless a later design explicitly moves writes to
-  a background workflow with crash consistency guarantees.
-- Improve job status text or typed status phases so operators can identify where
-  persistence time is spent.
+- Background build jobs report `building`, `persisting`, and
+  `validating_persistence` phases through durable job status rows.
+- Background maintenance jobs report `rebuilding`, `persisting`, and
+  `validating_persistence` phases through durable job status rows.
+- Artifact writes keep synchronous durability; `persisting` covers the
+  temp-file write and `sync_all()`, and `validating_persistence` covers
+  immediate mmap reload validation.
+- Long fixed-section and primary-key write loops check PostgreSQL interrupts at
+  bounded intervals when running inside PostgreSQL.
+- Failure status remains durable through the separate worker failure transaction
+  completed earlier in this milestone.
 
 Regression risk:
 
-- More progress writes can add catalog churn during large operations.
-- Cancellation checks improve operator control but add branch checks in hot
+- Background jobs add a small number of progress-row updates per build or
+  maintenance run.
+- Interrupt checks add bounded branch checks during large artifact section
   loops.
+- Synchronous durability, temp-write, fsync, atomic rename, and reload
+  validation semantics are unchanged.
 
 Completion criteria:
 
-- Operators can observe persistence phase and failure state through SQL status
-  rows.
-- Durability semantics are unchanged or explicitly documented with migration
-  notes.
+- Operators can observe persistence write/fsync and reload-validation phases
+  through SQL status rows.
+- Durability semantics are unchanged and documented.
+- Tests verify progress updates are visible for build and maintenance job rows.
 
 ## Milestone 5 - Query Performance Follow-Ups
 

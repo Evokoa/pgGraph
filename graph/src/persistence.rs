@@ -65,16 +65,25 @@ const HEADER_SIZE: usize = 128;
 /// Number of sections.
 const NUM_SECTIONS: usize = 11;
 const CRC_OFFSET: usize = 20 + NUM_SECTIONS * 8;
+const INTERRUPT_CHECK_INTERVAL: u32 = 4096;
+
+fn check_for_interrupts() {
+    #[cfg(not(test))]
+    {
+        pgrx::check_for_interrupts!();
+    }
+}
 
 struct GraphArtifactWriter {
     writer: BufWriter<fs::File>,
     section_offsets: [u64; NUM_SECTIONS],
     position: u64,
     hasher: crc32fast::Hasher,
+    check_interrupts: bool,
 }
 
 impl GraphArtifactWriter {
-    fn new(file: fs::File) -> GraphResult<Self> {
+    fn new(file: fs::File, check_interrupts: bool) -> GraphResult<Self> {
         let mut writer = BufWriter::new(file);
         writer
             .write_all(&[0u8; HEADER_SIZE])
@@ -84,6 +93,7 @@ impl GraphArtifactWriter {
             section_offsets: [0u64; NUM_SECTIONS],
             position: HEADER_SIZE as u64,
             hasher: crc32fast::Hasher::new(),
+            check_interrupts,
         })
     }
 
@@ -120,7 +130,10 @@ impl GraphArtifactWriter {
     }
 
     fn write_u32_values(&mut self, values: &[u32]) -> GraphResult<()> {
-        for &value in values {
+        for (idx, &value) in values.iter().enumerate() {
+            if self.check_interrupts && (idx as u32).is_multiple_of(INTERRUPT_CHECK_INTERVAL) {
+                check_for_interrupts();
+            }
             self.write_body(&value.to_le_bytes())?;
         }
         Ok(())
@@ -457,7 +470,23 @@ fn validate_section_layout(
 /// Write the engine state to a .pggraph file.
 ///
 /// Uses atomic rename: writes to `<path>.tmp`, then renames to `path`.
+#[cfg(test)]
 pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
+    write_graph_file_internal(engine, path, false)
+}
+
+pub(crate) fn write_graph_file_with_interrupt_checks(
+    engine: &Engine,
+    path: &Path,
+) -> GraphResult<()> {
+    write_graph_file_internal(engine, path, true)
+}
+
+fn write_graph_file_internal(
+    engine: &Engine,
+    path: &Path,
+    check_interrupts: bool,
+) -> GraphResult<()> {
     let tmp_path = append_path_suffix(path, ".tmp");
 
     // Ensure parent directory exists (handles first-run where $PGDATA/graph/ doesn't exist)
@@ -474,7 +503,7 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
     let file = fs::File::create(&tmp_path).map_err(|e| {
         GraphError::Internal(format!("Cannot create {}: {}", tmp_path.display(), e))
     })?;
-    let mut writer = GraphArtifactWriter::new(file)?;
+    let mut writer = GraphArtifactWriter::new(file, check_interrupts)?;
 
     writer.begin_section(0, None)?;
     let is_active_bytes = engine.node_store.is_active_bytes();
@@ -503,6 +532,9 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
     let mut pk_offset = 0u64;
     writer.write_u64_value(pk_offset)?;
     for node_idx in 0..engine.node_store.node_count() {
+        if check_interrupts && node_idx.is_multiple_of(INTERRUPT_CHECK_INTERVAL) {
+            check_for_interrupts();
+        }
         let pk = engine.node_store.primary_key(node_idx);
         pk_offset =
             pk_offset
@@ -515,6 +547,9 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
 
     writer.begin_section(8, None)?;
     for node_idx in 0..engine.node_store.node_count() {
+        if check_interrupts && node_idx.is_multiple_of(INTERRUPT_CHECK_INTERVAL) {
+            check_for_interrupts();
+        }
         let pk = engine.node_store.primary_key(node_idx);
         writer.write_body(pk.as_bytes())?;
     }

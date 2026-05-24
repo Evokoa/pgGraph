@@ -4,7 +4,7 @@ use crate::api_types::{
     BuildExecutionResult, BuildJobRow, MaintenanceExecutionResult, MaintenanceJobRow,
 };
 use crate::safety;
-use crate::sql_build::{execute_build, execute_maintenance_rebuild};
+use crate::sql_build::{execute_build_with_progress, execute_maintenance_rebuild_with_progress};
 use crate::sql_sync::current_sync_mode;
 use pgrx::bgworkers::{BackgroundWorkerBuilder, BgWorkerStartTime};
 use pgrx::prelude::*;
@@ -174,6 +174,30 @@ pub(crate) fn update_build_job_completed(
     })
 }
 
+pub(crate) fn update_build_job_progress(
+    build_id: &str,
+    phase: &str,
+    message: &str,
+) -> safety::GraphResult<()> {
+    let running = JobStatus::Running.as_str();
+    Spi::run_with_args(
+        "UPDATE graph._build_jobs
+         SET progress_phase = $2,
+             progress_message = $3,
+             updated_at = now()
+         WHERE build_id = $1 AND status = $4",
+        &[
+            build_id.into(),
+            phase.into(),
+            message.into(),
+            running.into(),
+        ],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("build job progress update failed: {}", err))
+    })
+}
+
 pub(crate) fn update_build_job_failed(build_id: &str, error: &str) -> safety::GraphResult<()> {
     let failed = JobStatus::Failed.as_str();
     let completed = JobStatus::Completed.as_str();
@@ -200,7 +224,8 @@ pub(crate) fn update_build_job_failed(build_id: &str, error: &str) -> safety::Gr
 
 pub(crate) fn run_build_job(build_id: &str) -> safety::GraphResult<()> {
     update_build_job_started(build_id)?;
-    let result = execute_build(true)?;
+    let mut progress = |phase, message| update_build_job_progress(build_id, phase, message);
+    let result = execute_build_with_progress(true, &mut progress)?;
     update_build_job_completed(build_id, &result)
 }
 
@@ -311,6 +336,25 @@ pub(crate) fn update_maintenance_job_completed(
     })
 }
 
+pub(crate) fn update_maintenance_job_progress(
+    job_id: &str,
+    phase: &str,
+    message: &str,
+) -> safety::GraphResult<()> {
+    let running = JobStatus::Running.as_str();
+    Spi::run_with_args(
+        "UPDATE graph._maintenance_jobs
+         SET progress_phase = $2,
+             progress_message = $3,
+             updated_at = now()
+         WHERE job_id = $1 AND status = $4",
+        &[job_id.into(), phase.into(), message.into(), running.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("maintenance job progress update failed: {}", err))
+    })
+}
+
 pub(crate) fn update_maintenance_job_failed(job_id: &str, error: &str) -> safety::GraphResult<()> {
     let failed = JobStatus::Failed.as_str();
     let completed = JobStatus::Completed.as_str();
@@ -332,7 +376,8 @@ pub(crate) fn update_maintenance_job_failed(job_id: &str, error: &str) -> safety
 
 pub(crate) fn run_maintenance_job(job_id: &str) -> safety::GraphResult<()> {
     update_maintenance_job_started(job_id)?;
-    let result = execute_maintenance_rebuild(true)?;
+    let mut progress = |phase, message| update_maintenance_job_progress(job_id, phase, message);
+    let result = execute_maintenance_rebuild_with_progress(true, &mut progress)?;
     update_maintenance_job_completed(job_id, &result)
 }
 

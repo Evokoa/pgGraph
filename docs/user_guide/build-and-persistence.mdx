@@ -63,7 +63,7 @@ status and error detail from a fresh worker transaction so
 | `status` | `queued`, `running`, `completed`, or `failed` |
 | `nodes_loaded`, `edges_loaded`, `build_time_ms`, `memory_used_mb` | Populated after completion |
 | `sync_mode` | Sync mode captured for the job |
-| `progress_phase` | Coarse operator phase such as `queued`, `building`, `completed`, or `failed` |
+| `progress_phase` | Coarse operator phase such as `queued`, `building`, `persisting`, `validating_persistence`, `completed`, or `failed` |
 | `progress_message` | Short operator-readable progress or failure detail |
 
 ## Build Pipeline
@@ -175,6 +175,10 @@ main.pggraph.sync.tmp
 
 This means a backend should either see the old complete graph file or the new
 complete graph file, not a partial file under the final name.
+
+Background build and maintenance jobs expose persistence phases through
+`progress_phase` and `progress_message`: `persisting` covers artifact write and
+fsync, and `validating_persistence` covers immediate mmap reload validation.
 
 ## Auto-Load
 
