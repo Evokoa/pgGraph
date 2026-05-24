@@ -391,44 +391,7 @@ fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> 
 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
-        eng.disabled_trigger_count = disabled_trigger_count;
-        eng.pending_sync_rows = pending;
-        if disabled_trigger_count > 0 && matches!(eng.schema_state, engine::SchemaState::Current) {
-            eng.schema_state = engine::SchemaState::Stale;
-            eng.invalid_reason = Some(format!(
-                "{} graph sync trigger(s) are disabled",
-                disabled_trigger_count
-            ));
-        }
-        if eng.built {
-            match &catalog_state {
-                Ok((_current_fingerprint, Some(reason))) => {
-                    eng.needs_rebuild = true;
-                    eng.schema_state = engine::SchemaState::Invalid;
-                    eng.invalid_reason = Some(reason.clone());
-                }
-                Ok((current_fingerprint, None))
-                    if eng.catalog_fingerprint.is_some()
-                        && eng.catalog_fingerprint != Some(*current_fingerprint) =>
-                {
-                    eng.needs_rebuild = true;
-                    eng.schema_state = engine::SchemaState::Invalid;
-                    eng.invalid_reason = Some(
-                        "registered graph catalog changed since graph.build(); rebuild required"
-                            .to_string(),
-                    );
-                }
-                Err(err) => {
-                    eng.needs_rebuild = true;
-                    eng.schema_state = engine::SchemaState::Invalid;
-                    eng.invalid_reason = Some(format!(
-                        "registered graph schema validation failed: {}",
-                        err
-                    ));
-                }
-                _ => {}
-            }
-        }
+        eng.refresh_observed_state(disabled_trigger_count, pending, &catalog_state);
         Ok(eng.status())
     })
 }

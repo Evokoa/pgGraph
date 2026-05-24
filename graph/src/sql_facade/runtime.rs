@@ -170,33 +170,12 @@ fn ensure_current_graph() -> safety::GraphResult<()> {
     let sync_mode = current_sync_mode()?;
 
     let disabled = disabled_graph_trigger_count()?;
-    let (current_fingerprint, schema_drift_reason) = current_catalog_state()?;
+    let catalog_state = current_catalog_state()?;
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
     let pending = pending_sync_rows(applied_sync_id)?;
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
-        eng.disabled_trigger_count = disabled;
-        eng.pending_sync_rows = pending;
-        if disabled > 0 {
-            eng.schema_state = engine::SchemaState::Stale;
-            eng.invalid_reason = Some(format!("{} graph sync trigger(s) are disabled", disabled));
-        }
-        if eng.built && schema_drift_reason.is_some() {
-            eng.needs_rebuild = true;
-            eng.schema_state = engine::SchemaState::Invalid;
-            eng.invalid_reason = schema_drift_reason;
-        }
-        if eng.built
-            && eng.catalog_fingerprint.is_some()
-            && eng.catalog_fingerprint != Some(current_fingerprint)
-        {
-            eng.needs_rebuild = true;
-            eng.schema_state = engine::SchemaState::Invalid;
-            eng.invalid_reason = Some(
-                "registered graph catalog changed since graph.build(); rebuild required"
-                    .to_string(),
-            );
-        }
+        eng.refresh_observed_state(disabled, pending, &Ok(catalog_state));
         if matches!(eng.schema_state, engine::SchemaState::Invalid) {
             return Err(safety::GraphError::Internal(
                 eng.invalid_reason

@@ -216,6 +216,60 @@ impl Engine {
         }
     }
 
+    /// Refresh status-only observations without replacing graph data stores.
+    pub fn refresh_observed_state(
+        &mut self,
+        disabled_trigger_count: i32,
+        pending_sync_rows: i64,
+        catalog_state: &GraphResult<(u64, Option<String>)>,
+    ) {
+        self.disabled_trigger_count = disabled_trigger_count;
+        self.pending_sync_rows = pending_sync_rows;
+
+        if disabled_trigger_count > 0 && matches!(self.schema_state, SchemaState::Current) {
+            self.mark_schema_stale(format!(
+                "{} graph sync trigger(s) are disabled",
+                disabled_trigger_count
+            ));
+        }
+
+        if !self.built {
+            return;
+        }
+
+        match catalog_state {
+            Ok((_current_fingerprint, Some(reason))) => {
+                self.mark_schema_invalid(reason.clone());
+            }
+            Ok((current_fingerprint, None))
+                if self.catalog_fingerprint.is_some()
+                    && self.catalog_fingerprint != Some(*current_fingerprint) =>
+            {
+                self.mark_schema_invalid(
+                    "registered graph catalog changed since graph.build(); rebuild required",
+                );
+            }
+            Err(err) => {
+                self.mark_schema_invalid(format!(
+                    "registered graph schema validation failed: {}",
+                    err
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_schema_stale(&mut self, reason: impl Into<String>) {
+        self.schema_state = SchemaState::Stale;
+        self.invalid_reason = Some(reason.into());
+    }
+
+    fn mark_schema_invalid(&mut self, reason: impl Into<String>) {
+        self.needs_rebuild = true;
+        self.schema_state = SchemaState::Invalid;
+        self.invalid_reason = Some(reason.into());
+    }
+
     /// Register a new edge type label. Returns the u8 type ID.
     pub fn register_edge_type(&mut self, label: &str) -> GraphResult<u8> {
         // Check if already registered
@@ -840,6 +894,40 @@ mod tests {
         assert!(engine.built);
         assert!(engine.edge_type_registry.contains(&"test_edge".to_string()));
         assert!(engine.estimated_memory_used_mb() > 0.0);
+    }
+
+    #[test]
+    fn refresh_observed_state_marks_disabled_triggers_stale() {
+        let mut engine = Engine::new();
+        let catalog_state = Ok((42, None));
+
+        engine.refresh_observed_state(2, 5, &catalog_state);
+
+        assert_eq!(engine.disabled_trigger_count, 2);
+        assert_eq!(engine.pending_sync_rows, 5);
+        assert_eq!(engine.schema_state, SchemaState::Stale);
+        assert_eq!(
+            engine.invalid_reason.as_deref(),
+            Some("2 graph sync trigger(s) are disabled")
+        );
+        assert!(!engine.needs_rebuild);
+    }
+
+    #[test]
+    fn refresh_observed_state_marks_built_graph_invalid_on_catalog_drift() {
+        let mut engine = Engine::new();
+        engine.built = true;
+        engine.catalog_fingerprint = Some(41);
+        let catalog_state = Ok((42, None));
+
+        engine.refresh_observed_state(0, 0, &catalog_state);
+
+        assert_eq!(engine.schema_state, SchemaState::Invalid);
+        assert!(engine.needs_rebuild);
+        assert_eq!(
+            engine.invalid_reason.as_deref(),
+            Some("registered graph catalog changed since graph.build(); rebuild required")
+        );
     }
 
     #[test]
