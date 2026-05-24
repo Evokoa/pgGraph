@@ -344,6 +344,7 @@ pub fn build_graph(
                     };
 
                     let node_idx = engine.node_store.add_node(oid, pk.clone());
+                    engine.insert_table_membership(oid, node_idx);
                     node_lookup_batch.push(oid, pk.clone(), node_idx);
                     node_lookup_batch.flush_if_full()?;
 

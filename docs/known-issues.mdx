@@ -65,6 +65,7 @@ remaining sections below are still open work.
 | Filter model and legacy numeric filters | SQL traversal now builds pushdown predicates only from structured typed filters; the legacy unsigned condition parser is limited to tests, fuzzing, and development helpers so signed values cannot be reintroduced through the public traversal path. |
 | Dynamic table SQL | Build and estimate reltuples reads now resolve registered table names through bound OID lookups, while table and column SQL fragments remain limited to validated catalog/regclass names and quoted identifiers. |
 | Discovery SQL | Auto-discovery schema values, targeted table OIDs, primary-key exclusions, and targeted foreign-key table sets now use SPI parameters instead of generated literal or `IN (...)` SQL fragments. |
+| Truncate handling | Sync replay now maintains table-to-node membership bitmaps, so table truncation tombstones only nodes from the affected table and removes their tenant membership. |
 
 ### Data Correctness and Corruption
 
@@ -100,7 +101,6 @@ table SQL and discovery SQL parameterization work.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Truncate handling | Truncate can force a synchronous full-graph scan. | Track table membership or epochs, or queue an explicit rebuild, so truncate work is bounded by affected table metadata instead of all nodes. Completion plan: `known-issues-completion-plan.md`. |
 | Tenant bitmap mutation | Tenant update/delete handling can require broad bitmap work. | Carry old and new tenant values through sync payloads and mutate only affected tenant bitmaps, with a visible fallback for older payloads if needed. Completion plan: `known-issues-completion-plan.md`. |
 | Internal scheduler | pgGraph exposes `graph.run_scheduled_maintenance()` and Docker/pg_cron examples, but does not run an always-on internal scheduler. | Keep scheduler ownership external for this hardening pass and document supported targets before considering an internal background-worker scheduler design. Completion plan: `known-issues-completion-plan.md`. |
 | Background job failures | Failure status can be lost if the worker transaction aborts. | Record worker failure status in a separate transaction or independent SPI context after the work transaction aborts, with an idempotent failure path. Completion plan: `known-issues-completion-plan.md`. |

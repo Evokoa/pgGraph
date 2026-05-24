@@ -102,6 +102,8 @@ pub struct Engine {
     pub catalog_fingerprint: Option<u64>,
     /// Number of pending durable sync rows from the last status/catch-up check.
     pub pending_sync_rows: i64,
+    /// Active node membership by source table for table-scoped sync operations.
+    pub table_membership: HashMap<u32, RoaringBitmap>,
     /// Tenant membership by tenant value for tenanted table rows.
     pub tenant_membership: HashMap<String, RoaringBitmap>,
     /// Table OIDs that require tenant scoping.
@@ -208,6 +210,7 @@ impl Engine {
             disabled_trigger_count: 0,
             catalog_fingerprint: None,
             pending_sync_rows: 0,
+            table_membership: HashMap::new(),
             tenant_membership: HashMap::new(),
             tenanted_table_oids: HashSet::new(),
         }
@@ -278,6 +281,28 @@ impl Engine {
             .entry(tenant.to_string())
             .or_default()
             .insert(node_idx);
+    }
+
+    pub fn insert_table_membership(&mut self, table_oid: u32, node_idx: u32) {
+        self.table_membership
+            .entry(table_oid)
+            .or_default()
+            .insert(node_idx);
+    }
+
+    pub fn remove_table_membership(&mut self, table_oid: u32, node_idx: u32) {
+        if let Some(bitmap) = self.table_membership.get_mut(&table_oid) {
+            bitmap.remove(node_idx);
+        }
+    }
+
+    pub fn rebuild_table_membership(&mut self) {
+        self.table_membership.clear();
+        for node_idx in 0..self.node_store.node_count() {
+            if self.node_store.is_active(node_idx) {
+                self.insert_table_membership(self.node_store.table_oid(node_idx), node_idx);
+            }
+        }
     }
 
     #[cfg(feature = "development")]
@@ -632,6 +657,8 @@ impl Engine {
                 .map(String::capacity)
                 .sum::<usize>();
         let edge_buffer_bytes = self.edge_buffer.capacity() * std::mem::size_of::<EdgeMutation>();
+        let table_membership_bytes = self.table_membership.capacity()
+            * (std::mem::size_of::<u32>() + std::mem::size_of::<RoaringBitmap>());
         let tenant_bytes = self.tenant_membership.capacity()
             * (std::mem::size_of::<String>() + std::mem::size_of::<RoaringBitmap>())
             + self
@@ -648,6 +675,7 @@ impl Engine {
             + resolution_bytes
             + registry_bytes
             + edge_buffer_bytes
+            + table_membership_bytes
             + tenant_bytes
             + tenanted_oid_bytes
     }

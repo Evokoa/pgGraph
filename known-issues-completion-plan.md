@@ -236,25 +236,32 @@ durable.
 ### Truncate Handling
 
 Tracked row: `Truncate handling`
+Status: completed in `fix(sync): bound truncate by table membership`
 
 Plan:
 
-- Track table membership during build/sync, either as table-to-node membership,
-  table epochs, or a queued rebuild marker.
-- On truncate, avoid scanning every node inline. Prefer table-scoped invalidation
-  or a rebuild job when precise mutation is not cheap.
-- Add pgrx tests for truncate on one registered source table with unrelated
-  tables still active.
+- Engine state now maintains a table-to-node `RoaringBitmap` membership index.
+- Build ingestion, sync inserts, sync deletes, and persisted graph load keep
+  table membership aligned with active nodes.
+- Truncate replay clones the affected table membership bitmap and tombstones
+  only those nodes, then removes their tenant membership and clears the table
+  membership entry.
+- A fallback rebuilds table membership if an older/manual test engine reaches
+  truncate without membership populated.
+- Unit coverage verifies insert, delete, truncate, unrelated-table preservation,
+  and tenant-membership cleanup.
 
 Regression risk:
 
-- Table membership metadata increases memory or artifact size.
-- Queuing rebuilds lowers immediate latency but delays freshness.
+- Table membership adds one compressed bitmap per table in backend memory.
+  Artifact format is unchanged; membership is rebuilt after mmap load.
+- Truncate latency now scales with affected table membership instead of total
+  graph node count when membership is present.
 
 Completion criteria:
 
-- Truncate work is bounded by affected table metadata or becomes an explicit
-  rebuild workflow.
+- Truncate work is bounded by affected table membership.
+- Existing mmap truncate replay and sync property tests continue to pass.
 
 ### Tenant Bitmap Mutation
 

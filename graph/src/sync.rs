@@ -83,6 +83,7 @@ pub fn sync_insert(
 
     // Add to NodeStore
     let node_idx = engine.node_store.add_node(table_oid, pk.to_string());
+    engine.insert_table_membership(table_oid, node_idx);
     if let Some(tenant) = tenant {
         engine.tenanted_table_oids.insert(table_oid);
         engine.insert_tenant_membership(tenant, node_idx);
@@ -167,6 +168,7 @@ pub fn sync_delete(engine: &mut Engine, table_oid: u32, pk: &str) -> GraphResult
 
     // Tombstone: mark as inactive
     engine.node_store.deactivate(node_idx);
+    engine.remove_table_membership(table_oid, node_idx);
 
     for bitmap in engine.tenant_membership.values_mut() {
         bitmap.remove(node_idx);
@@ -181,19 +183,26 @@ pub fn sync_truncate(engine: &mut Engine, table_oid: u32) -> GraphResult<u64> {
         return Err(engine.read_only_error());
     }
     engine.materialize_mmap_node_store_for_sync();
+    if !engine.table_membership.contains_key(&table_oid) {
+        engine.rebuild_table_membership();
+    }
     let mut tombstoned = 0;
-    let mut truncated_nodes = Vec::new();
-    for node_idx in 0..engine.node_store.node_count() {
-        if engine.node_store.table_oid(node_idx) == table_oid
-            && engine.node_store.is_active(node_idx)
+    let truncated_nodes = engine
+        .table_membership
+        .get(&table_oid)
+        .cloned()
+        .unwrap_or_default();
+    for node_idx in &truncated_nodes {
+        if engine.node_store.is_active(node_idx)
+            && engine.node_store.table_oid(node_idx) == table_oid
         {
             engine.node_store.deactivate(node_idx);
-            truncated_nodes.push(node_idx);
             tombstoned += 1;
         }
     }
+    engine.table_membership.remove(&table_oid);
     for bitmap in engine.tenant_membership.values_mut() {
-        for &node_idx in &truncated_nodes {
+        for node_idx in &truncated_nodes {
             bitmap.remove(node_idx);
         }
     }
@@ -330,6 +339,7 @@ mod tests {
     use super::*;
     use crate::engine::Engine;
     use proptest::prelude::*;
+    use roaring::RoaringBitmap;
     use std::collections::BTreeSet;
 
     fn test_engine() -> Engine {
@@ -535,6 +545,44 @@ mod tests {
         assert_eq!(eng.node_store.node_count(), 1);
         // Resolution still points to the same node
         assert_eq!(eng.resolve(42, "DUP"), Some(0));
+    }
+
+    #[test]
+    fn sync_table_membership_tracks_insert_delete_and_truncate() {
+        let mut eng = test_engine();
+        sync_insert(&mut eng, 42, "A", Some("tenant-a")).unwrap();
+        sync_insert(&mut eng, 42, "B", Some("tenant-a")).unwrap();
+        sync_insert(&mut eng, 99, "C", Some("tenant-a")).unwrap();
+
+        assert_eq!(
+            eng.table_membership
+                .get(&42)
+                .map(RoaringBitmap::len)
+                .unwrap_or_default(),
+            2
+        );
+        sync_delete(&mut eng, 42, "A").unwrap();
+        assert_eq!(
+            eng.table_membership
+                .get(&42)
+                .map(RoaringBitmap::len)
+                .unwrap_or_default(),
+            1
+        );
+
+        let tombstoned = sync_truncate(&mut eng, 42).unwrap();
+
+        assert_eq!(tombstoned, 1);
+        assert!(!eng.table_membership.contains_key(&42));
+        assert!(eng.resolve(42, "B").is_none());
+        assert!(eng.resolve(99, "C").is_some());
+        assert_eq!(
+            eng.tenant_membership
+                .get("tenant-a")
+                .map(RoaringBitmap::len)
+                .unwrap_or_default(),
+            1
+        );
     }
 
     proptest! {

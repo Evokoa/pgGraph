@@ -55,7 +55,7 @@ Generated triggers capture:
 | INSERT | new PK and row properties |
 | UPDATE | old/new PKs and row images |
 | DELETE | old PK and old row |
-| TRUNCATE | statement-level rebuild-needed marker |
+| TRUNCATE | statement-level table marker; replay uses table membership to tombstone affected nodes |
 
 The trigger layer writes durable rows. It does not update backend-local engines
 directly.

@@ -720,6 +720,7 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     engine.reverse_edge_store = engine.edge_store.reversed();
     engine.filter_index = filter_index;
     engine.edge_type_registry = edge_type_registry;
+    engine.rebuild_table_membership();
     engine.built = true;
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
         engine.applied_sync_id = applied_sync_id;
