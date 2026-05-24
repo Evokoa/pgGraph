@@ -183,6 +183,36 @@ pub(crate) struct SyncLogEntry {
     pub(crate) new_row: Option<String>,
 }
 
+#[derive(Debug)]
+struct ParsedSyncRows {
+    old: Option<serde_json::Value>,
+    new: Option<serde_json::Value>,
+}
+
+impl ParsedSyncRows {
+    fn from_entry(entry: &SyncLogEntry) -> safety::GraphResult<Self> {
+        Ok(Self {
+            old: parse_sync_row_image(entry.id, "old_row", entry.old_row.as_deref())?,
+            new: parse_sync_row_image(entry.id, "new_row", entry.new_row.as_deref())?,
+        })
+    }
+}
+
+fn parse_sync_row_image(
+    entry_id: i64,
+    field_name: &str,
+    raw: Option<&str>,
+) -> safety::GraphResult<Option<serde_json::Value>> {
+    raw.map(|row| {
+        serde_json::from_str(row).map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "sync row {entry_id} {field_name} JSON parse failed: {err}"
+            ))
+        })
+    })
+    .transpose()
+}
+
 pub(crate) struct SyncReplayContext {
     tables: Vec<builder::RegisteredTable>,
     edges: Vec<builder::RegisteredEdge>,
@@ -444,9 +474,10 @@ fn apply_sync_log_entry_with_context(
         None => context.table_oid_or_lookup(&entry.table_name)?,
     };
     let parsed = parse_sync_properties(entry.properties.as_deref());
-    let tenant_change = tenant_change_from_entry(table_oid, entry, &parsed, context)?;
+    let rows = ParsedSyncRows::from_entry(entry)?;
+    let tenant_change = tenant_change_from_entry(table_oid, &rows, &parsed, context)?;
     let edge_mutation_reservation =
-        sync_entry_edge_mutation_reservation(entry, table_oid, context)?;
+        sync_entry_edge_mutation_reservation(entry, table_oid, context, &rows)?;
 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
@@ -471,12 +502,13 @@ fn apply_sync_log_entry_with_context(
                     &context.filters,
                     &context.table_oids,
                     entry,
+                    &rows,
                 )?;
                 apply_row_edge_mutations(
                     &mut eng,
                     context,
                     table_oid,
-                    entry.new_row.as_deref(),
+                    rows.new.as_ref(),
                     engine::MutationKind::Insert,
                 )?;
                 stats.inserts += 1;
@@ -492,7 +524,7 @@ fn apply_sync_log_entry_with_context(
                     &mut eng,
                     context,
                     table_oid,
-                    entry.old_row.as_deref(),
+                    rows.old.as_ref(),
                     engine::MutationKind::Delete,
                 )?;
                 if old_pk == new_pk {
@@ -510,6 +542,7 @@ fn apply_sync_log_entry_with_context(
                         &context.filters,
                         &context.table_oids,
                         entry,
+                        &rows,
                     )?;
                 } else {
                     sync::sync_delete_tenant(
@@ -526,13 +559,14 @@ fn apply_sync_log_entry_with_context(
                         &context.filters,
                         &context.table_oids,
                         entry,
+                        &rows,
                     )?;
                 }
                 apply_row_edge_mutations(
                     &mut eng,
                     context,
                     table_oid,
-                    entry.new_row.as_deref(),
+                    rows.new.as_ref(),
                     engine::MutationKind::Insert,
                 )?;
                 stats.updates += 1;
@@ -552,7 +586,7 @@ fn apply_sync_log_entry_with_context(
                     &mut eng,
                     context,
                     table_oid,
-                    entry.old_row.as_deref(),
+                    rows.old.as_ref(),
                     engine::MutationKind::Delete,
                 )?;
                 sync::sync_delete_tenant(&mut eng, table_oid, pk, tenant_change.old.as_deref())?;
@@ -571,23 +605,17 @@ fn sync_entry_edge_mutation_reservation(
     entry: &SyncLogEntry,
     table_oid: u32,
     context: &SyncReplayContext,
+    rows: &ParsedSyncRows,
 ) -> safety::GraphResult<usize> {
     match entry.op {
-        SyncOp::Insert => {
-            potential_row_edge_mutation_count(context, table_oid, entry.new_row.as_deref())
+        SyncOp::Insert => potential_row_edge_mutation_count(context, table_oid, rows.new.as_ref()),
+        SyncOp::Update => {
+            Ok(
+                potential_row_edge_mutation_count(context, table_oid, rows.old.as_ref())?
+                    + potential_row_edge_mutation_count(context, table_oid, rows.new.as_ref())?,
+            )
         }
-        SyncOp::Update => Ok(potential_row_edge_mutation_count(
-            context,
-            table_oid,
-            entry.old_row.as_deref(),
-        )? + potential_row_edge_mutation_count(
-            context,
-            table_oid,
-            entry.new_row.as_deref(),
-        )?),
-        SyncOp::Delete => {
-            potential_row_edge_mutation_count(context, table_oid, entry.old_row.as_deref())
-        }
+        SyncOp::Delete => potential_row_edge_mutation_count(context, table_oid, rows.old.as_ref()),
         SyncOp::Truncate => Ok(0),
     }
 }
@@ -595,17 +623,11 @@ fn sync_entry_edge_mutation_reservation(
 fn potential_row_edge_mutation_count(
     context: &SyncReplayContext,
     table_oid: u32,
-    row_json: Option<&str>,
+    row: Option<&serde_json::Value>,
 ) -> safety::GraphResult<usize> {
-    let Some(row_json) = row_json else {
+    let Some(row) = row else {
         return Ok(0);
     };
-    let row: serde_json::Value = serde_json::from_str(row_json).map_err(|e| {
-        safety::GraphError::Internal(format!(
-            "sync row JSON parse failed for edge capacity reservation: {}",
-            e
-        ))
-    })?;
     let mut count = 0usize;
     for edge in &context.edges {
         let from_oid = context.table_oid(&edge.from_table);
@@ -619,8 +641,8 @@ fn potential_row_edge_mutation_count(
         else {
             continue;
         };
-        if row_pk_value(&row, &from_table.id_columns).is_none()
-            || row_text_value(&row, &edge.from_column).is_none()
+        if row_pk_value(row, &from_table.id_columns).is_none()
+            || row_text_value(row, &edge.from_column).is_none()
         {
             continue;
         }
@@ -636,6 +658,7 @@ fn refresh_filter_index_from_sync(
     filters: &[builder::RegisteredFilterColumn],
     table_oids: &HashMap<String, u32>,
     entry: &SyncLogEntry,
+    rows: &ParsedSyncRows,
 ) -> safety::GraphResult<()> {
     let Some(node_idx) = eng.resolve(table_oid, pk) else {
         return Ok(());
@@ -643,10 +666,6 @@ fn refresh_filter_index_from_sync(
     let properties = parse_sync_properties(entry.properties.as_deref())
         .into_iter()
         .collect::<HashMap<_, _>>();
-    let row = entry
-        .new_row
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
 
     for filter in filters {
         if table_oids.get(&filter.table_name).copied() != Some(table_oid) {
@@ -658,7 +677,7 @@ fn refresh_filter_index_from_sync(
         let value = filter_value_from_row_or_properties(
             &filter.column_name,
             eng.filter_index.column_type(column_idx),
-            row.as_ref(),
+            rows.new.as_ref(),
             &properties,
             &mut eng.filter_index,
             column_idx,
@@ -753,15 +772,12 @@ pub(crate) fn apply_row_edge_mutations(
     eng: &mut engine::Engine,
     context: &SyncReplayContext,
     table_oid: u32,
-    row_json: Option<&str>,
+    row: Option<&serde_json::Value>,
     kind: engine::MutationKind,
 ) -> safety::GraphResult<()> {
-    let Some(row_json) = row_json else {
+    let Some(row) = row else {
         return Ok(());
     };
-    let row: serde_json::Value = serde_json::from_str(row_json).map_err(|e| {
-        safety::GraphError::Internal(format!("sync row JSON parse failed for edge deltas: {}", e))
-    })?;
     for edge in &context.edges {
         let from_oid = context.table_oid(&edge.from_table);
         if from_oid != Some(table_oid) {
@@ -774,16 +790,16 @@ pub(crate) fn apply_row_edge_mutations(
         else {
             continue;
         };
-        let Some(from_pk) = row_pk_value(&row, &from_table.id_columns) else {
+        let Some(from_pk) = row_pk_value(row, &from_table.id_columns) else {
             continue;
         };
-        let Some(to_pk) = row_text_value(&row, &edge.from_column) else {
+        let Some(to_pk) = row_text_value(row, &edge.from_column) else {
             continue;
         };
         let edge_label = edge
             .label_column
             .as_deref()
-            .and_then(|column| row_text_value(&row, column))
+            .and_then(|column| row_text_value(row, column))
             .filter(|label| !label.trim().is_empty())
             .unwrap_or_else(|| edge.label.clone());
         let type_id = eng.register_edge_type(&edge_label)?;
@@ -1012,23 +1028,21 @@ struct TenantChange {
 
 fn tenant_change_from_entry(
     table_oid: u32,
-    entry: &SyncLogEntry,
+    rows: &ParsedSyncRows,
     properties: &[(String, String)],
     context: &SyncReplayContext,
 ) -> safety::GraphResult<TenantChange> {
     let Some(tenant_column) = tenant_column_for_table(table_oid, context) else {
         return Ok(TenantChange::default());
     };
-    let old = entry
-        .old_row
-        .as_deref()
-        .and_then(|row| tenant_from_row(row, &tenant_column).transpose())
-        .transpose()?;
-    let new = entry
-        .new_row
-        .as_deref()
-        .and_then(|row| tenant_from_row(row, &tenant_column).transpose())
-        .transpose()?
+    let old = rows
+        .old
+        .as_ref()
+        .and_then(|row| tenant_from_row(row, &tenant_column));
+    let new = rows
+        .new
+        .as_ref()
+        .and_then(|row| tenant_from_row(row, &tenant_column))
         .or_else(|| {
             properties
                 .iter()
@@ -1046,11 +1060,8 @@ fn tenant_column_for_table(table_oid: u32, context: &SyncReplayContext) -> Optio
         .and_then(|table| table.tenant_column.clone())
 }
 
-fn tenant_from_row(row_json: &str, tenant_column: &str) -> safety::GraphResult<Option<String>> {
-    let row: serde_json::Value = serde_json::from_str(row_json).map_err(|e| {
-        safety::GraphError::Internal(format!("sync tenant row JSON parse failed: {}", e))
-    })?;
-    Ok(row_text_value(&row, tenant_column))
+fn tenant_from_row(row: &serde_json::Value, tenant_column: &str) -> Option<String> {
+    row_text_value(row, tenant_column)
 }
 
 pub(crate) fn resolve_tenant_scope(
@@ -1116,7 +1127,7 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 mod tests {
     use super::{
         parse_sync_op, parse_sync_properties, required_sync_i64, required_sync_string,
-        tenant_change_from_entry, SyncLogEntry, SyncOp, SyncReplayContext,
+        tenant_change_from_entry, ParsedSyncRows, SyncLogEntry, SyncOp, SyncReplayContext,
     };
     use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredTable};
     use crate::safety::GraphError;
@@ -1168,9 +1179,10 @@ mod tests {
             new_row: Some(r#"{"id":"a1","tenant_id":"tenant-new"}"#.to_string()),
         };
 
+        let rows = ParsedSyncRows::from_entry(&entry).unwrap();
         let change = tenant_change_from_entry(
             42,
-            &entry,
+            &rows,
             &parse_sync_properties(entry.properties.as_deref()),
             &context,
         )
@@ -1178,6 +1190,28 @@ mod tests {
 
         assert_eq!(change.old.as_deref(), Some("tenant-old"));
         assert_eq!(change.new.as_deref(), Some("tenant-new"));
+    }
+
+    #[test]
+    fn parsed_sync_rows_reports_row_image_parse_errors() {
+        let entry = SyncLogEntry {
+            id: 99,
+            op: SyncOp::Insert,
+            table_oid: Some(42),
+            table_name: "public.accounts".to_string(),
+            old_pk: None,
+            new_pk: Some("a1".to_string()),
+            properties: None,
+            old_row: None,
+            new_row: Some("{broken".to_string()),
+        };
+
+        let err = ParsedSyncRows::from_entry(&entry).unwrap_err();
+
+        assert!(matches!(err, GraphError::Internal(_)));
+        assert!(err
+            .to_string()
+            .contains("sync row 99 new_row JSON parse failed"));
     }
 
     #[test]

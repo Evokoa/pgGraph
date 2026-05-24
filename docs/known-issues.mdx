@@ -175,7 +175,7 @@ but they do not change core user behavior.
 | Mmap mutation API | Sync paths materialize mmap-backed node stores through engine helpers before mutation, but lower-level stores still expose direct mutation primitives. | Keep mmap mutation at the engine boundary and make invalid direct mutation harder to call from production code. |
 | Mmap resolution state | The resolution offset/length now lives in `ResolutionStore::MmapBacked`, while the mmap handle remains engine-owned because node and edge stores borrow the same mapping. | Continue keeping resolution metadata attached to the active resolution backend and avoid reintroducing split offset fields. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
-| Sync row parsing | Some sync paths parse the same row JSON more than once. | Parse once at the boundary and pass borrowed row values through replay helpers. |
+| Sync row parsing | Sync replay parses each old/new row image once per log entry and passes borrowed JSON values through tenant, filter, reservation, and edge replay helpers. | Keep row-image parsing at the replay boundary as new sync paths are added. |
 | Sync mutation coupling | Some edge overlay maintenance relies on caller ordering around node replacement. | Encapsulate node and edge replay behind a typed sync-row operation helper. |
 
 ## Lower-Priority Optimizations
