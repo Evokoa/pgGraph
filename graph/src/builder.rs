@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use pgrx::prelude::*;
 
+use crate::catalog::estimated_table_rows;
 use crate::config::BuildScanMode;
 use crate::edge_store::{RawEdge, SortedEdgeStoreBuilder};
 use crate::engine::Engine;
@@ -206,48 +207,12 @@ pub fn estimate_graph_memory(
     let mut est_edges: i64 = 0;
 
     for table in tables {
-        let count: i64 = Spi::connect(|client| {
-            let query = format!(
-                "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE oid = '{}'::regclass",
-                table.table_name
-            );
-            let result = client.select(&query, None, &[]).map_err(|e| {
-                GraphError::Internal(format!(
-                    "OOM estimate failed for table {}: {}",
-                    table.table_name, e
-                ))
-            })?;
-            let val = result
-                .first()
-                .get::<i64>(1)
-                .map_err(|e| GraphError::Internal(format!("OOM estimate read error: {}", e)))?
-                .unwrap_or(0)
-                .max(0);
-            Ok::<_, GraphError>(val)
-        })?;
+        let count = estimated_table_rows(&table.table_name)?;
         est_nodes += count;
     }
 
     for edge in edges {
-        let count: i64 = Spi::connect(|client| {
-            let query = format!(
-                "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE oid = '{}'::regclass",
-                edge.from_table
-            );
-            let result = client.select(&query, None, &[]).map_err(|e| {
-                GraphError::Internal(format!(
-                    "OOM estimate failed for edge table {}: {}",
-                    edge.from_table, e
-                ))
-            })?;
-            let val = result
-                .first()
-                .get::<i64>(1)
-                .map_err(|e| GraphError::Internal(format!("OOM estimate read error: {}", e)))?
-                .unwrap_or(0)
-                .max(0);
-            Ok::<_, GraphError>(val)
-        })?;
+        let count = estimated_table_rows(&edge.from_table)?;
         let multiplier = if edge.bidirectional { 2 } else { 1 };
         est_edges += count * multiplier;
     }

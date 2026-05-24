@@ -9,7 +9,8 @@ pub(crate) use read::{catalog_fingerprint, current_catalog_state, read_catalog};
 #[cfg(feature = "pg_test")]
 pub(crate) use validate::validate_numeric_column;
 pub(crate) use validate::{
-    primary_key_expr, regclass_text, sql_table_name_from_catalog, table_oid_from_name,
-    validate_column_exists, validate_filter_column_type, validate_registered_table,
+    estimated_table_rows, primary_key_expr, regclass_text, sql_table_name_from_catalog,
+    table_oid_from_name, validate_column_exists, validate_filter_column_type,
+    validate_registered_table,
 };
 pub(crate) use write::{insert_registered_edge, insert_registered_table, RegisteredEdgeInsert};

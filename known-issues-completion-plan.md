@@ -163,27 +163,36 @@ Goal: make dynamic SQL trust boundaries explicit and auditable.
 ### Dynamic Table SQL
 
 Tracked row: `Dynamic table SQL`
+Status: completed in `fix(sql): bind table estimate lookups`
 
 Plan:
 
-- Introduce or extend a narrow helper type for validated table references and
-  identifier fragments.
-- Accept table identifiers only from catalog lookups, `regclass`, or pgrx
-  identifier quoting.
-- Keep all user/data values as SPI parameters.
-- Audit build, search, hydration, sync, and trigger-generation query builders.
+- Build, search, hydration, sync trigger generation, and registration surfaces
+  were audited for table and value boundaries.
+- Dynamic `FROM` and trigger table references remain limited to registered
+  `regclass` text, validated catalog lookups, or quoted identifiers.
+- Repeated `pg_class.reltuples` estimate queries now resolve registered table
+  names through `to_regclass($1)` and query `pg_class` by bound OID instead of
+  interpolating table text into a `'...'::regclass` literal.
+- The shared `estimated_table_rows()` helper is used by both build preflight
+  memory estimation and `graph.estimate()`.
+- pgrx regression coverage registers a table whose identifier contains a quote
+  and verifies `graph.estimate()` returns its analyzed row estimate.
 
 Regression risk:
 
-- More catalog validation can add SPI round trips if it is not batched.
-- Stricter identifier validation can reject names that previously happened to
-  work through interpolation.
+- Estimate paths now perform an explicit `to_regclass($1)` lookup before the
+  `pg_class` read. That is one extra catalog lookup per registered source/edge
+  table in preflight estimate code, not in traversal hot paths.
+- Removing literal interpolation fixes quoted identifiers and avoids accidental
+  SQL syntax failures for registered table names containing quote characters.
 
 Completion criteria:
 
-- Dynamic build/query paths no longer interpolate data values.
-- Remaining identifier fragments are wrapped in validated helper types and
-  covered by quoted-identifier tests.
+- Dynamic build/query paths no longer interpolate data values in the audited
+  table-estimate path.
+- Remaining table and column SQL fragments are catalog/regclass-derived or
+  quoted identifiers, with quoted-table estimate coverage.
 
 ### Discovery SQL
 

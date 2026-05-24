@@ -181,6 +181,31 @@ pub(crate) fn table_oid_from_name(table_name: &str) -> safety::GraphResult<u32> 
     })
 }
 
+pub(crate) fn estimated_table_rows(table_name: &str) -> safety::GraphResult<i64> {
+    let table_oid = table_oid_from_name(table_name)?;
+    Spi::connect(|client| {
+        let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
+        let result = client
+            .select(
+                "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE oid = $1::oid",
+                None,
+                &[table_oid.into()],
+            )
+            .map_err(|e| {
+                safety::GraphError::Internal(format!(
+                    "reltuples estimate failed for {}: {}",
+                    table_name, e
+                ))
+            })?;
+        let row = result.first();
+        Ok(row
+            .get::<i64>(1)
+            .map_err(|e| safety::GraphError::Internal(format!("reltuples read failed: {}", e)))?
+            .unwrap_or(0)
+            .max(0))
+    })
+}
+
 pub(crate) fn primary_key_expr(alias: &str, primary_key: &builder::PrimaryKeySpec) -> String {
     if primary_key.columns().len() > 1 {
         let parts = primary_key

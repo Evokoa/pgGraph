@@ -411,6 +411,43 @@ fn dynamic_sql_values_are_bound_for_search_and_hydration() {
 }
 
 #[pg_test]
+fn estimate_handles_registered_table_names_with_quotes() {
+    reset_and_create_fixtures();
+    Spi::run("DROP TABLE IF EXISTS public.\"graph_test_quote'pgtest\" CASCADE")
+        .expect("drop quoted table failed");
+    Spi::run(
+        "CREATE TABLE public.\"graph_test_quote'pgtest\" (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create quoted table failed");
+    Spi::run(
+        "INSERT INTO public.\"graph_test_quote'pgtest\" (id, name)
+             VALUES ('q1', 'Quoted')",
+    )
+    .expect("insert quoted table row failed");
+    Spi::run("ANALYZE public.\"graph_test_quote'pgtest\"").expect("analyze quoted table failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'public.\"graph_test_quote''pgtest\"'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add quoted table failed");
+
+    let estimated_nodes = Spi::get_one::<i64>(
+        "SELECT estimated_nodes
+             FROM graph.estimate()",
+    )
+    .expect("estimate quoted table failed")
+    .unwrap_or(0);
+
+    assert_eq!(estimated_nodes, 1);
+}
+
+#[pg_test]
 fn generated_source_search_sql_uses_placeholders_for_user_values() {
     reset_and_create_fixtures();
     Spi::run(

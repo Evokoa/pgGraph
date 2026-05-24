@@ -1192,48 +1192,13 @@ fn estimate() -> TableIterator<
         let mut est_nodes: i64 = 0;
         let mut est_edges: i64 = 0;
 
-        // Estimate node count from registered tables
         for table in &tables {
-            let count: i64 = Spi::connect(|client| {
-                let query = format!(
-                    "SELECT reltuples::bigint FROM pg_class WHERE oid = '{}'::regclass",
-                    table.table_name
-                );
-                let result = client.select(&query, None, &[]);
-                match result {
-                    Ok(rows) => {
-                        let row = rows.first();
-                        Ok::<_, pgrx::spi::SpiError>(
-                            row.get::<i64>(1).ok().flatten().unwrap_or(0).max(0),
-                        )
-                    }
-                    Err(_) => Ok(0),
-                }
-            })
-            .unwrap_or(0);
+            let count = catalog::estimated_table_rows(&table.table_name).unwrap_or(0);
             est_nodes += count;
         }
 
-        // Estimate edge count from registered edge tables
         for edge in &edges {
-            let count: i64 = Spi::connect(|client| {
-                let query = format!(
-                    "SELECT reltuples::bigint FROM pg_class WHERE oid = '{}'::regclass",
-                    edge.from_table
-                );
-                let result = client.select(&query, None, &[]);
-                match result {
-                    Ok(rows) => {
-                        let row = rows.first();
-                        Ok::<_, pgrx::spi::SpiError>(
-                            row.get::<i64>(1).ok().flatten().unwrap_or(0).max(0),
-                        )
-                    }
-                    Err(_) => Ok(0),
-                }
-            })
-            .unwrap_or(0);
-            // Bidirectional edges double the count
+            let count = catalog::estimated_table_rows(&edge.from_table).unwrap_or(0);
             let multiplier = if edge.bidirectional { 2 } else { 1 };
             est_edges += count * multiplier;
         }
