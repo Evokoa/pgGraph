@@ -463,8 +463,6 @@ Tracked P1 rows and specific plans:
   SQL/Rust predicate parity.
 - `Aggregation hydration`: use borrowed lookup shapes internally where pgrx row
   lifetimes allow it.
-- `Resolution delta lookups`: add an indexed delta map only if sync-delta
-  growth benchmarks show material lookup cost.
 
 Completed P1 rows:
 
@@ -504,6 +502,16 @@ Completed P1 rows:
   registered tables. Pre/post timing was recorded in
   `/private/tmp/pggraph-hydration-setup-pre-benchmark.md` and
   `/private/tmp/pggraph-hydration-setup-post-benchmark.md`.
+- `Resolution delta lookups`: completed in
+  `perf(resolution): index sync delta lookups`. Post-build sync inserts now use
+  a keyed `(table_oid, pk_hash)` delta map before falling back to finalized or
+  mmap-backed resolution indexes. Candidate node indexes are still verified
+  against `NodeStore`, so tombstones and hash collisions keep the prior safety
+  behavior. Regression note: lookup time now scales with matching hash
+  candidates instead of total sync-delta size, at the cost of one hash-map entry
+  and candidate vector storage per delta key. Pre/post timing was recorded in
+  `/private/tmp/pggraph-resolution-delta-pre-benchmark.md` and
+  `/private/tmp/pggraph-resolution-delta-post-benchmark.md`.
 
 Completion criteria:
 

@@ -22,7 +22,7 @@ variable-size structures remain per-backend heap allocations.
     - **FilterIndex** — bincode section deserialized per backend
     - **edge_type_registry** — bincode section deserialized per backend
     - **reverse_edge_store** — derived owned CSR for inbound traversal
-    - **resolution_delta** — post-load sync inserts
+    - **resolution_delta** — indexed post-load sync inserts
     - **edge_buffer** — post-load sync edge overlays
     - **tenant_membership** — backend-local state
   </SharedMemoryHeap>

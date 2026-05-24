@@ -10,7 +10,7 @@ use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
-use crate::resolution_index::{ResolutionIndex, ResolutionIndexBuilder};
+use crate::resolution_index::{ResolutionDeltaIndex, ResolutionIndex, ResolutionIndexBuilder};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::*;
 
@@ -62,11 +62,11 @@ pub struct Engine {
     /// Resolution store — switches from compact build entries to sorted array.
     pub resolution_store: ResolutionStore,
 
-    /// Post-build resolution delta for nodes inserted by sync replay.
+    /// Post-build indexed resolution delta for nodes inserted by sync replay.
     ///
     /// Finalized and mmap-backed resolution indexes are immutable. Inserts that
     /// arrive after build() live here until the next rebuild/vacuum merge.
-    pub resolution_delta: ResolutionIndexBuilder,
+    pub resolution_delta: ResolutionDeltaIndex,
 
     /// mmap handle. Keeps the mapping alive for mmap-backed NodeStore arrays,
     /// forward EdgeStore arrays, and ResolutionIndex bytes.
@@ -195,7 +195,7 @@ impl Engine {
             last_build: None,
             last_vacuum: None,
             resolution_store: ResolutionStore::Builder(ResolutionIndexBuilder::new()),
-            resolution_delta: ResolutionIndexBuilder::new(),
+            resolution_delta: ResolutionDeltaIndex::new(),
             _mmap: None,
             mmap_resolution_offset: 0,
             mmap_resolution_len: 0,

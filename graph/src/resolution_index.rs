@@ -12,6 +12,8 @@
 
 use xxhash_rust::xxh3::xxh3_64;
 
+use std::collections::HashMap;
+
 /// Entry size in the persisted sorted array: 4 + 8 + 4 = 16 bytes.
 pub const ENTRY_SIZE: usize = 16;
 
@@ -144,6 +146,79 @@ impl ResolutionIndexBuilder {
 impl Default for ResolutionIndexBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Post-build resolution delta for sync-inserted nodes.
+///
+/// Finalized and mmap-backed resolution indexes are immutable. Sync inserts use
+/// this keyed overlay so lookups only verify candidates for the requested
+/// `(table_oid, pk_hash)` instead of scanning every post-build insert.
+#[derive(Debug, Default)]
+pub struct ResolutionDeltaIndex {
+    by_key: HashMap<(u32, u64), Vec<u32>>,
+}
+
+impl ResolutionDeltaIndex {
+    pub fn new() -> Self {
+        Self {
+            by_key: HashMap::new(),
+        }
+    }
+
+    /// Insert a post-build (table_oid, pk) → node_idx mapping.
+    pub fn insert(&mut self, table_oid: u32, pk: &str, node_idx: u32) {
+        let pk_hash = ResolutionIndexBuilder::hash_pk(pk);
+        self.insert_hashed(table_oid, pk_hash, node_idx);
+    }
+
+    fn insert_hashed(&mut self, table_oid: u32, pk_hash: u64, node_idx: u32) {
+        self.by_key
+            .entry((table_oid, pk_hash))
+            .or_default()
+            .push(node_idx);
+    }
+
+    /// Resolve a verified post-build (table_oid, pk) → node_idx mapping.
+    ///
+    /// Candidate entries are stored by hash, so callers still verify against
+    /// authoritative node metadata to handle tombstones and rare hash
+    /// collisions.
+    pub fn resolve_verified(
+        &self,
+        table_oid: u32,
+        pk: &str,
+        mut verify: impl FnMut(u32) -> bool,
+    ) -> Option<u32> {
+        let pk_hash = ResolutionIndexBuilder::hash_pk(pk);
+        self.by_key
+            .get(&(table_oid, pk_hash))?
+            .iter()
+            .rev()
+            .copied()
+            .find(|&node_idx| verify(node_idx))
+    }
+
+    #[cfg(any(test, feature = "development"))]
+    pub fn len(&self) -> usize {
+        self.by_key.values().map(Vec::len).sum()
+    }
+
+    /// Estimate heap bytes owned by sync resolution delta entries.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        let map_bytes = self.by_key.capacity()
+            * (std::mem::size_of::<(u32, u64)>() + std::mem::size_of::<Vec<u32>>());
+        let value_bytes = self
+            .by_key
+            .values()
+            .map(|candidates| candidates.capacity() * std::mem::size_of::<u32>())
+            .sum::<usize>();
+        map_bytes + value_bytes
+    }
+
+    #[cfg(test)]
+    fn insert_hashed_for_test(&mut self, table_oid: u32, pk_hash: u64, node_idx: u32) {
+        self.insert_hashed(table_oid, pk_hash, node_idx);
     }
 }
 
@@ -364,6 +439,48 @@ mod tests {
             builder.resolve_verified(10, "left", |idx| idx == 0),
             Some(0)
         );
+    }
+
+    #[test]
+    fn delta_lookup_verifies_only_matching_hash_bucket() {
+        let mut delta = ResolutionDeltaIndex::new();
+        for i in 0..1000u32 {
+            delta.insert(10, &format!("unrelated-{i}"), i);
+        }
+        delta.insert(10, "target", 1001);
+
+        let mut verified = 0;
+        assert_eq!(
+            delta.resolve_verified(10, "target", |idx| {
+                verified += 1;
+                idx == 1001
+            }),
+            Some(1001)
+        );
+        assert_eq!(verified, 1);
+
+        assert_eq!(
+            delta.resolve_verified(10, "missing", |_| unreachable!()),
+            None
+        );
+    }
+
+    #[test]
+    fn delta_same_hash_candidates_remain_recent_first_and_verified() {
+        let mut delta = ResolutionDeltaIndex::new();
+        let hash = ResolutionIndexBuilder::hash_pk("left");
+        delta.insert_hashed_for_test(10, hash, 0);
+        delta.insert_hashed_for_test(10, hash, 1);
+
+        let mut verified = Vec::new();
+        assert_eq!(
+            delta.resolve_verified(10, "left", |idx| {
+                verified.push(idx);
+                idx == 0
+            }),
+            Some(0)
+        );
+        assert_eq!(verified, vec![1, 0]);
     }
 
     #[test]

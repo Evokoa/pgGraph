@@ -114,7 +114,8 @@ SQL, or application schedulers; the stable pgGraph boundary is the admin-only
 
 Mmap-backed node stores cannot be mutated. Before node mutation, the engine
 materializes node data into owned arrays. Inserted nodes are appended and added
-to `resolution_delta`; deleted nodes are tombstoned through `NodeStore`.
+to the indexed `resolution_delta`; deleted nodes are tombstoned through
+`NodeStore`.
 
 ## Edge Changes
 

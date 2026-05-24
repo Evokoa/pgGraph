@@ -12,7 +12,7 @@ search composition, sync overlays, status reporting, and persistence.
   { name: 'filter_index', type: 'FilterIndex', desc: 'typed filter columns keyed by node index' },
   { name: 'edge_type_registry', type: 'Vec<String>', desc: 'edge label table; index 0 is reserved for untyped root edges' },
   { name: 'resolution_store', type: 'ResolutionStore', desc: 'builder, finalized bytes, or mmap-backed lookup backend' },
-  { name: 'resolution_delta', type: 'ResolutionIndexBuilder', desc: 'post-build inserts that cannot mutate finalized/mmap index' },
+  { name: 'resolution_delta', type: 'ResolutionDeltaIndex', desc: 'indexed post-build inserts that cannot mutate finalized/mmap index' },
   { name: '_mmap', type: 'Option<Mmap>', desc: 'owns mmap lifetime for mmap-backed stores' },
   { name: 'edge_buffer', type: 'Vec<EdgeMutation>', desc: 'post-build edge insert/delete overlay' },
   { name: 'tenant_membership', type: 'HashMap<String, RoaringBitmap>', desc: 'tenant to allowed node set' }
@@ -30,7 +30,9 @@ search composition, sync overlays, status reporting, and persistence.
 
 `resolution_delta` is checked before the main backend. This keeps post-build
 sync inserts resolvable without rewriting the immutable finalized or mmap
-section.
+section. Unlike the build-time compact builder, the delta is keyed by
+`(table_oid, pk_hash)` so sync-time lookups verify only matching candidates
+instead of scanning every post-build insert.
 
 <ProcessTree title="resolve(table_oid, pk)">
   <ProcessStep title="resolution_delta" />
@@ -113,6 +115,7 @@ trigger count, pending sync rows, and schema drift.
 | `edge_type_registry[0] == ""` | Root/path formatting assumes ID 0 is reserved |
 | `reverse_edge_store` matches `edge_store` | Inbound traversal must avoid scanning all edges |
 | `resolution_delta` is checked first | Synced inserts shadow immutable base indexes |
+| `resolution_delta` verifies candidates through `node_store` | Tombstones and hash collisions cannot resolve stale or wrong nodes |
 | Mmap store pointers never outlive `Engine._mmap` | Raw pointer reads depend on mmap lifetime |
 | `node_store.is_active()` gates resolved nodes | Tombstones must not appear as live results |
 | `edge_buffer.len() <= graph.edge_buffer_size` | Prevents unbounded overlay memory |

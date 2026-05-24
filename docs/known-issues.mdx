@@ -75,6 +75,7 @@ remaining sections below are still open work.
 | Connected components | Component computation now stores component sizes once, and component helper APIs page matching rows before hydration instead of materializing every node row first. |
 | Reverse graph build | Reverse CSR construction now uses a linear two-pass count/fill builder, avoiding an intermediate reversed `RawEdge` vector and sort. |
 | Hydration setup | Batched hydration now groups the requested page first and resolves only registered table OIDs that are actually present in that page. |
+| Resolution delta lookups | Post-build sync resolution deltas now use an indexed key map, so seed and edge resolution only verify matching `(table_oid, pk_hash)` candidates before falling back to the finalized or mmap-backed index. |
 
 ### Data Correctness and Corruption
 
@@ -142,7 +143,6 @@ not changes to the public SQL contract.
 | Build-time SPI setup | Some build and discovery paths open repeated SPI contexts or run per-table metadata queries. | Batch metadata reads and reuse SPI contexts where query shape remains straightforward and errors stay precise. Completion plan: `known-issues-completion-plan.md`. |
 | Source search recheck | Search still verifies source-row matches in Rust after SQL candidate filtering and can allocate per candidate row. | Reduce per-candidate allocation while preserving SQL/Rust predicate parity through shared fixtures. Completion plan: `known-issues-completion-plan.md`. |
 | Aggregation hydration | Some aggregation paths clone node IDs, JSON values, roots, and table names for lookup ownership. | Use borrowed lookup shapes internally where pgrx row lifetimes allow it, with parity tests for result JSON. Completion plan: `known-issues-completion-plan.md`. |
-| Resolution delta lookups | Post-build sync inserts can accumulate in a delta structure that is scanned before the finalized index. | Add an indexed delta map only if sync-delta growth benchmarks show material lookup cost. Completion plan: `known-issues-completion-plan.md`. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 
