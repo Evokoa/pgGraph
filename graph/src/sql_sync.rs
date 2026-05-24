@@ -290,7 +290,7 @@ pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
     let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
-        eng.pending_sync_rows = pending;
+        eng.record_pending_sync_rows(pending);
     });
 
     Ok(stats)
@@ -314,7 +314,7 @@ pub(crate) fn apply_sync_until(
         for entry in log_entries {
             apply_sync_log_entry_with_context(&entry, &mut stats, &mut context)?;
             ENGINE.with(|e| {
-                e.borrow_mut().applied_sync_id = entry.id;
+                e.borrow_mut().record_applied_sync_id(entry.id);
             });
         }
     }

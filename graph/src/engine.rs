@@ -270,6 +270,65 @@ impl Engine {
         self.invalid_reason = Some(reason.into());
     }
 
+    pub fn replace_edge_stores(&mut self, edge_store: EdgeStore) {
+        let reverse_edge_store = edge_store.reversed();
+        self.edge_store = edge_store;
+        self.reverse_edge_store = reverse_edge_store;
+    }
+
+    pub fn mark_has_unidirectional_edges(&mut self) {
+        self.has_unidirectional_edges = true;
+    }
+
+    pub fn finish_build(&mut self, built_at: Option<TimestampWithTimeZone>) {
+        self.built = true;
+        self.last_build = built_at;
+    }
+
+    pub fn set_catalog_fingerprint(&mut self, catalog_fingerprint: u64) {
+        self.catalog_fingerprint = Some(catalog_fingerprint);
+    }
+
+    pub fn inherit_runtime_metadata_from(&mut self, source: &Self) {
+        self.catalog_fingerprint = source.catalog_fingerprint;
+        self.is_read_only = source.is_read_only;
+        self.read_only_reason = source.read_only_reason;
+        self.sync_status = source.sync_status;
+        self.last_build = source.last_build;
+        self.last_vacuum = source.last_vacuum;
+        self.applied_sync_id = source.applied_sync_id;
+        self.needs_vacuum = source.needs_vacuum;
+    }
+
+    pub fn record_applied_sync_id(&mut self, sync_id: i64) {
+        self.applied_sync_id = sync_id;
+    }
+
+    pub fn record_pending_sync_rows(&mut self, pending_sync_rows: i64) {
+        self.pending_sync_rows = pending_sync_rows;
+    }
+
+    pub fn mark_syncing(&mut self) {
+        if !self.is_read_only {
+            self.sync_status = SyncStatus::Syncing;
+        }
+    }
+
+    pub fn mark_idle_if_writable(&mut self) {
+        if !self.is_read_only {
+            self.sync_status = SyncStatus::Idle;
+        }
+    }
+
+    pub fn mark_vacuum_required(&mut self) {
+        self.needs_vacuum = true;
+    }
+
+    pub fn mark_vacuum_complete(&mut self, vacuumed_at: Option<TimestampWithTimeZone>) {
+        self.needs_vacuum = false;
+        self.last_vacuum = vacuumed_at;
+    }
+
     /// Register a new edge type label. Returns the u8 type ID.
     pub fn register_edge_type(&mut self, label: &str) -> GraphResult<u8> {
         // Check if already registered
@@ -928,6 +987,33 @@ mod tests {
             engine.invalid_reason.as_deref(),
             Some("registered graph catalog changed since graph.build(); rebuild required")
         );
+    }
+
+    #[test]
+    fn lifecycle_helpers_update_sync_and_vacuum_state() {
+        let mut engine = Engine::new();
+
+        engine.finish_build(None);
+        engine.set_catalog_fingerprint(42);
+        engine.record_applied_sync_id(7);
+        engine.record_pending_sync_rows(3);
+        engine.mark_syncing();
+        engine.mark_vacuum_required();
+
+        assert!(engine.built);
+        assert_eq!(engine.catalog_fingerprint, Some(42));
+        assert_eq!(engine.applied_sync_id, 7);
+        assert_eq!(engine.pending_sync_rows, 3);
+        assert_eq!(engine.sync_status, SyncStatus::Syncing);
+        assert!(engine.needs_vacuum);
+
+        engine.record_pending_sync_rows(0);
+        engine.mark_idle_if_writable();
+        engine.mark_vacuum_complete(None);
+
+        assert_eq!(engine.pending_sync_rows, 0);
+        assert_eq!(engine.sync_status, SyncStatus::Idle);
+        assert!(!engine.needs_vacuum);
     }
 
     #[test]

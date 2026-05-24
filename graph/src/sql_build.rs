@@ -67,14 +67,7 @@ fn persist_and_reload_engine(
             "graph.{operation}(): persisted mmap reload failed: {err}"
         ))
     })?;
-    loaded.catalog_fingerprint = source.catalog_fingerprint;
-    loaded.is_read_only = source.is_read_only;
-    loaded.read_only_reason = source.read_only_reason;
-    loaded.sync_status = source.sync_status;
-    loaded.last_build = source.last_build;
-    loaded.last_vacuum = source.last_vacuum;
-    loaded.applied_sync_id = source.applied_sync_id;
-    loaded.needs_vacuum = source.needs_vacuum;
+    loaded.inherit_runtime_metadata_from(source);
 
     Ok(loaded)
 }
@@ -128,8 +121,8 @@ fn execute_build_inner(
     if force_read_only {
         new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
     }
-    new_engine.catalog_fingerprint = Some(catalog_fingerprint(&tables, &edges, &filter_columns));
-    new_engine.applied_sync_id = max_sync_log_id()?;
+    new_engine.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filter_columns));
+    new_engine.record_applied_sync_id(max_sync_log_id()?);
 
     let nodes_loaded = new_engine.node_store.node_count() as i64;
     let edges_loaded = new_engine.edge_store.edge_count() as i64;
@@ -188,8 +181,7 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
     let after = max_sync_log_id()?;
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
-        eng.needs_vacuum = false;
-        eng.last_vacuum = Some(pgrx::datetime::transaction_timestamp());
+        eng.mark_vacuum_complete(Some(pgrx::datetime::transaction_timestamp()));
     });
     Ok(MaintenanceExecutionResult {
         sync_rows_applied: after.saturating_sub(previous_applied_sync_id),
@@ -232,14 +224,13 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     if force_read_only {
         new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
     }
-    new_engine.catalog_fingerprint = Some(catalog_fingerprint(&tables, &edges, &filter_columns));
-    new_engine.applied_sync_id = max_sync_log_id()?;
-    new_engine.needs_vacuum = false;
+    new_engine.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filter_columns));
+    new_engine.record_applied_sync_id(max_sync_log_id()?);
 
     let nodes_after = new_engine.node_store.node_count() as i64;
     let edges_rebuilt = new_engine.edge_store.edge_count() as i64;
     let tombstones_removed = nodes_before - active_before;
-    new_engine.last_vacuum = Some(pgrx::datetime::transaction_timestamp());
+    new_engine.mark_vacuum_complete(Some(pgrx::datetime::transaction_timestamp()));
 
     let persisted_engine = if force_persist || config::PERSIST_ON_BUILD.get() {
         let mut progress = |_, _| Ok(());

@@ -241,7 +241,7 @@ pub fn sync_truncate(engine: &mut Engine, table_oid: u32) -> GraphResult<u64> {
             bitmap.remove(node_idx);
         }
     }
-    engine.needs_vacuum = true;
+    engine.mark_vacuum_required();
     Ok(tombstoned)
 }
 

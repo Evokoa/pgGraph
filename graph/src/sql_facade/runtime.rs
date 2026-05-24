@@ -142,8 +142,9 @@ fn maybe_auto_load() {
         match persistence::load_graph_file(&path) {
             Ok(mut loaded_engine) => {
                 if let Ok((tables, edges, filters)) = read_catalog() {
-                    loaded_engine.catalog_fingerprint =
-                        Some(catalog_fingerprint(&tables, &edges, &filters));
+                    loaded_engine.set_catalog_fingerprint(catalog_fingerprint(
+                        &tables, &edges, &filters,
+                    ));
                 }
                 let nc = loaded_engine.node_store.node_count();
                 let ec = loaded_engine.edge_store.edge_count();
@@ -189,7 +190,7 @@ fn ensure_current_graph() -> safety::GraphResult<()> {
     if matches!(sync_mode, config::SyncMode::Trigger) && pending > 0 {
         ENGINE.with(|e| {
             let mut eng = e.borrow_mut();
-            eng.sync_status = engine::SyncStatus::Syncing;
+            eng.mark_syncing();
         });
     }
     Ok(())
@@ -231,9 +232,9 @@ fn ensure_current_graph_for_query(
             let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;
             ENGINE.with(|e| {
                 let mut eng = e.borrow_mut();
-                eng.pending_sync_rows = pending;
-                if pending == 0 && !eng.is_read_only {
-                    eng.sync_status = engine::SyncStatus::Idle;
+                eng.record_pending_sync_rows(pending);
+                if pending == 0 {
+                    eng.mark_idle_if_writable();
                 }
             });
             Ok(())

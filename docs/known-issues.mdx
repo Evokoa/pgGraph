@@ -171,7 +171,7 @@ but they do not change core user behavior.
 |---|---|---|
 | SQL facade and pg test layout | Some SQL facade and pg test files are included textually from `lib.rs`. | Replace `include!` usage with normal modules and local imports. |
 | Build/vacuum pipeline | Build and vacuum share a lot of pipeline logic. | Extract a shared helper while keeping build-only and vacuum-only behavior explicit. |
-| Engine state encapsulation | Status observations now route through `Engine::refresh_observed_state`, but build, sync, read-only, vacuum, mmap, and resolution lifecycle fields are still mutated directly in several modules. | Continue moving lifecycle transitions behind validated engine helpers before making fields private. |
+| Engine state encapsulation | Status observations, build completion, sync progress, and vacuum lifecycle now route through engine helpers, but mmap and resolution lifecycle fields are still mutated directly in lower-level load/materialization paths. | Continue moving mmap and resolution transitions behind validated engine helpers before making fields private. |
 | Mmap mutation API | Direct mutation on mmap-backed stores is not consistently represented. | Route mutations through engine helpers or make direct store mutation fail consistently. |
 | Mmap resolution state | Mmap resolution offsets and backing storage are split across engine fields. | Couple the backing data with the `MmapBacked` variant so invalid states are harder to represent. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |

@@ -551,22 +551,21 @@ pub fn build_graph(
         })?;
 
         if !edge.bidirectional {
-            engine.has_unidirectional_edges = true;
+            engine.mark_has_unidirectional_edges();
         }
     }
     edge_batch.flush()?;
 
     // Phase 3: Build CSR by streaming sorted temp-spooled edges.
     let node_count = engine.node_store.node_count();
-    engine.edge_store = load_edge_store_from_spool(node_count, has_weights)?;
-    engine.reverse_edge_store = engine.edge_store.reversed();
+    let edge_store = load_edge_store_from_spool(node_count, has_weights)?;
+    engine.replace_edge_stores(edge_store);
 
     // Mark as built
-    engine.built = true;
+    engine.finish_build(Some(pgrx::datetime::transaction_timestamp()));
     if graph_mode == GraphMode::ReadOnly {
         engine.mark_read_only(crate::engine::ReadOnlyReason::MemoryLimit);
     }
-    engine.last_build = Some(pgrx::datetime::transaction_timestamp());
 
     let elapsed = start.elapsed();
     pgrx::log!(
