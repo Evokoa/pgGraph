@@ -19,7 +19,7 @@ use roaring::RoaringBitmap;
 use std::collections::{HashMap, HashSet};
 
 type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
-type OverlayDeletes = HashSet<(u32, u32, u8)>;
+type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
 type TraversalEdgeOverlay = (OverlayInserts, OverlayDeletes);
 
 /// Resolution storage backend.
@@ -525,14 +525,21 @@ impl Engine {
             }
         }
 
-        let mut insert_map: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
+        let mut insert_map: OverlayInserts = HashMap::new();
         for (source, target, type_id) in inserts {
             insert_map
                 .entry(source)
                 .or_default()
                 .push((target, type_id));
         }
-        (insert_map, deletes)
+        let mut delete_map: OverlayDeletes = HashMap::new();
+        for (source, target, type_id) in deletes {
+            delete_map
+                .entry(source)
+                .or_default()
+                .insert((target, type_id));
+        }
+        (insert_map, delete_map)
     }
 
     /// Find shortest path between two nodes.

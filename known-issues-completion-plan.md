@@ -456,8 +456,6 @@ Tracked P1 rows and specific plans:
 - `Traversal internals`: benchmark reusable BFS/DFS scratch buffers and sparse
   result metadata; keep dense traversal result vectors for cases where path
   reconstruction across many returned rows remains faster.
-- `Edge overlays`: benchmark cache-friendly overlay sets or oriented overlays
-  once overlay buffers grow past a measured threshold.
 - `Build-time SPI setup`: batch metadata reads and reuse SPI contexts where
   query shape stays simple and error reporting remains clear.
 - `Source search recheck`: reduce per-candidate allocation while preserving
@@ -525,6 +523,17 @@ Completed P1 rows:
   Pre/post timing was recorded in
   `/private/tmp/pggraph-traversal-allocations-pre-benchmark.md` and
   `/private/tmp/pggraph-traversal-allocations-post-benchmark.md`.
+- `Edge overlays`: completed in
+  `perf(traversal): key deleted overlays by source`. Traversal and aggregation
+  overlay reduction now keeps delete overlays as
+  `HashMap<u32, HashSet<(target, type_id)>>`, matching the insert overlay's
+  source-keyed shape. Base-edge scans now skip delete lookups entirely when the
+  current source has no deletes, and delete hits hash only `(target, type_id)`
+  rather than a full `(source, target, type_id)` triple. Regression note: delete
+  overlay construction adds a grouping pass after conflict resolution, but the
+  traversal hot loop performs fewer and smaller hash lookups. Pre/post timing
+  was recorded in `/private/tmp/pggraph-edge-overlays-pre-benchmark.md` and
+  `/private/tmp/pggraph-edge-overlays-post-benchmark.md`.
 
 Completion criteria:
 

@@ -97,7 +97,7 @@ Before traversal, the engine reduces the buffer into:
 | Overlay | Type | Meaning |
 |---|---|---|
 | inserts | `HashMap<u32, Vec<(u32, u8)>>` | Extra neighbors by source node |
-| deletes | `HashSet<(u32, u32, u8)>` | Base edges hidden from traversal |
+| deletes | `HashMap<u32, HashSet<(u32, u8)>>` | Base edges hidden from traversal, keyed by source node |
 
 Insert after delete cancels the delete; delete after insert cancels the insert.
 

@@ -46,7 +46,7 @@ fn traversal_config(seed_node: u32, max_depth: i32) -> BfsConfig {
         tenanted_table_oids: HashSet::new(),
         tenant_membership: HashMap::new(),
         overlay_insert_edges: HashMap::new(),
-        overlay_deleted_edges: HashSet::new(),
+        overlay_deleted_edges: HashMap::new(),
     }
 }
 
@@ -62,7 +62,9 @@ fn add_overlay_edges(config: &mut BfsConfig, graph: &graph_gen::BenchGraph, stri
         if let Some((&target, &type_id)) = targets.first().zip(type_ids.first()) {
             config
                 .overlay_deleted_edges
-                .insert((source, target, type_id));
+                .entry(source)
+                .or_default()
+                .insert((target, type_id));
         }
     }
 }

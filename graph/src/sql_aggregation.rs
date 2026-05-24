@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
-type OverlayDeletes = HashSet<(u32, u32, u8)>;
+type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
 type AggregationEdgeOverlay = (OverlayInserts, OverlayDeletes);
 pub(crate) type IndexedPath = Rc<[u32]>;
 
@@ -234,7 +234,7 @@ pub(crate) fn enumerate_all_paths_dfs(
     edge_type_filter: Option<&HashSet<u8>>,
     node_table_filter: Option<&HashSet<u32>>,
     overlay_inserts: &HashMap<u32, Vec<(u32, u8)>>,
-    overlay_deletes: &HashSet<(u32, u32, u8)>,
+    overlay_deletes: &OverlayDeletes,
 ) {
     if depth >= request.min_depth
         && node_table_filter
@@ -350,14 +350,21 @@ pub(crate) fn aggregation_edge_overlay(
             }
         }
     }
-    let mut insert_map: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
+    let mut insert_map: OverlayInserts = HashMap::new();
     for (source, target, type_id) in inserts {
         insert_map
             .entry(source)
             .or_default()
             .push((target, type_id));
     }
-    (insert_map, deletes)
+    let mut delete_map: OverlayDeletes = HashMap::new();
+    for (source, target, type_id) in deletes {
+        delete_map
+            .entry(source)
+            .or_default()
+            .insert((target, type_id));
+    }
+    (insert_map, delete_map)
 }
 
 pub(crate) fn oriented_edge_keys(
@@ -380,7 +387,7 @@ pub(crate) fn aggregation_neighbors(
     current: u32,
     direction: types::TraversalDirection,
     overlay_inserts: &HashMap<u32, Vec<(u32, u8)>>,
-    overlay_deletes: &HashSet<(u32, u32, u8)>,
+    overlay_deletes: &OverlayDeletes,
 ) -> Vec<(u32, u8)> {
     let mut neighbors = Vec::new();
     let mut seen = HashSet::new();
@@ -421,13 +428,14 @@ pub(crate) fn aggregation_neighbors(
 pub(crate) fn push_base_neighbors(
     edge_store: &edge_store::EdgeStore,
     current: u32,
-    overlay_deletes: &HashSet<(u32, u32, u8)>,
+    overlay_deletes: &OverlayDeletes,
     seen: &mut HashSet<(u32, u8)>,
     neighbors: &mut Vec<(u32, u8)>,
 ) {
     let (targets, type_ids) = edge_store.neighbors(current);
+    let deleted = overlay_deletes.get(&current);
     for (&target, &type_id) in targets.iter().zip(type_ids.iter()) {
-        if overlay_deletes.contains(&(current, target, type_id)) {
+        if deleted.is_some_and(|deleted| deleted.contains(&(target, type_id))) {
             continue;
         }
         if seen.insert((target, type_id)) {

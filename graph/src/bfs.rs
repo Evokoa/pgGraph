@@ -44,8 +44,8 @@ pub struct BfsConfig {
     pub tenant_membership: HashMap<String, RoaringBitmap>,
     /// Sync overlay edges inserted after the last base build, keyed by source node.
     pub overlay_insert_edges: HashMap<u32, Vec<(u32, u8)>>,
-    /// Sync overlay edges deleted after the last base build.
-    pub overlay_deleted_edges: HashSet<(u32, u32, u8)>,
+    /// Sync overlay edges deleted after the last base build, keyed by source node.
+    pub overlay_deleted_edges: HashMap<u32, HashSet<(u32, u8)>>,
 }
 
 /// Result of BFS: discovered nodes with parent tracking for path reconstruction.
@@ -267,9 +267,8 @@ pub fn execute_dfs(
 struct NeighborIter<'a> {
     targets: &'a [u32],
     type_ids: &'a [u8],
-    deleted: Option<&'a HashSet<(u32, u32, u8)>>,
+    deleted: Option<&'a HashSet<(u32, u8)>>,
     inserted: Option<&'a [(u32, u8)]>,
-    source: u32,
     base_pos: usize,
     insert_pos: usize,
 }
@@ -280,13 +279,11 @@ impl<'a> NeighborIter<'a> {
         Self {
             targets,
             type_ids,
-            deleted: (!config.overlay_deleted_edges.is_empty())
-                .then_some(&config.overlay_deleted_edges),
+            deleted: config.overlay_deleted_edges.get(&node_idx),
             inserted: config
                 .overlay_insert_edges
                 .get(&node_idx)
                 .map(Vec::as_slice),
-            source: node_idx,
             base_pos: 0,
             insert_pos: 0,
         }
@@ -311,7 +308,7 @@ impl Iterator for NeighborIter<'_> {
             let type_id = self.type_ids[pos];
             if self
                 .deleted
-                .is_some_and(|deleted| deleted.contains(&(self.source, target, type_id)))
+                .is_some_and(|deleted| deleted.contains(&(target, type_id)))
             {
                 continue;
             }
@@ -419,7 +416,8 @@ impl DfsPushContext<'_> {
             if self
                 .config
                 .overlay_deleted_edges
-                .contains(&(current, neighbor, edge_type))
+                .get(&current)
+                .is_some_and(|deleted| deleted.contains(&(neighbor, edge_type)))
                 || self.push_candidate(current, current_depth, neighbor, edge_type)
             {
                 continue;
@@ -660,7 +658,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -683,7 +681,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -705,7 +703,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -734,7 +732,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -749,8 +747,8 @@ mod tests {
         let fi = FilterIndex::new();
         let mut overlay_insert_edges = std::collections::HashMap::new();
         overlay_insert_edges.insert(0, vec![(3, 1), (1, 1)]);
-        let mut overlay_deleted_edges = HashSet::new();
-        overlay_deleted_edges.insert((0, 1, 1));
+        let mut overlay_deleted_edges = std::collections::HashMap::new();
+        overlay_deleted_edges.insert(0, HashSet::from([(1, 1)]));
 
         let config = BfsConfig {
             seed_node: 0,
@@ -822,7 +820,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges,
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute_dfs(&ns, &es, &fi, &config);
@@ -850,7 +848,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -873,7 +871,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -929,7 +927,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -957,7 +955,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -981,7 +979,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -1004,7 +1002,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -1041,7 +1039,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -1073,7 +1071,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -1096,7 +1094,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -1122,7 +1120,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let bfs_result = execute(&ns, &es, &fi, &config);
@@ -1199,7 +1197,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -1223,7 +1221,7 @@ mod tests {
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
-            overlay_deleted_edges: HashSet::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
         };
 
         let result = execute(&ns, &es, &fi, &config);
