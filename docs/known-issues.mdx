@@ -81,6 +81,7 @@ remaining sections below are still open work.
 | Build-time SPI setup | Build memory preflight and `graph.estimate()` now cache registered table row estimates across node and edge accounting, avoiding repeated `pg_class.reltuples` lookups for the same source table. |
 | Source search recheck | Source-row search now prepares Rust match state once per query and table display labels once per source-table statement, avoiding repeated query normalization and regclass display lookups during candidate verification. |
 | Aggregation hydration | Aggregation now rekeys hydrated all-path nodes by table for borrowed node-id lookups and reuses borrowed parent-path hydration rows instead of cloning every candidate row into a lookup map. |
+| Traversal allocations and internals | BFS and DFS traversal result metadata now stays dense for normal high-coverage traversals, but switches to sparse parent/depth maps for low-visit-budget traversals on large graphs. |
 
 ### Data Correctness and Corruption
 
@@ -122,9 +123,11 @@ ownership and background-job failure handling were completed.
 
 ### Internal Construction and Performance
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| Traversal allocations | BFS and DFS traversal results still allocate full-graph-sized depth and parent vectors because every reached row may need path reconstruction. | Benchmark reusable traversal scratch buffers and sparse result metadata, keeping dense vectors where result conversion remains faster. Completion plan: `known-issues-completion-plan.md`. |
+<Callout type="info">
+No currently tracked next-update items remain in this category after traversal
+result metadata became adaptive for sparse visit budgets while retaining dense
+metadata for high-coverage result conversion.
+</Callout>
 
 ## P0: Operational Visibility and Resource Predictability
 
@@ -141,9 +144,11 @@ interrupt checks were added while preserving synchronous durability.
 These items are expected to improve latency or memory pressure, but they are
 not changes to the public SQL contract.
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| Traversal internals | BFS/DFS result construction still has avoidable per-query allocation in some graph shapes. | Benchmark reusable scratch buffers and sparse result metadata, keeping dense vectors where path reconstruction across many rows remains faster. Completion plan: `known-issues-completion-plan.md`. |
+<Callout type="info">
+No currently tracked P1 query-performance rows remain after source-search
+rechecks, aggregation hydration lookup ownership, and traversal result metadata
+were completed.
+</Callout>
 
 ## P2: SQL Ergonomics and Documented Semantics
 

@@ -453,9 +453,7 @@ Apply this workflow to each P1 row:
 
 Tracked P1 rows and specific plans:
 
-- `Traversal internals`: benchmark reusable BFS/DFS scratch buffers and sparse
-  result metadata; keep dense traversal result vectors for cases where path
-  reconstruction across many returned rows remains faster.
+- No tracked P1 rows remain open.
 
 Completed P1 rows:
 
@@ -561,6 +559,18 @@ Completed P1 rows:
   traversal rows. Pre/post timing was recorded in
   `/private/tmp/pggraph-aggregation-hydration-pre-benchmark.md` and
   `/private/tmp/pggraph-aggregation-hydration-post-benchmark.md`.
+- `Traversal allocations` and `Traversal internals`: completed in
+  `perf(traversal): adapt result metadata storage`. BFS and DFS traversal
+  result construction now keeps dense parent/depth metadata for normal
+  high-coverage traversals, preserving fast path reconstruction and result
+  conversion. When a large graph is traversed with a small `max_nodes` visit
+  budget, traversal metadata switches to sparse maps so the request does not
+  allocate full-graph-sized depth, parent, and parent-edge arrays up front.
+  Regression note: sparse mode adds hash lookups only for low-budget traversals
+  where the expected visited set is less than one sixteenth of the graph;
+  default/high-coverage traversals stay on dense vectors. Pre/post timing was
+  recorded in `/private/tmp/pggraph-traversal-internals-pre-benchmark.md` and
+  `/private/tmp/pggraph-traversal-internals-post-benchmark.md`.
 
 Completion criteria:
 

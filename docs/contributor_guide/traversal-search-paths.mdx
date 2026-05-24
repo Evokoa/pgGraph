@@ -17,13 +17,17 @@ low-level BFS/DFS execution over CSR arrays.
 `BfsConfig` owns resolved, hot-loop-friendly values. SQL strings and labels are
 resolved before entering the traversal loop.
 
+Traversal result metadata is adaptive. Dense parent/depth arrays are retained
+for normal high-coverage traversals, while low-visit-budget traversals on large
+graphs use sparse metadata to avoid full-graph scratch allocation.
+
 ## BFS Flow
 
 ```text
 allocate visited bitmap
-allocate depth vector
-allocate parent vector
-allocate parent_edge_type vector
+allocate dense or sparse depth metadata
+allocate dense or sparse parent metadata
+allocate dense or sparse parent_edge_type metadata
 seed frontier
 
 while frontier has nodes:
@@ -45,8 +49,9 @@ while frontier has nodes:
 ```
 
 The BFS neighbor iterator streams base CSR edges and overlay inserts without
-materializing all neighbors into a vector. DFS currently materializes and
-reverses the candidate vector to preserve deterministic depth-first order.
+materializing all neighbors into a vector. DFS pushes overlay and base
+neighbors in reverse stack order without materializing a full per-node neighbor
+vector.
 
 ## Circuit Breakers
 

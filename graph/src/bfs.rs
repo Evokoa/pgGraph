@@ -1,8 +1,8 @@
 //! # BFS — Breadth-First Search hot loop
 //!
 //! The core traversal engine. It preallocates traversal state and uses a
-//! VecDeque frontier + RoaringBitmap visited + parent[] for path
-//! reconstruction.
+//! VecDeque frontier + RoaringBitmap visited + adaptive parent/depth metadata
+//! for path reconstruction.
 //!
 //! ## Performance Constraints
 //!
@@ -21,6 +21,9 @@ use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::types::{FilterOp, PathCoordinate, TableOid, TraversalResult};
+
+const SPARSE_METADATA_MIN_NODES: usize = 4_096;
+const SPARSE_METADATA_RATIO: usize = 16;
 
 /// Configuration for a BFS traversal.
 pub struct BfsConfig {
@@ -52,15 +55,156 @@ pub struct BfsConfig {
 pub struct BfsResult {
     /// All visited node indices (including seed).
     pub visited: RoaringBitmap,
-    /// Depth of each node. Indexed by node_idx, -1 for unvisited.
-    pub depth: Vec<i32>,
+    /// Depth metadata for visited nodes.
+    pub depth: TraversalDepthMap,
     /// Parent of each visited node for path reconstruction.
-    /// `parent[i]` = the node_idx that discovered node `i`.
-    /// `parent[seed] = seed` (self-referential for the root).
-    pub parent: Vec<u32>,
+    pub parent: TraversalParentMap,
     /// Edge type used by `parent[i] -> i`.
-    /// `parent_edge_type[seed] = 0` for the root.
-    pub parent_edge_type: Vec<u8>,
+    pub parent_edge_type: TraversalParentEdgeTypes,
+}
+
+/// Traversal depth metadata.
+pub enum TraversalDepthMap {
+    /// Dense mode stores one depth slot per graph node for fast result conversion.
+    Dense(Vec<i32>),
+    /// Sparse mode stores only visited nodes for low-visit-budget traversals on large graphs.
+    Sparse(HashMap<u32, i32>),
+}
+
+impl TraversalDepthMap {
+    fn new(node_count: usize, sparse: bool, expected_visits: usize) -> Self {
+        if sparse {
+            Self::Sparse(HashMap::with_capacity(expected_visits))
+        } else {
+            Self::Dense(vec![-1i32; node_count])
+        }
+    }
+
+    fn set(&mut self, node_idx: u32, depth: i32) {
+        match self {
+            Self::Dense(depths) => depths[node_idx as usize] = depth,
+            Self::Sparse(depths) => {
+                depths.insert(node_idx, depth);
+            }
+        }
+    }
+
+    fn get(&self, node_idx: u32) -> Option<i32> {
+        match self {
+            Self::Dense(depths) => depths
+                .get(node_idx as usize)
+                .copied()
+                .filter(|depth| *depth >= 0),
+            Self::Sparse(depths) => depths.get(&node_idx).copied(),
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        match self {
+            Self::Dense(depths) => depths.len(),
+            Self::Sparse(depths) => depths.len(),
+        }
+    }
+
+    #[cfg(test)]
+    fn all_unvisited(&self) -> bool {
+        match self {
+            Self::Dense(depths) => depths.iter().all(|depth| *depth == -1),
+            Self::Sparse(depths) => depths.is_empty(),
+        }
+    }
+}
+
+/// Parent node metadata for traversal path reconstruction.
+pub enum TraversalParentMap {
+    /// Dense mode stores one parent slot per graph node.
+    Dense(Vec<u32>),
+    /// Sparse mode stores parents only for visited nodes.
+    Sparse(HashMap<u32, u32>),
+}
+
+impl TraversalParentMap {
+    fn new(node_count: usize, sparse: bool, expected_visits: usize) -> Self {
+        if sparse {
+            Self::Sparse(HashMap::with_capacity(expected_visits))
+        } else {
+            Self::Dense(vec![u32::MAX; node_count])
+        }
+    }
+
+    fn set(&mut self, node_idx: u32, parent: u32) {
+        match self {
+            Self::Dense(parents) => parents[node_idx as usize] = parent,
+            Self::Sparse(parents) => {
+                parents.insert(node_idx, parent);
+            }
+        }
+    }
+
+    fn get(&self, node_idx: u32) -> Option<u32> {
+        match self {
+            Self::Dense(parents) => parents
+                .get(node_idx as usize)
+                .copied()
+                .filter(|parent| *parent != u32::MAX),
+            Self::Sparse(parents) => parents.get(&node_idx).copied(),
+        }
+    }
+
+    #[cfg(test)]
+    fn all_unvisited(&self) -> bool {
+        match self {
+            Self::Dense(parents) => parents.iter().all(|parent| *parent == u32::MAX),
+            Self::Sparse(parents) => parents.is_empty(),
+        }
+    }
+}
+
+/// Parent edge-type metadata for traversal path reconstruction.
+pub enum TraversalParentEdgeTypes {
+    /// Dense mode stores one edge-type slot per graph node.
+    Dense(Vec<u8>),
+    /// Sparse mode stores edge types only for visited nodes.
+    Sparse(HashMap<u32, u8>),
+}
+
+impl TraversalParentEdgeTypes {
+    fn new(node_count: usize, sparse: bool, expected_visits: usize) -> Self {
+        if sparse {
+            Self::Sparse(HashMap::with_capacity(expected_visits))
+        } else {
+            Self::Dense(vec![0u8; node_count])
+        }
+    }
+
+    fn set(&mut self, node_idx: u32, edge_type: u8) {
+        match self {
+            Self::Dense(edge_types) => edge_types[node_idx as usize] = edge_type,
+            Self::Sparse(edge_types) => {
+                edge_types.insert(node_idx, edge_type);
+            }
+        }
+    }
+
+    fn get(&self, node_idx: u32) -> Option<u8> {
+        match self {
+            Self::Dense(edge_types) => edge_types.get(node_idx as usize).copied(),
+            Self::Sparse(edge_types) => edge_types.get(&node_idx).copied(),
+        }
+    }
+}
+
+fn expected_visit_capacity(node_count: usize, max_nodes: u32) -> usize {
+    usize::try_from(max_nodes)
+        .unwrap_or(usize::MAX)
+        .min(node_count)
+}
+
+fn use_sparse_metadata(node_count: usize, max_nodes: u32) -> bool {
+    let expected_visits = expected_visit_capacity(node_count, max_nodes);
+    node_count >= SPARSE_METADATA_MIN_NODES
+        && expected_visits.saturating_mul(SPARSE_METADATA_RATIO) < node_count
 }
 
 /// Execute BFS traversal from a seed node.
@@ -72,7 +216,7 @@ pub struct BfsResult {
 /// * `config` — BFS parameters
 ///
 /// # Returns
-/// BfsResult containing visited set, depth map, and parent array.
+/// BfsResult containing visited set, depth map, and parent metadata.
 pub fn execute(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
@@ -80,11 +224,14 @@ pub fn execute(
     config: &BfsConfig,
 ) -> BfsResult {
     let node_count = node_store.node_count() as usize;
+    let sparse_metadata = use_sparse_metadata(node_count, config.max_nodes);
+    let expected_visits = expected_visit_capacity(node_count, config.max_nodes);
 
     let mut visited = RoaringBitmap::new();
-    let mut depth_map = vec![-1i32; node_count];
-    let mut parent = vec![u32::MAX; node_count];
-    let mut parent_edge_type = vec![0u8; node_count];
+    let mut depth_map = TraversalDepthMap::new(node_count, sparse_metadata, expected_visits);
+    let mut parent = TraversalParentMap::new(node_count, sparse_metadata, expected_visits);
+    let mut parent_edge_type =
+        TraversalParentEdgeTypes::new(node_count, sparse_metadata, expected_visits);
     if config.seed_node as usize >= node_count {
         return BfsResult {
             visited,
@@ -100,9 +247,9 @@ pub fn execute(
     // Seed the BFS
     let seed = config.seed_node;
     visited.insert(seed);
-    depth_map[seed as usize] = 0;
-    parent[seed as usize] = seed; // Self-referential root
-    parent_edge_type[seed as usize] = 0;
+    depth_map.set(seed, 0);
+    parent.set(seed, seed); // Self-referential root
+    parent_edge_type.set(seed, 0);
     frontier.push_back(seed);
     nodes_visited += 1;
 
@@ -122,7 +269,7 @@ pub fn execute(
 
     // BFS loop — traversal state is allocated before this point.
     while let Some(current) = frontier.pop_front() {
-        let current_depth = depth_map[current as usize];
+        let current_depth = depth_map.get(current).unwrap_or(-1);
 
         // Depth limit check
         if current_depth >= config.max_depth {
@@ -143,9 +290,9 @@ pub fn execute(
             }
 
             visited.insert(neighbor);
-            depth_map[neighbor as usize] = current_depth + 1;
-            parent[neighbor as usize] = current;
-            parent_edge_type[neighbor as usize] = edge_type;
+            depth_map.set(neighbor, current_depth + 1);
+            parent.set(neighbor, current);
+            parent_edge_type.set(neighbor, edge_type);
             nodes_visited += 1;
 
             // Circuit breakers
@@ -191,11 +338,14 @@ pub fn execute_dfs(
     config: &BfsConfig,
 ) -> BfsResult {
     let node_count = node_store.node_count() as usize;
+    let sparse_metadata = use_sparse_metadata(node_count, config.max_nodes);
+    let expected_visits = expected_visit_capacity(node_count, config.max_nodes);
 
     let mut visited = RoaringBitmap::new();
-    let mut depth_map = vec![-1i32; node_count];
-    let mut parent = vec![u32::MAX; node_count];
-    let mut parent_edge_type = vec![0u8; node_count];
+    let mut depth_map = TraversalDepthMap::new(node_count, sparse_metadata, expected_visits);
+    let mut parent = TraversalParentMap::new(node_count, sparse_metadata, expected_visits);
+    let mut parent_edge_type =
+        TraversalParentEdgeTypes::new(node_count, sparse_metadata, expected_visits);
     if config.seed_node as usize >= node_count {
         return BfsResult {
             visited,
@@ -207,8 +357,9 @@ pub fn execute_dfs(
 
     let seed = config.seed_node;
     visited.insert(seed);
-    depth_map[seed as usize] = 0;
-    parent[seed as usize] = seed;
+    depth_map.set(seed, 0);
+    parent.set(seed, seed);
+    parent_edge_type.set(seed, 0);
 
     if matches!(
         config.edge_type_filter,
@@ -228,7 +379,7 @@ pub fn execute_dfs(
     let has_filters = !config.filter_ops.is_empty();
 
     while let Some(current) = stack.pop() {
-        let current_depth = depth_map[current as usize];
+        let current_depth = depth_map.get(current).unwrap_or(-1);
         if current_depth >= config.max_depth {
             continue;
         }
@@ -387,9 +538,9 @@ struct DfsPushContext<'a> {
     filter_index: &'a FilterIndex,
     config: &'a BfsConfig,
     visited: &'a mut RoaringBitmap,
-    depth_map: &'a mut [i32],
-    parent: &'a mut [u32],
-    parent_edge_type: &'a mut [u8],
+    depth_map: &'a mut TraversalDepthMap,
+    parent: &'a mut TraversalParentMap,
+    parent_edge_type: &'a mut TraversalParentEdgeTypes,
     stack: &'a mut Vec<u32>,
     nodes_visited: &'a mut u32,
     has_filters: bool,
@@ -448,9 +599,9 @@ impl DfsPushContext<'_> {
         }
 
         self.visited.insert(neighbor);
-        self.depth_map[neighbor as usize] = current_depth + 1;
-        self.parent[neighbor as usize] = current;
-        self.parent_edge_type[neighbor as usize] = edge_type;
+        self.depth_map.set(neighbor, current_depth + 1);
+        self.parent.set(neighbor, current);
+        self.parent_edge_type.set(neighbor, edge_type);
         *self.nodes_visited += 1;
 
         if *self.nodes_visited >= self.config.max_nodes {
@@ -468,10 +619,10 @@ impl DfsPushContext<'_> {
     }
 }
 
-/// Reconstruct the path from seed to a specific node using the parent array.
+/// Reconstruct the path from seed to a specific node using parent metadata.
 ///
 /// Returns the path as a sequence of node indices from seed to target.
-pub fn reconstruct_path(parent: &[u32], seed: u32, target: u32) -> Vec<u32> {
+pub fn reconstruct_path(parent: &TraversalParentMap, seed: u32, target: u32) -> Vec<u32> {
     let mut path = Vec::new();
     let mut current = target;
 
@@ -481,9 +632,11 @@ pub fn reconstruct_path(parent: &[u32], seed: u32, target: u32) -> Vec<u32> {
         if current == seed {
             break;
         }
-        let p = parent[current as usize];
-        if p == u32::MAX || p == current {
+        let Some(p) = parent.get(current) else {
             // Unreachable or already at root
+            break;
+        };
+        if p == current {
             break;
         }
         current = p;
@@ -495,8 +648,8 @@ pub fn reconstruct_path(parent: &[u32], seed: u32, target: u32) -> Vec<u32> {
 
 /// Reconstruct edge type IDs for the path from seed to target.
 pub fn reconstruct_edge_path(
-    parent: &[u32],
-    parent_edge_type: &[u8],
+    parent: &TraversalParentMap,
+    parent_edge_type: &TraversalParentEdgeTypes,
     seed: u32,
     target: u32,
 ) -> Vec<u8> {
@@ -504,14 +657,13 @@ pub fn reconstruct_edge_path(
     let mut current = target;
 
     while current != seed {
-        let current_idx = current as usize;
-        let Some(&parent_node) = parent.get(current_idx) else {
+        let Some(parent_node) = parent.get(current) else {
             break;
         };
-        if parent_node == u32::MAX || parent_node == current {
+        if parent_node == current {
             break;
         }
-        edge_path.push(parent_edge_type.get(current_idx).copied().unwrap_or(0));
+        edge_path.push(parent_edge_type.get(current).unwrap_or(0));
         current = parent_node;
     }
 
@@ -531,11 +683,11 @@ pub fn to_traversal_results(
     let seed = bfs_result
         .visited
         .iter()
-        .find(|&idx| bfs_result.depth[idx as usize] == 0)
+        .find(|&idx| bfs_result.depth.get(idx) == Some(0))
         .unwrap_or(0);
 
     for node_idx in bfs_result.visited.iter() {
-        let depth = bfs_result.depth[node_idx as usize];
+        let depth = bfs_result.depth.get(node_idx).unwrap_or(-1);
         let path_indices = reconstruct_path(&bfs_result.parent, seed, node_idx);
         let path: Vec<PathCoordinate> = path_indices
             .iter()
@@ -663,7 +815,7 @@ mod tests {
 
         let result = execute(&ns, &es, &fi, &config);
         assert!(result.visited.contains(0));
-        assert_eq!(result.depth[0], 0);
+        assert_eq!(result.depth.get(0), Some(0));
     }
 
     #[test]
@@ -961,7 +1113,7 @@ mod tests {
         let result = execute(&ns, &es, &fi, &config);
         assert_eq!(result.visited.len(), 1);
         assert!(result.visited.contains(0));
-        assert_eq!(result.depth[0], 0);
+        assert_eq!(result.depth.get(0), Some(0));
     }
 
     #[test]
@@ -1049,9 +1201,17 @@ mod tests {
 
     #[test]
     fn path_reconstruction_on_isolated_returns_just_seed() {
-        let result_parent = vec![0u32]; // node 0's parent is itself
+        let mut result_parent = TraversalParentMap::new(1, false, 1);
+        result_parent.set(0, 0);
         let path = reconstruct_path(&result_parent, 0, 0);
         assert_eq!(path, vec![0]);
+    }
+
+    #[test]
+    fn traversal_metadata_switches_to_sparse_for_small_visit_budgets() {
+        assert!(use_sparse_metadata(1_000_000, 10_000));
+        assert!(!use_sparse_metadata(1_000_000, 100_000));
+        assert!(!use_sparse_metadata(100, 1));
     }
 
     #[test]
@@ -1101,8 +1261,8 @@ mod tests {
 
         assert!(result.visited.is_empty());
         assert_eq!(result.depth.len(), ns.node_count() as usize);
-        assert!(result.depth.iter().all(|depth| *depth == -1));
-        assert!(result.parent.iter().all(|parent| *parent == u32::MAX));
+        assert!(result.depth.all_unvisited());
+        assert!(result.parent.all_unvisited());
     }
 
     #[test]
