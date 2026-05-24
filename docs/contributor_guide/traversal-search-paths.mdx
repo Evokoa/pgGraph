@@ -159,3 +159,7 @@ The aggregation path can operate on:
 | all possible paths | Enumerate paths with a hard count cap |
 
 Path enumeration must stay capped. Do not add an unbounded aggregate mode.
+All-path aggregation hydrates each unique coordinate once, then groups hydrated
+rows by table so repeated path occurrences can use borrowed node-id lookups.
+Chosen-parent-path aggregation keeps a borrowed cache over traversal rows and
+only clones hydrated JSON for rows it emits.

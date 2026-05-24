@@ -456,8 +456,6 @@ Tracked P1 rows and specific plans:
 - `Traversal internals`: benchmark reusable BFS/DFS scratch buffers and sparse
   result metadata; keep dense traversal result vectors for cases where path
   reconstruction across many returned rows remains faster.
-- `Aggregation hydration`: use borrowed lookup shapes internally where pgrx row
-  lifetimes allow it.
 
 Completed P1 rows:
 
@@ -551,6 +549,18 @@ Completed P1 rows:
   timing was recorded in
   `/private/tmp/pggraph-source-search-recheck-pre-benchmark.md` and
   `/private/tmp/pggraph-source-search-recheck-post-benchmark.md`.
+- `Aggregation hydration`: completed in
+  `perf(aggregation): borrow hydrated lookup keys`. All-possible-path
+  aggregation now groups hydrated rows by table so repeated path occurrences
+  can look up JSON rows by borrowed node IDs. Chosen-parent-path expansion now
+  builds a borrowed cache over traversal rows and clones JSON only for emitted
+  rows, rather than cloning every hydrated candidate into the cache upfront.
+  Regression note: grouped hydration adds one table-level map while removing
+  repeated `(table_oid, node_id.clone())` lookup keys; parent-path expansion
+  keeps source-row fallback hydration for path coordinates absent from returned
+  traversal rows. Pre/post timing was recorded in
+  `/private/tmp/pggraph-aggregation-hydration-pre-benchmark.md` and
+  `/private/tmp/pggraph-aggregation-hydration-post-benchmark.md`.
 
 Completion criteria:
 

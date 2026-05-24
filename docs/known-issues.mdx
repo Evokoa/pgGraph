@@ -80,6 +80,7 @@ remaining sections below are still open work.
 | Edge overlays | Traversal and aggregation delete overlays are now source-keyed maps, so base-edge scans only check delete sets for the current source node instead of hashing full `(source, target, type)` triples on every edge. |
 | Build-time SPI setup | Build memory preflight and `graph.estimate()` now cache registered table row estimates across node and edge accounting, avoiding repeated `pg_class.reltuples` lookups for the same source table. |
 | Source search recheck | Source-row search now prepares Rust match state once per query and table display labels once per source-table statement, avoiding repeated query normalization and regclass display lookups during candidate verification. |
+| Aggregation hydration | Aggregation now rekeys hydrated all-path nodes by table for borrowed node-id lookups and reuses borrowed parent-path hydration rows instead of cloning every candidate row into a lookup map. |
 
 ### Data Correctness and Corruption
 
@@ -143,7 +144,6 @@ not changes to the public SQL contract.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | Traversal internals | BFS/DFS result construction still has avoidable per-query allocation in some graph shapes. | Benchmark reusable scratch buffers and sparse result metadata, keeping dense vectors where path reconstruction across many rows remains faster. Completion plan: `known-issues-completion-plan.md`. |
-| Aggregation hydration | Some aggregation paths clone node IDs, JSON values, roots, and table names for lookup ownership. | Use borrowed lookup shapes internally where pgrx row lifetimes allow it, with parity tests for result JSON. Completion plan: `known-issues-completion-plan.md`. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 

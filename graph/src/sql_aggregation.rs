@@ -449,17 +449,7 @@ pub(crate) fn aggregate_indexed_paths(
     specs: Vec<AggregateSpec>,
 ) -> safety::GraphResult<serde_json::Value> {
     let coordinates_by_idx = indexed_path_coordinates(paths)?;
-    let unique_rows = coordinates_by_idx
-        .values()
-        .map(|coord| types::TraversalResult {
-            node_table: coord.table_oid,
-            node_id: coord.node_id.clone(),
-            depth: 0,
-            path: Vec::new(),
-            edge_path: Vec::new(),
-        })
-        .collect::<Vec<_>>();
-    let hydrated = hydrate_nodes(&unique_rows)?;
+    let hydrated = hydrate_indexed_path_nodes(&coordinates_by_idx)?;
     let mut accumulators = specs
         .iter()
         .map(|spec| (spec.alias.clone(), AggregateAccumulator::default()))
@@ -470,7 +460,10 @@ pub(crate) fn aggregate_indexed_paths(
             let Some(coord) = coordinates_by_idx.get(idx) else {
                 continue;
             };
-            let Some(node) = hydrated.get(&(coord.table_oid.0, coord.node_id.clone())) else {
+            let Some(table_nodes) = hydrated.get(&coord.table_oid.0) else {
+                continue;
+            };
+            let Some(node) = table_nodes.get(coord.node_id.as_str()) else {
                 continue;
             };
             for spec in specs
@@ -487,6 +480,35 @@ pub(crate) fn aggregate_indexed_paths(
     }
 
     aggregate_output(specs, accumulators)
+}
+
+fn hydrate_indexed_path_nodes(
+    coordinates_by_idx: &HashMap<u32, types::PathCoordinate>,
+) -> safety::GraphResult<HashMap<u32, HashMap<String, pgrx::JsonB>>> {
+    let unique_rows = coordinates_by_idx
+        .values()
+        .map(|coord| types::TraversalResult {
+            node_table: coord.table_oid,
+            node_id: coord.node_id.clone(),
+            depth: 0,
+            path: Vec::new(),
+            edge_path: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    hydrate_nodes(&unique_rows).map(group_hydrated_nodes_by_table)
+}
+
+fn group_hydrated_nodes_by_table(
+    hydrated: HashMap<(u32, String), pgrx::JsonB>,
+) -> HashMap<u32, HashMap<String, pgrx::JsonB>> {
+    let mut grouped = HashMap::new();
+    for ((table_oid, node_id), node) in hydrated {
+        grouped
+            .entry(table_oid)
+            .or_insert_with(HashMap::new)
+            .insert(node_id, node);
+    }
+    grouped
 }
 
 pub(crate) fn indexed_path_coordinates(
@@ -553,16 +575,16 @@ pub(crate) fn execute_aggregation_traversal(
 pub(crate) fn expand_rows_to_parent_path(
     rows: Vec<TraverseRow>,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
-    let mut by_coord = rows
+    let by_coord = rows
         .iter()
         .filter_map(|row| {
             row.7
                 .as_ref()
-                .map(|node| ((row.2.to_u32(), row.3.clone()), pgrx::JsonB(node.0.clone())))
+                .map(|node| ((row.2.to_u32(), row.3.as_str()), node))
         })
         .collect::<HashMap<_, _>>();
     let mut expanded = Vec::new();
-    for row in rows {
+    for row in &rows {
         let serde_json::Value::Array(path) = &row.5 .0 else {
             continue;
         };
@@ -571,7 +593,8 @@ pub(crate) fn expand_rows_to_parent_path(
             let id = path_node_field(coord, "id")?;
             let table_oid = table_oid_from_name(table)?;
             let node = by_coord
-                .remove(&(table_oid, id.to_string()))
+                .get(&(table_oid, id))
+                .map(|node| pgrx::JsonB(node.0.clone()))
                 .or_else(|| hydrate_node(table_oid, id).ok().flatten());
             expanded.push((
                 row.0,
@@ -796,5 +819,39 @@ mod tests {
         assert_eq!(&*paths[0], &[1, 2, 3]);
         assert_eq!(&*paths[1], &[1, 4, 3]);
         assert_eq!(seen_paths.len(), 2);
+    }
+
+    #[test]
+    fn hydrated_nodes_are_grouped_by_table_for_borrowed_lookup() {
+        let mut hydrated = HashMap::new();
+        hydrated.insert(
+            (10, "a".to_string()),
+            pgrx::JsonB(serde_json::json!({ "id": "a" })),
+        );
+        hydrated.insert(
+            (10, "b".to_string()),
+            pgrx::JsonB(serde_json::json!({ "id": "b" })),
+        );
+        hydrated.insert(
+            (20, "a".to_string()),
+            pgrx::JsonB(serde_json::json!({ "id": "a", "table": 20 })),
+        );
+
+        let grouped = group_hydrated_nodes_by_table(hydrated);
+
+        assert_eq!(
+            grouped
+                .get(&10)
+                .and_then(|nodes| nodes.get("a"))
+                .map(|node| &node.0),
+            Some(&serde_json::json!({ "id": "a" }))
+        );
+        assert_eq!(
+            grouped
+                .get(&20)
+                .and_then(|nodes| nodes.get("a"))
+                .map(|node| &node.0),
+            Some(&serde_json::json!({ "id": "a", "table": 20 }))
+        );
     }
 }
