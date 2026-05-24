@@ -303,26 +303,31 @@ Completion criteria:
 
 Tracked row: `Internal scheduler`
 
+Status: completed in `docs(sync): document external scheduler ownership`
+
 Plan:
 
-- Keep scheduler ownership external for this hardening pass.
-- Document `graph.run_scheduled_maintenance()` as the stable target for
-  `pg_cron`, Kubernetes CronJobs, systemd timers, Docker examples, or app-side
-  schedulers.
-- Do not add an always-on background scheduler without a separate design that
-  covers PostgreSQL worker lifecycle, crash behavior, privilege boundaries, and
-  operator controls.
+- Scheduler ownership remains external for this hardening pass.
+- `graph.run_scheduled_maintenance()` is documented as the stable admin-only
+  target for `pg_cron`, Kubernetes CronJobs, systemd timers, Docker
+  initialization SQL, or app-side schedulers.
+- The docs explicitly state pgGraph does not run an always-on internal scheduler
+  or background loop.
+- A future internal scheduler still requires a separate design covering
+  PostgreSQL worker lifecycle, crash behavior, privilege boundaries, background
+  worker slots, and operator controls.
 
 Regression risk:
 
-- No runtime regression if this remains a documentation/contract decision.
-- Adding an internal scheduler later would consume background-worker slots and
-  needs a separate resource plan.
+- No runtime regression; this is a documentation and operator-contract
+  decision.
+- External schedulers keep cadence, retry, and lifecycle behavior outside
+  backend-local pgGraph state.
 
 Completion criteria:
 
-- Docs state scheduler ownership clearly enough that this is no longer listed
-  as an alpha limitation.
+- User and contributor docs state scheduler ownership clearly enough that this
+  is no longer listed as an active alpha limitation.
 
 ### Background Job Failures
 

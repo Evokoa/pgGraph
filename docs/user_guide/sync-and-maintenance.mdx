@@ -151,6 +151,11 @@ SELECT cron.schedule(
 ```
 
 The extension does not run an always-on internal scheduler or background loop.
+Operators own the maintenance cadence and lifecycle through `pg_cron`,
+Kubernetes CronJobs, systemd timers, Docker initialization SQL, or an
+application-side scheduler. Keep the scheduled statement to the single
+admin-only call above so pgGraph can continue to apply sync and start
+maintenance using its built-in health checks.
 
 ## Edge Buffer Limits
 

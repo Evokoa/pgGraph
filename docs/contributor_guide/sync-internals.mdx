@@ -104,6 +104,12 @@ combines backend-local replay progress, durable `_sync_log` high-water state,
 freshness configuration, trigger health, and overlay pressure into one row for
 external schedulers and monitoring checks.
 
+Scheduler ownership intentionally stays outside the extension. PostgreSQL
+background-worker lifecycle, crash recovery, privilege boundaries, and cadence
+controls belong to pg_cron, Kubernetes CronJobs, systemd timers, Docker init
+SQL, or application schedulers; the stable pgGraph boundary is the admin-only
+`graph.run_scheduled_maintenance()` call.
+
 ## Node Changes
 
 Mmap-backed node stores cannot be mutated. Before node mutation, the engine

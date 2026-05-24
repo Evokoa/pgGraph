@@ -346,7 +346,10 @@ RETURNS TABLE (
 
 Admin-only. Applies pending sync when `graph.sync_health()` says it is safe,
 then starts `graph.maintenance(concurrently := true)` when refreshed health
-still recommends compaction or rebuild work.
+still recommends compaction or rebuild work. pgGraph does not run an internal
+scheduler; call this function from `pg_cron` or an external scheduler such as a
+Kubernetes CronJob, systemd timer, Docker init schedule, or application
+scheduler.
 
 ### `graph.vacuum()`
 
