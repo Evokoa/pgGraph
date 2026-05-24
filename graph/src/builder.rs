@@ -203,16 +203,25 @@ pub fn estimate_graph_memory(
     tables: &[RegisteredTable],
     edges: &[RegisteredEdge],
 ) -> GraphResult<BuildMemoryEstimate> {
+    estimate_graph_memory_with_counts(tables, edges, estimated_table_rows)
+}
+
+fn estimate_graph_memory_with_counts(
+    tables: &[RegisteredTable],
+    edges: &[RegisteredEdge],
+    mut row_count: impl FnMut(&str) -> GraphResult<i64>,
+) -> GraphResult<BuildMemoryEstimate> {
+    let mut table_counts: HashMap<String, i64> = HashMap::new();
     let mut est_nodes: i64 = 0;
     let mut est_edges: i64 = 0;
 
     for table in tables {
-        let count = estimated_table_rows(&table.table_name)?;
+        let count = cached_table_count(&mut table_counts, &mut row_count, &table.table_name)?;
         est_nodes += count;
     }
 
     for edge in edges {
-        let count = estimated_table_rows(&edge.from_table)?;
+        let count = cached_table_count(&mut table_counts, &mut row_count, &edge.from_table)?;
         let multiplier = if edge.bidirectional { 2 } else { 1 };
         est_edges += count * multiplier;
     }
@@ -220,6 +229,19 @@ pub fn estimate_graph_memory(
     Ok(BuildMemoryEstimate {
         memory_mb: (est_nodes as f64 * 140.0 + est_edges as f64 * 5.0) / 1_048_576.0,
     })
+}
+
+fn cached_table_count(
+    table_counts: &mut HashMap<String, i64>,
+    row_count: &mut impl FnMut(&str) -> GraphResult<i64>,
+    table_name: &str,
+) -> GraphResult<i64> {
+    if let Some(count) = table_counts.get(table_name) {
+        return Ok(*count);
+    }
+    let count = row_count(table_name)?;
+    table_counts.insert(table_name.to_string(), count);
+    Ok(count)
 }
 
 /// Build the graph engine from registered tables and edges.
@@ -1042,7 +1064,12 @@ fn primary_key_expr(primary_key: &PrimaryKeySpec) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::structural_text_value;
+    use super::{
+        estimate_graph_memory_with_counts, structural_text_value, PrimaryKeySpec, PropertyColumns,
+        RegisteredEdge, RegisteredTable,
+    };
+    use std::cell::RefCell;
+    use std::collections::HashMap;
 
     #[test]
     fn structural_text_value_preserves_empty_string_but_skips_null() {
@@ -1055,5 +1082,51 @@ mod tests {
             Some("node-1".to_string())
         );
         assert_eq!(structural_text_value(None), None);
+    }
+
+    #[test]
+    fn memory_estimate_reuses_table_counts_across_nodes_and_edges() {
+        let tables = vec![RegisteredTable {
+            table_name: "public.accounts".to_string(),
+            id_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
+            columns: PropertyColumns::from_columns(Vec::new()),
+            tenant_column: None,
+        }];
+        let edges = vec![
+            RegisteredEdge {
+                from_table: "public.accounts".to_string(),
+                from_column: "parent_id".to_string(),
+                to_table: "public.accounts".to_string(),
+                to_column: "id".to_string(),
+                label: "parent".to_string(),
+                bidirectional: false,
+                weight_column: None,
+                label_column: None,
+            },
+            RegisteredEdge {
+                from_table: "public.accounts".to_string(),
+                from_column: "owner_id".to_string(),
+                to_table: "public.accounts".to_string(),
+                to_column: "id".to_string(),
+                label: "owner".to_string(),
+                bidirectional: true,
+                weight_column: None,
+                label_column: None,
+            },
+        ];
+        let calls = RefCell::new(HashMap::new());
+
+        let estimate = estimate_graph_memory_with_counts(&tables, &edges, |table| {
+            *calls
+                .borrow_mut()
+                .entry(table.to_string())
+                .or_insert(0usize) += 1;
+            Ok(10)
+        })
+        .expect("estimate should succeed");
+
+        assert_eq!(calls.borrow().get("public.accounts"), Some(&1));
+        let expected_bytes = 10.0 * 140.0 + 30.0 * 5.0;
+        assert_eq!(estimate.memory_mb, expected_bytes / 1_048_576.0);
     }
 }

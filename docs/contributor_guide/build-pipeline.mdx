@@ -22,7 +22,7 @@ inputs.
 
 <ProcessTree title="build_graph(tables, edges, filters)">
   <ProcessStep title="parse graph.build_scan_mode" />
-  <ProcessStep title="estimate graph memory from pg_class.reltuples" />
+  <ProcessStep title="estimate graph memory from cached pg_class.reltuples reads" />
   <ProcessStep title="create pg_temp.graph_build_nodes" />
   <ProcessStep title="for each registered table">
     - open SPI cursor

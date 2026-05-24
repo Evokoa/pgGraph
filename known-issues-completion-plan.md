@@ -456,8 +456,6 @@ Tracked P1 rows and specific plans:
 - `Traversal internals`: benchmark reusable BFS/DFS scratch buffers and sparse
   result metadata; keep dense traversal result vectors for cases where path
   reconstruction across many returned rows remains faster.
-- `Build-time SPI setup`: batch metadata reads and reuse SPI contexts where
-  query shape stays simple and error reporting remains clear.
 - `Source search recheck`: reduce per-candidate allocation while preserving
   SQL/Rust predicate parity.
 - `Aggregation hydration`: use borrowed lookup shapes internally where pgrx row
@@ -534,6 +532,17 @@ Completed P1 rows:
   traversal hot loop performs fewer and smaller hash lookups. Pre/post timing
   was recorded in `/private/tmp/pggraph-edge-overlays-pre-benchmark.md` and
   `/private/tmp/pggraph-edge-overlays-post-benchmark.md`.
+- `Build-time SPI setup`: completed in
+  `perf(build): cache table row estimates`. Build memory preflight and
+  `graph.estimate()` now cache row estimates by registered table name across
+  node and edge accounting. A source table that is both a node table and the
+  source for multiple registered edges now performs one `pg_class.reltuples`
+  estimate lookup for that accounting pass instead of repeating the same SPI
+  helper call per use. Regression note: the cache retains one table-name/count
+  entry per unique registered source table during estimation and removes
+  repeated catalog estimate reads. Pre/post timing was recorded in
+  `/private/tmp/pggraph-build-spi-setup-pre-benchmark.md` and
+  `/private/tmp/pggraph-build-spi-setup-post-benchmark.md`.
 
 Completion criteria:
 

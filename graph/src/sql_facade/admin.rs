@@ -1215,14 +1215,15 @@ fn estimate() -> TableIterator<
         let (tables, edges, _filter_columns) = read_catalog().unwrap_or_else(|err| err.report());
         let mut est_nodes: i64 = 0;
         let mut est_edges: i64 = 0;
+        let mut table_counts = std::collections::HashMap::new();
 
         for table in &tables {
-            let count = catalog::estimated_table_rows(&table.table_name).unwrap_or(0);
+            let count = cached_estimated_table_rows(&mut table_counts, &table.table_name);
             est_nodes += count;
         }
 
         for edge in &edges {
-            let count = catalog::estimated_table_rows(&edge.from_table).unwrap_or(0);
+            let count = cached_estimated_table_rows(&mut table_counts, &edge.from_table);
             let multiplier = if edge.bidirectional { 2 } else { 1 };
             est_edges += count * multiplier;
         }
@@ -1472,6 +1473,18 @@ fn test_run_maintenance_job(job_id: &str) -> Option<String> {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         run_maintenance_job(job_id).err().map(|err| err.to_string())
     })
+}
+
+fn cached_estimated_table_rows(
+    table_counts: &mut std::collections::HashMap<String, i64>,
+    table_name: &str,
+) -> i64 {
+    if let Some(count) = table_counts.get(table_name) {
+        return *count;
+    }
+    let count = catalog::estimated_table_rows(table_name).unwrap_or(0);
+    table_counts.insert(table_name.to_string(), count);
+    count
 }
 
 /// Enable trigger-based sync for all registered tables.

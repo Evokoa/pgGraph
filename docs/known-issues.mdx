@@ -78,6 +78,7 @@ remaining sections below are still open work.
 | Resolution delta lookups | Post-build sync resolution deltas now use an indexed key map, so seed and edge resolution only verify matching `(table_oid, pk_hash)` candidates before falling back to the finalized or mmap-backed index. |
 | Path query allocations | Shortest-path queries now store unweighted parent links and weighted parent edge metadata sparsely instead of allocating full-graph parent and edge-metadata vectors for every path request. |
 | Edge overlays | Traversal and aggregation delete overlays are now source-keyed maps, so base-edge scans only check delete sets for the current source node instead of hashing full `(source, target, type)` triples on every edge. |
+| Build-time SPI setup | Build memory preflight and `graph.estimate()` now cache registered table row estimates across node and edge accounting, avoiding repeated `pg_class.reltuples` lookups for the same source table. |
 
 ### Data Correctness and Corruption
 
@@ -141,7 +142,6 @@ not changes to the public SQL contract.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | Traversal internals | BFS/DFS result construction still has avoidable per-query allocation in some graph shapes. | Benchmark reusable scratch buffers and sparse result metadata, keeping dense vectors where path reconstruction across many rows remains faster. Completion plan: `known-issues-completion-plan.md`. |
-| Build-time SPI setup | Some build and discovery paths open repeated SPI contexts or run per-table metadata queries. | Batch metadata reads and reuse SPI contexts where query shape remains straightforward and errors stay precise. Completion plan: `known-issues-completion-plan.md`. |
 | Source search recheck | Search still verifies source-row matches in Rust after SQL candidate filtering and can allocate per candidate row. | Reduce per-candidate allocation while preserving SQL/Rust predicate parity through shared fixtures. Completion plan: `known-issues-completion-plan.md`. |
 | Aggregation hydration | Some aggregation paths clone node IDs, JSON values, roots, and table names for lookup ownership. | Use borrowed lookup shapes internally where pgrx row lifetimes allow it, with parity tests for result JSON. Completion plan: `known-issues-completion-plan.md`. |
 

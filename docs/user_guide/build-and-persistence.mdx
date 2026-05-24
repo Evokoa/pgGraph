@@ -111,8 +111,11 @@ status and error detail from a fresh worker transaction so
 
 ## Build Memory Guard
 
-Before loading rows, the builder estimates memory with the registered table and
-edge row estimates. If the estimate exceeds `graph.memory_limit_mb`:
+Before loading rows, the builder estimates memory with registered table and
+edge row estimates from `pg_class.reltuples`. Reused source tables are counted
+from one cached estimate during the preflight, so a table that contributes both
+nodes and multiple registered edges does not require repeated catalog estimate
+reads. If the estimate exceeds `graph.memory_limit_mb`:
 
 | `graph.oom_action` | Behavior |
 |---|---|
