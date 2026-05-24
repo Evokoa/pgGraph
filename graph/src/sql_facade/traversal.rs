@@ -69,7 +69,6 @@ fn traverse(
             offset: row_offset,
             max_nodes,
             max_frontier,
-            filter_condition: None,
         };
         let rows = execute_traverse_rows(&request).unwrap_or_else(|err| err.report());
 
@@ -159,7 +158,6 @@ fn traverse_many(
                 offset: row_offset,
                 max_nodes,
                 max_frontier,
-                filter_condition: None,
             };
             let mut start_candidates =
                 execute_traverse_candidates(&request).unwrap_or_else(|err| err.report());

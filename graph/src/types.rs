@@ -223,7 +223,7 @@ pub enum EdgeTypeFilter {
     NoneMatched,
 }
 
-/// Filter operation parsed from a `filter_condition` string.
+/// Filter operation used by traversal filter pushdown.
 #[derive(Debug, Clone)]
 pub enum FilterOp {
     /// Unsigned numeric column is greater than the threshold.

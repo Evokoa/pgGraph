@@ -94,13 +94,7 @@ pub(crate) fn execute_traverse_candidates(
 
     let results = ENGINE.with(|e| {
         let eng = e.borrow();
-        let mut filter_ops = match request.filter_condition {
-            Some(condition) => eng
-                .filter_index
-                .parse_condition(condition)
-                .map_err(|reason| safety::GraphError::InvalidFilter { reason })?,
-            None => Vec::new(),
-        };
+        let mut filter_ops = Vec::with_capacity(structured_filter.pushdown_filters.len());
         for filter in &structured_filter.pushdown_filters {
             filter_ops.push(typed_pushdown_filter_op(&eng.filter_index, filter)?);
         }

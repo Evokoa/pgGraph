@@ -219,7 +219,6 @@ fn traverse_search(
                 offset: row_offset,
                 max_nodes: config::MAX_NODES.get(),
                 max_frontier: config::MAX_FRONTIER.get(),
-                filter_condition: None,
             };
             let mut start_candidates =
                 execute_traverse_candidates(&request).unwrap_or_else(|err| err.report());

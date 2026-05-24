@@ -535,7 +535,6 @@ pub(crate) fn execute_aggregation_traversal(
             offset: 0,
             max_nodes: crate::config::MAX_NODES.get(),
             max_frontier: crate::config::MAX_FRONTIER.get(),
-            filter_condition: None,
         };
         let mut start_rows = execute_traverse_rows(&traverse_request)?;
         rows.append(&mut start_rows);

@@ -126,23 +126,29 @@ Completion criteria:
 ### Filter Model
 
 Tracked rows: `Filter model` and `Legacy numeric filters`
+Status: completed in `fix(filters): retire raw traversal filters`
 
 Plan:
 
-- Inventory every raw-filter and structured-filter entrypoint.
-- Route legacy raw filters through the same typed condition model used by
-  structured filters, or reject/deprecate raw shapes that cannot be translated
-  safely.
-- Keep signed and unsigned numeric paths separated at the type boundary. Do not
-  convert signed values through unsigned-only helpers.
-- Add tests for negative integers, large signed integers, unsigned bounds, and
-  mixed JSON numeric representations.
+- SQL facade entrypoints now construct traversal predicates only from
+  structured typed filters.
+- `TraverseRequest` no longer carries `filter_condition`, so public traversal,
+  multi-start traversal, traversal search, and aggregation traversal cannot
+  select the legacy raw filter parser.
+- The legacy unsigned condition parser remains compiled only for tests,
+  fuzzing, and development helpers.
+- Signed typed filters continue to use `FilterOp::*I64` and never convert
+  through `UnsignedFilterOp`.
+- Regression coverage keeps the legacy parser rejecting signed numeric
+  literals instead of wrapping, dropping, or treating them as unsigned values.
 
 Regression risk:
 
-- Unifying filters can change edge-case behavior for legacy raw filters.
-- Stricter rejection improves correctness but can break callers relying on
-  ambiguous legacy shapes.
+- Public SQL behavior should not regress because raw `filter_condition` was
+  already absent from `graph.traverse` signatures.
+- Development-only callers of `Engine::traverse(..., filter_condition)` still
+  use the legacy unsigned parser; production SQL code should call
+  `traverse_with_filter_ops` through structured typed filters.
 
 Completion criteria:
 

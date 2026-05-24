@@ -90,7 +90,6 @@ pub(crate) struct TraverseRequest<'a> {
     pub(crate) offset: i32,
     pub(crate) max_nodes: i32,
     pub(crate) max_frontier: i32,
-    pub(crate) filter_condition: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]

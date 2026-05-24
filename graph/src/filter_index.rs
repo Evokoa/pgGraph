@@ -369,7 +369,7 @@ impl FilterIndex {
         )
     }
 
-    /// Parse a filter condition string into FilterOp(s).
+    /// Parse a legacy unsigned filter condition string into FilterOp(s).
     ///
     /// Supported formats:
     /// - `"amount > 10000"`
@@ -378,6 +378,7 @@ impl FilterIndex {
     /// - `"amount > 1000 AND risk_score > 50"`
     ///
     /// Returns `Err` with a reason if parsing fails.
+    #[cfg(any(test, feature = "development", feature = "fuzzing"))]
     pub fn parse_condition(&self, condition: &str) -> Result<Vec<FilterOp>, String> {
         let mut ops = Vec::new();
         let mut tokens = condition.split_whitespace().peekable();
@@ -446,6 +447,7 @@ impl FilterIndex {
     }
 }
 
+#[cfg(any(test, feature = "development", feature = "fuzzing"))]
 fn parse_u32_value(value: &str) -> Result<u32, String> {
     value
         .parse()
@@ -827,6 +829,17 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Cannot parse"));
+    }
+
+    #[test]
+    fn legacy_condition_parser_rejects_signed_numeric_literals() {
+        let mut fi = FilterIndex::new();
+        fi.register_column(100, "amount".to_string(), 1);
+
+        let result = fi.parse_condition("amount > -1");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot parse '-1'"));
     }
 
     #[test]
