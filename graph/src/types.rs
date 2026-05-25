@@ -225,75 +225,82 @@ pub enum EdgeTypeFilter {
 
 /// Filter operation used by traversal filter pushdown.
 #[derive(Debug, Clone)]
-pub enum FilterOp {
+pub struct FilterOp {
+    column_idx: usize,
+    condition: FilterCondition,
+}
+
+/// Typed filter predicate applied to a single filter column.
+#[derive(Debug, Clone)]
+pub enum FilterCondition {
     /// Unsigned numeric column is greater than the threshold.
-    Gt(usize, u32),
+    Gt(u32),
     /// Unsigned numeric column is greater than or equal to the threshold.
-    Gte(usize, u32),
+    Gte(u32),
     /// Unsigned numeric column is less than the threshold.
-    Lt(usize, u32),
+    Lt(u32),
     /// Unsigned numeric column is less than or equal to the threshold.
-    Lte(usize, u32),
+    Lte(u32),
     /// Unsigned numeric column equals the value.
-    Eq(usize, u32),
+    Eq(u32),
     /// Unsigned numeric column does not equal the value.
-    Neq(usize, u32),
+    Neq(u32),
     /// Unsigned numeric column is within the inclusive range.
-    Between(usize, u32, u32),
+    Between(u32, u32),
     /// Unsigned numeric column is one of the listed values.
-    In(usize, Vec<u32>),
+    In(Vec<u32>),
     /// Unsigned numeric column is not one of the listed values.
-    NotIn(usize, Vec<u32>),
+    NotIn(Vec<u32>),
     /// Signed numeric column equals the value.
-    EqI64(usize, i64),
+    EqI64(i64),
     /// Signed numeric column does not equal the value.
-    NeqI64(usize, i64),
+    NeqI64(i64),
     /// Signed numeric column is greater than the threshold.
-    GtI64(usize, i64),
+    GtI64(i64),
     /// Signed numeric column is greater than or equal to the threshold.
-    GteI64(usize, i64),
+    GteI64(i64),
     /// Signed numeric column is less than the threshold.
-    LtI64(usize, i64),
+    LtI64(i64),
     /// Signed numeric column is less than or equal to the threshold.
-    LteI64(usize, i64),
+    LteI64(i64),
     /// Signed numeric column is within the inclusive range.
-    BetweenI64(usize, i64, i64),
+    BetweenI64(i64, i64),
     /// Signed numeric/date/timestamptz column is one of the listed values.
-    InI64(usize, Vec<i64>),
+    InI64(Vec<i64>),
     /// Signed numeric/date/timestamptz column is not one of the listed values.
-    NotInI64(usize, Vec<i64>),
+    NotInI64(Vec<i64>),
     /// Boolean column equals the value.
-    EqBool(usize, bool),
+    EqBool(bool),
     /// Boolean column does not equal the value.
-    NeqBool(usize, bool),
+    NeqBool(bool),
     /// Boolean column is one of the listed values.
-    InBool(usize, Vec<bool>),
+    InBool(Vec<bool>),
     /// Boolean column is not one of the listed values.
-    NotInBool(usize, Vec<bool>),
+    NotInBool(Vec<bool>),
     /// Dictionary-encoded text/date/timestamptz token equals the value.
-    EqToken(usize, u32),
+    EqToken(u32),
     /// Dictionary-encoded text/date/timestamptz token does not equal the value.
-    NeqToken(usize, u32),
+    NeqToken(u32),
     /// Dictionary-encoded text token is one of the listed values.
-    InToken(usize, Vec<u32>),
+    InToken(Vec<u32>),
     /// Dictionary-encoded text token is not one of the listed values.
-    NotInToken(usize, Vec<u32>),
+    NotInToken(Vec<u32>),
     /// Dictionary-encoded text value contains the substring.
-    ContainsToken(usize, String),
+    ContainsToken(String),
     /// Dictionary-encoded text value starts with the prefix.
-    PrefixToken(usize, String),
+    PrefixToken(String),
     /// UUID column equals the 128-bit UUID value.
-    EqUuid(usize, u128),
+    EqUuid(u128),
     /// UUID column does not equal the 128-bit UUID value.
-    NeqUuid(usize, u128),
+    NeqUuid(u128),
     /// UUID column is one of the listed values.
-    InUuid(usize, Vec<u128>),
+    InUuid(Vec<u128>),
     /// UUID column is not one of the listed values.
-    NotInUuid(usize, Vec<u128>),
+    NotInUuid(Vec<u128>),
     /// Column value is SQL NULL.
-    IsNull(usize),
+    IsNull,
     /// Column value is not SQL NULL.
-    IsNotNull(usize),
+    IsNotNull,
 }
 
 /// Legacy unsigned numeric filter operation.
@@ -346,86 +353,80 @@ impl UnsignedFilterOp {
 }
 
 impl FilterOp {
+    /// Create a filter operation for `column_idx`.
+    #[inline]
+    pub fn new(column_idx: usize, condition: FilterCondition) -> Self {
+        Self {
+            column_idx,
+            condition,
+        }
+    }
+
+    /// Return the predicate portion of this filter.
+    #[inline]
+    pub fn condition(&self) -> &FilterCondition {
+        &self.condition
+    }
+
     /// Convert this filter to the legacy unsigned numeric evaluator shape.
     #[inline]
     pub fn as_unsigned(&self) -> Option<UnsignedFilterOp> {
-        match self {
-            FilterOp::Gt(idx, threshold) => Some(UnsignedFilterOp::Gt(*idx, *threshold)),
-            FilterOp::Gte(idx, threshold) => Some(UnsignedFilterOp::Gte(*idx, *threshold)),
-            FilterOp::Lt(idx, threshold) => Some(UnsignedFilterOp::Lt(*idx, *threshold)),
-            FilterOp::Lte(idx, threshold) => Some(UnsignedFilterOp::Lte(*idx, *threshold)),
-            FilterOp::Eq(idx, threshold) => Some(UnsignedFilterOp::Eq(*idx, *threshold)),
-            FilterOp::Neq(idx, threshold) => Some(UnsignedFilterOp::Neq(*idx, *threshold)),
-            FilterOp::Between(idx, lo, hi) => Some(UnsignedFilterOp::Between(*idx, *lo, *hi)),
-            FilterOp::EqI64(_, _)
-            | FilterOp::NeqI64(_, _)
-            | FilterOp::GtI64(_, _)
-            | FilterOp::GteI64(_, _)
-            | FilterOp::LtI64(_, _)
-            | FilterOp::LteI64(_, _)
-            | FilterOp::BetweenI64(_, _, _)
-            | FilterOp::In(_, _)
-            | FilterOp::NotIn(_, _)
-            | FilterOp::InI64(_, _)
-            | FilterOp::NotInI64(_, _)
-            | FilterOp::EqBool(_, _)
-            | FilterOp::NeqBool(_, _)
-            | FilterOp::InBool(_, _)
-            | FilterOp::NotInBool(_, _)
-            | FilterOp::EqToken(_, _)
-            | FilterOp::NeqToken(_, _)
-            | FilterOp::InToken(_, _)
-            | FilterOp::NotInToken(_, _)
-            | FilterOp::ContainsToken(_, _)
-            | FilterOp::PrefixToken(_, _)
-            | FilterOp::EqUuid(_, _)
-            | FilterOp::NeqUuid(_, _)
-            | FilterOp::InUuid(_, _)
-            | FilterOp::NotInUuid(_, _)
-            | FilterOp::IsNull(_)
-            | FilterOp::IsNotNull(_) => None,
+        match &self.condition {
+            FilterCondition::Gt(threshold) => {
+                Some(UnsignedFilterOp::Gt(self.column_idx, *threshold))
+            }
+            FilterCondition::Gte(threshold) => {
+                Some(UnsignedFilterOp::Gte(self.column_idx, *threshold))
+            }
+            FilterCondition::Lt(threshold) => {
+                Some(UnsignedFilterOp::Lt(self.column_idx, *threshold))
+            }
+            FilterCondition::Lte(threshold) => {
+                Some(UnsignedFilterOp::Lte(self.column_idx, *threshold))
+            }
+            FilterCondition::Eq(threshold) => {
+                Some(UnsignedFilterOp::Eq(self.column_idx, *threshold))
+            }
+            FilterCondition::Neq(threshold) => {
+                Some(UnsignedFilterOp::Neq(self.column_idx, *threshold))
+            }
+            FilterCondition::Between(lo, hi) => {
+                Some(UnsignedFilterOp::Between(self.column_idx, *lo, *hi))
+            }
+            FilterCondition::EqI64(_)
+            | FilterCondition::NeqI64(_)
+            | FilterCondition::GtI64(_)
+            | FilterCondition::GteI64(_)
+            | FilterCondition::LtI64(_)
+            | FilterCondition::LteI64(_)
+            | FilterCondition::BetweenI64(_, _)
+            | FilterCondition::In(_)
+            | FilterCondition::NotIn(_)
+            | FilterCondition::InI64(_)
+            | FilterCondition::NotInI64(_)
+            | FilterCondition::EqBool(_)
+            | FilterCondition::NeqBool(_)
+            | FilterCondition::InBool(_)
+            | FilterCondition::NotInBool(_)
+            | FilterCondition::EqToken(_)
+            | FilterCondition::NeqToken(_)
+            | FilterCondition::InToken(_)
+            | FilterCondition::NotInToken(_)
+            | FilterCondition::ContainsToken(_)
+            | FilterCondition::PrefixToken(_)
+            | FilterCondition::EqUuid(_)
+            | FilterCondition::NeqUuid(_)
+            | FilterCondition::InUuid(_)
+            | FilterCondition::NotInUuid(_)
+            | FilterCondition::IsNull
+            | FilterCondition::IsNotNull => None,
         }
     }
 
     /// Get the column index this filter operates on.
     #[inline]
     pub fn column_idx(&self) -> usize {
-        match self {
-            FilterOp::Gt(idx, _)
-            | FilterOp::Gte(idx, _)
-            | FilterOp::Lt(idx, _)
-            | FilterOp::Lte(idx, _)
-            | FilterOp::Eq(idx, _)
-            | FilterOp::Neq(idx, _)
-            | FilterOp::Between(idx, _, _)
-            | FilterOp::In(idx, _)
-            | FilterOp::NotIn(idx, _)
-            | FilterOp::EqI64(idx, _)
-            | FilterOp::NeqI64(idx, _)
-            | FilterOp::GtI64(idx, _)
-            | FilterOp::GteI64(idx, _)
-            | FilterOp::LtI64(idx, _)
-            | FilterOp::LteI64(idx, _)
-            | FilterOp::BetweenI64(idx, _, _)
-            | FilterOp::InI64(idx, _)
-            | FilterOp::NotInI64(idx, _)
-            | FilterOp::EqBool(idx, _)
-            | FilterOp::NeqBool(idx, _)
-            | FilterOp::InBool(idx, _)
-            | FilterOp::NotInBool(idx, _)
-            | FilterOp::EqToken(idx, _)
-            | FilterOp::NeqToken(idx, _)
-            | FilterOp::InToken(idx, _)
-            | FilterOp::NotInToken(idx, _)
-            | FilterOp::ContainsToken(idx, _)
-            | FilterOp::PrefixToken(idx, _)
-            | FilterOp::EqUuid(idx, _)
-            | FilterOp::NeqUuid(idx, _)
-            | FilterOp::InUuid(idx, _)
-            | FilterOp::NotInUuid(idx, _)
-            | FilterOp::IsNull(idx)
-            | FilterOp::IsNotNull(idx) => *idx,
-        }
+        self.column_idx
     }
 }
 
@@ -545,17 +546,17 @@ mod tests {
     #[test]
     fn typed_filter_ops_do_not_convert_to_unsigned_evaluators() {
         assert_eq!(
-            FilterOp::Gt(2, 9).as_unsigned(),
+            FilterOp::new(2, FilterCondition::Gt(9)).as_unsigned(),
             Some(UnsignedFilterOp::Gt(2, 9))
         );
 
         for op in [
-            FilterOp::EqI64(2, -1),
-            FilterOp::EqBool(2, true),
-            FilterOp::EqToken(2, 7),
-            FilterOp::EqUuid(2, 7),
-            FilterOp::IsNull(2),
-            FilterOp::IsNotNull(2),
+            FilterOp::new(2, FilterCondition::EqI64(-1)),
+            FilterOp::new(2, FilterCondition::EqBool(true)),
+            FilterOp::new(2, FilterCondition::EqToken(7)),
+            FilterOp::new(2, FilterCondition::EqUuid(7)),
+            FilterOp::new(2, FilterCondition::IsNull),
+            FilterOp::new(2, FilterCondition::IsNotNull),
         ] {
             assert_eq!(op.as_unsigned(), None, "{op:?}");
         }

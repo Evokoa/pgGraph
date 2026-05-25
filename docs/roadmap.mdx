@@ -98,7 +98,7 @@ Work is ranked by user impact:
 | P0 | Operational visibility and resource predictability | Build/vacuum diagnostics, sync backlog visibility, clearer read-only states, better memory estimates. |
 | P1 | Query performance follow-ups | Traversal scratch reuse, connected-component row materialization, hydration setup, source-search rechecks. |
 | P2 | SQL ergonomics and documented semantics | No active public rows after structured filters gained text predicates, membership, range, and null semantics. |
-| P3 | Internals and maintainability | Module cleanup, build/vacuum pipeline extraction, filter-op reshaping, test locality. |
+| P3 | Internals and maintainability | pg test locality once pgrx supports the needed out-of-line schema module shape. |
 
 The bias is to optimize with evidence. For hot paths, we prefer benchmarks or
 release-style SQL tests that show whether an allocation, SPI call, sort, clone,

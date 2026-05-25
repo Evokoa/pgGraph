@@ -349,18 +349,18 @@ pub(crate) fn typed_pushdown_filter_op(
     })?;
     if filter.value.is_null() {
         return match filter.operator.as_str() {
-            "eq" => Ok(types::FilterOp::IsNull(column_idx)),
-            "neq" => Ok(types::FilterOp::IsNotNull(column_idx)),
-            "is_null" => Ok(types::FilterOp::IsNull(column_idx)),
-            "is_not_null" => Ok(types::FilterOp::IsNotNull(column_idx)),
+            "eq" => Ok(pushdown_op(column_idx, types::FilterCondition::IsNull)),
+            "neq" => Ok(pushdown_op(column_idx, types::FilterCondition::IsNotNull)),
+            "is_null" => Ok(pushdown_op(column_idx, types::FilterCondition::IsNull)),
+            "is_not_null" => Ok(pushdown_op(column_idx, types::FilterCondition::IsNotNull)),
             other => Err(safety::GraphError::InvalidFilter {
                 reason: format!("operator '{}' is not supported for NULL filters", other),
             }),
         };
     }
     match filter.operator.as_str() {
-        "is_null" => return Ok(types::FilterOp::IsNull(column_idx)),
-        "is_not_null" => return Ok(types::FilterOp::IsNotNull(column_idx)),
+        "is_null" => return Ok(pushdown_op(column_idx, types::FilterCondition::IsNull)),
+        "is_not_null" => return Ok(pushdown_op(column_idx, types::FilterCondition::IsNotNull)),
         _ => {}
     }
     let column_type =
@@ -379,15 +379,23 @@ pub(crate) fn typed_pushdown_filter_op(
         filter_index::FilterColumnType::Boolean => {
             match filter.operator.as_str() {
                 "in" => {
-                    return Ok(types::FilterOp::InBool(
+                    return Ok(pushdown_op(
                         column_idx,
-                        jsonb_filter_array(&filter.column, &filter.value, jsonb_filter_bool)?,
+                        types::FilterCondition::InBool(jsonb_filter_array(
+                            &filter.column,
+                            &filter.value,
+                            jsonb_filter_bool,
+                        )?),
                     ));
                 }
                 "not_in" => {
-                    return Ok(types::FilterOp::NotInBool(
+                    return Ok(pushdown_op(
                         column_idx,
-                        jsonb_filter_array(&filter.column, &filter.value, jsonb_filter_bool)?,
+                        types::FilterCondition::NotInBool(jsonb_filter_array(
+                            &filter.column,
+                            &filter.value,
+                            jsonb_filter_bool,
+                        )?),
                     ));
                 }
                 _ => {}
@@ -403,8 +411,14 @@ pub(crate) fn typed_pushdown_filter_op(
                         ),
                     })?;
             match filter.operator.as_str() {
-                "eq" => Ok(types::FilterOp::EqBool(column_idx, value)),
-                "neq" => Ok(types::FilterOp::NeqBool(column_idx, value)),
+                "eq" => Ok(pushdown_op(
+                    column_idx,
+                    types::FilterCondition::EqBool(value),
+                )),
+                "neq" => Ok(pushdown_op(
+                    column_idx,
+                    types::FilterCondition::NeqBool(value),
+                )),
                 other => Err(safety::GraphError::InvalidFilter {
                     reason: format!("operator '{}' is not supported for boolean filters", other),
                 }),
@@ -413,31 +427,35 @@ pub(crate) fn typed_pushdown_filter_op(
         filter_index::FilterColumnType::Text => {
             match filter.operator.as_str() {
                 "in" => {
-                    return Ok(types::FilterOp::InToken(
+                    return Ok(pushdown_op(
                         column_idx,
-                        jsonb_filter_array(&filter.column, &filter.value, |value| {
-                            jsonb_filter_text_token(filter_index, column_idx, value)
-                        })?,
+                        types::FilterCondition::InToken(jsonb_filter_array(
+                            &filter.column,
+                            &filter.value,
+                            |value| jsonb_filter_text_token(filter_index, column_idx, value),
+                        )?),
                     ));
                 }
                 "not_in" => {
-                    return Ok(types::FilterOp::NotInToken(
+                    return Ok(pushdown_op(
                         column_idx,
-                        jsonb_filter_array(&filter.column, &filter.value, |value| {
-                            jsonb_filter_text_token(filter_index, column_idx, value)
-                        })?,
+                        types::FilterCondition::NotInToken(jsonb_filter_array(
+                            &filter.column,
+                            &filter.value,
+                            |value| jsonb_filter_text_token(filter_index, column_idx, value),
+                        )?),
                     ));
                 }
                 "contains" => {
-                    return Ok(types::FilterOp::ContainsToken(
+                    return Ok(pushdown_op(
                         column_idx,
-                        jsonb_filter_text(&filter.value)?,
+                        types::FilterCondition::ContainsToken(jsonb_filter_text(&filter.value)?),
                     ));
                 }
                 "prefix" => {
-                    return Ok(types::FilterOp::PrefixToken(
+                    return Ok(pushdown_op(
                         column_idx,
-                        jsonb_filter_text(&filter.value)?,
+                        types::FilterCondition::PrefixToken(jsonb_filter_text(&filter.value)?),
                     ));
                 }
                 _ => {}
@@ -455,8 +473,14 @@ pub(crate) fn typed_pushdown_filter_op(
                 .lookup_text_value(column_idx, value)
                 .unwrap_or(u32::MAX);
             match filter.operator.as_str() {
-                "eq" => Ok(types::FilterOp::EqToken(column_idx, token)),
-                "neq" => Ok(types::FilterOp::NeqToken(column_idx, token)),
+                "eq" => Ok(pushdown_op(
+                    column_idx,
+                    types::FilterCondition::EqToken(token),
+                )),
+                "neq" => Ok(pushdown_op(
+                    column_idx,
+                    types::FilterCondition::NeqToken(token),
+                )),
                 other => Err(safety::GraphError::InvalidFilter {
                     reason: format!("operator '{}' is not supported for text filters", other),
                 }),
@@ -483,15 +507,23 @@ pub(crate) fn typed_pushdown_filter_op(
         filter_index::FilterColumnType::Uuid => {
             match filter.operator.as_str() {
                 "in" => {
-                    return Ok(types::FilterOp::InUuid(
+                    return Ok(pushdown_op(
                         column_idx,
-                        jsonb_filter_array(&filter.column, &filter.value, jsonb_filter_uuid)?,
+                        types::FilterCondition::InUuid(jsonb_filter_array(
+                            &filter.column,
+                            &filter.value,
+                            jsonb_filter_uuid,
+                        )?),
                     ));
                 }
                 "not_in" => {
-                    return Ok(types::FilterOp::NotInUuid(
+                    return Ok(pushdown_op(
                         column_idx,
-                        jsonb_filter_array(&filter.column, &filter.value, jsonb_filter_uuid)?,
+                        types::FilterCondition::NotInUuid(jsonb_filter_array(
+                            &filter.column,
+                            &filter.value,
+                            jsonb_filter_uuid,
+                        )?),
                     ));
                 }
                 _ => {}
@@ -507,14 +539,25 @@ pub(crate) fn typed_pushdown_filter_op(
                 })?;
             let value = parse_uuid_u128(value)?;
             match filter.operator.as_str() {
-                "eq" => Ok(types::FilterOp::EqUuid(column_idx, value)),
-                "neq" => Ok(types::FilterOp::NeqUuid(column_idx, value)),
+                "eq" => Ok(pushdown_op(
+                    column_idx,
+                    types::FilterCondition::EqUuid(value),
+                )),
+                "neq" => Ok(pushdown_op(
+                    column_idx,
+                    types::FilterCondition::NeqUuid(value),
+                )),
                 other => Err(safety::GraphError::InvalidFilter {
                     reason: format!("operator '{}' is not supported for uuid filters", other),
                 }),
             }
         }
     }
+}
+
+#[inline]
+pub(crate) fn pushdown_op(column_idx: usize, condition: types::FilterCondition) -> types::FilterOp {
+    types::FilterOp::new(column_idx, condition)
 }
 
 pub(crate) fn typed_i64_op(
@@ -524,12 +567,30 @@ pub(crate) fn typed_i64_op(
     encoder: fn(&serde_json::Value) -> safety::GraphResult<i64>,
 ) -> safety::GraphResult<types::FilterOp> {
     match operator {
-        "eq" => Ok(types::FilterOp::EqI64(column_idx, encoder(value)?)),
-        "neq" => Ok(types::FilterOp::NeqI64(column_idx, encoder(value)?)),
-        "gt" => Ok(types::FilterOp::GtI64(column_idx, encoder(value)?)),
-        "gte" => Ok(types::FilterOp::GteI64(column_idx, encoder(value)?)),
-        "lt" => Ok(types::FilterOp::LtI64(column_idx, encoder(value)?)),
-        "lte" => Ok(types::FilterOp::LteI64(column_idx, encoder(value)?)),
+        "eq" => Ok(pushdown_op(
+            column_idx,
+            types::FilterCondition::EqI64(encoder(value)?),
+        )),
+        "neq" => Ok(pushdown_op(
+            column_idx,
+            types::FilterCondition::NeqI64(encoder(value)?),
+        )),
+        "gt" => Ok(pushdown_op(
+            column_idx,
+            types::FilterCondition::GtI64(encoder(value)?),
+        )),
+        "gte" => Ok(pushdown_op(
+            column_idx,
+            types::FilterCondition::GteI64(encoder(value)?),
+        )),
+        "lt" => Ok(pushdown_op(
+            column_idx,
+            types::FilterCondition::LtI64(encoder(value)?),
+        )),
+        "lte" => Ok(pushdown_op(
+            column_idx,
+            types::FilterCondition::LteI64(encoder(value)?),
+        )),
         "between" => {
             let bounds = value
                 .as_array()
@@ -537,19 +598,18 @@ pub(crate) fn typed_i64_op(
                 .ok_or_else(|| safety::GraphError::InvalidFilter {
                     reason: "between filter must be a two-item array".to_string(),
                 })?;
-            Ok(types::FilterOp::BetweenI64(
+            Ok(pushdown_op(
                 column_idx,
-                encoder(&bounds[0])?,
-                encoder(&bounds[1])?,
+                types::FilterCondition::BetweenI64(encoder(&bounds[0])?, encoder(&bounds[1])?),
             ))
         }
-        "in" => Ok(types::FilterOp::InI64(
+        "in" => Ok(pushdown_op(
             column_idx,
-            jsonb_filter_array("numeric", value, encoder)?,
+            types::FilterCondition::InI64(jsonb_filter_array("numeric", value, encoder)?),
         )),
-        "not_in" => Ok(types::FilterOp::NotInI64(
+        "not_in" => Ok(pushdown_op(
             column_idx,
-            jsonb_filter_array("numeric", value, encoder)?,
+            types::FilterCondition::NotInI64(jsonb_filter_array("numeric", value, encoder)?),
         )),
         other => Err(safety::GraphError::InvalidFilter {
             reason: format!("unsupported numeric filter operator '{}'", other),
@@ -965,13 +1025,20 @@ mod tests {
 
     #[test]
     fn typed_i64_op_accepts_membership_arrays() {
+        let in_filter = typed_i64_op(0, "in", &serde_json::json!([1, 2]), test_i64_encoder)
+            .expect("in filter should parse");
+        assert_eq!(in_filter.column_idx(), 0);
         assert!(matches!(
-            typed_i64_op(0, "in", &serde_json::json!([1, 2]), test_i64_encoder),
-            Ok(types::FilterOp::InI64(0, values)) if values == vec![1, 2]
+            in_filter.condition(),
+            types::FilterCondition::InI64(values) if values == &vec![1, 2]
         ));
+
+        let not_in_filter = typed_i64_op(0, "not_in", &serde_json::json!([3]), test_i64_encoder)
+            .expect("not_in filter should parse");
+        assert_eq!(not_in_filter.column_idx(), 0);
         assert!(matches!(
-            typed_i64_op(0, "not_in", &serde_json::json!([3]), test_i64_encoder),
-            Ok(types::FilterOp::NotInI64(0, values)) if values == vec![3]
+            not_in_filter.condition(),
+            types::FilterCondition::NotInI64(values) if values == &vec![3]
         ));
     }
 

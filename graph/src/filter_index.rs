@@ -3,7 +3,7 @@
 //! Registered filter columns are indexed by internal `node_idx` so BFS can
 //! evaluate traversal predicates without routing each neighbor back through SQL.
 
-use crate::types::FilterOp;
+use crate::types::{FilterCondition, FilterOp};
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -233,107 +233,109 @@ impl FilterIndex {
     pub fn check_filter(&self, node_idx: u32, op: &FilterOp) -> bool {
         let column_idx = op.column_idx();
         let Some(storage) = self.storage.get(column_idx) else {
-            return matches!(op, FilterOp::IsNull(_));
+            return matches!(op.condition(), FilterCondition::IsNull);
         };
         if !storage.is_present(node_idx) {
-            return matches!(op, FilterOp::IsNull(_));
+            return matches!(op.condition(), FilterCondition::IsNull);
         }
-        match op {
-            FilterOp::Gt(_, threshold) => self.get_value(column_idx, node_idx) > *threshold,
-            FilterOp::Gte(_, threshold) => self.get_value(column_idx, node_idx) >= *threshold,
-            FilterOp::Lt(_, threshold) => self.get_value(column_idx, node_idx) < *threshold,
-            FilterOp::Lte(_, threshold) => self.get_value(column_idx, node_idx) <= *threshold,
-            FilterOp::Eq(_, threshold) => self.get_value(column_idx, node_idx) == *threshold,
-            FilterOp::Neq(_, threshold) => self.get_value(column_idx, node_idx) != *threshold,
-            FilterOp::Between(_, lo, hi) => {
+        match op.condition() {
+            FilterCondition::Gt(threshold) => self.get_value(column_idx, node_idx) > *threshold,
+            FilterCondition::Gte(threshold) => self.get_value(column_idx, node_idx) >= *threshold,
+            FilterCondition::Lt(threshold) => self.get_value(column_idx, node_idx) < *threshold,
+            FilterCondition::Lte(threshold) => self.get_value(column_idx, node_idx) <= *threshold,
+            FilterCondition::Eq(threshold) => self.get_value(column_idx, node_idx) == *threshold,
+            FilterCondition::Neq(threshold) => self.get_value(column_idx, node_idx) != *threshold,
+            FilterCondition::Between(lo, hi) => {
                 let value = self.get_value(column_idx, node_idx);
                 value >= *lo && value <= *hi
             }
-            FilterOp::In(_, expected) => expected.contains(&self.get_value(column_idx, node_idx)),
-            FilterOp::NotIn(_, expected) => {
+            FilterCondition::In(expected) => {
+                expected.contains(&self.get_value(column_idx, node_idx))
+            }
+            FilterCondition::NotIn(expected) => {
                 !expected.contains(&self.get_value(column_idx, node_idx))
             }
-            FilterOp::EqI64(_, expected) => storage.encoded_i64(node_idx) == Some(*expected),
-            FilterOp::NeqI64(_, expected) => storage.encoded_i64(node_idx) != Some(*expected),
-            FilterOp::GtI64(_, expected) => self
+            FilterCondition::EqI64(expected) => storage.encoded_i64(node_idx) == Some(*expected),
+            FilterCondition::NeqI64(expected) => storage.encoded_i64(node_idx) != Some(*expected),
+            FilterCondition::GtI64(expected) => self
                 .storage
                 .get(column_idx)
                 .and_then(|storage| storage.encoded_i64(node_idx))
                 .is_some_and(|value| value > *expected),
-            FilterOp::GteI64(_, expected) => self
+            FilterCondition::GteI64(expected) => self
                 .storage
                 .get(column_idx)
                 .and_then(|storage| storage.encoded_i64(node_idx))
                 .is_some_and(|value| value >= *expected),
-            FilterOp::LtI64(_, expected) => self
+            FilterCondition::LtI64(expected) => self
                 .storage
                 .get(column_idx)
                 .and_then(|storage| storage.encoded_i64(node_idx))
                 .is_some_and(|value| value < *expected),
-            FilterOp::LteI64(_, expected) => self
+            FilterCondition::LteI64(expected) => self
                 .storage
                 .get(column_idx)
                 .and_then(|storage| storage.encoded_i64(node_idx))
                 .is_some_and(|value| value <= *expected),
-            FilterOp::BetweenI64(_, low, high) => self
+            FilterCondition::BetweenI64(low, high) => self
                 .storage
                 .get(column_idx)
                 .and_then(|storage| storage.encoded_i64(node_idx))
                 .is_some_and(|value| value >= *low && value <= *high),
-            FilterOp::InI64(_, expected) => self
+            FilterCondition::InI64(expected) => self
                 .storage
                 .get(column_idx)
                 .and_then(|storage| storage.encoded_i64(node_idx))
                 .is_some_and(|value| expected.contains(&value)),
-            FilterOp::NotInI64(_, expected) => self
+            FilterCondition::NotInI64(expected) => self
                 .storage
                 .get(column_idx)
                 .and_then(|storage| storage.encoded_i64(node_idx))
                 .is_some_and(|value| !expected.contains(&value)),
-            FilterOp::EqBool(_, expected) => {
+            FilterCondition::EqBool(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Boolean(value)) if value == *expected)
             }
-            FilterOp::NeqBool(_, expected) => {
+            FilterCondition::NeqBool(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Boolean(value)) if value != *expected)
             }
-            FilterOp::InBool(_, expected) => {
+            FilterCondition::InBool(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Boolean(value)) if expected.contains(&value))
             }
-            FilterOp::NotInBool(_, expected) => {
+            FilterCondition::NotInBool(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Boolean(value)) if !expected.contains(&value))
             }
-            FilterOp::EqToken(_, expected) => {
+            FilterCondition::EqToken(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if value == *expected)
             }
-            FilterOp::NeqToken(_, expected) => {
+            FilterCondition::NeqToken(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if value != *expected)
             }
-            FilterOp::InToken(_, expected) => {
+            FilterCondition::InToken(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if expected.contains(&value))
             }
-            FilterOp::NotInToken(_, expected) => {
+            FilterCondition::NotInToken(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if !expected.contains(&value))
             }
-            FilterOp::ContainsToken(_, expected) => {
+            FilterCondition::ContainsToken(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if self.text_value(column_idx, value).is_some_and(|actual| actual.contains(expected)))
             }
-            FilterOp::PrefixToken(_, expected) => {
+            FilterCondition::PrefixToken(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if self.text_value(column_idx, value).is_some_and(|actual| actual.starts_with(expected)))
             }
-            FilterOp::EqUuid(_, expected) => {
+            FilterCondition::EqUuid(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if value == *expected)
             }
-            FilterOp::NeqUuid(_, expected) => {
+            FilterCondition::NeqUuid(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if value != *expected)
             }
-            FilterOp::InUuid(_, expected) => {
+            FilterCondition::InUuid(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if expected.contains(&value))
             }
-            FilterOp::NotInUuid(_, expected) => {
+            FilterCondition::NotInUuid(expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if !expected.contains(&value))
             }
-            FilterOp::IsNull(_) => false,
-            FilterOp::IsNotNull(_) => true,
+            FilterCondition::IsNull => false,
+            FilterCondition::IsNotNull => true,
         }
     }
 
@@ -746,11 +748,11 @@ mod tests {
         fi.set_encoded_value(col, 7, Some(EncodedFilterValue::Boolean(false)));
 
         assert_eq!(fi.storage_kind(col), Some(FilterStorageKind::SparseBool));
-        assert!(fi.check_filter(3, &FilterOp::EqBool(col, true)));
-        assert!(fi.check_filter(7, &FilterOp::NeqBool(col, true)));
-        assert!(!fi.check_filter(9, &FilterOp::NeqBool(col, true)));
-        assert!(fi.check_filter(9, &FilterOp::IsNull(col)));
-        assert!(fi.check_filter(3, &FilterOp::IsNotNull(col)));
+        assert!(fi.check_filter(3, &FilterOp::new(col, FilterCondition::EqBool(true))));
+        assert!(fi.check_filter(7, &FilterOp::new(col, FilterCondition::NeqBool(true))));
+        assert!(!fi.check_filter(9, &FilterOp::new(col, FilterCondition::NeqBool(true))));
+        assert!(fi.check_filter(9, &FilterOp::new(col, FilterCondition::IsNull)));
+        assert!(fi.check_filter(3, &FilterOp::new(col, FilterCondition::IsNotNull)));
     }
 
     #[test]
@@ -769,12 +771,18 @@ mod tests {
         fi.set_encoded_value(col, 2, Some(EncodedFilterValue::Text(closed)));
 
         assert_eq!(fi.storage_kind(col), Some(FilterStorageKind::SparseLookup));
-        assert!(fi.check_filter(1, &FilterOp::EqToken(col, open)));
-        assert!(fi.check_filter(2, &FilterOp::NeqToken(col, open)));
-        assert!(fi.check_filter(1, &FilterOp::ContainsToken(col, "pe".to_string())));
-        assert!(fi.check_filter(2, &FilterOp::PrefixToken(col, "cl".to_string())));
-        assert!(!fi.check_filter(9, &FilterOp::NeqToken(col, open)));
-        assert!(fi.check_filter(9, &FilterOp::IsNull(col)));
+        assert!(fi.check_filter(1, &FilterOp::new(col, FilterCondition::EqToken(open))));
+        assert!(fi.check_filter(2, &FilterOp::new(col, FilterCondition::NeqToken(open))));
+        assert!(fi.check_filter(
+            1,
+            &FilterOp::new(col, FilterCondition::ContainsToken("pe".to_string()))
+        ));
+        assert!(fi.check_filter(
+            2,
+            &FilterOp::new(col, FilterCondition::PrefixToken("cl".to_string()))
+        ));
+        assert!(!fi.check_filter(9, &FilterOp::new(col, FilterCondition::NeqToken(open))));
+        assert!(fi.check_filter(9, &FilterOp::new(col, FilterCondition::IsNull)));
     }
 
     #[test]
@@ -792,10 +800,10 @@ mod tests {
         fi.set_encoded_value(col, 9, Some(EncodedFilterValue::Numeric(30)));
 
         assert_eq!(fi.storage_kind(col), Some(FilterStorageKind::SparseOrdered));
-        assert!(fi.check_filter(9, &FilterOp::GtI64(col, 20)));
-        assert!(fi.check_filter(3, &FilterOp::BetweenI64(col, 10, 30)));
-        assert!(!fi.check_filter(99, &FilterOp::GtI64(col, 0)));
-        assert!(fi.check_filter(99, &FilterOp::IsNull(col)));
+        assert!(fi.check_filter(9, &FilterOp::new(col, FilterCondition::GtI64(20))));
+        assert!(fi.check_filter(3, &FilterOp::new(col, FilterCondition::BetweenI64(10, 30))));
+        assert!(!fi.check_filter(99, &FilterOp::new(col, FilterCondition::GtI64(0))));
+        assert!(fi.check_filter(99, &FilterOp::new(col, FilterCondition::IsNull)));
     }
 
     #[test]
@@ -837,6 +845,6 @@ mod tests {
 
         assert_eq!(fi.storage_kind(col), Some(FilterStorageKind::Dense));
         assert_eq!(fi.get_value(col, 4), 42);
-        assert!(fi.check_filter(4, &FilterOp::EqI64(col, 42)));
+        assert!(fi.check_filter(4, &FilterOp::new(col, FilterCondition::EqI64(42))));
     }
 }

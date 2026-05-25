@@ -873,7 +873,7 @@ mod tests {
 
     use super::*;
     use crate::edge_store::RawEdge;
-    use crate::types::FilterOp;
+    use crate::types::{FilterCondition, FilterOp};
 
     #[cfg(not(feature = "pg_test"))]
     use std::sync::Mutex;
@@ -1034,15 +1034,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
         let loaded_status = loaded.filter_index.find_column("status").unwrap();
+        assert!(loaded.filter_index.check_filter(
+            a,
+            &FilterOp::new(loaded_status, FilterCondition::EqToken(open))
+        ));
+        assert!(!loaded.filter_index.check_filter(
+            b,
+            &FilterOp::new(loaded_status, FilterCondition::NeqToken(open))
+        ));
         assert!(loaded
             .filter_index
-            .check_filter(a, &FilterOp::EqToken(loaded_status, open)));
-        assert!(!loaded
-            .filter_index
-            .check_filter(b, &FilterOp::NeqToken(loaded_status, open)));
-        assert!(loaded
-            .filter_index
-            .check_filter(b, &FilterOp::IsNull(loaded_status)));
+            .check_filter(b, &FilterOp::new(loaded_status, FilterCondition::IsNull)));
     }
 
     #[test]

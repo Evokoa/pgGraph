@@ -120,7 +120,7 @@ pub mod bench_support {
     pub use crate::edge_store::{EdgeStore as EdgeStoreBuilder, RawEdge};
     pub use crate::filter_index::{FilterColumnType, FilterIndex as FilterIndexBuilder};
     pub use crate::node_store::NodeStore as NodeStoreBuilder;
-    pub use crate::types::{EdgeTypeFilter, FilterOp};
+    pub use crate::types::{EdgeTypeFilter, FilterCondition, FilterOp};
 }
 
 ::pgrx::pg_module_magic!(name, version);

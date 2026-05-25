@@ -96,6 +96,7 @@ remaining sections below are still open work.
 | Mmap resolution ownership | Resolution offset/length metadata lives in `ResolutionStore::MmapBacked`, while the engine-owned mmap handle remains shared with node and edge stores. |
 | Sync row parsing boundary | Sync replay parses old/new row images once per log entry and passes borrowed JSON through tenant, filter, reservation, and edge replay helpers. |
 | Engine state encapsulation | Engine store, sync, resolution, mmap, and status fields are now crate-visible internals instead of public crate API fields. |
+| Filter op shape | Traversal pushdown filters now store the target column once in `FilterOp` and keep typed predicate data in a separate `FilterCondition` enum. |
 
 ### Data Correctness and Corruption
 
@@ -183,7 +184,6 @@ but they do not change core user behavior.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | pg test layout | Some PostgreSQL integration test files are still included textually from `lib.rs` because pgrx `#[pg_schema]` currently requires an inline `mod {}` body for generated SQL tests. | Revisit when the pgrx macro supports out-of-line modules or when the pg test harness is reorganized around macro-compatible test modules. |
-| Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
 
 ## Lower-Priority Optimizations
 

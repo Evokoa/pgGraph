@@ -260,7 +260,7 @@ fn bench_bfs_filter_index_paths(c: &mut Criterion) {
             graph_gen::build_filtered_benchmark_graph(SMALL, AVG_DEGREE, SEED, populated_percent);
         let seed = graph_gen::find_supernode(&graph);
         let mut config = traversal_config(seed, 3);
-        config.filter_ops = vec![FilterOp::Gte(0, 50)];
+        config.filter_ops = vec![FilterOp::new(0, FilterCondition::Gte(50))];
         group.throughput(Throughput::Elements(SMALL as u64));
         group.bench_with_input(
             BenchmarkId::new("score_gte_50_d3", label),
