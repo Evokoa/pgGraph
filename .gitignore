@@ -54,6 +54,7 @@ graph/fuzz/target/
 
 # AI Related Files
 .agents/
+.codex/
 
 # Environment Variables
 .env
