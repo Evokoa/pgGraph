@@ -86,7 +86,8 @@ remaining sections below are still open work.
 | Auto-discovery text properties | Auto-discovery documentation now states that discovered searchable properties are bounded string-like columns, and points users to manual registration for custom search surfaces and filter-column registration for traversal filters. |
 | Case-insensitive search indexes | Search documentation now describes the `lower(<column>::text)` expression shape and shows matching btree and trigram index examples for case-insensitive exact, prefix, and contains search. |
 | Structured filter membership and null operators | Structured traversal filters now support `graph.in()`, `graph.not_in()`, `graph.is_null()`, and `graph.is_not_null()` across typed pushdown filters and hydration filters. |
-| Legacy raw filter exposure | The legacy unsigned raw-filter parser no longer compiles in development builds; it remains only under unit tests and the dedicated fuzz target while public traversal uses structured JSONB filters. |
+| Legacy raw filter exposure | The legacy unsigned raw-filter parser was removed from development builds before the remaining test/fuzz-only parser was deleted. |
+| Legacy raw filter removal | The remaining legacy unsigned raw-filter parser, its unit tests, and its fuzz target were removed; structured JSONB filter validation is the supported filter fuzz boundary. |
 | GUC enum compatibility | Configuration docs now record the compatibility policy for keeping alias-preserving typed settings as string GUCs while parsing them into Rust enums at the extension boundary. |
 | Mmap sync mutation boundary | Sync node insert, delete, and truncate paths now mutate node storage through engine helpers that materialize mmap-backed arrays before mutation. |
 | Sync row replay operation | Sync replay now resolves each durable row into a typed node operation before applying ordered edge overlays, tenant updates, filter refresh, and node replacement. |
@@ -170,7 +171,6 @@ not block use of the current documented SQL surface.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | Structured text filter operators | Structured filters now cover equality, inequality, range comparisons, `between`, `in`, `not_in`, and explicit null checks. | Consider dedicated text-search filter operators only when traversal-filter product requirements need them beyond `graph.search()` and `graph.traverse_search()`. |
-| Legacy raw filter fuzz target | The legacy raw filter parser is retained only for unit tests and the dedicated fuzz target. | Delete the fuzz target and parser after release validation no longer needs legacy raw-filter corpus coverage. |
 
 ## P3: Internals and Maintainability
 

@@ -97,7 +97,7 @@ Work is ranked by user impact:
 |---|---|---|
 | P0 | Operational visibility and resource predictability | Build/vacuum diagnostics, sync backlog visibility, clearer read-only states, better memory estimates. |
 | P1 | Query performance follow-ups | Traversal scratch reuse, connected-component row materialization, hydration setup, source-search rechecks. |
-| P2 | SQL ergonomics and documented semantics | Dedicated traversal text-filter operators and legacy raw-filter fuzz target cleanup. |
+| P2 | SQL ergonomics and documented semantics | Dedicated traversal text-filter operators when product requirements need them beyond search APIs. |
 | P3 | Internals and maintainability | Module cleanup, build/vacuum pipeline extraction, filter-op reshaping, test locality. |
 
 The bias is to optimize with evidence. For hot paths, we prefer benchmarks or

@@ -532,13 +532,12 @@ impl Engine {
         strategy: TraversalStrategy,
         direction: TraversalDirection,
     ) -> GraphResult<Vec<TraversalResult>> {
-        let filter_ops = match filter_condition {
-            Some(cond) => self
-                .filter_index
-                .parse_condition(cond)
-                .map_err(|reason| GraphError::InvalidFilter { reason })?,
-            None => Vec::new(),
-        };
+        if filter_condition.is_some() {
+            return Err(GraphError::InvalidFilter {
+                reason: "legacy raw traversal filters have been removed; use structured JSONB filters through SQL traversal helpers".to_string(),
+            });
+        }
+        let filter_ops = Vec::new();
 
         self.traverse_with_filter_ops(
             seed_table_oid,

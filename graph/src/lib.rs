@@ -83,7 +83,6 @@ use sql_traversal::validate_traverse_options;
 /// requiring a live PostgreSQL backend.
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzz_support {
-    pub use crate::filter_index::FilterIndex;
     pub use crate::persistence::load_graph_file;
 
     /// Parse sync JSON properties through the same lossy boundary used by SQL

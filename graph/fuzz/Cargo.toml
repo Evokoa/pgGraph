@@ -19,13 +19,6 @@ path = ".."
 features = ["pg17", "fuzzing"]
 
 [[bin]]
-name = "parse_condition"
-path = "fuzz_targets/parse_condition.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "load_graph_file"
 path = "fuzz_targets/load_graph_file.rs"
 test = false
