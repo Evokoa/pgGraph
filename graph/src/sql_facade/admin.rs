@@ -971,6 +971,34 @@ fn neq_i64(column_name: &str, value: i64) -> pgrx::JsonB {
     not_equals(column_name, pgrx::JsonB(serde_json::Value::from(value)))
 }
 
+/// Build a structured membership filter for `graph.traverse(filter := ...)`.
+#[pg_extern(schema = "graph", name = "in")]
+fn in_filter(column_name: &str, values: pgrx::JsonB) -> pgrx::JsonB {
+    filter_helper(column_name, "in", values)
+}
+
+/// Build a structured negative membership filter.
+#[pg_extern(schema = "graph")]
+fn not_in(column_name: &str, values: pgrx::JsonB) -> pgrx::JsonB {
+    filter_helper(column_name, "not_in", values)
+}
+
+/// Build a structured SQL NULL filter.
+#[pg_extern(schema = "graph")]
+fn is_null(column_name: &str) -> pgrx::JsonB {
+    filter_helper(column_name, "is_null", pgrx::JsonB(serde_json::Value::Null))
+}
+
+/// Build a structured SQL NOT NULL filter.
+#[pg_extern(schema = "graph")]
+fn is_not_null(column_name: &str) -> pgrx::JsonB {
+    filter_helper(
+        column_name,
+        "is_not_null",
+        pgrx::JsonB(serde_json::Value::Null),
+    )
+}
+
 /// Build a structured greater-than filter for `graph.traverse(filter := ...)`.
 #[pg_extern(schema = "graph")]
 fn greater_than(column_name: &str, value: pgrx::JsonB) -> pgrx::JsonB {

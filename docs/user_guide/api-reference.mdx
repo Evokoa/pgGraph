@@ -615,6 +615,11 @@ graph.neq(column_name text, value jsonb) RETURNS jsonb
 graph.neq(column_name text, value text) RETURNS jsonb
 graph.neq(column_name text, value bigint) RETURNS jsonb
 
+graph.in(column_name text, values jsonb) RETURNS jsonb
+graph.not_in(column_name text, values jsonb) RETURNS jsonb
+graph.is_null(column_name text) RETURNS jsonb
+graph.is_not_null(column_name text) RETURNS jsonb
+
 graph.greater_than(column_name text, value jsonb) RETURNS jsonb
 graph.greater_than(column_name text, value bigint) RETURNS jsonb
 graph.gt(column_name text, value jsonb) RETURNS jsonb

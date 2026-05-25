@@ -127,6 +127,24 @@ the row that sorts first by the multi-start ordering is kept. Use
 once for each root that found it. For a single start node, both modes produce
 the same node-level result set.
 
+Traversal filters are structured JSON predicates built with helper functions
+such as `graph.eq()`, `graph.not_in()`, `graph.between()`, and
+`graph.is_null()`. Registered filter columns are pushed down into the graph
+filter index; predicates on other registered node columns are checked against
+hydrated source rows.
+
+```sql
+SELECT *
+FROM graph.traverse(
+  seed_table := 'public.users'::regclass,
+  seed_id := 'u1',
+  filter := graph.all(ARRAY[
+    graph.in('status', '["active", "trial"]'::jsonb),
+    graph.is_not_null('created_at')
+  ])
+);
+```
+
 ### Direction
 
 | Direction | Behavior |

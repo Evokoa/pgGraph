@@ -240,6 +240,10 @@ pub enum FilterOp {
     Neq(usize, u32),
     /// Unsigned numeric column is within the inclusive range.
     Between(usize, u32, u32),
+    /// Unsigned numeric column is one of the listed values.
+    In(usize, Vec<u32>),
+    /// Unsigned numeric column is not one of the listed values.
+    NotIn(usize, Vec<u32>),
     /// Signed numeric column equals the value.
     EqI64(usize, i64),
     /// Signed numeric column does not equal the value.
@@ -254,18 +258,34 @@ pub enum FilterOp {
     LteI64(usize, i64),
     /// Signed numeric column is within the inclusive range.
     BetweenI64(usize, i64, i64),
+    /// Signed numeric/date/timestamptz column is one of the listed values.
+    InI64(usize, Vec<i64>),
+    /// Signed numeric/date/timestamptz column is not one of the listed values.
+    NotInI64(usize, Vec<i64>),
     /// Boolean column equals the value.
     EqBool(usize, bool),
     /// Boolean column does not equal the value.
     NeqBool(usize, bool),
+    /// Boolean column is one of the listed values.
+    InBool(usize, Vec<bool>),
+    /// Boolean column is not one of the listed values.
+    NotInBool(usize, Vec<bool>),
     /// Dictionary-encoded text/date/timestamptz token equals the value.
     EqToken(usize, u32),
     /// Dictionary-encoded text/date/timestamptz token does not equal the value.
     NeqToken(usize, u32),
+    /// Dictionary-encoded text token is one of the listed values.
+    InToken(usize, Vec<u32>),
+    /// Dictionary-encoded text token is not one of the listed values.
+    NotInToken(usize, Vec<u32>),
     /// UUID column equals the 128-bit UUID value.
     EqUuid(usize, u128),
     /// UUID column does not equal the 128-bit UUID value.
     NeqUuid(usize, u128),
+    /// UUID column is one of the listed values.
+    InUuid(usize, Vec<u128>),
+    /// UUID column is not one of the listed values.
+    NotInUuid(usize, Vec<u128>),
     /// Column value is SQL NULL.
     IsNull(usize),
     /// Column value is not SQL NULL.
@@ -340,12 +360,22 @@ impl FilterOp {
             | FilterOp::LtI64(_, _)
             | FilterOp::LteI64(_, _)
             | FilterOp::BetweenI64(_, _, _)
+            | FilterOp::In(_, _)
+            | FilterOp::NotIn(_, _)
+            | FilterOp::InI64(_, _)
+            | FilterOp::NotInI64(_, _)
             | FilterOp::EqBool(_, _)
             | FilterOp::NeqBool(_, _)
+            | FilterOp::InBool(_, _)
+            | FilterOp::NotInBool(_, _)
             | FilterOp::EqToken(_, _)
             | FilterOp::NeqToken(_, _)
+            | FilterOp::InToken(_, _)
+            | FilterOp::NotInToken(_, _)
             | FilterOp::EqUuid(_, _)
             | FilterOp::NeqUuid(_, _)
+            | FilterOp::InUuid(_, _)
+            | FilterOp::NotInUuid(_, _)
             | FilterOp::IsNull(_)
             | FilterOp::IsNotNull(_) => None,
         }
@@ -362,6 +392,8 @@ impl FilterOp {
             | FilterOp::Eq(idx, _)
             | FilterOp::Neq(idx, _)
             | FilterOp::Between(idx, _, _)
+            | FilterOp::In(idx, _)
+            | FilterOp::NotIn(idx, _)
             | FilterOp::EqI64(idx, _)
             | FilterOp::NeqI64(idx, _)
             | FilterOp::GtI64(idx, _)
@@ -369,12 +401,20 @@ impl FilterOp {
             | FilterOp::LtI64(idx, _)
             | FilterOp::LteI64(idx, _)
             | FilterOp::BetweenI64(idx, _, _)
+            | FilterOp::InI64(idx, _)
+            | FilterOp::NotInI64(idx, _)
             | FilterOp::EqBool(idx, _)
             | FilterOp::NeqBool(idx, _)
+            | FilterOp::InBool(idx, _)
+            | FilterOp::NotInBool(idx, _)
             | FilterOp::EqToken(idx, _)
             | FilterOp::NeqToken(idx, _)
+            | FilterOp::InToken(idx, _)
+            | FilterOp::NotInToken(idx, _)
             | FilterOp::EqUuid(idx, _)
             | FilterOp::NeqUuid(idx, _)
+            | FilterOp::InUuid(idx, _)
+            | FilterOp::NotInUuid(idx, _)
             | FilterOp::IsNull(idx)
             | FilterOp::IsNotNull(idx) => *idx,
         }

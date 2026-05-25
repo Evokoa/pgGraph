@@ -46,6 +46,10 @@ pub(crate) enum HydrationFilterOperator {
     Lt(serde_json::Value),
     Lte(serde_json::Value),
     Between(serde_json::Value, serde_json::Value),
+    In(Vec<serde_json::Value>),
+    NotIn(Vec<serde_json::Value>),
+    IsNull,
+    IsNotNull,
 }
 
 #[derive(Debug, Clone)]
@@ -136,8 +140,8 @@ pub(crate) fn parse_structured_filter(
                 reason: format!("filter for '{}' must contain exactly one operator", column),
             });
         };
+        validate_structured_operator_shape(column, operator, value)?;
         if resolved.column_type.is_some() {
-            validate_structured_operator_shape(column, operator, value)?;
             pushdown_filters.push(PushdownFilter {
                 column: column.clone(),
                 operator: operator.clone(),
@@ -298,6 +302,26 @@ pub(crate) fn validate_structured_operator_shape(
                 })?;
             Ok(())
         }
+        "in" | "not_in" => {
+            value
+                .as_array()
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
+                    reason: format!("{} filter for '{}' must be an array", operator, column),
+                })?;
+            Ok(())
+        }
+        "is_null" | "is_not_null" => {
+            if value.is_null() || matches!(value, serde_json::Value::Bool(true)) {
+                Ok(())
+            } else {
+                Err(safety::GraphError::InvalidFilter {
+                    reason: format!(
+                        "{} filter for '{}' does not accept a value",
+                        operator, column
+                    ),
+                })
+            }
+        }
         _ => Err(safety::GraphError::InvalidFilter {
             reason: format!("unsupported structured filter operator '{}'", operator),
         }),
@@ -317,10 +341,17 @@ pub(crate) fn typed_pushdown_filter_op(
         return match filter.operator.as_str() {
             "eq" => Ok(types::FilterOp::IsNull(column_idx)),
             "neq" => Ok(types::FilterOp::IsNotNull(column_idx)),
+            "is_null" => Ok(types::FilterOp::IsNull(column_idx)),
+            "is_not_null" => Ok(types::FilterOp::IsNotNull(column_idx)),
             other => Err(safety::GraphError::InvalidFilter {
                 reason: format!("operator '{}' is not supported for NULL filters", other),
             }),
         };
+    }
+    match filter.operator.as_str() {
+        "is_null" => return Ok(types::FilterOp::IsNull(column_idx)),
+        "is_not_null" => return Ok(types::FilterOp::IsNotNull(column_idx)),
+        _ => {}
     }
     let column_type =
         filter_index
@@ -336,6 +367,21 @@ pub(crate) fn typed_pushdown_filter_op(
             jsonb_filter_i64,
         ),
         filter_index::FilterColumnType::Boolean => {
+            match filter.operator.as_str() {
+                "in" => {
+                    return Ok(types::FilterOp::InBool(
+                        column_idx,
+                        jsonb_filter_array(&filter.column, &filter.value, jsonb_filter_bool)?,
+                    ));
+                }
+                "not_in" => {
+                    return Ok(types::FilterOp::NotInBool(
+                        column_idx,
+                        jsonb_filter_array(&filter.column, &filter.value, jsonb_filter_bool)?,
+                    ));
+                }
+                _ => {}
+            }
             let value =
                 filter
                     .value
@@ -355,6 +401,25 @@ pub(crate) fn typed_pushdown_filter_op(
             }
         }
         filter_index::FilterColumnType::Text => {
+            match filter.operator.as_str() {
+                "in" => {
+                    return Ok(types::FilterOp::InToken(
+                        column_idx,
+                        jsonb_filter_array(&filter.column, &filter.value, |value| {
+                            jsonb_filter_text_token(filter_index, column_idx, value)
+                        })?,
+                    ));
+                }
+                "not_in" => {
+                    return Ok(types::FilterOp::NotInToken(
+                        column_idx,
+                        jsonb_filter_array(&filter.column, &filter.value, |value| {
+                            jsonb_filter_text_token(filter_index, column_idx, value)
+                        })?,
+                    ));
+                }
+                _ => {}
+            }
             let value = filter
                 .value
                 .as_str()
@@ -394,6 +459,21 @@ pub(crate) fn typed_pushdown_filter_op(
             Ok(op)
         }
         filter_index::FilterColumnType::Uuid => {
+            match filter.operator.as_str() {
+                "in" => {
+                    return Ok(types::FilterOp::InUuid(
+                        column_idx,
+                        jsonb_filter_array(&filter.column, &filter.value, jsonb_filter_uuid)?,
+                    ));
+                }
+                "not_in" => {
+                    return Ok(types::FilterOp::NotInUuid(
+                        column_idx,
+                        jsonb_filter_array(&filter.column, &filter.value, jsonb_filter_uuid)?,
+                    ));
+                }
+                _ => {}
+            }
             let value = filter
                 .value
                 .as_str()
@@ -441,6 +521,14 @@ pub(crate) fn typed_i64_op(
                 encoder(&bounds[1])?,
             ))
         }
+        "in" => Ok(types::FilterOp::InI64(
+            column_idx,
+            jsonb_filter_array("numeric", value, encoder)?,
+        )),
+        "not_in" => Ok(types::FilterOp::NotInI64(
+            column_idx,
+            jsonb_filter_array("numeric", value, encoder)?,
+        )),
         other => Err(safety::GraphError::InvalidFilter {
             reason: format!("unsupported numeric filter operator '{}'", other),
         }),
@@ -531,6 +619,8 @@ pub(crate) fn hydration_filter_operator(
         "gte" => Ok(HydrationFilterOperator::Gte(value.clone())),
         "lt" => Ok(HydrationFilterOperator::Lt(value.clone())),
         "lte" => Ok(HydrationFilterOperator::Lte(value.clone())),
+        "is_null" => Ok(HydrationFilterOperator::IsNull),
+        "is_not_null" => Ok(HydrationFilterOperator::IsNotNull),
         "between" => {
             let bounds = value
                 .as_array()
@@ -542,6 +632,22 @@ pub(crate) fn hydration_filter_operator(
                 bounds[0].clone(),
                 bounds[1].clone(),
             ))
+        }
+        "in" => {
+            let values = value
+                .as_array()
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
+                    reason: format!("in filter for '{}' must be an array", column),
+                })?;
+            Ok(HydrationFilterOperator::In(values.clone()))
+        }
+        "not_in" => {
+            let values = value
+                .as_array()
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
+                    reason: format!("not_in filter for '{}' must be an array", column),
+                })?;
+            Ok(HydrationFilterOperator::NotIn(values.clone()))
         }
         _ => Err(safety::GraphError::InvalidFilter {
             reason: format!("unsupported structured filter operator '{}'", operator),
@@ -579,6 +685,53 @@ pub(crate) fn jsonb_filter_i64(value: &serde_json::Value) -> safety::GraphResult
     })
 }
 
+pub(crate) fn jsonb_filter_bool(value: &serde_json::Value) -> safety::GraphResult<bool> {
+    value
+        .as_bool()
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: "boolean filter values must be booleans".to_string(),
+        })
+}
+
+pub(crate) fn jsonb_filter_uuid(value: &serde_json::Value) -> safety::GraphResult<u128> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: "uuid filter values must be uuid text".to_string(),
+        })?;
+    parse_uuid_u128(text)
+}
+
+pub(crate) fn jsonb_filter_text_token(
+    filter_index: &filter_index::FilterIndex,
+    column_idx: usize,
+    value: &serde_json::Value,
+) -> safety::GraphResult<u32> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: "text filter values must be text".to_string(),
+        })?;
+    Ok(filter_index
+        .lookup_text_value(column_idx, text)
+        .unwrap_or(u32::MAX))
+}
+
+pub(crate) fn jsonb_filter_array<T>(
+    column: &str,
+    value: &serde_json::Value,
+    encoder: impl Fn(&serde_json::Value) -> safety::GraphResult<T>,
+) -> safety::GraphResult<Vec<T>> {
+    value
+        .as_array()
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: format!("filter value for '{}' must be an array", column),
+        })?
+        .iter()
+        .map(encoder)
+        .collect()
+}
+
 pub(crate) fn hydration_filters_match(
     table_oid: u32,
     node: &pgrx::JsonB,
@@ -611,6 +764,17 @@ pub(crate) fn hydration_filter_match(node: &pgrx::JsonB, filter: &HydrationFilte
                 && json_value_compare(actual, high)
                     .is_some_and(|ordering| ordering != std::cmp::Ordering::Greater)
         }
+        HydrationFilterOperator::In(expected) => expected
+            .iter()
+            .any(|expected| json_values_equal(actual, expected)),
+        HydrationFilterOperator::NotIn(expected) => {
+            !actual.is_null()
+                && expected
+                    .iter()
+                    .all(|expected| !json_values_equal(actual, expected))
+        }
+        HydrationFilterOperator::IsNull => actual.is_null(),
+        HydrationFilterOperator::IsNotNull => !actual.is_null(),
     }
 }
 
@@ -727,9 +891,57 @@ mod tests {
 
             let bounds = serde_json::json!([value, value.saturating_add(1)]);
             let result = validate_structured_operator_shape("prop", &operator, &bounds);
-            let allowed_array = allowed_scalar || operator == "between";
+            let allowed_array = allowed_scalar || matches!(operator.as_str(), "between" | "in" | "not_in");
             prop_assert_eq!(result.is_ok(), allowed_array);
         }
+    }
+
+    #[test]
+    fn typed_i64_op_accepts_membership_arrays() {
+        assert!(matches!(
+            typed_i64_op(0, "in", &serde_json::json!([1, 2]), test_i64_encoder),
+            Ok(types::FilterOp::InI64(0, values)) if values == vec![1, 2]
+        ));
+        assert!(matches!(
+            typed_i64_op(0, "not_in", &serde_json::json!([3]), test_i64_encoder),
+            Ok(types::FilterOp::NotInI64(0, values)) if values == vec![3]
+        ));
+    }
+
+    #[test]
+    fn hydration_membership_and_null_filters_match_json_values() {
+        let node = pgrx::JsonB(json!({"status": "open", "closed_at": null}));
+        let in_filter = HydrationFilter {
+            table_oid: 1,
+            column: "status".to_string(),
+            operator: HydrationFilterOperator::In(vec![json!("open"), json!("pending")]),
+        };
+        let not_in_filter = HydrationFilter {
+            table_oid: 1,
+            column: "status".to_string(),
+            operator: HydrationFilterOperator::NotIn(vec![json!("closed")]),
+        };
+        let null_filter = HydrationFilter {
+            table_oid: 1,
+            column: "closed_at".to_string(),
+            operator: HydrationFilterOperator::IsNull,
+        };
+
+        assert!(hydration_filter_match(&node, &in_filter));
+        assert!(hydration_filter_match(&node, &not_in_filter));
+        assert!(hydration_filter_match(&node, &null_filter));
+    }
+
+    #[test]
+    fn hydration_not_in_excludes_json_null_like_pushdown_filters() {
+        let node = pgrx::JsonB(json!({"status": null}));
+        let filter = HydrationFilter {
+            table_oid: 1,
+            column: "status".to_string(),
+            operator: HydrationFilterOperator::NotIn(vec![json!("closed")]),
+        };
+
+        assert!(!hydration_filter_match(&node, &filter));
     }
 
     #[test]

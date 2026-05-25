@@ -3,6 +3,13 @@
 All extension settings are PostgreSQL GUCs with the `graph.` prefix. They are
 registered in `_PG_init()` by `graph/src/config.rs`.
 
+String-valued settings such as `graph.oom_action`, `graph.sync_mode`,
+`graph.query_freshness`, and `graph.build_scan_mode` are parsed into typed Rust
+enums at the extension boundary. They remain string GUCs for compatibility with
+existing configuration files, aliases such as `readonly`/`read_only`, and
+current warning or reserved-mode behavior. A future PostgreSQL enum-GUC change
+would require an explicit migration plan for those aliases and error messages.
+
 ## Setting Values
 
 Use session-local settings for experiments:

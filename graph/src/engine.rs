@@ -496,7 +496,7 @@ impl Engine {
         }
     }
 
-    #[cfg(any(test, feature = "development"))]
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn traverse(
         &self,

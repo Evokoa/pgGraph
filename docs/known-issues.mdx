@@ -61,7 +61,7 @@ remaining sections below are still open work.
 | PostgreSQL API boundary wrappers | Background-worker notify PID access now goes through a small wrapper, and remaining direct `pg_sys` usage is limited to extension ABI, ACL, OID, mmap, and PostgreSQL data-directory boundaries. |
 | Traversal uniqueness | Multi-start `graph.traverse()` and `graph.traverse_search()` now honor `node_global` by de-duplicating reached nodes across roots before final pagination, while `node_per_root` keeps per-root results. |
 | Path aggregation | `all_possible_paths` counting and aggregation now keep enumerated paths as shared indexed snapshots, avoiding duplicate full-path clones and coordinate materialization for path-count checks. |
-| Filter model and legacy numeric filters | SQL traversal now builds pushdown predicates only from structured typed filters; the legacy unsigned condition parser is limited to tests, fuzzing, and development helpers so signed values cannot be reintroduced through the public traversal path. |
+| Filter model and legacy numeric filters | SQL traversal now builds pushdown predicates only from structured typed filters; the legacy unsigned condition parser is limited to tests and fuzzing so signed values cannot be reintroduced through the public traversal path. |
 | Dynamic table SQL | Build and estimate reltuples reads now resolve registered table names through bound OID lookups, while table and column SQL fragments remain limited to validated catalog/regclass names and quoted identifiers. |
 | Discovery SQL | Auto-discovery schema values, targeted table OIDs, primary-key exclusions, and targeted foreign-key table sets now use SPI parameters instead of generated literal or `IN (...)` SQL fragments. |
 | Truncate handling | Sync replay now maintains table-to-node membership bitmaps, so table truncation tombstones only nodes from the affected table and removes their tenant membership. |
@@ -85,6 +85,9 @@ remaining sections below are still open work.
 | SQL facade module layout | SQL facade files now compile as normal Rust modules with explicit sibling helper visibility instead of being textually included from `lib.rs`. |
 | Auto-discovery text properties | Auto-discovery documentation now states that discovered searchable properties are bounded string-like columns, and points users to manual registration for custom search surfaces and filter-column registration for traversal filters. |
 | Case-insensitive search indexes | Search documentation now describes the `lower(<column>::text)` expression shape and shows matching btree and trigram index examples for case-insensitive exact, prefix, and contains search. |
+| Structured filter membership and null operators | Structured traversal filters now support `graph.in()`, `graph.not_in()`, `graph.is_null()`, and `graph.is_not_null()` across typed pushdown filters and hydration filters. |
+| Legacy raw filter exposure | The legacy unsigned raw-filter parser no longer compiles in development builds; it remains only under unit tests and the dedicated fuzz target while public traversal uses structured JSONB filters. |
+| GUC enum compatibility | Configuration docs now record the compatibility policy for keeping alias-preserving typed settings as string GUCs while parsing them into Rust enums at the extension boundary. |
 
 ### Data Correctness and Corruption
 
@@ -160,9 +163,8 @@ not block use of the current documented SQL surface.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Structured filter operators | Structured filters currently focus on equality, inequality, range comparisons, and `between`. | Add `in`, `not_in`, text search, and explicit null operators as product requirements demand. |
-| Legacy raw filters | The legacy raw filter parser is compiled only for tests, fuzzing, and development helpers. | Delete the development-only parser after fuzz coverage moves fully to structured filters. |
-| GUC enum behavior | Some typed Rust settings are exposed as string GUCs to preserve aliases and warning behavior. | Consider native PostgreSQL enum GUCs only with an explicit compatibility plan. |
+| Structured text filter operators | Structured filters now cover equality, inequality, range comparisons, `between`, `in`, `not_in`, and explicit null checks. | Consider dedicated text-search filter operators only when traversal-filter product requirements need them beyond `graph.search()` and `graph.traverse_search()`. |
+| Legacy raw filter fuzz target | The legacy raw filter parser is retained only for unit tests and the dedicated fuzz target. | Delete the fuzz target and parser after release validation no longer needs legacy raw-filter corpus coverage. |
 
 ## P3: Internals and Maintainability
 

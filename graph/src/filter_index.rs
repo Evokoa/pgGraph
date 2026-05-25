@@ -249,6 +249,10 @@ impl FilterIndex {
                 let value = self.get_value(column_idx, node_idx);
                 value >= *lo && value <= *hi
             }
+            FilterOp::In(_, expected) => expected.contains(&self.get_value(column_idx, node_idx)),
+            FilterOp::NotIn(_, expected) => {
+                !expected.contains(&self.get_value(column_idx, node_idx))
+            }
             FilterOp::EqI64(_, expected) => storage.encoded_i64(node_idx) == Some(*expected),
             FilterOp::NeqI64(_, expected) => storage.encoded_i64(node_idx) != Some(*expected),
             FilterOp::GtI64(_, expected) => self
@@ -276,11 +280,27 @@ impl FilterIndex {
                 .get(column_idx)
                 .and_then(|storage| storage.encoded_i64(node_idx))
                 .is_some_and(|value| value >= *low && value <= *high),
+            FilterOp::InI64(_, expected) => self
+                .storage
+                .get(column_idx)
+                .and_then(|storage| storage.encoded_i64(node_idx))
+                .is_some_and(|value| expected.contains(&value)),
+            FilterOp::NotInI64(_, expected) => self
+                .storage
+                .get(column_idx)
+                .and_then(|storage| storage.encoded_i64(node_idx))
+                .is_some_and(|value| !expected.contains(&value)),
             FilterOp::EqBool(_, expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Boolean(value)) if value == *expected)
             }
             FilterOp::NeqBool(_, expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Boolean(value)) if value != *expected)
+            }
+            FilterOp::InBool(_, expected) => {
+                matches!(storage.value(node_idx), Some(EncodedFilterValue::Boolean(value)) if expected.contains(&value))
+            }
+            FilterOp::NotInBool(_, expected) => {
+                matches!(storage.value(node_idx), Some(EncodedFilterValue::Boolean(value)) if !expected.contains(&value))
             }
             FilterOp::EqToken(_, expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if value == *expected)
@@ -288,11 +308,23 @@ impl FilterIndex {
             FilterOp::NeqToken(_, expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if value != *expected)
             }
+            FilterOp::InToken(_, expected) => {
+                matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if expected.contains(&value))
+            }
+            FilterOp::NotInToken(_, expected) => {
+                matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if !expected.contains(&value))
+            }
             FilterOp::EqUuid(_, expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if value == *expected)
             }
             FilterOp::NeqUuid(_, expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if value != *expected)
+            }
+            FilterOp::InUuid(_, expected) => {
+                matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if expected.contains(&value))
+            }
+            FilterOp::NotInUuid(_, expected) => {
+                matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if !expected.contains(&value))
             }
             FilterOp::IsNull(_) => false,
             FilterOp::IsNotNull(_) => true,
@@ -378,7 +410,7 @@ impl FilterIndex {
     /// - `"amount > 1000 AND risk_score > 50"`
     ///
     /// Returns `Err` with a reason if parsing fails.
-    #[cfg(any(test, feature = "development", feature = "fuzzing"))]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub fn parse_condition(&self, condition: &str) -> Result<Vec<FilterOp>, String> {
         let mut ops = Vec::new();
         let mut tokens = condition.split_whitespace().peekable();
@@ -447,7 +479,7 @@ impl FilterIndex {
     }
 }
 
-#[cfg(any(test, feature = "development", feature = "fuzzing"))]
+#[cfg(any(test, feature = "fuzzing"))]
 fn parse_u32_value(value: &str) -> Result<u32, String> {
     value
         .parse()
