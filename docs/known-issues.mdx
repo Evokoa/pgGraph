@@ -83,6 +83,8 @@ remaining sections below are still open work.
 | Traversal allocations and internals | BFS and DFS traversal result metadata now stays dense for normal high-coverage traversals, but switches to sparse parent/depth maps for low-visit-budget traversals on large graphs. |
 | Background job gate parity | Development-only background job test runners now record failed build and maintenance job status rows through the same failure helpers used by real workers, so advisory-lock release gates validate durable failure state. |
 | SQL facade module layout | SQL facade files now compile as normal Rust modules with explicit sibling helper visibility instead of being textually included from `lib.rs`. |
+| Auto-discovery text properties | Auto-discovery documentation now states that discovered searchable properties are bounded string-like columns, and points users to manual registration for custom search surfaces and filter-column registration for traversal filters. |
+| Case-insensitive search indexes | Search documentation now describes the `lower(<column>::text)` expression shape and shows matching btree and trigram index examples for case-insensitive exact, prefix, and contains search. |
 
 ### Data Correctness and Corruption
 
@@ -158,10 +160,8 @@ not block use of the current documented SQL surface.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Auto-discovery text properties | Auto-discovery currently restricts discovered property columns to string-like values of bounded length. | Document the rule clearly and consider making the policy configurable. |
 | Structured filter operators | Structured filters currently focus on equality, inequality, range comparisons, and `between`. | Add `in`, `not_in`, text search, and explicit null operators as product requirements demand. |
 | Legacy raw filters | The legacy raw filter parser is compiled only for tests, fuzzing, and development helpers. | Delete the development-only parser after fuzz coverage moves fully to structured filters. |
-| Case-insensitive search | `lower(src.col::text)` needs matching expression indexes for good performance. | Document recommended indexes and consider helper DDL. |
 | GUC enum behavior | Some typed Rust settings are exposed as string GUCs to preserve aliases and warning behavior. | Consider native PostgreSQL enum GUCs only with an explicit compatibility plan. |
 
 ## P3: Internals and Maintainability

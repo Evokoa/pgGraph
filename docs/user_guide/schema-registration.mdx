@@ -222,3 +222,29 @@ Use auto-discovery for quick starts and formal FK schemas. Use manual
 registration when relationship tables, dynamic labels, weights, or custom
 tenant behavior matter.
 </Callout>
+
+Auto-discovery registers bounded string-like columns as searchable properties.
+This keeps quick-start search predictable for common names, codes, labels, and
+small text attributes while avoiding unexpectedly broad graph metadata from
+large text, numeric, JSON, or timestamp columns.
+
+Use manual registration when the searchable surface needs to include non-text
+properties or a narrower set of text columns:
+
+```sql
+SELECT graph.add_table(
+  table_name := 'public.users'::regclass,
+  key := ARRAY['id'],
+  columns := ARRAY['name', 'email', 'status']
+);
+```
+
+Traversal filters are registered separately from searchable properties:
+
+```sql
+SELECT graph.add_filter_column(
+  table_name := 'public.users'::regclass,
+  column_name := 'created_at',
+  column_type := 'timestamptz'
+);
+```

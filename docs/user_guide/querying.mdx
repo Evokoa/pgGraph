@@ -55,6 +55,30 @@ the final global merge.
 
 All modes validate that `property_key` is registered for the target table set.
 
+Case-insensitive search normalizes the source expression with
+`lower(<column>::text)`. Add matching expression indexes on high-volume
+search columns so PostgreSQL can use the same expression shape as pgGraph's
+predicate:
+
+```sql
+CREATE INDEX users_name_lower_idx
+ON public.users (lower(name::text));
+```
+
+For substring-heavy `contains` search, use PostgreSQL trigram indexing on the
+same normalized expression:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE INDEX users_name_lower_trgm_idx
+ON public.users USING gin (lower(name::text) gin_trgm_ops);
+```
+
+Create these indexes on the registered property columns and tables that are
+actually searched. Case-sensitive `exact` and `prefix` searches can use normal
+indexes when their predicate shape matches the source column and table filter.
+
 ## Traversal
 
 ```sql
