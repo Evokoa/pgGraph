@@ -198,6 +198,81 @@ impl ParsedSyncRows {
     }
 }
 
+enum SyncRowOperation<'a> {
+    Insert {
+        pk: &'a str,
+        tenant: Option<&'a str>,
+    },
+    Update {
+        old_pk: &'a str,
+        new_pk: &'a str,
+        old_tenant: Option<&'a str>,
+        new_tenant: Option<&'a str>,
+    },
+    Delete {
+        pk: &'a str,
+        old_tenant: Option<&'a str>,
+    },
+    Truncate,
+}
+
+impl<'a> SyncRowOperation<'a> {
+    fn from_entry(
+        entry: &'a SyncLogEntry,
+        tenant_change: &'a TenantChange,
+    ) -> safety::GraphResult<Self> {
+        match entry.op {
+            SyncOp::Insert => {
+                let pk = entry
+                    .new_pk
+                    .as_deref()
+                    .or(entry.old_pk.as_deref())
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal(format!(
+                            "sync row {} missing insert pk",
+                            entry.id
+                        ))
+                    })?;
+                Ok(Self::Insert {
+                    pk,
+                    tenant: tenant_change.new.as_deref(),
+                })
+            }
+            SyncOp::Update => {
+                let old_pk = entry.old_pk.as_deref().ok_or_else(|| {
+                    safety::GraphError::Internal(format!("sync row {} missing old_pk", entry.id))
+                })?;
+                let new_pk = entry.new_pk.as_deref().ok_or_else(|| {
+                    safety::GraphError::Internal(format!("sync row {} missing new_pk", entry.id))
+                })?;
+                Ok(Self::Update {
+                    old_pk,
+                    new_pk,
+                    old_tenant: tenant_change.old.as_deref(),
+                    new_tenant: tenant_change.new.as_deref(),
+                })
+            }
+            SyncOp::Delete => {
+                let pk = entry
+                    .old_pk
+                    .as_deref()
+                    .or(entry.new_pk.as_deref())
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal(format!(
+                            "sync row {} missing delete pk",
+                            entry.id
+                        ))
+                    })?;
+                Ok(Self::Delete {
+                    pk,
+                    old_tenant: tenant_change.old.as_deref(),
+                })
+            }
+            SyncOp::Truncate => Ok(Self::Truncate),
+        }
+    }
+}
+
 fn parse_sync_row_image(
     entry_id: i64,
     field_name: &str,
@@ -476,129 +551,108 @@ fn apply_sync_log_entry_with_context(
     let parsed = parse_sync_properties(entry.properties.as_deref());
     let rows = ParsedSyncRows::from_entry(entry)?;
     let tenant_change = tenant_change_from_entry(table_oid, &rows, &parsed, context)?;
+    let operation = SyncRowOperation::from_entry(entry, &tenant_change)?;
     let edge_mutation_reservation =
         sync_entry_edge_mutation_reservation(entry, table_oid, context, &rows)?;
 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
         eng.reserve_edge_mutation_capacity(edge_mutation_reservation)?;
+        apply_sync_row_operation(&mut eng, table_oid, entry, context, &rows, operation)?;
         match entry.op {
             SyncOp::Insert => {
-                let pk = entry
-                    .new_pk
-                    .as_deref()
-                    .or(entry.old_pk.as_deref())
-                    .ok_or_else(|| {
-                        safety::GraphError::Internal(format!(
-                            "sync row {} missing insert pk",
-                            entry.id
-                        ))
-                    })?;
-                sync::sync_insert(&mut eng, table_oid, pk, tenant_change.new.as_deref())?;
-                refresh_filter_index_from_sync(
-                    &mut eng,
-                    table_oid,
-                    pk,
-                    &context.filters,
-                    &context.table_oids,
-                    entry,
-                    &rows,
-                )?;
-                apply_row_edge_mutations(
-                    &mut eng,
-                    context,
-                    table_oid,
-                    rows.new.as_ref(),
-                    engine::MutationKind::Insert,
-                )?;
                 stats.inserts += 1;
             }
             SyncOp::Update => {
-                let old_pk = entry.old_pk.as_deref().ok_or_else(|| {
-                    safety::GraphError::Internal(format!("sync row {} missing old_pk", entry.id))
-                })?;
-                let new_pk = entry.new_pk.as_deref().ok_or_else(|| {
-                    safety::GraphError::Internal(format!("sync row {} missing new_pk", entry.id))
-                })?;
-                apply_row_edge_mutations(
-                    &mut eng,
-                    context,
-                    table_oid,
-                    rows.old.as_ref(),
-                    engine::MutationKind::Delete,
-                )?;
-                if old_pk == new_pk {
-                    sync::sync_update_tenant(
-                        &mut eng,
-                        table_oid,
-                        new_pk,
-                        tenant_change.old.as_deref(),
-                        tenant_change.new.as_deref(),
-                    )?;
-                    refresh_filter_index_from_sync(
-                        &mut eng,
-                        table_oid,
-                        new_pk,
-                        &context.filters,
-                        &context.table_oids,
-                        entry,
-                        &rows,
-                    )?;
-                } else {
-                    sync::sync_delete_tenant(
-                        &mut eng,
-                        table_oid,
-                        old_pk,
-                        tenant_change.old.as_deref(),
-                    )?;
-                    sync::sync_insert(&mut eng, table_oid, new_pk, tenant_change.new.as_deref())?;
-                    refresh_filter_index_from_sync(
-                        &mut eng,
-                        table_oid,
-                        new_pk,
-                        &context.filters,
-                        &context.table_oids,
-                        entry,
-                        &rows,
-                    )?;
-                }
-                apply_row_edge_mutations(
-                    &mut eng,
-                    context,
-                    table_oid,
-                    rows.new.as_ref(),
-                    engine::MutationKind::Insert,
-                )?;
                 stats.updates += 1;
             }
             SyncOp::Delete => {
-                let pk = entry
-                    .old_pk
-                    .as_deref()
-                    .or(entry.new_pk.as_deref())
-                    .ok_or_else(|| {
-                        safety::GraphError::Internal(format!(
-                            "sync row {} missing delete pk",
-                            entry.id
-                        ))
-                    })?;
-                apply_row_edge_mutations(
-                    &mut eng,
-                    context,
-                    table_oid,
-                    rows.old.as_ref(),
-                    engine::MutationKind::Delete,
-                )?;
-                sync::sync_delete_tenant(&mut eng, table_oid, pk, tenant_change.old.as_deref())?;
                 stats.deletes += 1;
             }
             SyncOp::Truncate => {
-                sync::sync_truncate(&mut eng, table_oid)?;
                 stats.truncates += 1;
             }
         }
         Ok::<_, safety::GraphError>(())
     })
+}
+
+fn apply_sync_row_operation(
+    eng: &mut engine::Engine,
+    table_oid: u32,
+    entry: &SyncLogEntry,
+    context: &SyncReplayContext,
+    rows: &ParsedSyncRows,
+    operation: SyncRowOperation<'_>,
+) -> safety::GraphResult<()> {
+    match operation {
+        SyncRowOperation::Insert { pk, tenant } => {
+            sync::sync_insert(eng, table_oid, pk, tenant)?;
+            refresh_filter_index_from_sync(
+                eng,
+                table_oid,
+                pk,
+                &context.filters,
+                &context.table_oids,
+                entry,
+                rows,
+            )?;
+            apply_row_edge_mutations(
+                eng,
+                context,
+                table_oid,
+                rows.new.as_ref(),
+                engine::MutationKind::Insert,
+            )
+        }
+        SyncRowOperation::Update {
+            old_pk,
+            new_pk,
+            old_tenant,
+            new_tenant,
+        } => {
+            apply_row_edge_mutations(
+                eng,
+                context,
+                table_oid,
+                rows.old.as_ref(),
+                engine::MutationKind::Delete,
+            )?;
+            if old_pk == new_pk {
+                sync::sync_update_tenant(eng, table_oid, new_pk, old_tenant, new_tenant)?;
+            } else {
+                sync::sync_delete_tenant(eng, table_oid, old_pk, old_tenant)?;
+                sync::sync_insert(eng, table_oid, new_pk, new_tenant)?;
+            }
+            refresh_filter_index_from_sync(
+                eng,
+                table_oid,
+                new_pk,
+                &context.filters,
+                &context.table_oids,
+                entry,
+                rows,
+            )?;
+            apply_row_edge_mutations(
+                eng,
+                context,
+                table_oid,
+                rows.new.as_ref(),
+                engine::MutationKind::Insert,
+            )
+        }
+        SyncRowOperation::Delete { pk, old_tenant } => {
+            apply_row_edge_mutations(
+                eng,
+                context,
+                table_oid,
+                rows.old.as_ref(),
+                engine::MutationKind::Delete,
+            )?;
+            sync::sync_delete_tenant(eng, table_oid, pk, old_tenant)
+        }
+        SyncRowOperation::Truncate => sync::sync_truncate(eng, table_oid).map(|_| ()),
+    }
 }
 
 fn sync_entry_edge_mutation_reservation(

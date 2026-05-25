@@ -89,6 +89,7 @@ remaining sections below are still open work.
 | Legacy raw filter exposure | The legacy unsigned raw-filter parser no longer compiles in development builds; it remains only under unit tests and the dedicated fuzz target while public traversal uses structured JSONB filters. |
 | GUC enum compatibility | Configuration docs now record the compatibility policy for keeping alias-preserving typed settings as string GUCs while parsing them into Rust enums at the extension boundary. |
 | Mmap sync mutation boundary | Sync node insert, delete, and truncate paths now mutate node storage through engine helpers that materialize mmap-backed arrays before mutation. |
+| Sync row replay operation | Sync replay now resolves each durable row into a typed node operation before applying ordered edge overlays, tenant updates, filter refresh, and node replacement. |
 
 ### Data Correctness and Corruption
 
@@ -180,7 +181,6 @@ but they do not change core user behavior.
 | Mmap resolution state | The resolution offset/length now lives in `ResolutionStore::MmapBacked`, while the mmap handle remains engine-owned because node and edge stores borrow the same mapping. | Continue keeping resolution metadata attached to the active resolution backend and avoid reintroducing split offset fields. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
 | Sync row parsing | Sync replay parses each old/new row image once per log entry and passes borrowed JSON values through tenant, filter, reservation, and edge replay helpers. | Keep row-image parsing at the replay boundary as new sync paths are added. |
-| Sync mutation coupling | Some edge overlay maintenance relies on caller ordering around node replacement. | Encapsulate node and edge replay behind a typed sync-row operation helper. |
 
 ## Lower-Priority Optimizations
 
