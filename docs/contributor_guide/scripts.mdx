@@ -13,7 +13,7 @@ root unless noted otherwise.
 |---|---|---|
 | `check_doc_references.py` | Editing docs or moving files | Validates local Markdown/MDX references so docs do not point at missing local files. |
 | `check_docs_drift.sh` | Before PRs and releases | Runs the aggregate documentation drift suite: local references, SQL API/GUC drift, and Rust source-map drift. |
-| `check_dependency_updates.py` | Before releases and dependency bumps | Checks pinned Cargo, Python, Docker, and Nix flake GitHub inputs against upstream registries. It recommends only releases or commits at least 14 days old by default and never updates files unless called with `--update ... --yes`. |
+| `check_dependency_updates.py` | Before releases and dependency bumps | Checks pinned Cargo, Python, Docker, and Nix flake GitHub inputs against upstream registries. It recommends only releases or commits at least 6 hours old by default and never updates files unless called with `--update ... --yes`. |
 | `check_rust_doc_map_drift.py` | Editing contributor internals docs | Checks that Rust source files and contributor documentation stay aligned. Supports `--list` for inventory inspection. |
 | `check_sql_api_drift.py` | Editing SQL APIs, GUCs, or API docs | Compares implemented SQL-facing functions and GUCs against documented API references. Supports `--list-implemented`. |
 | `clean_generated_artifacts.sh` | Before packaging, archiving, or release prep | Deletes generated local artifacts that should not ship: `graph/target/`, `graph/fuzz/target/`, and `.DS_Store` files. Has `--dry-run`. |
@@ -74,9 +74,10 @@ python3 scripts/check_dependency_updates.py
 ```
 
 The script queries crates.io, PyPI, Docker Hub, and GitHub for Nix flake inputs.
-It reports update candidates only when a newer release or commit is at least 14
-days old. Newer releases and commits are flagged for review but are not
-recommended for release adoption.
+It reports update candidates only when a newer release or commit is at least 6
+hours old. Newer releases and commits are flagged for review but are not
+recommended for release adoption. Any package-manager fetch or install needed
+after a manifest change must go through `sfw`.
 
 To change a supported manifest, name the dependency explicitly and confirm:
 

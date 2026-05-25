@@ -72,8 +72,24 @@ if [ ! -d "${VENV_DIR}" ]; then
   "${BENCHMARK_PYTHON}" -m venv "${VENV_DIR}"
 fi
 
-"${VENV_DIR}/bin/python" -m pip install --upgrade pip >/dev/null
-"${VENV_DIR}/bin/python" -m pip install -r "${SANDBOX_DIR}/benchmark/requirements.txt"
+USE_SFW_PIP=0
+if command -v sfw >/dev/null 2>&1; then
+  USE_SFW_PIP=1
+else
+  echo "Warning: sfw was not found; falling back to direct pip for benchmark dependencies." >&2
+fi
+
+run_venv_pip() {
+  if [ "${USE_SFW_PIP}" = "1" ]; then
+    PATH="${VENV_DIR}/bin:${PATH}" sfw pip "$@"
+    return
+  fi
+
+  "${VENV_DIR}/bin/python" -m pip "$@"
+}
+
+run_venv_pip install --upgrade pip >/dev/null
+run_venv_pip install -r "${SANDBOX_DIR}/benchmark/requirements.txt"
 
 "${VENV_DIR}/bin/python" "${SANDBOX_DIR}/common/run_benchmarks.py" \
   --dataset "${DATASET}" \

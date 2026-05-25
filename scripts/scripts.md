@@ -9,7 +9,7 @@ This is the quick index for repository scripts. The detailed maintainer guide is
 |---|---|
 | `scripts/check_doc_references.py` | Validates local documentation links and references. |
 | `scripts/check_docs_drift.sh` | Runs the aggregate documentation drift checks. |
-| `scripts/check_dependency_updates.py` | Audits pinned Cargo, Python, Docker, and Nix flake GitHub inputs and reports update candidates older than the release age gate. |
+| `scripts/check_dependency_updates.py` | Audits pinned Cargo, Python, Docker, and Nix flake GitHub inputs and reports update candidates at least 6 hours old by default. |
 | `scripts/check_rust_doc_map_drift.py` | Checks contributor documentation against the Rust source map. |
 | `scripts/check_sql_api_drift.py` | Checks SQL API and GUC documentation against implementation. |
 | `scripts/clean_generated_artifacts.sh` | Deletes generated local artifacts: `graph/target/`, `graph/fuzz/target/`, and `.DS_Store` files. |

@@ -45,9 +45,11 @@ python3 scripts/check_dependency_updates.py
 ```
 
 The dependency checker enforces the release policy that recommended dependency
-updates must be at least 14 days old. It flags newer releases for review and
+updates must be at least 6 hours old. It flags newer releases for review and
 requires explicit confirmation, for example
-`--update cargo:serde --yes`, before it rewrites supported manifests.
+`--update cargo:serde --yes`, before it rewrites supported manifests. Any
+package-manager fetch or install needed after a manifest change must go through
+`sfw`.
 
 ## Rust Unit Tests
 

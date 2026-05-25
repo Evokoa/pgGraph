@@ -205,7 +205,8 @@ Release dependencies are pinned and reviewed before they move:
 - Docker base images use explicit version tags plus digests.
 - Nix flake GitHub inputs are pinned in `flake.lock` and reviewed manually.
 - New dependency versions should not be adopted into a release until they are at
-  least 14 days old, unless a security fix requires an explicit exception.
+  least 6 hours old and any package-manager fetch or install goes through
+  `sfw`, unless a security fix requires an explicit exception.
 
 Check dependency freshness without applying updates:
 

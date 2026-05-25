@@ -94,6 +94,22 @@ wait_for_playground_ready() {
   return 1
 }
 
+USE_SFW_PIP=0
+if command -v sfw >/dev/null 2>&1; then
+  USE_SFW_PIP=1
+else
+  echo "Warning: sfw was not found; falling back to direct pip for playground dependencies." >&2
+fi
+
+run_venv_pip() {
+  if [ "${USE_SFW_PIP}" = "1" ]; then
+    PATH="${VENV_DIR}/bin:${PATH}" sfw pip "$@"
+    return
+  fi
+
+  "${VENV_DIR}/bin/python" -m pip "$@"
+}
+
 APP_PORT="$(choose_app_port)"
 
 "${PLAYGROUND_PYTHON}" "${SANDBOX_DIR}/common/run_benchmarks.py" \
@@ -119,8 +135,8 @@ if [ ! -d "${VENV_DIR}" ]; then
   "${PLAYGROUND_PYTHON}" -m venv "${VENV_DIR}"
 fi
 
-"${VENV_DIR}/bin/python" -m pip install --upgrade pip >/dev/null
-"${VENV_DIR}/bin/python" -m pip install -r "${SANDBOX_DIR}/playground/requirements.txt"
+run_venv_pip install --upgrade pip >/dev/null
+run_venv_pip install -r "${SANDBOX_DIR}/playground/requirements.txt"
 
 export PGGRAPH_DSN="host=127.0.0.1 port=${ACTUAL_PG_PORT} dbname=postgres user=postgres password=postgres"
 export PGGRAPH_ASSETS_DIR="${ROOT_DIR}/assets"

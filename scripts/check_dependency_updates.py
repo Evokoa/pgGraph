@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Check pinned dependency updates without applying them by default.
 
-The checker intentionally recommends only releases that are at least
-``--min-age-days`` old. Newer releases are flagged for review, but not
-recommended, so release managers have time to catch supply-chain incidents
-before adopting fresh artifacts.
+The checker intentionally recommends only releases that have passed the age
+gate. Newer releases are flagged for review, but not recommended, so release
+managers have time to catch supply-chain incidents before adopting fresh
+artifacts. Fresh package-manager fetches or installs must still go through sfw.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MIN_AGE_DAYS = 14
+DEFAULT_MIN_AGE_HOURS = 6
 
 
 @dataclass(frozen=True)
@@ -290,7 +290,18 @@ def rewrite_dependency(dep: Dependency, target_version: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--min-age-days", type=int, default=DEFAULT_MIN_AGE_DAYS)
+    parser.add_argument(
+        "--min-age-hours",
+        type=int,
+        default=DEFAULT_MIN_AGE_HOURS,
+        help="Minimum release age before recommending updates. Defaults to 6.",
+    )
+    parser.add_argument(
+        "--min-age-days",
+        type=int,
+        default=None,
+        help="Compatibility override for the release age gate, in days.",
+    )
     parser.add_argument(
         "--update",
         action="append",
@@ -301,7 +312,17 @@ def main() -> int:
     parser.add_argument("--yes", action="store_true", help="Required with --update.")
     args = parser.parse_args()
 
-    cutoff = utc_now() - dt.timedelta(days=args.min_age_days)
+    min_age = (
+        dt.timedelta(days=args.min_age_days)
+        if args.min_age_days is not None
+        else dt.timedelta(hours=args.min_age_hours)
+    )
+    age_label = (
+        f"{args.min_age_days} days"
+        if args.min_age_days is not None
+        else f"{args.min_age_hours} hours"
+    )
+    cutoff = utc_now() - min_age
     deps = (
         cargo_dependencies()
         + python_dependencies()
@@ -324,7 +345,7 @@ def main() -> int:
 
         if recommended is None:
             had_review_items = True
-            print(f"REVIEW {dep.key}: no release at least {args.min_age_days} days old found")
+            print(f"REVIEW {dep.key}: no release at least {age_label} old found")
             continue
 
         latest_note = ""
