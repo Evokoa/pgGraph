@@ -22,6 +22,7 @@ mod builder;
 mod catalog;
 mod config;
 mod connected_components;
+mod cypher_facade;
 mod discover;
 mod edge_store;
 mod engine;
@@ -128,6 +129,11 @@ pub mod bench_support {
     "../sql/bootstrap.sql",
     name = "graph_bootstrap_sql",
     requires = [auto_discover]
+);
+::pgrx::extension_sql_file!(
+    "../sql/cypher_catalog.sql",
+    name = "graph_cypher_catalog_sql",
+    requires = ["graph_bootstrap_sql"]
 );
 
 // Declare the 'graph' schema so pgrx can satisfy control-file schema checks.
