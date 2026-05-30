@@ -4,7 +4,7 @@ use std::fmt;
 use std::ops::Range;
 
 /// Byte span into the original query text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) struct Span {
     /// Inclusive byte offset where the item starts.
     pub(crate) start: u32,

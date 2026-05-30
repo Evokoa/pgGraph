@@ -1,6 +1,6 @@
 //! Catalog snapshots used by the GQL binder.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builder::{RegisteredEdge, RegisteredTable};
 use crate::catalog::{catalog_fingerprint, read_catalog, table_oid_from_name};
@@ -69,7 +69,7 @@ impl CatalogSnapshotImpl {
         let (tables, edges, filter_columns) = read_catalog()?;
         let fingerprint = catalog_fingerprint(&tables, &edges, &filter_columns);
         let labels = load_labels(&tables)?;
-        let rels = load_rels(&edges)?;
+        let rels = load_rels(&tables, &edges)?;
         Ok(Self {
             labels,
             rels,
@@ -144,23 +144,86 @@ fn load_labels(tables: &[RegisteredTable]) -> GraphResult<HashMap<String, LabelE
     Ok(labels)
 }
 
-fn load_rels(edges: &[RegisteredEdge]) -> GraphResult<Vec<RelTypeInfo>> {
+fn load_rels(
+    tables: &[RegisteredTable],
+    edges: &[RegisteredEdge],
+) -> GraphResult<Vec<RelTypeInfo>> {
+    let registered_tables = tables
+        .iter()
+        .map(|table| table.table_name.as_str())
+        .collect::<HashSet<_>>();
+    let mut registered_table_oids = HashMap::with_capacity(tables.len());
+    for table in tables {
+        registered_table_oids.insert(
+            table_oid_from_name(&table.table_name)?,
+            table.table_name.as_str(),
+        );
+    }
     let mut rels = Vec::with_capacity(edges.len());
     for edge in edges {
+        let from_node_table = if registered_tables.contains(edge.from_table.as_str()) {
+            Some(edge.from_table.as_str())
+        } else {
+            edge_source_fk_table_oid(edge)?.and_then(|oid| registered_table_oids.get(&oid).copied())
+        };
+        let Some(from_node_table) = from_node_table else {
+            continue;
+        };
         rels.push(RelTypeInfo {
             rel_type: edge.label.clone(),
-            from_table_oid: table_oid_from_name(&edge.from_table)?,
+            from_table_oid: table_oid_from_name(from_node_table)?,
             to_table_oid: table_oid_from_name(&edge.to_table)?,
         });
         if edge.bidirectional {
             rels.push(RelTypeInfo {
                 rel_type: edge.label.clone(),
                 from_table_oid: table_oid_from_name(&edge.to_table)?,
-                to_table_oid: table_oid_from_name(&edge.from_table)?,
+                to_table_oid: table_oid_from_name(from_node_table)?,
             });
         }
     }
     Ok(rels)
+}
+
+fn edge_source_fk_table_oid(edge: &RegisteredEdge) -> GraphResult<Option<u32>> {
+    let from_table_oid = table_oid_from_name(&edge.from_table)?;
+    pgrx::Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT c.confrelid::oid::integer
+                 FROM pg_constraint c
+                 JOIN unnest(c.conkey) WITH ORDINALITY AS fk_from(attnum, n) ON true
+                 JOIN pg_attribute from_attr
+                   ON from_attr.attrelid = c.conrelid
+                  AND from_attr.attnum = fk_from.attnum
+                 WHERE c.contype = 'f'
+                   AND c.conrelid = $1::oid
+                   AND from_attr.attname = $2
+                 ORDER BY c.oid
+                 LIMIT 2",
+                None,
+                &[
+                    pgrx::pg_sys::Oid::from_u32(from_table_oid).into(),
+                    edge.from_column.clone().into(),
+                ],
+            )
+            .map_err(|err| {
+                crate::safety::GraphError::Internal(format!(
+                    "edge source foreign-key lookup failed: {err}"
+                ))
+            })?;
+        if rows.len() != 1 {
+            return Ok(None);
+        }
+        rows.first()
+            .get::<i32>(1)
+            .map_err(|err| {
+                crate::safety::GraphError::Internal(format!(
+                    "edge source foreign-key target read failed: {err}"
+                ))
+            })
+            .map(|oid| oid.map(|oid| oid as u32))
+    })
 }
 
 fn gql_label_from_regclass(regclass: &str) -> Option<String> {

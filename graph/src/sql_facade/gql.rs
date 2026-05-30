@@ -42,11 +42,12 @@ fn gql(
         )
         .unwrap_or_else(|err| err.report());
         let params = gql_params(params).unwrap_or_else(|err| err.report());
-        let rows = crate::query::value::project_rows(matches, &plan, &hydrated, &params, hydrate)
-            .unwrap_or_else(|err| err.report())
-            .into_iter()
-            .map(|row| (pgrx::JsonB(row),))
-            .collect();
+        let rows: Vec<_> =
+            crate::query::value::project_rows(matches, &plan, &hydrated, &params, hydrate)
+                .unwrap_or_else(|err| err.report())
+                .into_iter()
+                .map(|row| (pgrx::JsonB(row),))
+                .collect();
         TableIterator::new(rows)
     })
 }

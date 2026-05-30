@@ -254,6 +254,7 @@ fn executor_filters_wrong_target_table_and_edge_type() {
     let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
     let physical = lower(logical);
     let mut engine = engine_fixture();
+    let works_at = engine.register_edge_type("works_at").unwrap();
     let owns = engine.register_edge_type("owns").unwrap();
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
@@ -261,7 +262,7 @@ fn executor_filters_wrong_target_table_and_edge_type() {
             RawEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: works_at,
                 weight: None,
             },
             RawEdge {
@@ -272,8 +273,8 @@ fn executor_filters_wrong_target_table_and_edge_type() {
             },
             RawEdge {
                 source: 1,
-                target: 3,
-                type_id: 1,
+                target: 0,
+                type_id: works_at,
                 weight: None,
             },
         ],
