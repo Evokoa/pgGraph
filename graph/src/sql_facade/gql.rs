@@ -65,8 +65,18 @@ fn check_plan_acl(plan: &crate::query::physical_plan::PhysicalPlan) {
 }
 
 fn gql_error_to_graph_error(err: crate::gql::errors::GqlError) -> safety::GraphError {
-    safety::GraphError::InvalidFilter {
-        reason: err.to_string(),
+    match &err.kind {
+        crate::gql::errors::GqlErrorKind::Syntax { .. } => safety::GraphError::GqlSyntax {
+            reason: err.to_string(),
+        },
+        crate::gql::errors::GqlErrorKind::Unsupported { .. } => {
+            safety::GraphError::GqlUnsupported {
+                reason: err.to_string(),
+            }
+        }
+        crate::gql::errors::GqlErrorKind::Bind { .. } => safety::GraphError::GqlSemantic {
+            reason: err.to_string(),
+        },
     }
 }
 
@@ -75,7 +85,7 @@ fn gql_params(
 ) -> safety::GraphResult<crate::query::value::QueryParams> {
     match params.map(|json| json.0) {
         Some(serde_json::Value::Object(map)) => Ok(map),
-        Some(_) => Err(safety::GraphError::InvalidFilter {
+        Some(_) => Err(safety::GraphError::GqlParameter {
             reason: "GQL params must be a JSON object".to_string(),
         }),
         None => Ok(serde_json::Map::new()),

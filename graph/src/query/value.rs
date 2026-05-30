@@ -18,8 +18,9 @@ pub(crate) type QueryParams = serde_json::Map<String, serde_json::Value>;
 ///
 /// # Errors
 ///
-/// Returns [`GraphError::InvalidFilter`] when a required parameter is missing
-/// or a predicate comparison cannot be evaluated safely.
+/// Returns [`GraphError::GqlParameter`] when a required parameter is missing
+/// and [`GraphError::GqlExecution`] when predicate evaluation cannot be
+/// completed safely.
 pub(crate) fn project_rows(
     rows: Vec<GqlRow>,
     plan: &PhysicalPlan,
@@ -171,7 +172,7 @@ fn eval_value(
             params
                 .get(name)
                 .cloned()
-                .ok_or_else(|| GraphError::InvalidFilter {
+                .ok_or_else(|| GraphError::GqlParameter {
                     reason: format!("missing GQL parameter `{name}`"),
                 })
         }
@@ -193,7 +194,7 @@ fn compare_values(
         BoundCmpOp::Gte => ordered(lhs, required_rhs(op, rhs)?).map(|ordering| !ordering.is_lt()),
         BoundCmpOp::In => match required_rhs(op, rhs)? {
             serde_json::Value::Array(values) => Ok(values.iter().any(|value| value == lhs)),
-            _ => Err(GraphError::InvalidFilter {
+            _ => Err(GraphError::GqlExecution {
                 reason: "GQL IN requires a list right-hand side".to_string(),
             }),
         },
@@ -206,7 +207,7 @@ fn required_rhs<'a>(
     op: BoundCmpOp,
     rhs: Option<&'a serde_json::Value>,
 ) -> GraphResult<&'a serde_json::Value> {
-    rhs.ok_or_else(|| GraphError::InvalidFilter {
+    rhs.ok_or_else(|| GraphError::GqlExecution {
         reason: format!("GQL comparison {op:?} requires a right-hand side"),
     })
 }
@@ -240,7 +241,7 @@ fn json_rank(value: &serde_json::Value) -> u8 {
 }
 
 fn non_orderable() -> GraphError {
-    GraphError::InvalidFilter {
+    GraphError::GqlExecution {
         reason: "GQL ordered comparisons require both operands to be numbers or strings"
             .to_string(),
     }

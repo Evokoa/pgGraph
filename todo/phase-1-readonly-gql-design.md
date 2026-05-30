@@ -367,9 +367,12 @@ pub enum GqlError {
 ```
 
 These map to `GraphError`/SQLSTATE at the `sql_facade/gql.rs` boundary. The
-SQLSTATE assignment is the **pre-facade gate task (DR-5)** — do not expose
-`graph.gql()` publicly until it is done. `Result<_, String>` is banned in these
-APIs (rust-planning rule 20).
+SQLSTATE assignment is the **pre-facade gate task (DR-5)**. Current mappings are
+`PG013` syntax, `PG014` unsupported feature, `PG015` semantic/bind, `PG016`
+parameter, and `PG017` execution/cardinality. Do not expose `graph.gql()`
+publicly until this taxonomy, docs positioning, compatibility-matrix rows, and
+regression checks are all green. `Result<_, String>` is banned in these APIs
+(rust-planning rule 20).
 
 ## 10. PR slices (TDD order)
 

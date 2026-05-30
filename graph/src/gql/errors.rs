@@ -69,7 +69,7 @@ impl GqlError {
     }
 }
 
-/// Stable frontend error categories used before SQLSTATE mapping exists.
+/// Stable frontend error categories used by SQLSTATE mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GqlErrorKind {
     /// Query text does not match the supported grammar.

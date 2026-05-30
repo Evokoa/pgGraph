@@ -35,6 +35,21 @@ pub enum GraphError {
     #[error("Invalid filter condition: {reason}")]
     InvalidFilter { reason: String }, // PG005
 
+    #[error("GQL syntax error: {reason}")]
+    GqlSyntax { reason: String }, // PG013
+
+    #[error("Unsupported GQL feature: {reason}")]
+    GqlUnsupported { reason: String }, // PG014
+
+    #[error("GQL semantic error: {reason}")]
+    GqlSemantic { reason: String }, // PG015
+
+    #[error("GQL parameter error: {reason}")]
+    GqlParameter { reason: String }, // PG016
+
+    #[error("GQL execution error: {reason}")]
+    GqlExecution { reason: String }, // PG017
+
     #[error("Another build() or vacuum() is already running")]
     BuildLocked, // PG006
 
@@ -71,6 +86,11 @@ impl GraphError {
             GraphError::NotBuilt => "PG003",
             GraphError::EdgeTypeLimit => "PG004",
             GraphError::InvalidFilter { .. } => "PG005",
+            GraphError::GqlSyntax { .. } => "PG013",
+            GraphError::GqlUnsupported { .. } => "PG014",
+            GraphError::GqlSemantic { .. } => "PG015",
+            GraphError::GqlParameter { .. } => "PG016",
+            GraphError::GqlExecution { .. } => "PG017",
             GraphError::BuildLocked => "PG006",
             GraphError::EdgeBufferFull { .. } => "PG008",
             GraphError::ReadOnly { .. } => "PG012",
@@ -102,6 +122,21 @@ impl GraphError {
             }
             GraphError::InvalidFilter { .. } => {
                 "Use JSONB filter helpers such as graph.eq(), graph.gt(), graph.gte(), graph.lt(), graph.lte(), graph.between(), graph.on_node(), and graph.all(); referenced columns must be registered with graph.add_filter_column().".to_string()
+            }
+            GraphError::GqlSyntax { .. } => {
+                "Check the GQL query text against the supported read-only subset.".to_string()
+            }
+            GraphError::GqlUnsupported { .. } => {
+                "Remove the unsupported GQL construct or rewrite the query using the documented compatibility matrix.".to_string()
+            }
+            GraphError::GqlSemantic { .. } => {
+                "Verify labels, relationship types, aliases, and return bindings against registered graph metadata.".to_string()
+            }
+            GraphError::GqlParameter { .. } => {
+                "Pass graph.gql() parameters as a JSON object and include every $parameter referenced by the query.".to_string()
+            }
+            GraphError::GqlExecution { .. } => {
+                "Reduce result cardinality with labels, predicates, direction, hop bounds, or LIMIT; rebuild the graph if registered metadata changed.".to_string()
             }
             GraphError::BuildLocked => {
                 "Wait for the current build() or vacuum() to complete, or check pg_stat_activity for blocking sessions.".to_string()
@@ -267,6 +302,30 @@ mod tests {
             reason: "bad syntax".to_string(),
         };
         assert_eq!(err.sqlstate(), "PG005");
+    }
+
+    #[test]
+    fn gql_errors_map_to_stable_sqlstates() {
+        assert_eq!(
+            GraphError::GqlSyntax { reason: "r".into() }.sqlstate(),
+            "PG013"
+        );
+        assert_eq!(
+            GraphError::GqlUnsupported { reason: "r".into() }.sqlstate(),
+            "PG014"
+        );
+        assert_eq!(
+            GraphError::GqlSemantic { reason: "r".into() }.sqlstate(),
+            "PG015"
+        );
+        assert_eq!(
+            GraphError::GqlParameter { reason: "r".into() }.sqlstate(),
+            "PG016"
+        );
+        assert_eq!(
+            GraphError::GqlExecution { reason: "r".into() }.sqlstate(),
+            "PG017"
+        );
     }
 
     #[test]
@@ -455,6 +514,11 @@ mod tests {
             GraphError::NotBuilt,
             GraphError::EdgeTypeLimit,
             GraphError::InvalidFilter { reason: "r".into() },
+            GraphError::GqlSyntax { reason: "r".into() },
+            GraphError::GqlUnsupported { reason: "r".into() },
+            GraphError::GqlSemantic { reason: "r".into() },
+            GraphError::GqlParameter { reason: "r".into() },
+            GraphError::GqlExecution { reason: "r".into() },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },
@@ -486,6 +550,11 @@ mod tests {
             GraphError::NotBuilt,
             GraphError::EdgeTypeLimit,
             GraphError::InvalidFilter { reason: "r".into() },
+            GraphError::GqlSyntax { reason: "r".into() },
+            GraphError::GqlUnsupported { reason: "r".into() },
+            GraphError::GqlSemantic { reason: "r".into() },
+            GraphError::GqlParameter { reason: "r".into() },
+            GraphError::GqlExecution { reason: "r".into() },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },
@@ -522,6 +591,11 @@ mod tests {
             GraphError::NotBuilt,
             GraphError::EdgeTypeLimit,
             GraphError::InvalidFilter { reason: "r".into() },
+            GraphError::GqlSyntax { reason: "r".into() },
+            GraphError::GqlUnsupported { reason: "r".into() },
+            GraphError::GqlSemantic { reason: "r".into() },
+            GraphError::GqlParameter { reason: "r".into() },
+            GraphError::GqlExecution { reason: "r".into() },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },

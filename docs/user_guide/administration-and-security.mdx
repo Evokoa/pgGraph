@@ -98,6 +98,12 @@ The extension emits custom SQLSTATEs through PostgreSQL's error reporting API.
 | `PG009` | Corrupt graph file | Rebuild persisted artifact |
 | `PG010` | Node not found | Check table/primary key and rebuild/apply sync if data changed |
 | `PG011` | Incompatible graph file version | Rebuild artifact with current extension version |
+| `PG012` | Read-only graph state | Inspect `graph.status().read_only_reason`, then rebuild, vacuum, or adjust memory policy |
+| `PG013` | GQL syntax error | Check the query text against the documented GQL subset |
+| `PG014` | Unsupported GQL feature | Rewrite the query using supported GQL compatibility-matrix features |
+| `PG015` | GQL semantic error | Verify labels, relationship types, aliases, and return bindings |
+| `PG016` | GQL parameter error | Pass a JSON object containing every `$parameter` referenced by the query |
+| `PG017` | GQL execution error | Reduce result cardinality or rebuild if graph metadata changed |
 | `55000` | Extension disabled | `SET graph.enabled = on` |
 | `XX000` | Internal error | Report with full message and reproduction |
 

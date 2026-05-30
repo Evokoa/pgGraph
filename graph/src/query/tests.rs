@@ -9,6 +9,7 @@ use crate::edge_store::{EdgeStore, RawEdge};
 use crate::engine::Engine;
 use crate::gql::errors::GqlErrorKind;
 use crate::gql::parse;
+use crate::safety::GraphError;
 use std::collections::HashMap;
 
 fn fake_catalog() -> FakeCatalog {
@@ -100,6 +101,7 @@ fn executor_enforces_hard_row_cap_before_projection() {
 
     let err = execute(&engine, &physical).unwrap_err();
 
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
     assert!(err.to_string().contains("row cap"));
 }
 
@@ -290,6 +292,7 @@ fn value_projection_reports_missing_parameters() {
 
     let err = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap_err();
 
+    assert!(matches!(err, GraphError::GqlParameter { .. }));
     assert!(err.to_string().contains("missing GQL parameter"));
 }
 

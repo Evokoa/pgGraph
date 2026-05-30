@@ -28,8 +28,9 @@ pub(crate) struct GqlRow {
 ///
 /// # Errors
 ///
-/// Returns [`GraphError`] when the graph is not built or the requested
-/// relationship type is not present in the built engine registry.
+/// Returns [`GraphError`] when the graph is not built, the requested
+/// relationship type is not present in the built engine registry, or execution
+/// exceeds the plan's cardinality cap.
 pub(crate) fn execute(engine: &Engine, plan: &PhysicalPlan) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
@@ -44,7 +45,7 @@ pub(crate) fn execute(engine: &Engine, plan: &PhysicalPlan) -> GraphResult<Vec<G
         for target_idx in expand_targets(engine, plan, source_idx, rel_type_id) {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
-                    return Err(GraphError::InvalidFilter {
+                    return Err(GraphError::GqlExecution {
                         reason: format!("GQL result row cap exceeded ({row_cap})"),
                     });
                 }
@@ -62,7 +63,7 @@ fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<u8> {
         .iter()
         .position(|label| label == rel_type)
         .map(|idx| idx as u8)
-        .ok_or_else(|| GraphError::InvalidFilter {
+        .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("relationship type `{rel_type}` is not present in the built graph"),
         })
 }

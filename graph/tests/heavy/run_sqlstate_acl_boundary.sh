@@ -3,6 +3,7 @@ set -euo pipefail
 
 DBNAME="${DBNAME:-pggraph_boundary}"
 ROLE_NAME="${ROLE_NAME:-${DBNAME}_restricted}"
+GQL_SQLSTATE_REQUIRED="${GQL_SQLSTATE_REQUIRED:-0}"
 
 run_sql() {
   local sql="$1"
@@ -79,6 +80,13 @@ SQL
   fi
 }
 
+has_gql_facade() {
+  local out
+
+  out="$(psql -X -q -v ON_ERROR_STOP=1 -tA -d "$DBNAME" -c "SELECT to_regprocedure('graph.gql(text,jsonb,boolean)') IS NOT NULL;")"
+  [[ "$out" == "t" ]]
+}
+
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 
@@ -102,6 +110,17 @@ run_sql "SELECT * FROM graph.build();"
 
 expect_sqlstate "PG010" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'missing', 1);"
 expect_sqlstate "PG005" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, NULL, '🔥 > 1');"
+
+if has_gql_facade; then
+  expect_sqlstate "PG013" "SELECT * FROM graph.gql('MATCH (');"
+  expect_sqlstate "PG014" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes)-[:boundary*]->(v:graph_boundary_nodes) RETURN u');"
+  expect_sqlstate "PG015" "SELECT * FROM graph.gql('MATCH (u:no_such_label)-[:boundary]->(v:graph_boundary_nodes) RETURN u');"
+  expect_sqlstate "PG016" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes {name: \$name})-[:boundary]->(v:graph_boundary_nodes) RETURN u', '[\"Alice\"]'::jsonb);"
+  expect_sqlstate "PG017" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes)-[:boundary]->(v:graph_boundary_nodes) WHERE u.age > ''old'' RETURN u');"
+elif [[ "$GQL_SQLSTATE_REQUIRED" == "1" ]]; then
+  echo "GQL_SQLSTATE_REQUIRED=1 but graph.gql(text,jsonb,boolean) is not installed"
+  exit 1
+fi
 
 expect_sqlstate "55000" "SET graph.enabled = off; SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1);"
 
