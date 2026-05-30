@@ -52,3 +52,10 @@ path = "fuzz_targets/traverse_options.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "gql_parser"
+path = "fuzz_targets/gql_parser.rs"
+test = false
+doc = false
+bench = false

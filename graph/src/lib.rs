@@ -26,6 +26,7 @@ mod discover;
 mod edge_store;
 mod engine;
 mod filter_index;
+mod gql;
 mod node_store;
 mod path_finder;
 mod persistence;
@@ -107,6 +108,12 @@ pub mod fuzz_support {
     /// through Postgres. Intended for fuzz targets.
     pub fn parse_node_ref_json_parts(value: &serde_json::Value) -> bool {
         crate::parse_node_ref_json_parts(value).is_ok()
+    }
+
+    /// Parse a GQL query through the pgrx-free frontend. Intended for fuzz
+    /// targets and unit tests.
+    pub fn parse_gql_query(query: &str) -> bool {
+        crate::gql::parse(query).is_ok()
     }
 }
 
