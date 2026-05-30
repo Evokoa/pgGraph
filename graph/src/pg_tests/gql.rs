@@ -91,3 +91,79 @@ fn gql_denies_without_select_on_bound_tables() {
 
     assert!(denied);
 }
+
+#[pg_test]
+fn gql_applies_session_tenant_scope_to_topology() {
+    reset_and_create_fixtures();
+    Spi::run("SET LOCAL graph.enforce_tenant_scope = on")
+        .expect("enable tenant enforcement failed");
+    Spi::run("SET LOCAL graph.tenant_setting = 'app.graph_gql_tenant'")
+        .expect("set tenant GUC failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_gql_tenant_pgtest CASCADE")
+        .expect("drop tenant table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_tenant_pgtest (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                parent_id TEXT REFERENCES public.graph_gql_tenant_pgtest(id)
+            )",
+    )
+    .expect("create tenant table failed");
+    Spi::run(
+        "INSERT INTO public.graph_gql_tenant_pgtest (id, tenant_id, name, parent_id) VALUES
+                ('a1', 'tenant-a', 'Root A', NULL),
+                ('a2', 'tenant-a', 'Child A', 'a1'),
+                ('b1', 'tenant-b', 'Root B', NULL),
+                ('b2', 'tenant-b', 'Child B', 'b1')",
+    )
+    .expect("insert tenant rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_gql_tenant_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name'],
+                tenant_column := 'tenant_id'
+            )",
+    )
+    .expect("add tenant table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_gql_tenant_pgtest'::regclass,
+                'parent_id',
+                'graph_gql_tenant_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add tenant edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build tenant graph failed");
+
+    Spi::run("SET LOCAL app.graph_gql_tenant = 'tenant-a'").expect("set tenant-a failed");
+    let tenant_a_child = Spi::get_one::<String>(
+        "SELECT row #>> '{child,_id,id}'
+             FROM graph.gql(
+                'MATCH (child:graph_gql_tenant_pgtest)-[:parent]->(parent:graph_gql_tenant_pgtest) RETURN child, parent'
+             )",
+    )
+    .expect("tenant-a gql failed")
+    .unwrap_or_default();
+
+    Spi::run("SET LOCAL app.graph_gql_tenant = 'tenant-b'").expect("set tenant-b failed");
+    let tenant_b_child = Spi::get_one::<String>(
+        "SELECT row #>> '{child,_id,id}'
+             FROM graph.gql(
+                'MATCH (child:graph_gql_tenant_pgtest)-[:parent]->(parent:graph_gql_tenant_pgtest) RETURN child, parent'
+             )",
+    )
+    .expect("tenant-b gql failed")
+    .unwrap_or_default();
+
+    Spi::run("RESET app.graph_gql_tenant").expect("reset tenant value failed");
+    Spi::run("RESET graph.tenant_setting").expect("reset tenant setting failed");
+    Spi::run("SET graph.enforce_tenant_scope = off").expect("disable tenant enforcement failed");
+
+    assert_eq!(tenant_a_child, "a2");
+    assert_eq!(tenant_b_child, "b2");
+}

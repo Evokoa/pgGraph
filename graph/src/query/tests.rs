@@ -99,7 +99,7 @@ fn executor_enforces_hard_row_cap_before_projection() {
     engine.reverse_edge_store = engine.edge_store.reversed();
     engine.built = true;
 
-    let err = execute(&engine, &physical).unwrap_err();
+    let err = execute(&engine, &physical, None).unwrap_err();
 
     assert!(matches!(err, GraphError::GqlExecution { .. }));
     assert!(err.to_string().contains("row cap"));
@@ -134,7 +134,7 @@ fn executor_returns_one_hop_coordinate_rows() {
     let physical = lower(logical);
     let engine = engine_fixture();
 
-    let rows = execute(&engine, &physical).unwrap();
+    let rows = execute(&engine, &physical, None).unwrap();
 
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].source.table_oid, 10);
@@ -175,11 +175,78 @@ fn executor_filters_wrong_target_table_and_edge_type() {
         false,
     );
 
-    let rows = execute(&engine, &physical).unwrap();
+    let rows = execute(&engine, &physical, None).unwrap();
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source.node_id, "u1");
     assert_eq!(rows[0].target.node_id, "c1");
+}
+
+#[test]
+fn executor_applies_tenant_scope_to_source_and_target_nodes() {
+    let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    engine.tenanted_table_oids.insert(10);
+    engine.tenanted_table_oids.insert(20);
+    engine.insert_tenant_membership("tenant-a", 0);
+    engine.insert_tenant_membership("tenant-b", 2);
+    engine.insert_tenant_membership("tenant-a", 1);
+    engine.insert_tenant_membership("tenant-a", 3);
+
+    let rows = execute(&engine, &physical, Some("tenant-a")).unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source.node_id, "u2");
+    assert_eq!(rows[0].target.node_id, "c2");
+}
+
+#[test]
+fn executor_applies_tenant_scope_to_var_len_and_undirected_frontiers() {
+    let var_len = lower(bind_query(
+        "MATCH (u:users)-[:works_at*2..2]->(c:companies) RETURN u, c",
+    ));
+    let undirected = lower(bind_query(
+        "MATCH (u:users)-[:works_at]-(c:companies) RETURN u, c",
+    ));
+    let mut engine = engine_fixture();
+    engine.tenanted_table_oids.insert(10);
+    engine.tenanted_table_oids.insert(20);
+    engine.insert_tenant_membership("tenant-a", 0);
+    engine.insert_tenant_membership("tenant-a", 1);
+    engine.insert_tenant_membership("tenant-b", 2);
+    engine.insert_tenant_membership("tenant-a", 3);
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 3,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    assert!(execute(&engine, &var_len, Some("tenant-a"))
+        .unwrap()
+        .is_empty());
+    assert!(execute(&engine, &undirected, Some("tenant-a"))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -270,7 +337,7 @@ fn value_projection_filters_predicates_and_hydrates_nodes() {
     );
     let physical = lower(logical);
     let engine = engine_fixture();
-    let rows = execute(&engine, &physical).unwrap();
+    let rows = execute(&engine, &physical, None).unwrap();
     let hydrated = hydrated_fixture();
 
     let projected = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap();
@@ -287,7 +354,7 @@ fn value_projection_reports_missing_parameters() {
     let logical = bind_query("MATCH (u:users {name: $name})-[:works_at]->(c:companies) RETURN u");
     let physical = lower(logical);
     let engine = engine_fixture();
-    let rows = execute(&engine, &physical).unwrap();
+    let rows = execute(&engine, &physical, None).unwrap();
     let hydrated = hydrated_fixture();
 
     let err = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap_err();
@@ -320,9 +387,9 @@ fn executor_supports_inbound_undirected_and_bounded_var_length() {
     ));
     let engine = engine_fixture();
 
-    assert_eq!(execute(&engine, &inbound).unwrap().len(), 2);
-    assert_eq!(execute(&engine, &undirected).unwrap().len(), 2);
-    assert_eq!(execute(&engine, &var_len).unwrap().len(), 2);
+    assert_eq!(execute(&engine, &inbound, None).unwrap().len(), 2);
+    assert_eq!(execute(&engine, &undirected, None).unwrap().len(), 2);
+    assert_eq!(execute(&engine, &var_len, None).unwrap().len(), 2);
 }
 
 #[test]
@@ -333,7 +400,7 @@ fn projection_orders_skips_and_limits_rows() {
     );
     let physical = lower(logical);
     let engine = engine_fixture();
-    let rows = execute(&engine, &physical).unwrap();
+    let rows = execute(&engine, &physical, None).unwrap();
     let hydrated = hydrated_fixture();
 
     let projected = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap();

@@ -433,8 +433,9 @@ Implementation checkpoint:
   hydrates internally when predicates or property returns require it.
 - Current coverage includes binder property negatives, predicate filtering,
   hydrated node projection, missing-parameter behavior through the value layer,
-  and the development pgrx ACL/traverse-parity test path. The broader generated
-  matrix and tenant-specific rows remain before the public exposure gate.
+  tenant-scoped topology filtering through the session tenant setting, and the
+  development pgrx ACL/traverse-parity test path. The broader generated matrix
+  remains before the public exposure gate.
 
 ### 1D — Ordering, limits, variable-length, undirected
 - `ORDER BY`/`SKIP`/`LIMIT` with hard row caps; undirected union+dedup; bounded

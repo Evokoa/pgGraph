@@ -31,18 +31,22 @@ pub(crate) struct GqlRow {
 /// Returns [`GraphError`] when the graph is not built, the requested
 /// relationship type is not present in the built engine registry, or execution
 /// exceeds the plan's cardinality cap.
-pub(crate) fn execute(engine: &Engine, plan: &PhysicalPlan) -> GraphResult<Vec<GqlRow>> {
+pub(crate) fn execute(
+    engine: &Engine,
+    plan: &PhysicalPlan,
+    tenant: Option<&str>,
+) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
     let rel_type_id = edge_type_id(engine, &plan.rel_type)?;
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
-    for source_idx in source_nodes(engine, plan.source_table_oid) {
+    for source_idx in source_nodes(engine, plan.source_table_oid, tenant) {
         if !engine.node_store.is_active(source_idx) {
             continue;
         }
-        for target_idx in expand_targets(engine, plan, source_idx, rel_type_id) {
+        for target_idx in expand_targets(engine, plan, source_idx, rel_type_id, tenant) {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
                     return Err(GraphError::GqlExecution {
@@ -68,12 +72,17 @@ fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<u8> {
         })
 }
 
-fn source_nodes(engine: &Engine, table_oid: u32) -> Vec<u32> {
-    if let Some(nodes) = engine.table_membership.get(&table_oid) {
-        return nodes.iter().collect();
-    }
-    (0..engine.node_store.node_count())
-        .filter(|&idx| engine.node_store.table_oid(idx) == table_oid)
+fn source_nodes(engine: &Engine, table_oid: u32, tenant: Option<&str>) -> Vec<u32> {
+    let nodes: Vec<u32> = if let Some(nodes) = engine.table_membership.get(&table_oid) {
+        nodes.iter().collect()
+    } else {
+        (0..engine.node_store.node_count())
+            .filter(|&idx| engine.node_store.table_oid(idx) == table_oid)
+            .collect()
+    };
+    nodes
+        .into_iter()
+        .filter(|&idx| tenant_allows_node(engine, idx, tenant))
         .collect()
 }
 
@@ -82,6 +91,7 @@ fn expand_targets(
     plan: &PhysicalPlan,
     source_idx: u32,
     rel_type_id: u8,
+    tenant: Option<&str>,
 ) -> Vec<u32> {
     let mut current = vec![source_idx];
     let mut results = Vec::new();
@@ -92,11 +102,13 @@ fn expand_targets(
         let mut seen_next = std::collections::HashSet::new();
         for node_idx in current {
             for neighbor in neighbors_for_direction(engine, plan.direction, node_idx, rel_type_id) {
-                if !engine.node_store.is_active(neighbor) {
+                if !engine.node_store.is_active(neighbor)
+                    || !tenant_allows_node(engine, neighbor, tenant)
+                {
                     continue;
                 }
                 if depth >= plan.hops.min
-                    && target_matches(engine, neighbor, plan.target_table_oid)
+                    && target_matches(engine, neighbor, plan.target_table_oid, tenant)
                     && seen_results.insert(neighbor)
                 {
                     results.push(neighbor);
@@ -155,10 +167,23 @@ fn append_matching_neighbors(
     );
 }
 
-fn target_matches(engine: &Engine, target_idx: u32, table_oid: u32) -> bool {
+fn target_matches(engine: &Engine, target_idx: u32, table_oid: u32, tenant: Option<&str>) -> bool {
     target_idx < engine.node_store.node_count()
         && engine.node_store.is_active(target_idx)
         && engine.node_store.table_oid(target_idx) == table_oid
+        && tenant_allows_node(engine, target_idx, tenant)
+}
+
+fn tenant_allows_node(engine: &Engine, node_idx: u32, tenant: Option<&str>) -> bool {
+    let Some(tenant) = tenant else {
+        return true;
+    };
+    let table_oid = engine.node_store.table_oid(node_idx);
+    !engine.tenanted_table_oids.contains(&table_oid)
+        || engine
+            .tenant_membership
+            .get(tenant)
+            .is_some_and(|bitmap| bitmap.contains(node_idx))
 }
 
 fn project_row(engine: &Engine, source_idx: u32, target_idx: u32) -> GqlRow {

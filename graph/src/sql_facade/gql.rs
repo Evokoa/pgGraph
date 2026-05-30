@@ -28,10 +28,13 @@ fn gql(
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let tenant_scope = resolve_tenant_scope(None).unwrap_or_else(|err| err.report());
         let plan = build_plan(query).unwrap_or_else(|err| gql_error_to_graph_error(err).report());
         check_plan_acl(&plan);
         let matches = ENGINE
-            .with(|engine| crate::query::execute::execute(&engine.borrow(), &plan))
+            .with(|engine| {
+                crate::query::execute::execute(&engine.borrow(), &plan, tenant_scope.as_deref())
+            })
             .unwrap_or_else(|err| err.report());
         let hydrated = hydrate_gql_rows(
             &matches,
