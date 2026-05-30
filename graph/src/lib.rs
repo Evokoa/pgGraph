@@ -28,10 +28,12 @@ mod discover;
 mod edge_store;
 mod engine;
 mod filter_index;
+#[cfg(any(test, feature = "development", feature = "fuzzing"))]
 mod gql;
 mod node_store;
 mod path_finder;
 mod persistence;
+#[cfg(any(test, feature = "development"))]
 mod query;
 mod quote;
 mod resolution_index;

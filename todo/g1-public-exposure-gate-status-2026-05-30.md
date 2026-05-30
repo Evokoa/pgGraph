@@ -68,6 +68,29 @@ significant regressions. Representative rows:
 | `graph_construction/build/100k` | `21.465 ms` | `+3.5110%` | Performance has regressed |
 | `bfs_overlay_paths/sparse_overlay_d3` | `90.304 us` | `+3.0220%` | Performance has regressed |
 
+### Follow-up Mitigation Attempt - 2026-05-31
+
+The development-only GQL frontend and shared query planner modules were gated
+out of plain `pg17` builds so the prototype cannot perturb production or
+benchmark binaries before G1. Validation after the cfg change:
+
+- `cargo build --features pg17 --lib --no-default-features`
+  - passed with no GQL/query dead-code warnings
+- `cargo check --features "pg17 fuzzing" --lib --no-default-features`
+  - passed; GQL parser remains available to fuzz support without compiling the
+    shared query planner
+- `cargo test --features "pg17 development" query::`
+  - `28 passed; 0 failed; 303 filtered out`
+- `cargo pgrx test --features "pg17 development" gql`
+  - `18 passed; 0 failed; 421 filtered out`
+- Targeted benchmark rerun:
+  - `cargo bench --features pg17 --bench bfs_bench -- bfs_traverse/d1_supernode/10k --baseline pre_gql_mutable_overlay`
+  - result: `4.6040 us`, `+141.44%`, `Performance has regressed`
+
+The targeted rerun is worse than the earlier full run, which makes current-host
+measurement drift or load/thermal state likely. It still does **not** satisfy
+the G1 zero-regression gate.
+
 ## Next Action
 
 Investigate or re-baseline the engine-level benchmark regression before
