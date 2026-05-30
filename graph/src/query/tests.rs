@@ -4,10 +4,12 @@ use super::explain::explain;
 use super::lower::lower;
 use super::physical_plan::ReturnSlot;
 use super::semantics::bind;
+use super::value::{project_rows, HydratedRows, QueryParams};
 use crate::edge_store::{EdgeStore, RawEdge};
 use crate::engine::Engine;
 use crate::gql::errors::GqlErrorKind;
 use crate::gql::parse;
+use std::collections::HashMap;
 
 fn fake_catalog() -> FakeCatalog {
     FakeCatalog::new()
@@ -49,9 +51,6 @@ fn binder_rejects_out_of_slice_1b_shapes() {
     for query in [
         "MATCH (u:users)<-[:works_at]-(c:companies) RETURN u",
         "MATCH (u:users)-[:works_at*1..2]->(c:companies) RETURN u",
-        "MATCH (u:users {id: 'u1'})-[:works_at]->(c:companies) RETURN u",
-        "MATCH (u:users)-[:works_at]->(c:companies) WHERE u.id = 'u1' RETURN u",
-        "MATCH (u:users)-[:works_at]->(c:companies) RETURN u.name",
         "MATCH (u:users)-[:works_at]->(c:companies) RETURN count(u)",
         "MATCH (u:users)-[:works_at]->(c:companies) RETURN DISTINCT u",
     ] {
@@ -75,8 +74,14 @@ fn lowering_preserves_bound_tables_and_return_slots() {
     assert_eq!(
         physical.returns,
         vec![
-            ReturnSlot::Target { name: "c".into() },
-            ReturnSlot::Source { name: "u".into() }
+            ReturnSlot::Node {
+                side: super::logical_plan::BindingSide::Target,
+                name: "c".into()
+            },
+            ReturnSlot::Node {
+                side: super::logical_plan::BindingSide::Source,
+                name: "u".into()
+            }
         ]
     );
 }
@@ -90,13 +95,11 @@ fn executor_returns_one_hop_coordinate_rows() {
     let rows = execute(&engine, &physical).unwrap();
 
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].values[0].name, "u");
-    assert_eq!(rows[0].values[0].coordinate.table_oid, 10);
-    assert_eq!(rows[0].values[0].coordinate.node_id, "u1");
-    assert_eq!(rows[0].values[1].name, "c");
-    assert_eq!(rows[0].values[1].coordinate.table_oid, 20);
-    assert_eq!(rows[0].values[1].coordinate.node_id, "c1");
-    assert_eq!(rows[1].values[0].coordinate.node_id, "u2");
+    assert_eq!(rows[0].source.table_oid, 10);
+    assert_eq!(rows[0].source.node_id, "u1");
+    assert_eq!(rows[0].target.table_oid, 20);
+    assert_eq!(rows[0].target.node_id, "c1");
+    assert_eq!(rows[1].source.node_id, "u2");
 }
 
 #[test]
@@ -133,8 +136,121 @@ fn executor_filters_wrong_target_table_and_edge_type() {
     let rows = execute(&engine, &physical).unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0].coordinate.node_id, "u1");
-    assert_eq!(rows[0].values[1].coordinate.node_id, "c1");
+    assert_eq!(rows[0].source.node_id, "u1");
+    assert_eq!(rows[0].target.node_id, "c1");
+}
+
+#[test]
+fn binder_accepts_where_inline_props_and_property_returns() {
+    let plan = bind_query(
+        "MATCH (u:users {name: $name})-[:works_at]->(c:companies) \
+         WHERE c.name = 'Acme' RETURN u.name AS employee, c",
+    );
+
+    assert!(plan.predicate.is_some());
+    assert_eq!(plan.returns.len(), 2);
+}
+
+#[test]
+fn binder_rejects_unknown_and_reserved_properties() {
+    for query in [
+        "MATCH (u:users)-[:works_at]->(c:companies) RETURN u.missing",
+        "MATCH (u:users {_id: 'u1'})-[:works_at]->(c:companies) RETURN u",
+    ] {
+        let ast = parse(query).unwrap();
+        let err = bind(&ast, &fake_catalog()).unwrap_err();
+        assert!(matches!(err.kind, GqlErrorKind::Bind { .. }), "{query}");
+    }
+}
+
+#[test]
+fn binder_rejects_duplicate_return_names() {
+    let ast = parse(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN u.name AS x, c.name AS x",
+    )
+    .unwrap();
+
+    let err = bind(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
+}
+
+#[test]
+fn binder_rejects_deep_boolean_predicates() {
+    let mut query = "MATCH (u:users)-[:works_at]->(c:companies) WHERE ".to_string();
+    for _ in 0..513 {
+        query.push_str("u.id = 'u1' AND ");
+    }
+    query.push_str("u.id = 'u1' RETURN u");
+    let ast = parse(&query).unwrap();
+
+    let err = bind(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Syntax { .. }));
+}
+
+#[test]
+fn binder_rejects_excessive_inline_property_predicates() {
+    let mut query = "MATCH (u:users {".to_string();
+    for idx in 0..513 {
+        if idx > 0 {
+            query.push_str(", ");
+        }
+        query.push_str("id: 'u1'");
+    }
+    query.push_str("})-[:works_at]->(c:companies) RETURN u");
+    let ast = parse(&query).unwrap();
+
+    let err = bind(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Syntax { .. }));
+}
+
+#[test]
+fn binder_rejects_registered_reserved_property_keys() {
+    let catalog = FakeCatalog::new()
+        .with_label("users", 10, ["id", "_shadow"])
+        .with_label("companies", 20, ["id", "name"])
+        .with_edge("works_at", 10, 20);
+    let ast = parse("MATCH (u:users)-[:works_at]->(c:companies) RETURN u").unwrap();
+
+    let err = bind(&ast, &catalog).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
+}
+
+#[test]
+fn value_projection_filters_predicates_and_hydrates_nodes() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE u.name IN ['Ada', 'Grace'] RETURN u.name AS employee, c",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical).unwrap();
+    let hydrated = hydrated_fixture();
+
+    let projected = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["employee"], "Ada");
+    assert_eq!(projected[0]["c"]["name"], "Acme");
+    assert_eq!(projected[0]["c"]["_id"]["table"], "companies");
+    assert_eq!(projected[0]["c"]["_labels"][0], "companies");
+}
+
+#[test]
+fn value_projection_reports_missing_parameters() {
+    let logical = bind_query("MATCH (u:users {name: $name})-[:works_at]->(c:companies) RETURN u");
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical).unwrap();
+    let hydrated = hydrated_fixture();
+
+    let err = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap_err();
+
+    assert!(err.to_string().contains("missing GQL parameter"));
 }
 
 #[test]
@@ -146,6 +262,27 @@ fn explain_contains_stable_1b_plan_shape() {
         explain(&physical),
         "OneHopExpand(source=u:10, rel=works_at, target=c:20, return=[u, c])"
     );
+}
+
+fn hydrated_fixture() -> HydratedRows {
+    HashMap::from([
+        (
+            (10, "u1".to_string()),
+            serde_json::json!({"id": "u1", "name": "Ada"}),
+        ),
+        (
+            (10, "u2".to_string()),
+            serde_json::json!({"id": "u2", "name": "Linus"}),
+        ),
+        (
+            (20, "c1".to_string()),
+            serde_json::json!({"id": "c1", "name": "Acme"}),
+        ),
+        (
+            (20, "c2".to_string()),
+            serde_json::json!({"id": "c2", "name": "Bell"}),
+        ),
+    ])
 }
 
 fn engine_fixture() -> Engine {

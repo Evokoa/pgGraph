@@ -8,15 +8,26 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
     PhysicalPlan {
         source_var: plan.source.var,
         source_table_oid: plan.source.table_oid,
+        source_label: plan.source.label,
         rel_type: plan.relationship.rel_type,
         target_var: plan.target.var,
         target_table_oid: plan.target.table_oid,
+        target_label: plan.target.label,
+        predicate: plan.predicate,
         returns: plan
             .returns
             .into_iter()
             .map(|slot| match slot {
-                ReturnBinding::Source { name } => ReturnSlot::Source { name },
-                ReturnBinding::Target { name } => ReturnSlot::Target { name },
+                ReturnBinding::Node { side, name } => ReturnSlot::Node { side, name },
+                ReturnBinding::Property {
+                    side,
+                    property,
+                    name,
+                } => ReturnSlot::Property {
+                    side,
+                    property,
+                    name,
+                },
             })
             .collect(),
     }

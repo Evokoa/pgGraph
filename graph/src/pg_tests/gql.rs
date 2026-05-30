@@ -3,13 +3,14 @@ fn gql_single_directed_match_matches_traverse_fixture() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();
 
-    let (gql_count, source_id, target_id, traverse_count) = Spi::connect(|client| {
+    let (gql_count, source_id, target_id, source_table, traverse_count) = Spi::connect(|client| {
         let gql = client
             .select(
                 "SELECT
                      count(*)::bigint,
-                     min(row #>> '{0,node_id}'),
-                     min(row #>> '{1,node_id}')
+                     min(row #>> '{u,_id,id}'),
+                     min(row #>> '{v,_id,id}'),
+                     min(row #>> '{u,_id,table}')
                  FROM graph.gql(
                      'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest) RETURN u, v'
                  )",
@@ -50,6 +51,10 @@ fn gql_single_directed_match_matches_traverse_fixture() {
                 .get::<String>(3)
                 .expect("target id read failed")
                 .unwrap_or_default(),
+            gql_row
+                .get::<String>(4)
+                .expect("source table read failed")
+                .unwrap_or_default(),
             traverse_count,
         ))
     })
@@ -58,6 +63,7 @@ fn gql_single_directed_match_matches_traverse_fixture() {
     assert_eq!(gql_count, traverse_count);
     assert_eq!(source_id, "u1");
     assert_eq!(target_id, "u2");
+    assert_eq!(source_table, "graph_test_users_pgtest");
 }
 
 #[pg_test]

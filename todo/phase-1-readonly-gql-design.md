@@ -417,6 +417,22 @@ Implementation checkpoint:
 - Tests: generated matrix over predicate × return-shape × hydration × tenant;
   null-vs-missing; reserved-key rejection; parameter missing/type-mismatch.
 
+Implementation checkpoint:
+- Added `query/value.rs` for pgrx-free hydrated predicate evaluation and JSONB
+  row projection. SQL hydration remains isolated in `sql_facade/gql.rs`.
+- Bound `WHERE`, inline node property maps, whole-node returns, property
+  returns, literal lists, and JSONB parameters. Relationship property maps,
+  functions, ordering, limits, and variable-length remain later-slice
+  rejections.
+- `graph.gql(query, params := ..., hydrate := ...)` now returns canonical JSON
+  objects rather than the Phase 1B coordinate array. Node returns always include
+  `_id` and `_labels`; `hydrate=false` suppresses source-row fields but still
+  hydrates internally when predicates or property returns require it.
+- Current coverage includes binder property negatives, predicate filtering,
+  hydrated node projection, missing-parameter behavior through the value layer,
+  and the development pgrx ACL/traverse-parity test path. The broader generated
+  matrix and tenant-specific rows remain before the public exposure gate.
+
 ### 1D — Ordering, limits, variable-length, undirected
 - `ORDER BY`/`SKIP`/`LIMIT` with hard row caps; undirected union+dedup; bounded
   var-length BFS.

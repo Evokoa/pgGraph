@@ -128,10 +128,12 @@ fn load_labels(tables: &[RegisteredTable]) -> GraphResult<HashMap<String, LabelE
     for table in tables {
         let table_oid = table_oid_from_name(&table.table_name)?;
         if let Some(label) = gql_label_from_regclass(&table.table_name) {
+            let mut properties = table.columns.iter().cloned().collect::<BTreeSet<_>>();
+            properties.extend(table.id_columns.columns().iter().cloned());
             let info = NodeLabelInfo {
                 label: label.clone(),
                 table_oid,
-                properties: table.columns.iter().cloned().collect(),
+                properties,
             };
             labels
                 .entry(label)
@@ -163,8 +165,10 @@ fn load_rels(edges: &[RegisteredEdge]) -> GraphResult<Vec<RelTypeInfo>> {
 
 fn gql_label_from_regclass(regclass: &str) -> Option<String> {
     let label = regclass.rsplit('.').next()?;
+    let first = label.bytes().next()?;
     if label.is_empty()
         || label.starts_with('"')
+        || !(first == b'_' || first.is_ascii_alphabetic())
         || !label
             .bytes()
             .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
@@ -270,5 +274,6 @@ mod tests {
             gql_label_from_regclass("tenant-a.users").as_deref(),
             Some("users")
         );
+        assert_eq!(gql_label_from_regclass("123users"), None);
     }
 }

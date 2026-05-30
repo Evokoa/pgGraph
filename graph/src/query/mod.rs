@@ -11,6 +11,7 @@ pub(crate) mod logical_plan;
 pub(crate) mod lower;
 pub(crate) mod physical_plan;
 pub(crate) mod semantics;
+pub(crate) mod value;
 
 #[cfg(test)]
 mod tests;

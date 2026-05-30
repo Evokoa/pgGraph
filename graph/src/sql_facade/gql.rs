@@ -19,18 +19,30 @@ fn gql_explain(query: &str) -> String {
     clippy::type_complexity,
     reason = "pgrx SQL ABI exposes tuple row columns"
 )]
-fn gql(query: &str) -> TableIterator<'static, (name!(row, pgrx::JsonB),)> {
+fn gql(
+    query: &str,
+    params: default!(Option<pgrx::JsonB>, "NULL"),
+    hydrate: default!(bool, "true"),
+) -> TableIterator<'static, (name!(row, pgrx::JsonB),)> {
     with_panic_boundary("gql()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let plan = build_plan(query).unwrap_or_else(|err| gql_error_to_graph_error(err).report());
         check_plan_acl(&plan);
-        let rows = ENGINE
+        let matches = ENGINE
             .with(|engine| crate::query::execute::execute(&engine.borrow(), &plan))
+            .unwrap_or_else(|err| err.report());
+        let hydrated = hydrate_gql_rows(
+            &matches,
+            crate::query::value::requires_hydration(&plan, hydrate),
+        )
+        .unwrap_or_else(|err| err.report());
+        let params = gql_params(params).unwrap_or_else(|err| err.report());
+        let rows = crate::query::value::project_rows(matches, &plan, &hydrated, &params, hydrate)
             .unwrap_or_else(|err| err.report())
             .into_iter()
-            .map(|row| (pgrx::JsonB(gql_row_json(row)),))
+            .map(|row| (pgrx::JsonB(row),))
             .collect();
         TableIterator::new(rows)
     })
@@ -52,23 +64,43 @@ fn check_plan_acl(plan: &crate::query::physical_plan::PhysicalPlan) {
     }
 }
 
-fn gql_row_json(row: crate::query::execute::GqlRow) -> serde_json::Value {
-    serde_json::Value::Array(
-        row.values
-            .into_iter()
-            .map(|value| {
-                serde_json::json!({
-                    "name": value.name,
-                    "table_oid": value.coordinate.table_oid,
-                    "node_id": value.coordinate.node_id,
-                })
-            })
-            .collect(),
-    )
-}
-
 fn gql_error_to_graph_error(err: crate::gql::errors::GqlError) -> safety::GraphError {
     safety::GraphError::InvalidFilter {
         reason: err.to_string(),
     }
+}
+
+fn gql_params(
+    params: Option<pgrx::JsonB>,
+) -> safety::GraphResult<crate::query::value::QueryParams> {
+    match params.map(|json| json.0) {
+        Some(serde_json::Value::Object(map)) => Ok(map),
+        Some(_) => Err(safety::GraphError::InvalidFilter {
+            reason: "GQL params must be a JSON object".to_string(),
+        }),
+        None => Ok(serde_json::Map::new()),
+    }
+}
+
+fn hydrate_gql_rows(
+    rows: &[crate::query::execute::GqlRow],
+    needed: bool,
+) -> safety::GraphResult<crate::query::value::HydratedRows> {
+    let mut hydrated = crate::query::value::HydratedRows::new();
+    if !needed {
+        return Ok(hydrated);
+    }
+    for row in rows {
+        for coordinate in [&row.source, &row.target] {
+            let key = (coordinate.table_oid, coordinate.node_id.clone());
+            if hydrated.contains_key(&key) {
+                continue;
+            }
+            let node = hydrate_node(coordinate.table_oid, &coordinate.node_id)?
+                .map(|json| json.0)
+                .unwrap_or(serde_json::Value::Null);
+            hydrated.insert(key, node);
+        }
+    }
+    Ok(hydrated)
 }

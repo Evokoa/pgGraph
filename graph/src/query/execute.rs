@@ -3,7 +3,7 @@
 use crate::engine::Engine;
 use crate::safety::{GraphError, GraphResult};
 
-use super::physical_plan::{PhysicalPlan, ReturnSlot};
+use super::physical_plan::PhysicalPlan;
 
 /// Coordinate-only node value returned by Phase 1B.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,20 +14,13 @@ pub(crate) struct GqlNodeCoordinate {
     pub(crate) node_id: String,
 }
 
-/// Named value in a result row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GqlValue {
-    /// Return column name.
-    pub(crate) name: String,
-    /// Coordinate-only node value.
-    pub(crate) coordinate: GqlNodeCoordinate,
-}
-
 /// One GQL result row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GqlRow {
-    /// Values in requested `RETURN` order.
-    pub(crate) values: Vec<GqlValue>,
+    /// Source coordinate.
+    pub(crate) source: GqlNodeCoordinate,
+    /// Target coordinate.
+    pub(crate) target: GqlNodeCoordinate,
 }
 
 /// Execute a physical one-hop plan.
@@ -49,7 +42,7 @@ pub(crate) fn execute(engine: &Engine, plan: &PhysicalPlan) -> GraphResult<Vec<G
         let (targets, type_ids) = engine.edge_store.neighbors(source_idx);
         for (&target_idx, &type_id) in targets.iter().zip(type_ids.iter()) {
             if type_id == rel_type_id && target_matches(engine, target_idx, plan.target_table_oid) {
-                rows.push(project_row(engine, plan, source_idx, target_idx));
+                rows.push(project_row(engine, source_idx, target_idx));
             }
         }
     }
@@ -82,22 +75,11 @@ fn target_matches(engine: &Engine, target_idx: u32, table_oid: u32) -> bool {
         && engine.node_store.table_oid(target_idx) == table_oid
 }
 
-fn project_row(engine: &Engine, plan: &PhysicalPlan, source_idx: u32, target_idx: u32) -> GqlRow {
-    let values = plan
-        .returns
-        .iter()
-        .map(|slot| match slot {
-            ReturnSlot::Source { name } => GqlValue {
-                name: name.clone(),
-                coordinate: coordinate(engine, source_idx),
-            },
-            ReturnSlot::Target { name } => GqlValue {
-                name: name.clone(),
-                coordinate: coordinate(engine, target_idx),
-            },
-        })
-        .collect();
-    GqlRow { values }
+fn project_row(engine: &Engine, source_idx: u32, target_idx: u32) -> GqlRow {
+    GqlRow {
+        source: coordinate(engine, source_idx),
+        target: coordinate(engine, target_idx),
+    }
 }
 
 fn coordinate(engine: &Engine, node_idx: u32) -> GqlNodeCoordinate {
