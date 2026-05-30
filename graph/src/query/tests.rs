@@ -402,6 +402,26 @@ fn value_projection_reports_non_orderable_predicate_types() {
 }
 
 #[test]
+fn value_projection_honors_hydrate_false_shape() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN u, c.name AS company_name",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let hydrated = hydrated_fixture();
+
+    let projected = project_rows(rows, &physical, &hydrated, &QueryParams::new(), false).unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["u"]["_id"]["id"], "u1");
+    assert_eq!(projected[0]["u"]["_labels"][0], "users");
+    assert!(projected[0]["u"].get("name").is_none());
+    assert_eq!(projected[0]["company_name"], "Acme");
+}
+
+#[test]
 fn explain_contains_stable_1b_plan_shape() {
     let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
     let physical = lower(logical);

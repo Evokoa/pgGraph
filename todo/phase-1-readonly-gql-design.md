@@ -433,7 +433,8 @@ Implementation checkpoint:
   hydrates internally when predicates or property returns require it.
 - Current coverage includes binder property negatives, predicate filtering,
   explicit null predicates, non-orderable type mismatch errors, hydrated node
-  projection, missing-parameter behavior through the value layer,
+  projection, `hydrate=false` coordinate-only node shape plus property returns,
+  missing-parameter behavior through the value layer,
   tenant-scoped topology filtering through the session tenant setting, and the
   development pgrx ACL/traverse-parity test path. The broader generated matrix
   remains before the public exposure gate.
