@@ -1127,6 +1127,228 @@ fn gql_create_node_inserts_mapped_row_and_records_delta() {
 }
 
 #[pg_test]
+fn gql_merge_node_inserts_then_updates_mapped_row() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (inserted_name, inserted_age, matched_name, matched_age, source_count, tx_added_nodes) =
+        Spi::connect(|client| {
+            let inserted = client
+                .select(
+                    "SELECT row #>> '{name}', (row #>> '{age}')::int
+                     FROM graph.gql(
+                        'MERGE (u:graph_test_users_pgtest {id: ''u3'', name: $name})
+                         ON CREATE SET u.age = 31
+                         ON MATCH SET u.name = ''Updated''
+                         RETURN u.name AS name, u.age AS age',
+                        params := '{\"name\":\"Cara\"}'::jsonb
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("gql merge insert failed")
+                .first();
+            let matched = client
+                .select(
+                    "SELECT row #>> '{name}', (row #>> '{age}')::int
+                     FROM graph.gql(
+                        'MERGE (u:graph_test_users_pgtest {id: ''u3'', name: ''Ignored''})
+                         ON CREATE SET u.age = 99
+                         ON MATCH SET u.name = $name
+                         RETURN u.name AS name, u.age AS age',
+                        params := '{\"name\":\"Caroline\"}'::jsonb
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("gql merge match failed")
+                .first();
+            let source_count = client
+                .select(
+                    "SELECT count(*)::bigint
+                     FROM public.graph_test_users_pgtest
+                     WHERE id = 'u3' AND name = 'Caroline' AND age = 31",
+                    None,
+                    &[],
+                )
+                .expect("source merge count failed")
+                .first()
+                .get::<i64>(1)
+                .expect("source merge count read failed")
+                .unwrap_or_default();
+            let tx_added_nodes = client
+                .select("SELECT tx_delta_added_nodes FROM graph.status()", None, &[])
+                .expect("status query failed")
+                .first()
+                .get::<i32>(1)
+                .expect("tx added node count read failed")
+                .unwrap_or_default();
+            Ok::<_, pgrx::spi::Error>((
+                inserted
+                    .get::<String>(1)
+                    .expect("inserted merge name read failed")
+                    .unwrap_or_default(),
+                inserted
+                    .get::<i32>(2)
+                    .expect("inserted merge age read failed")
+                    .unwrap_or_default(),
+                matched
+                    .get::<String>(1)
+                    .expect("matched merge name read failed")
+                    .unwrap_or_default(),
+                matched
+                    .get::<i32>(2)
+                    .expect("matched merge age read failed")
+                    .unwrap_or_default(),
+                source_count,
+                tx_added_nodes,
+            ))
+        })
+        .expect("merge verification failed");
+
+    assert_eq!(inserted_name, "Cara");
+    assert_eq!(inserted_age, 31);
+    assert_eq!(matched_name, "Caroline");
+    assert_eq!(matched_age, 31);
+    assert_eq!(source_count, 1);
+    assert_eq!(tx_added_nodes, 1);
+}
+
+#[pg_test]
+fn gql_merge_node_requires_identity_and_mutable_overlay() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let readonly_sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.gql(
+            'MERGE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara''}) RETURN u'
+         )",
+    );
+
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+    let missing_identity_sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.gql(
+            'MERGE (u:graph_test_users_pgtest {name: ''No Id''}) RETURN u'
+         )",
+    );
+
+    assert_eq!(readonly_sqlstate.as_deref(), Some("PG018"));
+    assert_eq!(missing_identity_sqlstate.as_deref(), Some("PG017"));
+}
+
+#[pg_test]
+fn gql_merge_node_does_not_evaluate_create_branch_on_match() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (matched_name, matched_age, source_count) = Spi::connect(|client| {
+        let matched = client
+            .select(
+                "SELECT row #>> '{name}', (row #>> '{age}')::int
+                 FROM graph.gql(
+                    'MERGE (u:graph_test_users_pgtest {id: ''u1''})
+                     ON CREATE SET u.age = $create_age
+                     ON MATCH SET u.name = $match_name
+                     RETURN u.name AS name, u.age AS age',
+                    params := '{\"match_name\":\"Alice Matched\"}'::jsonb
+                 )",
+                None,
+                &[],
+            )
+            .expect("gql merge match with missing create param failed")
+            .first();
+        let source_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM public.graph_test_users_pgtest
+                 WHERE id = 'u1' AND name = 'Alice Matched'",
+                None,
+                &[],
+            )
+            .expect("source merge branch count failed")
+            .first()
+            .get::<i64>(1)
+            .expect("source merge branch count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((
+            matched
+                .get::<String>(1)
+                .expect("matched merge branch name read failed")
+                .unwrap_or_default(),
+            matched
+                .get::<i32>(2)
+                .expect("matched merge branch age read failed")
+                .unwrap_or_default(),
+            source_count,
+        ))
+    })
+    .expect("merge branch verification failed");
+
+    assert_eq!(matched_name, "Alice Matched");
+    assert_eq!(matched_age, 37);
+    assert_eq!(source_count, 1);
+}
+
+#[pg_test]
+fn gql_merge_node_delta_limit_aborts_statement_before_source_insert() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.max_tx_delta_nodes = 0").expect("tighten node delta limit failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.gql(
+            'MERGE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u'
+         )",
+    );
+    let source_count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_test_users_pgtest WHERE id = 'u3'",
+    )
+    .expect("source count failed")
+    .unwrap_or_default();
+    let tx_added_nodes = Spi::get_one::<i32>("SELECT tx_delta_added_nodes FROM graph.status()")
+        .expect("status tx node count failed")
+        .unwrap_or_default();
+
+    Spi::run("RESET graph.max_tx_delta_nodes").expect("reset node delta limit failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("PG019"));
+    assert_eq!(source_count, 0);
+    assert_eq!(tx_added_nodes, 0);
+}
+
+#[pg_test]
 fn gql_create_node_delta_limit_aborts_statement_before_source_insert() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");

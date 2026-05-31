@@ -3,9 +3,9 @@
 use super::ast::{
     AggregateArg, AggregateFunc, CmpOp, CreateClause, CreateQuery, DeleteClause, DeleteQuery,
     DetachDeleteClause, DetachDeleteQuery, Direction, Expr, Ident, Literal, LiteralValue,
-    MatchClause, NodePat, Operand, Pattern, PropertyRef, Query, RelPat, RemoveClause, RemoveQuery,
-    RemoveTarget, ReturnClause, ReturnExpr, ReturnItem, SetClause, SetQuery, SortItem, SortKey,
-    Statement, VarLen, WithClause,
+    MatchClause, MergeClause, MergeQuery, NodePat, Operand, Pattern, PropertyRef, Query, RelPat,
+    RemoveClause, RemoveQuery, RemoveTarget, ReturnClause, ReturnExpr, ReturnItem, SetClause,
+    SetQuery, SortItem, SortKey, Statement, VarLen, WithClause,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
@@ -49,6 +49,7 @@ impl Parser {
     fn parse_statement(&mut self) -> Result<Statement, GqlError> {
         match self.peek() {
             TokKind::Create => self.parse_create_query().map(Statement::Create),
+            TokKind::Merge => self.parse_merge_query().map(Statement::Merge),
             TokKind::Match | TokKind::Optional if self.statement_contains_set_before_return() => {
                 self.parse_set_query().map(Statement::Set)
             }
@@ -158,6 +159,48 @@ impl Parser {
         })
     }
 
+    fn parse_merge_query(&mut self) -> Result<MergeQuery, GqlError> {
+        let start = self.current().span.start as usize;
+        let merge = self.parse_merge_clause()?;
+        let mut on_create = None;
+        let mut on_match = None;
+        while self.consume(TokKind::On).is_some() {
+            match self.peek() {
+                TokKind::Create if on_create.is_none() => {
+                    self.advance();
+                    on_create = Some(self.parse_set_clause()?);
+                }
+                TokKind::Match if on_match.is_none() => {
+                    self.advance();
+                    on_match = Some(self.parse_set_clause()?);
+                }
+                TokKind::Create | TokKind::Match => {
+                    return Err(GqlError::syntax(
+                        self.current().span,
+                        "duplicate MERGE branch",
+                    ));
+                }
+                _ => {
+                    return Err(GqlError::syntax(
+                        self.current().span,
+                        "expected CREATE or MATCH after ON",
+                    ));
+                }
+            }
+        }
+        let return_ = self.parse_return_clause()?;
+        self.reject_known_later_clauses()?;
+        let end = self.expect(TokKind::Eof, "expected end of query")?.span.end as usize;
+
+        Ok(MergeQuery {
+            merge,
+            on_create,
+            on_match,
+            return_,
+            span: Span::new(start, end),
+        })
+    }
+
     fn parse_set_query(&mut self) -> Result<SetQuery, GqlError> {
         let start = self.current().span.start as usize;
         let match_ = self.parse_match_clause()?;
@@ -253,6 +296,18 @@ impl Parser {
             .start as usize;
         let node = self.parse_node_pat()?;
         Ok(CreateClause {
+            span: Span::new(start, node.span.end as usize),
+            node,
+        })
+    }
+
+    fn parse_merge_clause(&mut self) -> Result<MergeClause, GqlError> {
+        let start = self
+            .expect(TokKind::Merge, "expected MERGE clause")?
+            .span
+            .start as usize;
+        let node = self.parse_node_pat()?;
+        Ok(MergeClause {
             span: Span::new(start, node.span.end as usize),
             node,
         })

@@ -268,6 +268,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_merge_node_statement_with_branches() {
+        let parsed = super::parse_statement(
+            "MERGE (u:users {id: $id, name: $name}) ON CREATE SET u.age = 1 ON MATCH SET u.name = $name RETURN u.name",
+        )
+        .expect("statement should parse");
+        let Statement::Merge(merge) = parsed else {
+            panic!("statement should be a merge query");
+        };
+
+        assert_eq!(merge.merge.node.var_text(), Some("u"));
+        assert_eq!(merge.merge.node.label_text(), Some("users"));
+        assert_eq!(merge.merge.node.props.len(), 2);
+        assert_eq!(
+            merge
+                .on_create
+                .as_ref()
+                .map(|set| set.target.property.text.as_str()),
+            Some("age")
+        );
+        assert_eq!(
+            merge
+                .on_match
+                .as_ref()
+                .map(|set| set.target.property.text.as_str()),
+            Some("name")
+        );
+        assert_eq!(merge.return_.items.len(), 1);
+    }
+
+    #[test]
     fn rejects_unbounded_variable_length_relationship() {
         let err = parse("MATCH (a)-[:knows*]-(b) RETURN a").expect_err("query should be rejected");
 

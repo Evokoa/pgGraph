@@ -10,9 +10,9 @@ use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundIncidentEdge,
     BoundMappedEdge, BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue,
-    HopBounds, LogicalCreateNode, LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalNodeScan,
-    LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement, PathFunc, Predicate,
-    ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
+    HopBounds, LogicalCreateNode, LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalMergeNode,
+    LogicalNodeScan, LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement,
+    PathFunc, Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -162,6 +162,9 @@ pub(crate) fn bind_statement(
         crate::gql::ast::Statement::DetachDelete(query) => {
             bind_detach_delete_node(query, catalog).map(LogicalStatement::DetachDeleteNode)
         }
+        crate::gql::ast::Statement::Merge(query) => {
+            bind_merge_node(query, catalog).map(LogicalStatement::MergeNode)
+        }
     }
 }
 
@@ -188,6 +191,97 @@ fn bind_create_node(
         node,
         properties,
         returns,
+    })
+}
+
+fn bind_merge_node(
+    query: &crate::gql::ast::MergeQuery,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalMergeNode, GqlError> {
+    if query.return_.distinct {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN DISTINCT over MERGE is implemented in a later phase",
+        ));
+    }
+    let node = bind_node(&query.merge.node, catalog)?;
+    if query.merge.node.props.is_empty() {
+        return Err(GqlError::unsupported(
+            query.merge.node.span,
+            "MERGE requires a property map for mapped node identity",
+        ));
+    }
+    let properties = bind_create_properties(&query.merge.node, &node)?;
+    let writable_properties =
+        writable_properties_for_label(&node.label, catalog, query.merge.node.span)?;
+    let on_create = query
+        .on_create
+        .as_ref()
+        .map(|set| bind_merge_set_property(set, &node, &writable_properties, "ON CREATE"))
+        .transpose()?;
+    let on_match = query
+        .on_match
+        .as_ref()
+        .map(|set| bind_merge_set_property(set, &node, &writable_properties, "ON MATCH"))
+        .transpose()?;
+    if let Some(on_create) = &on_create {
+        if properties
+            .iter()
+            .any(|property| property.property == on_create.property)
+        {
+            return Err(GqlError::bind(
+                query
+                    .on_create
+                    .as_ref()
+                    .map_or(query.merge.span, |set| set.target.property.span),
+                format!("duplicate MERGE property `{}`", on_create.property),
+            ));
+        }
+    }
+    let returns = bind_write_returns(&query.return_.items, &node, false)?;
+    Ok(LogicalMergeNode {
+        node,
+        properties,
+        on_create,
+        on_match,
+        returns,
+    })
+}
+
+fn bind_merge_set_property(
+    set: &crate::gql::ast::SetClause,
+    node: &BoundNode,
+    writable_properties: &std::collections::BTreeSet<String>,
+    branch: &str,
+) -> Result<CreateProperty, GqlError> {
+    if set.target.var.text != node.var {
+        return Err(GqlError::bind(
+            set.target.var.span,
+            format!("unknown MERGE {branch} variable `{}`", set.target.var.text),
+        ));
+    }
+    let property = set.target.property.text.clone();
+    if property.contains('.') {
+        return Err(GqlError::unsupported(
+            set.target.property.span,
+            "MERGE branch writes to jsonb property paths require a later write phase",
+        ));
+    }
+    if property.starts_with('_') {
+        return Err(GqlError::bind(
+            set.target.property.span,
+            format!("reserved GQL property key `{property}`"),
+        ));
+    }
+    if !writable_properties.contains(&property) {
+        return Err(GqlError::bind(
+            set.target.property.span,
+            format!("property `{property}` is not a writable mapped column"),
+        ));
+    }
+    Ok(CreateProperty {
+        property,
+        value: bind_create_value(&set.value)?,
     })
 }
 
@@ -459,6 +553,16 @@ fn writable_properties_for_match_start(
             info.map(|info| info.writable_properties)
                 .unwrap_or_default()
         })
+}
+
+fn writable_properties_for_label(
+    label: &str,
+    catalog: &impl CatalogSnapshot,
+    span: Span,
+) -> Result<std::collections::BTreeSet<String>, GqlError> {
+    catalog
+        .resolve_node_label(label, span)
+        .map(|info| info.writable_properties)
 }
 
 fn bind_delete_edge(

@@ -78,6 +78,14 @@ GQL/SQL-PGQ primary.
   PostgreSQL-first rewrite policy for them.
 - **4C — `MERGE`.** Locking. Tests: two-session race on same key, ON CREATE / ON
   MATCH branches, constraint interaction.
+
+  Status, 2026-05-31: closed for single-node mapped node merge. Execution uses
+  the registered primary-key columns as the identity, probes existing rows with
+  `FOR UPDATE`, inserts through `ON CONFLICT DO NOTHING`, retries the lock path
+  after insert races, and evaluates `ON CREATE`/`ON MATCH` branch values only on
+  the branch taken. Tests cover parser/binder shape, insert/match branches,
+  missing identity, readonly projection rejection, branch-lazy parameters,
+  delta-limit rollback, and a heavy two-session same-key race.
 - **4D — openCypher frontend (optional).** `cypher/` modules + `graph.cypher()`.
   Tests: parser totality fuzzing, rejection corpus for unmappable features,
   SQLSTATE stability across both function surfaces, shared-IR equivalence with

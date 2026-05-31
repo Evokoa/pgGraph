@@ -27,6 +27,8 @@ pub(crate) enum PhysicalStatement {
     DeleteEdge(PhysicalDeleteEdge),
     /// PostgreSQL-backed node detach-delete.
     DetachDeleteNode(PhysicalDetachDeleteNode),
+    /// PostgreSQL-backed node merge/upsert.
+    MergeNode(PhysicalMergeNode),
 }
 
 /// Single-hop physical plan for Phase 1B.
@@ -81,6 +83,25 @@ pub(crate) struct PhysicalCreateNode {
     pub(crate) label: String,
     /// Property values to insert into PostgreSQL.
     pub(crate) properties: Vec<CreatePropertySlot>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnSlot>,
+}
+
+/// Physical node merge/upsert plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalMergeNode {
+    /// Merged node variable.
+    pub(crate) var: String,
+    /// Source table OID.
+    pub(crate) table_oid: u32,
+    /// Source label.
+    pub(crate) label: String,
+    /// Property values used for the insert branch and identity lookup.
+    pub(crate) properties: Vec<CreatePropertySlot>,
+    /// Optional property assignment applied only to inserted rows.
+    pub(crate) on_create: Option<CreatePropertySlot>,
+    /// Optional property assignment applied only to matched rows.
+    pub(crate) on_match: Option<CreatePropertySlot>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnSlot>,
 }
@@ -350,6 +371,13 @@ impl PhysicalPlan {
 
 impl PhysicalCreateNode {
     /// Table OID whose rows will be inserted.
+    pub(crate) fn required_table_oid(&self) -> u32 {
+        self.table_oid
+    }
+}
+
+impl PhysicalMergeNode {
+    /// Table OID whose row will be inserted or locked/updated.
     pub(crate) fn required_table_oid(&self) -> u32 {
         self.table_oid
     }

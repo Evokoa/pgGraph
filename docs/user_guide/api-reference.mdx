@@ -535,8 +535,15 @@ incident edge-row relationships first, then deletes the PostgreSQL node row.
 The current backend records transaction-local edge and node tombstones so later
 reads in the same transaction do not see the deleted topology. Incident
 relationships must be backed by registered edge row tables. Relationship
-creation, `MERGE`, and multi-row writes are not part of this release's GQL
-subset.
+creation and multi-row writes are not part of this release's GQL subset.
+
+`MERGE (n:label {properties}) [ON CREATE SET ...] [ON MATCH SET ...] RETURN ...`
+is supported for a single node whose label maps to a registered source table. It
+requires a `mutable_overlay` projection and uses the registered primary key
+columns as the match identity. Existing rows are locked with `FOR UPDATE`; new
+rows are inserted with PostgreSQL `ON CONFLICT DO NOTHING` on that identity.
+`ON CREATE` expressions are evaluated only for inserted rows, and `ON MATCH`
+expressions are evaluated only for matched rows.
 
 ### `graph.gql_explain()`
 

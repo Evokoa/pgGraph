@@ -555,7 +555,7 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 | `DELETE` mapped relationships | phase_2 | required | required | required | required | No cascade in first write milestone. |
 | `REMOVE` property/label | phase_4 | supported | supported | supported | supported | Single-node mapped property removal is supported for scalar columns and registered dotted JSONB paths; label removal is an explicit unsupported-shape rejection. |
 | `DETACH DELETE` | phase_4 | supported | supported | supported | supported | Single-node mapped detach delete is supported when incident relationships are backed by registered edge row tables. |
-| `MERGE` | phase_4 | required | required | required | required | Requires read-before-write locking semantics. |
+| `MERGE` | phase_4 | supported | supported | supported | supported | Single-node mapped merge is supported by registered primary-key identity with lazy `ON CREATE`/`ON MATCH` branches and read-before-write locking. |
 | GQL DDL/schema creation | out_of_scope | optional | required | reject | required | Do not create arbitrary tables from GQL. |
 
 ## Pre-Code Baselines

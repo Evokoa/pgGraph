@@ -2,13 +2,13 @@
 
 use super::logical_plan::{
     CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalDeleteEdge,
-    LogicalDetachDeleteNode, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty,
+    LogicalDetachDeleteNode, LogicalMergeNode, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty,
     LogicalSetProperty, LogicalStatement, ReturnBinding,
 };
 use super::physical_plan::{
     CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalDeleteEdge,
-    PhysicalDetachDeleteNode, PhysicalIncidentEdge, PhysicalNodeScan, PhysicalPlan,
-    PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement, ReturnSlot,
+    PhysicalDetachDeleteNode, PhysicalIncidentEdge, PhysicalMergeNode, PhysicalNodeScan,
+    PhysicalPlan, PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement, ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
@@ -31,6 +31,7 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
         LogicalStatement::DetachDeleteNode(plan) => {
             PhysicalStatement::DetachDeleteNode(lower_detach_delete_node(plan))
         }
+        LogicalStatement::MergeNode(plan) => PhysicalStatement::MergeNode(lower_merge_node(plan)),
     }
 }
 
@@ -81,26 +82,25 @@ fn lower_create_node(plan: LogicalCreateNode) -> PhysicalCreateNode {
         properties: plan
             .properties
             .into_iter()
-            .map(|property| CreatePropertySlot {
-                property: property.property,
-                value: match property.value {
-                    CreateValue::Literal(value) => {
-                        CreateValueSlot::Literal(literal_value_json(value))
-                    }
-                    CreateValue::Param(name) => CreateValueSlot::Param(name),
-                },
-            })
+            .map(lower_create_property)
             .collect(),
-        returns: plan
-            .returns
+        returns: lower_create_returns(plan.returns),
+    }
+}
+
+fn lower_merge_node(plan: LogicalMergeNode) -> PhysicalMergeNode {
+    PhysicalMergeNode {
+        var: plan.node.var,
+        table_oid: plan.node.table_oid,
+        label: plan.node.label,
+        properties: plan
+            .properties
             .into_iter()
-            .map(|slot| match slot {
-                CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
-                CreateReturnBinding::Property { property, name } => {
-                    CreateReturnSlot::Property { property, name }
-                }
-            })
+            .map(lower_create_property)
             .collect(),
+        on_create: plan.on_create.map(lower_create_property),
+        on_match: plan.on_match.map(lower_create_property),
+        returns: lower_create_returns(plan.returns),
     }
 }
 
@@ -115,16 +115,7 @@ fn lower_set_property(plan: LogicalSetProperty) -> PhysicalSetProperty {
             CreateValue::Literal(value) => CreateValueSlot::Literal(literal_value_json(value)),
             CreateValue::Param(name) => CreateValueSlot::Param(name),
         },
-        returns: plan
-            .returns
-            .into_iter()
-            .map(|binding| match binding {
-                CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
-                CreateReturnBinding::Property { property, name } => {
-                    CreateReturnSlot::Property { property, name }
-                }
-            })
-            .collect(),
+        returns: lower_create_returns(plan.returns),
     }
 }
 
@@ -135,16 +126,7 @@ fn lower_remove_property(plan: LogicalRemoveProperty) -> PhysicalRemoveProperty 
         label: plan.node.label,
         predicate: plan.predicate,
         property: plan.property,
-        returns: plan
-            .returns
-            .into_iter()
-            .map(|binding| match binding {
-                CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
-                CreateReturnBinding::Property { property, name } => {
-                    CreateReturnSlot::Property { property, name }
-                }
-            })
-            .collect(),
+        returns: lower_create_returns(plan.returns),
     }
 }
 
@@ -189,17 +171,30 @@ fn lower_detach_delete_node(plan: LogicalDetachDeleteNode) -> PhysicalDetachDele
                 bidirectional: incident.edge.bidirectional,
             })
             .collect(),
-        returns: plan
-            .returns
-            .into_iter()
-            .map(|binding| match binding {
-                CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
-                CreateReturnBinding::Property { property, name } => {
-                    CreateReturnSlot::Property { property, name }
-                }
-            })
-            .collect(),
+        returns: lower_create_returns(plan.returns),
     }
+}
+
+fn lower_create_property(property: super::logical_plan::CreateProperty) -> CreatePropertySlot {
+    CreatePropertySlot {
+        property: property.property,
+        value: match property.value {
+            CreateValue::Literal(value) => CreateValueSlot::Literal(literal_value_json(value)),
+            CreateValue::Param(name) => CreateValueSlot::Param(name),
+        },
+    }
+}
+
+fn lower_create_returns(returns: Vec<CreateReturnBinding>) -> Vec<CreateReturnSlot> {
+    returns
+        .into_iter()
+        .map(|binding| match binding {
+            CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
+            CreateReturnBinding::Property { property, name } => {
+                CreateReturnSlot::Property { property, name }
+            }
+        })
+        .collect()
 }
 
 fn lower_return_stages(stages: Vec<Vec<ReturnBinding>>) -> Vec<Vec<ReturnSlot>> {

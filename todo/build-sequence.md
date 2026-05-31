@@ -208,6 +208,17 @@ transaction hide the deleted topology. Incident relationships not backed by
 registered edge row tables are rejected until a safe generic policy exists for
 endpoint-table foreign-key relationships.
 
+Status note, 2026-05-31: 4C is closed for single-node mapped `MERGE`.
+`graph.gql()` parses one node pattern with optional `ON CREATE SET` and
+`ON MATCH SET` branches, binds the registered primary-key columns as the match
+identity, locks existing rows with `FOR UPDATE`, inserts with
+`ON CONFLICT DO NOTHING`, and retries the lock path after an insert race.
+Branch expressions are lazy: `ON CREATE` parameters are required only when an
+insert is attempted, and `ON MATCH` parameters are required only when an
+existing row is matched. Coverage includes parser/binder tests, pgrx insert,
+match, lazy-branch, mutable-overlay, identity, and delta-limit cases, plus
+`gql_merge_race.sh` for a two-session same-key race.
+
 ## Cross-cutting, every slice
 
 - TDD: failing test first, then code (rust-planning rule 34a).

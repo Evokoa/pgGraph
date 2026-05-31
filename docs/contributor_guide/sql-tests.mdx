@@ -55,6 +55,7 @@ clusters where the pgrx harness is not representative enough.
 | `gql_create_tx_lifecycle.sh` | Public GQL `CREATE` transaction lifecycle proof: rollback discards inserted rows and node deltas, while commit persists the source row and clears backend-local deltas |
 | `gql_set_tx_lifecycle.sh` | Public GQL property `SET` transaction lifecycle proof: rollback discards source-row updates and transaction-local filter deltas |
 | `gql_delete_tx_lifecycle.sh` | Public GQL edge-row `DELETE` transaction lifecycle proof: rollback restores the source edge row and clears bidirectional tombstones |
+| `gql_merge_race.sh` | Public GQL `MERGE` concurrency proof: concurrent same-key statements converge on one PostgreSQL source row |
 | `tx_delta_crash_recovery.sh` | Internal mutable-overlay crash proof: uncommitted transaction overlays disappear after postmaster restart while the persisted base graph reloads |
 | `run_pgbench_sync.sh` and `pgbench_sync.sql` | Concurrent DML, trigger sync, sync apply, and post-sync query checks |
 | `crash_recovery.sh` | Persisted graph reload after postmaster kill and corrupt artifact rejection |

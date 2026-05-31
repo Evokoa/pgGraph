@@ -19,6 +19,8 @@ pub(crate) enum LogicalStatement {
     DeleteEdge(LogicalDeleteEdge),
     /// Mapped node detach-delete.
     DetachDeleteNode(LogicalDetachDeleteNode),
+    /// Mapped node merge/upsert.
+    MergeNode(LogicalMergeNode),
 }
 
 /// Bound read-only logical query.
@@ -76,6 +78,21 @@ pub(crate) struct LogicalCreateNode {
     pub(crate) node: BoundNode,
     /// Property values to insert into PostgreSQL.
     pub(crate) properties: Vec<CreateProperty>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnBinding>,
+}
+
+/// Bound node merge/upsert.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalMergeNode {
+    /// Merged node binding.
+    pub(crate) node: BoundNode,
+    /// Property values used for the insert branch and identity lookup.
+    pub(crate) properties: Vec<CreateProperty>,
+    /// Optional property assignment applied only to inserted rows.
+    pub(crate) on_create: Option<CreateProperty>,
+    /// Optional property assignment applied only to matched rows.
+    pub(crate) on_match: Option<CreateProperty>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnBinding>,
 }

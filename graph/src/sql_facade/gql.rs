@@ -29,6 +29,18 @@ fn gql_explain(query: &str) -> String {
                     plan.returns.len()
                 )
             }
+            crate::query::physical_plan::PhysicalStatement::MergeNode(plan) => {
+                check_merge_acl(&plan);
+                format!(
+                    "MergeNode(label={}, table_oid={}, properties={}, on_create={}, on_match={}, returns={})",
+                    plan.label,
+                    plan.table_oid,
+                    plan.properties.len(),
+                    plan.on_create.is_some(),
+                    plan.on_match.is_some(),
+                    plan.returns.len()
+                )
+            }
             crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
                 check_set_acl(&plan);
                 format!(
@@ -107,6 +119,7 @@ fn build_statement(
     let span = match &ast {
         crate::gql::ast::Statement::Read(query) => query.span,
         crate::gql::ast::Statement::Create(query) => query.span,
+        crate::gql::ast::Statement::Merge(query) => query.span,
         crate::gql::ast::Statement::Set(query) => query.span,
         crate::gql::ast::Statement::Remove(query) => query.span,
         crate::gql::ast::Statement::Delete(query) => query.span,
@@ -126,6 +139,12 @@ fn check_plan_acl(plan: &crate::query::physical_plan::PhysicalPlan) {
 
 fn check_create_acl(plan: &crate::query::physical_plan::PhysicalCreateNode) {
     acl::check_table_insert_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+}
+
+fn check_merge_acl(plan: &crate::query::physical_plan::PhysicalMergeNode) {
+    acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+    acl::check_table_insert_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+    acl::check_table_update_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
 }
 
 fn check_node_scan_acl(plan: &crate::query::physical_plan::PhysicalNodeScan) {
@@ -192,6 +211,10 @@ fn execute_statement(
             check_create_acl(&plan);
             execute_create_node(&plan, tenant_scope, params, hydrate)
         }
+        crate::query::physical_plan::PhysicalStatement::MergeNode(plan) => {
+            check_merge_acl(&plan);
+            execute_merge_node(&plan, tenant_scope, params, hydrate)
+        }
         crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
             check_set_acl(&plan);
             execute_set_property(&plan, tenant_scope, params, hydrate)
@@ -226,6 +249,31 @@ fn execute_create_node(
         insert.tenant.as_deref(),
     )?;
     Ok(vec![project_created_node(plan, insert, hydrate)])
+}
+
+fn execute_merge_node(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    ensure_mutable_projection("GQL MERGE")?;
+    let merged = merge_mapped_node(plan, tenant_scope, params)?;
+    if merged.created {
+        crate::projection::tx_delta::record_added_node(
+            plan.table_oid,
+            &merged.node_id,
+            merged.tenant.as_deref(),
+        )?;
+    } else if let Some(on_match) = &plan.on_match {
+        update_filter_index_for_property(
+            plan.table_oid,
+            &merged.node_id,
+            &on_match.property,
+            &merged.row,
+        )?;
+    }
+    Ok(vec![project_merged_node(plan, merged, hydrate)])
 }
 
 fn execute_set_property(
@@ -477,6 +525,13 @@ struct CreatedNode {
     row: serde_json::Value,
 }
 
+struct MergedNode {
+    node_id: String,
+    tenant: Option<String>,
+    row: serde_json::Value,
+    created: bool,
+}
+
 struct UpdatedNode {
     node_id: String,
     row: serde_json::Value,
@@ -587,6 +642,262 @@ fn insert_mapped_node(
             row: row_json.0,
         })
     })
+}
+
+fn merge_mapped_node(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<MergedNode> {
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let table = tables
+        .iter()
+        .find(|table| {
+            crate::catalog::table_oid_from_name(&table.table_name)
+                .ok()
+                .is_some_and(|oid| oid == plan.table_oid)
+        })
+        .ok_or_else(|| {
+            safety::GraphError::Internal(format!(
+                "cannot merge node into unregistered table OID {}",
+                plan.table_oid
+            ))
+        })?;
+    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let identity_values =
+        merge_identity_values_json(plan, table.tenant_column.as_deref(), tenant_scope, params)?;
+    validate_merge_identity(&identity_values, &table.id_columns)?;
+    if let Some(locked) = try_lock_merge_node(
+        plan,
+        table,
+        table_name.as_sql(),
+        identity_values.clone(),
+        tenant_scope,
+    )? {
+        return apply_merge_match_branch(plan, locked, params);
+    }
+
+    let insert_values =
+        merge_insert_values_json(plan, table.tenant_column.as_deref(), tenant_scope, params)?;
+    if let Some(inserted) = try_insert_merge_node(
+        plan,
+        table,
+        table_name.as_sql(),
+        tenant_scope,
+        insert_values,
+    )? {
+        return Ok(inserted);
+    }
+
+    let locked = try_lock_merge_node(
+        plan,
+        table,
+        table_name.as_sql(),
+        identity_values,
+        tenant_scope,
+    )?
+    .ok_or_else(|| safety::GraphError::GqlExecution {
+        reason: format!("GQL MERGE could not find or insert `{}` node", plan.label),
+    })?;
+    apply_merge_match_branch(plan, locked, params)
+}
+
+fn apply_merge_match_branch(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    locked: MergedNode,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<MergedNode> {
+    if let Some(on_match) = &plan.on_match {
+        let set_plan = crate::query::physical_plan::PhysicalSetProperty {
+            var: plan.var.clone(),
+            table_oid: plan.table_oid,
+            label: plan.label.clone(),
+            predicate: None,
+            property: on_match.property.clone(),
+            value: on_match.value.clone(),
+            returns: Vec::new(),
+        };
+        let updated = update_mapped_property(&set_plan, &locked.node_id, params)?;
+        return Ok(MergedNode {
+            node_id: updated.node_id,
+            tenant: locked.tenant,
+            row: updated.row,
+            created: false,
+        });
+    }
+    Ok(locked)
+}
+
+fn try_insert_merge_node(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    table: &crate::builder::RegisteredTable,
+    table_sql: &str,
+    tenant_scope: Option<&str>,
+    values: serde_json::Value,
+) -> safety::GraphResult<Option<MergedNode>> {
+    let insert_shape = merge_insert_shape(plan, table.tenant_column.as_deref(), tenant_scope);
+    let pk_expr = primary_key_expr("src", &table.id_columns);
+    let conflict_columns = table
+        .id_columns
+        .columns()
+        .iter()
+        .map(|column| quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!(
+        "WITH inserted AS (
+             INSERT INTO {} AS src ({})
+             SELECT {}
+             FROM jsonb_populate_record(NULL::{}, $1::jsonb) AS rec
+             ON CONFLICT ({}) DO NOTHING
+             RETURNING to_jsonb(src.*), {}
+         )
+         SELECT * FROM inserted",
+        table_sql,
+        insert_shape.columns.join(", "),
+        insert_shape.selectors.join(", "),
+        table_sql,
+        conflict_columns,
+        pk_expr
+    );
+    pgrx::Spi::connect_mut(|client| {
+        let rows = client
+            .update(&query, None, &[pgrx::JsonB(values).into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!("GQL MERGE insert failed for {}: {}", table_sql, err),
+            })?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("GQL MERGE inserted row read failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("GQL MERGE insert returned no row JSON".to_string())
+            })?;
+        let node_id = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL MERGE inserted primary key read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("GQL MERGE insert returned no primary key".to_string())
+            })?;
+        let tenant = row_tenant(&row_json.0, table.tenant_column.as_deref());
+        Ok(Some(MergedNode {
+            node_id,
+            tenant,
+            row: row_json.0,
+            created: true,
+        }))
+    })
+}
+
+fn try_lock_merge_node(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    table: &crate::builder::RegisteredTable,
+    table_sql: &str,
+    values: serde_json::Value,
+    tenant_scope: Option<&str>,
+) -> safety::GraphResult<Option<MergedNode>> {
+    let pk_expr = primary_key_expr("src", &table.id_columns);
+    let rec_pk_expr = primary_key_expr("rec", &table.id_columns);
+    let tenant_predicate = match (table.tenant_column.as_deref(), tenant_scope) {
+        (Some(column), Some(_)) => {
+            format!(
+                " AND src.{}::text = rec.{}::text",
+                quote_ident(column),
+                quote_ident(column)
+            )
+        }
+        _ => String::new(),
+    };
+    let query = format!(
+        "SELECT to_jsonb(src.*), {}
+         FROM {} AS src, jsonb_populate_record(NULL::{}, $1::jsonb) AS rec
+         WHERE {} = {}{}
+         FOR UPDATE OF src",
+        pk_expr, table_sql, table_sql, pk_expr, rec_pk_expr, tenant_predicate
+    );
+    pgrx::Spi::connect_mut(|client| {
+        let rows = client
+            .update(&query, None, &[pgrx::JsonB(values).into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!("GQL MERGE lookup failed for {}: {}", table_sql, err),
+            })?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if rows.len() > 1 {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL MERGE requires exactly one matched `{}` node, found {}",
+                    plan.label,
+                    rows.len()
+                ),
+            });
+        }
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("GQL MERGE matched row read failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("GQL MERGE match returned no row JSON".to_string())
+            })?;
+        let node_id = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL MERGE matched primary key read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("GQL MERGE match returned no primary key".to_string())
+            })?;
+        let tenant = row_tenant(&row_json.0, table.tenant_column.as_deref());
+        Ok(Some(MergedNode {
+            node_id,
+            tenant,
+            row: row_json.0,
+            created: false,
+        }))
+    })
+}
+
+fn row_tenant(row: &serde_json::Value, tenant_column: Option<&str>) -> Option<String> {
+    tenant_column.and_then(|column| {
+        row.get(column)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn validate_merge_identity(
+    values: &serde_json::Value,
+    id_columns: &crate::builder::PrimaryKeySpec,
+) -> safety::GraphResult<()> {
+    let Some(values) = values.as_object() else {
+        return Err(safety::GraphError::GqlExecution {
+            reason: "GQL MERGE identity values must be a JSON object".to_string(),
+        });
+    };
+    for column in id_columns.columns() {
+        if !values.contains_key(column)
+            || values.get(column).is_some_and(serde_json::Value::is_null)
+        {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!("GQL MERGE requires non-null identity property `{column}`"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn update_mapped_property(
@@ -1287,6 +1598,48 @@ fn create_insert_shape(
     }
 }
 
+fn merge_insert_shape(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    tenant_column: Option<&str>,
+    tenant_scope: Option<&str>,
+) -> CreateInsertShape {
+    let mut columns = Vec::with_capacity(
+        plan.properties.len()
+            + usize::from(plan.on_create.is_some())
+            + usize::from(tenant_column.is_some() && tenant_scope.is_some()),
+    );
+    let mut selectors = Vec::with_capacity(columns.capacity());
+    for property in &plan.properties {
+        columns.push(quote_ident(&property.property));
+        selectors.push(format!("rec.{}", quote_ident(&property.property)));
+    }
+    if let Some(property) = &plan.on_create {
+        columns.push(quote_ident(&property.property));
+        selectors.push(format!("rec.{}", quote_ident(&property.property)));
+    }
+    let tenant_column = match tenant_column {
+        Some(column)
+            if plan
+                .properties
+                .iter()
+                .any(|property| property.property == column) =>
+        {
+            Some(column.to_string())
+        }
+        Some(column) if tenant_scope.is_some() => {
+            columns.push(quote_ident(column));
+            selectors.push(format!("rec.{}", quote_ident(column)));
+            Some(column.to_string())
+        }
+        Some(_) | None => None,
+    };
+    CreateInsertShape {
+        columns,
+        selectors,
+        tenant_column,
+    }
+}
+
 fn ensure_mutable_projection(operation: &str) -> safety::GraphResult<()> {
     ENGINE.with(|engine| {
         let engine = engine.borrow();
@@ -1342,6 +1695,74 @@ fn create_values_json(
     Ok(serde_json::Value::Object(values))
 }
 
+fn merge_identity_values_json(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    tenant_column: Option<&str>,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<serde_json::Value> {
+    let mut values = serde_json::Map::with_capacity(plan.properties.len());
+    for property in &plan.properties {
+        values.insert(
+            property.property.clone(),
+            write_value_json(&property.value, params)?,
+        );
+    }
+    apply_tenant_scope(&mut values, tenant_column, tenant_scope, "GQL MERGE")?;
+    Ok(serde_json::Value::Object(values))
+}
+
+fn merge_insert_values_json(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    tenant_column: Option<&str>,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<serde_json::Value> {
+    let mut values = serde_json::Map::with_capacity(plan.properties.len() + 1);
+    for property in &plan.properties {
+        values.insert(
+            property.property.clone(),
+            write_value_json(&property.value, params)?,
+        );
+    }
+    if let Some(property) = &plan.on_create {
+        values.insert(
+            property.property.clone(),
+            write_value_json(&property.value, params)?,
+        );
+    }
+    apply_tenant_scope(&mut values, tenant_column, tenant_scope, "GQL MERGE")?;
+    Ok(serde_json::Value::Object(values))
+}
+
+fn apply_tenant_scope(
+    values: &mut serde_json::Map<String, serde_json::Value>,
+    tenant_column: Option<&str>,
+    tenant_scope: Option<&str>,
+    operation: &str,
+) -> safety::GraphResult<()> {
+    let (Some(tenant_column), Some(tenant_scope)) = (tenant_column, tenant_scope) else {
+        return Ok(());
+    };
+    match values.get(tenant_column) {
+        Some(serde_json::Value::String(value)) if value == tenant_scope => {}
+        Some(_) => {
+            return Err(safety::GraphError::InvalidFilter {
+                reason: format!(
+                    "{operation} tenant property `{tenant_column}` must match the active tenant scope"
+                ),
+            });
+        }
+        None => {
+            values.insert(
+                tenant_column.to_string(),
+                serde_json::Value::String(tenant_scope.to_string()),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn project_created_node(
     plan: &crate::query::physical_plan::PhysicalCreateNode,
     created: CreatedNode,
@@ -1362,6 +1783,25 @@ fn project_created_node(
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
                 );
+            }
+        }
+    }
+    serde_json::Value::Object(output)
+}
+
+fn project_merged_node(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    merged: MergedNode,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut output = serde_json::Map::new();
+    for slot in &plan.returns {
+        match slot {
+            crate::query::physical_plan::CreateReturnSlot::Node { name } => {
+                output.insert(name.clone(), merged_node_value(plan, &merged, hydrate));
+            }
+            crate::query::physical_plan::CreateReturnSlot::Property { property, name } => {
+                output.insert(name.clone(), row_property_value(&merged.row, property));
             }
         }
     }
@@ -1450,6 +1890,30 @@ fn created_node_value(
         serde_json::json!({
             "table": &plan.label,
             "id": &created.node_id,
+        }),
+    );
+    node.insert(
+        "_labels".to_string(),
+        serde_json::Value::Array(vec![serde_json::Value::String(plan.label.clone())]),
+    );
+    serde_json::Value::Object(node)
+}
+
+fn merged_node_value(
+    plan: &crate::query::physical_plan::PhysicalMergeNode,
+    merged: &MergedNode,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut node = if hydrate {
+        merged.row.as_object().cloned().unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    node.insert(
+        "_id".to_string(),
+        serde_json::json!({
+            "table": &plan.label,
+            "id": &merged.node_id,
         }),
     );
     node.insert(

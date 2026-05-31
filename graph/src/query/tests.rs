@@ -210,6 +210,48 @@ fn binder_accepts_detach_delete_for_node_with_mapped_incident_edges() {
 }
 
 #[test]
+fn binder_accepts_merge_node_with_create_and_match_branches() {
+    let ast = crate::gql::parse_statement(
+        "MERGE (u:users {id: $id, name: $name}) ON CREATE SET u.age = 1 ON MATCH SET u.name = $name RETURN u.name",
+    )
+    .unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::MergeNode(merge) = plan else {
+        panic!("expected merge node plan");
+    };
+
+    assert_eq!(merge.node.var, "u");
+    assert_eq!(merge.node.table_oid, 10);
+    assert_eq!(merge.properties.len(), 2);
+    assert_eq!(
+        merge
+            .on_create
+            .as_ref()
+            .map(|property| property.property.as_str()),
+        Some("age")
+    );
+    assert_eq!(
+        merge
+            .on_match
+            .as_ref()
+            .map(|property| property.property.as_str()),
+        Some("name")
+    );
+    assert_eq!(merge.returns.len(), 1);
+}
+
+#[test]
+fn binder_rejects_merge_branch_for_non_writable_column() {
+    let ast =
+        crate::gql::parse_statement("MERGE (u:users {id: $id}) ON MATCH SET u.id = 'u2' RETURN u")
+            .unwrap();
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
+    assert!(err.to_string().contains("not a writable mapped column"));
+}
+
+#[test]
 fn binder_rejects_detach_delete_unknown_variable() {
     let ast =
         crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) DETACH DELETE v RETURN u").unwrap();

@@ -17,6 +17,8 @@ pub(crate) enum Statement {
     Delete(DeleteQuery),
     /// `MATCH ... DETACH DELETE ... RETURN` node cascade delete query.
     DetachDelete(DetachDeleteQuery),
+    /// `MERGE ... RETURN` node upsert query.
+    Merge(MergeQuery),
 }
 
 /// Parsed GQL query.
@@ -122,10 +124,34 @@ pub(crate) struct DetachDeleteQuery {
     pub(crate) span: Span,
 }
 
+/// Parsed mapped node merge query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergeQuery {
+    /// Node merge clause.
+    pub(crate) merge: MergeClause,
+    /// Optional property assignment applied only when the row is inserted.
+    pub(crate) on_create: Option<SetClause>,
+    /// Optional property assignment applied only when an existing row matches.
+    pub(crate) on_match: Option<SetClause>,
+    /// Required `RETURN` clause.
+    pub(crate) return_: ReturnClause,
+    /// Full query span.
+    pub(crate) span: Span,
+}
+
 /// `CREATE` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateClause {
     /// Node to create.
+    pub(crate) node: NodePat,
+    /// Clause span.
+    pub(crate) span: Span,
+}
+
+/// `MERGE` clause for one mapped node.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergeClause {
+    /// Node identity/properties to merge.
     pub(crate) node: NodePat,
     /// Clause span.
     pub(crate) span: Span,
