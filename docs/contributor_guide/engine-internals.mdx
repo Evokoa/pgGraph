@@ -105,6 +105,9 @@ Insert after delete cancels the delete; delete after insert cancels the insert.
 Transaction-local edge deltas use the same reduced insert/delete map shape and
 are merged after `edge_buffer`, so reads in the current backend can observe
 their own pending graph deltas without changing the immutable CSR stores.
+Read-only GQL pattern expansion uses the same neighbor-source abstraction as
+traversal and unweighted graph algorithms, so one-hop and bounded variable-length
+relationship reads share overlay semantics with the SQL traversal APIs.
 Mutable write operators must reject execution while a PostgreSQL subtransaction
 is active; the current delta model does not attempt per-savepoint overlay
 rollback.

@@ -103,6 +103,9 @@ mark-stale; upgrade if benchmarks demand).
   unweighted shortest path, and connected components. Weighted shortest path
   rejects dirty transaction edge overlays until committed weights are folded
   into CSR.
+- Routed read-only GQL relationship expansion through the same overlay-aware
+  neighbor path and covered internal transaction edge inserts/deletes from
+  SQL-visible tests.
 - Exposed projection mode and empty transaction-delta counters through
   `graph.status()` and `graph.sync_health()`.
 - Remaining 2B work before write slices: route actual GQL write deltas into

@@ -167,3 +167,67 @@ fn gql_applies_session_tenant_scope_to_topology() {
     assert_eq!(tenant_a_child, "a2");
     assert_eq!(tenant_b_child, "b2");
 }
+
+#[pg_test]
+fn gql_reads_transaction_delta_edge_overlay() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    Spi::run(
+        "SELECT graph._test_record_tx_edge(
+            'graph_test_users_pgtest'::regclass,
+            'u2',
+            'graph_test_users_pgtest'::regclass,
+            'u1',
+            'friend',
+            'insert'
+        )",
+    )
+    .expect("record tx edge insert failed");
+
+    let reverse_count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+         FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest) RETURN u, v',
+            hydrate := false
+         )
+         WHERE row #>> '{u,_id,id}' = 'u2'
+           AND row #>> '{v,_id,id}' = 'u1'",
+    )
+    .expect("gql tx overlay read failed")
+    .unwrap_or_default();
+
+    assert_eq!(reverse_count, 1);
+}
+
+#[pg_test]
+fn gql_hides_transaction_delta_edge_delete() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    Spi::run(
+        "SELECT graph._test_record_tx_edge(
+            'graph_test_users_pgtest'::regclass,
+            'u1',
+            'graph_test_users_pgtest'::regclass,
+            'u2',
+            'friend',
+            'delete'
+        )",
+    )
+    .expect("record tx edge delete failed");
+
+    let base_edge_count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+         FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest) RETURN u, v',
+            hydrate := false
+         )
+         WHERE row #>> '{u,_id,id}' = 'u1'
+           AND row #>> '{v,_id,id}' = 'u2'",
+    )
+    .expect("gql tx overlay delete read failed")
+    .unwrap_or_default();
+
+    assert_eq!(base_edge_count, 0);
+}

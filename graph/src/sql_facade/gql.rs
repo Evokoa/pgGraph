@@ -118,3 +118,64 @@ fn hydrate_gql_rows(
     }
     Ok(hydrated)
 }
+
+#[cfg(feature = "pg_test")]
+#[pg_extern(schema = "graph", name = "_test_record_tx_edge")]
+fn test_record_tx_edge(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    edge_label: &str,
+    mutation: &str,
+) {
+    with_panic_boundary("_test_record_tx_edge()", || {
+        super::admin::require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let (source_idx, target_idx, type_id) = ENGINE
+            .with(|engine| {
+                let engine = engine.borrow();
+                let source_idx = engine
+                    .resolve(source_table.to_u32(), source_id)
+                    .ok_or_else(|| safety::GraphError::NodeNotFound {
+                        table: source_table.to_u32().to_string(),
+                        pk: source_id.to_string(),
+                    })?;
+                let target_idx = engine
+                    .resolve(target_table.to_u32(), target_id)
+                    .ok_or_else(|| safety::GraphError::NodeNotFound {
+                        table: target_table.to_u32().to_string(),
+                        pk: target_id.to_string(),
+                    })?;
+                let type_id = engine
+                    .edge_type_registry
+                    .iter()
+                    .position(|label| label == edge_label)
+                    .map(|idx| idx as u8)
+                    .ok_or_else(|| safety::GraphError::InvalidFilter {
+                        reason: format!("unknown edge type '{edge_label}'"),
+                    })?;
+                Ok::<_, safety::GraphError>((source_idx, target_idx, type_id))
+            })
+            .unwrap_or_else(|err| err.report());
+
+        match mutation {
+            "insert" => crate::projection::tx_delta::record_added_edge(
+                source_idx,
+                crate::projection::tx_delta::DeltaEdge {
+                    target: target_idx,
+                    type_id,
+                    weight: None,
+                },
+            ),
+            "delete" => {
+                crate::projection::tx_delta::record_deleted_edge(source_idx, target_idx, type_id)
+            }
+            other => Err(safety::GraphError::InvalidFilter {
+                reason: format!(
+                    "unsupported tx edge mutation '{other}'; expected insert or delete"
+                ),
+            }),
+        }
+        .unwrap_or_else(|err| err.report());
+    });
+}

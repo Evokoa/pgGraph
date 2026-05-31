@@ -1,4 +1,4 @@
-//! Lowering from logical GQL plans to physical CSR plans.
+//! Lowering from logical GQL plans to executable physical plans.
 
 use super::logical_plan::{LogicalPlan, ReturnBinding};
 use super::physical_plan::{PhysicalPlan, ReturnSlot};

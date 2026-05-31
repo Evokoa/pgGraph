@@ -676,7 +676,11 @@ impl Engine {
         }
     }
 
-    fn traversal_edge_overlay(&self, direction: TraversalDirection) -> EdgeOverlay {
+    pub(crate) fn has_edge_overlay(&self) -> bool {
+        !self.edge_buffer.is_empty() || tx_delta::edge_delta_dirty()
+    }
+
+    pub(crate) fn traversal_edge_overlay(&self, direction: TraversalDirection) -> EdgeOverlay {
         let mut inserts: HashSet<(u32, u32, u8)> = HashSet::new();
         let mut deletes: HashSet<(u32, u32, u8)> = HashSet::new();
 
@@ -759,7 +763,7 @@ impl Engine {
                     pk: target_id.to_string(),
                 })?;
 
-        let result = if self.edge_buffer.is_empty() && !tx_delta::edge_delta_dirty() {
+        let result = if !self.has_edge_overlay() {
             let neighbors = CsrNeighbors::new(&self.edge_store);
             path_finder::shortest_path_with_neighbors(
                 &self.node_store,
@@ -803,7 +807,7 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        if !self.edge_buffer.is_empty() || tx_delta::edge_delta_dirty() {
+        if self.has_edge_overlay() {
             return Err(GraphError::UnsupportedOperation {
                 operation: "graph.weighted_shortest_path() with pending edge overlays"
                     .to_string(),
@@ -940,7 +944,7 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        if self.edge_buffer.is_empty() && !tx_delta::edge_delta_dirty() {
+        if !self.has_edge_overlay() {
             return Ok(crate::connected_components::compute_components(
                 &self.node_store,
                 &self.edge_store,

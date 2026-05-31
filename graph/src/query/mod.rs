@@ -2,7 +2,7 @@
 //!
 //! The query layer is intentionally pgrx-free except for the catalog adapter.
 //! Parser output binds against a catalog snapshot, lowers into a physical plan,
-//! and executes against immutable CSR stores in [`crate::engine::Engine`].
+//! and executes against [`crate::engine::Engine`] topology stores.
 
 pub(crate) mod catalog_snapshot;
 pub(crate) mod execute;

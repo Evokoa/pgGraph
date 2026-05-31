@@ -1,4 +1,4 @@
-//! Physical plans executable against immutable CSR stores.
+//! Physical plans executable against engine topology stores.
 
 use super::logical_plan::{BindingSide, BoundDirection, HopBounds, Predicate, SortBinding};
 

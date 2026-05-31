@@ -126,8 +126,10 @@ edge deltas live in `TxGraphDelta`. Overlay-aware graph algorithms reduce both
 sources into insert and delete overlays for the selected direction, with
 transaction-local deltas applied last for read-your-own-writes semantics.
 Traversal, unweighted shortest path, and connected components consume the
-shared neighbor-source abstraction. Weighted shortest path rejects a dirty edge
-overlay until vacuum or maintenance merges committed weights into the base CSR.
+shared neighbor-source abstraction. Read-only GQL relationship expansion uses
+the same overlay-aware neighbor path. Weighted shortest path rejects a dirty
+edge overlay until vacuum or maintenance merges committed weights into the base
+CSR.
 
 When the buffer reaches `graph.edge_buffer_size`, the engine enters read-only
 mode with `read_only_reason = 'edge_buffer_full'` and returns

@@ -49,8 +49,10 @@ within noise of the pre-2A baseline.
 Status note, 2026-05-31: 2B infrastructure has started. Projection-mode GUCs,
 `graph.build(mode := ...)`, queued-build mode persistence, status/sync-health
 mode columns, the transaction-delta callback skeleton, and internal
-transaction-local edge overlay reads are in place. The 2B write-proof gates
-remain open until mapped writes record deltas and rollback, isolation,
+transaction-local edge overlay reads are in place. Read-only GQL pattern
+expansion now consumes the same overlay-aware neighbor path, with SQL-visible
+coverage for internal transaction edge inserts and deletes. The 2B write-proof
+gates remain open until mapped writes record deltas and rollback, isolation,
 out-of-band sync, and crash/reload behavior are proven end to end.
 
 ## Phase 3 — Advanced reads + SQL/PGQ adapter

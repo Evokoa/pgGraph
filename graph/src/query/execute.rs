@@ -1,7 +1,11 @@
-//! Physical GQL plan execution against immutable engine stores.
+//! Physical GQL plan execution against engine stores and edge overlays.
 
+use crate::edge_store::EdgeStore;
 use crate::engine::Engine;
+use crate::projection::neighbors::EdgeOverlay;
+use crate::projection::neighbors::{CsrNeighbors, NeighborSource, OverlayNeighbors};
 use crate::safety::{GraphError, GraphResult};
+use crate::types::TraversalDirection;
 
 use super::logical_plan::BoundDirection;
 use super::physical_plan::{PhysicalPlan, ReturnSlot};
@@ -44,13 +48,14 @@ pub(crate) fn execute(
         return Err(GraphError::NotBuilt);
     }
     let rel_type_id = edge_type_id(engine, &plan.rel_type)?;
+    let neighbors = GqlNeighbors::new(engine);
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
     for source_idx in source_nodes(engine, plan.source_table_oid, tenant) {
         if !engine.node_store.is_active(source_idx) {
             continue;
         }
-        for target in expand_targets(engine, plan, source_idx, rel_type_id, tenant) {
+        for target in expand_targets(&neighbors, engine, plan, source_idx, rel_type_id, tenant) {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
                     return Err(GraphError::GqlExecution {
@@ -91,6 +96,7 @@ fn source_nodes(engine: &Engine, table_oid: u32, tenant: Option<&str>) -> Vec<u3
 }
 
 fn expand_targets(
+    neighbors: &GqlNeighbors<'_>,
     engine: &Engine,
     plan: &PhysicalPlan,
     source_idx: u32,
@@ -110,7 +116,7 @@ fn expand_targets(
         let mut next = Vec::new();
         let mut seen_next = std::collections::HashSet::new();
         for node_idx in current {
-            for target in neighbors_for_direction(engine, plan.direction, node_idx, rel_type_id) {
+            for target in neighbors.for_direction(plan.direction, node_idx, rel_type_id) {
                 if !engine.node_store.is_active(target.node_idx)
                     || !tenant_allows_node(engine, target.node_idx, tenant)
                 {
@@ -142,34 +148,84 @@ fn expand_targets(
     results
 }
 
-fn neighbors_for_direction(
-    engine: &Engine,
-    direction: BoundDirection,
-    node_idx: u32,
-    rel_type_id: u8,
-) -> Vec<GqlTarget> {
-    let mut neighbors = Vec::new();
-    if matches!(direction, BoundDirection::Out | BoundDirection::Undirected) {
-        append_matching_neighbors(
-            &engine.edge_store,
-            node_idx,
-            rel_type_id,
-            EdgeOrientation::Forward,
-            &mut neighbors,
-        );
+struct GqlNeighbors<'a> {
+    out_store: &'a EdgeStore,
+    in_store: &'a EdgeStore,
+    out_overlay: Option<EdgeOverlay>,
+    in_overlay: Option<EdgeOverlay>,
+}
+
+impl<'a> GqlNeighbors<'a> {
+    fn new(engine: &'a Engine) -> Self {
+        let (out_overlay, in_overlay) = if engine.has_edge_overlay() {
+            (
+                Some(engine.traversal_edge_overlay(TraversalDirection::Out)),
+                Some(engine.traversal_edge_overlay(TraversalDirection::In)),
+            )
+        } else {
+            (None, None)
+        };
+
+        Self {
+            out_store: &engine.edge_store,
+            in_store: &engine.reverse_edge_store,
+            out_overlay,
+            in_overlay,
+        }
     }
-    if matches!(direction, BoundDirection::In | BoundDirection::Undirected) {
-        append_matching_neighbors(
-            &engine.reverse_edge_store,
-            node_idx,
-            rel_type_id,
-            EdgeOrientation::Reverse,
-            &mut neighbors,
-        );
+
+    fn for_direction(
+        &self,
+        direction: BoundDirection,
+        node_idx: u32,
+        rel_type_id: u8,
+    ) -> Vec<GqlTarget> {
+        let mut neighbors = Vec::new();
+        if matches!(direction, BoundDirection::Out | BoundDirection::Undirected) {
+            self.append_direction_neighbors(
+                TraversalDirection::Out,
+                node_idx,
+                rel_type_id,
+                EdgeOrientation::Forward,
+                &mut neighbors,
+            );
+        }
+        if matches!(direction, BoundDirection::In | BoundDirection::Undirected) {
+            self.append_direction_neighbors(
+                TraversalDirection::In,
+                node_idx,
+                rel_type_id,
+                EdgeOrientation::Reverse,
+                &mut neighbors,
+            );
+        }
+        neighbors.sort_by_key(|target| (target.node_idx, target.orientation));
+        neighbors.dedup();
+        neighbors
     }
-    neighbors.sort_by_key(|target| (target.node_idx, target.orientation));
-    neighbors.dedup();
-    neighbors
+
+    fn append_direction_neighbors(
+        &self,
+        direction: TraversalDirection,
+        node_idx: u32,
+        rel_type_id: u8,
+        orientation: EdgeOrientation,
+        out: &mut Vec<GqlTarget>,
+    ) {
+        let (edge_store, overlay) = match direction {
+            TraversalDirection::Any | TraversalDirection::Out => {
+                (self.out_store, self.out_overlay.as_ref())
+            }
+            TraversalDirection::In => (self.in_store, self.in_overlay.as_ref()),
+        };
+        let Some((inserts, deletes)) = overlay else {
+            let neighbors = CsrNeighbors::new(edge_store);
+            append_matching_neighbors(&neighbors, node_idx, rel_type_id, orientation, out);
+            return;
+        };
+        let neighbors = OverlayNeighbors::new(edge_store, inserts, deletes);
+        append_matching_neighbors(&neighbors, node_idx, rel_type_id, orientation, out);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,24 +241,18 @@ enum EdgeOrientation {
 }
 
 fn append_matching_neighbors(
-    store: &crate::edge_store::EdgeStore,
+    source: &impl NeighborSource,
     node_idx: u32,
     rel_type_id: u8,
     orientation: EdgeOrientation,
     out: &mut Vec<GqlTarget>,
 ) {
-    let (targets, type_ids) = store.neighbors(node_idx);
-    out.extend(
-        targets
-            .iter()
-            .zip(type_ids.iter())
-            .filter_map(|(&target, &type_id)| {
-                (type_id == rel_type_id).then_some(GqlTarget {
-                    node_idx: target,
-                    orientation,
-                })
-            }),
-    );
+    out.extend(source.neighbors(node_idx).filter_map(|neighbor| {
+        (neighbor.type_id == rel_type_id).then_some(GqlTarget {
+            node_idx: neighbor.target,
+            orientation,
+        })
+    }));
 }
 
 fn target_matches(engine: &Engine, target_idx: u32, table_oid: u32, tenant: Option<&str>) -> bool {

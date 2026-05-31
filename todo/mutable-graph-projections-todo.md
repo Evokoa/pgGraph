@@ -275,11 +275,12 @@ interacts with the current sync path.
   weighted shortest path, connected components, search/traversal hybrids, and
   aggregation where supported. Phase 2A introduced the shared neighbor-source
   abstraction for clean CSR and edge overlays; `bfs.rs`, unweighted
-  `path_finder.rs`, `connected_components.rs`, and `sql_aggregation.rs` now
-  consume pending edge overlays. Weighted shortest path rejects dirty edge
-  overlays with `PG018` until vacuum/maintenance merges weights into CSR.
-  Source-table search remains a PostgreSQL source-row lookup rather than a
-  graph-topology algorithm; `traverse_search` inherits overlay-aware traversal.
+  `path_finder.rs`, `connected_components.rs`, `sql_aggregation.rs`, and
+  read-only GQL relationship expansion now consume pending edge overlays.
+  Weighted shortest path rejects dirty edge overlays with `PG018` until
+  vacuum/maintenance merges weights into CSR. Source-table search remains a
+  PostgreSQL source-row lookup rather than a graph-topology algorithm;
+  `traverse_search` inherits overlay-aware traversal.
 
 ## Blind Spots To Resolve
 
