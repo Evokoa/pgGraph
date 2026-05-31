@@ -73,17 +73,22 @@ Supported read coverage:
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum |
 | Predicates | Property comparisons, null checks, membership, boolean combinations, and JSONB `$parameters` |
-| Return values | Node values, scalar properties, coordinate-only single-hop relationship identities, and JSON `null` for unmatched optional targets or relationships |
+| Return values | Node values, scalar properties, coordinate-only single-hop relationship identities, aggregate values, and JSON `null` for unmatched optional targets or relationships |
 | Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases and shadowing |
+| Aggregates | `count`, `sum`, `avg`, `min`, `max`, and `collect` in `RETURN`; non-aggregate return items are implicit grouping keys |
 | Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT`, with the hard GQL row cap still enforced |
 
 With `hydrate := true`, returned node values include hydrated source rows when
 the caller has source-table privileges and RLS allows the read. With
 `hydrate := false`, node values are graph coordinates only. Relationship values
 are coordinate identity objects in this release. `OPTIONAL MATCH` null-extends
-unmatched source rows for single-relationship patterns. Relationship source-row
-hydration, raw path values, path functions, aggregates, and multi-pattern
-optional joins are future work.
+unmatched source rows for single-relationship patterns. Aggregate functions
+ignore JSON `null` inputs for `count(expr)`, `sum`, `avg`, `min`, and `max`;
+`count(*)` counts every input row, `collect` preserves values in row order, and
+aggregate-only empty inputs return one row with `0`, `null`, or `[]` according
+to the aggregate. Relationship source-row hydration, raw path values, path
+functions, aggregate `DISTINCT`, and multi-pattern optional joins are planned
+outside this subset.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on

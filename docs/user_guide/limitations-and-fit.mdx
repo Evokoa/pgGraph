@@ -34,7 +34,7 @@ data into another system.
 |---|---|
 | WAL sync | `graph.sync_mode = 'wal'` is parsed but reserved; use `manual` or `trigger` |
 | Build scanner | `graph.build_scan_mode = 'copy'` is reserved; use `select` |
-| GQL | `graph.gql()` supports the documented read subset, including node-only `MATCH`, single-node mapped `CREATE`, single-node mapped property `SET`, and single-edge mapped `DELETE`; aggregates, path functions, multi-stage queries, and broader writes are future work |
+| GQL | `graph.gql()` supports the documented read subset, including node-only `MATCH`, top-level single-relationship `OPTIONAL MATCH`, projection-stage `WITH`, `RETURN` aggregates, single-node mapped `CREATE`, single-node mapped property `SET`, and single-edge mapped `DELETE`; path functions, SQL/PGQ, and broader writes are future work |
 | SQL/PGQ | Planned adapter work, not a current public API |
 | Projection modes | `graph.build()` defaults to `csr_readonly`; `mutable_overlay` can be selected when `graph.mutable_enabled = on` and is required for GQL writes |
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |

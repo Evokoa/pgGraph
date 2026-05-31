@@ -1,17 +1,17 @@
 //! Semantic binding for the supported GQL subset.
 
 use crate::gql::ast::{
-    CmpOp, Direction, Expr, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern, RelPat,
-    ReturnExpr, ReturnItem, SortItem, SortKey, WithClause,
+    self, CmpOp, Direction, Expr, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern,
+    RelPat, ReturnExpr, ReturnItem, SortItem, SortKey, WithClause,
 };
 use crate::gql::errors::{GqlError, Span};
 
 use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
-    BindingSide, BoundCmpOp, BoundDirection, BoundMappedEdge, BoundNode, BoundRel, CreateProperty,
-    CreateReturnBinding, CreateValue, HopBounds, LogicalCreateNode, LogicalDeleteEdge,
-    LogicalNodeScan, LogicalPlan, LogicalSetProperty, LogicalStatement, Predicate, ReturnBinding,
-    SortBinding, SortBindingKey, ValueExpr,
+    AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundMappedEdge,
+    BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue, HopBounds,
+    LogicalCreateNode, LogicalDeleteEdge, LogicalNodeScan, LogicalPlan, LogicalSetProperty,
+    LogicalStatement, Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -251,6 +251,12 @@ fn bind_create_returns(
                     "RETURN functions over CREATE are implemented in a later phase",
                 ));
             }
+            ReturnExpr::Aggregate { span, .. } => {
+                return Err(GqlError::unsupported(
+                    *span,
+                    "RETURN aggregates over CREATE are implemented in a later phase",
+                ));
+            }
         };
         if !seen.insert(binding.name().to_string()) {
             return Err(GqlError::bind(
@@ -385,6 +391,12 @@ fn bind_delete_edge(
     )?;
     let scope = initial_relationship_scope(rel_pat, target_pat, &source, &target)?;
     let returns = bind_scoped_returns(&query.return_.items, &scope, &source, &target)?;
+    if returns.iter().any(ReturnBinding::is_aggregate) {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN aggregates over DELETE are implemented in a later phase",
+        ));
+    }
     Ok(LogicalDeleteEdge {
         source,
         relationship: BoundRel {
@@ -626,6 +638,12 @@ fn bind_projection_scope(
 ) -> Result<BindingScope, GqlError> {
     let mut next = BindingScope::with_capacity(items.len());
     for item in items {
+        if let ReturnExpr::Aggregate { span, .. } = item.expr {
+            return Err(GqlError::unsupported(
+                span,
+                "aggregate WITH projections require row-stream aggregation from a later read phase",
+            ));
+        }
         let (name, binding) = bind_scoped_item(item, scope, source, target)?;
         if next.insert(name.clone(), binding).is_some() {
             return Err(GqlError::bind(
@@ -646,27 +664,51 @@ fn bind_scoped_returns(
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut bindings = Vec::with_capacity(items.len());
     for item in items {
-        let (name, scoped) = bind_scoped_item(item, scope, source, target)?;
+        let name = projection_name(item);
         if !seen.insert(name.clone()) {
             return Err(GqlError::bind(
                 item.span,
                 format!("duplicate return name `{name}`"),
             ));
         }
-        let binding = match scoped {
-            ScopedBinding::Node(side) => ReturnBinding::Node { side, name },
-            ScopedBinding::Relationship { var_len: false } => ReturnBinding::Relationship { name },
-            ScopedBinding::Relationship { var_len: true } => {
+        let binding = if let ReturnExpr::Aggregate {
+            func,
+            distinct,
+            arg,
+            span,
+            ..
+        } = &item.expr
+        {
+            if *distinct {
                 return Err(GqlError::unsupported(
-                    item.span,
-                    "RETURN relationship variables over variable-length patterns require path support",
+                    *span,
+                    "aggregate DISTINCT is implemented in Phase 3D",
                 ));
             }
-            ScopedBinding::Property { side, property } => ReturnBinding::Property {
-                side,
-                property,
+            ReturnBinding::Aggregate {
+                func: bind_aggregate_func(*func),
+                arg: bind_aggregate_arg(*func, arg, scope, source, target)?,
                 name,
-            },
+            }
+        } else {
+            let (_, scoped) = bind_scoped_item(item, scope, source, target)?;
+            match scoped {
+                ScopedBinding::Node(side) => ReturnBinding::Node { side, name },
+                ScopedBinding::Relationship { var_len: false } => {
+                    ReturnBinding::Relationship { name }
+                }
+                ScopedBinding::Relationship { var_len: true } => {
+                    return Err(GqlError::unsupported(
+                        item.span,
+                        "RETURN relationship variables over variable-length patterns require path support",
+                    ));
+                }
+                ScopedBinding::Property { side, property } => ReturnBinding::Property {
+                    side,
+                    property,
+                    name,
+                },
+            }
         };
         bindings.push(binding);
     }
@@ -710,8 +752,110 @@ fn bind_scoped_item(
                 "RETURN functions are implemented in a later read phase",
             ));
         }
+        ReturnExpr::Aggregate { span, .. } => {
+            return Err(GqlError::unsupported(
+                *span,
+                "aggregate expressions are only supported in RETURN",
+            ));
+        }
     };
     Ok((projection_name(item), binding))
+}
+
+fn bind_aggregate_func(func: ast::AggregateFunc) -> AggregateFunc {
+    match func {
+        ast::AggregateFunc::Count => AggregateFunc::Count,
+        ast::AggregateFunc::Sum => AggregateFunc::Sum,
+        ast::AggregateFunc::Avg => AggregateFunc::Avg,
+        ast::AggregateFunc::Min => AggregateFunc::Min,
+        ast::AggregateFunc::Max => AggregateFunc::Max,
+        ast::AggregateFunc::Collect => AggregateFunc::Collect,
+    }
+}
+
+fn bind_aggregate_arg(
+    func: ast::AggregateFunc,
+    arg: &ast::AggregateArg,
+    scope: &BindingScope,
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<AggregateArg, GqlError> {
+    match arg {
+        ast::AggregateArg::All { span } => {
+            if func == ast::AggregateFunc::Count {
+                Ok(AggregateArg::All)
+            } else {
+                Err(GqlError::bind(
+                    *span,
+                    "only count(*) may use '*' as an aggregate argument",
+                ))
+            }
+        }
+        ast::AggregateArg::Var { var, span } => match scope.get(&var.text) {
+            Some(ScopedBinding::Node(side)) if aggregate_accepts_value(func) => {
+                Ok(AggregateArg::Node(*side))
+            }
+            Some(ScopedBinding::Relationship { var_len: false })
+                if aggregate_accepts_value(func) =>
+            {
+                Ok(AggregateArg::Relationship)
+            }
+            Some(ScopedBinding::Relationship { var_len: true }) => Err(GqlError::unsupported(
+                *span,
+                "aggregates over variable-length relationships require path support",
+            )),
+            Some(_) => Err(GqlError::bind(
+                *span,
+                format!(
+                    "aggregate `{}` requires a property argument",
+                    aggregate_name(func)
+                ),
+            )),
+            None => Err(GqlError::bind(
+                *span,
+                format!("unknown aggregate variable `{}`", var.text),
+            )),
+        },
+        ast::AggregateArg::Property {
+            var,
+            property,
+            span: _,
+        } => match scope.get(&var.text) {
+            Some(ScopedBinding::Node(side)) => {
+                validate_property(*side, &property.text, source, target, property.span)?;
+                Ok(AggregateArg::Property {
+                    side: *side,
+                    property: property.text.clone(),
+                })
+            }
+            Some(_) => Err(GqlError::bind(
+                var.span,
+                format!("variable `{}` does not bind a node", var.text),
+            )),
+            None => Err(GqlError::bind(
+                var.span,
+                format!("unknown aggregate variable `{}`", var.text),
+            )),
+        },
+    }
+}
+
+fn aggregate_accepts_value(func: ast::AggregateFunc) -> bool {
+    matches!(
+        func,
+        ast::AggregateFunc::Count | ast::AggregateFunc::Collect
+    )
+}
+
+fn aggregate_name(func: ast::AggregateFunc) -> &'static str {
+    match func {
+        ast::AggregateFunc::Count => "count",
+        ast::AggregateFunc::Sum => "sum",
+        ast::AggregateFunc::Avg => "avg",
+        ast::AggregateFunc::Min => "min",
+        ast::AggregateFunc::Max => "max",
+        ast::AggregateFunc::Collect => "collect",
+    }
 }
 
 fn projection_name(item: &ReturnItem) -> String {
@@ -722,6 +866,7 @@ fn projection_name(item: &ReturnItem) -> String {
         ReturnExpr::Var { var, .. } => var.text.clone(),
         ReturnExpr::Property { var, property, .. } => format!("{}.{}", var.text, property.text),
         ReturnExpr::Func { name, .. } => name.text.clone(),
+        ReturnExpr::Aggregate { name, .. } => name.text.clone(),
     }
 }
 
@@ -732,6 +877,7 @@ fn bind_scoped_sort_items(
     source: &BoundNode,
     target: &BoundNode,
 ) -> Result<Vec<SortBinding>, GqlError> {
+    let has_aggregate = returns.iter().any(ReturnBinding::is_aggregate);
     items
         .iter()
         .map(|item| {
@@ -739,7 +885,7 @@ fn bind_scoped_sort_items(
                 SortKey::Alias { alias, .. } => {
                     if returns
                         .iter()
-                        .any(|binding| binding.name() == alias.text && binding.is_property())
+                        .any(|binding| binding.name() == alias.text && binding.is_sortable_scalar())
                     {
                         SortBindingKey::ReturnName(alias.text.clone())
                     } else if returns.iter().any(|binding| binding.name() == alias.text) {
@@ -750,6 +896,12 @@ fn bind_scoped_sort_items(
                     } else if let Some(ScopedBinding::Property { side, property }) =
                         scope.get(&alias.text)
                     {
+                        if has_aggregate {
+                            return Err(GqlError::unsupported(
+                                alias.span,
+                                "aggregate queries must ORDER BY returned property or aggregate aliases",
+                            ));
+                        }
                         SortBindingKey::Property {
                             side: *side,
                             property: property.clone(),
@@ -770,27 +922,48 @@ fn bind_scoped_sort_items(
                     var,
                     property,
                     span: _,
-                } => match scope.get(&var.text) {
-                    Some(ScopedBinding::Node(side)) => {
-                        validate_property(*side, &property.text, source, target, property.span)?;
-                        SortBindingKey::Property {
-                            side: *side,
-                            property: property.text.clone(),
+                } => {
+                    if has_aggregate {
+                        if let Some(binding) =
+                            returned_property_binding(returns, scope, &var.text, &property.text)
+                        {
+                            SortBindingKey::ReturnName(binding.name().to_string())
+                        } else {
+                            return Err(GqlError::unsupported(
+                                item.span,
+                                "aggregate queries must ORDER BY returned property or aggregate aliases",
+                            ));
+                        }
+                    } else {
+                        match scope.get(&var.text) {
+                            Some(ScopedBinding::Node(side)) => {
+                                validate_property(
+                                    *side,
+                                    &property.text,
+                                    source,
+                                    target,
+                                    property.span,
+                                )?;
+                                SortBindingKey::Property {
+                                    side: *side,
+                                    property: property.text.clone(),
+                                }
+                            }
+                            Some(_) => {
+                                return Err(GqlError::bind(
+                                    var.span,
+                                    format!("variable `{}` does not bind a node", var.text),
+                                ));
+                            }
+                            None => {
+                                return Err(GqlError::bind(
+                                    var.span,
+                                    format!("unknown ORDER BY variable `{}`", var.text),
+                                ));
+                            }
                         }
                     }
-                    Some(_) => {
-                        return Err(GqlError::bind(
-                            var.span,
-                            format!("variable `{}` does not bind a node", var.text),
-                        ));
-                    }
-                    None => {
-                        return Err(GqlError::bind(
-                            var.span,
-                            format!("unknown ORDER BY variable `{}`", var.text),
-                        ));
-                    }
-                },
+                }
             };
             Ok(SortBinding {
                 key,
@@ -798,6 +971,27 @@ fn bind_scoped_sort_items(
             })
         })
         .collect()
+}
+
+fn returned_property_binding<'a>(
+    returns: &'a [ReturnBinding],
+    scope: &BindingScope,
+    var: &str,
+    property: &str,
+) -> Option<&'a ReturnBinding> {
+    let Some(ScopedBinding::Node(side)) = scope.get(var) else {
+        return None;
+    };
+    returns.iter().find(|binding| {
+        matches!(
+            binding,
+            ReturnBinding::Property {
+                side: binding_side,
+                property: binding_property,
+                ..
+            } if binding_side == side && binding_property == property
+        )
+    })
 }
 
 fn bind_predicates(

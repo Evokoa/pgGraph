@@ -16,7 +16,8 @@ pub(crate) use parser::parse_statement;
 #[cfg(test)]
 mod tests {
     use super::ast::{
-        CmpOp, Direction, Expr, Literal, LiteralValue, Operand, ReturnExpr, SortKey, Statement,
+        AggregateArg, AggregateFunc, CmpOp, Direction, Expr, Literal, LiteralValue, Operand,
+        ReturnExpr, SortKey, Statement,
     };
     use super::errors::GqlErrorKind;
     use super::parse;
@@ -106,12 +107,38 @@ mod tests {
     }
 
     #[test]
-    fn parses_count_return_function() {
-        let parsed = parse("MATCH (u:users) RETURN count(u) AS total").expect("query should parse");
+    fn parses_aggregate_return_functions() {
+        let parsed = parse(
+            "MATCH (u:users) RETURN count(*) AS total, sum(u.age) AS total_age, collect(DISTINCT u.name) AS names",
+        )
+        .expect("query should parse");
         let item = &parsed.return_.items[0];
 
-        assert!(matches!(&item.expr, ReturnExpr::Func { .. }));
+        assert!(matches!(
+            &item.expr,
+            ReturnExpr::Aggregate {
+                func: AggregateFunc::Count,
+                arg: AggregateArg::All { .. },
+                ..
+            }
+        ));
         assert_eq!(item.alias_text(), Some("total"));
+        assert!(matches!(
+            &parsed.return_.items[1].expr,
+            ReturnExpr::Aggregate {
+                func: AggregateFunc::Sum,
+                arg: AggregateArg::Property { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &parsed.return_.items[2].expr,
+            ReturnExpr::Aggregate {
+                func: AggregateFunc::Collect,
+                distinct: true,
+                ..
+            }
+        ));
     }
 
     #[test]

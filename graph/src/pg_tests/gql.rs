@@ -311,6 +311,165 @@ fn gql_optional_match_hydrates_source_with_null_target_and_relationship() {
 }
 
 #[pg_test]
+fn gql_aggregates_match_sql_grouping_and_numeric_results() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Cara', 29), ('u4', 'Drew', 31)",
+    )
+    .expect("insert aggregate users failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f2', 'u3', 'u2'), ('f3', 'u4', 'u1')",
+    )
+    .expect("insert aggregate friendships failed");
+    build_friendship_fixture_graph();
+
+    let (matches_sql, group_count, bob_names) = Spi::connect(|client| {
+        let row = client
+            .select(
+                "WITH gql_rows AS (
+                     SELECT jsonb_agg(row ORDER BY row->>'friend_name') AS rows,
+                            count(*)::bigint AS group_count
+                     FROM graph.gql(
+                         'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                          RETURN v.name AS friend_name,
+                                 count(u) AS users,
+                                 sum(u.age) AS total_age,
+                                 avg(u.age) AS avg_age,
+                                 min(u.age) AS youngest,
+                                 max(u.age) AS oldest,
+                                 collect(u.name) AS names
+                          ORDER BY friend_name',
+                         hydrate := true
+                     )
+                 ),
+                 sql_rows AS (
+                     SELECT jsonb_agg(
+                                jsonb_build_object(
+                                    'friend_name', friend_name,
+                                    'users', users,
+                                    'total_age', total_age,
+                                    'avg_age', avg_age,
+                                    'youngest', youngest,
+                                    'oldest', oldest,
+                                    'names', names
+                                )
+                                ORDER BY friend_name
+                            ) AS rows
+                     FROM (
+                         SELECT v.name AS friend_name,
+                                count(u.id)::bigint AS users,
+                                sum(u.age)::float8 AS total_age,
+                                avg(u.age)::float8 AS avg_age,
+                                min(u.age)::int AS youngest,
+                                max(u.age)::int AS oldest,
+                                jsonb_agg(to_jsonb(u.name) ORDER BY u.id) AS names
+                         FROM public.graph_test_users_pgtest u
+                         JOIN public.graph_test_friendships_pgtest f ON f.user_id = u.id
+                         JOIN public.graph_test_users_pgtest v ON v.id = f.friend_id
+                         GROUP BY v.name
+                     ) expected
+                 )
+                 SELECT gql_rows.rows = sql_rows.rows,
+                        gql_rows.group_count,
+                        (
+                            SELECT jsonb_agg(row->'names')->0
+                            FROM graph.gql(
+                                'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                                 RETURN v.name AS friend_name, collect(u.name) AS names
+                                 ORDER BY friend_name',
+                                hydrate := true
+                            )
+                            WHERE row->>'friend_name' = 'Bob'
+                        )
+                 FROM gql_rows, sql_rows",
+                None,
+                &[],
+            )
+            .expect("aggregate comparison query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<bool>(1)
+                .expect("aggregate equality failed")
+                .unwrap_or(false),
+            row.get::<i64>(2)
+                .expect("aggregate group count failed")
+                .unwrap_or_default(),
+            row.get::<pgrx::JsonB>(3)
+                .expect("aggregate Bob names failed")
+                .unwrap(),
+        ))
+    })
+    .expect("aggregate comparison failed");
+
+    assert!(matches_sql);
+    assert_eq!(group_count, 2);
+    assert_eq!(bob_names.0, serde_json::json!(["Alice", "Cara"]));
+}
+
+#[pg_test]
+fn gql_aggregates_return_empty_group_and_optional_null_counts() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (empty_count, empty_sum_is_null, empty_names, optional_rows, optional_matches) =
+        Spi::connect(|client| {
+            let empty = client
+                .select(
+                    "SELECT (row #>> '{rows}')::bigint,
+                            row->'total_age' = 'null'::jsonb,
+                            row->'names'
+                     FROM graph.gql(
+                         'MATCH (u:graph_test_users_pgtest)
+                          WHERE u.name = ''Missing''
+                          RETURN count(*) AS rows, sum(u.age) AS total_age, collect(u.name) AS names',
+                         hydrate := true
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("empty aggregate gql query failed")
+                .first();
+            let optional = client
+                .select(
+                    "SELECT (row #>> '{source_rows}')::bigint,
+                            (row #>> '{matched_targets}')::bigint
+                     FROM graph.gql(
+                         'OPTIONAL MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                          WHERE v.name = ''Alice''
+                          RETURN count(*) AS source_rows, count(v) AS matched_targets',
+                         hydrate := true
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("optional aggregate gql query failed")
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                empty.get::<i64>(1).expect("empty count failed").unwrap_or_default(),
+                empty.get::<bool>(2).expect("empty sum failed").unwrap_or(false),
+                empty.get::<pgrx::JsonB>(3).expect("empty names failed").unwrap(),
+                optional
+                    .get::<i64>(1)
+                    .expect("optional rows failed")
+                    .unwrap_or_default(),
+                optional
+                    .get::<i64>(2)
+                    .expect("optional matches failed")
+                    .unwrap_or_default(),
+            ))
+        })
+        .expect("aggregate null comparison failed");
+
+    assert_eq!(empty_count, 0);
+    assert!(empty_sum_is_null);
+    assert_eq!(empty_names.0, serde_json::json!([]));
+    assert_eq!(optional_rows, 2);
+    assert_eq!(optional_matches, 0);
+}
+
+#[pg_test]
 fn gql_denies_without_select_on_bound_tables() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

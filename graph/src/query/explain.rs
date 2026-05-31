@@ -7,11 +7,7 @@ pub(crate) fn explain(plan: &PhysicalPlan) -> String {
     let returns = plan
         .returns
         .iter()
-        .map(|slot| match slot {
-            ReturnSlot::Node { name, .. }
-            | ReturnSlot::Relationship { name }
-            | ReturnSlot::Property { name, .. } => name.as_str(),
-        })
+        .map(ReturnSlot::name)
         .collect::<Vec<_>>()
         .join(", ");
     let op = if plan.optional {
@@ -37,11 +33,7 @@ pub(crate) fn explain_node_scan(plan: &PhysicalNodeScan) -> String {
     let returns = plan
         .returns
         .iter()
-        .map(|slot| match slot {
-            ReturnSlot::Node { name, .. }
-            | ReturnSlot::Relationship { name }
-            | ReturnSlot::Property { name, .. } => name.as_str(),
-        })
+        .map(ReturnSlot::name)
         .collect::<Vec<_>>()
         .join(", ");
     format!(

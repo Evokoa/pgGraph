@@ -133,6 +133,18 @@ optional GQL row counts and null target counts against equivalent PostgreSQL
 left-outer SQL. Node-only optional matches and `WITH ... OPTIONAL MATCH`
 multi-pattern joins remain deferred to later row-stream join planning.
 
+Status note, 2026-05-31: 3C is closed for `RETURN` aggregates over the current
+node-only and single-relationship row streams. `graph.gql()` now parses and
+binds `count`, `sum`, `avg`, `min`, `max`, and `collect`, treats
+non-aggregate `RETURN` items as implicit grouping keys, applies ordering and
+pagination after aggregation, returns an empty aggregate group for aggregate-only
+empty inputs, and preserves optional-match null-extension semantics for
+aggregate counts. SQL-visible coverage compares grouping and numeric aggregate
+results against equivalent PostgreSQL aggregation and covers empty-group/null
+behavior. Aggregate `DISTINCT`, aggregate `WITH` projections, and aggregate
+arguments over future path values remain deferred to the later DISTINCT and
+multi-stage row-stream planner work.
+
 ## Phase 4 — Advanced writes + optional openCypher
 
 | Slice | Depends on | Merge gate |

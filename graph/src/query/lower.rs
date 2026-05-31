@@ -50,6 +50,9 @@ fn lower_node_scan(plan: LogicalNodeScan) -> PhysicalNodeScan {
                     property,
                     name,
                 },
+                ReturnBinding::Aggregate { func, arg, name } => {
+                    ReturnSlot::Aggregate { func, arg, name }
+                }
             })
             .collect(),
     }
@@ -88,6 +91,9 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
                     property,
                     name,
                 },
+                ReturnBinding::Aggregate { func, arg, name } => {
+                    ReturnSlot::Aggregate { func, arg, name }
+                }
             })
             .collect(),
     }
@@ -181,6 +187,9 @@ fn lower_delete_edge(plan: LogicalDeleteEdge) -> PhysicalDeleteEdge {
                     property,
                     name,
                 },
+                ReturnBinding::Aggregate { func, arg, name } => {
+                    ReturnSlot::Aggregate { func, arg, name }
+                }
             })
             .collect(),
     }

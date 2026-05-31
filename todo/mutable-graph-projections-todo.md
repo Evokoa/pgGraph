@@ -534,7 +534,7 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 | `OPTIONAL MATCH` | phase_3 | required | required | required | required | Needs null-extension semantics. |
 | `WITH` | phase_3 | required | required | required | required | Needed for multi-stage queries. |
 | `DISTINCT` | phase_3 | required | required | required | required | Memory limits required. |
-| Aggregates: `count`, `sum`, `avg`, `min`, `max`, `collect` | phase_3 | required | required | required | required | Start with `count` if staged. |
+| Aggregates: `count`, `sum`, `avg`, `min`, `max`, `collect` | phase_3 | supported | supported | supported | supported | `RETURN` aggregates over node-only and single-relationship row streams; aggregate `DISTINCT` and aggregate `WITH` remain later row-stream work. |
 | Path functions: `nodes`, `relationships`, `length` | phase_3 | required | required | required | required | Path value model must be stable. |
 | `CREATE` registered node/edge rows | phase_2 | required | required | required | required | PostgreSQL-first, registered labels/types only. |
 | `SET` mapped properties | phase_2 | required | required | required | required | Requires type mapping and row locks. |

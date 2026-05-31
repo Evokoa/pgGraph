@@ -1,9 +1,10 @@
 //! Recursive-descent parser for the supported GQL subset.
 
 use super::ast::{
-    CmpOp, CreateClause, CreateQuery, DeleteClause, DeleteQuery, Direction, Expr, Ident, Literal,
-    LiteralValue, MatchClause, NodePat, Operand, Pattern, PropertyRef, Query, RelPat, ReturnClause,
-    ReturnExpr, ReturnItem, SetClause, SetQuery, SortItem, SortKey, Statement, VarLen, WithClause,
+    AggregateArg, AggregateFunc, CmpOp, CreateClause, CreateQuery, DeleteClause, DeleteQuery,
+    Direction, Expr, Ident, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern,
+    PropertyRef, Query, RelPat, ReturnClause, ReturnExpr, ReturnItem, SetClause, SetQuery,
+    SortItem, SortKey, Statement, VarLen, WithClause,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
@@ -488,6 +489,19 @@ impl Parser {
     fn parse_return_expr(&mut self) -> Result<ReturnExpr, GqlError> {
         let ident = self.parse_ident()?;
         if self.consume(TokKind::LParen).is_some() {
+            if let Some(func) = aggregate_func(&ident.text) {
+                let distinct = self.consume(TokKind::Distinct).is_some();
+                let arg = self.parse_aggregate_arg()?;
+                self.expect(TokKind::RParen, "expected ')' after aggregate argument")?;
+                let end = self.previous().span.end as usize;
+                return Ok(ReturnExpr::Aggregate {
+                    func,
+                    distinct,
+                    arg,
+                    name: ident.clone(),
+                    span: Span::new(ident.span.start as usize, end),
+                });
+            }
             let mut args = Vec::new();
             if self.consume(TokKind::RParen).is_none() {
                 loop {
@@ -516,6 +530,27 @@ impl Parser {
             Ok(ReturnExpr::Var {
                 span: ident.span,
                 var: ident,
+            })
+        }
+    }
+
+    fn parse_aggregate_arg(&mut self) -> Result<AggregateArg, GqlError> {
+        if self.consume(TokKind::Star).is_some() {
+            let span = self.previous().span;
+            return Ok(AggregateArg::All { span });
+        }
+        let var = self.parse_ident()?;
+        if self.consume(TokKind::Dot).is_some() {
+            let property = self.parse_ident()?;
+            Ok(AggregateArg::Property {
+                span: Span::new(var.span.start as usize, property.span.end as usize),
+                var,
+                property,
+            })
+        } else {
+            Ok(AggregateArg::Var {
+                span: var.span,
+                var,
             })
         }
     }
@@ -888,6 +923,18 @@ fn join_expr_span(lhs: &Expr, rhs: &Expr) -> Span {
     let lhs = expr_span(lhs);
     let rhs = expr_span(rhs);
     Span::new(lhs.start as usize, rhs.end as usize)
+}
+
+fn aggregate_func(name: &str) -> Option<AggregateFunc> {
+    match name.to_ascii_lowercase().as_str() {
+        "count" => Some(AggregateFunc::Count),
+        "sum" => Some(AggregateFunc::Sum),
+        "avg" => Some(AggregateFunc::Avg),
+        "min" => Some(AggregateFunc::Min),
+        "max" => Some(AggregateFunc::Max),
+        "collect" => Some(AggregateFunc::Collect),
+        _ => None,
+    }
 }
 
 fn expr_span(expr: &Expr) -> Span {

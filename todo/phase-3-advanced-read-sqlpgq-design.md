@@ -83,6 +83,14 @@ with stable diagnostics.
   post-`WITH` optional joins remain later multi-pattern planner work.
 - **3C — Aggregates.** `count` (exists) → `sum`/`avg`/`min`/`max`/`collect`;
   grouping. Tests: correctness vs SQL aggregation, empty-group, null handling.
+
+  Status, 2026-05-31: `RETURN` aggregates are implemented for node-only and
+  single-relationship row streams. Non-aggregate return items are grouping keys;
+  aggregate-only empty inputs return one output row; optional-match null rows
+  participate in `count(*)` and are skipped by `count(expr)`, numeric
+  aggregates, `min`, and `max`. Aggregate `DISTINCT`, aggregate `WITH`
+  projections, and aggregate path arguments remain follow-up work for 3D and
+  the later multi-stage planner.
 - **3D — `DISTINCT`.** With memory limit (DR-2 style). Tests: dedup correctness,
   over-limit abort.
 - **3E — Path functions.** `nodes`/`relationships`/`length` over a stable path

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 fn fake_catalog() -> FakeCatalog {
     FakeCatalog::new()
-        .with_writable_label("users", 10, ["id", "name"], ["name"])
+        .with_writable_label("users", 10, ["id", "name", "age"], ["name"])
         .with_writable_label("companies", 20, ["id", "name"], ["name"])
         .with_edge("works_at", 10, 20)
         .with_mapped_edge("friend", 10, 10, 30, "user_id", "friend_id", false)
@@ -186,7 +186,6 @@ fn binder_rejects_unknown_label_and_relationship_type() {
 #[test]
 fn binder_rejects_out_of_slice_1b_shapes() {
     for query in [
-        "MATCH (u:users)-[:works_at]->(c:companies) RETURN count(u)",
         "MATCH (u:users)-[:works_at]->(c:companies) RETURN DISTINCT u",
         "MATCH (u:users)-[:works_at*0..1]->(c:companies) RETURN u",
         "MATCH (u:users)-[:works_at*1..65]->(c:companies) RETURN u",
@@ -201,6 +200,72 @@ fn binder_rejects_out_of_slice_1b_shapes() {
             "{query}"
         );
     }
+}
+
+#[test]
+fn binder_accepts_aggregate_return_slots_and_grouping_keys() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN c.name AS company, count(u) AS users, sum(u.age) AS total_age \
+         ORDER BY users DESC",
+    );
+    let physical = lower(logical);
+
+    assert_eq!(physical.returns.len(), 3);
+    assert!(matches!(
+        physical.returns[1],
+        ReturnSlot::Aggregate {
+            func: super::logical_plan::AggregateFunc::Count,
+            ..
+        }
+    ));
+    assert_eq!(physical.order_by.len(), 1);
+}
+
+#[test]
+fn binder_orders_aggregate_query_by_returned_property_expression() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN c.name, count(u) AS users ORDER BY c.name",
+    );
+
+    assert_eq!(logical.order_by.len(), 1);
+}
+
+#[test]
+fn binder_rejects_aggregate_distinct_until_distinct_phase() {
+    let ast = parse("MATCH (u:users) RETURN collect(DISTINCT u.name) AS names").unwrap();
+
+    let err = bind_statement(&crate::gql::ast::Statement::Read(ast), &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("aggregate DISTINCT"));
+}
+
+#[test]
+fn binder_rejects_aggregate_order_by_scope_alias_not_returned() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users) WITH u.name AS name, u RETURN count(*) AS total ORDER BY name",
+    )
+    .unwrap();
+
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("aggregate queries must ORDER BY"));
+}
+
+#[test]
+fn binder_rejects_delete_return_aggregates() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users)-[r:friend]->(v:users) DELETE r RETURN count(*)",
+    )
+    .unwrap();
+
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("aggregates over DELETE"));
 }
 
 #[test]
@@ -555,6 +620,93 @@ fn optional_match_predicate_miss_null_extends_source_row() {
     assert_eq!(projected[0]["c"]["id"], "c1");
     assert_eq!(projected[1]["u"]["id"], "u2");
     assert!(projected[1]["c"].is_null());
+}
+
+#[test]
+fn aggregate_projection_groups_and_computes_numeric_values() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN c.name AS company,
+                count(u) AS users,
+                sum(u.age) AS total_age,
+                avg(u.age) AS avg_age,
+                min(u.age) AS youngest,
+                max(u.age) AS oldest,
+                collect(u.name) AS names
+         ORDER BY company",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["company"], "Acme");
+    assert_eq!(projected[0]["users"], 1);
+    assert_eq!(projected[0]["total_age"], 37.0);
+    assert_eq!(projected[0]["avg_age"], 37.0);
+    assert_eq!(projected[0]["youngest"], 37);
+    assert_eq!(projected[0]["oldest"], 37);
+    assert_eq!(projected[0]["names"], serde_json::json!(["Ada"]));
+}
+
+#[test]
+fn aggregate_projection_returns_empty_group_for_empty_input() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users) WHERE u.name = 'Missing' \
+         RETURN count(*) AS rows, sum(u.age) AS total_age, collect(u.name) AS names",
+    )
+    .unwrap();
+    let logical = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::physical_plan::PhysicalStatement::NodeScan(physical) = lower_statement(logical)
+    else {
+        panic!("expected node scan");
+    };
+    let engine = engine_fixture();
+    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let projected = project_node_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["rows"], 0);
+    assert!(projected[0]["total_age"].is_null());
+    assert_eq!(projected[0]["names"], serde_json::json!([]));
+}
+
+#[test]
+fn optional_aggregate_counts_null_extended_rows_like_left_join() {
+    let logical = bind_query(
+        "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE c.name = 'Acme' RETURN count(*) AS source_rows, count(c) AS matched_targets",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["source_rows"], 2);
+    assert_eq!(projected[0]["matched_targets"], 1);
 }
 
 #[test]
@@ -969,11 +1121,11 @@ fn hydrated_fixture() -> HydratedRows {
     HashMap::from([
         (
             (10, "u1".to_string()),
-            serde_json::json!({"id": "u1", "name": "Ada"}),
+            serde_json::json!({"id": "u1", "name": "Ada", "age": 37}),
         ),
         (
             (10, "u2".to_string()),
-            serde_json::json!({"id": "u2", "name": "Linus"}),
+            serde_json::json!({"id": "u2", "name": "Linus", "age": 41}),
         ),
         (
             (20, "c1".to_string()),

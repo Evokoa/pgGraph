@@ -217,22 +217,72 @@ pub(crate) enum ReturnBinding {
         /// Return column name.
         name: String,
     },
+    /// Aggregate value.
+    Aggregate {
+        /// Aggregate function.
+        func: AggregateFunc,
+        /// Aggregate input.
+        arg: AggregateArg,
+        /// Return column name.
+        name: String,
+    },
 }
 
 impl ReturnBinding {
     /// Return the output column name.
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Node { name, .. } | Self::Relationship { name } | Self::Property { name, .. } => {
-                name
-            }
+            Self::Node { name, .. }
+            | Self::Relationship { name }
+            | Self::Property { name, .. }
+            | Self::Aggregate { name, .. } => name,
         }
     }
 
-    /// Return whether this binding projects a scalar property value.
-    pub(crate) fn is_property(&self) -> bool {
-        matches!(self, Self::Property { .. })
+    /// Return whether this binding projects a scalar value sortable by output name.
+    pub(crate) fn is_sortable_scalar(&self) -> bool {
+        matches!(self, Self::Property { .. } | Self::Aggregate { .. })
     }
+
+    /// Return whether this binding is an aggregate.
+    pub(crate) fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Aggregate { .. })
+    }
+}
+
+/// Bound aggregate function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AggregateFunc {
+    /// `count(...)`.
+    Count,
+    /// `sum(...)`.
+    Sum,
+    /// `avg(...)`.
+    Avg,
+    /// `min(...)`.
+    Min,
+    /// `max(...)`.
+    Max,
+    /// `collect(...)`.
+    Collect,
+}
+
+/// Bound aggregate argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AggregateArg {
+    /// `*`.
+    All,
+    /// Node variable.
+    Node(BindingSide),
+    /// Relationship variable.
+    Relationship,
+    /// Node property.
+    Property {
+        /// Source or target binding.
+        side: BindingSide,
+        /// Source property name.
+        property: String,
+    },
 }
 
 /// Bound sort key.

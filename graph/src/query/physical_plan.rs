@@ -1,6 +1,8 @@
 //! Physical plans executable against engine topology stores or PostgreSQL SPI.
 
-use super::logical_plan::{BindingSide, BoundDirection, HopBounds, Predicate, SortBinding};
+use super::logical_plan::{
+    AggregateArg, AggregateFunc, BindingSide, BoundDirection, HopBounds, Predicate, SortBinding,
+};
 
 /// Maximum GQL matches collected before sorting/projection.
 pub(crate) const MAX_GQL_RESULT_ROWS: usize = 10_000;
@@ -194,6 +196,32 @@ pub(crate) enum ReturnSlot {
         /// Return column name.
         name: String,
     },
+    /// Aggregate value.
+    Aggregate {
+        /// Aggregate function.
+        func: AggregateFunc,
+        /// Aggregate input.
+        arg: AggregateArg,
+        /// Return column name.
+        name: String,
+    },
+}
+
+impl ReturnSlot {
+    /// Return the output column name.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Node { name, .. }
+            | Self::Relationship { name }
+            | Self::Property { name, .. }
+            | Self::Aggregate { name, .. } => name,
+        }
+    }
+
+    /// Return whether this slot contains an aggregate value.
+    pub(crate) fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Aggregate { .. })
+    }
 }
 
 impl PhysicalPlan {

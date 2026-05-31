@@ -409,6 +409,54 @@ pub(crate) enum ReturnExpr {
         /// Expression span.
         span: Span,
     },
+    /// Aggregate function call.
+    Aggregate {
+        /// Aggregate function.
+        func: AggregateFunc,
+        /// Whether the aggregate uses DISTINCT.
+        distinct: bool,
+        /// Aggregate argument.
+        arg: AggregateArg,
+        /// Function name as written.
+        name: Ident,
+        /// Expression span.
+        span: Span,
+    },
+}
+
+/// Supported aggregate functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AggregateFunc {
+    /// `count(...)`.
+    Count,
+    /// `sum(...)`.
+    Sum,
+    /// `avg(...)`.
+    Avg,
+    /// `min(...)`.
+    Min,
+    /// `max(...)`.
+    Max,
+    /// `collect(...)`.
+    Collect,
+}
+
+/// Aggregate argument.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AggregateArg {
+    /// `*`.
+    All { span: Span },
+    /// A variable.
+    Var { var: Ident, span: Span },
+    /// A variable property.
+    Property {
+        /// Variable name.
+        var: Ident,
+        /// Property name.
+        property: Ident,
+        /// Argument span.
+        span: Span,
+    },
 }
 
 /// Sort item.
