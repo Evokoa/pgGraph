@@ -225,10 +225,9 @@ scales with churn, not graph size.
   rollback discards deltas; concurrent sessions isolated; out-of-band SQL
   catch-up via sync log; crash/reload rebuilds (doesn't trust) overlay.
 - **2C — `CREATE` mapped node.** SPI-first insert + delta. Tests:
-  read-your-own-writes, ACL/RLS/tenant, unregistered-label rejection, edge-type
-  ceiling. Current slice supports the public SPI-first insert/result/delta path;
-  remaining tests and node-topology visibility decisions are tracked in
-  `build-sequence.md`.
+  read-your-own-writes, ACL/RLS/tenant, unregistered-label rejection, and
+  read-only projection rejection. Public docs keep edge-row creation outside
+  the current write subset.
 - **2D — `SET` mapped property.** Tests: typed-column only, type-mismatch
   rejection, filter-index delta visibility.
 - **2E — `DELETE` mapped edge.** Tests: tombstone reduces neighbors, no cascade,

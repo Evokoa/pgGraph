@@ -818,7 +818,7 @@ fn bind_hops(rel: &RelPat) -> Result<HopBounds, GqlError> {
     if hops.min == 0 {
         return Err(GqlError::unsupported(
             rel.var_len.map_or(rel.span, |var_len| var_len.span),
-            "zero-hop variable-length relationships are not implemented yet",
+            "zero-hop variable-length relationships are outside the supported GQL subset",
         ));
     }
     if hops.max > MAX_BOUND_HOPS {

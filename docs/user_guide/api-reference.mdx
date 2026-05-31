@@ -497,7 +497,8 @@ return matched relationship rows, and emit one null-extended row for each source
 node with no qualifying target. Null-extended rows use JSON `null` for target
 nodes, target properties, and relationship values. Supported return values are
 node values, scalar properties, JSONB list/map properties, coordinate-only
-single-hop relationship identities, bounded relationship path values,
+single-hop relationship identities, bounded relationship path values with a
+minimum of at least one hop,
 `RETURN DISTINCT`, and `RETURN` aggregates: `count`, `sum`, `avg`, `min`,
 `max`, and `collect`. Registered JSONB source columns can be addressed with
 dotted property paths such as `u.profile.plan`; returned JSONB arrays and

@@ -72,7 +72,7 @@ Supported read coverage:
 | Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, or top-level single-relationship `OPTIONAL MATCH` |
 | Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
 | Direction | Outbound, inbound, and undirected relationship patterns |
-| Variable length | Bounded variable-length relationships with an explicit maximum |
+| Variable length | Bounded variable-length relationships with an explicit maximum and minimum of at least one hop |
 | Predicates | Property comparisons, null checks, membership, boolean combinations, JSONB `$parameters`, and dotted paths into registered JSONB property columns |
 | Return values | Node values, scalar properties, JSONB list/map properties, coordinate-only single-hop relationship identities, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
 | Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases, shadowing, and `WITH DISTINCT` row-stream deduplication |

@@ -129,12 +129,10 @@ openCypher compatibility.
   `graph.vacuum()`, `graph.maintenance()`, backup/restore, and crash recovery
   behave for each projection mode.
 - Define GUCs for projection mode defaults, mutable enablement, transaction
-  delta limits, compaction thresholds, and memory caps. Phase 2B has added
+  delta limits, compaction thresholds, and memory caps. Phase 2 added
   `graph.default_projection_mode`, `graph.mutable_enabled`, queued-build mode
-  persistence, the transaction-delta lifecycle skeleton, and internal
-  transaction-local edge overlay reads, and public GQL node-create deltas;
-  delta limits, compaction thresholds, and overlay memory caps remain for later
-  Phase 2 slices.
+  persistence, transaction-delta lifecycle coverage, public GQL node-create
+  deltas, delta limits, compaction recommendations, and overlay memory caps.
 - Define SQLSTATE policy for GQL syntax, unsupported feature, semantic,
   parameter, type mismatch, schema violation, write-on-read-only, and memory
   limit errors.
@@ -516,11 +514,11 @@ Phase gates:
 - Phase 1: read-only GQL parses, binds, plans, executes, explains, and rejects
   writes without requiring mutable overlay support.
 - Phase 2: GQL writes update PostgreSQL first, then transaction-local overlay
-  state. Current internal edge-overlay lifecycle coverage proves rollback
-  discard, commit cleanup, concurrent backend isolation, and query-time sync
-  catch-up for source-table writes. Internal crash coverage proves uncommitted
-  transaction edge overlays are not trusted after restart while the persisted
-  base graph reloads; mapped GQL writes still gate completion.
+  state. Public mapped `CREATE`, `SET`, `DELETE`, `REMOVE`, `DETACH DELETE`,
+  and `MERGE` coverage plus heavy transaction lifecycle tests prove rollback
+  discard, commit cleanup, concurrent backend isolation, query-time sync
+  catch-up for source-table writes, memory-limit aborts, and crash/reload
+  behavior for uncommitted transaction overlays.
 
 ## GQL Compatibility Matrix
 
@@ -550,9 +548,9 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 | Aggregates: `count`, `sum`, `avg`, `min`, `max`, `collect` | phase_3 | supported | supported | supported | supported | `RETURN` aggregates over node-only and single-relationship row streams; aggregate `DISTINCT` is supported. |
 | Path functions: `nodes`, `relationships`, `length` | phase_3 | supported | supported | supported | supported | Supported over bounded named relationship path values in final `RETURN`. |
 | SQL/PGQ typed adapter seam | phase_3 | n/a | supported | supported | supported | Internal hook-targeted adapter only; no SQL text parser or public SQL/PGQ API. |
-| `CREATE` registered node/edge rows | phase_2 | required | required | required | required | PostgreSQL-first, registered labels/types only. |
-| `SET` mapped properties | phase_2 | required | required | required | required | Requires type mapping and row locks. |
-| `DELETE` mapped relationships | phase_2 | required | required | required | required | No cascade in first write milestone. |
+| `CREATE` registered node rows | phase_2 | supported | supported | supported | supported | PostgreSQL-first, registered labels only; creating relationship rows is outside the current write subset. |
+| `SET` mapped properties | phase_2 | supported | supported | supported | supported | Single-node mapped property update with PostgreSQL type checks and row locking. |
+| `DELETE` mapped relationships | phase_2 | supported | supported | supported | supported | Single directed relationship backed by a registered edge row; endpoint nodes are not cascaded. |
 | `REMOVE` property/label | phase_4 | supported | supported | supported | supported | Single-node mapped property removal is supported for scalar columns and registered dotted JSONB paths; label removal is an explicit unsupported-shape rejection. |
 | `DETACH DELETE` | phase_4 | supported | supported | supported | supported | Single-node mapped detach delete is supported when incident relationships are backed by registered edge row tables. |
 | `MERGE` | phase_4 | supported | supported | supported | supported | Single-node mapped merge is supported by registered primary-key identity with lazy `ON CREATE`/`ON MATCH` branches and read-before-write locking. |
