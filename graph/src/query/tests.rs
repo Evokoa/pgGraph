@@ -18,6 +18,7 @@ fn fake_catalog() -> FakeCatalog {
         .with_writable_label("users", 10, ["id", "name"], ["name"])
         .with_writable_label("companies", 20, ["id", "name"], ["name"])
         .with_edge("works_at", 10, 20)
+        .with_mapped_edge("friend", 10, 10, 30, "user_id", "friend_id", false)
 }
 
 fn bind_query(query: &str) -> super::logical_plan::LogicalPlan {
@@ -83,6 +84,47 @@ fn binder_rejects_set_property_for_tenant_column() {
 
     assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
     assert!(err.to_string().contains("not a writable mapped column"));
+}
+
+#[test]
+fn binder_accepts_delete_for_mapped_edge_row() {
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users)-[r:friend]->(v:users) DELETE r RETURN u, v")
+            .unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::DeleteEdge(delete) = plan else {
+        panic!("expected delete edge plan");
+    };
+
+    assert_eq!(delete.source.var, "u");
+    assert_eq!(delete.target.var, "v");
+    assert_eq!(delete.rel_var, "r");
+    assert_eq!(delete.edge.edge_table_oid, 30);
+    assert_eq!(delete.edge.source_column, "user_id");
+    assert_eq!(delete.edge.target_column, "friend_id");
+    assert_eq!(delete.returns.len(), 2);
+}
+
+#[test]
+fn binder_rejects_delete_for_unmapped_relationship_row() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users)-[r:works_at]->(c:companies) DELETE r RETURN u",
+    )
+    .unwrap();
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("registered edge row table"));
+}
+
+#[test]
+fn binder_rejects_undirected_delete_edge() {
+    let ast = crate::gql::parse_statement("MATCH (u:users)-[r:friend]-(v:users) DELETE r RETURN u")
+        .unwrap();
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("directed relationship pattern"));
 }
 
 #[test]

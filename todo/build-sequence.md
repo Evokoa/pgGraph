@@ -77,6 +77,18 @@ PostgreSQL type-mismatch rejection, tenant-column rejection, same-backend typed
 filter-index visibility after the update, and rollback cleanup of the
 transaction-local filter delta.
 
+Status note, 2026-05-31: 2E is closed. Public `graph.gql()` accepts directed
+single-edge mapped relationship `DELETE` on `mutable_overlay` when the
+relationship is backed by a registered edge row table. The write deletes
+exactly one PostgreSQL edge row first, then records transaction-local edge
+tombstones; bidirectional registrations hide both neighbor directions and do
+not cascade to endpoint nodes. Directed reverse matches on self-referential
+bidirectional mappings delete the registered physical row when exactly one
+orientation exists, while opposite physical rows are rejected as ambiguous.
+SQL-visible coverage includes source-row delete, `csr_readonly` rejection,
+forward and reverse neighbor reduction, no endpoint cascade, ambiguous
+self-edge rejection, and rollback cleanup through `gql_delete_tx_lifecycle.sh`.
+
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 
 | Slice | Depends on | Merge gate |

@@ -1,9 +1,9 @@
 //! Recursive-descent parser for the supported GQL subset.
 
 use super::ast::{
-    CmpOp, CreateClause, CreateQuery, Direction, Expr, Ident, Literal, LiteralValue, MatchClause,
-    NodePat, Operand, Pattern, PropertyRef, Query, RelPat, ReturnClause, ReturnExpr, ReturnItem,
-    SetClause, SetQuery, SortItem, SortKey, Statement, VarLen,
+    CmpOp, CreateClause, CreateQuery, DeleteClause, DeleteQuery, Direction, Expr, Ident, Literal,
+    LiteralValue, MatchClause, NodePat, Operand, Pattern, PropertyRef, Query, RelPat, ReturnClause,
+    ReturnExpr, ReturnItem, SetClause, SetQuery, SortItem, SortKey, Statement, VarLen,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
@@ -50,6 +50,9 @@ impl Parser {
             TokKind::Match if self.statement_contains_set_before_return() => {
                 self.parse_set_query().map(Statement::Set)
             }
+            TokKind::Match if self.statement_contains_delete_before_return() => {
+                self.parse_delete_query().map(Statement::Delete)
+            }
             _ => self.parse_query().map(Statement::Read),
         }
     }
@@ -60,6 +63,14 @@ impl Parser {
             .skip(self.pos)
             .take_while(|token| token.kind != TokKind::Return && token.kind != TokKind::Eof)
             .any(|token| token.kind == TokKind::Set)
+    }
+
+    fn statement_contains_delete_before_return(&self) -> bool {
+        self.tokens
+            .iter()
+            .skip(self.pos)
+            .take_while(|token| token.kind != TokKind::Return && token.kind != TokKind::Eof)
+            .any(|token| token.kind == TokKind::Delete)
     }
 
     fn parse_query(&mut self) -> Result<Query, GqlError> {
@@ -137,6 +148,28 @@ impl Parser {
         })
     }
 
+    fn parse_delete_query(&mut self) -> Result<DeleteQuery, GqlError> {
+        let start = self.current().span.start as usize;
+        let match_ = self.parse_match_clause()?;
+        let where_ = if self.consume(TokKind::Where).is_some() {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let delete = self.parse_delete_clause()?;
+        let return_ = self.parse_return_clause()?;
+        self.reject_known_later_clauses()?;
+        let end = self.expect(TokKind::Eof, "expected end of query")?.span.end as usize;
+
+        Ok(DeleteQuery {
+            match_,
+            where_,
+            delete,
+            return_,
+            span: Span::new(start, end),
+        })
+    }
+
     fn parse_create_clause(&mut self) -> Result<CreateClause, GqlError> {
         let start = self
             .expect(TokKind::Create, "expected CREATE clause")?
@@ -164,6 +197,18 @@ impl Parser {
             target,
             value,
             span: Span::new(start, end),
+        })
+    }
+
+    fn parse_delete_clause(&mut self) -> Result<DeleteClause, GqlError> {
+        let start = self
+            .expect(TokKind::Delete, "expected DELETE clause")?
+            .span
+            .start as usize;
+        let var = self.parse_ident()?;
+        Ok(DeleteClause {
+            span: Span::new(start, var.span.end as usize),
+            var,
         })
     }
 

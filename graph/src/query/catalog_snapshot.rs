@@ -35,6 +35,26 @@ pub(crate) struct RelTypeInfo {
     pub(crate) from_table_oid: u32,
     /// Target node table OID.
     pub(crate) to_table_oid: u32,
+    /// Registered edge-row mapping when this relationship is backed by a
+    /// separate edge table.
+    pub(crate) edge_mapping: Option<EdgeMappingInfo>,
+}
+
+/// Source-table details required for mapped edge writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EdgeMappingInfo {
+    /// Registered edge row table OID.
+    pub(crate) edge_table_oid: u32,
+    /// Registered source node table OID.
+    pub(crate) source_table_oid: u32,
+    /// Registered target node table OID.
+    pub(crate) target_table_oid: u32,
+    /// Edge row column containing the source node key.
+    pub(crate) source_column: String,
+    /// Edge row column containing the target node key.
+    pub(crate) target_column: String,
+    /// Whether the edge was registered as bidirectional.
+    pub(crate) bidirectional: bool,
 }
 
 /// Catalog lookup port for semantic binding.
@@ -159,24 +179,42 @@ fn load_rels(
     }
     let mut rels = Vec::with_capacity(edges.len());
     for edge in edges {
-        let from_node_table = if registered_tables.contains(edge.from_table.as_str()) {
-            Some(edge.from_table.as_str())
-        } else {
-            edge_source_fk_table_oid(edge)?.and_then(|oid| registered_table_oids.get(&oid).copied())
-        };
+        let (from_node_table, edge_mapping) =
+            if registered_tables.contains(edge.from_table.as_str()) {
+                (Some(edge.from_table.as_str()), None)
+            } else {
+                let edge_table_oid = table_oid_from_name(&edge.from_table)?;
+                let source_table_oid = edge_source_fk_table_oid(edge)?;
+                let from_node_table =
+                    source_table_oid.and_then(|oid| registered_table_oids.get(&oid).copied());
+                let target_table_oid = table_oid_from_name(&edge.to_table)?;
+                let edge_mapping = source_table_oid.map(|source_table_oid| EdgeMappingInfo {
+                    edge_table_oid,
+                    source_table_oid,
+                    target_table_oid,
+                    source_column: edge.from_column.clone(),
+                    target_column: edge.to_column.clone(),
+                    bidirectional: edge.bidirectional,
+                });
+                (from_node_table, edge_mapping)
+            };
         let Some(from_node_table) = from_node_table else {
             continue;
         };
+        let source_table_oid = table_oid_from_name(from_node_table)?;
+        let target_table_oid = table_oid_from_name(&edge.to_table)?;
         rels.push(RelTypeInfo {
             rel_type: edge.label.clone(),
-            from_table_oid: table_oid_from_name(from_node_table)?,
-            to_table_oid: table_oid_from_name(&edge.to_table)?,
+            from_table_oid: source_table_oid,
+            to_table_oid: target_table_oid,
+            edge_mapping: edge_mapping.clone(),
         });
         if edge.bidirectional {
             rels.push(RelTypeInfo {
                 rel_type: edge.label.clone(),
-                from_table_oid: table_oid_from_name(&edge.to_table)?,
-                to_table_oid: table_oid_from_name(from_node_table)?,
+                from_table_oid: target_table_oid,
+                to_table_oid: source_table_oid,
+                edge_mapping,
             });
         }
     }
@@ -313,6 +351,34 @@ impl FakeCatalog {
             rel_type: rel_type.to_string(),
             from_table_oid,
             to_table_oid,
+            edge_mapping: None,
+        });
+        self
+    }
+
+    /// Add a directed relationship type backed by a mapped edge row table.
+    pub(crate) fn with_mapped_edge(
+        mut self,
+        rel_type: &str,
+        from_table_oid: u32,
+        to_table_oid: u32,
+        edge_table_oid: u32,
+        source_column: &str,
+        target_column: &str,
+        bidirectional: bool,
+    ) -> Self {
+        self.rels.push(RelTypeInfo {
+            rel_type: rel_type.to_string(),
+            from_table_oid,
+            to_table_oid,
+            edge_mapping: Some(EdgeMappingInfo {
+                edge_table_oid,
+                source_table_oid: from_table_oid,
+                target_table_oid: to_table_oid,
+                source_column: source_column.to_string(),
+                target_column: target_column.to_string(),
+                bidirectional,
+            }),
         });
         self
     }

@@ -22,7 +22,7 @@ adapters and broader graph-language coverage remain future work.
 | Edge registration | FK-style edges and edge-table style relationships through `graph.add_edge()` |
 | Search | Source-table SQL search over registered columns with `contains`, `exact`, `prefix`, and `token` modes |
 | Traversal | Bounded BFS and DFS over CSR edges with direction, edge type, table, tenant, filter, hydration, pagination, and circuit breaker options |
-| GQL | A documented GQL-compatible graph-pattern subset, single-node mapped `CREATE`, and single-node mapped property `SET`, returned as JSONB rows |
+| GQL | A documented GQL-compatible graph-pattern subset, single-node mapped `CREATE`, mapped property `SET`, and mapped edge-row `DELETE`, returned as JSONB rows |
 | Paths | Unweighted shortest path, weighted shortest path when edge weights are registered, readable path helpers, and workflow wrappers |
 | Components | Admin-only connected component summaries and paginated component membership |
 | Filtering | Traversal-time typed filter pushdown for registered filter columns |

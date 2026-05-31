@@ -136,6 +136,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_delete_edge_statement() {
+        let parsed =
+            super::parse_statement("MATCH (u:users)-[r:friend]->(v:users) DELETE r RETURN u, v")
+                .expect("statement should parse");
+        let Statement::Delete(delete) = parsed else {
+            panic!("statement should be a delete query");
+        };
+
+        assert_eq!(delete.match_.pattern.start.var_text(), Some("u"));
+        let (rel, target) = &delete.match_.pattern.tail[0];
+        assert_eq!(rel.var_text(), Some("r"));
+        assert_eq!(rel.rel_type_text(), Some("friend"));
+        assert_eq!(target.var_text(), Some("v"));
+        assert_eq!(delete.delete.var.text, "r");
+        assert_eq!(delete.return_.items.len(), 2);
+    }
+
+    #[test]
     fn rejects_unbounded_variable_length_relationship() {
         let err = parse("MATCH (a)-[:knows*]-(b) RETURN a").expect_err("query should be rejected");
 

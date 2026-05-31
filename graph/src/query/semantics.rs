@@ -8,10 +8,10 @@ use crate::gql::errors::{GqlError, Span};
 
 use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
-    BindingSide, BoundCmpOp, BoundDirection, BoundNode, BoundRel, CreateProperty,
-    CreateReturnBinding, CreateValue, HopBounds, LogicalCreateNode, LogicalNodeScan, LogicalPlan,
-    LogicalSetProperty, LogicalStatement, Predicate, ReturnBinding, SortBinding, SortBindingKey,
-    ValueExpr,
+    BindingSide, BoundCmpOp, BoundDirection, BoundMappedEdge, BoundNode, BoundRel, CreateProperty,
+    CreateReturnBinding, CreateValue, HopBounds, LogicalCreateNode, LogicalDeleteEdge,
+    LogicalNodeScan, LogicalPlan, LogicalSetProperty, LogicalStatement, Predicate, ReturnBinding,
+    SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -116,6 +116,9 @@ pub(crate) fn bind_statement(
         }
         crate::gql::ast::Statement::Set(query) => {
             bind_set_property(query, catalog).map(LogicalStatement::SetProperty)
+        }
+        crate::gql::ast::Statement::Delete(query) => {
+            bind_delete_edge(query, catalog).map(LogicalStatement::DeleteEdge)
         }
     }
 }
@@ -295,6 +298,88 @@ fn bind_set_property(
         predicate,
         property,
         value,
+        returns,
+    })
+}
+
+fn bind_delete_edge(
+    query: &crate::gql::ast::DeleteQuery,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalDeleteEdge, GqlError> {
+    if query.return_.distinct {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN DISTINCT is implemented in a later phase",
+        ));
+    }
+    let (source_pat, rel_pat, target_pat) = single_outbound_hop(&query.match_)?;
+    if rel_pat.var_len.is_some() {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "DELETE supports only a single matched relationship in this release",
+        ));
+    }
+    if rel_pat.direction == Direction::Undirected {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "DELETE requires a directed relationship pattern in this release",
+        ));
+    }
+    let rel_var = rel_pat.var.as_ref().ok_or_else(|| {
+        GqlError::bind(
+            rel_pat.span,
+            "DELETE requires a named relationship variable",
+        )
+    })?;
+    if query.delete.var.text != rel_var.text {
+        return Err(GqlError::bind(
+            query.delete.var.span,
+            format!("unknown DELETE variable `{}`", query.delete.var.text),
+        ));
+    }
+    let source = bind_node(source_pat, catalog)?;
+    let target = bind_node(target_pat, catalog)?;
+    let rel_type = rel_pat.rel_type.as_ref().ok_or_else(|| {
+        GqlError::unsupported(
+            rel_pat.span,
+            "anonymous relationship types require a later phase",
+        )
+    })?;
+    let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
+    let edge_mapping = rel_info.edge_mapping.ok_or_else(|| {
+        GqlError::unsupported(
+            rel_pat.span,
+            "DELETE requires a relationship backed by a registered edge row table",
+        )
+    })?;
+    let predicate = bind_predicates(
+        query.where_.as_ref(),
+        source_pat,
+        rel_pat,
+        target_pat,
+        &source,
+        &target,
+    )?;
+    let returns = bind_returns(&query.return_.items, &source, rel_pat, &target)?;
+    Ok(LogicalDeleteEdge {
+        source,
+        relationship: BoundRel {
+            var: Some(rel_var.text.clone()),
+            rel_type: rel_info.rel_type,
+            direction: bind_direction(rel_pat.direction),
+            hops: HopBounds { min: 1, max: 1 },
+        },
+        rel_var: rel_var.text.clone(),
+        target,
+        edge: BoundMappedEdge {
+            edge_table_oid: edge_mapping.edge_table_oid,
+            source_table_oid: edge_mapping.source_table_oid,
+            target_table_oid: edge_mapping.target_table_oid,
+            source_column: edge_mapping.source_column,
+            target_column: edge_mapping.target_column,
+            bidirectional: edge_mapping.bidirectional,
+        },
+        predicate,
         returns,
     })
 }

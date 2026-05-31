@@ -61,7 +61,8 @@ through the pgrx path used here. Use `select`.
 `graph.default_projection_mode = 'csr_readonly'` preserves the immutable
 read-mostly engine. `mutable_overlay` is an opt-in build mode for
 transaction-local GQL writes such as single-node mapped `CREATE` and mapped
-property `SET`; selecting it requires `graph.mutable_enabled = on`.
+property `SET`, plus mapped edge-row `DELETE`; selecting it requires
+`graph.mutable_enabled = on`.
 
 ## Memory And Build Settings
 

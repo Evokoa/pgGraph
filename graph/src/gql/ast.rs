@@ -11,6 +11,8 @@ pub(crate) enum Statement {
     Create(CreateQuery),
     /// `MATCH ... SET ... RETURN` property write query.
     Set(SetQuery),
+    /// `MATCH ... DELETE ... RETURN` edge write query.
+    Delete(DeleteQuery),
 }
 
 /// Parsed GQL query.
@@ -58,6 +60,21 @@ pub(crate) struct SetQuery {
     pub(crate) span: Span,
 }
 
+/// Parsed mapped edge delete query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DeleteQuery {
+    /// Required `MATCH` clause selecting the relationship.
+    pub(crate) match_: MatchClause,
+    /// Optional `WHERE` clause.
+    pub(crate) where_: Option<Expr>,
+    /// Relationship delete clause.
+    pub(crate) delete: DeleteClause,
+    /// Required `RETURN` clause.
+    pub(crate) return_: ReturnClause,
+    /// Full query span.
+    pub(crate) span: Span,
+}
+
 /// `CREATE` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateClause {
@@ -74,6 +91,15 @@ pub(crate) struct SetClause {
     pub(crate) target: PropertyRef,
     /// New property value.
     pub(crate) value: Operand,
+    /// Clause span.
+    pub(crate) span: Span,
+}
+
+/// `DELETE` clause for one relationship variable.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DeleteClause {
+    /// Relationship variable to delete.
+    pub(crate) var: Ident,
     /// Clause span.
     pub(crate) span: Span,
 }

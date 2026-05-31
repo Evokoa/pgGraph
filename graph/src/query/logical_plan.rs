@@ -13,6 +13,8 @@ pub(crate) enum LogicalStatement {
     CreateNode(LogicalCreateNode),
     /// Mapped node property update.
     SetProperty(LogicalSetProperty),
+    /// Mapped edge row deletion.
+    DeleteEdge(LogicalDeleteEdge),
 }
 
 /// Bound read-only logical query.
@@ -77,6 +79,42 @@ pub(crate) struct LogicalSetProperty {
     pub(crate) value: CreateValue,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnBinding>,
+}
+
+/// Bound mapped edge deletion.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalDeleteEdge {
+    /// Source node binding in the query pattern.
+    pub(crate) source: BoundNode,
+    /// Relationship binding.
+    pub(crate) relationship: BoundRel,
+    /// Relationship variable targeted by `DELETE`.
+    pub(crate) rel_var: String,
+    /// Target node binding in the query pattern.
+    pub(crate) target: BoundNode,
+    /// Registered edge row mapping.
+    pub(crate) edge: BoundMappedEdge,
+    /// Optional hydrated-row predicate selecting the relationship match.
+    pub(crate) predicate: Option<Predicate>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnBinding>,
+}
+
+/// Bound mapped edge row details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundMappedEdge {
+    /// Edge row table OID.
+    pub(crate) edge_table_oid: u32,
+    /// Registered source node table OID.
+    pub(crate) source_table_oid: u32,
+    /// Registered target node table OID.
+    pub(crate) target_table_oid: u32,
+    /// Edge row source key column.
+    pub(crate) source_column: String,
+    /// Edge row target key column.
+    pub(crate) target_column: String,
+    /// Whether the edge is registered bidirectionally.
+    pub(crate) bidirectional: bool,
 }
 
 /// Bound property value for a write.

@@ -64,6 +64,8 @@ pub(crate) enum TokKind {
     Create,
     /// `SET`
     Set,
+    /// `DELETE`
+    Delete,
     /// `WHERE`
     Where,
     /// `RETURN`
@@ -287,6 +289,7 @@ impl Lexer<'_> {
             "MATCH" => TokKind::Match,
             "CREATE" => TokKind::Create,
             "SET" => TokKind::Set,
+            "DELETE" => TokKind::Delete,
             "WHERE" => TokKind::Where,
             "RETURN" => TokKind::Return,
             "DISTINCT" => TokKind::Distinct,
@@ -356,7 +359,8 @@ mod tests {
 
     #[test]
     fn tokenizes_keywords_case_insensitively() {
-        let tokens = tokenize("match (n) set n.name = 'Ada' return n").expect("lexing succeeds");
+        let tokens =
+            tokenize("match (n)-[r:knows]->(m) delete r return n").expect("lexing succeeds");
         let kinds = tokens.iter().map(|token| token.kind).collect::<Vec<_>>();
 
         assert_eq!(
@@ -366,12 +370,18 @@ mod tests {
                 TokKind::LParen,
                 TokKind::Ident,
                 TokKind::RParen,
-                TokKind::Set,
+                TokKind::Dash,
+                TokKind::LBracket,
                 TokKind::Ident,
-                TokKind::Dot,
+                TokKind::Colon,
                 TokKind::Ident,
-                TokKind::Eq,
-                TokKind::String,
+                TokKind::RBracket,
+                TokKind::ArrowRight,
+                TokKind::LParen,
+                TokKind::Ident,
+                TokKind::RParen,
+                TokKind::Delete,
+                TokKind::Ident,
                 TokKind::Return,
                 TokKind::Ident,
                 TokKind::Eof,

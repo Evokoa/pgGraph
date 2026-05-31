@@ -16,6 +16,8 @@ pub(crate) enum PhysicalStatement {
     CreateNode(PhysicalCreateNode),
     /// PostgreSQL-backed node property update.
     SetProperty(PhysicalSetProperty),
+    /// PostgreSQL-backed edge row deletion.
+    DeleteEdge(PhysicalDeleteEdge),
 }
 
 /// Single-hop physical plan for Phase 1B.
@@ -85,6 +87,45 @@ pub(crate) struct PhysicalSetProperty {
     pub(crate) value: CreateValueSlot,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnSlot>,
+}
+
+/// Physical mapped edge row deletion plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalDeleteEdge {
+    /// Source node variable.
+    pub(crate) source_var: String,
+    /// Source table OID in the query pattern.
+    pub(crate) source_table_oid: u32,
+    /// Source label.
+    pub(crate) source_label: String,
+    /// Relationship type label.
+    pub(crate) rel_type: String,
+    /// Relationship variable.
+    pub(crate) rel_var: String,
+    /// Traversal direction.
+    pub(crate) direction: BoundDirection,
+    /// Target node variable.
+    pub(crate) target_var: String,
+    /// Target table OID in the query pattern.
+    pub(crate) target_table_oid: u32,
+    /// Target label.
+    pub(crate) target_label: String,
+    /// Registered edge row table OID.
+    pub(crate) edge_table_oid: u32,
+    /// Registered source node table OID.
+    pub(crate) edge_source_table_oid: u32,
+    /// Registered target node table OID.
+    pub(crate) edge_target_table_oid: u32,
+    /// Edge row source key column.
+    pub(crate) source_column: String,
+    /// Edge row target key column.
+    pub(crate) target_column: String,
+    /// Whether the edge row is registered bidirectionally.
+    pub(crate) bidirectional: bool,
+    /// Optional hydrated-row predicate.
+    pub(crate) predicate: Option<Predicate>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnSlot>,
 }
 
 /// Physical node-only scan plan.
@@ -189,6 +230,18 @@ impl PhysicalSetProperty {
     /// Table OID whose row will be updated.
     pub(crate) fn required_table_oid(&self) -> u32 {
         self.table_oid
+    }
+}
+
+impl PhysicalDeleteEdge {
+    /// Table OIDs whose node rows must be visible to the current SQL role.
+    pub(crate) fn required_node_table_oids(&self) -> [u32; 2] {
+        [self.source_table_oid, self.target_table_oid]
+    }
+
+    /// Edge row table OID whose row will be deleted.
+    pub(crate) fn required_edge_table_oid(&self) -> u32 {
+        self.edge_table_oid
     }
 }
 
