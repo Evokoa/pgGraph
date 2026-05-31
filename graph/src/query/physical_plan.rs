@@ -25,6 +25,8 @@ pub(crate) enum PhysicalStatement {
     RemoveProperty(PhysicalRemoveProperty),
     /// PostgreSQL-backed edge row deletion.
     DeleteEdge(PhysicalDeleteEdge),
+    /// PostgreSQL-backed node detach-delete.
+    DetachDeleteNode(PhysicalDetachDeleteNode),
 }
 
 /// Single-hop physical plan for Phase 1B.
@@ -156,6 +158,42 @@ pub(crate) struct PhysicalDeleteEdge {
     pub(crate) predicate: Option<Predicate>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnSlot>,
+}
+
+/// Physical mapped node detach-delete plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalDetachDeleteNode {
+    /// Matched node variable.
+    pub(crate) var: String,
+    /// Source table OID.
+    pub(crate) table_oid: u32,
+    /// Source label.
+    pub(crate) label: String,
+    /// Optional hydrated-row predicate.
+    pub(crate) predicate: Option<Predicate>,
+    /// Incident edge-row mappings to delete before the node row.
+    pub(crate) incident_edges: Vec<PhysicalIncidentEdge>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnSlot>,
+}
+
+/// Physical incident edge-row mapping for `DETACH DELETE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhysicalIncidentEdge {
+    /// Relationship type label.
+    pub(crate) rel_type: String,
+    /// Registered edge row table OID.
+    pub(crate) edge_table_oid: u32,
+    /// Registered source node table OID.
+    pub(crate) edge_source_table_oid: u32,
+    /// Registered target node table OID.
+    pub(crate) edge_target_table_oid: u32,
+    /// Edge row source key column.
+    pub(crate) source_column: String,
+    /// Edge row target key column.
+    pub(crate) target_column: String,
+    /// Whether the edge row is registered bidirectionally.
+    pub(crate) bidirectional: bool,
 }
 
 /// Physical node-only scan plan.
@@ -340,6 +378,25 @@ impl PhysicalDeleteEdge {
     /// Edge row table OID whose row will be deleted.
     pub(crate) fn required_edge_table_oid(&self) -> u32 {
         self.edge_table_oid
+    }
+}
+
+impl PhysicalDetachDeleteNode {
+    /// Node table OID whose row will be deleted.
+    pub(crate) fn required_node_table_oid(&self) -> u32 {
+        self.table_oid
+    }
+
+    /// Incident edge table OIDs whose rows may be deleted.
+    pub(crate) fn required_edge_table_oids(&self) -> Vec<u32> {
+        let mut oids = self
+            .incident_edges
+            .iter()
+            .map(|edge| edge.edge_table_oid)
+            .collect::<Vec<_>>();
+        oids.sort_unstable();
+        oids.dedup();
+        oids
     }
 }
 

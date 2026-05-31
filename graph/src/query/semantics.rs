@@ -8,11 +8,11 @@ use crate::gql::errors::{GqlError, Span};
 
 use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
-    AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundMappedEdge,
-    BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue, HopBounds,
-    LogicalCreateNode, LogicalDeleteEdge, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty,
-    LogicalSetProperty, LogicalStatement, PathFunc, Predicate, ReturnBinding, SortBinding,
-    SortBindingKey, ValueExpr,
+    AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundIncidentEdge,
+    BoundMappedEdge, BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue,
+    HopBounds, LogicalCreateNode, LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalNodeScan,
+    LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement, PathFunc, Predicate,
+    ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -158,6 +158,9 @@ pub(crate) fn bind_statement(
         }
         crate::gql::ast::Statement::Delete(query) => {
             bind_delete_edge(query, catalog).map(LogicalStatement::DeleteEdge)
+        }
+        crate::gql::ast::Statement::DetachDelete(query) => {
+            bind_detach_delete_node(query, catalog).map(LogicalStatement::DetachDeleteNode)
         }
     }
 }
@@ -549,6 +552,73 @@ fn bind_delete_edge(
             bidirectional: edge_mapping.bidirectional,
         },
         predicate,
+        returns,
+    })
+}
+
+fn bind_detach_delete_node(
+    query: &crate::gql::ast::DetachDeleteQuery,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalDetachDeleteNode, GqlError> {
+    if query.match_.optional {
+        return Err(GqlError::unsupported(
+            query.match_.span,
+            "OPTIONAL MATCH is only supported for read queries",
+        ));
+    }
+    if query.return_.distinct {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN DISTINCT over DETACH DELETE is implemented in a later phase",
+        ));
+    }
+    let Pattern { start, tail, .. } = &query.match_.pattern;
+    if !tail.is_empty() {
+        return Err(GqlError::unsupported(
+            query.match_.pattern.span,
+            "DETACH DELETE supports a single-node MATCH pattern in this release",
+        ));
+    }
+    let node = bind_node(start, catalog)?;
+    if query.delete.var.text != node.var {
+        return Err(GqlError::bind(
+            query.delete.var.span,
+            format!("unknown DETACH DELETE variable `{}`", query.delete.var.text),
+        ));
+    }
+    let mut incident_edges = Vec::new();
+    for rel in catalog.incident_rel_types(node.table_oid) {
+        let edge = rel.edge_mapping.ok_or_else(|| {
+            GqlError::unsupported(
+                query.delete.span,
+                "DETACH DELETE requires incident relationships backed by registered edge row tables",
+            )
+        })?;
+        if !incident_edges.iter().any(|existing: &BoundIncidentEdge| {
+            existing.rel_type == rel.rel_type
+                && existing.edge.edge_table_oid == edge.edge_table_oid
+                && existing.edge.source_column == edge.source_column
+                && existing.edge.target_column == edge.target_column
+        }) {
+            incident_edges.push(BoundIncidentEdge {
+                rel_type: rel.rel_type,
+                edge: BoundMappedEdge {
+                    edge_table_oid: edge.edge_table_oid,
+                    source_table_oid: edge.source_table_oid,
+                    target_table_oid: edge.target_table_oid,
+                    source_column: edge.source_column,
+                    target_column: edge.target_column,
+                    bidirectional: edge.bidirectional,
+                },
+            });
+        }
+    }
+    let predicate = bind_node_predicates(query.where_.as_ref(), start, &node)?;
+    let returns = bind_write_returns(&query.return_.items, &node, true)?;
+    Ok(LogicalDetachDeleteNode {
+        node,
+        predicate,
+        incident_edges,
         returns,
     })
 }

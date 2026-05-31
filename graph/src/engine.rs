@@ -392,6 +392,7 @@ impl Engine {
         let verify = |idx: u32| {
             idx < self.node_store.node_count()
                 && self.node_store.is_active(idx)
+                && !tx_delta::node_deleted(idx)
                 && self.node_store.table_oid(idx) == table_oid
                 && self.node_store.primary_key(idx) == pk
         };

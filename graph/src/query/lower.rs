@@ -1,13 +1,14 @@
 //! Lowering from logical GQL plans to executable physical plans.
 
 use super::logical_plan::{
-    CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalDeleteEdge, LogicalNodeScan,
-    LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement, ReturnBinding,
+    CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalDeleteEdge,
+    LogicalDetachDeleteNode, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty,
+    LogicalSetProperty, LogicalStatement, ReturnBinding,
 };
 use super::physical_plan::{
     CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalDeleteEdge,
-    PhysicalNodeScan, PhysicalPlan, PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement,
-    ReturnSlot,
+    PhysicalDetachDeleteNode, PhysicalIncidentEdge, PhysicalNodeScan, PhysicalPlan,
+    PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement, ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
@@ -26,6 +27,9 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
         }
         LogicalStatement::DeleteEdge(plan) => {
             PhysicalStatement::DeleteEdge(lower_delete_edge(plan))
+        }
+        LogicalStatement::DetachDeleteNode(plan) => {
+            PhysicalStatement::DetachDeleteNode(lower_detach_delete_node(plan))
         }
     }
 }
@@ -163,6 +167,38 @@ fn lower_delete_edge(plan: LogicalDeleteEdge) -> PhysicalDeleteEdge {
         bidirectional: plan.edge.bidirectional,
         predicate: plan.predicate,
         returns: lower_returns(plan.returns),
+    }
+}
+
+fn lower_detach_delete_node(plan: LogicalDetachDeleteNode) -> PhysicalDetachDeleteNode {
+    PhysicalDetachDeleteNode {
+        var: plan.node.var,
+        table_oid: plan.node.table_oid,
+        label: plan.node.label,
+        predicate: plan.predicate,
+        incident_edges: plan
+            .incident_edges
+            .into_iter()
+            .map(|incident| PhysicalIncidentEdge {
+                rel_type: incident.rel_type,
+                edge_table_oid: incident.edge.edge_table_oid,
+                edge_source_table_oid: incident.edge.source_table_oid,
+                edge_target_table_oid: incident.edge.target_table_oid,
+                source_column: incident.edge.source_column,
+                target_column: incident.edge.target_column,
+                bidirectional: incident.edge.bidirectional,
+            })
+            .collect(),
+        returns: plan
+            .returns
+            .into_iter()
+            .map(|binding| match binding {
+                CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
+                CreateReturnBinding::Property { property, name } => {
+                    CreateReturnSlot::Property { property, name }
+                }
+            })
+            .collect(),
     }
 }
 

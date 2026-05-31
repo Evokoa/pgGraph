@@ -15,6 +15,8 @@ pub(crate) enum Statement {
     Remove(RemoveQuery),
     /// `MATCH ... DELETE ... RETURN` edge write query.
     Delete(DeleteQuery),
+    /// `MATCH ... DETACH DELETE ... RETURN` node cascade delete query.
+    DetachDelete(DetachDeleteQuery),
 }
 
 /// Parsed GQL query.
@@ -105,6 +107,21 @@ pub(crate) struct DeleteQuery {
     pub(crate) span: Span,
 }
 
+/// Parsed mapped node detach-delete query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DetachDeleteQuery {
+    /// Required `MATCH` clause selecting the node.
+    pub(crate) match_: MatchClause,
+    /// Optional `WHERE` clause.
+    pub(crate) where_: Option<Expr>,
+    /// Node detach-delete clause.
+    pub(crate) delete: DetachDeleteClause,
+    /// Required `RETURN` clause.
+    pub(crate) return_: ReturnClause,
+    /// Full query span.
+    pub(crate) span: Span,
+}
+
 /// `CREATE` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateClause {
@@ -154,6 +171,15 @@ pub(crate) enum RemoveTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DeleteClause {
     /// Relationship variable to delete.
+    pub(crate) var: Ident,
+    /// Clause span.
+    pub(crate) span: Span,
+}
+
+/// `DETACH DELETE` clause for one node variable.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DetachDeleteClause {
+    /// Node variable to delete after incident edges are removed.
     pub(crate) var: Ident,
     /// Clause span.
     pub(crate) span: Span,

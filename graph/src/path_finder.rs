@@ -146,7 +146,9 @@ fn bidirectional_bfs(
                     break;
                 };
                 for edge in neighbors.neighbors(current) {
-                    if !node_store.is_active(edge.target) {
+                    if !node_store.is_active(edge.target)
+                        || crate::projection::tx_delta::node_deleted(edge.target)
+                    {
                         continue;
                     }
                     if !fwd_visited.contains(edge.target) {
@@ -180,7 +182,9 @@ fn bidirectional_bfs(
                     break;
                 };
                 for edge in neighbors.neighbors(current) {
-                    if !node_store.is_active(edge.target) {
+                    if !node_store.is_active(edge.target)
+                        || crate::projection::tx_delta::node_deleted(edge.target)
+                    {
                         continue;
                     }
                     if !bwd_visited.contains(edge.target) {
@@ -308,7 +312,10 @@ fn single_direction_bfs(
         }
 
         for edge in neighbors.neighbors(current) {
-            if visited.contains(edge.target) || !node_store.is_active(edge.target) {
+            if visited.contains(edge.target)
+                || !node_store.is_active(edge.target)
+                || crate::projection::tx_delta::node_deleted(edge.target)
+            {
                 continue;
             }
 
@@ -414,7 +421,10 @@ pub fn weighted_shortest_path(
                 continue;
             };
 
-            if new_cost < dist[neighbor as usize] && node_store.is_active(neighbor) {
+            if new_cost < dist[neighbor as usize]
+                && node_store.is_active(neighbor)
+                && !crate::projection::tx_delta::node_deleted(neighbor)
+            {
                 dist[neighbor as usize] = new_cost;
                 parent.insert(
                     neighbor,

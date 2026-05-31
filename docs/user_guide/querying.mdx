@@ -103,7 +103,9 @@ Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on
 one matched node, `REMOVE` can clear one mapped property on one matched node,
 and directed `DELETE` can remove one matched relationship backed by a
-registered edge row table, when the active graph was built with
+registered edge row table. `DETACH DELETE` can remove one matched node and its
+incident registered edge-row relationships. These writes require that the
+active graph was built with
 `mode := 'mutable_overlay'` and `graph.mutable_enabled = on`:
 
 ```sql
@@ -140,6 +142,14 @@ FROM graph.gql(
 );
 ```
 
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (c:customers {id: $id}) DETACH DELETE c RETURN c.id AS customer_id',
+  params := '{"id":"c-42"}'::jsonb
+);
+```
+
 The write is PostgreSQL-first: pgGraph inserts, updates, or deletes the mapped
 source row through SPI, PostgreSQL enforces table privileges, constraints,
 RLS, triggers, and MVCC, and the GQL result is built from the affected row or
@@ -152,10 +162,16 @@ a registered dotted key from a JSONB property column; repeated `REMOVE` calls
 are idempotent. Labels map to registered source tables, so label removal is not
 part of the supported write model. `DELETE` tombstones the matching graph edge
 in the current backend after PostgreSQL deletes exactly one edge row; endpoint
-nodes are not deleted. `CREATE`, `SET`, `REMOVE`, and `DELETE` are rejected on
-`csr_readonly` projections. Relationship creation, `MERGE`, multi-row writes,
-dynamic labels, and creating new PostgreSQL schema objects from GQL are future
-work.
+nodes are not deleted. `DETACH DELETE` enumerates registered incident edge-row
+tables, deletes matching forward and reverse edge rows first, then deletes the
+matched node row and tombstones the node and deleted graph edges in the current
+backend. If any step fails, PostgreSQL aborts the statement and the source rows
+remain authoritative. `DETACH DELETE` rejects incident relationships that are
+not backed by registered edge row tables because pgGraph has no safe generic
+policy for rewriting arbitrary endpoint-table foreign keys. `CREATE`, `SET`,
+`REMOVE`, `DELETE`, and `DETACH DELETE` are rejected on `csr_readonly`
+projections. Relationship creation, `MERGE`, multi-row writes, dynamic labels,
+and creating new PostgreSQL schema objects from GQL are future work.
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
 planning stages without executing the query.

@@ -34,7 +34,7 @@ data into another system.
 |---|---|
 | WAL sync | `graph.sync_mode = 'wal'` is parsed but reserved; use `manual` or `trigger` |
 | Build scanner | `graph.build_scan_mode = 'copy'` is reserved; use `select` |
-| GQL | `graph.gql()` supports the documented read subset, including node-only `MATCH`, top-level single-relationship `OPTIONAL MATCH`, projection-stage `WITH`, bounded `DISTINCT`, `RETURN` aggregates, JSONB list/map property paths, bounded relationship path values and path functions, single-node mapped `CREATE`, single-node mapped property `SET`, mapped property `REMOVE`, and single-edge mapped `DELETE`; full path variable syntax and broader writes are future work |
+| GQL | `graph.gql()` supports the documented read subset, including node-only `MATCH`, top-level single-relationship `OPTIONAL MATCH`, projection-stage `WITH`, bounded `DISTINCT`, `RETURN` aggregates, JSONB list/map property paths, bounded relationship path values and path functions, single-node mapped `CREATE`, single-node mapped property `SET`, mapped property `REMOVE`, single-edge mapped `DELETE`, and single-node `DETACH DELETE` over registered edge-row relationships; full path variable syntax and broader writes are future work |
 | SQL/PGQ | Internal typed adapter seam only; no public SQL/PGQ API is exposed until PostgreSQL provides stable graph-pattern hooks pgGraph can consume |
 | Projection modes | `graph.build()` defaults to `csr_readonly`; `mutable_overlay` can be selected when `graph.mutable_enabled = on` and is required for GQL writes |
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |

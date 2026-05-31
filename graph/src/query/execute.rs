@@ -72,7 +72,9 @@ pub(crate) fn execute(
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
     for source_idx in source_nodes(engine, plan.source_table_oid, tenant) {
-        if !engine.node_store.is_active(source_idx) {
+        if !engine.node_store.is_active(source_idx)
+            || crate::projection::tx_delta::node_deleted(source_idx)
+        {
             continue;
         }
         let targets = expand_targets(&neighbors, engine, plan, source_idx, rel_type_id, tenant);
@@ -121,7 +123,9 @@ pub(crate) fn execute_node_scan(
     let row_cap = plan.execution_row_cap();
     let mut seen = std::collections::HashSet::new();
     for node_idx in source_nodes(engine, plan.table_oid, tenant) {
-        if !engine.node_store.is_active(node_idx) {
+        if !engine.node_store.is_active(node_idx)
+            || crate::projection::tx_delta::node_deleted(node_idx)
+        {
             continue;
         }
         let node_id = engine.node_store.primary_key(node_idx).to_string();
@@ -221,6 +225,7 @@ fn expand_targets(
         for state in current {
             for target in neighbors.for_direction(plan.direction, state.node_idx, rel_type_id) {
                 if !engine.node_store.is_active(target.node_idx)
+                    || crate::projection::tx_delta::node_deleted(target.node_idx)
                     || !tenant_allows_node(engine, target.node_idx, tenant)
                 {
                     continue;

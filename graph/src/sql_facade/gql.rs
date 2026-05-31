@@ -58,6 +58,16 @@ fn gql_explain(query: &str) -> String {
                     plan.returns.len()
                 )
             }
+            crate::query::physical_plan::PhysicalStatement::DetachDeleteNode(plan) => {
+                check_detach_delete_acl(&plan);
+                format!(
+                    "DetachDeleteNode(label={}, table_oid={}, incident_edge_tables={}, returns={})",
+                    plan.label,
+                    plan.table_oid,
+                    plan.required_edge_table_oids().len(),
+                    plan.returns.len()
+                )
+            }
         }
     })
 }
@@ -100,6 +110,7 @@ fn build_statement(
         crate::gql::ast::Statement::Set(query) => query.span,
         crate::gql::ast::Statement::Remove(query) => query.span,
         crate::gql::ast::Statement::Delete(query) => query.span,
+        crate::gql::ast::Statement::DetachDelete(query) => query.span,
     };
     let catalog = crate::query::catalog_snapshot::CatalogSnapshotImpl::load()
         .map_err(|err| crate::gql::errors::GqlError::bind(span, err.to_string()))?;
@@ -137,6 +148,15 @@ fn check_delete_acl(plan: &crate::query::physical_plan::PhysicalDeleteEdge) {
     }
     acl::check_table_acl(plan.required_edge_table_oid()).unwrap_or_else(|err| err.report());
     acl::check_table_delete_acl(plan.required_edge_table_oid()).unwrap_or_else(|err| err.report());
+}
+
+fn check_detach_delete_acl(plan: &crate::query::physical_plan::PhysicalDetachDeleteNode) {
+    acl::check_table_acl(plan.required_node_table_oid()).unwrap_or_else(|err| err.report());
+    acl::check_table_delete_acl(plan.required_node_table_oid()).unwrap_or_else(|err| err.report());
+    for table_oid in plan.required_edge_table_oids() {
+        acl::check_table_acl(table_oid).unwrap_or_else(|err| err.report());
+        acl::check_table_delete_acl(table_oid).unwrap_or_else(|err| err.report());
+    }
 }
 
 fn execute_statement(
@@ -183,6 +203,10 @@ fn execute_statement(
         crate::query::physical_plan::PhysicalStatement::DeleteEdge(plan) => {
             check_delete_acl(&plan);
             execute_delete_edge(&plan, tenant_scope, params, hydrate)
+        }
+        crate::query::physical_plan::PhysicalStatement::DetachDeleteNode(plan) => {
+            check_detach_delete_acl(&plan);
+            execute_detach_delete_node(&plan, tenant_scope, params, hydrate)
         }
     }
 }
@@ -304,6 +328,66 @@ fn remove_property_node_scan(
     }
 }
 
+fn detach_delete_node_scan(
+    plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
+) -> crate::query::physical_plan::PhysicalNodeScan {
+    crate::query::physical_plan::PhysicalNodeScan {
+        var: plan.var.clone(),
+        table_oid: plan.table_oid,
+        label: plan.label.clone(),
+        returns: Vec::new(),
+        distinct_stages: Vec::new(),
+        distinct: false,
+        predicate: plan.predicate.clone(),
+        order_by: Vec::new(),
+        skip: None,
+        limit: None,
+    }
+}
+
+fn execute_detach_delete_node(
+    plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    ensure_mutable_projection("GQL DETACH DELETE")?;
+    let scan = detach_delete_node_scan(plan);
+    let matches = ENGINE.with(|engine| {
+        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope)
+    })?;
+    let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
+    let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
+    let [row] = matches.as_slice() else {
+        return Err(safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL DETACH DELETE requires exactly one matched `{}` node, found {}",
+                plan.label,
+                matches.len()
+            ),
+        });
+    };
+    let node_idx = ENGINE.with(|engine| {
+        engine
+            .borrow()
+            .resolve(plan.table_oid, &row.node.node_id)
+            .ok_or_else(|| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL DETACH DELETE node `{}` is not in the built graph",
+                    row.node.node_id
+                ),
+            })
+    })?;
+    let deleted_edges = delete_incident_edge_rows(plan, &row.node.node_id)?;
+    crate::projection::tx_delta::ensure_write_capacity(1, deleted_edges.delta_count(), 0)?;
+    let deleted = delete_mapped_node_row(plan, &row.node.node_id)?;
+    for edge in deleted_edges.edges {
+        record_detach_deleted_edge_delta(&edge)?;
+    }
+    crate::projection::tx_delta::record_deleted_node(node_idx)?;
+    Ok(vec![project_detach_deleted_node(plan, deleted, hydrate)])
+}
+
 fn execute_delete_edge(
     plan: &crate::query::physical_plan::PhysicalDeleteEdge,
     tenant_scope: Option<&str>,
@@ -396,6 +480,33 @@ struct CreatedNode {
 struct UpdatedNode {
     node_id: String,
     row: serde_json::Value,
+}
+
+struct DeletedNode {
+    node_id: String,
+    row: serde_json::Value,
+}
+
+struct DeletedIncidentEdges {
+    edges: Vec<DeletedIncidentEdge>,
+}
+
+impl DeletedIncidentEdges {
+    fn delta_count(&self) -> usize {
+        self.edges
+            .iter()
+            .map(|edge| if edge.bidirectional { 2 } else { 1 })
+            .sum()
+    }
+}
+
+struct DeletedIncidentEdge {
+    rel_type: String,
+    source_table_oid: u32,
+    target_table_oid: u32,
+    source_id: String,
+    target_id: String,
+    bidirectional: bool,
 }
 
 fn insert_mapped_node(
@@ -630,6 +741,194 @@ fn remove_mapped_property(
             node_id,
             row: row_json.0,
         })
+    })
+}
+
+fn delete_mapped_node_row(
+    plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
+    node_id: &str,
+) -> safety::GraphResult<DeletedNode> {
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let table = tables
+        .iter()
+        .find(|table| {
+            crate::catalog::table_oid_from_name(&table.table_name)
+                .ok()
+                .is_some_and(|oid| oid == plan.table_oid)
+        })
+        .ok_or_else(|| {
+            safety::GraphError::Internal(format!(
+                "cannot delete node from unregistered table OID {}",
+                plan.table_oid
+            ))
+        })?;
+    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let pk_expr = primary_key_expr("src", &table.id_columns);
+    let query = format!(
+        "WITH deleted AS (
+             DELETE FROM {} AS src
+             WHERE {} = $1
+             RETURNING to_jsonb(src.*), {}
+         )
+         SELECT * FROM deleted",
+        table_name.as_sql(),
+        pk_expr,
+        pk_expr
+    );
+    pgrx::Spi::connect_mut(|client| {
+        let rows = client
+            .update(&query, None, &[node_id.into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL DETACH DELETE node row failed for {}: {}",
+                    table_name.as_sql(),
+                    err
+                ),
+            })?;
+        if rows.is_empty() {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL DETACH DELETE matched node `{node_id}` but PostgreSQL deleted no row"
+                ),
+            });
+        }
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("GQL DETACH DELETE row read failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("GQL DETACH DELETE returned no row JSON".into())
+            })?;
+        let node_id = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL DETACH DELETE primary key read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "GQL DETACH DELETE returned no primary key".to_string(),
+                )
+            })?;
+        Ok(DeletedNode {
+            node_id,
+            row: row_json.0,
+        })
+    })
+}
+
+fn delete_incident_edge_rows(
+    plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
+    node_id: &str,
+) -> safety::GraphResult<DeletedIncidentEdges> {
+    let (_tables, edges, _filter_columns) = read_catalog()?;
+    let mut deleted = Vec::new();
+    for incident in &plan.incident_edges {
+        let edge = edges
+            .iter()
+            .find(|edge| {
+                crate::catalog::table_oid_from_name(&edge.from_table)
+                    .ok()
+                    .is_some_and(|oid| oid == incident.edge_table_oid)
+                    && edge.from_column == incident.source_column
+                    && edge.to_column == incident.target_column
+                    && edge.label == incident.rel_type
+            })
+            .ok_or_else(|| {
+                safety::GraphError::Internal(format!(
+                    "cannot detach-delete unregistered edge row table OID {}",
+                    incident.edge_table_oid
+                ))
+            })?;
+        let table_name = sql_table_name_from_catalog(&edge.from_table)?;
+        deleted.extend(delete_incident_edge_rows_for_mapping(
+            plan,
+            incident,
+            table_name.as_sql(),
+            node_id,
+        )?);
+    }
+    Ok(DeletedIncidentEdges { edges: deleted })
+}
+
+fn delete_incident_edge_rows_for_mapping(
+    plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
+    incident: &crate::query::physical_plan::PhysicalIncidentEdge,
+    table_sql: &str,
+    node_id: &str,
+) -> safety::GraphResult<Vec<DeletedIncidentEdge>> {
+    let source_incident = incident.edge_source_table_oid == plan.table_oid;
+    let target_incident = incident.edge_target_table_oid == plan.table_oid;
+    let predicate = match (source_incident, target_incident) {
+        (true, true) => format!(
+            "e.{}::text = $1 OR e.{}::text = $1",
+            quote_ident(&incident.source_column),
+            quote_ident(&incident.target_column)
+        ),
+        (true, false) => format!("e.{}::text = $1", quote_ident(&incident.source_column)),
+        (false, true) => format!("e.{}::text = $1", quote_ident(&incident.target_column)),
+        (false, false) => return Ok(Vec::new()),
+    };
+    let query = format!(
+        "WITH deleted AS (
+             DELETE FROM {} AS e
+             WHERE {}
+             RETURNING e.{}::text, e.{}::text
+         )
+         SELECT * FROM deleted",
+        table_sql,
+        predicate,
+        quote_ident(&incident.source_column),
+        quote_ident(&incident.target_column)
+    );
+    pgrx::Spi::connect_mut(|client| {
+        let rows = client
+            .update(&query, None, &[node_id.into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL DETACH DELETE incident edge row failed for {}: {}",
+                    table_sql, err
+                ),
+            })?;
+        let mut deleted = Vec::with_capacity(rows.len());
+        for row in rows {
+            let source_id = row
+                .get::<String>(1)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "GQL DETACH DELETE source edge key read failed: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "GQL DETACH DELETE returned no source edge key".to_string(),
+                    )
+                })?;
+            let target_id = row
+                .get::<String>(2)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "GQL DETACH DELETE target edge key read failed: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "GQL DETACH DELETE returned no target edge key".to_string(),
+                    )
+                })?;
+            deleted.push(DeletedIncidentEdge {
+                rel_type: incident.rel_type.clone(),
+                source_table_oid: incident.edge_source_table_oid,
+                target_table_oid: incident.edge_target_table_oid,
+                source_id,
+                target_id,
+                bidirectional: incident.bidirectional,
+            });
+        }
+        Ok(deleted)
     })
 }
 
@@ -911,6 +1210,27 @@ fn record_deleted_edge_delta(
     Ok(())
 }
 
+fn record_detach_deleted_edge_delta(edge: &DeletedIncidentEdge) -> safety::GraphResult<()> {
+    let Some((source, target, type_id)) = ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        let source = engine.resolve(edge.source_table_oid, &edge.source_id)?;
+        let target = engine.resolve(edge.target_table_oid, &edge.target_id)?;
+        let type_id = engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == &edge.rel_type)
+            .map(|idx| idx as u8)?;
+        Some((source, target, type_id))
+    }) else {
+        return Ok(());
+    };
+    crate::projection::tx_delta::record_deleted_edge(source, target, type_id)?;
+    if edge.bidirectional {
+        crate::projection::tx_delta::record_deleted_edge(target, source, type_id)?;
+    }
+    Ok(())
+}
+
 fn write_value_json(
     value: &crate::query::physical_plan::CreateValueSlot,
     params: &crate::query::value::QueryParams,
@@ -1093,6 +1413,28 @@ fn project_removed_node(
     serde_json::Value::Object(output)
 }
 
+fn project_detach_deleted_node(
+    plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
+    deleted: DeletedNode,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut output = serde_json::Map::new();
+    for slot in &plan.returns {
+        match slot {
+            crate::query::physical_plan::CreateReturnSlot::Node { name } => {
+                output.insert(
+                    name.clone(),
+                    detach_deleted_node_value(plan, &deleted, hydrate),
+                );
+            }
+            crate::query::physical_plan::CreateReturnSlot::Property { property, name } => {
+                output.insert(name.clone(), row_property_value(&deleted.row, property));
+            }
+        }
+    }
+    serde_json::Value::Object(output)
+}
+
 fn created_node_value(
     plan: &crate::query::physical_plan::PhysicalCreateNode,
     created: &CreatedNode,
@@ -1156,6 +1498,30 @@ fn removed_node_value(
         serde_json::json!({
             "table": &plan.label,
             "id": &updated.node_id,
+        }),
+    );
+    node.insert(
+        "_labels".to_string(),
+        serde_json::Value::Array(vec![serde_json::Value::String(plan.label.clone())]),
+    );
+    serde_json::Value::Object(node)
+}
+
+fn detach_deleted_node_value(
+    plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
+    deleted: &DeletedNode,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut node = if hydrate {
+        deleted.row.as_object().cloned().unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    node.insert(
+        "_id".to_string(),
+        serde_json::json!({
+            "table": &plan.label,
+            "id": &deleted.node_id,
         }),
     );
     node.insert(

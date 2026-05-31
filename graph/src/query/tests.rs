@@ -188,6 +188,38 @@ fn binder_accepts_delete_for_mapped_edge_row() {
 }
 
 #[test]
+fn binder_accepts_detach_delete_for_node_with_mapped_incident_edges() {
+    let catalog = FakeCatalog::new()
+        .with_writable_label("users", 10, ["id", "name"], ["name"])
+        .with_mapped_edge("friend", 10, 10, 30, "user_id", "friend_id", false);
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) DETACH DELETE u RETURN u.name")
+            .unwrap();
+    let plan = bind_statement(&ast, &catalog).unwrap();
+    let super::logical_plan::LogicalStatement::DetachDeleteNode(delete) = plan else {
+        panic!("expected detach delete node plan");
+    };
+
+    assert_eq!(delete.node.var, "u");
+    assert_eq!(delete.node.table_oid, 10);
+    assert!(delete.predicate.is_some());
+    assert_eq!(delete.incident_edges.len(), 1);
+    assert_eq!(delete.incident_edges[0].rel_type, "friend");
+    assert_eq!(delete.incident_edges[0].edge.edge_table_oid, 30);
+    assert_eq!(delete.returns.len(), 1);
+}
+
+#[test]
+fn binder_rejects_detach_delete_unknown_variable() {
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) DETACH DELETE v RETURN u").unwrap();
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
+    assert!(err.to_string().contains("unknown DETACH DELETE variable"));
+}
+
+#[test]
 fn sqlpgq_adapter_lowers_node_pattern_into_shared_ir() {
     let read = SqlPgqRead {
         source: SqlPgqNodePattern {

@@ -2,9 +2,10 @@
 
 use super::ast::{
     AggregateArg, AggregateFunc, CmpOp, CreateClause, CreateQuery, DeleteClause, DeleteQuery,
-    Direction, Expr, Ident, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern,
-    PropertyRef, Query, RelPat, RemoveClause, RemoveQuery, RemoveTarget, ReturnClause, ReturnExpr,
-    ReturnItem, SetClause, SetQuery, SortItem, SortKey, Statement, VarLen, WithClause,
+    DetachDeleteClause, DetachDeleteQuery, Direction, Expr, Ident, Literal, LiteralValue,
+    MatchClause, NodePat, Operand, Pattern, PropertyRef, Query, RelPat, RemoveClause, RemoveQuery,
+    RemoveTarget, ReturnClause, ReturnExpr, ReturnItem, SetClause, SetQuery, SortItem, SortKey,
+    Statement, VarLen, WithClause,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
@@ -57,6 +58,12 @@ impl Parser {
                 self.parse_remove_query().map(Statement::Remove)
             }
             TokKind::Match | TokKind::Optional
+                if self.statement_contains_detach_before_return() =>
+            {
+                self.parse_detach_delete_query()
+                    .map(Statement::DetachDelete)
+            }
+            TokKind::Match | TokKind::Optional
                 if self.statement_contains_delete_before_return() =>
             {
                 self.parse_delete_query().map(Statement::Delete)
@@ -75,6 +82,10 @@ impl Parser {
 
     fn statement_contains_delete_before_return(&self) -> bool {
         self.statement_contains_before_return(TokKind::Delete)
+    }
+
+    fn statement_contains_detach_before_return(&self) -> bool {
+        self.statement_contains_before_return(TokKind::Detach)
     }
 
     fn statement_contains_remove_before_return(&self) -> bool {
@@ -213,6 +224,28 @@ impl Parser {
         })
     }
 
+    fn parse_detach_delete_query(&mut self) -> Result<DetachDeleteQuery, GqlError> {
+        let start = self.current().span.start as usize;
+        let match_ = self.parse_match_clause()?;
+        let where_ = if self.consume(TokKind::Where).is_some() {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let delete = self.parse_detach_delete_clause()?;
+        let return_ = self.parse_return_clause()?;
+        self.reject_known_later_clauses()?;
+        let end = self.expect(TokKind::Eof, "expected end of query")?.span.end as usize;
+
+        Ok(DetachDeleteQuery {
+            match_,
+            where_,
+            delete,
+            return_,
+            span: Span::new(start, end),
+        })
+    }
+
     fn parse_create_clause(&mut self) -> Result<CreateClause, GqlError> {
         let start = self
             .expect(TokKind::Create, "expected CREATE clause")?
@@ -250,6 +283,19 @@ impl Parser {
             .start as usize;
         let var = self.parse_ident()?;
         Ok(DeleteClause {
+            span: Span::new(start, var.span.end as usize),
+            var,
+        })
+    }
+
+    fn parse_detach_delete_clause(&mut self) -> Result<DetachDeleteClause, GqlError> {
+        let start = self
+            .expect(TokKind::Detach, "expected DETACH clause")?
+            .span
+            .start as usize;
+        self.expect(TokKind::Delete, "expected DELETE after DETACH")?;
+        let var = self.parse_ident()?;
+        Ok(DetachDeleteClause {
             span: Span::new(start, var.span.end as usize),
             var,
         })

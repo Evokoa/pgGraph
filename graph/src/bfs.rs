@@ -440,7 +440,7 @@ fn candidate_allowed(
             return false;
         }
     }
-    if !node_store.is_active(neighbor) {
+    if !node_store.is_active(neighbor) || crate::projection::tx_delta::node_deleted(neighbor) {
         return false;
     }
     if let Some(tenant) = config.tenant.as_deref() {

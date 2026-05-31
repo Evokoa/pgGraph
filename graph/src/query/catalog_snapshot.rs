@@ -70,6 +70,9 @@ pub(crate) trait CatalogSnapshot {
         to_table_oid: u32,
         span: Span,
     ) -> Result<RelTypeInfo, GqlError>;
+
+    /// Return registered relationships incident to the table OID.
+    fn incident_rel_types(&self, table_oid: u32) -> Vec<RelTypeInfo>;
 }
 
 /// SPI-backed catalog snapshot.
@@ -132,6 +135,29 @@ impl CatalogSnapshot for CatalogSnapshotImpl {
                 )
             })
     }
+
+    fn incident_rel_types(&self, table_oid: u32) -> Vec<RelTypeInfo> {
+        incident_rel_types(&self.rels, table_oid)
+    }
+}
+
+fn incident_rel_types(rels: &[RelTypeInfo], table_oid: u32) -> Vec<RelTypeInfo> {
+    let mut seen = HashSet::new();
+    rels.iter()
+        .filter(|rel| rel.from_table_oid == table_oid || rel.to_table_oid == table_oid)
+        .filter(|rel| {
+            seen.insert((
+                rel.rel_type.clone(),
+                rel.from_table_oid,
+                rel.to_table_oid,
+                rel.edge_mapping
+                    .as_ref()
+                    .map(|edge| edge.edge_table_oid)
+                    .unwrap_or_default(),
+            ))
+        })
+        .cloned()
+        .collect()
 }
 
 fn load_labels(tables: &[RegisteredTable]) -> GraphResult<HashMap<String, LabelEntry>> {
@@ -409,6 +435,10 @@ impl CatalogSnapshot for FakeCatalog {
             })
             .cloned()
             .ok_or_else(|| GqlError::bind(span, format!("unknown relationship type `{rel_type}`")))
+    }
+
+    fn incident_rel_types(&self, table_oid: u32) -> Vec<RelTypeInfo> {
+        incident_rel_types(&self.rels, table_oid)
     }
 }
 

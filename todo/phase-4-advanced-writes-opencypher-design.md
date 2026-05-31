@@ -69,6 +69,13 @@ GQL/SQL-PGQ primary.
   registered source tables rather than dynamic node labels.
 - **4B — `DETACH DELETE`.** Cascade policy. Tests: incident-edge enumeration,
   ordering, reverse consistency, partial-failure rollback.
+
+  Status, 2026-05-31: closed for single-node mapped detach deletes whose
+  incident relationships are backed by registered edge row tables. Execution
+  deletes incident edge rows before deleting the node row, records
+  transaction-local edge and node tombstones for read-your-own-writes, and
+  rejects incident endpoint-table relationships until pgGraph has a safe
+  PostgreSQL-first rewrite policy for them.
 - **4C — `MERGE`.** Locking. Tests: two-session race on same key, ON CREATE / ON
   MATCH branches, constraint interaction.
 - **4D — openCypher frontend (optional).** `cypher/` modules + `graph.cypher()`.

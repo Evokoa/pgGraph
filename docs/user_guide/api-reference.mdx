@@ -527,8 +527,16 @@ single matched relationship backed by a registered edge row table. It requires a
 then tombstones the graph edge in the current backend. Bidirectional edge
 registrations hide both neighbor directions after the delete. Endpoint nodes are
 not deleted. Undirected relationship `DELETE` is not part of this release's GQL
-subset. Relationship creation, `MERGE`, `DETACH DELETE`, and multi-row writes
-are not part of this release's GQL subset.
+subset.
+
+`MATCH (n:label {...}) DETACH DELETE n RETURN ...` is supported for a single
+matched node. It requires a `mutable_overlay` projection, deletes registered
+incident edge-row relationships first, then deletes the PostgreSQL node row.
+The current backend records transaction-local edge and node tombstones so later
+reads in the same transaction do not see the deleted topology. Incident
+relationships must be backed by registered edge row tables. Relationship
+creation, `MERGE`, and multi-row writes are not part of this release's GQL
+subset.
 
 ### `graph.gql_explain()`
 

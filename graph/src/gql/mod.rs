@@ -255,6 +255,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_detach_delete_node_statement() {
+        let parsed = super::parse_statement("MATCH (u:users {id: 'u1'}) DETACH DELETE u RETURN u")
+            .expect("statement should parse");
+        let Statement::DetachDelete(delete) = parsed else {
+            panic!("statement should be a detach delete query");
+        };
+
+        assert_eq!(delete.match_.pattern.start.var_text(), Some("u"));
+        assert_eq!(delete.delete.var.text, "u");
+        assert_eq!(delete.return_.items.len(), 1);
+    }
+
+    #[test]
     fn rejects_unbounded_variable_length_relationship() {
         let err = parse("MATCH (a)-[:knows*]-(b) RETURN a").expect_err("query should be rejected");
 

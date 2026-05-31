@@ -68,6 +68,8 @@ pub(crate) enum TokKind {
     Set,
     /// `REMOVE`
     Remove,
+    /// `DETACH`
+    Detach,
     /// `DELETE`
     Delete,
     /// `WHERE`
@@ -295,6 +297,7 @@ impl Lexer<'_> {
             "CREATE" => TokKind::Create,
             "SET" => TokKind::Set,
             "REMOVE" => TokKind::Remove,
+            "DETACH" => TokKind::Detach,
             "DELETE" => TokKind::Delete,
             "WHERE" => TokKind::Where,
             "RETURN" => TokKind::Return,

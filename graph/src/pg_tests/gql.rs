@@ -1994,6 +1994,178 @@ fn gql_delete_edge_delta_limit_aborts_before_source_delete() {
 }
 
 #[pg_test]
+fn gql_detach_delete_removes_incident_edges_before_node() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f2', 'u2', 'u1')",
+    )
+    .expect("insert reverse friendship failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (returned_name, edge_rows, deleted_user_rows, remaining_user_rows, gql_deleted_visible) =
+        Spi::connect(|client| {
+            let deleted = client
+                .select(
+                    "SELECT row #>> '{name}'
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u1''}) DETACH DELETE u RETURN u.name AS name'
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("gql detach delete failed")
+                .first();
+            let edge_rows = client
+                .select(
+                    "SELECT count(*)::bigint FROM public.graph_test_friendships_pgtest",
+                    None,
+                    &[],
+                )
+                .expect("edge row count failed")
+                .first()
+                .get::<i64>(1)
+                .expect("edge count read failed")
+                .unwrap_or_default();
+            let deleted_user_rows = client
+                .select(
+                    "SELECT count(*)::bigint FROM public.graph_test_users_pgtest WHERE id = 'u1'",
+                    None,
+                    &[],
+                )
+                .expect("deleted user count failed")
+                .first()
+                .get::<i64>(1)
+                .expect("deleted user read failed")
+                .unwrap_or_default();
+            let remaining_user_rows = client
+                .select(
+                    "SELECT count(*)::bigint FROM public.graph_test_users_pgtest WHERE id = 'u2'",
+                    None,
+                    &[],
+                )
+                .expect("remaining user count failed")
+                .first()
+                .get::<i64>(1)
+                .expect("remaining user read failed")
+                .unwrap_or_default();
+            let gql_deleted_visible = client
+                .select(
+                    "SELECT count(*)::bigint
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u1''}) RETURN u',
+                        hydrate := false
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("gql deleted visibility check failed")
+                .first()
+                .get::<i64>(1)
+                .expect("gql deleted visibility read failed")
+                .unwrap_or_default();
+            Ok::<_, pgrx::spi::Error>((
+                deleted
+                    .get::<String>(1)
+                    .expect("deleted name read failed")
+                    .unwrap_or_default(),
+                edge_rows,
+                deleted_user_rows,
+                remaining_user_rows,
+                gql_deleted_visible,
+            ))
+        })
+        .expect("detach delete verification failed");
+    let traverse_deleted_sqlstate = sqlstate_for_error(
+        "SELECT *
+         FROM graph.traverse(
+            'graph_test_users_pgtest'::regclass,
+            'u1',
+            1,
+            edge_types := ARRAY['friend'],
+            hydrate := false
+         )",
+    )
+    .unwrap_or_default();
+
+    assert_eq!(returned_name, "Alice");
+    assert_eq!(edge_rows, 0);
+    assert_eq!(deleted_user_rows, 0);
+    assert_eq!(remaining_user_rows, 1);
+    assert_eq!(gql_deleted_visible, 0);
+    assert_eq!(traverse_deleted_sqlstate, "PG010");
+}
+
+#[pg_test]
+fn gql_detach_delete_delta_limit_rolls_back_source_rows() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.max_tx_delta_nodes = 0").expect("tighten node delta limit failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest {id: ''u1''}) DETACH DELETE u RETURN u'
+         )",
+    );
+    let user_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_test_users_pgtest WHERE id = 'u1'",
+    )
+    .expect("user row count failed")
+    .unwrap_or_default();
+    let edge_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_test_friendships_pgtest",
+    )
+    .expect("edge row count failed")
+    .unwrap_or_default();
+
+    Spi::run("RESET graph.max_tx_delta_nodes").expect("reset node delta limit failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("PG019"));
+    assert_eq!(user_rows, 1);
+    assert_eq!(edge_rows, 1);
+}
+
+#[pg_test]
 fn gql_delete_edge_handles_bidirectional_reverse_match() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");

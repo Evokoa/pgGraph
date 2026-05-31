@@ -188,6 +188,27 @@ pub(crate) fn added_node_keys(table_oid: u32, tenant: Option<&str>) -> Vec<Strin
     })
 }
 
+/// Record a transaction-local node deletion.
+pub(crate) fn record_deleted_node(node_idx: u32) -> GraphResult<()> {
+    ensure_write_capacity(1, 0, std::mem::size_of::<u32>())?;
+    TX_DELTA.with(|delta| {
+        let mut borrowed = delta.borrow_mut();
+        let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        delta.deleted_nodes.insert(node_idx);
+    });
+    Ok(())
+}
+
+/// Return whether a node has been deleted in the active transaction.
+pub(crate) fn node_deleted(node_idx: u32) -> bool {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .is_some_and(|delta| delta.deleted_nodes.contains(&node_idx))
+    })
+}
+
 /// Record a transaction-local typed filter-index value update.
 pub(crate) fn record_filter_value_update(
     column_idx: usize,
@@ -607,6 +628,19 @@ mod tests {
 
         clear_current_transaction_state();
         assert_eq!(filter_value_update(2, 42), None);
+    }
+
+    #[test]
+    fn deleted_nodes_are_transaction_local() {
+        clear_current_transaction_state();
+        record_deleted_node(42).expect("record node tombstone");
+
+        assert!(node_deleted(42));
+        assert!(!node_deleted(43));
+        assert_eq!(stats().deleted_nodes, 1);
+
+        clear_current_transaction_state();
+        assert!(!node_deleted(42));
     }
 
     #[test]

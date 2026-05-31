@@ -17,6 +17,8 @@ pub(crate) enum LogicalStatement {
     RemoveProperty(LogicalRemoveProperty),
     /// Mapped edge row deletion.
     DeleteEdge(LogicalDeleteEdge),
+    /// Mapped node detach-delete.
+    DetachDeleteNode(LogicalDetachDeleteNode),
 }
 
 /// Bound read-only logical query.
@@ -123,6 +125,28 @@ pub(crate) struct LogicalDeleteEdge {
     pub(crate) predicate: Option<Predicate>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnBinding>,
+}
+
+/// Bound mapped node detach-delete.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalDetachDeleteNode {
+    /// Matched node binding.
+    pub(crate) node: BoundNode,
+    /// Optional hydrated-row predicate selecting the row.
+    pub(crate) predicate: Option<Predicate>,
+    /// Registered edge-row mappings that may contain incident edges.
+    pub(crate) incident_edges: Vec<BoundIncidentEdge>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnBinding>,
+}
+
+/// Bound incident edge row details for `DETACH DELETE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundIncidentEdge {
+    /// Relationship type label.
+    pub(crate) rel_type: String,
+    /// Registered edge row mapping.
+    pub(crate) edge: BoundMappedEdge,
 }
 
 /// Bound mapped edge row details.

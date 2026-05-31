@@ -121,12 +121,14 @@ pub(crate) fn compute_components_with_neighbors(
 
     // Iterate through all edges in the CSR — sequential, cache-friendly
     for node in 0..node_count as u32 {
-        if !node_store.is_active(node) {
+        if !node_store.is_active(node) || crate::projection::tx_delta::node_deleted(node) {
             continue;
         }
 
         for edge in neighbors.neighbors(node) {
-            if node_store.is_active(edge.target) {
+            if node_store.is_active(edge.target)
+                && !crate::projection::tx_delta::node_deleted(edge.target)
+            {
                 uf.union(node, edge.target);
             }
         }
@@ -137,7 +139,7 @@ pub(crate) fn compute_components_with_neighbors(
     let mut component_sizes = HashMap::new();
 
     for node in 0..node_count as u32 {
-        if !node_store.is_active(node) {
+        if !node_store.is_active(node) || crate::projection::tx_delta::node_deleted(node) {
             component[node as usize] = u32::MAX; // inactive
             continue;
         }

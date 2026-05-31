@@ -198,6 +198,16 @@ dotted JSONB property paths remove the addressed key and missing-key removal is
 idempotent. `REMOVE n:Label` is parsed and rejected because labels map to
 registered source tables rather than mutable node tags.
 
+Status note, 2026-05-31: 4B is closed for single-node `DETACH DELETE` over
+registered edge-row relationships. `graph.gql()` parses
+`DETACH DELETE n`, binds a node-only match, enumerates registered incident
+edge-row tables, deletes matching forward and reverse edge rows first, then
+deletes the matched PostgreSQL node row. The current backend records
+transaction-local edge and node tombstones so subsequent reads in the same
+transaction hide the deleted topology. Incident relationships not backed by
+registered edge row tables are rejected until a safe generic policy exists for
+endpoint-table foreign-key relationships.
+
 ## Cross-cutting, every slice
 
 - TDD: failing test first, then code (rust-planning rule 34a).
