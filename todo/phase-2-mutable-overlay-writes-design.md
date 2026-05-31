@@ -87,6 +87,22 @@ pub struct DeltaEdge { pub target: u32, pub type_id: u8, pub weight: Option<u32>
 or mark reverse stale and reject `expand-in` on a dirty overlay (start with
 mark-stale; upgrade if benchmarks demand).
 
+### Slice 2B infrastructure status - 2026-05-31
+
+- Added `ProjectionMode` parsing plus `graph.default_projection_mode` and
+  `graph.mutable_enabled`.
+- Added `graph.build(mode := 'csr_readonly' | 'mutable_overlay')`; mutable mode
+  is rejected until `graph.mutable_enabled = on`, and queued builds persist the
+  selected projection mode for the background worker.
+- Added `TxGraphDelta` storage and backend-local transaction/subtransaction
+  callbacks that clear deltas at transaction end and track nested
+  subtransaction depth.
+- Exposed projection mode and empty transaction-delta counters through
+  `graph.status()` and `graph.sync_health()`.
+- Remaining 2B work before write slices: route actual GQL write deltas into
+  `TxGraphDelta`, prove rollback/read-your-own-writes/concurrent isolation with
+  write behavior, and prove crash/reload ignores uncommitted overlays.
+
 ## 4. Transaction callbacks (slice 2B) — NEW infrastructure
 
 There are no xact callbacks in the codebase today. Register one via

@@ -23,6 +23,7 @@ pub(crate) struct BuildExecutionResult {
     pub(crate) build_time_ms: f64,
     pub(crate) memory_used_mb: f64,
     pub(crate) sync_mode: String,
+    pub(crate) projection_mode: String,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,7 @@ pub(crate) struct BuildJobRow {
     pub(crate) build_time_ms: Option<f64>,
     pub(crate) memory_used_mb: Option<f64>,
     pub(crate) sync_mode: String,
+    pub(crate) projection_mode: String,
     pub(crate) progress_phase: String,
     pub(crate) progress_message: Option<String>,
     pub(crate) started_at: Option<TimestampWithTimeZone>,

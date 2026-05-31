@@ -115,6 +115,8 @@ CREATE TABLE IF NOT EXISTS graph._build_jobs (
     build_time_ms  DOUBLE PRECISION,
     memory_used_mb DOUBLE PRECISION,
     sync_mode      TEXT NOT NULL DEFAULT 'manual',
+    projection_mode TEXT NOT NULL DEFAULT 'csr_readonly'
+        CHECK (projection_mode IN ('csr_readonly', 'mutable_overlay')),
     progress_phase TEXT NOT NULL DEFAULT 'queued',
     progress_message TEXT,
     started_at     TIMESTAMPTZ,
@@ -126,8 +128,14 @@ CREATE TABLE IF NOT EXISTS graph._build_jobs (
 );
 
 ALTER TABLE graph._build_jobs
+    ADD COLUMN IF NOT EXISTS projection_mode TEXT,
     ADD COLUMN IF NOT EXISTS progress_phase TEXT,
     ADD COLUMN IF NOT EXISTS progress_message TEXT;
+
+UPDATE graph._build_jobs
+SET projection_mode = 'csr_readonly'
+WHERE projection_mode IS NULL
+   OR projection_mode NOT IN ('csr_readonly', 'mutable_overlay');
 
 UPDATE graph._build_jobs
 SET progress_phase = CASE status
@@ -147,8 +155,24 @@ END
 WHERE progress_message IS NULL;
 
 ALTER TABLE graph._build_jobs
+    ALTER COLUMN projection_mode SET DEFAULT 'csr_readonly',
+    ALTER COLUMN projection_mode SET NOT NULL,
     ALTER COLUMN progress_phase SET DEFAULT 'queued',
     ALTER COLUMN progress_phase SET NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._build_jobs'::regclass
+          AND conname = '_build_jobs_projection_mode_check'
+    ) THEN
+        ALTER TABLE graph._build_jobs
+            ADD CONSTRAINT _build_jobs_projection_mode_check
+            CHECK (projection_mode IN ('csr_readonly', 'mutable_overlay'));
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS _build_jobs_status_idx
     ON graph._build_jobs (status, created_at);

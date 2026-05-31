@@ -28,6 +28,7 @@ Synchronous build:
 
 ```sql
 SELECT * FROM graph.build();
+SELECT * FROM graph.build(mode := 'csr_readonly');
 ```
 
 Compatibility overload:
@@ -43,9 +44,9 @@ SELECT * FROM graph.build(concurrently := true);
 SELECT * FROM graph.build_status('<build_id>');
 ```
 
-The background path creates a row in `graph._build_jobs` and launches a dynamic
-background worker. If worker launch fails, the job row is marked failed and the
-SQL call reports the error.
+The background path creates a row in `graph._build_jobs`, stores the selected
+projection mode, and launches a dynamic background worker. If worker launch
+fails, the job row is marked failed and the SQL call reports the error.
 If the worker starts and the build later fails, pgGraph records the failed
 status and error detail from a fresh worker transaction so
 `graph.build_status('<build_id>')` remains the operator source of truth.
@@ -61,6 +62,7 @@ status and error detail from a fresh worker transaction so
 | `build_time_ms` | `DOUBLE PRECISION` | Wall-clock build duration |
 | `memory_used_mb` | `DOUBLE PRECISION` | Engine memory estimate after build |
 | `sync_mode` | `TEXT` | Parsed sync mode at build time |
+| `projection_mode` | `TEXT` | Built projection mode: `csr_readonly` or `mutable_overlay` |
 
 `graph.build(concurrently := ...)` returns:
 
@@ -70,8 +72,7 @@ status and error detail from a fresh worker transaction so
 | `status` | `queued`, `running`, `completed`, or `failed` |
 | `nodes_loaded`, `edges_loaded`, `build_time_ms`, `memory_used_mb` | Populated after completion |
 | `sync_mode` | Sync mode captured for the job |
-| `progress_phase` | Coarse operator phase such as `queued`, `building`, `persisting`, `validating_persistence`, `completed`, or `failed` |
-| `progress_message` | Short operator-readable progress or failure detail |
+| `projection_mode` | Projection mode captured for the job |
 
 ## Build Pipeline
 

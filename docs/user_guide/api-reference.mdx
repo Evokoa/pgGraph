@@ -57,13 +57,22 @@ RETURNS TABLE (
   invalid_reason text,
   disabled_trigger_count int,
   read_only boolean,
-  read_only_reason text
+  read_only_reason text,
+  projection_mode text,
+  tx_delta_dirty boolean,
+  tx_delta_added_nodes int,
+  tx_delta_deleted_nodes int,
+  tx_delta_added_edges int,
+  tx_delta_deleted_edges int,
+  tx_delta_memory_bytes bigint
 )
 ```
 
 Reports backend-local engine state and current catalog/sync validity. When
 `read_only` is true, `read_only_reason` is `memory_limit`,
-`edge_buffer_full`, or another typed reason.
+`edge_buffer_full`, or another typed reason. `projection_mode` is
+`csr_readonly` or `mutable_overlay`; transaction-delta columns are zero/false
+until mutable graph writes are enabled by later release slices.
 
 ### `graph.sync_health()`
 
@@ -83,6 +92,13 @@ RETURNS TABLE (
   needs_rebuild boolean,
   read_only boolean,
   read_only_reason text,
+  projection_mode text,
+  tx_delta_dirty boolean,
+  tx_delta_added_nodes int,
+  tx_delta_deleted_nodes int,
+  tx_delta_added_edges int,
+  tx_delta_deleted_edges int,
+  tx_delta_memory_bytes bigint,
   apply_sync_recommended boolean,
   maintenance_recommended boolean
 )
@@ -263,11 +279,28 @@ RETURNS TABLE (
   edges_loaded bigint,
   build_time_ms double precision,
   memory_used_mb double precision,
-  sync_mode text
+  sync_mode text,
+  projection_mode text
 )
 ```
 
-Admin-only. Builds the graph synchronously.
+Admin-only. Builds the graph synchronously using
+`graph.default_projection_mode`.
+
+```sql
+graph.build(mode text)
+RETURNS TABLE (
+  nodes_loaded bigint,
+  edges_loaded bigint,
+  build_time_ms double precision,
+  memory_used_mb double precision,
+  sync_mode text,
+  projection_mode text
+)
+```
+
+Admin-only. Builds the graph synchronously with `mode` set to `csr_readonly` or
+`mutable_overlay`. `mutable_overlay` requires `graph.mutable_enabled = on`.
 
 ```sql
 graph.build(concurrently boolean)
@@ -278,7 +311,8 @@ RETURNS TABLE (
   edges_loaded bigint,
   build_time_ms double precision,
   memory_used_mb double precision,
-  sync_mode text
+  sync_mode text,
+  projection_mode text
 )
 ```
 

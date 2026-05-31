@@ -3,8 +3,12 @@
 use crate::api_types::{
     BuildExecutionResult, BuildJobRow, MaintenanceExecutionResult, MaintenanceJobRow,
 };
+use crate::config;
 use crate::safety;
-use crate::sql_build::{execute_build_with_progress, execute_maintenance_rebuild_with_progress};
+use crate::sql_build::{
+    execute_build_with_prevalidated_mode_and_progress, execute_maintenance_rebuild_with_progress,
+    validate_projection_mode_enabled,
+};
 use crate::sql_sync::current_sync_mode;
 use pgrx::bgworkers::{BackgroundWorkerBuilder, BgWorkerStartTime};
 use pgrx::prelude::*;
@@ -64,19 +68,24 @@ fn current_backend_pid() -> i32 {
     unsafe { pgrx::pg_sys::MyProcPid }
 }
 
-pub(crate) fn create_build_job() -> safety::GraphResult<String> {
+pub(crate) fn create_build_job(
+    projection_mode: config::ProjectionMode,
+) -> safety::GraphResult<String> {
+    validate_projection_mode_enabled(projection_mode)?;
     let sync_mode = current_sync_mode()?.as_str().to_string();
+    let projection_mode = projection_mode.as_str().to_string();
     let queued = JobStatus::Queued.as_str();
     Spi::get_one_with_args::<String>(
         "INSERT INTO graph._build_jobs (
-            build_id, status, sync_mode, progress_phase, progress_message
+            build_id, status, sync_mode, projection_mode,
+            progress_phase, progress_message
          )
          VALUES (
-            gen_random_uuid()::text, $2, $1, $2,
+            gen_random_uuid()::text, $3, $1, $2, $3,
             'queued for background build'
          )
          RETURNING build_id",
-        &[sync_mode.into(), queued.into()],
+        &[sync_mode.into(), projection_mode.into(), queued.into()],
     )
     .map_err(|err| safety::GraphError::Internal(format!("build job creation failed: {}", err)))?
     .ok_or_else(|| safety::GraphError::Internal("build job creation returned no id".to_string()))
@@ -86,7 +95,7 @@ pub(crate) fn build_job_row(build_id: &str) -> safety::GraphResult<Option<BuildJ
     Spi::connect(|client| {
         let rows = client.select(
             "SELECT build_id, status, nodes_loaded, edges_loaded,
-                    build_time_ms, memory_used_mb, sync_mode,
+                    build_time_ms, memory_used_mb, sync_mode, projection_mode,
                     progress_phase, progress_message,
                     started_at, finished_at, error
              FROM graph._build_jobs
@@ -109,13 +118,16 @@ pub(crate) fn build_job_row(build_id: &str) -> safety::GraphResult<Option<BuildJ
                 sync_mode: row
                     .get::<String>(7)?
                     .unwrap_or_else(|| "manual".to_string()),
-                progress_phase: row
+                projection_mode: row
                     .get::<String>(8)?
+                    .unwrap_or_else(|| config::ProjectionMode::CsrReadonly.as_str().to_string()),
+                progress_phase: row
+                    .get::<String>(9)?
                     .unwrap_or_else(|| "unknown".to_string()),
-                progress_message: row.get::<String>(9)?,
-                started_at: row.get::<TimestampWithTimeZone>(10)?,
-                finished_at: row.get::<TimestampWithTimeZone>(11)?,
-                error: row.get::<String>(12)?,
+                progress_message: row.get::<String>(10)?,
+                started_at: row.get::<TimestampWithTimeZone>(11)?,
+                finished_at: row.get::<TimestampWithTimeZone>(12)?,
+                error: row.get::<String>(13)?,
             }));
         }
         Ok(None)
@@ -153,6 +165,7 @@ pub(crate) fn update_build_job_completed(
              build_time_ms = $4,
              memory_used_mb = $5,
              sync_mode = $6,
+             projection_mode = $8,
              progress_phase = $7,
              progress_message = 'build completed',
              finished_at = now(),
@@ -167,6 +180,7 @@ pub(crate) fn update_build_job_completed(
             result.memory_used_mb.into(),
             result.sync_mode.clone().into(),
             completed.into(),
+            result.projection_mode.clone().into(),
         ],
     )
     .map_err(|err| {
@@ -223,9 +237,21 @@ pub(crate) fn update_build_job_failed(build_id: &str, error: &str) -> safety::Gr
 }
 
 pub(crate) fn run_build_job(build_id: &str) -> safety::GraphResult<()> {
+    let row = build_job_row(build_id)?.ok_or_else(|| {
+        safety::GraphError::Internal(format!("build job '{}' was not found", build_id))
+    })?;
+    let projection_mode = config::parse_projection_mode(&row.projection_mode).ok_or_else(|| {
+        safety::GraphError::InvalidFilter {
+            reason: format!(
+                "unsupported stored projection mode '{}'; expected 'csr_readonly' or 'mutable_overlay'",
+                row.projection_mode
+            ),
+        }
+    })?;
     update_build_job_started(build_id)?;
     let mut progress = |phase, message| update_build_job_progress(build_id, phase, message);
-    let result = execute_build_with_progress(true, &mut progress)?;
+    let result =
+        execute_build_with_prevalidated_mode_and_progress(true, projection_mode, &mut progress)?;
     update_build_job_completed(build_id, &result)
 }
 

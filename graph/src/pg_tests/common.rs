@@ -112,6 +112,9 @@ fn reset_and_create_fixtures() {
     Spi::run("SET graph.enabled = on").expect("enable graph failed");
     Spi::run("SET graph.sync_mode = 'manual'").expect("reset sync_mode failed");
     Spi::run("SET graph.build_scan_mode = 'select'").expect("reset build_scan_mode failed");
+    Spi::run("SET graph.default_projection_mode = 'csr_readonly'")
+        .expect("reset default_projection_mode failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("reset mutable_enabled failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_junction_pgtest CASCADE")
         .expect("drop junction failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_friendships_pgtest CASCADE")
@@ -221,6 +224,9 @@ fn reset_and_create_synthetic_fixture(node_count: i32, hub_fanout: i32, persist:
     Spi::run("SET graph.enabled = on").expect("enable graph failed");
     Spi::run("SET graph.sync_mode = 'manual'").expect("reset sync_mode failed");
     Spi::run("SET graph.build_scan_mode = 'select'").expect("reset build_scan_mode failed");
+    Spi::run("SET graph.default_projection_mode = 'csr_readonly'")
+        .expect("reset default_projection_mode failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("reset mutable_enabled failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_synth_edges_pgtest CASCADE")
         .expect("drop synthetic edges failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_synth_nodes_pgtest CASCADE")

@@ -128,7 +128,10 @@ openCypher compatibility.
   `graph.vacuum()`, `graph.maintenance()`, backup/restore, and crash recovery
   behave for each projection mode.
 - Define GUCs for projection mode defaults, mutable enablement, transaction
-  delta limits, compaction thresholds, and memory caps.
+  delta limits, compaction thresholds, and memory caps. Phase 2B has added
+  `graph.default_projection_mode`, `graph.mutable_enabled`, queued-build mode
+  persistence, and the transaction-delta lifecycle skeleton; delta limits,
+  compaction thresholds, and overlay memory caps remain for later Phase 2 slices.
 - Define SQLSTATE policy for GQL syntax, unsupported feature, semantic,
   parameter, type mismatch, schema violation, write-on-read-only, and memory
   limit errors.
@@ -397,11 +400,13 @@ SQLSTATE, tenant, and type-mapping decisions are implemented.
 - Shared physical graph operators such as index scan, expand-out, expand-in,
   filter, project, hash join, update property, create node, and delete edge
 - Projection catalog model
-- Projection mode selection during graph build
+- Projection mode selection during graph build (`graph.build(mode := ...)`
+  added in Phase 2B infrastructure)
 - SQL read/write API shape
 - Runtime mutation model
 - Immutable CSR base plus mutable overlay storage design
-- Simple transaction-local delta maps/vectors
+- Simple transaction-local delta maps/vectors (`TxGraphDelta` skeleton added in
+  Phase 2B infrastructure)
 - Optional arena/slab adjacency for larger long-lived mutable regions
 - Backend-local transaction delta overlay
 - Sync and invalidation flow

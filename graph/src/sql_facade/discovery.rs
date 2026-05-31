@@ -92,13 +92,13 @@ fn register_discovery(
 fn append_auto_build_summary(result: &mut Vec<(String, String, String)>) {
     // Build automatically so discovered schemas are immediately queryable.
     let build_rows: Vec<_> = build().collect();
-    if let Some((nodes, edges, _ms, mem_mb, sync_mode)) = build_rows.first() {
+    if let Some((nodes, edges, _ms, mem_mb, sync_mode, projection_mode)) = build_rows.first() {
         result.push((
             "build".to_string(),
             "graph".to_string(),
             format!(
-                "{} nodes, {} edges, {:.1} MB, sync_mode={}",
-                nodes, edges, mem_mb, sync_mode
+                "{} nodes, {} edges, {:.1} MB, sync_mode={}, projection_mode={}",
+                nodes, edges, mem_mb, sync_mode, projection_mode
             ),
         ));
     }

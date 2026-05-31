@@ -69,9 +69,10 @@ use sql_facade::ensure_current_graph;
 use sql_filters::validate_structured_operator_shape;
 #[cfg(feature = "pg_test")]
 use sql_jobs::{
-    create_build_job, create_maintenance_job, update_build_job_completed, update_build_job_failed,
-    update_build_job_progress, update_build_job_started, update_maintenance_job_completed,
-    update_maintenance_job_failed, update_maintenance_job_progress, update_maintenance_job_started,
+    create_build_job, create_maintenance_job, run_build_job, update_build_job_completed,
+    update_build_job_failed, update_build_job_progress, update_build_job_started,
+    update_maintenance_job_completed, update_maintenance_job_failed,
+    update_maintenance_job_progress, update_maintenance_job_started,
 };
 #[cfg(feature = "pg_test")]
 use sql_sync::current_sync_mode;
@@ -172,6 +173,7 @@ thread_local! {
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     config::register_gucs();
+    projection::tx_delta::register_transaction_callbacks();
 
     // Eagerly pre-warm the OS page cache for the .pggraph file.
     let Ok(path) = persistence::graph_file_path() else {

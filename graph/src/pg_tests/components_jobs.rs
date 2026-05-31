@@ -110,7 +110,16 @@ fn build_status_reads_durable_concurrent_job_rows() {
     )
     .expect("add table failed");
 
-    let build_id = super::create_build_job().expect("create build job failed");
+    let build_id = super::create_build_job(crate::config::ProjectionMode::CsrReadonly)
+        .expect("create build job failed");
+    let queued_projection = Spi::get_one::<String>(&format!(
+        "SELECT projection_mode
+         FROM graph._build_jobs
+         WHERE build_id = {}",
+        super::sql_literal(&build_id)
+    ))
+    .expect("queued projection mode read failed")
+    .unwrap_or_default();
     let (queued_status, queued_phase, queued_message) = Spi::connect(|client| {
         let result = client
             .select(
@@ -138,6 +147,7 @@ fn build_status_reads_durable_concurrent_job_rows() {
         build_time_ms: 12.5,
         memory_used_mb: 1.25,
         sync_mode: "manual".to_string(),
+        projection_mode: "csr_readonly".to_string(),
     };
     super::update_build_job_started(&build_id).expect("mark build job running failed");
     super::update_build_job_progress(&build_id, "persisting", "writing and fsyncing graph artifact")
@@ -176,6 +186,7 @@ fn build_status_reads_durable_concurrent_job_rows() {
     assert_eq!(queued_status, "queued");
     assert_eq!(queued_phase, "queued");
     assert_eq!(queued_message, "queued for background build");
+    assert_eq!(queued_projection, "csr_readonly");
     assert!(completed);
 }
 
@@ -259,7 +270,8 @@ fn maintenance_status_reads_durable_job_rows() {
 fn failed_job_status_updates_are_idempotent_and_do_not_overwrite_completed_jobs() {
     reset_and_create_fixtures();
 
-    let failed_build_id = super::create_build_job().expect("create failed build job");
+    let failed_build_id = super::create_build_job(crate::config::ProjectionMode::CsrReadonly)
+        .expect("create failed build job");
     super::update_build_job_failed(&failed_build_id, "build exploded")
         .expect("mark build failed");
     let failed_build = Spi::get_one::<bool>(&format!(
@@ -276,13 +288,15 @@ fn failed_job_status_updates_are_idempotent_and_do_not_overwrite_completed_jobs(
     .unwrap_or(false);
     assert!(failed_build);
 
-    let completed_build_id = super::create_build_job().expect("create completed build job");
+    let completed_build_id = super::create_build_job(crate::config::ProjectionMode::CsrReadonly)
+        .expect("create completed build job");
     let build_result = super::BuildExecutionResult {
         nodes_loaded: 1,
         edges_loaded: 0,
         build_time_ms: 1.0,
         memory_used_mb: 1.0,
         sync_mode: "manual".to_string(),
+        projection_mode: "csr_readonly".to_string(),
     };
     super::update_build_job_completed(&completed_build_id, &build_result)
         .expect("mark build completed");

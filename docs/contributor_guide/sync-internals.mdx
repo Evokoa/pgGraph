@@ -101,8 +101,9 @@ because it reads source-table properties through SQL rather than graph topology.
 
 `graph.sync_health()` is the operator-facing read model for this state. It
 combines backend-local replay progress, durable `_sync_log` high-water state,
-freshness configuration, trigger health, and overlay pressure into one row for
-external schedulers and monitoring checks.
+freshness configuration, trigger health, projection mode, transaction-delta
+counts, and overlay pressure into one row for external schedulers and
+monitoring checks.
 
 Scheduler ownership intentionally stays outside the extension. PostgreSQL
 background-worker lifecycle, crash recovery, privilege boundaries, and cadence

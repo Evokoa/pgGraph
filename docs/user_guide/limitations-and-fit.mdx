@@ -36,7 +36,7 @@ data into another system.
 | Build scanner | `graph.build_scan_mode = 'copy'` is reserved; use `select` |
 | GQL | `graph.gql()` supports the documented read-only Phase 1 subset; writes, aggregates, path functions, and multi-stage queries are future work |
 | SQL/PGQ | Planned adapter work, not a current public API |
-| Projection modes | The current runtime is effectively `csr_readonly`; a future `mutable_overlay` mode is planned but not implemented |
+| Projection modes | `graph.build()` defaults to `csr_readonly`; `mutable_overlay` can be selected when `graph.mutable_enabled = on`, but public graph write clauses are still future work |
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |

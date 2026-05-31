@@ -15,6 +15,7 @@ search composition, sync overlays, status reporting, and persistence.
   { name: 'resolution_delta', type: 'ResolutionDeltaIndex', desc: 'indexed post-build inserts that cannot mutate finalized/mmap index' },
   { name: '_mmap', type: 'Option<Mmap>', desc: 'owns mmap lifetime for mmap-backed stores' },
   { name: 'edge_buffer', type: 'Vec<EdgeMutation>', desc: 'post-build edge insert/delete overlay' },
+  { name: 'projection_mode', type: 'ProjectionMode', desc: 'csr_readonly or mutable_overlay runtime mode' },
   { name: 'tenant_membership', type: 'HashMap<String, RoaringBitmap>', desc: 'tenant to allowed node set' }
 ]} />
 
@@ -104,9 +105,10 @@ Insert after delete cancels the delete; delete after insert cancels the insert.
 ## Status Computation
 
 `Engine::status()` returns counts, memory estimates, sync status, schema state,
-edge labels, pending sync state, and read-only flags. Some fields are refreshed
-by SQL runtime helpers before calling `Engine::status()`, including disabled
-trigger count, pending sync rows, and schema drift.
+edge labels, projection mode, transaction-delta counts, pending sync state, and
+read-only flags. Some fields are refreshed by SQL runtime helpers before
+calling `Engine::status()`, including disabled trigger count, pending sync rows,
+and schema drift.
 
 ## Important Invariants
 
@@ -119,3 +121,4 @@ trigger count, pending sync rows, and schema drift.
 | Mmap store pointers never outlive `Engine._mmap` | Raw pointer reads depend on mmap lifetime |
 | `node_store.is_active()` gates resolved nodes | Tombstones must not appear as live results |
 | `edge_buffer.len() <= graph.edge_buffer_size` | Prevents unbounded overlay memory |
+| Transaction deltas clear at transaction end | Rollback/commit must not leak uncommitted graph state across transactions |

@@ -74,29 +74,67 @@ fn persist_and_reload_engine(
 
 pub(crate) fn execute_build(force_persist: bool) -> safety::GraphResult<BuildExecutionResult> {
     let mut progress = |_, _| Ok(());
-    execute_build_with_progress(force_persist, &mut progress)
+    let mode = configured_projection_mode()?;
+    execute_build_with_mode_and_progress(force_persist, mode, &mut progress)
 }
 
-pub(crate) fn execute_build_with_progress(
+pub(crate) fn execute_build_with_mode(
     force_persist: bool,
+    projection_mode: config::ProjectionMode,
+) -> safety::GraphResult<BuildExecutionResult> {
+    let mut progress = |_, _| Ok(());
+    execute_build_with_mode_and_progress(force_persist, projection_mode, &mut progress)
+}
+
+pub(crate) fn execute_build_with_mode_and_progress(
+    force_persist: bool,
+    projection_mode: config::ProjectionMode,
     progress: &mut ProgressCallback<'_>,
 ) -> safety::GraphResult<BuildExecutionResult> {
     execute_build_inner(
         force_persist,
+        projection_mode,
+        ProjectionModeGate::CheckGuc,
         "building",
         "building graph from registered source tables",
         progress,
     )
 }
 
+pub(crate) fn execute_build_with_prevalidated_mode_and_progress(
+    force_persist: bool,
+    projection_mode: config::ProjectionMode,
+    progress: &mut ProgressCallback<'_>,
+) -> safety::GraphResult<BuildExecutionResult> {
+    execute_build_inner(
+        force_persist,
+        projection_mode,
+        ProjectionModeGate::Prevalidated,
+        "building",
+        "building graph from registered source tables",
+        progress,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionModeGate {
+    CheckGuc,
+    Prevalidated,
+}
+
 fn execute_build_inner(
     force_persist: bool,
+    projection_mode: config::ProjectionMode,
+    mode_gate: ProjectionModeGate,
     build_phase: &'static str,
     build_message: &'static str,
     progress: &mut ProgressCallback<'_>,
 ) -> safety::GraphResult<BuildExecutionResult> {
     let start = std::time::Instant::now();
     let sync_mode = current_sync_mode()?;
+    if mode_gate == ProjectionModeGate::CheckGuc {
+        validate_projection_mode_enabled(projection_mode)?;
+    }
 
     acquire_build_lock()?;
 
@@ -110,6 +148,7 @@ fn execute_build_inner(
             build_time_ms: 0.0,
             memory_used_mb: 0.0,
             sync_mode: "manual".to_string(),
+            projection_mode: projection_mode.as_str().to_string(),
         });
     }
 
@@ -119,6 +158,7 @@ fn execute_build_inner(
     report_progress(progress, build_phase, build_message)?;
     let mut new_engine =
         build_replacement_engine(&tables, &edges, &filter_columns, force_read_only)?;
+    new_engine.set_projection_mode(projection_mode);
 
     let nodes_loaded = new_engine.node_store.node_count() as i64;
     let edges_loaded = new_engine.edge_store.edge_count() as i64;
@@ -153,6 +193,7 @@ fn execute_build_inner(
         build_time_ms,
         memory_used_mb,
         sync_mode: sync_mode.as_str().to_string(),
+        projection_mode: projection_mode.as_str().to_string(),
     })
 }
 
@@ -170,6 +211,8 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
     let previous_applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
     let build = execute_build_inner(
         force_persist,
+        configured_projection_mode()?,
+        ProjectionModeGate::CheckGuc,
         "rebuilding",
         "rebuilding graph for maintenance",
         progress,
@@ -281,6 +324,33 @@ fn build_replacement_engine(
     Ok(new_engine)
 }
 
+pub(crate) fn configured_projection_mode() -> safety::GraphResult<config::ProjectionMode> {
+    config::default_projection_mode().ok_or_else(|| safety::GraphError::InvalidFilter {
+        reason: format!(
+            "unsupported graph.default_projection_mode '{}'; expected 'csr_readonly' or 'mutable_overlay'",
+            config::DEFAULT_PROJECTION_MODE
+                .get()
+                .as_ref()
+                .and_then(|c| c.to_str().ok())
+                .unwrap_or("csr_readonly")
+        ),
+    })
+}
+
+pub(crate) fn validate_projection_mode_enabled(
+    projection_mode: config::ProjectionMode,
+) -> safety::GraphResult<()> {
+    if matches!(projection_mode, config::ProjectionMode::MutableOverlay)
+        && !config::MUTABLE_ENABLED.get()
+    {
+        return Err(safety::GraphError::UnsupportedOperation {
+            operation: "graph.build(mode => 'mutable_overlay')".to_string(),
+            reason: "graph.mutable_enabled is off".to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn guard_build_memory_headroom(
     tables: &[builder::RegisteredTable],
     edges: &[builder::RegisteredEdge],
@@ -338,7 +408,11 @@ pub(crate) fn check_build_acls_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_lock_query, BUILD_LOCK_CLASS_ID, BUILD_LOCK_OBJECT_ID};
+    use super::{
+        build_lock_query, validate_projection_mode_enabled, BUILD_LOCK_CLASS_ID,
+        BUILD_LOCK_OBJECT_ID,
+    };
+    use crate::config::ProjectionMode;
 
     #[test]
     fn build_lock_query_uses_named_advisory_lock_keys() {
@@ -348,5 +422,11 @@ mod tests {
             build_lock_query(),
             "SELECT pg_try_advisory_xact_lock(1918928211, 1735552871)"
         );
+    }
+
+    #[test]
+    fn csr_readonly_projection_mode_is_always_allowed() {
+        validate_projection_mode_enabled(ProjectionMode::CsrReadonly)
+            .expect("csr_readonly should be allowed");
     }
 }

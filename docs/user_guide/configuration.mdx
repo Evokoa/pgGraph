@@ -49,12 +49,19 @@ SELECT pg_reload_conf();
 | `graph.enforce_tenant_scope` | bool | `true` | `USERSET` | `on`, `off` | Tenanted graph queries |
 | `graph.tenant_setting` | string | empty | `USERSET` | Any session GUC name | Tenant fallback |
 | `graph.build_scan_mode` | string | `select` | `USERSET` | `select`; `copy` is reserved | Build scanner |
+| `graph.default_projection_mode` | string | `csr_readonly` | `USERSET` | `csr_readonly`, `mutable_overlay` | Default `graph.build()` projection mode |
+| `graph.mutable_enabled` | bool | `false` | `USERSET` | `on`, `off` | Allows `mutable_overlay` builds |
 
 <Callout type="warning">
 `graph.build_scan_mode = 'copy'` is present as a reserved mode, but the current
 code returns an error because safe server-side COPY hooks are not available
 through the pgrx path used here. Use `select`.
 </Callout>
+
+`graph.default_projection_mode = 'csr_readonly'` preserves the immutable
+read-mostly engine. `mutable_overlay` is an opt-in build mode for the upcoming
+transaction-local write surface; selecting it requires
+`graph.mutable_enabled = on`.
 
 ## Memory And Build Settings
 
@@ -119,6 +126,8 @@ graph.max_frontier = 100000
 graph.default_max_depth = 5
 graph.default_search_mode = 'contains'
 graph.default_hydrate = on
+graph.default_projection_mode = 'csr_readonly'
+graph.mutable_enabled = off
 graph.query_freshness = 'apply_pending_sync'
 graph.sync_mode = 'manual'
 ```

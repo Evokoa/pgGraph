@@ -116,6 +116,11 @@ FROM graph.sync_health();
 | `disabled_trigger_count` | Registered graph triggers currently disabled |
 | `edge_buffer_used` | Pending edge overlay mutations |
 | `edge_buffer_size` | Configured edge overlay capacity |
+| `projection_mode` | Built projection mode: `csr_readonly` or `mutable_overlay` |
+| `tx_delta_dirty` | Whether this backend has transaction-local graph deltas |
+| `tx_delta_added_nodes` / `tx_delta_deleted_nodes` | Transaction-local node delta counts |
+| `tx_delta_added_edges` / `tx_delta_deleted_edges` | Transaction-local edge delta counts |
+| `tx_delta_memory_bytes` | Estimated transaction-delta heap memory |
 | `read_only_reason` | Typed reason such as `memory_limit` or `edge_buffer_full` when read-only |
 | `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` while the engine is writable |
 | `maintenance_recommended` | Overlay, read-only, vacuum, or rebuild state should be compacted |
@@ -244,6 +249,8 @@ SELECT
   edge_buffer_used,
   needs_vacuum,
   needs_rebuild,
+  projection_mode,
+  tx_delta_dirty,
   applied_sync_id,
   pending_sync_rows,
   disabled_trigger_count,
@@ -257,6 +264,8 @@ FROM graph.status();
 | `edge_buffer_used` | Pending edge overlay mutations |
 | `needs_vacuum` | Overlay/tombstone state should be merged |
 | `needs_rebuild` | Catalog/schema drift requires full rebuild |
+| `projection_mode` | Built projection mode |
+| `tx_delta_dirty` | Whether this backend has transaction-local graph deltas |
 | `applied_sync_id` | Last durable sync log row applied by this backend-local engine |
 | `pending_sync_rows` | Durable sync rows newer than `applied_sync_id` |
 | `disabled_trigger_count` | Registered graph triggers currently disabled |

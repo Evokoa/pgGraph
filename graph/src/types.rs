@@ -210,6 +210,13 @@ pub struct EngineStatus {
     pub disabled_trigger_count: i32,
     pub read_only: bool,
     pub read_only_reason: Option<String>,
+    pub projection_mode: String,
+    pub tx_delta_dirty: bool,
+    pub tx_delta_added_nodes: i32,
+    pub tx_delta_deleted_nodes: i32,
+    pub tx_delta_added_edges: i32,
+    pub tx_delta_deleted_edges: i32,
+    pub tx_delta_memory_bytes: i64,
 }
 
 /// Edge type filter for traversal.

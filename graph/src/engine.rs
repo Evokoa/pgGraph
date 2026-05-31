@@ -13,6 +13,7 @@ use crate::path_finder;
 use crate::projection::neighbors::{
     CsrNeighbors, EdgeOverlay, OverlayDeletes, OverlayInserts, OverlayNeighbors,
 };
+use crate::projection::tx_delta;
 use crate::resolution_index::{ResolutionDeltaIndex, ResolutionIndex, ResolutionIndexBuilder};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::*;
@@ -89,6 +90,8 @@ pub struct Engine {
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
     pub(crate) edge_buffer: Vec<EdgeMutation>,
+    /// Runtime projection mode selected at build/load time.
+    pub(crate) projection_mode: crate::config::ProjectionMode,
 
     /// When true, the engine is in read-only mode.
     /// Sync inserts/updates/deletes are rejected until a rebuild installs a
@@ -209,6 +212,7 @@ impl Engine {
             resolution_delta: ResolutionDeltaIndex::new(),
             _mmap: None,
             edge_buffer: Vec::new(),
+            projection_mode: crate::config::ProjectionMode::CsrReadonly,
             is_read_only: false,
             read_only_reason: None,
             applied_sync_id: 0,
@@ -307,6 +311,11 @@ impl Engine {
         self.last_vacuum = source.last_vacuum;
         self.applied_sync_id = source.applied_sync_id;
         self.needs_vacuum = source.needs_vacuum;
+        self.projection_mode = source.projection_mode;
+    }
+
+    pub fn set_projection_mode(&mut self, projection_mode: crate::config::ProjectionMode) {
+        self.projection_mode = projection_mode;
     }
 
     pub fn record_applied_sync_id(&mut self, sync_id: i64) {
@@ -812,6 +821,7 @@ impl Engine {
 
     /// Get engine status.
     pub fn status(&self) -> EngineStatus {
+        let tx_delta_stats = tx_delta::stats();
         EngineStatus {
             node_count: self.node_store.node_count() as i32,
             edge_count: self.edge_store.edge_count() as i32,
@@ -834,6 +844,13 @@ impl Engine {
             disabled_trigger_count: self.disabled_trigger_count,
             read_only: self.is_read_only,
             read_only_reason: self.read_only_reason.map(|reason| reason.to_string()),
+            projection_mode: self.projection_mode.as_str().to_string(),
+            tx_delta_dirty: tx_delta_stats.dirty,
+            tx_delta_added_nodes: tx_delta_stats.added_nodes.min(i32::MAX as usize) as i32,
+            tx_delta_deleted_nodes: tx_delta_stats.deleted_nodes.min(i32::MAX as usize) as i32,
+            tx_delta_added_edges: tx_delta_stats.added_edges.min(i32::MAX as usize) as i32,
+            tx_delta_deleted_edges: tx_delta_stats.deleted_edges.min(i32::MAX as usize) as i32,
+            tx_delta_memory_bytes: tx_delta_stats.memory_bytes.min(i64::MAX as usize) as i64,
         }
     }
 

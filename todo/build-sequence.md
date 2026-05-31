@@ -46,6 +46,12 @@ unweighted paths/components route through overlay neighbors, weighted paths
 reject dirty edge overlays with `PG018`, and the clean-overlay benchmark is
 within noise of the pre-2A baseline.
 
+Status note, 2026-05-31: 2B infrastructure has started. Projection-mode GUCs,
+`graph.build(mode := ...)`, queued-build mode persistence, status/sync-health
+mode columns, and the transaction-delta callback skeleton are in place. The 2B
+write-proof gates remain open until mapped writes record deltas and rollback,
+isolation, out-of-band sync, and crash/reload behavior are proven end to end.
+
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 
 | Slice | Depends on | Merge gate |
