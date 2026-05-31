@@ -101,6 +101,14 @@ with stable diagnostics.
   and path arguments require the path value model from 3E.
 - **3E — Path functions.** `nodes`/`relationships`/`length` over a stable path
   value model. Tests: path value-shape snapshots.
+
+  Status, 2026-05-31: named relationship variables now have a stable path value
+  model for bounded relationship patterns. `RETURN r` over a variable-length
+  relationship returns `{"_path": {"nodes": [...], "relationships": [...]}}`;
+  `nodes(r)`, `relationships(r)`, and `length(r)` are supported in final
+  `RETURN` projections. Remaining follow-up: path-function `WITH` projections,
+  full standalone path-variable syntax, and aggregate path arguments require the
+  later multi-stage row-stream planner.
 - **3F — jsonb properties.** Dynamic/list/map type mapping; missing-vs-null rule.
 - **3G — SQL/PGQ adapter.** Success + rejection corpus; own compatibility matrix.
 

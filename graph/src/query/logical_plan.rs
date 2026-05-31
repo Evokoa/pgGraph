@@ -216,6 +216,15 @@ pub(crate) enum ReturnBinding {
     Node { side: BindingSide, name: String },
     /// Whole relationship variable.
     Relationship { name: String },
+    /// Whole path value.
+    Path { name: String },
+    /// Path function value.
+    PathFunction {
+        /// Function to evaluate.
+        func: PathFunc,
+        /// Return column name.
+        name: String,
+    },
     /// Node property.
     Property {
         /// Source or target binding.
@@ -244,6 +253,8 @@ impl ReturnBinding {
         match self {
             Self::Node { name, .. }
             | Self::Relationship { name }
+            | Self::Path { name }
+            | Self::PathFunction { name, .. }
             | Self::Property { name, .. }
             | Self::Aggregate { name, .. } => name,
         }
@@ -251,13 +262,32 @@ impl ReturnBinding {
 
     /// Return whether this binding projects a scalar value sortable by output name.
     pub(crate) fn is_sortable_scalar(&self) -> bool {
-        matches!(self, Self::Property { .. } | Self::Aggregate { .. })
+        matches!(
+            self,
+            Self::Property { .. }
+                | Self::Aggregate { .. }
+                | Self::PathFunction {
+                    func: PathFunc::Length,
+                    ..
+                }
+        )
     }
 
     /// Return whether this binding is an aggregate.
     pub(crate) fn is_aggregate(&self) -> bool {
         matches!(self, Self::Aggregate { .. })
     }
+}
+
+/// Bound path function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathFunc {
+    /// `nodes(path)`.
+    Nodes,
+    /// `relationships(path)`.
+    Relationships,
+    /// `length(path)`.
+    Length,
 }
 
 /// Bound aggregate function.

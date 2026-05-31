@@ -1,7 +1,8 @@
 //! Physical plans executable against engine topology stores or PostgreSQL SPI.
 
 use super::logical_plan::{
-    AggregateArg, AggregateFunc, BindingSide, BoundDirection, HopBounds, Predicate, SortBinding,
+    AggregateArg, AggregateFunc, BindingSide, BoundDirection, HopBounds, PathFunc, Predicate,
+    SortBinding,
 };
 
 /// Maximum GQL matches collected before sorting/projection.
@@ -197,6 +198,15 @@ pub(crate) enum ReturnSlot {
     Node { side: BindingSide, name: String },
     /// Whole relationship value.
     Relationship { name: String },
+    /// Whole path value.
+    Path { name: String },
+    /// Path function value.
+    PathFunction {
+        /// Function to evaluate.
+        func: PathFunc,
+        /// Return column name.
+        name: String,
+    },
     /// Node property value.
     Property {
         /// Source or target binding.
@@ -225,6 +235,8 @@ impl ReturnSlot {
         match self {
             Self::Node { name, .. }
             | Self::Relationship { name }
+            | Self::Path { name }
+            | Self::PathFunction { name, .. }
             | Self::Property { name, .. }
             | Self::Aggregate { name, .. } => name,
         }
@@ -233,6 +245,11 @@ impl ReturnSlot {
     /// Return whether this slot contains an aggregate value.
     pub(crate) fn is_aggregate(&self) -> bool {
         matches!(self, Self::Aggregate { .. })
+    }
+
+    /// Return whether this slot needs the executor to retain path details.
+    pub(crate) fn requires_path(&self) -> bool {
+        matches!(self, Self::Path { .. } | Self::PathFunction { .. })
     }
 }
 

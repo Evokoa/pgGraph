@@ -1070,6 +1070,7 @@ fn hydrate_gql_rows(
     for row in rows {
         for coordinate in std::iter::once(Some(&row.source))
             .chain(std::iter::once(row.target.as_ref()))
+            .chain(row.path_nodes.iter().map(Some))
             .flatten()
         {
             let key = (coordinate.table_oid, coordinate.node_id.clone());

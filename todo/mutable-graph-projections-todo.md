@@ -528,14 +528,14 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 | Parameters through JSONB | phase_1 | supported | supported | supported | supported | Missing/wrong type errors covered. |
 | `RETURN` node and scalar property values | phase_1 | supported | supported | supported | supported | JSONB row shape is stable. |
 | `RETURN` coordinate-only single-hop relationship identity | phase_1 | supported | supported | supported | supported | Relationship source-row hydration is deferred. |
-| `RETURN` raw paths and path functions | phase_3 | required | required | required | required | Raw path variables, `nodes`, `relationships`, and `length` are not Phase 1. |
+| `RETURN` raw paths and path functions | phase_3 | supported | supported | supported | supported | Bounded named relationship paths and `nodes`, `relationships`, `length` are supported; standalone path variables remain later work. |
 | `ORDER BY`, `SKIP`, `LIMIT` | phase_1 | supported | supported | supported | supported | Hard row limits still apply. |
 | Bounded variable-length relationships | phase_1 | supported | supported | supported | supported | Requires explicit max bounds; variable-length relationship return is rejected. |
 | `OPTIONAL MATCH` | phase_3 | required | required | required | required | Needs null-extension semantics. |
 | `WITH` | phase_3 | supported | supported | supported | supported | Projection-stage `WITH` is supported; aggregate `WITH` projections remain later multi-stage row-stream work. |
 | `DISTINCT` | phase_3 | supported | supported | supported | supported | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are bounded by the GQL unique-key cap. |
 | Aggregates: `count`, `sum`, `avg`, `min`, `max`, `collect` | phase_3 | supported | supported | supported | supported | `RETURN` aggregates over node-only and single-relationship row streams; aggregate `DISTINCT` is supported. |
-| Path functions: `nodes`, `relationships`, `length` | phase_3 | required | required | required | required | Path value model must be stable. |
+| Path functions: `nodes`, `relationships`, `length` | phase_3 | supported | supported | supported | supported | Supported over bounded named relationship path values in final `RETURN`. |
 | `CREATE` registered node/edge rows | phase_2 | required | required | required | required | PostgreSQL-first, registered labels/types only. |
 | `SET` mapped properties | phase_2 | required | required | required | required | Requires type mapping and row locks. |
 | `DELETE` mapped relationships | phase_2 | required | required | required | required | No cascade in first write milestone. |

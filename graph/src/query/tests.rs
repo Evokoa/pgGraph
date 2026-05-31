@@ -306,10 +306,56 @@ fn binder_rejects_delete_return_aggregates() {
 
 #[test]
 fn binder_rejects_variable_length_relationship_return() {
-    let ast = parse("MATCH (u:users)-[r:works_at*1..2]->(c:companies) RETURN r").unwrap();
-    let err = bind(&ast, &fake_catalog()).unwrap_err();
+    let logical = bind_query("MATCH (u:users)-[r:works_at*1..2]->(c:companies) RETURN r");
+    let physical = lower(logical);
+
+    assert!(matches!(physical.returns[0], ReturnSlot::Path { .. }));
+}
+
+#[test]
+fn binder_accepts_path_functions_over_relationship_variables() {
+    let logical = bind_query(
+        "MATCH (u:users)-[r:works_at*1..2]->(c:companies) \
+         RETURN nodes(r) AS ns, relationships(r) AS rs, length(r) AS len ORDER BY len DESC",
+    );
+    let physical = lower(logical);
+
+    assert!(matches!(
+        physical.returns[0],
+        ReturnSlot::PathFunction {
+            func: super::logical_plan::PathFunc::Nodes,
+            ..
+        }
+    ));
+    assert!(matches!(
+        physical.returns[1],
+        ReturnSlot::PathFunction {
+            func: super::logical_plan::PathFunc::Relationships,
+            ..
+        }
+    ));
+    assert!(matches!(
+        physical.returns[2],
+        ReturnSlot::PathFunction {
+            func: super::logical_plan::PathFunc::Length,
+            ..
+        }
+    ));
+    assert_eq!(physical.order_by.len(), 1);
+}
+
+#[test]
+fn binder_rejects_path_functions_outside_return_projection() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users)-[r:works_at*1..2]->(c:companies) \
+         WITH nodes(r) AS ns RETURN ns",
+    )
+    .unwrap();
+
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
 
     assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("path-function WITH projections"));
 }
 
 #[test]
@@ -741,6 +787,160 @@ fn aggregate_limit_does_not_truncate_input_rows() {
     assert_eq!(physical.execution_row_cap(), 10_000);
     assert!(physical.cap_exhaustion_is_error());
     assert_eq!(projected, vec![serde_json::json!({"rows": 2})]);
+}
+
+#[test]
+fn path_projection_returns_stable_path_value_and_functions() {
+    let logical = bind_query(
+        "MATCH (u:users)-[p:works_at*1..2]->(c:companies) \
+         RETURN p, nodes(p) AS ns, relationships(p) AS rs, length(p) AS len \
+         ORDER BY len DESC",
+    );
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 3,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["len"], 2);
+    assert_eq!(projected[0]["ns"][0]["_id"]["table"], "users");
+    assert_eq!(projected[0]["ns"][0]["id"], "u1");
+    assert_eq!(projected[0]["ns"][1]["_id"]["table"], "companies");
+    assert_eq!(projected[0]["ns"][1]["id"], "c1");
+    assert_eq!(projected[0]["ns"][2]["id"], "c2");
+    assert_eq!(
+        projected[0]["rs"].as_array().expect("relationships").len(),
+        2
+    );
+    assert_eq!(projected[0]["rs"][0]["_type"], "works_at");
+    assert_eq!(projected[0]["rs"][0]["_start"]["id"], "u1");
+    assert_eq!(projected[0]["rs"][0]["_end"]["id"], "c1");
+    assert_eq!(projected[0]["p"]["_path"]["nodes"], projected[0]["ns"]);
+    assert_eq!(
+        projected[0]["p"]["_path"]["relationships"],
+        projected[0]["rs"]
+    );
+}
+
+#[test]
+fn path_projection_preserves_distinct_paths_to_same_target() {
+    let logical = bind_query(
+        "MATCH (u:users)-[p:friend*1..2]->(v:users) \
+         WHERE u.id = 'u1' AND v.id = 'u3' RETURN length(p) AS len ORDER BY len",
+    );
+    let physical = lower(logical);
+    let mut engine = Engine::new();
+    for pk in ["u1", "u2", "u3"] {
+        let node_idx = engine.node_store.add_node(10, pk.to_string());
+        engine.resolution_insert(10, pk, node_idx);
+        engine.insert_table_membership(10, node_idx);
+    }
+    let friend = engine.register_edge_type("friend").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: friend,
+                weight: None,
+            },
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: friend,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: friend,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+    let hydrated = HashMap::from([
+        (
+            (10, "u1".to_string()),
+            serde_json::json!({"id": "u1", "name": "Ada"}),
+        ),
+        (
+            (10, "u2".to_string()),
+            serde_json::json!({"id": "u2", "name": "Linus"}),
+        ),
+        (
+            (10, "u3".to_string()),
+            serde_json::json!({"id": "u3", "name": "Grace"}),
+        ),
+    ]);
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap();
+
+    assert_eq!(
+        projected
+            .iter()
+            .map(|row| row["len"].as_u64().expect("path length"))
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[test]
+fn optional_path_functions_return_null_for_unmatched_rows() {
+    let logical = bind_query(
+        "OPTIONAL MATCH (u:users)-[p:works_at]->(c:companies) \
+         WHERE c.name = 'Missing' RETURN nodes(p) AS ns, relationships(p) AS rs, length(p) AS len",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert!(projected.iter().all(|row| row["ns"].is_null()));
+    assert!(projected.iter().all(|row| row["rs"].is_null()));
+    assert!(projected.iter().all(|row| row["len"].is_null()));
 }
 
 #[test]

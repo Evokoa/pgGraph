@@ -560,6 +560,75 @@ fn gql_distinct_matches_sql_distinct_counts() {
 }
 
 #[pg_test]
+fn gql_path_values_and_functions_have_stable_shape() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Cara', 29)",
+    )
+    .expect("insert path user failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f2', 'u2', 'u3')",
+    )
+    .expect("insert path friendship failed");
+    build_friendship_fixture_graph();
+
+    let (path_len, node_ids, relationship_count, raw_path_matches) = Spi::connect(|client| {
+        let row = client
+            .select(
+                "WITH selected AS (
+                     SELECT row
+                     FROM graph.gql(
+                         'MATCH (u:graph_test_users_pgtest)-[p:friend*2..2]->(v:graph_test_users_pgtest)
+                          WHERE u.id = ''u1'' AND v.id = ''u3''
+                          RETURN p,
+                                 nodes(p) AS ns,
+                                 relationships(p) AS rs,
+                                 length(p) AS len',
+                         hydrate := true
+                     )
+                     LIMIT 1
+                 )
+                 SELECT (row->>'len')::bigint,
+                        (
+                            SELECT jsonb_agg(node->>'id' ORDER BY ord)
+                            FROM selected,
+                                 jsonb_array_elements(row->'ns') WITH ORDINALITY AS n(node, ord)
+                        ),
+                        jsonb_array_length(row->'rs'),
+                        row->'p'->'_path'->'nodes' = row->'ns'
+                            AND row->'p'->'_path'->'relationships' = row->'rs'
+                 FROM selected",
+                None,
+                &[],
+            )
+            .expect("path shape query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)
+                .expect("path length read failed")
+                .unwrap_or_default(),
+            row.get::<pgrx::JsonB>(2)
+                .expect("path node ids read failed")
+                .unwrap(),
+            row.get::<i32>(3)
+                .expect("relationship count read failed")
+                .unwrap_or_default(),
+            row.get::<bool>(4)
+                .expect("raw path equality read failed")
+                .unwrap_or(false),
+        ))
+    })
+    .expect("path shape comparison failed");
+
+    assert_eq!(path_len, 2);
+    assert_eq!(node_ids.0, serde_json::json!(["u1", "u2", "u3"]));
+    assert_eq!(relationship_count, 2);
+    assert!(raw_path_matches);
+}
+
+#[pg_test]
 fn gql_aggregates_return_empty_group_and_optional_null_counts() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

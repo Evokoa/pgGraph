@@ -30,6 +30,19 @@ pub(crate) struct GqlRow {
     pub(crate) rel_start: Option<GqlNodeCoordinate>,
     /// Relationship end coordinate in the registered edge direction.
     pub(crate) rel_end: Option<GqlNodeCoordinate>,
+    /// Path nodes in query traversal order.
+    pub(crate) path_nodes: Vec<GqlNodeCoordinate>,
+    /// Path relationships in query traversal order.
+    pub(crate) path_relationships: Vec<GqlPathRelationship>,
+}
+
+/// One relationship step in a GQL path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GqlPathRelationship {
+    /// Relationship start coordinate in the registered edge direction.
+    pub(crate) start: GqlNodeCoordinate,
+    /// Relationship end coordinate in the registered edge direction.
+    pub(crate) end: GqlNodeCoordinate,
 }
 
 /// One GQL node-only result row.
@@ -183,40 +196,61 @@ fn expand_targets(
     rel_type_id: u8,
     tenant: Option<&str>,
 ) -> Vec<GqlTarget> {
-    let mut current = vec![source_idx];
     let mut results = Vec::new();
     let returns_relationship = plan
         .returns
         .iter()
         .any(|slot| matches!(slot, ReturnSlot::Relationship { .. }));
+    let returns_path = plan.returns.iter().any(ReturnSlot::requires_path)
+        || plan
+            .distinct_stages
+            .iter()
+            .flatten()
+            .any(ReturnSlot::requires_path);
     let mut seen_result_nodes = std::collections::HashSet::new();
     let mut seen_result_relationships = std::collections::HashSet::new();
     let mut seen_frontier = std::collections::HashSet::from([source_idx]);
+    let mut current = vec![PathState {
+        node_idx: source_idx,
+        path_nodes: vec![source_idx],
+        path_relationships: Vec::new(),
+    }];
     for depth in 1..=plan.hops.max {
         let mut next = Vec::new();
         let mut seen_next = std::collections::HashSet::new();
-        for node_idx in current {
-            for target in neighbors.for_direction(plan.direction, node_idx, rel_type_id) {
+        for state in current {
+            for target in neighbors.for_direction(plan.direction, state.node_idx, rel_type_id) {
                 if !engine.node_store.is_active(target.node_idx)
                     || !tenant_allows_node(engine, target.node_idx, tenant)
                 {
                     continue;
                 }
+                if returns_path && state.path_nodes.contains(&target.node_idx) {
+                    continue;
+                }
+                let next_state = state.push(target);
                 if depth >= plan.hops.min
                     && target_matches(engine, target.node_idx, plan.target_table_oid, tenant)
-                    && if returns_relationship {
-                        seen_result_relationships.insert((target.node_idx, target.orientation))
-                    } else {
-                        seen_result_nodes.insert(target.node_idx)
-                    }
+                    && (returns_path
+                        || if returns_relationship {
+                            seen_result_relationships.insert((target.node_idx, target.orientation))
+                        } else {
+                            seen_result_nodes.insert(target.node_idx)
+                        })
                 {
-                    results.push(target);
+                    results.push(GqlTarget {
+                        node_idx: target.node_idx,
+                        orientation: target.orientation,
+                        path_nodes: next_state.path_nodes.clone(),
+                        path_relationships: next_state.path_relationships.clone(),
+                    });
                 }
                 if depth < plan.hops.max
-                    && seen_frontier.insert(target.node_idx)
-                    && seen_next.insert(target.node_idx)
+                    && (returns_path
+                        || (seen_frontier.insert(target.node_idx)
+                            && seen_next.insert(target.node_idx)))
                 {
-                    next.push(target.node_idx);
+                    next.push(next_state);
                 }
             }
         }
@@ -226,6 +260,31 @@ fn expand_targets(
         }
     }
     results
+}
+
+#[derive(Debug, Clone)]
+struct PathState {
+    node_idx: u32,
+    path_nodes: Vec<u32>,
+    path_relationships: Vec<GqlRelationshipStep>,
+}
+
+impl PathState {
+    fn push(&self, target: GqlStepTarget) -> Self {
+        let mut path_nodes = self.path_nodes.clone();
+        path_nodes.push(target.node_idx);
+        let mut path_relationships = self.path_relationships.clone();
+        path_relationships.push(GqlRelationshipStep {
+            from_idx: self.node_idx,
+            to_idx: target.node_idx,
+            orientation: target.orientation,
+        });
+        Self {
+            node_idx: target.node_idx,
+            path_nodes,
+            path_relationships,
+        }
+    }
 }
 
 struct GqlNeighbors<'a> {
@@ -259,7 +318,7 @@ impl<'a> GqlNeighbors<'a> {
         direction: BoundDirection,
         node_idx: u32,
         rel_type_id: u8,
-    ) -> Vec<GqlTarget> {
+    ) -> Vec<GqlStepTarget> {
         let mut neighbors = Vec::new();
         if matches!(direction, BoundDirection::Out | BoundDirection::Undirected) {
             self.append_direction_neighbors(
@@ -290,7 +349,7 @@ impl<'a> GqlNeighbors<'a> {
         node_idx: u32,
         rel_type_id: u8,
         orientation: EdgeOrientation,
-        out: &mut Vec<GqlTarget>,
+        out: &mut Vec<GqlStepTarget>,
     ) {
         let (edge_store, overlay) = match direction {
             TraversalDirection::Any | TraversalDirection::Out => {
@@ -308,9 +367,24 @@ impl<'a> GqlNeighbors<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GqlTarget {
     node_idx: u32,
+    orientation: EdgeOrientation,
+    path_nodes: Vec<u32>,
+    path_relationships: Vec<GqlRelationshipStep>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GqlStepTarget {
+    node_idx: u32,
+    orientation: EdgeOrientation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GqlRelationshipStep {
+    from_idx: u32,
+    to_idx: u32,
     orientation: EdgeOrientation,
 }
 
@@ -325,10 +399,10 @@ fn append_matching_neighbors(
     node_idx: u32,
     rel_type_id: u8,
     orientation: EdgeOrientation,
-    out: &mut Vec<GqlTarget>,
+    out: &mut Vec<GqlStepTarget>,
 ) {
     out.extend(source.neighbors(node_idx).filter_map(|neighbor| {
-        (neighbor.type_id == rel_type_id).then_some(GqlTarget {
+        (neighbor.type_id == rel_type_id).then_some(GqlStepTarget {
             node_idx: neighbor.target,
             orientation,
         })
@@ -365,6 +439,25 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GqlRow {
         target: Some(coordinate(engine, target_idx)),
         rel_start: Some(coordinate(engine, rel_start_idx)),
         rel_end: Some(coordinate(engine, rel_end_idx)),
+        path_nodes: target
+            .path_nodes
+            .into_iter()
+            .map(|node_idx| coordinate(engine, node_idx))
+            .collect(),
+        path_relationships: target
+            .path_relationships
+            .into_iter()
+            .map(|relationship| {
+                let (start_idx, end_idx) = match relationship.orientation {
+                    EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
+                    EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
+                };
+                GqlPathRelationship {
+                    start: coordinate(engine, start_idx),
+                    end: coordinate(engine, end_idx),
+                }
+            })
+            .collect(),
     }
 }
 
@@ -374,6 +467,8 @@ fn project_optional_row(engine: &Engine, source_idx: u32) -> GqlRow {
         target: None,
         rel_start: None,
         rel_end: None,
+        path_nodes: Vec::new(),
+        path_relationships: Vec::new(),
     }
 }
 

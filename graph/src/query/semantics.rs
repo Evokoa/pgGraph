@@ -11,7 +11,7 @@ use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundMappedEdge,
     BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue, HopBounds,
     LogicalCreateNode, LogicalDeleteEdge, LogicalNodeScan, LogicalPlan, LogicalSetProperty,
-    LogicalStatement, Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
+    LogicalStatement, PathFunc, Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -584,6 +584,7 @@ enum ScopedBinding {
     Node(BindingSide),
     Relationship { var_len: bool },
     Property { side: BindingSide, property: String },
+    PathFunction(PathFunc),
 }
 
 type BindingScope = std::collections::HashMap<String, ScopedBinding>;
@@ -662,11 +663,20 @@ fn bind_distinct_stage(
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut stage = Vec::with_capacity(items.len());
     for item in items {
-        if let ReturnExpr::Aggregate { span, .. } = item.expr {
-            return Err(GqlError::unsupported(
-                span,
-                "aggregate WITH projections require row-stream aggregation from a later read phase",
-            ));
+        match item.expr {
+            ReturnExpr::Aggregate { span, .. } => {
+                return Err(GqlError::unsupported(
+                    span,
+                    "aggregate WITH projections require row-stream aggregation from a later read phase",
+                ));
+            }
+            ReturnExpr::Func { span, .. } => {
+                return Err(GqlError::unsupported(
+                    span,
+                    "path-function WITH projections require row-stream value projection from a later read phase",
+                ));
+            }
+            _ => {}
         }
         let (name, scoped) = bind_scoped_item(item, scope, source, target)?;
         if !seen.insert(name.clone()) {
@@ -678,12 +688,8 @@ fn bind_distinct_stage(
         let binding = match scoped {
             ScopedBinding::Node(side) => ReturnBinding::Node { side, name },
             ScopedBinding::Relationship { var_len: false } => ReturnBinding::Relationship { name },
-            ScopedBinding::Relationship { var_len: true } => {
-                return Err(GqlError::unsupported(
-                    item.span,
-                    "WITH DISTINCT relationship variables over variable-length patterns require path support",
-                ));
-            }
+            ScopedBinding::Relationship { var_len: true } => ReturnBinding::Path { name },
+            ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction { func, name },
             ScopedBinding::Property { side, property } => ReturnBinding::Property {
                 side,
                 property,
@@ -703,11 +709,20 @@ fn bind_projection_scope(
 ) -> Result<BindingScope, GqlError> {
     let mut next = BindingScope::with_capacity(items.len());
     for item in items {
-        if let ReturnExpr::Aggregate { span, .. } = item.expr {
-            return Err(GqlError::unsupported(
-                span,
-                "aggregate WITH projections require row-stream aggregation from a later read phase",
-            ));
+        match item.expr {
+            ReturnExpr::Aggregate { span, .. } => {
+                return Err(GqlError::unsupported(
+                    span,
+                    "aggregate WITH projections require row-stream aggregation from a later read phase",
+                ));
+            }
+            ReturnExpr::Func { span, .. } => {
+                return Err(GqlError::unsupported(
+                    span,
+                    "path-function WITH projections require row-stream value projection from a later read phase",
+                ));
+            }
+            _ => {}
         }
         let (name, binding) = bind_scoped_item(item, scope, source, target)?;
         if next.insert(name.clone(), binding).is_some() {
@@ -757,12 +772,8 @@ fn bind_scoped_returns(
                 ScopedBinding::Relationship { var_len: false } => {
                     ReturnBinding::Relationship { name }
                 }
-                ScopedBinding::Relationship { var_len: true } => {
-                    return Err(GqlError::unsupported(
-                        item.span,
-                        "RETURN relationship variables over variable-length patterns require path support",
-                    ));
-                }
+                ScopedBinding::Relationship { var_len: true } => ReturnBinding::Path { name },
+                ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction { func, name },
                 ScopedBinding::Property { side, property } => ReturnBinding::Property {
                     side,
                     property,
@@ -806,11 +817,9 @@ fn bind_scoped_item(
                 ));
             }
         },
-        ReturnExpr::Func { span, .. } => {
-            return Err(GqlError::unsupported(
-                *span,
-                "RETURN functions are implemented in a later read phase",
-            ));
+        ReturnExpr::Func { name, args, span } => {
+            return bind_path_function(name, args, *span, scope)
+                .map(|binding| (projection_name(item), binding));
         }
         ReturnExpr::Aggregate { span, .. } => {
             return Err(GqlError::unsupported(
@@ -822,6 +831,45 @@ fn bind_scoped_item(
     Ok((projection_name(item), binding))
 }
 
+fn bind_path_function(
+    name: &crate::gql::ast::Ident,
+    args: &[crate::gql::ast::Ident],
+    span: Span,
+    scope: &BindingScope,
+) -> Result<ScopedBinding, GqlError> {
+    if path_func(&name.text).is_none() {
+        return Err(GqlError::unsupported(
+            span,
+            "RETURN functions are implemented in a later read phase",
+        ));
+    }
+    let [arg] = args else {
+        return Err(GqlError::bind(
+            span,
+            format!(
+                "path function `{}` requires exactly one path argument",
+                name.text
+            ),
+        ));
+    };
+    match scope.get(&arg.text) {
+        Some(ScopedBinding::Relationship { .. }) => Ok(ScopedBinding::PathFunction(
+            path_func(&name.text).expect("checked path function"),
+        )),
+        Some(_) => Err(GqlError::bind(
+            arg.span,
+            format!(
+                "path function `{}` requires a relationship path variable",
+                name.text
+            ),
+        )),
+        None => Err(GqlError::bind(
+            arg.span,
+            format!("unknown path variable `{}`", arg.text),
+        )),
+    }
+}
+
 fn bind_aggregate_func(func: ast::AggregateFunc) -> AggregateFunc {
     match func {
         ast::AggregateFunc::Count => AggregateFunc::Count,
@@ -830,6 +878,15 @@ fn bind_aggregate_func(func: ast::AggregateFunc) -> AggregateFunc {
         ast::AggregateFunc::Min => AggregateFunc::Min,
         ast::AggregateFunc::Max => AggregateFunc::Max,
         ast::AggregateFunc::Collect => AggregateFunc::Collect,
+    }
+}
+
+fn path_func(name: &str) -> Option<PathFunc> {
+    match name {
+        "nodes" => Some(PathFunc::Nodes),
+        "relationships" => Some(PathFunc::Relationships),
+        "length" => Some(PathFunc::Length),
+        _ => None,
     }
 }
 

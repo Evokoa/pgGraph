@@ -152,6 +152,8 @@ fn lower_returns(returns: Vec<ReturnBinding>) -> Vec<ReturnSlot> {
         .map(|slot| match slot {
             ReturnBinding::Node { side, name } => ReturnSlot::Node { side, name },
             ReturnBinding::Relationship { name } => ReturnSlot::Relationship { name },
+            ReturnBinding::Path { name } => ReturnSlot::Path { name },
+            ReturnBinding::PathFunction { func, name } => ReturnSlot::PathFunction { func, name },
             ReturnBinding::Property {
                 side,
                 property,

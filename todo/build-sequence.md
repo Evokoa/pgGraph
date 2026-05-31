@@ -154,6 +154,15 @@ that cap is exceeded. SQL-visible coverage compares `RETURN DISTINCT`,
 `WITH DISTINCT`, aggregate `DISTINCT`, and `collect(DISTINCT ...)` against
 equivalent PostgreSQL results.
 
+Status note, 2026-05-31: 3E is closed for the current named-relationship path
+model. Bounded relationship variables now project stable path objects with
+`_path.nodes` and `_path.relationships`, and `nodes(path)`,
+`relationships(path)`, and `length(path)` are supported in final `RETURN`
+projections. SQL-visible coverage snapshots the raw path value and path
+functions over a two-hop relationship pattern. Path-function `WITH`
+projections, full standalone path-variable syntax, and aggregate path arguments
+remain later multi-stage row-stream work.
+
 ## Phase 4 — Advanced writes + optional openCypher
 
 | Slice | Depends on | Merge gate |
