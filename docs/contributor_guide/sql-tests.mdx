@@ -18,6 +18,12 @@ They do not require preloaded application data or external datasets. Test
 helpers in `common.rs` create source tables, reset graph state, register graph
 metadata, and build fixtures inside the test database.
 
+The files are included from the inline `#[pg_schema] mod tests { ... }` block in
+`graph/src/lib.rs`. Keep that shape unless the pgrx macro gains support for the
+same generated-SQL behavior with out-of-line modules; the inline body is what
+keeps the pg test functions visible to the pgrx SQL generator while still
+letting each coverage area live in a separate source file.
+
 | File | Coverage |
 |---|---|
 | `common.rs` | Shared fixture setup, catalog reset helpers, SQL error capture helpers, synthetic fixture creation |

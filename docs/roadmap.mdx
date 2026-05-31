@@ -99,7 +99,7 @@ Work is ranked by user impact:
 | P0 | Operational visibility and resource predictability | No active public rows after instance-level memory sizing visibility was added. |
 | P1 | Query performance follow-ups | No active public rows after source-search rechecks, aggregation hydration ownership, and adaptive traversal metadata. |
 | P2 | SQL ergonomics and documented semantics | No active public rows after structured filters and the edge-label cardinality limit were documented. |
-| P3 | Internals and maintainability | pg test locality once pgrx supports the needed out-of-line schema module shape. |
+| P3 | Internals and maintainability | No active public rows; the pgrx SQL test module layout is documented for contributors. |
 
 The bias is to optimize with evidence. For hot paths, we prefer benchmarks or
 release-style SQL tests that show whether an allocation, SPI call, sort, clone,

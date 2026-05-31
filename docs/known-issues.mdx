@@ -118,12 +118,11 @@ fails cleanly with `PG004`.
 
 ## P3: Internals and Maintainability
 
-These are mostly contributor-facing improvements. They help long-term velocity,
-but they do not change core user behavior.
-
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| pg test layout | Some PostgreSQL integration test files are still included textually from `lib.rs` because pgrx `#[pg_schema]` currently requires an inline `mod {}` body for generated SQL tests. | Revisit when the pgrx macro supports out-of-line modules or when the pg test harness is reorganized around macro-compatible test modules. |
+<Callout type="info">
+No currently tracked P3 rows remain. The pgrx SQL test module layout is a
+contributor-harness detail documented in the
+[SQL Tests](./contributor_guide/sql-tests) guide, not a user-facing known issue.
+</Callout>
 
 ## Lower-Priority Optimizations
 
