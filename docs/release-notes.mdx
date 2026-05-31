@@ -2,6 +2,37 @@
 
 Release notes are ordered newest first.
 
+## v0.1.4: PGXN Distribution
+
+`v0.1.4` adds PGXN distribution metadata and a top-level Makefile for
+source-based installation via PGXN. It keeps the `v0.1.3` SQL contract
+and adds no breaking changes.
+
+### Highlights
+
+- Added PGXN `META.json` distribution metadata at the repository root.
+- Added a PGXN-compatible top-level `Makefile` that delegates to `cargo pgrx`.
+- Added PGXN and manual source installation documentation to `README.md`,
+  `README_zh.md`, and the user guide.
+- Documented `PG_CONFIG` targeting and missing PostgreSQL header
+  troubleshooting for source installs.
+- Prepared pgGraph for source-based PGXN release.
+
+### Validation
+
+Run the PGXN metadata validation (`cargo install pgxn_meta --locked`):
+
+```bash
+pgxn_meta
+```
+
+Run the PGXN-style build flow:
+
+```bash
+make
+make installcheck
+```
+
 ## v0.1.3: Structured Filters And Architecture Clarity
 
 `v0.1.3` adds structured traversal filter helpers, removes the legacy raw-filter

@@ -11,7 +11,7 @@ the release support matrix.
 | Requirement | Version or note |
 |---|---|
 | Rust | `1.95`, pinned by `graph/rust-toolchain.toml` |
-| PostgreSQL | 14, 15, 16, 17, or 18 |
+| PostgreSQL | 14, 15, 16, 17, or 18, with server development headers and `pg_config` |
 | pgrx | `0.18.0` |
 | Crate feature | One of `pg14`, `pg15`, `pg16`, `pg17`, `pg18` |
 | Extension control | `graph/graph.control` |
@@ -23,36 +23,85 @@ build should not be installed into a PostgreSQL 16 server.
 
 ## Install pgrx
 
+Install cargo-pgrx and register the PostgreSQL on your `PATH` with pgrx. The
+major is detected from `pg_config`:
+
 ```bash
 cargo install cargo-pgrx --version 0.18.0 --locked
-cargo pgrx init --pg17=/path/to/pg_config
+PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+cargo pgrx init --pg${PG_MAJOR}="$(which pg_config)"
 ```
 
-Use the matching flag for another supported major:
+To register a different installation, point the flag at that server's
+`pg_config`. For example, a Debian or Ubuntu PostgreSQL 16 install:
 
 ```bash
-cargo pgrx init --pg14=/path/to/pg_config
-cargo pgrx init --pg15=/path/to/pg_config
-cargo pgrx init --pg16=/path/to/pg_config
-cargo pgrx init --pg18=/path/to/pg_config
+cargo pgrx init --pg16=/usr/lib/postgresql/16/bin/pg_config
 ```
 
 For PostgreSQL 13, use the legacy `pg13` pgrx feature only as best-effort
 compatibility. It is not covered by release gates after PostgreSQL 13 upstream
 EOL.
 
-## Build And Install
+## PGXN Source Install
+
+pgGraph is available on PGXN as a source distribution. Because pgGraph is a
+Rust/pgrx extension, source installation requires Rust and `cargo-pgrx` before
+running `pgxn install`.
 
 ```bash
-cd graph
-cargo pgrx install --pg-config=/path/to/pg_config
+cargo install cargo-pgrx --version 0.18.0 --locked
+# Register the installed PostgreSQL with pgrx (auto-detects the major):
+PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+cargo pgrx init --pg${PG_MAJOR}="$(which pg_config)"
+pgxn install pgGraph
 ```
 
-For an explicit PostgreSQL feature:
+## Manual Source Install
+
+Compile and install the extension from source:
+
+```bash
+git clone https://github.com/evokoa/pggraph.git
+cd pggraph
+make install # may need sudo
+```
+
+If your machine has multiple PostgreSQL installations, set `PG_CONFIG` to the
+target server's `pg_config`, then re-run the installation:
+
+```bash
+export PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+make install
+```
+
+If `sudo` is needed for `make install`, preserve `PG_CONFIG`:
+
+```bash
+sudo --preserve-env=PG_CONFIG make install
+```
+
+If compilation fails with `fatal error: postgres.h: No such file or directory`,
+install the PostgreSQL server development package for the target PostgreSQL
+major, such as `postgresql-server-dev-17` on Ubuntu or Debian.
+
+## Build And Install With cargo-pgrx
+
+`make install` wraps this flow. To run it directly, build with the feature that
+matches your `pg_config` major and install into that server:
 
 ```bash
 cd graph
-cargo pgrx install --features pg17 --no-default-features --pg-config=/path/to/pg_config
+PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+cargo pgrx install --no-default-features --features pg${PG_MAJOR} --pg-config="$(which pg_config)"
+```
+
+To target a different installation, set its `pg_config` explicitly. For example,
+a Debian or Ubuntu PostgreSQL 16 install:
+
+```bash
+cd graph
+cargo pgrx install --no-default-features --features pg16 --pg-config=/usr/lib/postgresql/16/bin/pg_config
 ```
 
 ## Create The Extension
@@ -87,12 +136,52 @@ followed by `CREATE EXTENSION graph;` instead of relying on runtime migrations.
 
 ## Docker Install Options
 
-pgGraph supports two Docker installation paths:
+pgGraph supports three Docker installation paths:
 
 | Path | Use when |
 |---|---|
+| Pull the pre-built image from GHCR | You want the fastest start with no build step |
 | Build a PostgreSQL image with pgGraph already installed | You want a new container image for Evokoa or local evaluation |
 | Install into an existing running PostgreSQL container | You already have a PostgreSQL container and want to add pgGraph to it |
+
+### Pre-built Docker Image
+
+A pre-built image is published on GitHub Container Registry for each release.
+This is the fastest Docker path — no build step is needed. The published image
+supports **linux/amd64** and **linux/arm64**, so it works on macOS, Linux, and
+Windows (via Docker Desktop or WSL2).
+
+```bash
+docker pull ghcr.io/evokoa/pggraph:0.1.4
+```
+
+| Tag | Description |
+|---|---|
+| `0.1.4` | Pinned reproducible tag — always resolves to the same image digest |
+| `latest` | Moving tag that points to the most recent stable release |
+
+Start the container:
+
+```bash
+docker run --rm \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=graph \
+  -p 5432:5432 \
+  ghcr.io/evokoa/pggraph:0.1.4
+```
+
+Verify that `pg_cron` and `graph` are installed and loaded:
+
+```bash
+psql -h localhost -U postgres -d graph -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('pg_cron','graph');"
+```
+
+The image includes PostgreSQL 17, `pg_cron`, and pgGraph. On first
+initialization, `docker/init/01-create-extensions-and-schedule.sql` creates the
+`pg_cron` and `graph` extensions and schedules
+`graph.run_scheduled_maintenance()` every five minutes. For databases beyond the
+initial Docker database, create the extension explicitly with
+`CREATE EXTENSION graph;`.
 
 ### Build A PostgreSQL Image With pgGraph
 

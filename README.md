@@ -15,13 +15,16 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-0.1.3-2ea44f?style=flat-square" alt="Version 0.1.3">
+    <img src="https://img.shields.io/badge/version-0.1.4-2ea44f?style=flat-square" alt="Version 0.1.4">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
   </a>
   <a href="https://www.postgresql.org/">
     <img src="https://img.shields.io/badge/PostgreSQL-14--18-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 14-18">
+  </a>
+  <a href="https://ghcr.io/evokoa/pggraph">
+    <img src="https://img.shields.io/badge/Docker-ghcr.io%2Fevokoa%2Fpggraph-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker image">
   </a>
 </p>
 
@@ -90,11 +93,42 @@ query language.
 
 ## Quickstart
 
-The fastest way to try pgGraph is the included quickstart script.
+The fastest way to try pgGraph is to pull the pre-built Docker image — no
+build step needed.
 
-It starts a disposable Docker-backed PostgreSQL database, installs pgGraph,
-creates two normal PostgreSQL tables, discovers the foreign key relationship,
-builds the graph, and runs example queries.
+The image is multi-arch (`linux/amd64` and `linux/arm64`) and works on macOS,
+Linux, and Windows via Docker Desktop.
+
+```bash
+docker pull ghcr.io/evokoa/pggraph:0.1.4
+docker run -d --rm \
+  --name pggraph \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  ghcr.io/evokoa/pggraph:0.1.4
+```
+
+The default database is `graph` with `pg_cron` and a maintenance job
+pre-configured.
+
+Verify the extensions are loaded (uses `psql` inside the container, so you
+don't need a local PostgreSQL client):
+
+```bash
+docker exec pggraph psql -U postgres -d graph \
+  -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('graph', 'pg_cron');"
+```
+
+If you have `psql` installed locally you can also connect directly:
+
+```bash
+psql -h localhost -U postgres -d graph
+```
+
+To build from source or run the full interactive demo instead, use the included
+quickstart script. It starts a disposable Docker-backed PostgreSQL database,
+installs pgGraph, creates two normal PostgreSQL tables, discovers the foreign
+key relationship, builds the graph, and runs example queries.
 
 You need Docker or Docker Desktop installed and running:
 
@@ -145,6 +179,57 @@ extension artifacts for officially supported PostgreSQL 14 through 18 targets.
 PostgreSQL 13 is no longer an official support target after upstream EOL, though
 the legacy `pg13` pgrx feature remains available on a best-effort basis. The
 PostgreSQL major version of the extension package must match the target server.
+
+## PGXN Source Installation
+
+pgGraph is available on PGXN as a source distribution. Because pgGraph is a
+Rust/pgrx extension, building from source requires the Rust toolchain.
+
+### Prerequisites
+
+- PostgreSQL development headers and `pg_config`
+- Rust toolchain (`1.95`, pinned by `graph/rust-toolchain.toml`)
+- `cargo-pgrx` 0.18.0
+
+### Install with pgxn-client
+
+```bash
+cargo install cargo-pgrx --version 0.18.0 --locked
+# Register the installed PostgreSQL with pgrx (auto-detects the major):
+PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+cargo pgrx init --pg${PG_MAJOR}="$(which pg_config)"
+pgxn install pgGraph
+```
+
+### Manual source install
+
+```bash
+git clone https://github.com/evokoa/pggraph.git
+cd pggraph
+make install # may need sudo
+psql -d postgres -c "CREATE EXTENSION graph;"
+```
+
+If you have multiple PostgreSQL installations, set `PG_CONFIG` to the target
+server's `pg_config`, then re-run the installation:
+
+```bash
+export PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+make install
+```
+
+If `sudo` is needed for `make install`, preserve `PG_CONFIG`:
+
+```bash
+sudo --preserve-env=PG_CONFIG make install
+```
+
+If compilation fails with `fatal error: postgres.h: No such file or directory`,
+install the PostgreSQL server development package for the target PostgreSQL
+major, such as `postgresql-server-dev-17` on Ubuntu or Debian.
+
+> **Note:** The PGXN distribution name is `pgGraph` but the PostgreSQL extension
+> name is `graph`. Use `CREATE EXTENSION graph;` after installation.
 
 ## Documentation
 More information is available in the pgGraph docs:

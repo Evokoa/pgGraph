@@ -15,13 +15,16 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-0.1.3-2ea44f?style=flat-square" alt="Version 0.1.3">
+    <img src="https://img.shields.io/badge/version-0.1.4-2ea44f?style=flat-square" alt="Version 0.1.4">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
   </a>
   <a href="https://www.postgresql.org/">
     <img src="https://img.shields.io/badge/PostgreSQL-14--18-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 14-18">
+  </a>
+  <a href="https://ghcr.io/evokoa/pggraph">
+    <img src="https://img.shields.io/badge/Docker-ghcr.io%2Fevokoa%2Fpggraph-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker image">
   </a>
 </p>
 
@@ -82,8 +85,36 @@ pgGraph 在你现有的 PostgreSQL 表之上添加图查询，不需要单独的
 
 ## 快速开始
 
-想要快速体验 pgGraph，最简单的方法是运行提供的快速启动脚本。
+想要快速体验 pgGraph，最简单的方法是拉取预构建的 Docker 镜像——无需编译。
 
+该镜像为多架构镜像（`linux/amd64` 和 `linux/arm64`），可在 macOS、Linux 和
+Windows（通过 Docker Desktop）上运行。
+
+```bash
+docker pull ghcr.io/evokoa/pggraph:0.1.4
+docker run -d --rm \
+  --name pggraph \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  ghcr.io/evokoa/pggraph:0.1.4
+```
+
+默认数据库是 `graph`，已预配置 `pg_cron` 和维护定时任务。
+
+验证扩展是否已加载（使用容器内的 `psql`，无需本地安装 PostgreSQL 客户端）：
+
+```bash
+docker exec pggraph psql -U postgres -d graph \
+  -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('graph', 'pg_cron');"
+```
+
+如果你已在本地安装了 `psql`，也可以直接连接：
+
+```bash
+psql -h localhost -U postgres -d graph
+```
+
+如果你想从源码构建或运行完整的交互式演示，可以使用提供的快速启动脚本。
 它会启动一个一次性的、基于 Docker 的 PostgreSQL 数据库，安装 pgGraph，创建两个普通 PostgreSQL 表，发现外键关系，构建图，并运行示例查询。
 
 你需要安装并运行 Docker 或 Docker Desktop：
@@ -126,6 +157,57 @@ scripts/quickstart.sh playground panama
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。
 
 基础 Docker 镜像目前运行 PostgreSQL 17。打包脚本可以为官方支持的 PostgreSQL 14 到 18 目标构建扩展构建产物。PostgreSQL 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
+
+## PGXN 源码安装
+
+pgGraph 在 PGXN 上以源码分发包的形式提供。因为 pgGraph 是一个 Rust/pgrx 扩展，
+从源码构建需要 Rust 工具链。
+
+### 前置要求
+
+- PostgreSQL 开发头文件和 `pg_config`
+- Rust 工具链（`1.95`，由 `graph/rust-toolchain.toml` 锁定）
+- `cargo-pgrx` 0.18.0
+
+### 使用 pgxn-client 安装
+
+```bash
+cargo install cargo-pgrx --version 0.18.0 --locked
+# 用 pgrx 注册已安装的 PostgreSQL（自动识别主版本）：
+PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+cargo pgrx init --pg${PG_MAJOR}="$(which pg_config)"
+pgxn install pgGraph
+```
+
+### 手动源码安装
+
+```bash
+git clone https://github.com/evokoa/pggraph.git
+cd pggraph
+make install # 可能需要 sudo
+psql -d postgres -c "CREATE EXTENSION graph;"
+```
+
+如果你安装了多个 PostgreSQL 版本，可以将 `PG_CONFIG` 指向目标服务器的
+`pg_config`，然后重新运行安装：
+
+```bash
+export PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+make install
+```
+
+如果 `make install` 需要 `sudo`，请保留 `PG_CONFIG` 环境变量：
+
+```bash
+sudo --preserve-env=PG_CONFIG make install
+```
+
+如果编译失败并出现 `fatal error: postgres.h: No such file or directory`，
+请安装目标 PostgreSQL 主版本对应的服务器开发包，例如 Ubuntu 或 Debian 上的
+`postgresql-server-dev-17`。
+
+> **注意：** PGXN 分发名称是 `pgGraph`，但 PostgreSQL 扩展名是 `graph`。
+> 安装后请使用 `CREATE EXTENSION graph;`。
 
 ## 文档
 更多信息可在 pgGraph 文档中找到：

@@ -1,6 +1,11 @@
 .git
 .reference
 .agents
+.codex
+.env
+**/.env
+.venv
+**/.venv
 target
 graph/target
 graph/fuzz/target

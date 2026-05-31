@@ -28,6 +28,10 @@ RUN cargo pgrx init --pg${PG_MAJOR}=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_confi
 
 FROM postgres:17.9-bookworm@sha256:47f917f7409eacd22fc5dfb1dee634e1b55cf0c01d1a7eb701be2227a03e0641
 
+LABEL org.opencontainers.image.source="https://github.com/evokoa/pggraph" \
+      org.opencontainers.image.description="PostgreSQL with pgGraph pre-installed" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 ARG PG_MAJOR=17
 
 RUN apt-get update \

@@ -59,6 +59,7 @@ graph/fuzz/target/
 # Environment Variables
 .env
 **/.env
+.venv/
 
 # Sandbox benchmark outputs and downloaded datasets
 sandbox/benchmark/results/
