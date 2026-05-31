@@ -29,6 +29,16 @@ fn gql_explain(query: &str) -> String {
                     plan.returns.len()
                 )
             }
+            crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
+                check_set_acl(&plan);
+                format!(
+                    "SetProperty(label={}, table_oid={}, property={}, returns={})",
+                    plan.label,
+                    plan.table_oid,
+                    plan.property,
+                    plan.returns.len()
+                )
+            }
         }
     })
 }
@@ -68,6 +78,7 @@ fn build_statement(
     let span = match &ast {
         crate::gql::ast::Statement::Read(query) => query.span,
         crate::gql::ast::Statement::Create(query) => query.span,
+        crate::gql::ast::Statement::Set(query) => query.span,
     };
     let catalog = crate::query::catalog_snapshot::CatalogSnapshotImpl::load()
         .map_err(|err| crate::gql::errors::GqlError::bind(span, err.to_string()))?;
@@ -87,6 +98,11 @@ fn check_create_acl(plan: &crate::query::physical_plan::PhysicalCreateNode) {
 
 fn check_node_scan_acl(plan: &crate::query::physical_plan::PhysicalNodeScan) {
     acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+}
+
+fn check_set_acl(plan: &crate::query::physical_plan::PhysicalSetProperty) {
+    acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+    acl::check_table_update_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
 }
 
 fn execute_statement(
@@ -122,6 +138,10 @@ fn execute_statement(
             check_create_acl(&plan);
             execute_create_node(&plan, tenant_scope, params, hydrate)
         }
+        crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
+            check_set_acl(&plan);
+            execute_set_property(&plan, tenant_scope, params, hydrate)
+        }
     }
 }
 
@@ -131,7 +151,7 @@ fn execute_create_node(
     params: &crate::query::value::QueryParams,
     hydrate: bool,
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
-    ensure_mutable_projection()?;
+    ensure_mutable_projection("GQL CREATE")?;
     crate::projection::tx_delta::ensure_write_allowed()?;
     let insert = insert_mapped_node(plan, tenant_scope, params)?;
     crate::projection::tx_delta::record_added_node(
@@ -142,9 +162,62 @@ fn execute_create_node(
     Ok(vec![project_created_node(plan, insert, hydrate)])
 }
 
+fn execute_set_property(
+    plan: &crate::query::physical_plan::PhysicalSetProperty,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    ensure_mutable_projection("GQL SET")?;
+    crate::projection::tx_delta::ensure_write_allowed()?;
+    let scan = set_property_node_scan(plan);
+    let matches = ENGINE.with(|engine| {
+        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope)
+    })?;
+    let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
+    let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
+    let [row] = matches.as_slice() else {
+        return Err(safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL SET requires exactly one matched `{}` node, found {}",
+                plan.label,
+                matches.len()
+            ),
+        });
+    };
+    let updated = update_mapped_property(plan, &row.node.node_id, params)?;
+    update_filter_index_for_property(
+        plan.table_oid,
+        &updated.node_id,
+        &plan.property,
+        &updated.row,
+    )?;
+    Ok(vec![project_updated_node(plan, updated, hydrate)])
+}
+
+fn set_property_node_scan(
+    plan: &crate::query::physical_plan::PhysicalSetProperty,
+) -> crate::query::physical_plan::PhysicalNodeScan {
+    crate::query::physical_plan::PhysicalNodeScan {
+        var: plan.var.clone(),
+        table_oid: plan.table_oid,
+        label: plan.label.clone(),
+        returns: Vec::new(),
+        predicate: plan.predicate.clone(),
+        order_by: Vec::new(),
+        skip: None,
+        limit: None,
+    }
+}
+
 struct CreatedNode {
     node_id: String,
     tenant: Option<String>,
+    row: serde_json::Value,
+}
+
+struct UpdatedNode {
+    node_id: String,
     row: serde_json::Value,
 }
 
@@ -228,6 +301,99 @@ fn insert_mapped_node(
     })
 }
 
+fn update_mapped_property(
+    plan: &crate::query::physical_plan::PhysicalSetProperty,
+    node_id: &str,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<UpdatedNode> {
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let table = tables
+        .iter()
+        .find(|table| {
+            crate::catalog::table_oid_from_name(&table.table_name)
+                .ok()
+                .is_some_and(|oid| oid == plan.table_oid)
+        })
+        .ok_or_else(|| {
+            safety::GraphError::Internal(format!(
+                "cannot update node in unregistered table OID {}",
+                plan.table_oid
+            ))
+        })?;
+    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let value = write_value_json(&plan.value, params)?;
+    let values = serde_json::json!({ &plan.property: value });
+    let pk_expr = primary_key_expr("src", &table.id_columns);
+    let query = format!(
+        "WITH updated AS (
+             UPDATE {} AS src
+             SET {} = rec.{}
+             FROM jsonb_populate_record(NULL::{}, $2::jsonb) AS rec
+             WHERE {} = $1
+             RETURNING to_jsonb(src.*), {}
+         )
+         SELECT * FROM updated",
+        table_name.as_sql(),
+        quote_ident(&plan.property),
+        quote_ident(&plan.property),
+        table_name.as_sql(),
+        pk_expr,
+        pk_expr
+    );
+    pgrx::Spi::connect_mut(|client| {
+        let rows = client
+            .update(&query, None, &[node_id.into(), pgrx::JsonB(values).into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL SET update failed for {}.{}: {}",
+                    table_name.as_sql(),
+                    quote_ident(&plan.property),
+                    err
+                ),
+            })?;
+        if rows.is_empty() {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL SET matched node `{}` but PostgreSQL updated no row",
+                    node_id
+                ),
+            });
+        }
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| safety::GraphError::Internal(format!("GQL SET row read failed: {err}")))?
+            .ok_or_else(|| safety::GraphError::Internal("GQL SET returned no row JSON".into()))?;
+        let node_id = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("GQL SET primary key read failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("GQL SET returned no primary key".to_string())
+            })?;
+        Ok(UpdatedNode {
+            node_id,
+            row: row_json.0,
+        })
+    })
+}
+
+fn write_value_json(
+    value: &crate::query::physical_plan::CreateValueSlot,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<serde_json::Value> {
+    match value {
+        crate::query::physical_plan::CreateValueSlot::Literal(value) => Ok(value.clone()),
+        crate::query::physical_plan::CreateValueSlot::Param(name) => params
+            .get(name)
+            .cloned()
+            .ok_or_else(|| safety::GraphError::GqlParameter {
+                reason: format!("missing GQL parameter `{name}`"),
+            }),
+    }
+}
+
 struct CreateInsertShape {
     columns: Vec<String>,
     selectors: Vec<String>,
@@ -269,14 +435,14 @@ fn create_insert_shape(
     }
 }
 
-fn ensure_mutable_projection() -> safety::GraphResult<()> {
+fn ensure_mutable_projection(operation: &str) -> safety::GraphResult<()> {
     ENGINE.with(|engine| {
         let engine = engine.borrow();
         if engine.projection_mode == config::ProjectionMode::MutableOverlay {
             Ok(())
         } else {
             Err(safety::GraphError::UnsupportedOperation {
-                operation: "GQL CREATE".to_string(),
+                operation: operation.to_string(),
                 reason: "mapped writes require a mutable_overlay projection".to_string(),
             })
         }
@@ -350,6 +516,32 @@ fn project_created_node(
     serde_json::Value::Object(output)
 }
 
+fn project_updated_node(
+    plan: &crate::query::physical_plan::PhysicalSetProperty,
+    updated: UpdatedNode,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut output = serde_json::Map::new();
+    for slot in &plan.returns {
+        match slot {
+            crate::query::physical_plan::CreateReturnSlot::Node { name } => {
+                output.insert(name.clone(), updated_node_value(plan, &updated, hydrate));
+            }
+            crate::query::physical_plan::CreateReturnSlot::Property { property, name } => {
+                output.insert(
+                    name.clone(),
+                    updated
+                        .row
+                        .get(property)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+    }
+    serde_json::Value::Object(output)
+}
+
 fn created_node_value(
     plan: &crate::query::physical_plan::PhysicalCreateNode,
     created: &CreatedNode,
@@ -372,6 +564,103 @@ fn created_node_value(
         serde_json::Value::Array(vec![serde_json::Value::String(plan.label.clone())]),
     );
     serde_json::Value::Object(node)
+}
+
+fn updated_node_value(
+    plan: &crate::query::physical_plan::PhysicalSetProperty,
+    updated: &UpdatedNode,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut node = if hydrate {
+        updated.row.as_object().cloned().unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    node.insert(
+        "_id".to_string(),
+        serde_json::json!({
+            "table": &plan.label,
+            "id": &updated.node_id,
+        }),
+    );
+    node.insert(
+        "_labels".to_string(),
+        serde_json::Value::Array(vec![serde_json::Value::String(plan.label.clone())]),
+    );
+    serde_json::Value::Object(node)
+}
+
+fn update_filter_index_for_property(
+    table_oid: u32,
+    node_id: &str,
+    property: &str,
+    row: &serde_json::Value,
+) -> safety::GraphResult<()> {
+    ENGINE.with(|engine| {
+        let mut engine = engine.borrow_mut();
+        let Some(node_idx) = engine.resolve(table_oid, node_id) else {
+            return Ok(());
+        };
+        let Some(column_idx) = engine
+            .filter_index
+            .columns
+            .iter()
+            .position(|column| column.table_oid == table_oid && column.column_name == property)
+        else {
+            return Ok(());
+        };
+        let value =
+            encode_filter_value_from_json(row.get(property), &mut engine.filter_index, column_idx)?;
+        crate::projection::tx_delta::record_filter_value_update(column_idx, node_idx, value)
+    })
+}
+
+fn encode_filter_value_from_json(
+    raw: Option<&serde_json::Value>,
+    filter_index: &mut crate::filter_index::FilterIndex,
+    column_idx: usize,
+) -> safety::GraphResult<Option<crate::filter_index::EncodedFilterValue>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let Some(column_type) = filter_index.column_type(column_idx) else {
+        return Ok(None);
+    };
+    match column_type {
+        crate::filter_index::FilterColumnType::Numeric => {
+            Ok(Some(crate::filter_index::EncodedFilterValue::Numeric(
+                crate::sql_filters::jsonb_filter_i64(raw)?,
+            )))
+        }
+        crate::filter_index::FilterColumnType::Boolean => {
+            Ok(Some(crate::filter_index::EncodedFilterValue::Boolean(
+                crate::sql_filters::jsonb_filter_bool(raw)?,
+            )))
+        }
+        crate::filter_index::FilterColumnType::Text => {
+            let value = crate::sql_filters::jsonb_filter_text(raw)?;
+            let token = filter_index.intern_text_value(column_idx, &value);
+            Ok(Some(crate::filter_index::EncodedFilterValue::Text(token)))
+        }
+        crate::filter_index::FilterColumnType::Date => {
+            Ok(Some(crate::filter_index::EncodedFilterValue::Date(
+                crate::sql_filters::encode_date_filter_value(raw)?,
+            )))
+        }
+        crate::filter_index::FilterColumnType::Timestamptz => {
+            Ok(Some(crate::filter_index::EncodedFilterValue::Timestamptz(
+                crate::sql_filters::encode_timestamptz_filter_value(raw)?,
+            )))
+        }
+        crate::filter_index::FilterColumnType::Uuid => {
+            Ok(Some(crate::filter_index::EncodedFilterValue::Uuid(
+                crate::sql_filters::jsonb_filter_uuid(raw)?,
+            )))
+        }
+    }
 }
 
 fn gql_error_to_graph_error(err: crate::gql::errors::GqlError) -> safety::GraphError {

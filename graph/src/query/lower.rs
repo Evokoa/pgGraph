@@ -2,11 +2,11 @@
 
 use super::logical_plan::{
     CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalNodeScan, LogicalPlan,
-    LogicalStatement, ReturnBinding,
+    LogicalSetProperty, LogicalStatement, ReturnBinding,
 };
 use super::physical_plan::{
     CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalNodeScan,
-    PhysicalPlan, PhysicalStatement, ReturnSlot,
+    PhysicalPlan, PhysicalSetProperty, PhysicalStatement, ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
@@ -16,6 +16,9 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
         LogicalStatement::NodeScan(plan) => PhysicalStatement::NodeScan(lower_node_scan(plan)),
         LogicalStatement::CreateNode(plan) => {
             PhysicalStatement::CreateNode(lower_create_node(plan))
+        }
+        LogicalStatement::SetProperty(plan) => {
+            PhysicalStatement::SetProperty(lower_set_property(plan))
         }
     }
 }
@@ -108,6 +111,30 @@ fn lower_create_node(plan: LogicalCreateNode) -> PhysicalCreateNode {
             .returns
             .into_iter()
             .map(|slot| match slot {
+                CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
+                CreateReturnBinding::Property { property, name } => {
+                    CreateReturnSlot::Property { property, name }
+                }
+            })
+            .collect(),
+    }
+}
+
+fn lower_set_property(plan: LogicalSetProperty) -> PhysicalSetProperty {
+    PhysicalSetProperty {
+        var: plan.node.var,
+        table_oid: plan.node.table_oid,
+        label: plan.node.label,
+        predicate: plan.predicate,
+        property: plan.property,
+        value: match plan.value {
+            CreateValue::Literal(value) => CreateValueSlot::Literal(literal_value_json(value)),
+            CreateValue::Param(name) => CreateValueSlot::Param(name),
+        },
+        returns: plan
+            .returns
+            .into_iter()
+            .map(|binding| match binding {
                 CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
                 CreateReturnBinding::Property { property, name } => {
                     CreateReturnSlot::Property { property, name }

@@ -19,6 +19,7 @@ RUN_RSS="${RUN_RSS:-0}"
 RUN_SYNTHETIC="${RUN_SYNTHETIC:-1}"
 RUN_PLAYGROUND="${RUN_PLAYGROUND:-1}"
 RUN_GQL_CREATE_TX="${RUN_GQL_CREATE_TX:-1}"
+RUN_GQL_SET_TX="${RUN_GQL_SET_TX:-1}"
 RUN_TX_DELTA_CRASH="${RUN_TX_DELTA_CRASH:-0}"
 
 if [[ "$RUN_FULL_MATRIX" == "1" ]]; then
@@ -84,6 +85,10 @@ fi
 
 if [[ "$RUN_GQL_CREATE_TX" == "1" ]]; then
   DBNAME="${DB_PREFIX}_gql_create_tx" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" ./tests/heavy/gql_create_tx_lifecycle.sh
+fi
+
+if [[ "$RUN_GQL_SET_TX" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_gql_set_tx" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" ./tests/heavy/gql_set_tx_lifecycle.sh
 fi
 
 if [[ "$RUN_RSS" == "1" ]]; then

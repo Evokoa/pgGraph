@@ -10,7 +10,8 @@ use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
     BindingSide, BoundCmpOp, BoundDirection, BoundNode, BoundRel, CreateProperty,
     CreateReturnBinding, CreateValue, HopBounds, LogicalCreateNode, LogicalNodeScan, LogicalPlan,
-    LogicalStatement, Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
+    LogicalSetProperty, LogicalStatement, Predicate, ReturnBinding, SortBinding, SortBindingKey,
+    ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -113,6 +114,9 @@ pub(crate) fn bind_statement(
         crate::gql::ast::Statement::Create(query) => {
             bind_create_node(query, catalog).map(LogicalStatement::CreateNode)
         }
+        crate::gql::ast::Statement::Set(query) => {
+            bind_set_property(query, catalog).map(LogicalStatement::SetProperty)
+        }
     }
 }
 
@@ -161,28 +165,28 @@ fn bind_create_properties(
                 format!("duplicate CREATE property `{}`", key.text),
             ));
         }
-        let value = match value {
-            Operand::Literal(Literal::Value { value, .. }) => CreateValue::Literal(value.clone()),
-            Operand::Param { name, .. } => CreateValue::Param(name.text.clone()),
-            Operand::List { span, .. } => {
-                return Err(GqlError::unsupported(
-                    *span,
-                    "CREATE property lists are implemented in a later write phase",
-                ));
-            }
-            Operand::Property { span, .. } => {
-                return Err(GqlError::unsupported(
-                    *span,
-                    "CREATE property references require MATCH writes from a later phase",
-                ));
-            }
-        };
+        let value = bind_create_value(value)?;
         properties.push(CreateProperty {
             property: key.text.clone(),
             value,
         });
     }
     Ok(properties)
+}
+
+fn bind_create_value(value: &Operand) -> Result<CreateValue, GqlError> {
+    match value {
+        Operand::Literal(Literal::Value { value, .. }) => Ok(CreateValue::Literal(value.clone())),
+        Operand::Param { name, .. } => Ok(CreateValue::Param(name.text.clone())),
+        Operand::List { span, .. } => Err(GqlError::unsupported(
+            *span,
+            "write property lists are implemented in a later write phase",
+        )),
+        Operand::Property { span, .. } => Err(GqlError::unsupported(
+            *span,
+            "write property references require MATCH writes from a later phase",
+        )),
+    }
 }
 
 fn bind_create_returns(
@@ -243,6 +247,56 @@ fn bind_create_returns(
         bindings.push(binding);
     }
     Ok(bindings)
+}
+
+fn bind_set_property(
+    query: &crate::gql::ast::SetQuery,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalSetProperty, GqlError> {
+    let Pattern { start, tail, .. } = &query.match_.pattern;
+    if !tail.is_empty() {
+        return Err(GqlError::unsupported(
+            query.match_.pattern.span,
+            "SET supports a single-node MATCH pattern in this release",
+        ));
+    }
+    let node = bind_node(start, catalog)?;
+    let writable_properties = start
+        .label
+        .as_ref()
+        .map(|label| catalog.resolve_node_label(&label.text, label.span))
+        .transpose()?
+        .map(|info| info.writable_properties)
+        .unwrap_or_default();
+    if query.set.target.var.text != node.var {
+        return Err(GqlError::bind(
+            query.set.target.var.span,
+            format!("unknown SET variable `{}`", query.set.target.var.text),
+        ));
+    }
+    let property = query.set.target.property.text.clone();
+    if property.starts_with('_') {
+        return Err(GqlError::bind(
+            query.set.target.property.span,
+            format!("reserved GQL property key `{property}`"),
+        ));
+    }
+    if !writable_properties.contains(&property) {
+        return Err(GqlError::bind(
+            query.set.target.property.span,
+            format!("property `{property}` is not a writable mapped column"),
+        ));
+    }
+    let value = bind_create_value(&query.set.value)?;
+    let predicate = bind_node_predicates(query.where_.as_ref(), start, &node)?;
+    let returns = bind_create_returns(&query.return_.items, &node)?;
+    Ok(LogicalSetProperty {
+        node,
+        predicate,
+        property,
+        value,
+        returns,
+    })
 }
 
 fn validate_row_window(query: &crate::gql::ast::Query) -> Result<(), GqlError> {

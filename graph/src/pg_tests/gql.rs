@@ -563,6 +563,190 @@ fn gql_create_node_preserves_source_table_rls() {
 }
 
 #[pg_test]
+fn gql_set_property_updates_source_row_and_filter_index() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT graph.add_filter_column('graph_test_users_pgtest'::regclass, 'age')")
+        .expect("add age filter failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (returned_age, source_age, filtered_neighbor_count) = Spi::connect(|client| {
+        let updated = client
+            .select(
+                "SELECT row #>> '{age}'
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''}) SET u.age = $age RETURN u.age AS age',
+                    params := '{\"age\":101}'::jsonb
+                 )",
+                None,
+                &[],
+            )
+            .expect("gql set failed")
+            .first()
+            .get::<String>(1)
+            .expect("updated age read failed")
+            .unwrap_or_default();
+        let source_age = client
+            .select(
+                "SELECT age FROM public.graph_test_users_pgtest WHERE id = 'u2'",
+                None,
+                &[],
+            )
+            .expect("source age query failed")
+            .first()
+            .get::<i32>(1)
+            .expect("source age read failed")
+            .unwrap_or_default();
+        let filtered_neighbor_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM graph.traverse(
+                    'graph_test_users_pgtest'::regclass,
+                    'u1',
+                    1,
+                    filter := '{\"node\":{\"where\":{\"age\":{\"gt\":100}}}}'::jsonb,
+                    hydrate := false
+                 )
+                 WHERE node_id = 'u2'",
+                None,
+                &[],
+            )
+            .expect("filtered traverse failed")
+            .first()
+            .get::<i64>(1)
+            .expect("filtered count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((updated, source_age, filtered_neighbor_count))
+    })
+    .expect("set verification failed");
+
+    assert_eq!(returned_age, "101");
+    assert_eq!(source_age, 101);
+    assert_eq!(filtered_neighbor_count, 1);
+}
+
+#[pg_test]
+fn gql_set_property_rejects_type_mismatch_and_readonly_projection() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    build_friendship_fixture_graph();
+    create_error_capture_helper();
+
+    let readonly_denied = Spi::get_one::<bool>(&format!(
+        "SELECT public.graph_test_sql_raises({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest {id: ''u2''}) SET u.age = 42 RETURN u.age'
+             )"
+        )
+    ))
+    .expect("readonly set capture failed")
+    .unwrap_or(false);
+
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+    let type_denied = Spi::get_one::<bool>(&format!(
+        "SELECT public.graph_test_sql_raises({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest {id: ''u2''}) SET u.age = ''not numeric'' RETURN u.age'
+             )"
+        )
+    ))
+    .expect("type mismatch capture failed")
+    .unwrap_or(false);
+    let source_age = Spi::get_one::<i32>(
+        "SELECT age FROM public.graph_test_users_pgtest WHERE id = 'u2'",
+    )
+    .expect("source age query failed")
+    .unwrap_or_default();
+
+    assert!(readonly_denied);
+    assert!(type_denied);
+    assert_eq!(source_age, 41);
+}
+
+#[pg_test]
+fn gql_set_property_rejects_registered_tenant_column() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET LOCAL graph.enforce_tenant_scope = on")
+        .expect("enable tenant enforcement failed");
+    Spi::run("SET LOCAL graph.tenant_setting = 'app.graph_gql_set_tenant'")
+        .expect("set tenant GUC failed");
+    Spi::run("SET LOCAL app.graph_gql_set_tenant = 'tenant-a'").expect("set tenant failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_gql_set_tenant_pgtest CASCADE")
+        .expect("drop tenant set table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_set_tenant_pgtest (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create tenant set table failed");
+    Spi::run(
+        "INSERT INTO public.graph_gql_set_tenant_pgtest (id, tenant_id, name)
+         VALUES ('a1', 'tenant-a', 'Ada')",
+    )
+    .expect("insert tenant set row failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_gql_set_tenant_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['tenant_id', 'name'],
+                tenant_column := 'tenant_id'
+            )",
+    )
+    .expect("add tenant set table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable tenant graph failed");
+    create_error_capture_helper();
+
+    let denied = Spi::get_one::<bool>(&format!(
+        "SELECT public.graph_test_sql_raises({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_gql_set_tenant_pgtest {id: ''a1''}) SET u.tenant_id = ''tenant-b'' RETURN u'
+             )"
+        )
+    ))
+    .expect("tenant column set capture failed")
+    .unwrap_or(false);
+    let tenant = Spi::get_one::<String>(
+        "SELECT tenant_id FROM public.graph_gql_set_tenant_pgtest WHERE id = 'a1'",
+    )
+    .expect("tenant value query failed")
+    .unwrap_or_default();
+
+    Spi::run("RESET app.graph_gql_set_tenant").expect("reset tenant failed");
+    Spi::run("RESET graph.tenant_setting").expect("reset tenant setting failed");
+    Spi::run("SET graph.enforce_tenant_scope = off").expect("disable tenant enforcement failed");
+
+    assert!(denied);
+    assert_eq!(tenant, "tenant-a");
+}
+
+#[pg_test]
 fn gql_create_node_rejects_unregistered_label() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");

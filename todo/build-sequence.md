@@ -68,6 +68,15 @@ rejection, session-tenant insertion, source-table RLS preservation, explicit
 rollback/commit lifecycle behavior, node-delta visibility, and
 unregistered-label rejection.
 
+Status note, 2026-05-31: 2D is closed. Public `graph.gql()` accepts
+single-node mapped property `SET` on `mutable_overlay`, performs a
+PostgreSQL-first `UPDATE ... RETURNING`, returns the updated row, rejects
+`csr_readonly`, and rejects non-writable mapped columns such as primary keys
+and tenant columns. SQL-visible coverage includes source-row update,
+PostgreSQL type-mismatch rejection, tenant-column rejection, same-backend typed
+filter-index visibility after the update, and rollback cleanup of the
+transaction-local filter delta.
+
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 
 | Slice | Depends on | Merge gate |

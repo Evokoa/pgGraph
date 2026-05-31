@@ -8,6 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::filter_index::EncodedFilterValue;
 use crate::projection::neighbors::{EdgeOverlay, OverlayDeletes, OverlayInserts};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
@@ -43,6 +44,7 @@ pub(crate) struct TxGraphDelta {
     deleted_nodes: HashSet<u32>,
     added_edges: HashMap<u32, Vec<DeltaEdge>>,
     deleted_edges: HashSet<(u32, u32, u8)>,
+    filter_updates: HashMap<(usize, u32), Option<EncodedFilterValue>>,
 }
 
 /// Lightweight statistics exposed through graph status surfaces.
@@ -101,6 +103,9 @@ impl TxGraphDelta {
                 * (std::mem::size_of::<u32>() + std::mem::size_of::<Vec<DeltaEdge>>())
             + added_edge_bytes
             + self.deleted_edges.capacity() * std::mem::size_of::<(u32, u32, u8)>()
+            + self.filter_updates.capacity()
+                * (std::mem::size_of::<(usize, u32)>()
+                    + std::mem::size_of::<Option<EncodedFilterValue>>())
     }
 
     fn is_dirty(&self) -> bool {
@@ -108,6 +113,7 @@ impl TxGraphDelta {
             || !self.deleted_nodes.is_empty()
             || !self.added_edges.is_empty()
             || !self.deleted_edges.is_empty()
+            || !self.filter_updates.is_empty()
     }
 
     #[cfg(test)]
@@ -166,6 +172,34 @@ pub(crate) fn added_node_keys(table_oid: u32, tenant: Option<&str>) -> Vec<Strin
                     .collect()
             })
             .unwrap_or_default()
+    })
+}
+
+/// Record a transaction-local typed filter-index value update.
+pub(crate) fn record_filter_value_update(
+    column_idx: usize,
+    node_idx: u32,
+    value: Option<EncodedFilterValue>,
+) -> GraphResult<()> {
+    ensure_write_allowed()?;
+    TX_DELTA.with(|delta| {
+        let mut borrowed = delta.borrow_mut();
+        let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        delta.filter_updates.insert((column_idx, node_idx), value);
+    });
+    Ok(())
+}
+
+/// Return a transaction-local typed filter-index value update.
+pub(crate) fn filter_value_update(
+    column_idx: usize,
+    node_idx: u32,
+) -> Option<Option<EncodedFilterValue>> {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .and_then(|delta| delta.filter_updates.get(&(column_idx, node_idx)).copied())
     })
 }
 
@@ -433,6 +467,22 @@ mod tests {
         assert_eq!(added_node_keys(100, None), vec!["a1", "b1"]);
 
         clear_current_transaction_state();
+    }
+
+    #[test]
+    fn filter_value_updates_are_transaction_local() {
+        clear_current_transaction_state();
+        record_filter_value_update(2, 42, Some(EncodedFilterValue::Numeric(101)))
+            .expect("record filter update");
+
+        assert_eq!(
+            filter_value_update(2, 42),
+            Some(Some(EncodedFilterValue::Numeric(101)))
+        );
+        assert!(stats().dirty);
+
+        clear_current_transaction_state();
+        assert_eq!(filter_value_update(2, 42), None);
     }
 
     #[test]

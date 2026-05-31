@@ -14,6 +14,8 @@ pub(crate) enum PhysicalStatement {
     NodeScan(PhysicalNodeScan),
     /// PostgreSQL-backed node creation.
     CreateNode(PhysicalCreateNode),
+    /// PostgreSQL-backed node property update.
+    SetProperty(PhysicalSetProperty),
 }
 
 /// Single-hop physical plan for Phase 1B.
@@ -62,6 +64,25 @@ pub(crate) struct PhysicalCreateNode {
     pub(crate) label: String,
     /// Property values to insert into PostgreSQL.
     pub(crate) properties: Vec<CreatePropertySlot>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnSlot>,
+}
+
+/// Physical node property update plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalSetProperty {
+    /// Matched node variable.
+    pub(crate) var: String,
+    /// Source table OID.
+    pub(crate) table_oid: u32,
+    /// Source label.
+    pub(crate) label: String,
+    /// Optional hydrated-row predicate selecting the row.
+    pub(crate) predicate: Option<Predicate>,
+    /// Source table column name to update.
+    pub(crate) property: String,
+    /// New property value.
+    pub(crate) value: CreateValueSlot,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnSlot>,
 }
@@ -159,6 +180,13 @@ impl PhysicalPlan {
 
 impl PhysicalCreateNode {
     /// Table OID whose rows will be inserted.
+    pub(crate) fn required_table_oid(&self) -> u32 {
+        self.table_oid
+    }
+}
+
+impl PhysicalSetProperty {
+    /// Table OID whose row will be updated.
     pub(crate) fn required_table_oid(&self) -> u32 {
         self.table_oid
     }

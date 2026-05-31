@@ -474,8 +474,15 @@ label maps to a registered source table. It requires a `mutable_overlay`
 projection and inserts the PostgreSQL source row first, so table privileges,
 constraints, triggers, RLS, and MVCC remain authoritative. `CREATE` is rejected
 on `csr_readonly`. The same transaction can read created nodes through
-node-only `MATCH`. Relationship creation, `SET`, `DELETE`, `MERGE`, and
-multi-row writes are not part of this release's GQL subset.
+node-only `MATCH`.
+
+`MATCH (n:label {...}) SET n.property = value RETURN ...` is supported for a
+single matched node and one registered non-key, non-tenant property column. It requires a
+`mutable_overlay` projection, updates the PostgreSQL source row first, and
+refreshes the backend's typed filter index value when the property is also a
+registered filter column. PostgreSQL rejects type mismatches according to the
+source column type. Relationship creation, `DELETE`, `MERGE`, and multi-row
+writes are not part of this release's GQL subset.
 
 ### `graph.gql_explain()`
 

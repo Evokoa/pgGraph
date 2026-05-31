@@ -22,6 +22,8 @@ pub(crate) struct NodeLabelInfo {
     pub(crate) table_oid: u32,
     /// Registered property column names for later predicate/property phases.
     pub(crate) properties: BTreeSet<String>,
+    /// Registered non-key property columns that writes may update.
+    pub(crate) writable_properties: BTreeSet<String>,
 }
 
 /// Bound metadata for a relationship type.
@@ -119,10 +121,17 @@ fn load_labels(tables: &[RegisteredTable]) -> GraphResult<HashMap<String, LabelE
         if let Some(label) = gql_label_from_regclass(&table.table_name) {
             let mut properties = table.columns.iter().cloned().collect::<BTreeSet<_>>();
             properties.extend(table.id_columns.columns().iter().cloned());
+            let writable_properties = table
+                .columns
+                .iter()
+                .filter(|column| table.tenant_column.as_deref() != Some(column.as_str()))
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let info = NodeLabelInfo {
                 label: label.clone(),
                 table_oid,
                 properties,
+                writable_properties,
             };
             labels
                 .entry(label)
@@ -258,6 +267,33 @@ impl FakeCatalog {
                 label: label.to_string(),
                 table_oid,
                 properties: properties
+                    .into_iter()
+                    .map(|property| property.as_ref().to_string())
+                    .collect(),
+                writable_properties: BTreeSet::new(),
+            },
+        );
+        self
+    }
+
+    /// Add a node label with distinct read and write property sets.
+    pub(crate) fn with_writable_label(
+        mut self,
+        label: &str,
+        table_oid: u32,
+        properties: impl IntoIterator<Item = impl AsRef<str>>,
+        writable_properties: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        self.labels.insert(
+            label.to_string(),
+            NodeLabelInfo {
+                label: label.to_string(),
+                table_oid,
+                properties: properties
+                    .into_iter()
+                    .map(|property| property.as_ref().to_string())
+                    .collect(),
+                writable_properties: writable_properties
                     .into_iter()
                     .map(|property| property.as_ref().to_string())
                     .collect(),

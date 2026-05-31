@@ -53,6 +53,7 @@ clusters where the pgrx harness is not representative enough.
 | `sqlstate_acl_boundary.sql` | SQL steps for the SQLSTATE/ACL boundary scenario; use the shell runner for assertions |
 | `tx_delta_lifecycle.sh` | Internal mutable-overlay transaction lifecycle proof: read-your-own-writes, rollback discard, commit cleanup, backend isolation, and trigger-sync catch-up |
 | `gql_create_tx_lifecycle.sh` | Public GQL `CREATE` transaction lifecycle proof: rollback discards inserted rows and node deltas, while commit persists the source row and clears backend-local deltas |
+| `gql_set_tx_lifecycle.sh` | Public GQL property `SET` transaction lifecycle proof: rollback discards source-row updates and transaction-local filter deltas |
 | `tx_delta_crash_recovery.sh` | Internal mutable-overlay crash proof: uncommitted transaction overlays disappear after postmaster restart while the persisted base graph reloads |
 | `run_pgbench_sync.sh` and `pgbench_sync.sql` | Concurrent DML, trigger sync, sync apply, and post-sync query checks |
 | `crash_recovery.sh` | Persisted graph reload after postmaster kill and corrupt artifact rejection |

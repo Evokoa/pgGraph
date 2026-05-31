@@ -2,8 +2,8 @@
 
 use super::ast::{
     CmpOp, CreateClause, CreateQuery, Direction, Expr, Ident, Literal, LiteralValue, MatchClause,
-    NodePat, Operand, Pattern, Query, RelPat, ReturnClause, ReturnExpr, ReturnItem, SortItem,
-    SortKey, Statement, VarLen,
+    NodePat, Operand, Pattern, PropertyRef, Query, RelPat, ReturnClause, ReturnExpr, ReturnItem,
+    SetClause, SetQuery, SortItem, SortKey, Statement, VarLen,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
@@ -47,8 +47,19 @@ impl Parser {
     fn parse_statement(&mut self) -> Result<Statement, GqlError> {
         match self.peek() {
             TokKind::Create => self.parse_create_query().map(Statement::Create),
+            TokKind::Match if self.statement_contains_set_before_return() => {
+                self.parse_set_query().map(Statement::Set)
+            }
             _ => self.parse_query().map(Statement::Read),
         }
+    }
+
+    fn statement_contains_set_before_return(&self) -> bool {
+        self.tokens
+            .iter()
+            .skip(self.pos)
+            .take_while(|token| token.kind != TokKind::Return && token.kind != TokKind::Eof)
+            .any(|token| token.kind == TokKind::Set)
     }
 
     fn parse_query(&mut self) -> Result<Query, GqlError> {
@@ -104,6 +115,28 @@ impl Parser {
         })
     }
 
+    fn parse_set_query(&mut self) -> Result<SetQuery, GqlError> {
+        let start = self.current().span.start as usize;
+        let match_ = self.parse_match_clause()?;
+        let where_ = if self.consume(TokKind::Where).is_some() {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let set = self.parse_set_clause()?;
+        let return_ = self.parse_return_clause()?;
+        self.reject_known_later_clauses()?;
+        let end = self.expect(TokKind::Eof, "expected end of query")?.span.end as usize;
+
+        Ok(SetQuery {
+            match_,
+            where_,
+            set,
+            return_,
+            span: Span::new(start, end),
+        })
+    }
+
     fn parse_create_clause(&mut self) -> Result<CreateClause, GqlError> {
         let start = self
             .expect(TokKind::Create, "expected CREATE clause")?
@@ -113,6 +146,35 @@ impl Parser {
         Ok(CreateClause {
             span: Span::new(start, node.span.end as usize),
             node,
+        })
+    }
+
+    fn parse_set_clause(&mut self) -> Result<SetClause, GqlError> {
+        let start = self.expect(TokKind::Set, "expected SET clause")?.span.start as usize;
+        let target = self.parse_property_ref()?;
+        self.expect(TokKind::Eq, "expected '=' in SET clause")?;
+        let value = self.parse_literal_or_param()?;
+        let end = match &value {
+            Operand::Literal(Literal::Value { span, .. }) | Operand::Param { span, .. } => {
+                span.end as usize
+            }
+            Operand::Property { span, .. } | Operand::List { span, .. } => span.end as usize,
+        };
+        Ok(SetClause {
+            target,
+            value,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_property_ref(&mut self) -> Result<PropertyRef, GqlError> {
+        let var = self.parse_ident()?;
+        self.expect(TokKind::Dot, "expected '.' in property reference")?;
+        let property = self.parse_ident()?;
+        Ok(PropertyRef {
+            span: Span::new(var.span.start as usize, property.span.end as usize),
+            var,
+            property,
         })
     }
 

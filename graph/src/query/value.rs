@@ -93,6 +93,31 @@ pub(crate) fn project_node_rows(
         .collect())
 }
 
+/// Return node-only matches that satisfy the plan predicate.
+///
+/// # Errors
+///
+/// Returns [`GraphError::GqlParameter`] when a required parameter is missing
+/// and [`GraphError::GqlExecution`] when predicate evaluation cannot be
+/// completed safely.
+pub(crate) fn filter_node_rows(
+    rows: Vec<GqlNodeRow>,
+    plan: &PhysicalNodeScan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+) -> GraphResult<Vec<GqlNodeRow>> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let fake = node_row_as_gql_row(&row);
+            match predicate_matches(plan.predicate.as_ref(), &fake, hydrated, params) {
+                Ok(true) => Some(Ok(row)),
+                Ok(false) => None,
+                Err(err) => Some(Err(err)),
+            }
+        })
+        .collect()
+}
+
 /// Return whether this plan requires SQL row hydration.
 pub(crate) fn requires_hydration(plan: &PhysicalPlan, hydrate_nodes: bool) -> bool {
     hydrate_nodes

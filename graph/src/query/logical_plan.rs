@@ -11,6 +11,8 @@ pub(crate) enum LogicalStatement {
     NodeScan(LogicalNodeScan),
     /// Node creation write.
     CreateNode(LogicalCreateNode),
+    /// Mapped node property update.
+    SetProperty(LogicalSetProperty),
 }
 
 /// Bound read-only logical query.
@@ -58,6 +60,21 @@ pub(crate) struct LogicalCreateNode {
     pub(crate) node: BoundNode,
     /// Property values to insert into PostgreSQL.
     pub(crate) properties: Vec<CreateProperty>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnBinding>,
+}
+
+/// Bound node property update.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalSetProperty {
+    /// Matched node binding.
+    pub(crate) node: BoundNode,
+    /// Optional hydrated-row predicate selecting the row.
+    pub(crate) predicate: Option<Predicate>,
+    /// Source table column name to update.
+    pub(crate) property: String,
+    /// New property value.
+    pub(crate) value: CreateValue,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnBinding>,
 }

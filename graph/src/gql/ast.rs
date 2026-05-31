@@ -9,6 +9,8 @@ pub(crate) enum Statement {
     Read(Query),
     /// `CREATE` node write query.
     Create(CreateQuery),
+    /// `MATCH ... SET ... RETURN` property write query.
+    Set(SetQuery),
 }
 
 /// Parsed GQL query.
@@ -41,12 +43,49 @@ pub(crate) struct CreateQuery {
     pub(crate) span: Span,
 }
 
+/// Parsed mapped property update query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SetQuery {
+    /// Required `MATCH` clause selecting the updated node.
+    pub(crate) match_: MatchClause,
+    /// Optional `WHERE` clause.
+    pub(crate) where_: Option<Expr>,
+    /// Property update clause.
+    pub(crate) set: SetClause,
+    /// Required `RETURN` clause.
+    pub(crate) return_: ReturnClause,
+    /// Full query span.
+    pub(crate) span: Span,
+}
+
 /// `CREATE` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateClause {
     /// Node to create.
     pub(crate) node: NodePat,
     /// Clause span.
+    pub(crate) span: Span,
+}
+
+/// `SET` clause for one node property.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SetClause {
+    /// Updated node property.
+    pub(crate) target: PropertyRef,
+    /// New property value.
+    pub(crate) value: Operand,
+    /// Clause span.
+    pub(crate) span: Span,
+}
+
+/// Variable property reference.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PropertyRef {
+    /// Variable name.
+    pub(crate) var: Ident,
+    /// Property name.
+    pub(crate) property: Ident,
+    /// Full reference span.
     pub(crate) span: Span,
 }
 

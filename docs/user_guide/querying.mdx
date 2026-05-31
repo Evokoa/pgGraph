@@ -84,7 +84,8 @@ hydration, raw path values, path functions, aggregates, `OPTIONAL MATCH`,
 and `WITH` are future work.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
-row into a registered source table when the active graph was built with
+row into a registered source table, and `SET` can update one mapped property on
+one matched node, when the active graph was built with
 `mode := 'mutable_overlay'` and `graph.mutable_enabled = on`:
 
 ```sql
@@ -95,13 +96,24 @@ FROM graph.gql(
 );
 ```
 
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (c:customers {id: $id}) SET c.status = $status RETURN c.status AS status',
+  params := '{"id":"c-42","status":"active"}'::jsonb
+);
+```
+
 The write is PostgreSQL-first: pgGraph inserts the mapped source row through
-SPI, PostgreSQL enforces table privileges, constraints, RLS, triggers, and MVCC,
-and the GQL result is built from the inserted row. Within the same transaction,
-node-only `MATCH` queries can read the created node through the backend-local
-transaction delta. `CREATE` is rejected on `csr_readonly` projections.
-Relationship creation, `SET`, `DELETE`, `MERGE`, multi-row writes, dynamic
-labels, and creating new PostgreSQL schema objects from GQL are future work.
+SPI or updates it with SPI, PostgreSQL enforces table privileges, constraints,
+RLS, triggers, and MVCC, and the GQL result is built from the affected row.
+Within the same transaction, node-only `MATCH` queries can read newly created
+nodes through the backend-local transaction delta. `SET` updates registered
+non-key, non-tenant property columns and refreshes any registered typed filter index value
+for that backend. `CREATE` and `SET` are rejected on `csr_readonly`
+projections. Relationship creation, `DELETE`, `MERGE`, multi-row writes,
+dynamic labels, and creating new PostgreSQL schema objects from GQL are future
+work.
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
 planning stages without executing the query.

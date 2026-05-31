@@ -120,6 +120,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_set_property_statement() {
+        let parsed = super::parse_statement(
+            "MATCH (u:users {id: 'u1'}) SET u.name = $name RETURN u.name AS name",
+        )
+        .expect("statement should parse");
+        let Statement::Set(set) = parsed else {
+            panic!("statement should be a set query");
+        };
+
+        assert_eq!(set.match_.pattern.start.var_text(), Some("u"));
+        assert_eq!(set.set.target.var.text, "u");
+        assert_eq!(set.set.target.property.text, "name");
+        assert_eq!(set.return_.items.len(), 1);
+    }
+
+    #[test]
     fn rejects_unbounded_variable_length_relationship() {
         let err = parse("MATCH (a)-[:knows*]-(b) RETURN a").expect_err("query should be rejected");
 

@@ -34,9 +34,9 @@ data into another system.
 |---|---|
 | WAL sync | `graph.sync_mode = 'wal'` is parsed but reserved; use `manual` or `trigger` |
 | Build scanner | `graph.build_scan_mode = 'copy'` is reserved; use `select` |
-| GQL | `graph.gql()` supports the documented read subset, including node-only `MATCH`, and single-node mapped `CREATE`; aggregates, path functions, multi-stage queries, and broader writes are future work |
+| GQL | `graph.gql()` supports the documented read subset, including node-only `MATCH`, single-node mapped `CREATE`, and single-node mapped property `SET`; aggregates, path functions, multi-stage queries, and broader writes are future work |
 | SQL/PGQ | Planned adapter work, not a current public API |
-| Projection modes | `graph.build()` defaults to `csr_readonly`; `mutable_overlay` can be selected when `graph.mutable_enabled = on` and is required for GQL `CREATE` |
+| Projection modes | `graph.build()` defaults to `csr_readonly`; `mutable_overlay` can be selected when `graph.mutable_enabled = on` and is required for GQL writes |
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |

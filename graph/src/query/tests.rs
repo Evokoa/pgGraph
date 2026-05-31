@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 fn fake_catalog() -> FakeCatalog {
     FakeCatalog::new()
-        .with_label("users", 10, ["id", "name"])
-        .with_label("companies", 20, ["id", "name"])
+        .with_writable_label("users", 10, ["id", "name"], ["name"])
+        .with_writable_label("companies", 20, ["id", "name"], ["name"])
         .with_edge("works_at", 10, 20)
 }
 
@@ -38,6 +38,51 @@ fn binder_accepts_create_node_for_registered_label() {
     assert_eq!(create.node.table_oid, 10);
     assert_eq!(create.properties.len(), 2);
     assert_eq!(create.returns.len(), 1);
+}
+
+#[test]
+fn binder_accepts_set_property_for_writable_column() {
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) SET u.name = $name RETURN u.name")
+            .unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::SetProperty(set) = plan else {
+        panic!("expected set property plan");
+    };
+
+    assert_eq!(set.node.var, "u");
+    assert_eq!(set.node.table_oid, 10);
+    assert_eq!(set.property, "name");
+    assert!(set.predicate.is_some());
+    assert_eq!(set.returns.len(), 1);
+}
+
+#[test]
+fn binder_rejects_set_property_for_non_writable_column() {
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) SET u.id = 'u2' RETURN u").unwrap();
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
+    assert!(err.to_string().contains("not a writable mapped column"));
+}
+
+#[test]
+fn binder_rejects_set_property_for_tenant_column() {
+    let catalog = FakeCatalog::new().with_writable_label(
+        "tenant_users",
+        30,
+        ["id", "tenant_id", "name"],
+        ["name"],
+    );
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:tenant_users {id: 'u1'}) SET u.tenant_id = 'tenant-b' RETURN u",
+    )
+    .unwrap();
+    let err = bind_statement(&ast, &catalog).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
+    assert!(err.to_string().contains("not a writable mapped column"));
 }
 
 #[test]

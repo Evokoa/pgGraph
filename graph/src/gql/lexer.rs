@@ -62,6 +62,8 @@ pub(crate) enum TokKind {
     Match,
     /// `CREATE`
     Create,
+    /// `SET`
+    Set,
     /// `WHERE`
     Where,
     /// `RETURN`
@@ -284,6 +286,7 @@ impl Lexer<'_> {
         let kind = match text.to_ascii_uppercase().as_str() {
             "MATCH" => TokKind::Match,
             "CREATE" => TokKind::Create,
+            "SET" => TokKind::Set,
             "WHERE" => TokKind::Where,
             "RETURN" => TokKind::Return,
             "DISTINCT" => TokKind::Distinct,
@@ -353,7 +356,7 @@ mod tests {
 
     #[test]
     fn tokenizes_keywords_case_insensitively() {
-        let tokens = tokenize("match (n) return n").expect("lexing succeeds");
+        let tokens = tokenize("match (n) set n.name = 'Ada' return n").expect("lexing succeeds");
         let kinds = tokens.iter().map(|token| token.kind).collect::<Vec<_>>();
 
         assert_eq!(
@@ -363,6 +366,12 @@ mod tests {
                 TokKind::LParen,
                 TokKind::Ident,
                 TokKind::RParen,
+                TokKind::Set,
+                TokKind::Ident,
+                TokKind::Dot,
+                TokKind::Ident,
+                TokKind::Eq,
+                TokKind::String,
                 TokKind::Return,
                 TokKind::Ident,
                 TokKind::Eof,
