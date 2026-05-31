@@ -17,6 +17,9 @@ QUERY_QUESTIONS = {
     "Traverse Neighborhood": "What is within two hops of this Panama officer node?",
     "Expand Neighborhood": "What readable neighborhood does graph.expand produce from this seed?",
     "Shortest Path": "What path connects this Panama officer seed to the selected target?",
+    "GQL One-Hop Relationships": "Which nodes does a GQL pattern match directly from this Panama officer?",
+    "GQL Aggregated Neighbors": "How does GQL group this officer's direct neighbors by source label?",
+    "GQL Explain": "What physical plan does pgGraph choose for a one-hop GQL pattern?",
     "Component Stats": "How many connected components exist, and what are the first components?",
     "Largest Component": "Which nodes appear in the largest connected component?",
     "Table Sizes": "How large are the loaded Panama node and relationship tables?",
@@ -89,6 +92,33 @@ FROM graph.shortest_path(
   hydrate := true
 )
 ORDER BY step;""",
+            "GQL One-Hop Relationships": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+   WHERE source.node_id = $seed
+     AND target.node_id = $target
+   RETURN source.node_id AS source_id,
+          target.node_id AS target_id,
+          target.name AS target_name,
+          target.label AS target_label
+   ORDER BY target_id
+   LIMIT 1',
+  params := '{"seed":"54662","target":"147079"}'::jsonb
+);""",
+            "GQL Aggregated Neighbors": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+   WHERE source.node_id = $seed
+   RETURN count(*) AS direct_links',
+  params := '{"seed":"54662"}'::jsonb
+);""",
+            "GQL Explain": """SELECT graph.gql_explain(
+  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+   WHERE source.node_id = $seed
+   RETURN source.node_id AS source_id, target.node_id AS target_id
+   ORDER BY target_id
+   LIMIT 20'
+);""",
             "Component Stats": """SELECT * FROM graph.component_stats();
 
 SELECT * FROM graph.components(max_rows := 20);""",

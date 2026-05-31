@@ -516,9 +516,13 @@ projection stages over the matched row stream; downstream `RETURN` and
 `WITH DISTINCT` deduplicates the row stream at that
 projection boundary. DISTINCT forms use a bounded in-memory key set and abort
 if the unique-key cap is exceeded. `RETURN DISTINCT` queries must order by
-returned scalar expressions. With `hydrate := true`, node values include source rows when
-PostgreSQL ACL and RLS allow them. With `hydrate := false`, node values are
-coordinates only. Relationship source-row hydration, path-function `WITH`
+returned scalar expressions. The default `hydrate := true` behavior returns
+hydrated source rows for node values when PostgreSQL ACL and RLS allow them.
+Queries that only need identifiers should project identifier properties, such
+as `RETURN n.id AS id`, rather than returning the whole node. The optional
+`hydrate := false` argument returns coordinate-only node objects for callers
+that explicitly want the compact `{table, id}` shape. Relationship source-row
+hydration, path-function `WITH`
 projections, aggregate `WITH` projections, full path variable syntax, node-only
 optional matches, and multi-pattern optional joins are not part of this
 release's GQL subset.

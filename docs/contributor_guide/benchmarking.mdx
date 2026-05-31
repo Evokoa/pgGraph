@@ -123,6 +123,11 @@ The current workload asks:
 - Which Panama entities mention Mossack in a registered searchable field?
 - What is the two-hop neighborhood around a high-degree Panama node?
 - Can pgGraph find the direct path between a high-degree seed and one adjacent target?
+- What is the overhead of a one-hop `graph.gql()` scalar projection?
+- What is the overhead of returning hydrated GQL node objects?
+- What is the overhead of returning coordinate-only GQL node objects?
+- How does the same one-hop seed compare through a direct PostgreSQL join and
+  the native `graph.traverse()` API?
 - How many connected components does the Panama graph have?
 - Which nodes are in the first page of the largest connected component?
 
@@ -142,6 +147,9 @@ The current workload asks:
 - Is the full modeled LDBC graph loaded in this backend, and how large is it?
 - Which people have John in their first name?
 - Who is directly connected to a high-degree person through the social graph?
+- What is the overhead of one-hop `graph.gql()` knows queries with scalar,
+  hydrated-node, and coordinate-only outputs?
+- How does the same knows seed compare through a direct PostgreSQL join?
 - What people, posts, comments, forums, tags, places, and organisations are near a high-degree person within two hops?
 - What members, posts, tags, and related nodes are near a busy forum?
 - Can pgGraph find the path between a post and one of its tags?

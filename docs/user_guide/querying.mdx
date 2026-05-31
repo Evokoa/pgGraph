@@ -81,10 +81,14 @@ Supported read coverage:
 | Path functions | `nodes(path)`, `relationships(path)`, and `length(path)` over named relationship patterns |
 | Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT`, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
 
-With `hydrate := true`, returned node values include hydrated source rows when
-the caller has source-table privileges and RLS allows the read. With
-`hydrate := false`, node values are graph coordinates only. Relationship values
-are coordinate identity objects in this release. `OPTIONAL MATCH` null-extends
+By default, GQL returns hydrated node objects when a query returns a node value
+such as `RETURN o` or `RETURN c`; PostgreSQL ACL and RLS still decide whether
+the source row can be read. To return only identifiers, project the identifier
+property directly, for example `RETURN o.id AS order_id`, instead of returning
+the whole node. The optional `hydrate := false` SQL argument is a pgGraph
+escape hatch for coordinate-only node objects when callers intentionally want
+the compact `{table, id}` shape. Relationship values are coordinate identity
+objects in this release. `OPTIONAL MATCH` null-extends
 unmatched source rows for single-relationship patterns. Aggregate functions
 ignore JSON `null` inputs for `count(expr)`, `sum`, `avg`, `min`, and `max`;
 `count(*)` counts every input row, `collect` preserves values in row order, and

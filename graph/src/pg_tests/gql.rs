@@ -67,6 +67,55 @@ fn gql_single_directed_match_matches_traverse_fixture() {
 }
 
 #[pg_test]
+fn gql_defaults_to_hydrated_nodes_and_projects_ids_explicitly() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (default_has_name, coordinate_has_name, scalar_id) = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT
+                    (SELECT row->'u' ? 'name'
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u1''}) RETURN u'
+                     )
+                     LIMIT 1),
+                    (SELECT row->'u' ? 'name'
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u1''}) RETURN u',
+                        hydrate := false
+                     )
+                     LIMIT 1),
+                    (SELECT row #>> '{id}'
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u1''}) RETURN u.id AS id'
+                     )
+                     LIMIT 1)",
+                None,
+                &[],
+            )
+            .expect("gql hydrate behavior query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<bool>(1)
+                .expect("default hydrate flag read failed")
+                .unwrap_or(false),
+            row.get::<bool>(2)
+                .expect("coordinate hydrate flag read failed")
+                .unwrap_or(true),
+            row.get::<String>(3)
+                .expect("scalar id read failed")
+                .unwrap_or_default(),
+        ))
+    })
+    .expect("gql hydrate behavior verification failed");
+
+    assert!(default_has_name);
+    assert!(!coordinate_has_name);
+    assert_eq!(scalar_id, "u1");
+}
+
+#[pg_test]
 fn gql_with_projection_scope_aliases_and_shadows() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

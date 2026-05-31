@@ -963,6 +963,7 @@ def workload(dataset: str, container: str) -> list[WorkloadQuery]:
     if dataset == "panama":
         seed = scalar(container, "SELECT start_id FROM panama.edges GROUP BY start_id ORDER BY count(*) DESC LIMIT 1;")
         target = scalar(container, f"SELECT end_id FROM panama.edges WHERE start_id = {sql_literal(seed)} LIMIT 1;")
+        gql_params = json.dumps({"seed": seed})
         status_sql = f"""
 WITH warm AS MATERIALIZED (
   SELECT count(*) AS rows_seen
@@ -976,11 +977,80 @@ FROM warm, graph.status() s
             WorkloadQuery("entity_search", "Which Panama entities mention Mossack in a registered searchable field?", "SELECT * FROM graph.search('name', 'Mossack', table_filter := 'panama.nodes'::regclass, mode := 'contains', max_rows := 25, hydrate := false)"),
             WorkloadQuery("traverse_depth_2", "What is the two-hop neighborhood around a high-degree Panama node?", f"SELECT * FROM graph.traverse('panama.nodes'::regclass, {sql_literal(seed)}, 2, hydrate := false, max_rows := 500)"),
             WorkloadQuery("shortest_path", "Can pgGraph find the direct path between a high-degree Panama seed and one adjacent target?", f"SELECT * FROM graph.shortest_path('panama.nodes'::regclass, {sql_literal(seed)}, 'panama.nodes'::regclass, {sql_literal(target)}, max_depth := 4, hydrate := false)"),
+            WorkloadQuery(
+                "gql_one_hop_scalar",
+                "What is the GQL overhead for a one-hop scalar projection over the built graph?",
+                f"""SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+   WHERE source.node_id = $seed
+   RETURN source.node_id AS source_id,
+          target.node_id AS target_id,
+          target.name AS target_name
+   ORDER BY target_id
+   LIMIT 50',
+  params := {sql_literal(gql_params)}::jsonb
+)""",
+            ),
+            WorkloadQuery(
+                "gql_one_hop_hydrated_nodes",
+                "What is the GQL overhead when returning hydrated source-row node objects?",
+                f"""SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+   WHERE source.node_id = $seed
+   RETURN source, target
+   ORDER BY target.node_id
+   LIMIT 50',
+  params := {sql_literal(gql_params)}::jsonb
+)""",
+            ),
+            WorkloadQuery(
+                "gql_one_hop_coordinates",
+                "What is the GQL overhead when returning coordinate-only node objects?",
+                f"""SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+   WHERE source.node_id = $seed
+   RETURN source, target
+   ORDER BY target.node_id
+   LIMIT 50',
+  params := {sql_literal(gql_params)}::jsonb,
+  hydrate := false
+)""",
+            ),
+            WorkloadQuery(
+                "sql_join_one_hop_equivalent",
+                "How fast is the equivalent PostgreSQL join over the source tables?",
+                f"""SELECT source.node_id AS source_id,
+       target.node_id AS target_id,
+       target.name AS target_name
+FROM panama.nodes source
+JOIN panama.edges edge ON edge.start_id = source.node_id
+JOIN panama.nodes target ON target.node_id = edge.end_id
+WHERE source.node_id = {sql_literal(seed)}
+ORDER BY target.node_id
+LIMIT 50""",
+            ),
+            WorkloadQuery(
+                "traverse_one_hop_coordinates",
+                "How fast is the native pgGraph traversal API for the same seed with coordinate output?",
+                f"""SELECT node_table_name, node_id, depth
+FROM graph.traverse(
+  'panama.nodes'::regclass,
+  {sql_literal(seed)},
+  1,
+  hydrate := false,
+  max_rows := 50
+)
+ORDER BY depth, node_id""",
+            ),
             WorkloadQuery("component_stats", "How many connected components does the Panama graph have, and how large are they?", "SELECT * FROM graph.component_stats()"),
             WorkloadQuery("largest_component", "Which nodes are in the first page of the largest Panama connected component?", "SELECT * FROM graph.largest_component()"),
         ]
     seed = scalar(container, "SELECT src_person_id FROM ldbc.person_knows_person GROUP BY src_person_id ORDER BY count(*) DESC LIMIT 1;")
     target = scalar(container, f"SELECT dst_person_id FROM ldbc.person_knows_person WHERE src_person_id = {sql_literal(seed)} LIMIT 1;")
+    gql_params = json.dumps({"seed": seed})
     forum_seed = scalar(container, "SELECT forum_id FROM ldbc.forum_has_member_person GROUP BY forum_id ORDER BY count(*) DESC LIMIT 1;")
     post_seed = scalar(container, "SELECT post_id FROM ldbc.post_has_tag_tag LIMIT 1;")
     tag_target = scalar(container, f"SELECT tag_id FROM ldbc.post_has_tag_tag WHERE post_id = {sql_literal(post_seed)} LIMIT 1;")
@@ -998,6 +1068,61 @@ FROM warm, graph.status() s
         WorkloadQuery("status", "Is the full modeled LDBC graph loaded in this backend, and how large is it?", status_sql),
         WorkloadQuery("person_search", "Which people have John in their first name?", "SELECT * FROM graph.search('first_name', 'John', table_filter := 'ldbc.persons'::regclass, mode := 'contains', max_rows := 25, hydrate := false)"),
         WorkloadQuery("friend_traversal_depth_1", "Who is directly connected to a high-degree person through the social graph?", f"SELECT * FROM graph.traverse('ldbc.persons'::regclass, {sql_literal(seed)}, 1, hydrate := false, max_rows := 500)"),
+        WorkloadQuery(
+            "gql_knows_scalar",
+            "What is the GQL overhead for a one-hop knows projection over the built graph?",
+            f"""SELECT row
+FROM graph.gql(
+  'MATCH (person:persons)-[:knows]->(friend:persons)
+   WHERE person.person_id = $seed
+   RETURN person.person_id AS person_id,
+          friend.person_id AS friend_id,
+          friend.first_name AS friend_first_name
+   ORDER BY friend_id
+   LIMIT 100',
+  params := {sql_literal(gql_params)}::jsonb
+)""",
+        ),
+        WorkloadQuery(
+            "gql_knows_hydrated_nodes",
+            "What is the GQL overhead when returning hydrated person node objects?",
+            f"""SELECT row
+FROM graph.gql(
+  'MATCH (person:persons)-[:knows]->(friend:persons)
+   WHERE person.person_id = $seed
+   RETURN person, friend
+   ORDER BY friend.person_id
+   LIMIT 100',
+  params := {sql_literal(gql_params)}::jsonb
+)""",
+        ),
+        WorkloadQuery(
+            "gql_knows_coordinates",
+            "What is the GQL overhead when returning coordinate-only person node objects?",
+            f"""SELECT row
+FROM graph.gql(
+  'MATCH (person:persons)-[:knows]->(friend:persons)
+   WHERE person.person_id = $seed
+   RETURN person, friend
+   ORDER BY friend.person_id
+   LIMIT 100',
+  params := {sql_literal(gql_params)}::jsonb,
+  hydrate := false
+)""",
+        ),
+        WorkloadQuery(
+            "sql_join_knows_equivalent",
+            "How fast is the equivalent PostgreSQL join over the LDBC source tables?",
+            f"""SELECT person.person_id,
+       friend.person_id AS friend_id,
+       friend.first_name AS friend_first_name
+FROM ldbc.persons person
+JOIN ldbc.person_knows_person edge ON edge.src_person_id = person.person_id
+JOIN ldbc.persons friend ON friend.person_id = edge.dst_person_id
+WHERE person.person_id = {sql_literal(seed)}
+ORDER BY friend.person_id
+LIMIT 100""",
+        ),
         WorkloadQuery("person_content_neighborhood", "What people, posts, comments, forums, tags, places, and organisations are near a high-degree person within two hops?", f"SELECT * FROM graph.traverse('ldbc.persons'::regclass, {sql_literal(seed)}, 2, hydrate := false, max_rows := 1000)"),
         WorkloadQuery("forum_neighborhood", "What members, posts, tags, and related nodes are near a busy forum?", f"SELECT * FROM graph.traverse('ldbc.forums'::regclass, {sql_literal(forum_seed)}, 2, hydrate := false, max_rows := 1000)"),
         WorkloadQuery("post_to_tag_path", "Can pgGraph find the path between a post and one of its tags?", f"SELECT * FROM graph.shortest_path('ldbc.posts'::regclass, {sql_literal(post_seed)}, 'ldbc.tags'::regclass, {sql_literal(tag_target)}, max_depth := 4, hydrate := false)"),
