@@ -24,12 +24,12 @@ pub(crate) struct GqlNodeCoordinate {
 pub(crate) struct GqlRow {
     /// Source coordinate.
     pub(crate) source: GqlNodeCoordinate,
-    /// Target coordinate.
-    pub(crate) target: GqlNodeCoordinate,
+    /// Target coordinate, absent for null-extended optional matches.
+    pub(crate) target: Option<GqlNodeCoordinate>,
     /// Relationship start coordinate in the registered edge direction.
-    pub(crate) rel_start: GqlNodeCoordinate,
+    pub(crate) rel_start: Option<GqlNodeCoordinate>,
     /// Relationship end coordinate in the registered edge direction.
-    pub(crate) rel_end: GqlNodeCoordinate,
+    pub(crate) rel_end: Option<GqlNodeCoordinate>,
 }
 
 /// One GQL node-only result row.
@@ -62,7 +62,20 @@ pub(crate) fn execute(
         if !engine.node_store.is_active(source_idx) {
             continue;
         }
-        for target in expand_targets(&neighbors, engine, plan, source_idx, rel_type_id, tenant) {
+        let targets = expand_targets(&neighbors, engine, plan, source_idx, rel_type_id, tenant);
+        if targets.is_empty() && plan.optional {
+            if rows.len() >= row_cap {
+                if plan.cap_exhaustion_is_error() {
+                    return Err(GraphError::GqlExecution {
+                        reason: format!("GQL result row cap exceeded ({row_cap})"),
+                    });
+                }
+                return Ok(rows);
+            }
+            rows.push(project_optional_row(engine, source_idx));
+            continue;
+        }
+        for target in targets {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
                     return Err(GraphError::GqlExecution {
@@ -349,9 +362,18 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GqlRow {
     };
     GqlRow {
         source: coordinate(engine, source_idx),
-        target: coordinate(engine, target_idx),
-        rel_start: coordinate(engine, rel_start_idx),
-        rel_end: coordinate(engine, rel_end_idx),
+        target: Some(coordinate(engine, target_idx)),
+        rel_start: Some(coordinate(engine, rel_start_idx)),
+        rel_end: Some(coordinate(engine, rel_end_idx)),
+    }
+}
+
+fn project_optional_row(engine: &Engine, source_idx: u32) -> GqlRow {
+    GqlRow {
+        source: coordinate(engine, source_idx),
+        target: None,
+        rel_start: None,
+        rel_end: None,
     }
 }
 

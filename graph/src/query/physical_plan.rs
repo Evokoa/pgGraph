@@ -23,6 +23,8 @@ pub(crate) enum PhysicalStatement {
 /// Single-hop physical plan for Phase 1B.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PhysicalPlan {
+    /// Whether unmatched source rows should be null-extended.
+    pub(crate) optional: bool,
     /// Source node variable.
     pub(crate) source_var: String,
     /// Source table OID.

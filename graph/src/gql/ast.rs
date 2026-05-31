@@ -131,6 +131,8 @@ pub(crate) struct PropertyRef {
 /// `MATCH` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MatchClause {
+    /// Whether this clause null-extends unmatched rows.
+    pub(crate) optional: bool,
     /// Linear graph pattern.
     pub(crate) pattern: Pattern,
     /// Clause span.

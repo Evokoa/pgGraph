@@ -58,6 +58,7 @@ fn lower_node_scan(plan: LogicalNodeScan) -> PhysicalNodeScan {
 /// Lower a bound logical plan into the executable Phase 1B physical plan.
 pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
     PhysicalPlan {
+        optional: plan.optional,
         source_var: plan.source.var,
         source_table_oid: plan.source.table_oid,
         source_label: plan.source.label,

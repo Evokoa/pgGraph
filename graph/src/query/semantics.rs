@@ -54,6 +54,7 @@ pub(crate) fn bind(
     let returns = bind_scoped_returns(&query.return_.items, &scope, &source, &target)?;
     let order_by = bind_scoped_sort_items(&query.order_by, &returns, &scope, &source, &target)?;
     Ok(LogicalPlan {
+        optional: query.match_.optional,
         source,
         relationship: BoundRel {
             var: rel_pat.var.as_ref().map(|var| var.text.clone()),
@@ -81,6 +82,12 @@ fn bind_node_scan(
         return Err(GqlError::unsupported(
             query.match_.pattern.span,
             "node scan binding requires a node-only MATCH pattern",
+        ));
+    }
+    if query.match_.optional {
+        return Err(GqlError::unsupported(
+            query.match_.span,
+            "node-only OPTIONAL MATCH requires multi-stage row semantics from a later read phase",
         ));
     }
     let node = bind_node(start, catalog)?;
@@ -260,6 +267,12 @@ fn bind_set_property(
     query: &crate::gql::ast::SetQuery,
     catalog: &impl CatalogSnapshot,
 ) -> Result<LogicalSetProperty, GqlError> {
+    if query.match_.optional {
+        return Err(GqlError::unsupported(
+            query.match_.span,
+            "OPTIONAL MATCH is only supported for read queries",
+        ));
+    }
     let Pattern { start, tail, .. } = &query.match_.pattern;
     if !tail.is_empty() {
         return Err(GqlError::unsupported(
@@ -310,6 +323,12 @@ fn bind_delete_edge(
     query: &crate::gql::ast::DeleteQuery,
     catalog: &impl CatalogSnapshot,
 ) -> Result<LogicalDeleteEdge, GqlError> {
+    if query.match_.optional {
+        return Err(GqlError::unsupported(
+            query.match_.span,
+            "OPTIONAL MATCH is only supported for read queries",
+        ));
+    }
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,

@@ -14,8 +14,13 @@ pub(crate) fn explain(plan: &PhysicalPlan) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let op = if plan.optional {
+        "OptionalExpand"
+    } else {
+        "Expand"
+    };
     format!(
-        "Expand(source={}:{}, rel={}, hops={}..{}, target={}:{}, return=[{}])",
+        "{op}(source={}:{}, rel={}, hops={}..{}, target={}:{}, return=[{}])",
         plan.source_var,
         plan.source_table_oid,
         plan.rel_type,

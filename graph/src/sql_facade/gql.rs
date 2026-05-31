@@ -274,6 +274,7 @@ fn delete_edge_read_plan(
     plan: &crate::query::physical_plan::PhysicalDeleteEdge,
 ) -> crate::query::physical_plan::PhysicalPlan {
     crate::query::physical_plan::PhysicalPlan {
+        optional: false,
         source_var: plan.source_var.clone(),
         source_table_oid: plan.source_table_oid,
         source_label: plan.source_label.clone(),
@@ -298,9 +299,17 @@ struct MatchedEdgeIds {
 }
 
 fn matched_edge_ids(row: &crate::query::execute::GqlRow) -> MatchedEdgeIds {
+    let rel_start = row
+        .rel_start
+        .as_ref()
+        .expect("DELETE read plan always returns matched relationships");
+    let rel_end = row
+        .rel_end
+        .as_ref()
+        .expect("DELETE read plan always returns matched relationships");
     MatchedEdgeIds {
-        source_id: row.rel_start.node_id.clone(),
-        target_id: row.rel_end.node_id.clone(),
+        source_id: rel_start.node_id.clone(),
+        target_id: rel_end.node_id.clone(),
     }
 }
 
@@ -1055,7 +1064,10 @@ fn hydrate_gql_rows(
         return Ok(hydrated);
     }
     for row in rows {
-        for coordinate in [&row.source, &row.target] {
+        for coordinate in std::iter::once(Some(&row.source))
+            .chain(std::iter::once(row.target.as_ref()))
+            .flatten()
+        {
             let key = (coordinate.table_oid, coordinate.node_id.clone());
             if hydrated.contains_key(&key) {
                 continue;

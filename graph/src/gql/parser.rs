@@ -47,10 +47,12 @@ impl Parser {
     fn parse_statement(&mut self) -> Result<Statement, GqlError> {
         match self.peek() {
             TokKind::Create => self.parse_create_query().map(Statement::Create),
-            TokKind::Match if self.statement_contains_set_before_return() => {
+            TokKind::Match | TokKind::Optional if self.statement_contains_set_before_return() => {
                 self.parse_set_query().map(Statement::Set)
             }
-            TokKind::Match if self.statement_contains_delete_before_return() => {
+            TokKind::Match | TokKind::Optional
+                if self.statement_contains_delete_before_return() =>
+            {
                 self.parse_delete_query().map(Statement::Delete)
             }
             _ => self.parse_query().map(Statement::Read),
@@ -229,6 +231,7 @@ impl Parser {
     }
 
     fn parse_match_clause(&mut self) -> Result<MatchClause, GqlError> {
+        let optional = self.consume(TokKind::Optional).is_some();
         let start = self
             .expect(TokKind::Match, "expected MATCH clause")?
             .span
@@ -239,6 +242,7 @@ impl Parser {
             .last()
             .map_or(pattern.start.span.end, |(_, node)| node.span.end) as usize;
         Ok(MatchClause {
+            optional,
             pattern,
             span: Span::new(start, end),
         })

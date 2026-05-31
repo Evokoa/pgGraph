@@ -136,6 +136,181 @@ fn gql_with_projection_scope_aliases_and_shadows() {
 }
 
 #[pg_test]
+fn gql_optional_match_matches_left_outer_sql() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (gql_rows, gql_null_targets, sql_rows, sql_null_targets) = Spi::connect(|client| {
+        let gql = client
+            .select(
+                "SELECT count(*)::bigint,
+                        count(*) FILTER (WHERE row->'v' = 'null'::jsonb)::bigint
+                 FROM graph.gql(
+                     'OPTIONAL MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                      RETURN u, v',
+                     hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("optional gql query failed")
+            .first();
+        let sql = client
+            .select(
+                "SELECT count(*)::bigint,
+                        count(*) FILTER (WHERE v.id IS NULL)::bigint
+                 FROM public.graph_test_users_pgtest u
+                 LEFT JOIN public.graph_test_friendships_pgtest f ON f.user_id = u.id
+                 LEFT JOIN public.graph_test_users_pgtest v ON v.id = f.friend_id",
+                None,
+                &[],
+            )
+            .expect("left outer sql query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            gql.get::<i64>(1)
+                .expect("gql row count read failed")
+                .unwrap_or_default(),
+            gql.get::<i64>(2)
+                .expect("gql null count read failed")
+                .unwrap_or_default(),
+            sql.get::<i64>(1)
+                .expect("sql row count read failed")
+                .unwrap_or_default(),
+            sql.get::<i64>(2)
+                .expect("sql null count read failed")
+                .unwrap_or_default(),
+        ))
+    })
+    .expect("optional comparison failed");
+
+    assert_eq!(gql_rows, sql_rows);
+    assert_eq!(gql_null_targets, sql_null_targets);
+    assert_eq!(gql_rows, 2);
+    assert_eq!(gql_null_targets, 1);
+}
+
+#[pg_test]
+fn gql_optional_match_filters_orders_and_paginates_null_rows() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (gql_rows, gql_null_names, gql_null_rels, sql_rows, sql_null_names, sql_null_rels) =
+        Spi::connect(|client| {
+            let gql = client
+                .select(
+                    "SELECT count(*)::bigint,
+                            count(*) FILTER (WHERE row->'friend_name' = 'null'::jsonb)::bigint,
+                            count(*) FILTER (WHERE row->'r' = 'null'::jsonb)::bigint
+                     FROM graph.gql(
+                         'OPTIONAL MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                          WHERE v.name = ''Alice''
+                          RETURN u.id AS user_id, v.name AS friend_name, r
+                          ORDER BY friend_name
+                          SKIP 1 LIMIT 1',
+                         hydrate := true
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("optional filtered gql query failed")
+                .first();
+            let sql = client
+                .select(
+                    "WITH optional_rows AS (
+                         SELECT u.id AS user_id, opt.friend_name, opt.rel_id
+                         FROM public.graph_test_users_pgtest u
+                         LEFT JOIN (
+                             SELECT f.user_id, f.id AS rel_id, v.name AS friend_name
+                             FROM public.graph_test_friendships_pgtest f
+                             JOIN public.graph_test_users_pgtest v
+                               ON v.id = f.friend_id
+                              AND v.name = 'Alice'
+                         ) opt ON opt.user_id = u.id
+                         ORDER BY opt.friend_name NULLS FIRST
+                         OFFSET 1 LIMIT 1
+                     )
+                     SELECT count(*)::bigint,
+                            count(*) FILTER (WHERE friend_name IS NULL)::bigint,
+                            count(*) FILTER (WHERE rel_id IS NULL)::bigint
+                     FROM optional_rows",
+                    None,
+                    &[],
+                )
+                .expect("optional filtered sql query failed")
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                gql.get::<i64>(1)
+                    .expect("gql row count read failed")
+                    .unwrap_or_default(),
+                gql.get::<i64>(2)
+                    .expect("gql null name count read failed")
+                    .unwrap_or_default(),
+                gql.get::<i64>(3)
+                    .expect("gql null relationship count read failed")
+                    .unwrap_or_default(),
+                sql.get::<i64>(1)
+                    .expect("sql row count read failed")
+                    .unwrap_or_default(),
+                sql.get::<i64>(2)
+                    .expect("sql null name count read failed")
+                    .unwrap_or_default(),
+                sql.get::<i64>(3)
+                    .expect("sql null relationship count read failed")
+                    .unwrap_or_default(),
+            ))
+        })
+        .expect("optional filtered comparison failed");
+
+    assert_eq!(gql_rows, sql_rows);
+    assert_eq!(gql_null_names, sql_null_names);
+    assert_eq!(gql_null_rels, sql_null_rels);
+    assert_eq!((gql_rows, gql_null_names, gql_null_rels), (1, 1, 1));
+}
+
+#[pg_test]
+fn gql_optional_match_hydrates_source_with_null_target_and_relationship() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (source_name, target_is_null, relationship_is_null) = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT row #>> '{u,name}',
+                        row->'v' = 'null'::jsonb,
+                        row->'r' = 'null'::jsonb
+                 FROM graph.gql(
+                     'OPTIONAL MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                      RETURN u, r, v
+                      ORDER BY u.name',
+                     hydrate := true
+                 )
+                 WHERE row #>> '{u,_id,id}' = 'u2'",
+                None,
+                &[],
+            )
+            .expect("optional hydrated gql query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)
+                .expect("source name read failed")
+                .unwrap_or_default(),
+            row.get::<bool>(2)
+                .expect("target null read failed")
+                .unwrap_or(false),
+            row.get::<bool>(3)
+                .expect("relationship null read failed")
+                .unwrap_or(false),
+        ))
+    })
+    .expect("optional hydrated check failed");
+
+    assert_eq!(source_name, "Bob");
+    assert!(target_is_null);
+    assert!(relationship_is_null);
+}
+
+#[pg_test]
 fn gql_denies_without_select_on_bound_tables() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();
@@ -156,9 +331,20 @@ fn gql_denies_without_select_on_bound_tables() {
     ))
     .expect("acl error capture query failed")
     .unwrap_or(false);
+    let optional_denied = Spi::get_one::<bool>(&format!(
+        "SELECT public.graph_test_sql_raises({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'OPTIONAL MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest) RETURN u, v'
+             )"
+        )
+    ))
+    .expect("optional acl error capture query failed")
+    .unwrap_or(false);
     Spi::run("RESET ROLE").expect("reset role failed");
 
     assert!(denied);
+    assert!(optional_denied);
 }
 
 #[pg_test]

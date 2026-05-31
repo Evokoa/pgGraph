@@ -123,6 +123,16 @@ into final `RETURN`. Post-`WITH MATCH` joins remain deferred to the later
 multi-pattern read work, where the physical planner can add row-stream joins
 instead of overloading the current single-pattern executor.
 
+Status note, 2026-05-31: 3B is closed for top-level single-relationship
+`OPTIONAL MATCH`. `graph.gql()` now parses `OPTIONAL MATCH`, binds optional
+relationship reads into an explicit optional expand plan, and null-extends
+unmatched source rows with JSON `null` target nodes, target properties, and
+relationship values. Predicate misses on optional targets also null-extend the
+source row, matching left-outer join behavior. SQL-visible coverage compares
+optional GQL row counts and null target counts against equivalent PostgreSQL
+left-outer SQL. Node-only optional matches and `WITH ... OPTIONAL MATCH`
+multi-pattern joins remain deferred to later row-stream join planning.
+
 ## Phase 4 — Advanced writes + optional openCypher
 
 | Slice | Depends on | Merge gate |

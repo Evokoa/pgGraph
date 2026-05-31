@@ -74,6 +74,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_optional_match_clause() {
+        let parsed = parse("OPTIONAL MATCH (a:users)-[:knows]->(b:users) RETURN a, b")
+            .expect("query should parse");
+
+        assert!(parsed.match_.optional);
+        assert_eq!(parsed.match_.pattern.tail.len(), 1);
+    }
+
+    #[test]
     fn parses_property_predicates_and_literal_lists() {
         let parsed = parse(
             "MATCH (u:users) WHERE u.status IN ['active', 'pending'] OR u.age IS NULL RETURN u",

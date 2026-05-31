@@ -20,6 +20,8 @@ pub(crate) enum LogicalStatement {
 /// Bound read-only logical query.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LogicalPlan {
+    /// Whether unmatched source rows should be null-extended.
+    pub(crate) optional: bool,
     /// Source node binding.
     pub(crate) source: BoundNode,
     /// Single relationship expansion.

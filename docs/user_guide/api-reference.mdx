@@ -468,15 +468,19 @@ labels resolve to registered table names, relationship types resolve to
 registered edge labels, and `$parameters` are read from the `params` JSON
 object.
 
-Supported read patterns are node-only `MATCH` and single-relationship graph
-patterns. Supported return values are node values, scalar properties, and
-coordinate-only single-hop relationship identities. `WITH` can introduce
-projection stages over the matched row stream; downstream `RETURN` and
-`ORDER BY` clauses see the projected aliases, including shadowed names. With
-`hydrate := true`, node values include source rows when PostgreSQL ACL and RLS
-allow them. With `hydrate := false`, node values are coordinates only.
-Relationship source-row hydration, raw path values, aggregates, and
-`OPTIONAL MATCH` are not part of this release's GQL subset.
+Supported read patterns are node-only `MATCH`, single-relationship graph
+patterns, and top-level single-relationship `OPTIONAL MATCH`. Optional matches
+return matched relationship rows, and emit one null-extended row for each source
+node with no qualifying target. Null-extended rows use JSON `null` for target
+nodes, target properties, and relationship values. Supported return values are
+node values, scalar properties, and coordinate-only single-hop relationship
+identities. `WITH` can introduce projection stages over the matched row stream;
+downstream `RETURN` and `ORDER BY` clauses see the projected aliases, including
+shadowed names. With `hydrate := true`, node values include source rows when
+PostgreSQL ACL and RLS allow them. With `hydrate := false`, node values are
+coordinates only. Relationship source-row hydration, raw path values,
+aggregates, node-only optional matches, and multi-pattern optional joins are not
+part of this release's GQL subset.
 
 `CREATE (n:label {properties}) RETURN ...` is supported for a single node whose
 label maps to a registered source table. It requires a `mutable_overlay`

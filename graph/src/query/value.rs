@@ -29,12 +29,52 @@ pub(crate) fn project_rows(
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
     let mut projected = Vec::new();
-    for row in rows {
-        if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
-            projected.push(ProjectedRow {
-                row: project_row(&row, plan, hydrated, hydrate_nodes),
-                sort_values: sort_values(&row, plan, hydrated, params)?,
-            });
+    if plan.optional {
+        let mut current_source: Option<GqlNodeCoordinate> = None;
+        let mut fallback: Option<GqlRow> = None;
+        let mut matched_current_source = false;
+        for row in rows {
+            if current_source.as_ref() != Some(&row.source) {
+                flush_optional_source(
+                    &mut projected,
+                    plan,
+                    hydrated,
+                    params,
+                    hydrate_nodes,
+                    &mut fallback,
+                    matched_current_source,
+                )?;
+                current_source = Some(row.source.clone());
+                matched_current_source = false;
+            }
+            if fallback.is_none() || row.target.is_none() {
+                fallback = Some(row.clone());
+            }
+            if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
+                projected.push(ProjectedRow {
+                    row: project_row(&row, plan, hydrated, hydrate_nodes),
+                    sort_values: sort_values(&row, plan, hydrated, params)?,
+                });
+                matched_current_source = true;
+            }
+        }
+        flush_optional_source(
+            &mut projected,
+            plan,
+            hydrated,
+            params,
+            hydrate_nodes,
+            &mut fallback,
+            matched_current_source,
+        )?;
+    } else {
+        for row in rows {
+            if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
+                projected.push(ProjectedRow {
+                    row: project_row(&row, plan, hydrated, hydrate_nodes),
+                    sort_values: sort_values(&row, plan, hydrated, params)?,
+                });
+            }
         }
     }
     if !plan.order_by.is_empty() {
@@ -51,6 +91,33 @@ pub(crate) fn project_rows(
         .take(limit)
         .map(|row| row.row)
         .collect())
+}
+
+fn flush_optional_source(
+    projected: &mut Vec<ProjectedRow>,
+    plan: &PhysicalPlan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+    hydrate_nodes: bool,
+    fallback: &mut Option<GqlRow>,
+    matched_current_source: bool,
+) -> GraphResult<()> {
+    let Some(row) = fallback.take() else {
+        return Ok(());
+    };
+    if !matched_current_source {
+        let null_row = GqlRow {
+            source: row.source,
+            target: None,
+            rel_start: None,
+            rel_end: None,
+        };
+        projected.push(ProjectedRow {
+            row: project_row(&null_row, plan, hydrated, hydrate_nodes),
+            sort_values: sort_values(&null_row, plan, hydrated, params)?,
+        });
+    }
+    Ok(())
 }
 
 /// Project node-only matches into canonical JSON rows.
@@ -297,9 +364,9 @@ fn eval_value(
     params: &QueryParams,
 ) -> GraphResult<serde_json::Value> {
     match expr {
-        ValueExpr::Property { side, property } => {
-            Ok(property_value(coordinate(row, *side), hydrated, property))
-        }
+        ValueExpr::Property { side, property } => Ok(coordinate(row, *side)
+            .map(|coordinate| property_value(coordinate, hydrated, property))
+            .unwrap_or(serde_json::Value::Null)),
         ValueExpr::Literal(value) => Ok(value.clone()),
         ValueExpr::Param(name) => {
             params
@@ -419,15 +486,12 @@ fn project_row(
     for slot in &plan.returns {
         match slot {
             ReturnSlot::Node { side, name } => {
-                output.insert(
-                    name.clone(),
-                    node_value(
-                        coordinate(row, *side),
-                        hydrated,
-                        label(plan, *side),
-                        hydrate_nodes,
-                    ),
-                );
+                let value = coordinate(row, *side)
+                    .map(|coordinate| {
+                        node_value(coordinate, hydrated, label(plan, *side), hydrate_nodes)
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+                output.insert(name.clone(), value);
             }
             ReturnSlot::Relationship { name } => {
                 output.insert(name.clone(), relationship_value(row, plan));
@@ -439,7 +503,9 @@ fn project_row(
             } => {
                 output.insert(
                     name.clone(),
-                    property_value(coordinate(row, *side), hydrated, property),
+                    coordinate(row, *side)
+                        .map(|coordinate| property_value(coordinate, hydrated, property))
+                        .unwrap_or(serde_json::Value::Null),
                 );
             }
         }
@@ -478,17 +544,20 @@ fn project_node_row(
 fn node_row_as_gql_row(row: &GqlNodeRow) -> GqlRow {
     GqlRow {
         source: row.node.clone(),
-        target: row.node.clone(),
-        rel_start: row.node.clone(),
-        rel_end: row.node.clone(),
+        target: Some(row.node.clone()),
+        rel_start: Some(row.node.clone()),
+        rel_end: Some(row.node.clone()),
     }
 }
 
 fn relationship_value(row: &GqlRow, plan: &PhysicalPlan) -> serde_json::Value {
+    let (Some(rel_start), Some(rel_end)) = (&row.rel_start, &row.rel_end) else {
+        return serde_json::Value::Null;
+    };
     serde_json::json!({
         "_type": &plan.rel_type,
-        "_start": relationship_endpoint(&row.rel_start, plan),
-        "_end": relationship_endpoint(&row.rel_end, plan),
+        "_start": relationship_endpoint(rel_start, plan),
+        "_end": relationship_endpoint(rel_end, plan),
     })
 }
 
@@ -540,10 +609,10 @@ fn property_value(
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn coordinate(row: &GqlRow, side: BindingSide) -> &GqlNodeCoordinate {
+fn coordinate(row: &GqlRow, side: BindingSide) -> Option<&GqlNodeCoordinate> {
     match side {
-        BindingSide::Source => &row.source,
-        BindingSide::Target => &row.target,
+        BindingSide::Source => Some(&row.source),
+        BindingSide::Target => row.target.as_ref(),
     }
 }
 

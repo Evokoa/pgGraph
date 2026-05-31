@@ -131,12 +131,31 @@ fn binder_rejects_undirected_delete_edge() {
 fn binder_accepts_single_directed_match_returning_coordinates() {
     let plan = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
 
+    assert!(!plan.optional);
     assert_eq!(plan.source.var, "u");
     assert_eq!(plan.source.table_oid, 10);
     assert_eq!(plan.relationship.rel_type, "works_at");
     assert_eq!(plan.target.var, "c");
     assert_eq!(plan.target.table_oid, 20);
     assert_eq!(plan.returns.len(), 2);
+}
+
+#[test]
+fn binder_accepts_optional_relationship_match() {
+    let plan = bind_query("OPTIONAL MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
+
+    assert!(plan.optional);
+    assert_eq!(plan.source.var, "u");
+    assert_eq!(plan.target.var, "c");
+}
+
+#[test]
+fn binder_rejects_node_only_optional_match() {
+    let ast = crate::gql::parse_statement("OPTIONAL MATCH (u:users) RETURN u").unwrap();
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("node-only OPTIONAL MATCH"));
 }
 
 #[test]
@@ -491,9 +510,51 @@ fn executor_returns_one_hop_coordinate_rows() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].source.table_oid, 10);
     assert_eq!(rows[0].source.node_id, "u1");
-    assert_eq!(rows[0].target.table_oid, 20);
-    assert_eq!(rows[0].target.node_id, "c1");
+    let target = rows[0].target.as_ref().expect("target");
+    assert_eq!(target.table_oid, 20);
+    assert_eq!(target.node_id, "c1");
     assert_eq!(rows[1].source.node_id, "u2");
+}
+
+#[test]
+fn optional_match_null_extends_unmatched_source_rows() {
+    let logical = bind_query("OPTIONAL MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let u3 = engine.node_store.add_node(10, "u3".to_string());
+    engine.resolution_insert(10, "u3", u3);
+    engine.insert_table_membership(10, u3);
+
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[2].source.node_id, "u3");
+    assert!(rows[2].target.is_none());
+}
+
+#[test]
+fn optional_match_predicate_miss_null_extends_source_row() {
+    let logical = bind_query(
+        "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE c.name = 'Acme' RETURN u, c",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["u"]["id"], "u1");
+    assert_eq!(projected[0]["c"]["id"], "c1");
+    assert_eq!(projected[1]["u"]["id"], "u2");
+    assert!(projected[1]["c"].is_null());
 }
 
 #[test]
@@ -605,7 +666,7 @@ fn executor_filters_wrong_target_table_and_edge_type() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source.node_id, "u1");
-    assert_eq!(rows[0].target.node_id, "c1");
+    assert_eq!(rows[0].target.as_ref().expect("target").node_id, "c1");
 }
 
 #[test]
@@ -624,7 +685,7 @@ fn executor_applies_tenant_scope_to_source_and_target_nodes() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source.node_id, "u2");
-    assert_eq!(rows[0].target.node_id, "c2");
+    assert_eq!(rows[0].target.as_ref().expect("target").node_id, "c2");
 }
 
 #[test]
@@ -855,6 +916,17 @@ fn explain_contains_stable_1b_plan_shape() {
     assert_eq!(
         explain(&physical),
         "Expand(source=u:10, rel=works_at, hops=1..1, target=c:20, return=[u, c])"
+    );
+}
+
+#[test]
+fn explain_marks_optional_relationship_expands() {
+    let logical = bind_query("OPTIONAL MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
+    let physical = lower(logical);
+
+    assert_eq!(
+        explain(&physical),
+        "OptionalExpand(source=u:10, rel=works_at, hops=1..1, target=c:20, return=[u, c])"
     );
 }
 

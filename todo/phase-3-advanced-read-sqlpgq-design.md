@@ -75,6 +75,12 @@ with stable diagnostics.
   later multi-pattern planner task because it requires row-stream joins rather
   than only scope rebinding.
 - **3B — `OPTIONAL MATCH`.** Null-extension. Tests vs equivalent left-outer SQL.
+
+  Status, 2026-05-31: top-level single-relationship `OPTIONAL MATCH` is
+  implemented. Unmatched source rows and target-predicate misses return JSON
+  `null` for target/relationship projections, and SQL tests compare the result
+  shape against equivalent left-outer SQL. Node-only optional matches and
+  post-`WITH` optional joins remain later multi-pattern planner work.
 - **3C — Aggregates.** `count` (exists) → `sum`/`avg`/`min`/`max`/`collect`;
   grouping. Tests: correctness vs SQL aggregation, empty-group, null handling.
 - **3D — `DISTINCT`.** With memory limit (DR-2 style). Tests: dedup correctness,

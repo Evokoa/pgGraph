@@ -68,21 +68,22 @@ Supported read coverage:
 
 | Area | Supported behavior |
 |---|---|
-| Pattern | One node-only `MATCH` pattern or one graph pattern with two node variables and one relationship pattern |
+| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, or top-level single-relationship `OPTIONAL MATCH` |
 | Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum |
 | Predicates | Property comparisons, null checks, membership, boolean combinations, and JSONB `$parameters` |
-| Return values | Node values, scalar properties, and coordinate-only single-hop relationship identities |
+| Return values | Node values, scalar properties, coordinate-only single-hop relationship identities, and JSON `null` for unmatched optional targets or relationships |
 | Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases and shadowing |
 | Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT`, with the hard GQL row cap still enforced |
 
 With `hydrate := true`, returned node values include hydrated source rows when
 the caller has source-table privileges and RLS allows the read. With
 `hydrate := false`, node values are graph coordinates only. Relationship values
-are coordinate identity objects in this release; relationship source-row
-hydration, raw path values, path functions, aggregates, and `OPTIONAL MATCH`
-are future work.
+are coordinate identity objects in this release. `OPTIONAL MATCH` null-extends
+unmatched source rows for single-relationship patterns. Relationship source-row
+hydration, raw path values, path functions, aggregates, and multi-pattern
+optional joins are future work.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on
