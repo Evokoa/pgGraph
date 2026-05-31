@@ -133,6 +133,22 @@ pub static DEFAULT_PROJECTION_MODE: GucSetting<Option<std::ffi::CString>> =
 /// Default: false.
 pub static MUTABLE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Maximum transaction-local node deltas accepted by one backend.
+/// Default: 100000. Range: 0-10000000.
+pub static MAX_TX_DELTA_NODES: GucSetting<i32> = GucSetting::<i32>::new(100_000);
+
+/// Maximum transaction-local edge deltas accepted by one backend.
+/// Default: 100000. Range: 0-10000000.
+pub static MAX_TX_DELTA_EDGES: GucSetting<i32> = GucSetting::<i32>::new(100_000);
+
+/// Maximum estimated transaction-overlay heap, in MB, accepted by one backend.
+/// Default: 256. Range: 1-32768.
+pub static MAX_OVERLAY_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
+
+/// Delta or tombstone count at which compaction is recommended.
+/// Default: 50000. Range: 1-10000000.
+pub static COMPACTION_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(50_000);
+
 /// Whether tenanted graphs require a query or session tenant.
 /// Default: true.
 pub static ENFORCE_TENANT_SCOPE: GucSetting<bool> = GucSetting::<bool>::new(true);
@@ -310,6 +326,28 @@ pub fn default_projection_mode() -> Option<ProjectionMode> {
         .unwrap_or("csr_readonly");
 
     parse_projection_mode(raw)
+}
+
+/// Return the configured transaction-local node delta limit.
+#[cfg_attr(test, allow(dead_code))]
+pub fn max_tx_delta_nodes() -> usize {
+    MAX_TX_DELTA_NODES.get().max(0) as usize
+}
+
+/// Return the configured transaction-local edge delta limit.
+#[cfg_attr(test, allow(dead_code))]
+pub fn max_tx_delta_edges() -> usize {
+    MAX_TX_DELTA_EDGES.get().max(0) as usize
+}
+
+/// Return the configured transaction-overlay memory limit in bytes.
+pub fn max_overlay_memory_bytes() -> usize {
+    (MAX_OVERLAY_MEMORY_MB.get().max(1) as usize).saturating_mul(1_048_576)
+}
+
+/// Return the delta/tombstone threshold at which compaction is recommended.
+pub fn compaction_threshold() -> usize {
+    COMPACTION_THRESHOLD.get().max(1) as usize
 }
 
 /// Return the bounded sync replay batch size.
@@ -619,6 +657,50 @@ pub fn register_gucs() {
         c"Allow building mutable_overlay projections.",
         c"Default off. Enable only when using transaction-local graph-write features.",
         &MUTABLE_ENABLED,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.max_tx_delta_nodes",
+        c"Maximum transaction-local node deltas per backend.",
+        c"Mapped GQL writes abort the current statement when the limit would be exceeded.",
+        &MAX_TX_DELTA_NODES,
+        0,
+        10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.max_tx_delta_edges",
+        c"Maximum transaction-local edge deltas per backend.",
+        c"Mapped GQL writes abort the current statement when the limit would be exceeded.",
+        &MAX_TX_DELTA_EDGES,
+        0,
+        10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.max_overlay_memory_mb",
+        c"Maximum transaction-overlay memory per backend.",
+        c"Mapped GQL writes abort the current statement when estimated overlay memory would exceed this limit.",
+        &MAX_OVERLAY_MEMORY_MB,
+        1,
+        32768,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.compaction_threshold",
+        c"Delta or tombstone count at which graph.sync_health() recommends compaction.",
+        c"Run graph.maintenance() or graph.vacuum() when compaction is recommended.",
+        &COMPACTION_THRESHOLD,
+        1,
+        10_000_000,
         GucContext::Userset,
         GucFlags::default(),
     );

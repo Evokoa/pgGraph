@@ -842,6 +842,28 @@ impl Engine {
     /// Get engine status.
     pub fn status(&self) -> EngineStatus {
         let tx_delta_stats = tx_delta::stats();
+        let edge_buffer_tombstones = self
+            .edge_buffer
+            .iter()
+            .filter(|mutation| mutation.kind == MutationKind::Delete)
+            .count();
+        let tx_delta_tombstones = tx_delta_stats
+            .deleted_nodes
+            .saturating_add(tx_delta_stats.deleted_edges);
+        let overlay_tombstones = edge_buffer_tombstones.saturating_add(tx_delta_tombstones);
+        let edge_buffer_memory_bytes = self
+            .edge_buffer
+            .capacity()
+            .saturating_mul(std::mem::size_of::<EdgeMutation>());
+        let overlay_memory_bytes = tx_delta_stats
+            .memory_bytes
+            .saturating_add(edge_buffer_memory_bytes);
+        let durable_overlay_memory_bytes = edge_buffer_memory_bytes;
+        let compaction_threshold = crate::config::compaction_threshold();
+        let compaction_recommended = self.needs_vacuum
+            || self.edge_buffer.len() >= compaction_threshold
+            || edge_buffer_tombstones >= compaction_threshold
+            || durable_overlay_memory_bytes >= crate::config::max_overlay_memory_bytes();
         EngineStatus {
             node_count: self.node_store.node_count() as i32,
             edge_count: self.edge_store.edge_count() as i32,
@@ -865,6 +887,9 @@ impl Engine {
             read_only: self.is_read_only,
             read_only_reason: self.read_only_reason.map(|reason| reason.to_string()),
             projection_mode: self.projection_mode.as_str().to_string(),
+            overlay_tombstone_count: overlay_tombstones.min(i32::MAX as usize) as i32,
+            overlay_memory_bytes: overlay_memory_bytes.min(i64::MAX as usize) as i64,
+            compaction_recommended,
             tx_delta_dirty: tx_delta_stats.dirty,
             tx_delta_added_nodes: tx_delta_stats.added_nodes.min(i32::MAX as usize) as i32,
             tx_delta_deleted_nodes: tx_delta_stats.deleted_nodes.min(i32::MAX as usize) as i32,

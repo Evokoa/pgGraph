@@ -89,6 +89,17 @@ SQL-visible coverage includes source-row delete, `csr_readonly` rejection,
 forward and reverse neighbor reduction, no endpoint cascade, ambiguous
 self-edge rejection, and rollback cleanup through `gql_delete_tx_lifecycle.sh`.
 
+Status note, 2026-05-31: 2F is closed. `graph.status()` and
+`graph.sync_health()` expose overlay tombstone count, estimated overlay memory,
+durable compaction recommendation, and transaction-delta counters; overlay
+dirty state is visible from existing `edge_buffer_used` plus `tx_delta_dirty`.
+Mapped GQL writes enforce `graph.max_tx_delta_nodes`,
+`graph.max_tx_delta_edges`, and `graph.max_overlay_memory_mb` before recording
+transaction-local deltas; over-limit writes abort with `PG019` and leave source
+tables unchanged for the failed statement. `graph.compaction_threshold` drives
+operator-facing compaction recommendations for durable overlays, and
+maintenance scheduling treats that recommendation as work to run.
+
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 
 | Slice | Depends on | Merge gate |

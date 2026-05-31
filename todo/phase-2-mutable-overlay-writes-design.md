@@ -195,6 +195,19 @@ projection mode, overlay dirty flag, added/deleted node+edge delta counts,
 tombstone count, overlay memory estimate, compaction-recommended, read-only/
 rejection reason.
 
+### Slice 2F implementation status - 2026-05-31
+
+- Added public status and sync-health fields for overlay tombstone count,
+  estimated overlay memory, and durable-overlay compaction recommendation.
+  Overlay dirty state remains derivable from `edge_buffer_used` plus
+  `tx_delta_dirty`.
+- Added `graph.max_tx_delta_nodes`, `graph.max_tx_delta_edges`,
+  `graph.max_overlay_memory_mb`, and `graph.compaction_threshold`.
+- Mapped GQL writes fail with `PG019` before source-table DML when node or edge
+  delta limits would be exceeded. Transaction-delta recording also checks the
+  overlay memory cap before mutating backend-local state.
+- Maintenance recommendations now include explicit compaction recommendations.
+
 ## 10. Compaction (slice 2F)
 
 Fold overlays into a fresh immutable CSR via the normal build/rebuild path when

@@ -59,6 +59,9 @@ RETURNS TABLE (
   read_only boolean,
   read_only_reason text,
   projection_mode text,
+  overlay_tombstone_count int,
+  overlay_memory_bytes bigint,
+  compaction_recommended boolean,
   tx_delta_dirty boolean,
   tx_delta_added_nodes int,
   tx_delta_deleted_nodes int,
@@ -71,8 +74,9 @@ RETURNS TABLE (
 Reports backend-local engine state and current catalog/sync validity. When
 `read_only` is true, `read_only_reason` is `memory_limit`,
 `edge_buffer_full`, or another typed reason. `projection_mode` is
-`csr_readonly` or `mutable_overlay`; transaction-delta columns report
-backend-local GQL write overlays for the current transaction.
+`csr_readonly` or `mutable_overlay`. Overlay columns summarize tombstones,
+memory, and durable compaction policy; `edge_buffer_used` plus `tx_delta_dirty`
+show whether pending sync or transaction-local overlays exist.
 
 ### `graph.sync_health()`
 
@@ -93,6 +97,9 @@ RETURNS TABLE (
   read_only boolean,
   read_only_reason text,
   projection_mode text,
+  overlay_tombstone_count int,
+  overlay_memory_bytes bigint,
+  compaction_recommended boolean,
   tx_delta_dirty boolean,
   tx_delta_added_nodes int,
   tx_delta_deleted_nodes int,

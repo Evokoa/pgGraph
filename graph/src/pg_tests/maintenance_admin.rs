@@ -1467,7 +1467,7 @@ fn sync_health_exposes_operator_contract_field_names() {
     let signature_matches = Spi::get_one::<bool>(
             "WITH expected(result_type) AS (
                 VALUES (
-                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, read_only_reason text, apply_sync_recommended boolean, maintenance_recommended boolean)'
+                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, read_only_reason text, projection_mode text, overlay_tombstone_count integer, overlay_memory_bytes bigint, compaction_recommended boolean, tx_delta_dirty boolean, tx_delta_added_nodes integer, tx_delta_deleted_nodes integer, tx_delta_added_edges integer, tx_delta_deleted_edges integer, tx_delta_memory_bytes bigint, apply_sync_recommended boolean, maintenance_recommended boolean)'
                 )
              )
              SELECT pg_get_function_result(p.oid) = expected.result_type

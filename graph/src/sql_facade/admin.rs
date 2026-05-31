@@ -66,6 +66,7 @@ pub(crate) struct ScheduledMaintenanceInputs {
     pub(crate) needs_vacuum: bool,
     pub(crate) needs_rebuild: bool,
     pub(crate) read_only: bool,
+    pub(crate) compaction_recommended: bool,
 }
 
 impl From<&crate::types::EngineStatus> for ScheduledMaintenanceInputs {
@@ -77,6 +78,7 @@ impl From<&crate::types::EngineStatus> for ScheduledMaintenanceInputs {
             needs_vacuum: status.needs_vacuum,
             needs_rebuild: status.needs_rebuild,
             read_only: status.read_only,
+            compaction_recommended: status.compaction_recommended,
         }
     }
 }
@@ -97,7 +99,8 @@ pub(crate) fn scheduled_maintenance_decision(
     let start_maintenance = inputs.read_only
         || inputs.needs_rebuild
         || inputs.needs_vacuum
-        || inputs.edge_buffer_used > 0;
+        || inputs.edge_buffer_used > 0
+        || inputs.compaction_recommended;
 
     ScheduledMaintenanceDecision {
         apply_sync,
@@ -120,6 +123,7 @@ mod scheduled_maintenance_tests {
             needs_vacuum: false,
             needs_rebuild: false,
             read_only: false,
+            compaction_recommended: false,
         });
 
         assert_eq!(
@@ -141,6 +145,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: false,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 2,
@@ -149,6 +154,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: true,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 2,
@@ -157,6 +163,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: false,
                 read_only: true,
+                compaction_recommended: false,
             },
         ] {
             let decision = scheduled_maintenance_decision(inputs);
@@ -178,6 +185,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: false,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 0,
@@ -186,6 +194,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: true,
                 needs_rebuild: false,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 0,
@@ -194,6 +203,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: true,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 0,
@@ -202,6 +212,16 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: false,
                 read_only: true,
+                compaction_recommended: false,
+            },
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 0,
+                disabled_trigger_count: 0,
+                edge_buffer_used: 0,
+                needs_vacuum: false,
+                needs_rebuild: false,
+                read_only: false,
+                compaction_recommended: true,
             },
         ] {
             let decision = scheduled_maintenance_decision(inputs);
@@ -244,6 +264,9 @@ fn status() -> TableIterator<
         name!(read_only, bool),
         name!(read_only_reason, Option<String>),
         name!(projection_mode, String),
+        name!(overlay_tombstone_count, i32),
+        name!(overlay_memory_bytes, i64),
+        name!(compaction_recommended, bool),
         name!(tx_delta_dirty, bool),
         name!(tx_delta_added_nodes, i32),
         name!(tx_delta_deleted_nodes, i32),
@@ -278,6 +301,9 @@ fn status() -> TableIterator<
             s.read_only,
             s.read_only_reason,
             s.projection_mode,
+            s.overlay_tombstone_count,
+            s.overlay_memory_bytes,
+            s.compaction_recommended,
             s.tx_delta_dirty,
             s.tx_delta_added_nodes,
             s.tx_delta_deleted_nodes,
@@ -310,6 +336,9 @@ fn sync_health() -> TableIterator<
         name!(read_only, bool),
         name!(read_only_reason, Option<String>),
         name!(projection_mode, String),
+        name!(overlay_tombstone_count, i32),
+        name!(overlay_memory_bytes, i64),
+        name!(compaction_recommended, bool),
         name!(tx_delta_dirty, bool),
         name!(tx_delta_added_nodes, i32),
         name!(tx_delta_deleted_nodes, i32),
@@ -341,6 +370,9 @@ fn sync_health() -> TableIterator<
             s.read_only,
             s.read_only_reason,
             s.projection_mode,
+            s.overlay_tombstone_count,
+            s.overlay_memory_bytes,
+            s.compaction_recommended,
             s.tx_delta_dirty,
             s.tx_delta_added_nodes,
             s.tx_delta_deleted_nodes,

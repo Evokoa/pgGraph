@@ -67,6 +67,12 @@ pub(crate) struct TxDeltaStats {
 thread_local! {
     static TX_DELTA: RefCell<Option<TxGraphDelta>> = const { RefCell::new(None) };
     static SUBTRANSACTION_DEPTH: Cell<u32> = const { Cell::new(0) };
+    #[cfg(test)]
+    static TEST_MAX_TX_DELTA_NODES: Cell<usize> = const { Cell::new(100_000) };
+    #[cfg(test)]
+    static TEST_MAX_TX_DELTA_EDGES: Cell<usize> = const { Cell::new(100_000) };
+    #[cfg(test)]
+    static TEST_MAX_OVERLAY_MEMORY_BYTES: Cell<usize> = const { Cell::new(256 * 1_048_576) };
 }
 
 static CALLBACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -91,6 +97,12 @@ impl TxGraphDelta {
             .iter()
             .map(|node| node.primary_key.capacity())
             .sum::<usize>();
+        let node_tenant_bytes = self
+            .added_nodes
+            .iter()
+            .filter_map(|node| node.tenant.as_ref())
+            .map(String::capacity)
+            .sum::<usize>();
         let added_edge_bytes = self
             .added_edges
             .values()
@@ -98,6 +110,7 @@ impl TxGraphDelta {
             .sum::<usize>();
         self.added_nodes.capacity() * std::mem::size_of::<AddedNode>()
             + node_pk_bytes
+            + node_tenant_bytes
             + self.deleted_nodes.capacity() * std::mem::size_of::<u32>()
             + self.added_edges.capacity()
                 * (std::mem::size_of::<u32>() + std::mem::size_of::<Vec<DeltaEdge>>())
@@ -138,7 +151,7 @@ pub(crate) fn record_added_node(
     primary_key: &str,
     tenant: Option<&str>,
 ) -> GraphResult<()> {
-    ensure_write_allowed()?;
+    ensure_write_capacity(1, 0, estimated_added_node_bytes(primary_key, tenant))?;
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
@@ -181,7 +194,7 @@ pub(crate) fn record_filter_value_update(
     node_idx: u32,
     value: Option<EncodedFilterValue>,
 ) -> GraphResult<()> {
-    ensure_write_allowed()?;
+    ensure_write_capacity(0, 0, estimated_filter_update_bytes())?;
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
@@ -203,9 +216,65 @@ pub(crate) fn filter_value_update(
     })
 }
 
-/// Validate that the current transaction can accept a graph write delta.
-pub(crate) fn ensure_write_allowed() -> GraphResult<()> {
+/// Validate that the current transaction can accept additional graph deltas.
+pub(crate) fn ensure_write_capacity(
+    additional_nodes: usize,
+    additional_edges: usize,
+    additional_memory_bytes: usize,
+) -> GraphResult<()> {
+    let stats = stats();
+    enforce_limit(
+        "tx_delta_nodes",
+        stats
+            .added_nodes
+            .saturating_add(stats.deleted_nodes)
+            .saturating_add(additional_nodes),
+        max_tx_delta_nodes(),
+    )?;
+    enforce_limit(
+        "tx_delta_edges",
+        stats
+            .added_edges
+            .saturating_add(stats.deleted_edges)
+            .saturating_add(additional_edges),
+        max_tx_delta_edges(),
+    )?;
+    enforce_limit(
+        "overlay_memory_bytes",
+        stats.memory_bytes.saturating_add(additional_memory_bytes),
+        max_overlay_memory_bytes(),
+    )?;
     reject_if_subtransaction()
+}
+
+#[cfg(not(test))]
+fn max_tx_delta_nodes() -> usize {
+    crate::config::max_tx_delta_nodes()
+}
+
+#[cfg(test)]
+fn max_tx_delta_nodes() -> usize {
+    TEST_MAX_TX_DELTA_NODES.with(Cell::get)
+}
+
+#[cfg(not(test))]
+fn max_tx_delta_edges() -> usize {
+    crate::config::max_tx_delta_edges()
+}
+
+#[cfg(test)]
+fn max_tx_delta_edges() -> usize {
+    TEST_MAX_TX_DELTA_EDGES.with(Cell::get)
+}
+
+#[cfg(not(test))]
+fn max_overlay_memory_bytes() -> usize {
+    crate::config::max_overlay_memory_bytes()
+}
+
+#[cfg(test)]
+fn max_overlay_memory_bytes() -> usize {
+    TEST_MAX_OVERLAY_MEMORY_BYTES.with(Cell::get)
 }
 
 /// Record a transaction-local edge insertion.
@@ -214,7 +283,7 @@ pub(crate) fn ensure_write_allowed() -> GraphResult<()> {
     reason = "Phase 2C write operators call this after PostgreSQL accepts edge DML"
 )]
 pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()> {
-    reject_if_subtransaction()?;
+    ensure_write_capacity(0, 1, estimated_added_edge_bytes())?;
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
@@ -232,7 +301,7 @@ pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()>
     reason = "Phase 2E write operators call this after PostgreSQL accepts edge DML"
 )]
 pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> GraphResult<()> {
-    reject_if_subtransaction()?;
+    ensure_write_capacity(0, 1, estimated_deleted_edge_bytes())?;
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
@@ -284,6 +353,38 @@ pub(crate) fn edge_overlay(direction: TraversalDirection) -> EdgeOverlay {
 
         (inserts, deletes)
     })
+}
+
+fn enforce_limit(kind: &str, requested: usize, limit: usize) -> GraphResult<()> {
+    if requested > limit {
+        return Err(GraphError::OverlayLimit {
+            kind: kind.to_string(),
+            requested,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+fn estimated_added_node_bytes(primary_key: &str, tenant: Option<&str>) -> usize {
+    std::mem::size_of::<AddedNode>()
+        .saturating_add(primary_key.len())
+        .saturating_add(tenant.map(str::len).unwrap_or_default())
+}
+
+fn estimated_added_edge_bytes() -> usize {
+    std::mem::size_of::<u32>()
+        .saturating_add(std::mem::size_of::<Vec<DeltaEdge>>())
+        .saturating_add(std::mem::size_of::<DeltaEdge>())
+}
+
+fn estimated_deleted_edge_bytes() -> usize {
+    std::mem::size_of::<(u32, u32, u8)>()
+}
+
+fn estimated_filter_update_bytes() -> usize {
+    std::mem::size_of::<(usize, u32)>()
+        .saturating_add(std::mem::size_of::<Option<EncodedFilterValue>>())
 }
 
 fn orient_edge(direction: TraversalDirection, source: u32, target: u32) -> (u32, u32) {
@@ -413,8 +514,16 @@ fn set_subtransaction_depth_for_test(depth: u32) {
 }
 
 #[cfg(test)]
+fn set_test_limits(nodes: usize, edges: usize, memory_bytes: usize) {
+    TEST_MAX_TX_DELTA_NODES.with(|cell| cell.set(nodes));
+    TEST_MAX_TX_DELTA_EDGES.with(|cell| cell.set(edges));
+    TEST_MAX_OVERLAY_MEMORY_BYTES.with(|cell| cell.set(memory_bytes));
+}
+
+#[cfg(test)]
 pub(crate) fn clear_for_test() {
     clear_current_transaction_state();
+    set_test_limits(100_000, 100_000, 256 * 1_048_576);
 }
 
 #[cfg(test)]
@@ -453,6 +562,21 @@ mod tests {
         assert_eq!(stats.deleted_edges, 1);
         assert!(stats.memory_bytes > 0);
         assert!(stats.dirty);
+    }
+
+    #[test]
+    fn stats_include_tenant_string_heap_for_added_nodes() {
+        clear_current_transaction_state();
+        record_added_node(100, "n1", Some("tenant-a")).expect("record tenant node");
+
+        let with_tenant = stats().memory_bytes;
+
+        clear_current_transaction_state();
+        record_added_node(100, "n1", None).expect("record unscoped node");
+        let without_tenant = stats().memory_bytes;
+
+        assert!(with_tenant > without_tenant);
+        clear_current_transaction_state();
     }
 
     #[test]
@@ -569,5 +693,36 @@ mod tests {
 
         assert!(matches!(err, GraphError::UnsupportedOperation { .. }));
         set_subtransaction_depth_for_test(0);
+    }
+
+    #[test]
+    fn capacity_rejection_reports_overlay_limit_before_subtransaction_guard() {
+        clear_current_transaction_state();
+        set_subtransaction_depth_for_test(1);
+
+        let err = ensure_write_capacity(100_001, 0, 0)
+            .expect_err("node capacity should reject before subtransaction");
+
+        assert!(matches!(
+            err,
+            GraphError::OverlayLimit { kind, .. } if kind == "tx_delta_nodes"
+        ));
+        set_subtransaction_depth_for_test(0);
+    }
+
+    #[test]
+    fn overlay_memory_limit_rejects_before_recording_delta() {
+        clear_current_transaction_state();
+        set_test_limits(100_000, 100_000, 8);
+
+        let err =
+            record_added_node(100, "long-primary-key", None).expect_err("memory cap should reject");
+
+        assert!(matches!(
+            err,
+            GraphError::OverlayLimit { kind, .. } if kind == "overlay_memory_bytes"
+        ));
+        assert_eq!(stats(), TxDeltaStats::default());
+        clear_for_test();
     }
 }

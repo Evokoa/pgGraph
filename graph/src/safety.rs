@@ -62,6 +62,13 @@ pub enum GraphError {
     #[error("Graph is read-only: {reason}")]
     ReadOnly { reason: String }, // PG012
 
+    #[error("Graph overlay limit exceeded: {kind} would be {requested}, limit is {limit}")]
+    OverlayLimit {
+        kind: String,
+        requested: usize,
+        limit: usize,
+    }, // PG019
+
     #[error("Corrupt .pggraph file: {reason}")]
     CorruptFile { reason: String }, // PG009
 
@@ -98,6 +105,7 @@ impl GraphError {
             GraphError::BuildLocked => "PG006",
             GraphError::EdgeBufferFull { .. } => "PG008",
             GraphError::ReadOnly { .. } => "PG012",
+            GraphError::OverlayLimit { .. } => "PG019",
             GraphError::CorruptFile { .. } => "PG009",
             GraphError::IncompatibleVersion(_) => "PG011",
             GraphError::NodeNotFound { .. } => "PG010",
@@ -156,6 +164,15 @@ impl GraphError {
             }
             GraphError::ReadOnly { .. } => {
                 "Inspect graph.status().read_only_reason, then run graph.maintenance(), graph.vacuum(), or graph.build() as appropriate.".to_string()
+            }
+            GraphError::OverlayLimit { kind, .. } if kind == "tx_delta_nodes" => {
+                "Commit or roll back the current transaction, or increase graph.max_tx_delta_nodes.".to_string()
+            }
+            GraphError::OverlayLimit { kind, .. } if kind == "tx_delta_edges" => {
+                "Commit or roll back the current transaction, or increase graph.max_tx_delta_edges.".to_string()
+            }
+            GraphError::OverlayLimit { .. } => {
+                "Commit or roll back the current transaction, or increase graph.max_overlay_memory_mb.".to_string()
             }
             GraphError::CorruptFile { .. } => {
                 "Run graph.build() to reconstruct the graph from source tables.".to_string()
@@ -356,6 +373,17 @@ mod tests {
     }
 
     #[test]
+    fn overlay_limit_maps_to_pg019() {
+        let err = GraphError::OverlayLimit {
+            kind: "tx_delta_nodes".to_string(),
+            requested: 2,
+            limit: 1,
+        };
+        assert_eq!(err.sqlstate(), "PG019");
+        assert!(err.hint().contains("graph.max_tx_delta_nodes"));
+    }
+
+    #[test]
     fn read_only_maps_to_pg012() {
         let err = GraphError::ReadOnly {
             reason: "memory_limit".to_string(),
@@ -539,6 +567,11 @@ mod tests {
                 operation: "op".into(),
                 reason: "r".into(),
             },
+            GraphError::OverlayLimit {
+                kind: "tx_delta_nodes".into(),
+                requested: 2,
+                limit: 1,
+            },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },
@@ -578,6 +611,11 @@ mod tests {
             GraphError::UnsupportedOperation {
                 operation: "op".into(),
                 reason: "r".into(),
+            },
+            GraphError::OverlayLimit {
+                kind: "tx_delta_edges".into(),
+                requested: 2,
+                limit: 1,
             },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },
@@ -623,6 +661,11 @@ mod tests {
             GraphError::UnsupportedOperation {
                 operation: "op".into(),
                 reason: "r".into(),
+            },
+            GraphError::OverlayLimit {
+                kind: "overlay_memory_bytes".into(),
+                requested: 2,
+                limit: 1,
             },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },

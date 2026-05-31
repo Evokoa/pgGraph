@@ -174,7 +174,7 @@ fn execute_create_node(
     hydrate: bool,
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL CREATE")?;
-    crate::projection::tx_delta::ensure_write_allowed()?;
+    crate::projection::tx_delta::ensure_write_capacity(1, 0, 0)?;
     let insert = insert_mapped_node(plan, tenant_scope, params)?;
     crate::projection::tx_delta::record_added_node(
         plan.table_oid,
@@ -191,7 +191,7 @@ fn execute_set_property(
     hydrate: bool,
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL SET")?;
-    crate::projection::tx_delta::ensure_write_allowed()?;
+    crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
     let scan = set_property_node_scan(plan);
     let matches = ENGINE.with(|engine| {
         crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope)
@@ -239,7 +239,11 @@ fn execute_delete_edge(
     hydrate: bool,
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL DELETE")?;
-    crate::projection::tx_delta::ensure_write_allowed()?;
+    crate::projection::tx_delta::ensure_write_capacity(
+        0,
+        if plan.bidirectional { 2 } else { 1 },
+        0,
+    )?;
     let read_plan = delete_edge_read_plan(plan);
     let matches = ENGINE.with(|engine| {
         crate::query::execute::execute(&engine.borrow(), &read_plan, tenant_scope)

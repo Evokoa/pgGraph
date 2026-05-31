@@ -105,6 +105,7 @@ The extension emits custom SQLSTATEs through PostgreSQL's error reporting API.
 | `PG016` | GQL parameter error | Pass a JSON object containing every `$parameter` referenced by the query |
 | `PG017` | GQL execution error | Reduce result cardinality or rebuild if graph metadata changed |
 | `PG018` | Unsupported graph operation | Use a supported query shape or merge pending overlays before retrying |
+| `PG019` | Overlay limit exceeded | Commit or roll back the transaction, or raise the relevant overlay GUC |
 | `55000` | Extension disabled | `SET graph.enabled = on` |
 | `XX000` | Internal error | Report with full message and reproduction |
 

@@ -366,6 +366,110 @@ fn gql_create_node_inserts_mapped_row_and_records_delta() {
 }
 
 #[pg_test]
+fn gql_create_node_delta_limit_aborts_statement_before_source_insert() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.max_tx_delta_nodes = 0").expect("tighten node delta limit failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.gql(
+            'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u'
+         )",
+    );
+    let source_count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_test_users_pgtest WHERE id = 'u3'",
+    )
+    .expect("source count failed")
+    .unwrap_or_default();
+    let tx_added_nodes = Spi::get_one::<i32>("SELECT tx_delta_added_nodes FROM graph.status()")
+        .expect("status tx node count failed")
+        .unwrap_or_default();
+
+    Spi::run("RESET graph.max_tx_delta_nodes").expect("reset node delta limit failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("PG019"));
+    assert_eq!(source_count, 0);
+    assert_eq!(tx_added_nodes, 0);
+}
+
+#[pg_test]
+fn transaction_local_delta_pressure_does_not_recommend_maintenance() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.compaction_threshold = 1").expect("tighten compaction threshold failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (tx_added_nodes, compaction_recommended, maintenance_recommended) =
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT * FROM graph.gql(
+                        'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u'
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("gql create failed");
+            let status = client
+                .select(
+                    "SELECT tx_delta_added_nodes, compaction_recommended FROM graph.status()",
+                    None,
+                    &[],
+                )
+                .expect("status failed")
+                .first();
+            let health = client
+                .select(
+                    "SELECT maintenance_recommended FROM graph.sync_health()",
+                    None,
+                    &[],
+                )
+                .expect("sync health failed")
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                status
+                    .get::<i32>(1)
+                    .expect("tx count read failed")
+                    .unwrap_or_default(),
+                status
+                    .get::<bool>(2)
+                    .expect("compaction read failed")
+                    .unwrap_or(false),
+                health
+                    .get::<bool>(1)
+                    .expect("maintenance read failed")
+                    .unwrap_or(false),
+            ))
+        })
+        .expect("tx pressure verification failed");
+
+    Spi::run("RESET graph.compaction_threshold").expect("reset compaction threshold failed");
+
+    assert_eq!(tx_added_nodes, 1);
+    assert!(!compaction_recommended);
+    assert!(!maintenance_recommended);
+}
+
+#[pg_test]
 fn gql_create_node_applies_session_tenant_scope() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
@@ -868,6 +972,54 @@ fn gql_delete_edge_removes_source_row_and_tombstones_neighbors() {
     assert_eq!(forward_count, 0);
     assert_eq!(reverse_count, 0);
     assert_eq!(user_count, 2);
+}
+
+#[pg_test]
+fn gql_delete_edge_delta_limit_aborts_before_source_delete() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.max_tx_delta_edges = 0").expect("tighten edge delta limit failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := true
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u2''}) DELETE r RETURN u'
+         )",
+    );
+    let edge_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_test_friendships_pgtest",
+    )
+    .expect("edge row count failed")
+    .unwrap_or_default();
+    let tx_deleted_edges = Spi::get_one::<i32>("SELECT tx_delta_deleted_edges FROM graph.status()")
+        .expect("status tx edge count failed")
+        .unwrap_or_default();
+
+    Spi::run("RESET graph.max_tx_delta_edges").expect("reset edge delta limit failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("PG019"));
+    assert_eq!(edge_rows, 1);
+    assert_eq!(tx_deleted_edges, 0);
 }
 
 #[pg_test]

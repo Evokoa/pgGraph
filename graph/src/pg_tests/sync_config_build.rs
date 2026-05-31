@@ -170,6 +170,10 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert!(crate::config::ENFORCE_TENANT_SCOPE.get());
     assert_eq!(crate::config::MAX_EXACT_PATH_COUNT.get(), 100_000);
     assert_eq!(crate::config::BUILD_BATCH_SIZE.get(), 10_000);
+    assert_eq!(crate::config::MAX_TX_DELTA_NODES.get(), 100_000);
+    assert_eq!(crate::config::MAX_TX_DELTA_EDGES.get(), 100_000);
+    assert_eq!(crate::config::MAX_OVERLAY_MEMORY_MB.get(), 256);
+    assert_eq!(crate::config::COMPACTION_THRESHOLD.get(), 50_000);
 
     let registered = Spi::get_one::<bool>(
         "WITH expected(name, context, min_val, max_val) AS (
@@ -181,7 +185,11 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                     ('graph.max_exact_path_count', 'user', '1', '10000000'),
                     ('graph.build_batch_size', 'superuser', '1', '1000000'),
                     ('graph.edge_buffer_size', 'superuser', '1000', '10000000'),
-                    ('graph.vacuum_interval_secs', 'superuser', '5', '86400')
+                    ('graph.vacuum_interval_secs', 'superuser', '5', '86400'),
+                    ('graph.max_tx_delta_nodes', 'user', '0', '10000000'),
+                    ('graph.max_tx_delta_edges', 'user', '0', '10000000'),
+                    ('graph.max_overlay_memory_mb', 'user', '1', '32768'),
+                    ('graph.compaction_threshold', 'user', '1', '10000000')
              ),
              matched AS (
                 SELECT e.name,
@@ -191,7 +199,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                 FROM expected e
                 JOIN pg_settings s ON s.name = e.name
              )
-             SELECT count(*) = 8 AND bool_and(ok)
+             SELECT count(*) = 12 AND bool_and(ok)
              FROM matched",
     )
     .expect("pg_settings inspection failed")
@@ -201,6 +209,10 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert!(sql_raises("SET graph.max_exact_path_count = 0"));
     assert!(sql_raises("SET graph.build_batch_size = 0"));
     assert!(sql_raises("SET graph.edge_buffer_size = 999"));
+    assert!(sql_raises("SET graph.max_tx_delta_nodes = -1"));
+    assert!(sql_raises("SET graph.max_tx_delta_edges = -1"));
+    assert!(sql_raises("SET graph.max_overlay_memory_mb = 0"));
+    assert!(sql_raises("SET graph.compaction_threshold = 0"));
 }
 
 #[pg_test]
@@ -225,6 +237,9 @@ fn projection_mode_build_and_status_contract() {
         .expect("status row missing");
     let delta_clean = Spi::get_one::<bool>(
         "SELECT NOT tx_delta_dirty
+                AND overlay_tombstone_count = 0
+                AND overlay_memory_bytes = 0
+                AND NOT compaction_recommended
                 AND tx_delta_added_nodes = 0
                 AND tx_delta_deleted_nodes = 0
                 AND tx_delta_added_edges = 0

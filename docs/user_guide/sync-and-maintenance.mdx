@@ -117,6 +117,9 @@ FROM graph.sync_health();
 | `edge_buffer_used` | Pending edge overlay mutations |
 | `edge_buffer_size` | Configured edge overlay capacity |
 | `projection_mode` | Built projection mode: `csr_readonly` or `mutable_overlay` |
+| `overlay_tombstone_count` | Pending overlay delete/tombstone count |
+| `overlay_memory_bytes` | Estimated backend-local overlay heap memory |
+| `compaction_recommended` | `true` when durable overlay count, tombstones, memory, or vacuum state crosses the configured compaction policy |
 | `tx_delta_dirty` | Whether this backend has transaction-local graph deltas |
 | `tx_delta_added_nodes` / `tx_delta_deleted_nodes` | Transaction-local node delta counts |
 | `tx_delta_added_edges` / `tx_delta_deleted_edges` | Transaction-local edge delta counts |
