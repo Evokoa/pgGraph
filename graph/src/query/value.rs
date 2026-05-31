@@ -741,6 +741,21 @@ struct SortValue {
     desc: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum EvalValue {
+    Value(serde_json::Value),
+    Missing,
+}
+
+impl EvalValue {
+    fn into_json_or_null(self) -> serde_json::Value {
+        match self {
+            Self::Value(value) => value,
+            Self::Missing => serde_json::Value::Null,
+        }
+    }
+}
+
 fn compare_projected_rows(left: &ProjectedRow, right: &ProjectedRow) -> std::cmp::Ordering {
     for (left, right) in left.sort_values.iter().zip(right.sort_values.iter()) {
         let ordering = total_json_order(&left.value, &right.value);
@@ -777,7 +792,8 @@ fn sort_values(
                     row,
                     hydrated,
                     params,
-                )?,
+                )?
+                .into_json_or_null(),
             };
             Ok(SortValue {
                 value,
@@ -810,7 +826,8 @@ fn sort_values_for_node(
                     &fake,
                     hydrated,
                     params,
-                )?,
+                )?
+                .into_json_or_null(),
             };
             Ok(SortValue {
                 value,
@@ -860,29 +877,32 @@ fn eval_value(
     row: &GqlRow,
     hydrated: &HydratedRows,
     params: &QueryParams,
-) -> GraphResult<serde_json::Value> {
+) -> GraphResult<EvalValue> {
     match expr {
         ValueExpr::Property { side, property } => Ok(coordinate(row, *side)
-            .map(|coordinate| property_value(coordinate, hydrated, property))
-            .unwrap_or(serde_json::Value::Null)),
-        ValueExpr::Literal(value) => Ok(value.clone()),
+            .map(|coordinate| lookup_property_value(coordinate, hydrated, property))
+            .unwrap_or(EvalValue::Value(serde_json::Value::Null))),
+        ValueExpr::Literal(value) => Ok(EvalValue::Value(value.clone())),
         ValueExpr::Param(name) => {
             params
                 .get(name)
                 .cloned()
+                .map(EvalValue::Value)
                 .ok_or_else(|| GraphError::GqlParameter {
                     reason: format!("missing GQL parameter `{name}`"),
                 })
         }
-        ValueExpr::List(values) => Ok(serde_json::Value::Array(values.clone())),
+        ValueExpr::List(values) => Ok(EvalValue::Value(serde_json::Value::Array(values.clone()))),
     }
 }
 
-fn compare_values(
-    lhs: &serde_json::Value,
-    op: BoundCmpOp,
-    rhs: Option<&serde_json::Value>,
-) -> GraphResult<bool> {
+fn compare_values(lhs: &EvalValue, op: BoundCmpOp, rhs: Option<&EvalValue>) -> GraphResult<bool> {
+    if matches!(lhs, EvalValue::Missing) || matches!(rhs, Some(EvalValue::Missing)) {
+        return Ok(false);
+    }
+    let EvalValue::Value(lhs) = lhs else {
+        unreachable!("missing handled above");
+    };
     match op {
         BoundCmpOp::Eq => Ok(lhs == required_rhs(op, rhs)?),
         BoundCmpOp::Neq => Ok(lhs != required_rhs(op, rhs)?),
@@ -903,11 +923,15 @@ fn compare_values(
 
 fn required_rhs<'a>(
     op: BoundCmpOp,
-    rhs: Option<&'a serde_json::Value>,
+    rhs: Option<&'a EvalValue>,
 ) -> GraphResult<&'a serde_json::Value> {
-    rhs.ok_or_else(|| GraphError::GqlExecution {
+    let value = rhs.ok_or_else(|| GraphError::GqlExecution {
         reason: format!("GQL comparison {op:?} requires a right-hand side"),
-    })
+    })?;
+    let EvalValue::Value(value) = value else {
+        unreachable!("missing handled by compare_values");
+    };
+    Ok(value)
 }
 
 fn ordered(lhs: &serde_json::Value, rhs: &serde_json::Value) -> GraphResult<std::cmp::Ordering> {
@@ -1281,11 +1305,31 @@ fn property_value(
     hydrated: &HydratedRows,
     property: &str,
 ) -> serde_json::Value {
-    hydrated
-        .get(&(coordinate.table_oid, coordinate.node_id.clone()))
-        .and_then(|row| row.get(property))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null)
+    lookup_property_value(coordinate, hydrated, property).into_json_or_null()
+}
+
+fn lookup_property_value(
+    coordinate: &GqlNodeCoordinate,
+    hydrated: &HydratedRows,
+    property: &str,
+) -> EvalValue {
+    let Some(row) = hydrated.get(&(coordinate.table_oid, coordinate.node_id.clone())) else {
+        return EvalValue::Value(serde_json::Value::Null);
+    };
+    let mut segments = property.split('.');
+    let Some(first) = segments.next() else {
+        return EvalValue::Missing;
+    };
+    let Some(mut value) = row.get(first) else {
+        return EvalValue::Missing;
+    };
+    for segment in segments {
+        let Some(next) = value.get(segment) else {
+            return EvalValue::Missing;
+        };
+        value = next;
+    }
+    EvalValue::Value(value.clone())
 }
 
 fn coordinate(row: &GqlRow, side: BindingSide) -> Option<&GqlNodeCoordinate> {

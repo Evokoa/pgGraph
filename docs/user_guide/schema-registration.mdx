@@ -52,13 +52,18 @@ Composite IDs are encoded as JSON array text during build. For example,
 | `table_name` | `REGCLASS` | yes | Source table to index as graph nodes |
 | `id_column` | `TEXT` | yes for scalar overload | Primary key or unique not-null column |
 | `id_columns` | `TEXT[]` | yes for composite overload | Ordered primary key or unique not-null columns |
-| `columns` | `TEXT[]` | no | Source columns available to `graph.search()` |
+| `columns` | `TEXT[]` | no | Source columns available to search and GQL; dotted JSONB property paths are available to GQL |
 | `tenant_column` | `TEXT` | no | Per-row tenant value used for tenant-scoped traversal and search |
 
 <Callout type="warning">
 Search only considers columns registered in `columns`. Traversal filter pushdown
 uses `graph.add_filter_column()` separately.
 </Callout>
+
+For `graph.gql()`, `columns` may also include dotted paths rooted at a JSONB
+source column, such as `profile.plan` or `profile.tags`. The base column must
+exist and have type `jsonb`; typed filter indexes still use
+`graph.add_filter_column()` on ordinary columns.
 
 ## Register FK-Style Edges
 

@@ -527,6 +527,7 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 | `WHERE` property predicates | phase_1 | supported | supported | supported | supported | Covers eq/neq/range/null/membership plus boolean combinations. |
 | Parameters through JSONB | phase_1 | supported | supported | supported | supported | Missing/wrong type errors covered. |
 | `RETURN` node and scalar property values | phase_1 | supported | supported | supported | supported | JSONB row shape is stable. |
+| JSONB list/map property paths | phase_3 | supported | supported | supported | supported | Dotted registered properties rooted at a JSONB source column; missing keys project null but do not match `IS NULL`. |
 | `RETURN` coordinate-only single-hop relationship identity | phase_1 | supported | supported | supported | supported | Relationship source-row hydration is deferred. |
 | `RETURN` raw paths and path functions | phase_3 | supported | supported | supported | supported | Bounded named relationship paths and `nodes`, `relationships`, `length` are supported; standalone path variables remain later work. |
 | `ORDER BY`, `SKIP`, `LIMIT` | phase_1 | supported | supported | supported | supported | Hard row limits still apply. |

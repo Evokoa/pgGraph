@@ -110,6 +110,14 @@ with stable diagnostics.
   full standalone path-variable syntax, and aggregate path arguments require the
   later multi-stage row-stream planner.
 - **3F — jsonb properties.** Dynamic/list/map type mapping; missing-vs-null rule.
+
+  Status, 2026-05-31: read-time JSONB property paths are implemented for
+  registered dotted properties rooted at a `jsonb` source column. The executor
+  evaluates those paths from hydrated source rows, preserves JSONB arrays and
+  objects in `RETURN`, and treats missing keys as distinct from explicit JSON
+  `null` for `IS NULL` predicates. Registration rejects dotted paths on
+  non-JSONB base columns. JSONB path writes are intentionally deferred to the
+  Phase 4 write-path slices.
 - **3G — SQL/PGQ adapter.** Success + rejection corpus; own compatibility matrix.
 
 Benchmark gate unchanged: existing CSR traversal must not regress.

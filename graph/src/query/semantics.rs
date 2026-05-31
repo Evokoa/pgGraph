@@ -197,6 +197,12 @@ fn bind_create_properties(
                 format!("unknown property `{}`", key.text),
             ));
         }
+        if key.text.contains('.') {
+            return Err(GqlError::unsupported(
+                key.span,
+                "writes to jsonb property paths require the Phase 4 jsonb write path",
+            ));
+        }
         if !seen.insert(key.text.as_str()) {
             return Err(GqlError::bind(
                 key.span,
@@ -249,6 +255,12 @@ fn bind_create_returns(
                     node,
                     property.span,
                 )?;
+                if property.text.contains('.') {
+                    return Err(GqlError::unsupported(
+                        property.span,
+                        "write RETURN jsonb property paths require the Phase 4 jsonb write path",
+                    ));
+                }
                 CreateReturnBinding::Property {
                     property: property.text.clone(),
                     name: item
@@ -331,6 +343,12 @@ fn bind_set_property(
         ));
     }
     let property = query.set.target.property.text.clone();
+    if property.contains('.') {
+        return Err(GqlError::unsupported(
+            query.set.target.property.span,
+            "writes to jsonb property paths require the Phase 4 jsonb write path",
+        ));
+    }
     if property.starts_with('_') {
         return Err(GqlError::bind(
             query.set.target.property.span,
@@ -561,11 +579,11 @@ fn bind_node(node: &NodePat, catalog: &impl CatalogSnapshot) -> Result<BoundNode
         GqlError::unsupported(node.span, "unlabeled node patterns require a later phase")
     })?;
     let info = catalog.resolve_node_label(&label.text, label.span)?;
-    if let Some(property) = info
-        .properties
-        .iter()
-        .find(|property| property.starts_with('_'))
-    {
+    if let Some(property) = info.properties.iter().find(|property| {
+        property
+            .split('.')
+            .any(|segment| segment.is_empty() || segment.starts_with('_'))
+    }) {
         return Err(GqlError::bind(
             label.span,
             format!("registered property `{property}` uses a reserved GQL key"),
@@ -1325,7 +1343,10 @@ fn validate_property(
     target: &BoundNode,
     span: Span,
 ) -> Result<(), GqlError> {
-    if property.starts_with('_') {
+    if property
+        .split('.')
+        .any(|segment| segment.is_empty() || segment.starts_with('_'))
+    {
         return Err(GqlError::bind(
             span,
             format!("reserved GQL property key `{property}`"),

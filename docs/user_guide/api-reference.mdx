@@ -473,18 +473,23 @@ patterns, and top-level single-relationship `OPTIONAL MATCH`. Optional matches
 return matched relationship rows, and emit one null-extended row for each source
 node with no qualifying target. Null-extended rows use JSON `null` for target
 nodes, target properties, and relationship values. Supported return values are
-node values, scalar properties, coordinate-only single-hop relationship
-identities, bounded relationship path values, `RETURN DISTINCT`, and `RETURN`
-aggregates: `count`, `sum`, `avg`, `min`, `max`, and `collect`. Non-aggregate
-return items are implicit grouping keys. `count(*)` counts every input row;
-`count(expr)`, `sum`, `avg`, `min`, and `max` ignore JSON `null` inputs;
-aggregate-only empty inputs return one row with `0`, `null`, or `[]` according
-to the aggregate. Aggregate `DISTINCT` is supported. Named relationship
-patterns can be returned as path objects with `_path.nodes` and
-`_path.relationships`; `nodes(path)`, `relationships(path)`, and `length(path)`
-return those components directly. `WITH` can introduce projection stages over the matched row stream;
-downstream `RETURN` and `ORDER BY` clauses see the projected aliases, including
-shadowed names, and `WITH DISTINCT` deduplicates the row stream at that
+node values, scalar properties, JSONB list/map properties, coordinate-only
+single-hop relationship identities, bounded relationship path values,
+`RETURN DISTINCT`, and `RETURN` aggregates: `count`, `sum`, `avg`, `min`,
+`max`, and `collect`. Registered JSONB source columns can be addressed with
+dotted property paths such as `u.profile.plan`; returned JSONB arrays and
+objects keep their JSON shape. A missing key inside a JSONB property path
+projects as JSON `null`, but it does not satisfy `IS NULL`; explicit JSON
+`null` does. Non-aggregate return items are implicit grouping keys. `count(*)`
+counts every input row; `count(expr)`, `sum`, `avg`, `min`, and `max` ignore
+JSON `null` inputs; aggregate-only empty inputs return one row with `0`,
+`null`, or `[]` according to the aggregate. Aggregate `DISTINCT` is supported.
+Named relationship patterns can be returned as path objects with `_path.nodes`
+and `_path.relationships`; `nodes(path)`, `relationships(path)`, and
+`length(path)` return those components directly. `WITH` can introduce
+projection stages over the matched row stream; downstream `RETURN` and
+`ORDER BY` clauses see the projected aliases, including shadowed names, and
+`WITH DISTINCT` deduplicates the row stream at that
 projection boundary. DISTINCT forms use a bounded in-memory key set and abort
 if the unique-key cap is exceeded. `RETURN DISTINCT` queries must order by
 returned scalar expressions. With `hydrate := true`, node values include source rows when

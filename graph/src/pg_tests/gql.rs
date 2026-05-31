@@ -409,6 +409,133 @@ fn gql_aggregates_match_sql_grouping_and_numeric_results() {
 }
 
 #[pg_test]
+fn gql_jsonb_property_paths_return_lists_maps_and_distinguish_missing_from_null() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest
+         ADD COLUMN profile jsonb NOT NULL DEFAULT '{}'::jsonb",
+    )
+    .expect("add profile column failed");
+    Spi::run(
+        "UPDATE public.graph_test_users_pgtest
+         SET profile = CASE id
+           WHEN 'u1' THEN '{\"plan\":\"pro\",\"tags\":[\"founder\",7],\"flags\":{\"beta\":true},\"explicit_null\":null}'::jsonb
+           ELSE '{\"plan\":\"free\",\"tags\":[\"reader\"],\"flags\":{\"beta\":false}}'::jsonb
+         END",
+    )
+    .expect("update profile json failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY[
+                    'name',
+                    'age',
+                    'profile',
+                    'profile.plan',
+                    'profile.tags',
+                    'profile.flags',
+                    'profile.missing',
+                    'profile.explicit_null'
+                ]
+            )",
+    )
+    .expect("add users table with profile failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build graph failed");
+
+    let (tags, flags, missing, explicit_null_matches, missing_null_matches) =
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT row->'tags',
+                            row->'flags',
+                            row->'missing',
+                            (
+                              SELECT count(*)::bigint
+                              FROM graph.gql(
+                                'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                                 WHERE u.profile.explicit_null IS NULL
+                                 RETURN u.name AS name',
+                                hydrate := true
+                              )
+                            ),
+                            (
+                              SELECT count(*)::bigint
+                              FROM graph.gql(
+                                'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                                 WHERE u.profile.missing IS NULL
+                                 RETURN u.name AS name',
+                                hydrate := true
+                              )
+                            )
+                     FROM graph.gql(
+                       'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                        WHERE u.profile.plan = ''pro''
+                        RETURN u.profile.tags AS tags, u.profile.flags AS flags, u.profile.missing AS missing',
+                       hydrate := true
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("jsonb gql query failed")
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<pgrx::JsonB>(1)
+                    .expect("tags read failed")
+                    .map(|json| json.0)
+                    .unwrap_or(serde_json::Value::Null),
+                row.get::<pgrx::JsonB>(2)
+                    .expect("flags read failed")
+                    .map(|json| json.0)
+                    .unwrap_or(serde_json::Value::Null),
+                row.get::<pgrx::JsonB>(3)
+                    .expect("missing read failed")
+                    .map(|json| json.0)
+                    .unwrap_or(serde_json::Value::Null),
+                row.get::<i64>(4)
+                    .expect("explicit null count read failed")
+                    .unwrap_or_default(),
+                row.get::<i64>(5)
+                    .expect("missing null count read failed")
+                    .unwrap_or_default(),
+            ))
+        })
+        .expect("jsonb property query failed");
+
+    assert_eq!(tags, serde_json::json!(["founder", 7]));
+    assert_eq!(flags, serde_json::json!({"beta": true}));
+    assert!(missing.is_null());
+    assert_eq!(explicit_null_matches, 1);
+    assert_eq!(missing_null_matches, 0);
+}
+
+#[pg_test]
+fn gql_rejects_jsonb_property_paths_on_non_jsonb_columns() {
+    reset_and_create_fixtures();
+
+    let denied = sql_raises(
+        "SELECT graph.add_table(
+             'graph_test_users_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['name.first']
+         )",
+    );
+
+    assert!(denied);
+}
+
+#[pg_test]
 fn gql_distinct_matches_sql_distinct_counts() {
     reset_and_create_fixtures();
     Spi::run(

@@ -223,7 +223,7 @@ impl Parser {
     fn parse_property_ref(&mut self) -> Result<PropertyRef, GqlError> {
         let var = self.parse_ident()?;
         self.expect(TokKind::Dot, "expected '.' in property reference")?;
-        let property = self.parse_ident()?;
+        let property = self.parse_property_path()?;
         Ok(PropertyRef {
             span: Span::new(var.span.start as usize, property.span.end as usize),
             var,
@@ -413,7 +413,7 @@ impl Parser {
             return Ok(props);
         }
         loop {
-            let key = self.parse_ident()?;
+            let key = self.parse_property_path()?;
             self.expect(TokKind::Colon, "expected ':' after property name")?;
             let value = self.parse_literal_or_param()?;
             props.push((key, value));
@@ -520,7 +520,7 @@ impl Parser {
             });
         }
         if self.consume(TokKind::Dot).is_some() {
-            let property = self.parse_ident()?;
+            let property = self.parse_property_path()?;
             Ok(ReturnExpr::Property {
                 span: Span::new(ident.span.start as usize, property.span.end as usize),
                 var: ident,
@@ -541,7 +541,7 @@ impl Parser {
         }
         let var = self.parse_ident()?;
         if self.consume(TokKind::Dot).is_some() {
-            let property = self.parse_ident()?;
+            let property = self.parse_property_path()?;
             Ok(AggregateArg::Property {
                 span: Span::new(var.span.start as usize, property.span.end as usize),
                 var,
@@ -570,7 +570,7 @@ impl Parser {
         let start = self.current().span.start as usize;
         let ident = self.parse_ident()?;
         let key = if self.consume(TokKind::Dot).is_some() {
-            let property = self.parse_ident()?;
+            let property = self.parse_property_path()?;
             SortKey::Property {
                 span: Span::new(ident.span.start as usize, property.span.end as usize),
                 var: ident,
@@ -713,7 +713,7 @@ impl Parser {
             TokKind::Ident => {
                 let var = self.parse_ident()?;
                 self.expect(TokKind::Dot, "expected property reference")?;
-                let property = self.parse_ident()?;
+                let property = self.parse_property_path()?;
                 let span = Span::new(var.span.start as usize, property.span.end as usize);
                 Ok(Operand::Property {
                     var,
@@ -832,6 +832,22 @@ impl Parser {
         Ok(Ident {
             text: token.text,
             span: token.span,
+        })
+    }
+
+    fn parse_property_path(&mut self) -> Result<Ident, GqlError> {
+        let first = self.parse_ident()?;
+        let mut text = first.text;
+        let mut end = first.span.end;
+        while self.consume(TokKind::Dot).is_some() {
+            let part = self.parse_ident()?;
+            text.push('.');
+            text.push_str(&part.text);
+            end = part.span.end;
+        }
+        Ok(Ident {
+            text,
+            span: Span::new(first.span.start as usize, end as usize),
         })
     }
 

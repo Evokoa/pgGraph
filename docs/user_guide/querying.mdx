@@ -72,8 +72,8 @@ Supported read coverage:
 | Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum |
-| Predicates | Property comparisons, null checks, membership, boolean combinations, and JSONB `$parameters` |
-| Return values | Node values, scalar properties, coordinate-only single-hop relationship identities, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
+| Predicates | Property comparisons, null checks, membership, boolean combinations, JSONB `$parameters`, and dotted paths into registered JSONB property columns |
+| Return values | Node values, scalar properties, JSONB list/map properties, coordinate-only single-hop relationship identities, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
 | Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases, shadowing, and `WITH DISTINCT` row-stream deduplication |
 | Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported with a bounded in-memory key set |
 | Aggregates | `count`, `sum`, `avg`, `min`, `max`, and `collect` in `RETURN`; non-aggregate return items are implicit grouping keys |
@@ -91,10 +91,13 @@ aggregate-only empty inputs return one row with `0`, `null`, or `[]` according
 to the aggregate. `DISTINCT` query forms abort if their unique-key working set
 exceeds the GQL result cap. Bounded relationship variables return path objects
 with `_path.nodes` and `_path.relationships`; `nodes`, `relationships`, and
-`length` expose those components directly. Relationship source-row hydration,
-path-function `WITH` projections, aggregate `WITH` projections, full path
-variable syntax, and multi-pattern optional joins are planned outside this
-subset.
+`length` expose those components directly. Registered JSONB source columns can
+be addressed with dotted property paths such as `u.profile.plan`; returned
+JSONB arrays and objects keep their JSON shape. A missing key inside a JSONB
+property path projects as JSON `null`, but it does not satisfy `IS NULL`;
+explicit JSON `null` does. Relationship source-row hydration, path-function
+`WITH` projections, aggregate `WITH` projections, full path variable syntax,
+and multi-pattern optional joins are planned outside this subset.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on

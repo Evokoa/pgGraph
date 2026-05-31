@@ -15,7 +15,22 @@ use std::collections::HashMap;
 
 fn fake_catalog() -> FakeCatalog {
     FakeCatalog::new()
-        .with_writable_label("users", 10, ["id", "name", "age"], ["name"])
+        .with_writable_label(
+            "users",
+            10,
+            [
+                "id",
+                "name",
+                "age",
+                "profile",
+                "profile.plan",
+                "profile.tags",
+                "profile.flags",
+                "profile.missing",
+                "profile.explicit_null",
+            ],
+            ["name"],
+        )
         .with_writable_label("companies", 20, ["id", "name"], ["name"])
         .with_edge("works_at", 10, 20)
         .with_mapped_edge("friend", 10, 10, 30, "user_id", "friend_id", false)
@@ -84,6 +99,25 @@ fn binder_rejects_set_property_for_tenant_column() {
 
     assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
     assert!(err.to_string().contains("not a writable mapped column"));
+}
+
+#[test]
+fn binder_rejects_jsonb_property_path_returns_for_writes() {
+    let create = crate::gql::parse_statement(
+        "CREATE (u:users {id: 'u3', name: 'Cara'}) RETURN u.profile.plan",
+    )
+    .unwrap();
+    let create_err = bind_statement(&create, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(create_err.kind, GqlErrorKind::Unsupported { .. }));
+
+    let set = crate::gql::parse_statement(
+        "MATCH (u:users {id: 'u1'}) SET u.name = 'Ada' RETURN u.profile.plan",
+    )
+    .unwrap();
+    let set_err = bind_statement(&set, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(set_err.kind, GqlErrorKind::Unsupported { .. }));
 }
 
 #[test]
@@ -1456,6 +1490,43 @@ fn value_projection_filters_explicit_null_predicates() {
 }
 
 #[test]
+fn value_projection_reads_jsonb_paths_and_distinguishes_missing_from_null() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE u.profile.plan = 'pro' AND u.profile.explicit_null IS NULL \
+         RETURN u.profile.tags AS tags, u.profile.flags AS flags, u.profile.missing AS missing",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let hydrated = hydrated_fixture();
+
+    let projected = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["tags"], serde_json::json!(["founder", 7]));
+    assert_eq!(projected[0]["flags"], serde_json::json!({"beta": true}));
+    assert!(projected[0]["missing"].is_null());
+
+    let missing_null_query = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE u.profile.missing IS NULL RETURN u.name AS name",
+    );
+    let missing_physical = lower(missing_null_query);
+    let rows = execute(&engine, &missing_physical, None).unwrap();
+    let missing_projected = project_rows(
+        rows,
+        &missing_physical,
+        &hydrated,
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert!(missing_projected.is_empty());
+}
+
+#[test]
 fn value_projection_reports_non_orderable_predicate_types() {
     let logical = bind_query(
         "MATCH (u:users)-[:works_at]->(c:companies) \
@@ -1553,11 +1624,30 @@ fn hydrated_fixture() -> HydratedRows {
     HashMap::from([
         (
             (10, "u1".to_string()),
-            serde_json::json!({"id": "u1", "name": "Ada", "age": 37}),
+            serde_json::json!({
+                "id": "u1",
+                "name": "Ada",
+                "age": 37,
+                "profile": {
+                    "plan": "pro",
+                    "tags": ["founder", 7],
+                    "flags": {"beta": true},
+                    "explicit_null": null
+                }
+            }),
         ),
         (
             (10, "u2".to_string()),
-            serde_json::json!({"id": "u2", "name": "Linus", "age": 41}),
+            serde_json::json!({
+                "id": "u2",
+                "name": "Linus",
+                "age": 41,
+                "profile": {
+                    "plan": "free",
+                    "tags": ["kernel"],
+                    "flags": {"beta": false}
+                }
+            }),
         ),
         (
             (20, "c1".to_string()),

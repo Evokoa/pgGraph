@@ -107,6 +107,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_dotted_jsonb_property_paths() {
+        let parsed = parse(
+            "MATCH (u:users {profile.plan: 'pro'}) \
+             WHERE u.profile.flags IN ['beta'] RETURN u.profile.tags AS tags \
+             ORDER BY u.profile.plan",
+        )
+        .expect("query should parse");
+
+        assert_eq!(parsed.match_.pattern.start.props[0].0.text, "profile.plan");
+        assert!(matches!(
+            &parsed.return_.items[0].expr,
+            ReturnExpr::Property { property, .. } if property.text == "profile.tags"
+        ));
+        assert!(matches!(
+            &parsed.order_by[0].key,
+            SortKey::Property { property, .. } if property.text == "profile.plan"
+        ));
+    }
+
+    #[test]
     fn parses_aggregate_return_functions() {
         let parsed = parse(
             "MATCH (u:users) RETURN count(*) AS total, sum(u.age) AS total_age, collect(DISTINCT u.name) AS names",

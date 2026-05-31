@@ -418,12 +418,70 @@ pub(crate) fn validate_registered_table(
         validate_column_exists(table_oid, col)?;
     }
     if let Some(cols) = columns {
-        for column in cols {
-            validate_column_exists(table_oid, column)?;
+        for property in cols {
+            validate_registered_property(table_oid, property)?;
         }
     }
     if let Some(column) = tenant_column {
         validate_column_exists(table_oid, column)?;
     }
     Ok(())
+}
+
+fn validate_registered_property(table_oid: u32, property: &str) -> safety::GraphResult<()> {
+    let Some((base_column, _path)) = property.split_once('.') else {
+        return validate_column_exists(table_oid, property);
+    };
+    if base_column.is_empty() {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: format!("jsonb property path '{property}' is missing a base column"),
+        });
+    }
+    validate_jsonb_column(table_oid, base_column).map_err(|err| match err {
+        safety::GraphError::Internal(reason) => safety::GraphError::InvalidFilter {
+            reason: format!(
+                "jsonb property path '{property}' requires base column '{base_column}' to exist and have type jsonb: {reason}"
+            ),
+        },
+        other => other,
+    })
+}
+
+fn validate_jsonb_column(table_oid: u32, column: &str) -> safety::GraphResult<()> {
+    let is_jsonb = Spi::connect(|client| {
+        let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
+        let result = client
+            .select(
+                "SELECT a.atttypid = 'jsonb'::regtype
+                 FROM pg_attribute a
+                 WHERE a.attrelid = $1::oid
+                   AND a.attname = $2
+                   AND a.attnum > 0
+                   AND NOT a.attisdropped",
+                None,
+                &[table_oid.into(), column.into()],
+            )
+            .map_err(|e| {
+                safety::GraphError::Internal(format!("jsonb column validation failed: {}", e))
+            })?;
+        let row = result.first();
+        Ok::<_, safety::GraphError>(
+            row.get::<bool>(1)
+                .map_err(|e| {
+                    safety::GraphError::Internal(format!(
+                        "jsonb column validation read failed: {}",
+                        e
+                    ))
+                })?
+                .unwrap_or(false),
+        )
+    })?;
+    if is_jsonb {
+        Ok(())
+    } else {
+        Err(safety::GraphError::Internal(format!(
+            "column '{}' on table OID {} is not jsonb",
+            column, table_oid
+        )))
+    }
 }

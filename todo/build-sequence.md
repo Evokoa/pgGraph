@@ -163,6 +163,15 @@ functions over a two-hop relationship pattern. Path-function `WITH`
 projections, full standalone path-variable syntax, and aggregate path arguments
 remain later multi-stage row-stream work.
 
+Status note, 2026-05-31: 3F is closed for read-time JSONB property paths.
+Registered table properties may include dotted paths rooted at a `jsonb` source
+column, such as `profile.plan`, and `graph.gql()` can predicate, order, group,
+aggregate, and return those values through hydration-time evaluation. JSONB
+arrays and objects keep their JSON shape. Missing JSONB keys project as JSON
+`null` but do not satisfy `IS NULL`; explicit JSON `null` does. Registration
+rejects dotted paths whose base column is not `jsonb`. JSONB path writes remain
+Phase 4 work.
+
 ## Phase 4 — Advanced writes + optional openCypher
 
 | Slice | Depends on | Merge gate |
