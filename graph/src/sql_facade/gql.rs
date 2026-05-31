@@ -131,6 +131,8 @@ fn test_record_tx_edge(
 ) {
     with_panic_boundary("_test_record_tx_edge()", || {
         super::admin::require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let (source_idx, target_idx, type_id) = ENGINE
             .with(|engine| {
                 let engine = engine.borrow();

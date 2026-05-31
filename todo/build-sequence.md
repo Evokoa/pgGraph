@@ -51,9 +51,12 @@ Status note, 2026-05-31: 2B infrastructure has started. Projection-mode GUCs,
 mode columns, the transaction-delta callback skeleton, and internal
 transaction-local edge overlay reads are in place. Read-only GQL pattern
 expansion now consumes the same overlay-aware neighbor path, with SQL-visible
-coverage for internal transaction edge inserts and deletes. The 2B write-proof
-gates remain open until mapped writes record deltas and rollback, isolation,
-out-of-band sync, and crash/reload behavior are proven end to end.
+coverage for internal transaction edge inserts and deletes. The
+`tx_delta_lifecycle.sh` heavy script now proves commit cleanup, rollback
+discard, concurrent backend isolation, and trigger-sync catch-up for the
+internal transaction edge overlay path. The 2B write-proof gates remain open
+until mapped writes record deltas and crash/reload behavior proves uncommitted
+overlays are ignored end to end.
 
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 

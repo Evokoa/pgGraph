@@ -51,6 +51,7 @@ clusters where the pgrx harness is not representative enough.
 |---|---|
 | `run_sqlstate_acl_boundary.sh` | Client-visible SQLSTATEs and restricted-role ACL behavior |
 | `sqlstate_acl_boundary.sql` | SQL steps for the SQLSTATE/ACL boundary scenario; use the shell runner for assertions |
+| `tx_delta_lifecycle.sh` | Internal mutable-overlay transaction lifecycle proof: read-your-own-writes, rollback discard, commit cleanup, backend isolation, and trigger-sync catch-up |
 | `run_pgbench_sync.sh` and `pgbench_sync.sql` | Concurrent DML, trigger sync, sync apply, and post-sync query checks |
 | `crash_recovery.sh` | Persisted graph reload after postmaster kill and corrupt artifact rejection |
 | `run_memory_sanitizers.sh` | pgrx SQL suite plus optional ASan, Valgrind, and pgbench sync smoke |
@@ -88,6 +89,6 @@ behavioral coverage.
 |---|---|
 | SQL function behavior, row shape, validation, fixtures | pgrx SQL tests |
 | Client-visible SQLSTATE, role switching, ACL/RLS boundaries | Heavy SQL scripts |
-| Sync, crash recovery, backup/restore, package, Docker, upgrade, concurrency | Heavy SQL scripts |
+| Transaction lifecycle, sync, crash recovery, backup/restore, package, Docker, upgrade, concurrency | Heavy SQL scripts |
 | PostgreSQL-major compatibility | `run_pg_matrix.sh` or `run_pg_matrix_docker.sh` |
 | Release-gate synthetic fixture | `synthetic_release.rs` for pgrx coverage, `synthetic_release_smoke.sh` for shell/client coverage |

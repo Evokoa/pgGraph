@@ -199,8 +199,9 @@ full graph semantics; use persistence tests and release smoke scripts for that.
 
 Heavy scripts live in `graph/tests/heavy/` and are usually run from `graph/`.
 They cover operational behavior that pgrx tests do not model well: client/server
-SQLSTATEs, Docker images, package installation, backup/restore, upgrade,
-concurrency, memory, synthetic release evidence, and playground query stability.
+SQLSTATEs, transaction lifecycle, Docker images, package installation,
+backup/restore, upgrade, concurrency, memory, synthetic release evidence, and
+playground query stability.
 
 | Script | Use when | What it does |
 |---|---|---|
@@ -212,6 +213,7 @@ concurrency, memory, synthetic release evidence, and playground query stability.
 | `fresh_install_smoke.sh` | Installed extension smoke | Installs pgGraph into a local PostgreSQL major and runs a quick extension workflow. |
 | `function_metadata_audit.sh` | SQL metadata contract check | Audits SQL function volatility, security, cost, rows, and parallel-safety metadata. |
 | `run_sqlstate_acl_boundary.sh` | Client-visible errors and ACLs | Runs `sqlstate_acl_boundary.sql` through `psql` and asserts SQLSTATE/role behavior at the client boundary. |
+| `tx_delta_lifecycle.sh` | Mutable-overlay transaction lifecycle | Installs the internal pg_test surface and checks transaction-local overlay visibility, rollback discard, commit cleanup, backend isolation, and trigger-sync catch-up. |
 | `run_pgbench_sync.sh` | Trigger sync stress | Uses `pgbench_sync.sql` to drive concurrent DML and validate explicit sync apply behavior. |
 | `read_latency_under_sync.sh` | Read-latency baseline | Measures traversal and path p50/p95/p99 latency with no backlog, pending sync backlog, and concurrent sync writers. |
 | `backup_restore_validate.sh` | Dump/restore behavior | Validates source tables, graph catalog state, sync state, and persisted graph behavior across backup and restore. |

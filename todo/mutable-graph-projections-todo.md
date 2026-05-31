@@ -502,8 +502,10 @@ Phase gates:
 - Phase 1: read-only GQL parses, binds, plans, executes, explains, and rejects
   writes without requiring mutable overlay support.
 - Phase 2: GQL writes update PostgreSQL first, then transaction-local overlay
-  state; rollback discards deltas; concurrent sessions do not see uncommitted
-  changes; committed visibility flows through sync-log replay.
+  state. Current internal edge-overlay lifecycle coverage proves rollback
+  discard, commit cleanup, concurrent backend isolation, and query-time sync
+  catch-up for source-table writes; mapped GQL writes and crash/reload proof
+  still gate completion.
 
 ## GQL Compatibility Matrix
 

@@ -106,12 +106,15 @@ mark-stale; upgrade if benchmarks demand).
 - Routed read-only GQL relationship expansion through the same overlay-aware
   neighbor path and covered internal transaction edge inserts/deletes from
   SQL-visible tests.
+- Added `tx_delta_lifecycle.sh` heavy coverage for the internal transaction
+  edge overlay path: read-your-own-writes, rollback discard, commit cleanup,
+  concurrent backend isolation, and trigger-sync catch-up from source-table
+  updates.
 - Exposed projection mode and empty transaction-delta counters through
   `graph.status()` and `graph.sync_health()`.
 - Remaining 2B work before write slices: route actual GQL write deltas into
-  `TxGraphDelta`, prove rollback/read-your-own-writes/concurrent isolation with
-  SQL-visible write behavior, and prove crash/reload ignores uncommitted
-  overlays.
+  `TxGraphDelta` and prove crash/reload ignores uncommitted overlays end to
+  end.
 
 ## 4. Transaction callbacks (slice 2B) — NEW infrastructure
 
