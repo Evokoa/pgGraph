@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use crate::safety::{GraphError, GraphResult};
 
-use super::execute::{GqlNodeCoordinate, GqlRow};
+use super::execute::{GqlNodeCoordinate, GqlNodeRow, GqlRow};
 use super::logical_plan::{BindingSide, BoundCmpOp, Predicate, SortBindingKey, ValueExpr};
-use super::physical_plan::{PhysicalPlan, ReturnSlot};
+use super::physical_plan::{PhysicalNodeScan, PhysicalPlan, ReturnSlot};
 
 /// Hydrated source rows keyed by graph coordinate.
 pub(crate) type HydratedRows = HashMap<(u32, String), serde_json::Value>;
@@ -53,8 +53,59 @@ pub(crate) fn project_rows(
         .collect())
 }
 
+/// Project node-only matches into canonical JSON rows.
+///
+/// # Errors
+///
+/// Returns [`GraphError::GqlParameter`] when a required parameter is missing
+/// and [`GraphError::GqlExecution`] when predicate evaluation cannot be
+/// completed safely.
+pub(crate) fn project_node_rows(
+    rows: Vec<GqlNodeRow>,
+    plan: &PhysicalNodeScan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+    hydrate_nodes: bool,
+) -> GraphResult<Vec<serde_json::Value>> {
+    let mut projected = Vec::new();
+    for row in rows {
+        let fake = node_row_as_gql_row(&row);
+        if predicate_matches(plan.predicate.as_ref(), &fake, hydrated, params)? {
+            projected.push(ProjectedRow {
+                row: project_node_row(&row, plan, hydrated, hydrate_nodes)?,
+                sort_values: sort_values_for_node(&row, plan, hydrated, params)?,
+            });
+        }
+    }
+    if !plan.order_by.is_empty() {
+        projected.sort_by(compare_projected_rows);
+    }
+    let skip = usize::try_from(plan.skip.unwrap_or(0)).unwrap_or(usize::MAX);
+    let limit = plan
+        .limit
+        .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+        .unwrap_or(usize::MAX);
+    Ok(projected
+        .into_iter()
+        .skip(skip)
+        .take(limit)
+        .map(|row| row.row)
+        .collect())
+}
+
 /// Return whether this plan requires SQL row hydration.
 pub(crate) fn requires_hydration(plan: &PhysicalPlan, hydrate_nodes: bool) -> bool {
+    hydrate_nodes
+        || plan.predicate.is_some()
+        || !plan.order_by.is_empty()
+        || plan
+            .returns
+            .iter()
+            .any(|slot| matches!(slot, ReturnSlot::Property { .. }))
+}
+
+/// Return whether this node-scan plan requires SQL row hydration.
+pub(crate) fn node_scan_requires_hydration(plan: &PhysicalNodeScan, hydrate_nodes: bool) -> bool {
     hydrate_nodes
         || plan.predicate.is_some()
         || !plan.order_by.is_empty()
@@ -110,6 +161,39 @@ fn sort_values(
                         property: property.clone(),
                     },
                     row,
+                    hydrated,
+                    params,
+                )?,
+            };
+            Ok(SortValue {
+                value,
+                desc: sort.desc,
+            })
+        })
+        .collect()
+}
+
+fn sort_values_for_node(
+    row: &GqlNodeRow,
+    plan: &PhysicalNodeScan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+) -> GraphResult<Vec<SortValue>> {
+    let fake = node_row_as_gql_row(row);
+    plan.order_by
+        .iter()
+        .map(|sort| {
+            let value = match &sort.key {
+                SortBindingKey::ReturnName(name) => project_node_row(row, plan, hydrated, true)?
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                SortBindingKey::Property { side, property } => eval_value(
+                    &ValueExpr::Property {
+                        side: *side,
+                        property: property.clone(),
+                    },
+                    &fake,
                     hydrated,
                     params,
                 )?,
@@ -312,6 +396,43 @@ fn project_row(
         }
     }
     serde_json::Value::Object(output)
+}
+
+fn project_node_row(
+    row: &GqlNodeRow,
+    plan: &PhysicalNodeScan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    let mut output = serde_json::Map::new();
+    for slot in &plan.returns {
+        match slot {
+            ReturnSlot::Node { name, .. } => {
+                output.insert(
+                    name.clone(),
+                    node_value(&row.node, hydrated, &plan.label, hydrate_nodes),
+                );
+            }
+            ReturnSlot::Property { property, name, .. } => {
+                output.insert(name.clone(), property_value(&row.node, hydrated, property));
+            }
+            ReturnSlot::Relationship { .. } => {
+                return Err(GraphError::GqlExecution {
+                    reason: "node-only MATCH cannot return relationship values".to_string(),
+                });
+            }
+        }
+    }
+    Ok(serde_json::Value::Object(output))
+}
+
+fn node_row_as_gql_row(row: &GqlNodeRow) -> GqlRow {
+    GqlRow {
+        source: row.node.clone(),
+        target: row.node.clone(),
+        rel_start: row.node.clone(),
+        rel_end: row.node.clone(),
+    }
 }
 
 fn relationship_value(row: &GqlRow, plan: &PhysicalPlan) -> serde_json::Value {

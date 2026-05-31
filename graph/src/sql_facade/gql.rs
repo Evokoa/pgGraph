@@ -16,6 +16,10 @@ fn gql_explain(query: &str) -> String {
                 check_plan_acl(&plan);
                 crate::query::explain::explain(&plan)
             }
+            crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
+                check_node_scan_acl(&plan);
+                crate::query::explain::explain_node_scan(&plan)
+            }
             crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
                 check_create_acl(&plan);
                 format!(
@@ -81,6 +85,10 @@ fn check_create_acl(plan: &crate::query::physical_plan::PhysicalCreateNode) {
     acl::check_table_insert_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
 }
 
+fn check_node_scan_acl(plan: &crate::query::physical_plan::PhysicalNodeScan) {
+    acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+}
+
 fn execute_statement(
     statement: crate::query::physical_plan::PhysicalStatement,
     tenant_scope: Option<&str>,
@@ -99,6 +107,17 @@ fn execute_statement(
             )?;
             crate::query::value::project_rows(matches, &plan, &hydrated, params, hydrate)
         }
+        crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
+            check_node_scan_acl(&plan);
+            let matches = ENGINE.with(|engine| {
+                crate::query::execute::execute_node_scan(&engine.borrow(), &plan, tenant_scope)
+            })?;
+            let hydrated = hydrate_gql_node_rows(
+                &matches,
+                crate::query::value::node_scan_requires_hydration(&plan, hydrate),
+            )?;
+            crate::query::value::project_node_rows(matches, &plan, &hydrated, params, hydrate)
+        }
         crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
             check_create_acl(&plan);
             execute_create_node(&plan, tenant_scope, params, hydrate)
@@ -115,12 +134,17 @@ fn execute_create_node(
     ensure_mutable_projection()?;
     crate::projection::tx_delta::ensure_write_allowed()?;
     let insert = insert_mapped_node(plan, tenant_scope, params)?;
-    crate::projection::tx_delta::record_added_node(plan.table_oid, &insert.node_id)?;
+    crate::projection::tx_delta::record_added_node(
+        plan.table_oid,
+        &insert.node_id,
+        insert.tenant.as_deref(),
+    )?;
     Ok(vec![project_created_node(plan, insert, hydrate)])
 }
 
 struct CreatedNode {
     node_id: String,
+    tenant: Option<String>,
     row: serde_json::Value,
 }
 
@@ -189,8 +213,16 @@ fn insert_mapped_node(
             .ok_or_else(|| {
                 safety::GraphError::Internal("GQL CREATE returned no primary key".to_string())
             })?;
+        let tenant = table.tenant_column.as_deref().and_then(|column| {
+            row_json
+                .0
+                .get(column)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
         Ok(CreatedNode {
             node_id,
+            tenant,
             row: row_json.0,
         })
     })
@@ -389,6 +421,27 @@ fn hydrate_gql_rows(
                 .unwrap_or(serde_json::Value::Null);
             hydrated.insert(key, node);
         }
+    }
+    Ok(hydrated)
+}
+
+fn hydrate_gql_node_rows(
+    rows: &[crate::query::execute::GqlNodeRow],
+    needed: bool,
+) -> safety::GraphResult<crate::query::value::HydratedRows> {
+    let mut hydrated = crate::query::value::HydratedRows::new();
+    if !needed {
+        return Ok(hydrated);
+    }
+    for row in rows {
+        let key = (row.node.table_oid, row.node.node_id.clone());
+        if hydrated.contains_key(&key) {
+            continue;
+        }
+        let node = hydrate_node(row.node.table_oid, &row.node.node_id)?
+            .map(|json| json.0)
+            .unwrap_or(serde_json::Value::Null);
+        hydrated.insert(key, node);
     }
     Ok(hydrated)
 }

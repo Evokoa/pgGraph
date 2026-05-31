@@ -461,18 +461,20 @@ labels resolve to registered table names, relationship types resolve to
 registered edge labels, and `$parameters` are read from the `params` JSON
 object.
 
-Supported return values are node values, scalar properties, and coordinate-only
-single-hop relationship identities. With `hydrate := true`, node values include
-source rows when PostgreSQL ACL and RLS allow them. With `hydrate := false`,
-node values are coordinates only. Relationship source-row hydration, raw path
-values, aggregates, `OPTIONAL MATCH`, and `WITH` are not part of this release's
-GQL subset.
+Supported read patterns are node-only `MATCH` and single-relationship graph
+patterns. Supported return values are node values, scalar properties, and
+coordinate-only single-hop relationship identities. With `hydrate := true`,
+node values include source rows when PostgreSQL ACL and RLS allow them. With
+`hydrate := false`, node values are coordinates only. Relationship source-row
+hydration, raw path values, aggregates, `OPTIONAL MATCH`, and `WITH` are not
+part of this release's GQL subset.
 
 `CREATE (n:label {properties}) RETURN ...` is supported for a single node whose
 label maps to a registered source table. It requires a `mutable_overlay`
 projection and inserts the PostgreSQL source row first, so table privileges,
 constraints, triggers, RLS, and MVCC remain authoritative. `CREATE` is rejected
-on `csr_readonly`. Relationship creation, `SET`, `DELETE`, `MERGE`, and
+on `csr_readonly`. The same transaction can read created nodes through
+node-only `MATCH`. Relationship creation, `SET`, `DELETE`, `MERGE`, and
 multi-row writes are not part of this release's GQL subset.
 
 ### `graph.gql_explain()`

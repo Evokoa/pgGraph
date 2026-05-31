@@ -1,6 +1,6 @@
 //! Stable explain strings for read-oriented GQL inspection.
 
-use super::physical_plan::{PhysicalPlan, ReturnSlot};
+use super::physical_plan::{PhysicalNodeScan, PhysicalPlan, ReturnSlot};
 
 /// Render a compact physical plan explanation.
 pub(crate) fn explain(plan: &PhysicalPlan) -> String {
@@ -24,5 +24,23 @@ pub(crate) fn explain(plan: &PhysicalPlan) -> String {
         plan.target_var,
         plan.target_table_oid,
         returns
+    )
+}
+
+/// Render a compact node-scan plan explanation.
+pub(crate) fn explain_node_scan(plan: &PhysicalNodeScan) -> String {
+    let returns = plan
+        .returns
+        .iter()
+        .map(|slot| match slot {
+            ReturnSlot::Node { name, .. }
+            | ReturnSlot::Relationship { name }
+            | ReturnSlot::Property { name, .. } => name.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "NodeScan(node={}:{}, return=[{}])",
+        plan.var, plan.table_oid, returns
     )
 }

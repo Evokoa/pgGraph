@@ -9,8 +9,8 @@ use crate::gql::errors::{GqlError, Span};
 use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
     BindingSide, BoundCmpOp, BoundDirection, BoundNode, BoundRel, CreateProperty,
-    CreateReturnBinding, CreateValue, HopBounds, LogicalCreateNode, LogicalPlan, LogicalStatement,
-    Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
+    CreateReturnBinding, CreateValue, HopBounds, LogicalCreateNode, LogicalNodeScan, LogicalPlan,
+    LogicalStatement, Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -67,6 +67,33 @@ pub(crate) fn bind(
     })
 }
 
+fn bind_node_scan(
+    query: &crate::gql::ast::Query,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalNodeScan, GqlError> {
+    reject_later_clauses(query)?;
+    validate_row_window(query)?;
+    let Pattern { start, tail, .. } = &query.match_.pattern;
+    if !tail.is_empty() {
+        return Err(GqlError::unsupported(
+            query.match_.pattern.span,
+            "node scan binding requires a node-only MATCH pattern",
+        ));
+    }
+    let node = bind_node(start, catalog)?;
+    let predicate = bind_node_predicates(query.where_.as_ref(), start, &node)?;
+    let returns = bind_node_returns(&query.return_.items, &node)?;
+    let order_by = bind_sort_items(&query.order_by, &returns, &node, &node)?;
+    Ok(LogicalNodeScan {
+        node,
+        returns,
+        predicate,
+        order_by,
+        skip: query.skip,
+        limit: query.limit,
+    })
+}
+
 /// Bind a parsed GQL statement into a logical statement.
 ///
 /// # Errors
@@ -79,6 +106,9 @@ pub(crate) fn bind_statement(
     catalog: &impl CatalogSnapshot,
 ) -> Result<LogicalStatement, GqlError> {
     match statement {
+        crate::gql::ast::Statement::Read(query) if query.match_.pattern.tail.is_empty() => {
+            bind_node_scan(query, catalog).map(LogicalStatement::NodeScan)
+        }
         crate::gql::ast::Statement::Read(query) => bind(query, catalog).map(LogicalStatement::Read),
         crate::gql::ast::Statement::Create(query) => {
             bind_create_node(query, catalog).map(LogicalStatement::CreateNode)
@@ -430,6 +460,67 @@ fn bind_returns(
     Ok(bindings)
 }
 
+fn bind_node_returns(
+    items: &[ReturnItem],
+    node: &BoundNode,
+) -> Result<Vec<ReturnBinding>, GqlError> {
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    let mut bindings = Vec::with_capacity(items.len());
+    for item in items {
+        let binding = match &item.expr {
+            ReturnExpr::Var { var, .. } if var.text == node.var => Ok(ReturnBinding::Node {
+                side: BindingSide::Source,
+                name: item
+                    .alias
+                    .as_ref()
+                    .map_or_else(|| var.text.clone(), |alias| alias.text.clone()),
+            }),
+            ReturnExpr::Property {
+                var,
+                property,
+                span: _,
+            } if var.text == node.var => {
+                validate_property(
+                    BindingSide::Source,
+                    &property.text,
+                    node,
+                    node,
+                    property.span,
+                )?;
+                Ok(ReturnBinding::Property {
+                    side: BindingSide::Source,
+                    property: property.text.clone(),
+                    name: item.alias.as_ref().map_or_else(
+                        || format!("{}.{}", var.text, property.text),
+                        |alias| alias.text.clone(),
+                    ),
+                })
+            }
+            ReturnExpr::Var { var, span } => Err(GqlError::bind(
+                *span,
+                format!("unknown return variable `{}`", var.text),
+            )),
+            ReturnExpr::Property { var, span, .. } => Err(GqlError::bind(
+                *span,
+                format!("unknown return variable `{}`", var.text),
+            )),
+            ReturnExpr::Func { span, .. } => Err(GqlError::unsupported(
+                *span,
+                "RETURN functions are implemented in a later read phase",
+            )),
+        }?;
+        let name = binding.name();
+        if !seen.insert(name.to_string()) {
+            return Err(GqlError::bind(
+                item.span,
+                format!("duplicate return name `{name}`"),
+            ));
+        }
+        bindings.push(binding);
+    }
+    Ok(bindings)
+}
+
 fn bind_sort_items(
     items: &[SortItem],
     returns: &[ReturnBinding],
@@ -532,6 +623,38 @@ fn bind_predicates(
             rel_pat.span,
             "relationship property maps are implemented in a later read phase",
         ));
+    }
+    Ok(predicates
+        .into_iter()
+        .reduce(|lhs, rhs| Predicate::And(Box::new(lhs), Box::new(rhs))))
+}
+
+fn bind_node_predicates(
+    where_: Option<&Expr>,
+    node_pat: &NodePat,
+    node: &BoundNode,
+) -> Result<Option<Predicate>, GqlError> {
+    let mut predicates = Vec::new();
+    if let Some(expr) = where_ {
+        predicates.push(bind_expr(expr, node, node, 0)?);
+    }
+    for (property, value) in &node_pat.props {
+        check_predicate_count(&predicates, property.span)?;
+        validate_property(
+            BindingSide::Source,
+            &property.text,
+            node,
+            node,
+            property.span,
+        )?;
+        predicates.push(Predicate::Compare {
+            lhs: ValueExpr::Property {
+                side: BindingSide::Source,
+                property: property.text.clone(),
+            },
+            op: BoundCmpOp::Eq,
+            rhs: Some(bind_operand(value, node, node)?),
+        });
     }
     Ok(predicates
         .into_iter()

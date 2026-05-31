@@ -10,6 +10,8 @@ pub(crate) const MAX_GQL_RESULT_ROWS: usize = 10_000;
 pub(crate) enum PhysicalStatement {
     /// Read-only topology query.
     Read(PhysicalPlan),
+    /// Node-only read query.
+    NodeScan(PhysicalNodeScan),
     /// PostgreSQL-backed node creation.
     CreateNode(PhysicalCreateNode),
 }
@@ -62,6 +64,27 @@ pub(crate) struct PhysicalCreateNode {
     pub(crate) properties: Vec<CreatePropertySlot>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnSlot>,
+}
+
+/// Physical node-only scan plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalNodeScan {
+    /// Node variable.
+    pub(crate) var: String,
+    /// Source table OID.
+    pub(crate) table_oid: u32,
+    /// Source label.
+    pub(crate) label: String,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnSlot>,
+    /// Optional hydrated-row predicate.
+    pub(crate) predicate: Option<Predicate>,
+    /// Sort keys in requested order.
+    pub(crate) order_by: Vec<SortBinding>,
+    /// Number of rows to skip after ordering.
+    pub(crate) skip: Option<u64>,
+    /// Maximum rows to return.
+    pub(crate) limit: Option<u64>,
 }
 
 /// Physical property value for a write.
@@ -117,7 +140,7 @@ impl PhysicalPlan {
 
     /// Maximum matches the executor should collect for this plan.
     pub(crate) fn execution_row_cap(&self) -> usize {
-        if self.order_by.is_empty() {
+        if self.order_by.is_empty() && self.predicate.is_none() {
             if let Some(limit) = self.limit {
                 let requested = self.skip.unwrap_or(0).saturating_add(limit);
                 return usize::try_from(requested)
@@ -130,7 +153,7 @@ impl PhysicalPlan {
 
     /// Whether hitting the execution cap means results would be incomplete.
     pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
-        !self.order_by.is_empty() || self.limit.is_none()
+        !self.order_by.is_empty() || self.limit.is_none() || self.predicate.is_some()
     }
 }
 
@@ -138,5 +161,30 @@ impl PhysicalCreateNode {
     /// Table OID whose rows will be inserted.
     pub(crate) fn required_table_oid(&self) -> u32 {
         self.table_oid
+    }
+}
+
+impl PhysicalNodeScan {
+    /// Table OID whose rows must be visible to the current SQL role.
+    pub(crate) fn required_table_oid(&self) -> u32 {
+        self.table_oid
+    }
+
+    /// Maximum matches the executor should collect for this plan.
+    pub(crate) fn execution_row_cap(&self) -> usize {
+        if self.order_by.is_empty() && self.predicate.is_none() {
+            if let Some(limit) = self.limit {
+                let requested = self.skip.unwrap_or(0).saturating_add(limit);
+                return usize::try_from(requested)
+                    .unwrap_or(usize::MAX)
+                    .min(MAX_GQL_RESULT_ROWS);
+            }
+        }
+        MAX_GQL_RESULT_ROWS
+    }
+
+    /// Whether hitting the execution cap means results would be incomplete.
+    pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
+        !self.order_by.is_empty() || self.limit.is_none() || self.predicate.is_some()
     }
 }

@@ -58,15 +58,15 @@ uncommitted transaction edge overlays are ignored after postmaster crash/reload
 while the persisted base graph reloads. Public mapped `CREATE` now records node
 deltas through the public GQL write path.
 
-Status note, 2026-05-31: 2C has started. Public `graph.gql()` accepts
+Status note, 2026-05-31: 2C is closed. Public `graph.gql()` accepts
 single-node mapped `CREATE` on `mutable_overlay`, performs a PostgreSQL-first
 `INSERT ... RETURNING`, returns the inserted row, rejects `csr_readonly`, and
-records a transaction-local added-node delta. SQL-visible coverage includes
-read-only projection rejection, session-tenant insertion, source-table RLS
-preservation, explicit rollback/commit lifecycle behavior, and
-unregistered-label rejection. Remaining 2C work: clarify node-delta visibility
-for subsequent topology reads, and decide whether isolated node visibility needs
-a node-only `MATCH` read slice or should wait for edge `CREATE`.
+records a transaction-local added-node delta. Node-only `MATCH` reads merge the
+active transaction's added-node keys so a transaction can read its own newly
+created isolated nodes. SQL-visible coverage includes read-only projection
+rejection, session-tenant insertion, source-table RLS preservation, explicit
+rollback/commit lifecycle behavior, node-delta visibility, and
+unregistered-label rejection.
 
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 

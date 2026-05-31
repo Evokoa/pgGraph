@@ -291,7 +291,8 @@ fn gql_create_node_inserts_mapped_row_and_records_delta() {
     Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
         .expect("build mutable graph failed");
 
-    let (created_id, created_name, source_count, tx_added_nodes) = Spi::connect(|client| {
+    let (created_id, created_name, source_count, tx_added_nodes, node_match_count) =
+        Spi::connect(|client| {
         let created = client
             .select(
                 "SELECT
@@ -326,6 +327,21 @@ fn gql_create_node_inserts_mapped_row_and_records_delta() {
             .get::<i32>(1)
             .expect("tx added node count read failed")
             .unwrap_or_default();
+        let node_match_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u3''}) RETURN u',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("node scan query failed")
+            .first()
+            .get::<i64>(1)
+            .expect("node scan count read failed")
+            .unwrap_or_default();
         Ok::<_, pgrx::spi::Error>((
             created
                 .get::<String>(1)
@@ -337,14 +353,16 @@ fn gql_create_node_inserts_mapped_row_and_records_delta() {
                 .unwrap_or_default(),
             source_count,
             tx_added_nodes,
+            node_match_count,
         ))
-    })
-    .expect("create verification failed");
+        })
+        .expect("create verification failed");
 
     assert_eq!(created_id, "u3");
     assert_eq!(created_name, "Cara");
     assert_eq!(source_count, 1);
     assert_eq!(tx_added_nodes, 1);
+    assert_eq!(node_match_count, 1);
 }
 
 #[pg_test]

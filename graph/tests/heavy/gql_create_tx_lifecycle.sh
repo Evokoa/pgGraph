@@ -61,6 +61,7 @@ SELECT graph.gql(
 DO $$
 DECLARE
     source_count bigint;
+    match_count bigint;
     dirty boolean;
     added_nodes integer;
 BEGIN
@@ -70,6 +71,16 @@ BEGIN
     IF source_count <> 1 THEN
         RAISE EXCEPTION 'GQL CREATE source row was not visible before rollback, got %',
             source_count;
+    END IF;
+
+    SELECT count(*) INTO match_count
+    FROM graph.gql(
+        'MATCH (u:graph_gql_create_tx_nodes {id: ''rollback-node''}) RETURN u',
+        hydrate := false
+    );
+    IF match_count <> 1 THEN
+        RAISE EXCEPTION 'GQL CREATE node delta was not visible to node MATCH before rollback, got %',
+            match_count;
     END IF;
 
     SELECT tx_delta_dirty, tx_delta_added_nodes INTO dirty, added_nodes

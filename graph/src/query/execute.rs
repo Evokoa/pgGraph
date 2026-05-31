@@ -8,7 +8,7 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 use super::logical_plan::BoundDirection;
-use super::physical_plan::{PhysicalPlan, ReturnSlot};
+use super::physical_plan::{PhysicalNodeScan, PhysicalPlan, ReturnSlot};
 
 /// Coordinate-only node value returned by Phase 1B.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +30,13 @@ pub(crate) struct GqlRow {
     pub(crate) rel_start: GqlNodeCoordinate,
     /// Relationship end coordinate in the registered edge direction.
     pub(crate) rel_end: GqlNodeCoordinate,
+}
+
+/// One GQL node-only result row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GqlNodeRow {
+    /// Node coordinate.
+    pub(crate) node: GqlNodeCoordinate,
 }
 
 /// Execute a physical one-hop plan.
@@ -65,6 +72,66 @@ pub(crate) fn execute(
                 return Ok(rows);
             }
             rows.push(project_row(engine, source_idx, target));
+        }
+    }
+    Ok(rows)
+}
+
+/// Execute a physical node-only scan.
+///
+/// # Errors
+///
+/// Returns [`GraphError`] when the graph is not built or execution exceeds the
+/// plan's cardinality cap.
+pub(crate) fn execute_node_scan(
+    engine: &Engine,
+    plan: &PhysicalNodeScan,
+    tenant: Option<&str>,
+) -> GraphResult<Vec<GqlNodeRow>> {
+    if !engine.built {
+        return Err(GraphError::NotBuilt);
+    }
+    let mut rows = Vec::new();
+    let row_cap = plan.execution_row_cap();
+    let mut seen = std::collections::HashSet::new();
+    for node_idx in source_nodes(engine, plan.table_oid, tenant) {
+        if !engine.node_store.is_active(node_idx) {
+            continue;
+        }
+        let node_id = engine.node_store.primary_key(node_idx).to_string();
+        if seen.insert(node_id.clone()) {
+            if rows.len() >= row_cap {
+                if plan.cap_exhaustion_is_error() {
+                    return Err(GraphError::GqlExecution {
+                        reason: format!("GQL result row cap exceeded ({row_cap})"),
+                    });
+                }
+                return Ok(rows);
+            }
+            rows.push(GqlNodeRow {
+                node: GqlNodeCoordinate {
+                    table_oid: plan.table_oid,
+                    node_id,
+                },
+            });
+        }
+    }
+    for node_id in crate::projection::tx_delta::added_node_keys(plan.table_oid, tenant) {
+        if seen.insert(node_id.clone()) {
+            if rows.len() >= row_cap {
+                if plan.cap_exhaustion_is_error() {
+                    return Err(GraphError::GqlExecution {
+                        reason: format!("GQL result row cap exceeded ({row_cap})"),
+                    });
+                }
+                return Ok(rows);
+            }
+            rows.push(GqlNodeRow {
+                node: GqlNodeCoordinate {
+                    table_oid: plan.table_oid,
+                    node_id,
+                },
+            });
         }
     }
     Ok(rows)

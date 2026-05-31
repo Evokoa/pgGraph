@@ -68,7 +68,7 @@ Supported read coverage:
 
 | Area | Supported behavior |
 |---|---|
-| Pattern | One `MATCH` graph pattern with two node variables and one relationship pattern |
+| Pattern | One node-only `MATCH` pattern or one graph pattern with two node variables and one relationship pattern |
 | Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum |
@@ -97,10 +97,11 @@ FROM graph.gql(
 
 The write is PostgreSQL-first: pgGraph inserts the mapped source row through
 SPI, PostgreSQL enforces table privileges, constraints, RLS, triggers, and MVCC,
-and the GQL result is built from the inserted row. `CREATE` is rejected on
-`csr_readonly` projections. Relationship creation, `SET`, `DELETE`, `MERGE`,
-multi-row writes, dynamic labels, and creating new PostgreSQL schema objects
-from GQL are future work.
+and the GQL result is built from the inserted row. Within the same transaction,
+node-only `MATCH` queries can read the created node through the backend-local
+transaction delta. `CREATE` is rejected on `csr_readonly` projections.
+Relationship creation, `SET`, `DELETE`, `MERGE`, multi-row writes, dynamic
+labels, and creating new PostgreSQL schema objects from GQL are future work.
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
 planning stages without executing the query.

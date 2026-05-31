@@ -1,11 +1,11 @@
 use super::catalog_snapshot::FakeCatalog;
-use super::execute::execute;
+use super::execute::{execute, execute_node_scan};
 use super::explain::explain;
-use super::lower::lower;
+use super::lower::{lower, lower_statement};
 use super::physical_plan::ReturnSlot;
 use super::semantics::bind;
 use super::semantics::bind_statement;
-use super::value::{project_rows, HydratedRows, QueryParams};
+use super::value::{project_node_rows, project_rows, HydratedRows, QueryParams};
 use crate::edge_store::{EdgeStore, RawEdge};
 use crate::engine::Engine;
 use crate::gql::errors::GqlErrorKind;
@@ -50,6 +50,20 @@ fn binder_accepts_single_directed_match_returning_coordinates() {
     assert_eq!(plan.target.var, "c");
     assert_eq!(plan.target.table_oid, 20);
     assert_eq!(plan.returns.len(), 2);
+}
+
+#[test]
+fn binder_accepts_node_only_match_for_registered_label() {
+    let ast = crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) RETURN u, u.name").unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::NodeScan(scan) = plan else {
+        panic!("expected node scan plan");
+    };
+
+    assert_eq!(scan.node.var, "u");
+    assert_eq!(scan.node.table_oid, 10);
+    assert!(scan.predicate.is_some());
+    assert_eq!(scan.returns.len(), 2);
 }
 
 #[test]
@@ -263,6 +277,79 @@ fn executor_returns_one_hop_coordinate_rows() {
     assert_eq!(rows[0].target.table_oid, 20);
     assert_eq!(rows[0].target.node_id, "c1");
     assert_eq!(rows[1].source.node_id, "u2");
+}
+
+#[test]
+fn executor_node_scan_reads_graph_and_transaction_nodes() {
+    crate::projection::tx_delta::clear_for_test();
+    let ast = crate::gql::parse_statement("MATCH (u:users) RETURN u").unwrap();
+    let logical = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::physical_plan::PhysicalStatement::NodeScan(physical) = lower_statement(logical)
+    else {
+        panic!("expected node scan");
+    };
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+
+    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["u1", "u2", "u3"]
+    );
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn node_scan_projection_filters_inline_predicates() {
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users {name: 'Ada'}) RETURN u.name AS name").unwrap();
+    let logical = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::physical_plan::PhysicalStatement::NodeScan(physical) = lower_statement(logical)
+    else {
+        panic!("expected node scan");
+    };
+    let engine = engine_fixture();
+    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let projected = project_node_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["name"], "Ada");
+}
+
+#[test]
+fn node_scan_limit_does_not_hide_later_predicate_matches() {
+    crate::projection::tx_delta::clear_for_test();
+    let ast = crate::gql::parse_statement("MATCH (u:users {id: 'u3'}) RETURN u LIMIT 1").unwrap();
+    let logical = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::physical_plan::PhysicalStatement::NodeScan(physical) = lower_statement(logical)
+    else {
+        panic!("expected node scan");
+    };
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+
+    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let mut hydrated = hydrated_fixture();
+    hydrated.insert(
+        (10, "u3".to_string()),
+        serde_json::json!({"id": "u3", "name": "Grace"}),
+    );
+    let projected =
+        project_node_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["u"]["id"], "u3");
+    crate::projection::tx_delta::clear_for_test();
 }
 
 #[test]

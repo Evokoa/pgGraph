@@ -19,6 +19,8 @@ pub(crate) struct AddedNode {
     pub(crate) table_oid: u32,
     /// Source table primary key.
     pub(crate) primary_key: String,
+    /// Tenant scope active when the node was created.
+    pub(crate) tenant: Option<String>,
     /// Assigned graph node index when the topology has materialized this row.
     pub(crate) node_idx: Option<u32>,
 }
@@ -113,6 +115,7 @@ impl TxGraphDelta {
         self.added_nodes.push(AddedNode {
             table_oid,
             primary_key: primary_key.to_string(),
+            tenant: None,
             node_idx: Some(node_idx),
         });
     }
@@ -124,7 +127,11 @@ impl TxGraphDelta {
 }
 
 /// Record a transaction-local node insertion.
-pub(crate) fn record_added_node(table_oid: u32, primary_key: &str) -> GraphResult<()> {
+pub(crate) fn record_added_node(
+    table_oid: u32,
+    primary_key: &str,
+    tenant: Option<&str>,
+) -> GraphResult<()> {
     ensure_write_allowed()?;
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
@@ -132,10 +139,34 @@ pub(crate) fn record_added_node(table_oid: u32, primary_key: &str) -> GraphResul
         delta.added_nodes.push(AddedNode {
             table_oid,
             primary_key: primary_key.to_string(),
+            tenant: tenant.map(str::to_string),
             node_idx: None,
         });
     });
     Ok(())
+}
+
+/// Return transaction-local node primary keys for a table and tenant scope.
+pub(crate) fn added_node_keys(table_oid: u32, tenant: Option<&str>) -> Vec<String> {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .map(|delta| {
+                delta
+                    .added_nodes
+                    .iter()
+                    .filter(|node| node.table_oid == table_oid)
+                    .filter(|node| match (tenant, node.tenant.as_deref()) {
+                        (Some(active), Some(created)) => active == created,
+                        (Some(_), None) => true,
+                        (None, _) => true,
+                    })
+                    .map(|node| node.primary_key.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
 }
 
 /// Validate that the current transaction can accept a graph write delta.
@@ -388,6 +419,20 @@ mod tests {
         assert_eq!(stats.deleted_edges, 1);
         assert!(stats.memory_bytes > 0);
         assert!(stats.dirty);
+    }
+
+    #[test]
+    fn added_node_keys_respect_recorded_tenant_scope() {
+        clear_current_transaction_state();
+        record_added_node(100, "a1", Some("tenant-a")).expect("record tenant-a");
+        record_added_node(100, "b1", Some("tenant-b")).expect("record tenant-b");
+        record_added_node(200, "other", Some("tenant-a")).expect("record other table");
+
+        assert_eq!(added_node_keys(100, Some("tenant-a")), vec!["a1"]);
+        assert_eq!(added_node_keys(100, Some("tenant-b")), vec!["b1"]);
+        assert_eq!(added_node_keys(100, None), vec!["a1", "b1"]);
+
+        clear_current_transaction_state();
     }
 
     #[test]

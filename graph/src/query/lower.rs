@@ -1,21 +1,51 @@
 //! Lowering from logical GQL plans to executable physical plans.
 
 use super::logical_plan::{
-    CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalPlan, LogicalStatement,
-    ReturnBinding,
+    CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalNodeScan, LogicalPlan,
+    LogicalStatement, ReturnBinding,
 };
 use super::physical_plan::{
-    CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalPlan,
-    PhysicalStatement, ReturnSlot,
+    CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalNodeScan,
+    PhysicalPlan, PhysicalStatement, ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
 pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement {
     match statement {
         LogicalStatement::Read(plan) => PhysicalStatement::Read(lower(plan)),
+        LogicalStatement::NodeScan(plan) => PhysicalStatement::NodeScan(lower_node_scan(plan)),
         LogicalStatement::CreateNode(plan) => {
             PhysicalStatement::CreateNode(lower_create_node(plan))
         }
+    }
+}
+
+fn lower_node_scan(plan: LogicalNodeScan) -> PhysicalNodeScan {
+    PhysicalNodeScan {
+        var: plan.node.var,
+        table_oid: plan.node.table_oid,
+        label: plan.node.label,
+        predicate: plan.predicate,
+        order_by: plan.order_by,
+        skip: plan.skip,
+        limit: plan.limit,
+        returns: plan
+            .returns
+            .into_iter()
+            .map(|slot| match slot {
+                ReturnBinding::Node { side, name } => ReturnSlot::Node { side, name },
+                ReturnBinding::Relationship { name } => ReturnSlot::Relationship { name },
+                ReturnBinding::Property {
+                    side,
+                    property,
+                    name,
+                } => ReturnSlot::Property {
+                    side,
+                    property,
+                    name,
+                },
+            })
+            .collect(),
     }
 }
 

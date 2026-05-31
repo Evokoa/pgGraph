@@ -7,6 +7,8 @@ use crate::gql::ast::LiteralValue;
 pub(crate) enum LogicalStatement {
     /// Read-only query.
     Read(LogicalPlan),
+    /// Node-only read query.
+    NodeScan(LogicalNodeScan),
     /// Node creation write.
     CreateNode(LogicalCreateNode),
 }
@@ -20,6 +22,23 @@ pub(crate) struct LogicalPlan {
     pub(crate) relationship: BoundRel,
     /// Target node binding.
     pub(crate) target: BoundNode,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnBinding>,
+    /// Optional hydrated-row predicate.
+    pub(crate) predicate: Option<Predicate>,
+    /// Sort keys in requested order.
+    pub(crate) order_by: Vec<SortBinding>,
+    /// Number of rows to skip after ordering.
+    pub(crate) skip: Option<u64>,
+    /// Maximum rows to return.
+    pub(crate) limit: Option<u64>,
+}
+
+/// Bound node-only logical query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalNodeScan {
+    /// Scanned node binding.
+    pub(crate) node: BoundNode,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnBinding>,
     /// Optional hydrated-row predicate.
