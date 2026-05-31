@@ -130,8 +130,9 @@ openCypher compatibility.
 - Define GUCs for projection mode defaults, mutable enablement, transaction
   delta limits, compaction thresholds, and memory caps. Phase 2B has added
   `graph.default_projection_mode`, `graph.mutable_enabled`, queued-build mode
-  persistence, and the transaction-delta lifecycle skeleton; delta limits,
-  compaction thresholds, and overlay memory caps remain for later Phase 2 slices.
+  persistence, the transaction-delta lifecycle skeleton, and internal
+  transaction-local edge overlay reads; delta limits, compaction thresholds, and
+  overlay memory caps remain for later Phase 2 slices.
 - Define SQLSTATE policy for GQL syntax, unsupported feature, semantic,
   parameter, type mismatch, schema violation, write-on-read-only, and memory
   limit errors.

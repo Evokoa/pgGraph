@@ -699,6 +699,22 @@ impl Engine {
             }
         }
 
+        let (tx_inserts, tx_deletes) = tx_delta::edge_overlay(direction);
+        for (source, targets) in tx_deletes {
+            for (target, type_id) in targets {
+                let key = (source, target, type_id);
+                inserts.remove(&key);
+                deletes.insert(key);
+            }
+        }
+        for (source, targets) in tx_inserts {
+            for (target, type_id) in targets {
+                let key = (source, target, type_id);
+                deletes.remove(&key);
+                inserts.insert(key);
+            }
+        }
+
         let mut insert_map: OverlayInserts = HashMap::new();
         for (source, target, type_id) in inserts {
             insert_map
@@ -743,7 +759,7 @@ impl Engine {
                     pk: target_id.to_string(),
                 })?;
 
-        let result = if self.edge_buffer.is_empty() {
+        let result = if self.edge_buffer.is_empty() && !tx_delta::edge_delta_dirty() {
             let neighbors = CsrNeighbors::new(&self.edge_store);
             path_finder::shortest_path_with_neighbors(
                 &self.node_store,
@@ -787,11 +803,11 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        if !self.edge_buffer.is_empty() {
+        if !self.edge_buffer.is_empty() || tx_delta::edge_delta_dirty() {
             return Err(GraphError::UnsupportedOperation {
                 operation: "graph.weighted_shortest_path() with pending edge overlays"
                     .to_string(),
-                reason: "pending edge overlays do not carry edge weights until graph.vacuum() or graph.maintenance() merges them".to_string(),
+                reason: "pending edge overlays do not carry stable edge weights until graph.vacuum() or graph.maintenance() merges them".to_string(),
             });
         }
 
@@ -924,7 +940,7 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        if self.edge_buffer.is_empty() {
+        if self.edge_buffer.is_empty() && !tx_delta::edge_delta_dirty() {
             return Ok(crate::connected_components::compute_components(
                 &self.node_store,
                 &self.edge_store,
@@ -1449,6 +1465,65 @@ mod tests {
     }
 
     #[test]
+    fn traverse_uses_transaction_delta_edge_insert() {
+        let eng = build_test_engine();
+        tx_delta::clear_for_test();
+        tx_delta::record_added_edge(
+            4,
+            tx_delta::DeltaEdge {
+                target: 3,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect("record tx edge insert");
+
+        let results = eng
+            .traverse(
+                100,
+                "E",
+                1,
+                100000,
+                100000,
+                Some(vec!["linked".to_string()]),
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::Out,
+            )
+            .unwrap();
+
+        assert!(results.iter().any(|row| row.node_id == "D"));
+        tx_delta::clear_for_test();
+    }
+
+    #[test]
+    fn traverse_hides_transaction_delta_edge_delete() {
+        let eng = build_test_engine();
+        tx_delta::clear_for_test();
+        tx_delta::record_deleted_edge(1, 2, 1).expect("record tx edge delete");
+
+        let results = eng
+            .traverse(
+                100,
+                "A",
+                10,
+                100000,
+                100000,
+                Some(vec!["linked".to_string()]),
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::Out,
+            )
+            .unwrap();
+
+        assert!(!results.iter().any(|row| row.node_id == "C"));
+        assert!(!results.iter().any(|row| row.node_id == "D"));
+        tx_delta::clear_for_test();
+    }
+
+    #[test]
     fn traverse_invalid_filter_returns_error() {
         let eng = build_test_engine();
         let result = eng.traverse(
@@ -1582,6 +1657,46 @@ mod tests {
         assert!(steps.is_empty());
     }
 
+    #[test]
+    fn shortest_path_uses_transaction_delta_edge_insert() {
+        let mut eng = build_test_engine();
+        eng.has_unidirectional_edges = true;
+        tx_delta::clear_for_test();
+        tx_delta::record_added_edge(
+            4,
+            tx_delta::DeltaEdge {
+                target: 3,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect("record tx edge insert");
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "E", "D"]
+        );
+        tx_delta::clear_for_test();
+    }
+
+    #[test]
+    fn shortest_path_hides_transaction_delta_edge_delete() {
+        let mut eng = build_test_engine();
+        eng.has_unidirectional_edges = true;
+        tx_delta::clear_for_test();
+        tx_delta::record_deleted_edge(1, 2, 1).expect("record tx edge delete");
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert!(steps.is_empty());
+        tx_delta::clear_for_test();
+    }
+
     // ─── weighted_shortest_path() ───
 
     #[test]
@@ -1626,6 +1741,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn weighted_shortest_path_rejects_transaction_delta_edge_overlay() {
+        let mut eng = build_test_engine();
+        eng.edge_store = crate::edge_store::EdgeStore::from_edges(
+            5,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: Some(1),
+            }],
+            true,
+        );
+        tx_delta::clear_for_test();
+        tx_delta::record_added_edge(
+            1,
+            tx_delta::DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: Some(1),
+            },
+        )
+        .expect("record tx edge insert");
+
+        let result = eng.weighted_shortest_path(100, "A", 100, "C");
+
+        assert!(matches!(
+            result,
+            Err(GraphError::UnsupportedOperation { .. })
+        ));
+        tx_delta::clear_for_test();
+    }
+
     // ─── connected_components() ───
 
     #[test]
@@ -1658,6 +1806,20 @@ mod tests {
         let result = eng.connected_components().unwrap();
 
         assert_eq!(result.num_components, 2);
+    }
+
+    #[test]
+    fn connected_components_honor_transaction_delta_edge_deletes() {
+        let eng = build_test_engine();
+        tx_delta::clear_for_test();
+        for (source, target) in [(1, 2), (2, 1)] {
+            tx_delta::record_deleted_edge(source, target, 1).expect("record tx edge delete");
+        }
+
+        let result = eng.connected_components().unwrap();
+
+        assert_eq!(result.num_components, 2);
+        tx_delta::clear_for_test();
     }
 
     // ─── register_edge_type() ───

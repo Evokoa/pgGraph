@@ -8,6 +8,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::projection::neighbors::{EdgeOverlay, OverlayDeletes, OverlayInserts};
+use crate::safety::{GraphError, GraphResult};
+use crate::types::TraversalDirection;
+
 /// Transaction-local node created by a graph write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddedNode {
@@ -119,6 +123,91 @@ impl TxGraphDelta {
     }
 }
 
+/// Record a transaction-local edge insertion.
+#[allow(
+    dead_code,
+    reason = "Phase 2C write operators call this after PostgreSQL accepts edge DML"
+)]
+pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()> {
+    reject_if_subtransaction()?;
+    TX_DELTA.with(|delta| {
+        let mut borrowed = delta.borrow_mut();
+        let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        delta
+            .deleted_edges
+            .remove(&(source, edge.target, edge.type_id));
+        delta.added_edges.entry(source).or_default().push(edge);
+    });
+    Ok(())
+}
+
+/// Record a transaction-local edge deletion.
+#[allow(
+    dead_code,
+    reason = "Phase 2E write operators call this after PostgreSQL accepts edge DML"
+)]
+pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> GraphResult<()> {
+    reject_if_subtransaction()?;
+    TX_DELTA.with(|delta| {
+        let mut borrowed = delta.borrow_mut();
+        let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        if let Some(edges) = delta.added_edges.get_mut(&source) {
+            edges.retain(|edge| edge.target != target || edge.type_id != type_id);
+            if edges.is_empty() {
+                delta.added_edges.remove(&source);
+            }
+        }
+        delta.deleted_edges.insert((source, target, type_id));
+    });
+    Ok(())
+}
+
+/// Return whether transaction-local edge deltas are present.
+pub(crate) fn edge_delta_dirty() -> bool {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .is_some_and(|delta| !delta.added_edges.is_empty() || !delta.deleted_edges.is_empty())
+    })
+}
+
+/// Return edge overlay maps for the requested traversal direction.
+pub(crate) fn edge_overlay(direction: TraversalDirection) -> EdgeOverlay {
+    TX_DELTA.with(|delta| {
+        let borrowed = delta.borrow();
+        let Some(delta) = borrowed.as_ref() else {
+            return (OverlayInserts::new(), OverlayDeletes::new());
+        };
+
+        let mut inserts = OverlayInserts::new();
+        for (&source, edges) in &delta.added_edges {
+            for edge in edges {
+                let (source, target) = orient_edge(direction, source, edge.target);
+                inserts
+                    .entry(source)
+                    .or_default()
+                    .push((target, edge.type_id));
+            }
+        }
+
+        let mut deletes = OverlayDeletes::new();
+        for &(source, target, type_id) in &delta.deleted_edges {
+            let (source, target) = orient_edge(direction, source, target);
+            deletes.entry(source).or_default().insert((target, type_id));
+        }
+
+        (inserts, deletes)
+    })
+}
+
+fn orient_edge(direction: TraversalDirection, source: u32, target: u32) -> (u32, u32) {
+    match direction {
+        TraversalDirection::Any | TraversalDirection::Out => (source, target),
+        TraversalDirection::In => (target, source),
+    }
+}
+
 /// Register transaction callbacks used to clear backend-local deltas.
 pub(crate) fn register_transaction_callbacks() {
     #[cfg(not(test))]
@@ -175,7 +264,6 @@ unsafe extern "C-unwind" fn subxact_callback(
             decrement_subtransaction_depth();
         }
         SubXactEvent::SUBXACT_EVENT_ABORT_SUB => {
-            clear_current_delta();
             decrement_subtransaction_depth();
         }
         SubXactEvent::SUBXACT_EVENT_PRE_COMMIT_SUB => {}
@@ -194,9 +282,20 @@ pub(crate) fn stats() -> TxDeltaStats {
     })
 }
 
-#[cfg(test)]
 fn subtransaction_active() -> bool {
     SUBTRANSACTION_DEPTH.with(|depth| depth.get() > 0)
+}
+
+fn reject_if_subtransaction() -> GraphResult<()> {
+    if subtransaction_active() {
+        return Err(GraphError::UnsupportedOperation {
+            operation: "mutable graph write inside a subtransaction".to_string(),
+            reason:
+                "transaction-local graph overlays reject SAVEPOINT and PL subtransaction writes"
+                    .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn clear_current_delta() {
@@ -229,19 +328,13 @@ fn set_subtransaction_depth_for_test(depth: u32) {
 }
 
 #[cfg(test)]
+pub(crate) fn clear_for_test() {
+    clear_current_transaction_state();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safety::GraphError;
-
-    fn reject_if_subtransaction_for_test() -> Result<(), GraphError> {
-        if subtransaction_active() {
-            return Err(GraphError::UnsupportedOperation {
-                operation: "mutable graph write inside a subtransaction".to_string(),
-                reason: "transaction-local graph overlays do not yet support SAVEPOINT or PL subtransaction rollback".to_string(),
-            });
-        }
-        Ok(())
-    }
 
     #[test]
     fn empty_delta_reports_clean_stats() {
@@ -278,6 +371,38 @@ mod tests {
     }
 
     #[test]
+    fn edge_overlay_normalizes_local_insert_delete_order() {
+        clear_current_transaction_state();
+
+        record_added_edge(
+            1,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect("record insert");
+        record_deleted_edge(1, 2, 1).expect("record delete");
+        let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
+        assert!(inserts.is_empty());
+        assert!(deletes.get(&1).is_some_and(|edges| edges.contains(&(2, 1))));
+
+        record_added_edge(
+            1,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect("record insert after delete");
+        let (inserts, deletes) = edge_overlay(TraversalDirection::In);
+        assert!(deletes.is_empty());
+        assert!(inserts.get(&2).is_some_and(|edges| edges.contains(&(1, 1))));
+    }
+
+    #[test]
     fn transaction_end_clears_delta_and_subtransaction_flag() {
         clear_current_transaction_state();
         with_delta_for_test(|delta| delta.add_node_for_test(100, "new-node", 42));
@@ -302,15 +427,14 @@ mod tests {
     }
 
     #[test]
-    fn subtransaction_abort_clears_delta_but_preserves_outer_depth() {
+    fn subtransaction_abort_preserves_outer_delta_and_depth() {
         clear_current_transaction_state();
         with_delta_for_test(|delta| delta.add_node_for_test(100, "new-node", 42));
         set_subtransaction_depth_for_test(2);
 
-        clear_current_delta();
         decrement_subtransaction_depth();
 
-        assert_eq!(stats(), TxDeltaStats::default());
+        assert!(stats().dirty);
         assert!(subtransaction_active());
     }
 
@@ -318,8 +442,15 @@ mod tests {
     fn subtransaction_rejection_is_explicit() {
         set_subtransaction_depth_for_test(1);
 
-        let err =
-            reject_if_subtransaction_for_test().expect_err("subtransaction should be rejected");
+        let err = record_added_edge(
+            1,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect_err("subtransaction should be rejected");
 
         assert!(matches!(err, GraphError::UnsupportedOperation { .. }));
         set_subtransaction_depth_for_test(0);

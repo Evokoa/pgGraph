@@ -96,12 +96,19 @@ mark-stale; upgrade if benchmarks demand).
   selected projection mode for the background worker.
 - Added `TxGraphDelta` storage and backend-local transaction/subtransaction
   callbacks that clear deltas at transaction end and track nested
-  subtransaction depth.
+  subtransaction depth. Mutable edge-delta recording rejects writes while a
+  subtransaction is active; top-level deltas are preserved across unrelated
+  subtransaction aborts.
+- Routed transaction-local edge insert/delete overlays into traversal,
+  unweighted shortest path, and connected components. Weighted shortest path
+  rejects dirty transaction edge overlays until committed weights are folded
+  into CSR.
 - Exposed projection mode and empty transaction-delta counters through
   `graph.status()` and `graph.sync_health()`.
 - Remaining 2B work before write slices: route actual GQL write deltas into
   `TxGraphDelta`, prove rollback/read-your-own-writes/concurrent isolation with
-  write behavior, and prove crash/reload ignores uncommitted overlays.
+  SQL-visible write behavior, and prove crash/reload ignores uncommitted
+  overlays.
 
 ## 4. Transaction callbacks (slice 2B) — NEW infrastructure
 

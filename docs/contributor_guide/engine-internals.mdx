@@ -61,7 +61,8 @@ Engine traversal does:
 1. Verify the engine is built.
 2. Resolve the seed table+PK to `node_idx`.
 3. Resolve the requested edge label strings to compact `u8` IDs.
-4. Build the edge overlay maps for the chosen direction.
+4. Build the sync and transaction-local edge overlay maps for the chosen
+   direction.
 5. Build `BfsConfig`.
 6. Choose forward or reverse CSR based on direction.
 7. Run BFS or DFS.
@@ -71,7 +72,7 @@ Engine traversal does:
   <PipelineStep title="request" />
   <PipelineStep title="resolve seed" />
   <PipelineStep title="edge type filter" />
-  <PipelineStep title="sync overlay" />
+  <PipelineStep title="sync + tx overlay" />
   <PipelineStep title="BfsConfig" />
   <PipelineStep title="strategy">
     - `bfs::execute`
@@ -80,7 +81,7 @@ Engine traversal does:
   <PipelineStep title="to_traversal_results" />
 </PipelineDiagram>
 
-## Sync Overlay Semantics
+## Overlay Semantics
 
 `edge_buffer` contains ordered mutations:
 
@@ -101,6 +102,12 @@ Before traversal, the engine reduces the buffer into:
 | deletes | `HashMap<u32, HashSet<(u32, u8)>>` | Base edges hidden from traversal, keyed by source node |
 
 Insert after delete cancels the delete; delete after insert cancels the insert.
+Transaction-local edge deltas use the same reduced insert/delete map shape and
+are merged after `edge_buffer`, so reads in the current backend can observe
+their own pending graph deltas without changing the immutable CSR stores.
+Mutable write operators must reject execution while a PostgreSQL subtransaction
+is active; the current delta model does not attempt per-savepoint overlay
+rollback.
 
 ## Status Computation
 
@@ -118,6 +125,7 @@ and schema drift.
 | `reverse_edge_store` matches `edge_store` | Inbound traversal must avoid scanning all edges |
 | `resolution_delta` is checked first | Synced inserts shadow immutable base indexes |
 | `resolution_delta` verifies candidates through `node_store` | Tombstones and hash collisions cannot resolve stale or wrong nodes |
+| transaction edge deltas clear at transaction end | Uncommitted overlays must not leak across transactions or backends |
 | Mmap store pointers never outlive `Engine._mmap` | Raw pointer reads depend on mmap lifetime |
 | `node_store.is_active()` gates resolved nodes | Tombstones must not appear as live results |
 | `edge_buffer.len() <= graph.edge_buffer_size` | Prevents unbounded overlay memory |

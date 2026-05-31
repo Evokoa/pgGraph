@@ -120,12 +120,14 @@ to the indexed `resolution_delta`; deleted nodes are tombstoned through
 
 ## Edge Changes
 
-The base `EdgeStore` remains immutable. Edge mutations are appended to
-`engine.edge_buffer` as `EdgeMutation` values. Overlay-aware graph algorithms
-reduce this buffer into insert and delete overlays for the selected direction.
+The base `EdgeStore` remains immutable. Committed sync edge mutations are
+appended to `engine.edge_buffer` as `EdgeMutation` values. Transaction-local
+edge deltas live in `TxGraphDelta`. Overlay-aware graph algorithms reduce both
+sources into insert and delete overlays for the selected direction, with
+transaction-local deltas applied last for read-your-own-writes semantics.
 Traversal, unweighted shortest path, and connected components consume the
 shared neighbor-source abstraction. Weighted shortest path rejects a dirty edge
-overlay until vacuum or maintenance merges weights into the base CSR.
+overlay until vacuum or maintenance merges committed weights into the base CSR.
 
 When the buffer reaches `graph.edge_buffer_size`, the engine enters read-only
 mode with `read_only_reason = 'edge_buffer_full'` and returns
