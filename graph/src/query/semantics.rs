@@ -1157,11 +1157,14 @@ fn bind_aggregate_func(func: ast::AggregateFunc) -> AggregateFunc {
 }
 
 fn path_func(name: &str) -> Option<PathFunc> {
-    match name {
-        "nodes" => Some(PathFunc::Nodes),
-        "relationships" => Some(PathFunc::Relationships),
-        "length" => Some(PathFunc::Length),
-        _ => None,
+    if name.eq_ignore_ascii_case("nodes") {
+        Some(PathFunc::Nodes)
+    } else if name.eq_ignore_ascii_case("relationships") {
+        Some(PathFunc::Relationships)
+    } else if name.eq_ignore_ascii_case("length") {
+        Some(PathFunc::Length)
+    } else {
+        None
     }
 }
 

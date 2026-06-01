@@ -862,6 +862,37 @@ fn binder_accepts_path_functions_over_relationship_variables() {
 }
 
 #[test]
+fn binder_accepts_mixed_case_path_functions() {
+    let logical = bind_query(
+        "MATCH (u:users)-[r:works_at*1..2]->(c:companies) \
+         RETURN NoDeS(r) AS ns, ReLaTiOnShIpS(r) AS rs, LeNgTh(r) AS len",
+    );
+    let physical = lower(logical);
+
+    assert!(matches!(
+        physical.returns[0],
+        ReturnSlot::PathFunction {
+            func: super::logical_plan::PathFunc::Nodes,
+            ..
+        }
+    ));
+    assert!(matches!(
+        physical.returns[1],
+        ReturnSlot::PathFunction {
+            func: super::logical_plan::PathFunc::Relationships,
+            ..
+        }
+    ));
+    assert!(matches!(
+        physical.returns[2],
+        ReturnSlot::PathFunction {
+            func: super::logical_plan::PathFunc::Length,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn binder_rejects_path_functions_outside_return_projection() {
     let ast = crate::gql::parse_statement(
         "MATCH (u:users)-[r:works_at*1..2]->(c:companies) \
