@@ -16,8 +16,7 @@ the open.
 
 This page documents known alpha limitations, next-update hardening work, and
 lower-priority follow-up items. The list is ranked by expected user impact, not
-by implementation difficulty. Each active row records the pgGraph version range
-where the issue is known to be present.
+by implementation difficulty.
 
 This page is the authoritative register for known limitations and correctness,
 operational, performance, or maintainability risks. Future product direction,
@@ -37,30 +36,18 @@ The next update is focused on issues that are either hard to change after users
 depend on SQL behavior, or important enough to fix before recommending
 production use.
 
-### Version Range Format
-
-| Format | Meaning |
-|---|---|
-| `v0.1.5` | Confirmed only in that release line so far. |
-| `v0.1.3-v0.1.5` | Confirmed from the first listed version through the second listed version, inclusive. |
-| `<=v0.1.5` | Known to exist in `v0.1.5`; the exact introduction version has not been audited. |
-| `fixed in vX.Y.Z` | Resolved by that release. |
-
-When a known issue is fixed, move it out of the active priority section and
-record the fixed version in the relevant release notes.
-
 ### Data Correctness and Corruption
 
-| ID | Issue | Present in | Status | Notes |
-|---|---|---|---|---|
-| KI-001 | GQL mutable writes should re-check matched predicates at the final PostgreSQL write boundary under concurrent source-row changes. | `v0.1.5` | Planned hardening | Current narrow writes use PostgreSQL-first DML and row-level behavior, but the remaining hardening item is to make stale-match drift explicit for `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` weak paths. |
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-001 | GQL mutable writes should re-check matched predicates at the final PostgreSQL write boundary under concurrent source-row changes. | Planned hardening | Current narrow writes use PostgreSQL-first DML and row-level behavior, but the remaining hardening item is to make stale-match drift explicit for `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` weak paths. |
 
 ### SQL Contract and Query Semantics
 
-| ID | Issue | Present in | Status | Notes |
-|---|---|---|---|---|
-| KI-002 | Transaction-created nodes are visible to node-only GQL reads, but traversal/path entry-point behavior for those tx-local nodes remains intentionally narrow. | `v0.1.5` | Planned clarification | Either reject unsupported traversal/path use with a typed error or add temporary-ID traversal support. Keep the documented mutable-overlay contract aligned with the implemented policy. |
-| KI-003 | The GQL and Cypher parser surfaces need dedicated fuzz targets beyond unit and pgrx coverage. | `v0.1.5` | Planned test hardening | Parser totality has unit coverage for representative corpora, but fuzz targets should be added for sustained random input coverage before broadening language syntax. |
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-002 | Transaction-created nodes are visible to node-only GQL reads, but traversal/path entry-point behavior for those tx-local nodes remains intentionally narrow. | Planned clarification | Either reject unsupported traversal/path use with a typed error or add temporary-ID traversal support. Keep the documented mutable-overlay contract aligned with the implemented policy. |
+| KI-003 | The GQL and Cypher parser surfaces need dedicated fuzz targets beyond unit and pgrx coverage. | Planned test hardening | Parser totality has unit coverage for representative corpora, but fuzz targets should be added for sustained random input coverage before broadening language syntax. |
 
 ### SQL Safety and Schema Plumbing
 
@@ -85,9 +72,9 @@ ownership and background-job failure handling were completed.
 
 ### Internal Construction and Performance
 
-| ID | Issue | Present in | Status | Notes |
-|---|---|---|---|---|
-| KI-004 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | `v0.1.5` | Measure before optimizing | Current behavior is correctness-gated. Future work should use benchmarks before changing duplicate suppression, overlay indexing, or transaction delta snapshotting. |
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-004 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Current behavior is correctness-gated. Future work should use benchmarks before changing duplicate suppression, overlay indexing, or transaction delta snapshotting. |
 
 ## P0: Operational Visibility and Resource Predictability
 
@@ -107,26 +94,26 @@ cluster-wide hard cap.
 These items are expected to improve latency or memory pressure, but they are
 not changes to the public SQL contract.
 
-| ID | Issue | Present in | Status | Notes |
-|---|---|---|---|---|
-| KI-004 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | `v0.1.5` | Measure before optimizing | Duplicated here because it is an internal construction item with user-visible latency implications on dirty mutable projections. |
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-004 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Duplicated here because it is an internal construction item with user-visible latency implications on dirty mutable projections. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 
 These items clarify behavior or broaden the API. They are planned, but should
 not block use of the current documented SQL surface.
 
-| ID | Issue | Present in | Status | Notes |
-|---|---|---|---|---|
-| KI-005 | `graph.cypher()` is a narrow compatibility preview over pgGraph's supported GQL subset, not Neo4j compatibility. | `v0.1.5` | Documented limitation | Keep compatibility rows honest and route broad Cypher/openCypher expansion through [Roadmap](./roadmap), not this register. |
-| KI-006 | SQL/PGQ remains an internal adapter seam, not a public SQL API. | `v0.1.5` | Deferred public surface | Track public SQL/PGQ exposure in [Roadmap](./roadmap) after PostgreSQL graph-pattern hooks stabilize. |
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-005 | `graph.cypher()` is a narrow compatibility preview over pgGraph's supported GQL subset, not Neo4j compatibility. | Documented limitation | Keep compatibility rows honest and route broad Cypher/openCypher expansion through [Roadmap](./roadmap), not this register. |
+| KI-006 | SQL/PGQ remains an internal adapter seam, not a public SQL API. | Deferred public surface | Track public SQL/PGQ exposure in [Roadmap](./roadmap) after PostgreSQL graph-pattern hooks stabilize. |
 
 ## P3: Internals and Maintainability
 
-| ID | Issue | Present in | Status | Notes |
-|---|---|---|---|---|
-| KI-007 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | `<=v0.1.5` | Planned refactor | Highest-priority split candidates are `graph/src/pg_tests/gql.rs`, `graph/src/sql_facade/gql.rs`, `graph/src/query/tests.rs`, `graph/src/engine.rs`, `graph/src/query/semantics.rs`, `graph/src/query/value.rs`, `graph/src/bfs.rs`, and `graph/src/gql/parser.rs`. |
-| KI-008 | GQL write weak-path tests can be expanded for more SQLSTATE and rollback scenarios. | `v0.1.5` | Planned test hardening | Current release-gate coverage includes GQL transaction lifecycle scripts, pgrx GQL tests, playground fixtures, and unit tests. Additional weak paths should be added close to the code they constrain. |
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-007 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | Planned refactor | Highest-priority split candidates are `graph/src/pg_tests/gql.rs`, `graph/src/sql_facade/gql.rs`, `graph/src/query/tests.rs`, `graph/src/engine.rs`, `graph/src/query/semantics.rs`, `graph/src/query/value.rs`, `graph/src/bfs.rs`, and `graph/src/gql/parser.rs`. |
+| KI-008 | GQL write weak-path tests can be expanded for more SQLSTATE and rollback scenarios. | Planned test hardening | Current release-gate coverage includes GQL transaction lifecycle scripts, pgrx GQL tests, playground fixtures, and unit tests. Additional weak paths should be added close to the code they constrain. |
 
 ## Roadmap-Owned Future Work
 
