@@ -1,4 +1,7 @@
-FROM rust:1.95.0-bookworm@sha256:503651ea31e66ecb74623beabde781059a5978df1595a9e8ed03974d5fec1bf0 AS builder
+ARG RUST_IMAGE=rust:1.95.0-bookworm@sha256:503651ea31e66ecb74623beabde781059a5978df1595a9e8ed03974d5fec1bf0
+ARG POSTGRES_IMAGE=postgres:17-bookworm
+
+FROM ${RUST_IMAGE} AS builder
 
 ARG PG_MAJOR=17
 ARG PGRX_VERSION=0.18.0
@@ -26,7 +29,7 @@ COPY graph/ /src/graph/
 RUN cargo pgrx init --pg${PG_MAJOR}=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config \
     && cargo pgrx package --pg-config=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
 
-FROM postgres:17.9-bookworm@sha256:47f917f7409eacd22fc5dfb1dee634e1b55cf0c01d1a7eb701be2227a03e0641
+FROM ${POSTGRES_IMAGE}
 
 LABEL org.opencontainers.image.source="https://github.com/evokoa/pggraph" \
       org.opencontainers.image.description="PostgreSQL with pgGraph pre-installed" \
