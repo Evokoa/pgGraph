@@ -304,13 +304,27 @@ fn max_overlay_memory_bytes() -> usize {
     reason = "Phase 2C write operators call this after PostgreSQL accepts edge DML"
 )]
 pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()> {
-    ensure_write_capacity(0, 1, estimated_added_edge_bytes())?;
+    let cancels_delete = TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().is_some_and(|delta| {
+            delta
+                .deleted_edges
+                .contains(&(source, edge.target, edge.type_id))
+        })
+    });
+    if cancels_delete {
+        ensure_write_capacity(0, 0, 0)?;
+    } else {
+        ensure_write_capacity(0, 1, estimated_added_edge_bytes())?;
+    }
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
-        delta
+        if delta
             .deleted_edges
-            .remove(&(source, edge.target, edge.type_id));
+            .remove(&(source, edge.target, edge.type_id))
+        {
+            return;
+        }
         delta.added_edges.entry(source).or_default().push(edge);
     });
     Ok(())
@@ -322,7 +336,20 @@ pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()>
     reason = "Phase 2E write operators call this after PostgreSQL accepts edge DML"
 )]
 pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> GraphResult<()> {
-    ensure_write_capacity(0, 1, estimated_deleted_edge_bytes())?;
+    let cancels_insert = TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().is_some_and(|delta| {
+            delta.added_edges.get(&source).is_some_and(|edges| {
+                edges
+                    .iter()
+                    .any(|edge| edge.target == target && edge.type_id == type_id)
+            })
+        })
+    });
+    if cancels_insert {
+        ensure_write_capacity(0, 0, 0)?;
+    } else {
+        ensure_write_capacity(0, 1, estimated_deleted_edge_bytes())?;
+    }
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
@@ -330,6 +357,9 @@ pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> Grap
             edges.retain(|edge| edge.target != target || edge.type_id != type_id);
             if edges.is_empty() {
                 delta.added_edges.remove(&source);
+            }
+            if cancels_insert {
+                return;
             }
         }
         delta.deleted_edges.insert((source, target, type_id));
@@ -645,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn edge_overlay_normalizes_local_insert_delete_order() {
+    fn edge_overlay_cancels_local_insert_delete_pairs() {
         clear_current_transaction_state();
 
         record_added_edge(
@@ -660,7 +690,7 @@ mod tests {
         record_deleted_edge(1, 2, 1).expect("record delete");
         let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
         assert!(inserts.is_empty());
-        assert!(deletes.get(&1).is_some_and(|edges| edges.contains(&(2, 1))));
+        assert!(deletes.is_empty());
 
         record_added_edge(
             1,
@@ -674,6 +704,45 @@ mod tests {
         let (inserts, deletes) = edge_overlay(TraversalDirection::In);
         assert!(deletes.is_empty());
         assert!(inserts.get(&2).is_some_and(|edges| edges.contains(&(1, 1))));
+
+        record_deleted_edge(1, 2, 1).expect("record delete after insert");
+        let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
+        assert!(inserts.is_empty());
+        assert!(deletes.is_empty());
+    }
+
+    #[test]
+    fn edge_delta_capacity_allows_net_neutral_pairs_at_limit() {
+        clear_current_transaction_state();
+        set_test_limits(100_000, 1, 256 * 1_048_576);
+
+        record_deleted_edge(1, 2, 1).expect("record delete at limit");
+        record_added_edge(
+            1,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect("delete plus add should be net neutral at limit");
+        assert_eq!(stats().deleted_edges, 0);
+        assert_eq!(stats().added_edges, 0);
+
+        record_added_edge(
+            1,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect("record insert at limit");
+        record_deleted_edge(1, 2, 1).expect("insert plus delete should be net neutral at limit");
+        assert_eq!(stats().deleted_edges, 0);
+        assert_eq!(stats().added_edges, 0);
+
+        clear_for_test();
     }
 
     #[test]
