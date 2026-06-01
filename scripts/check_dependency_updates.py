@@ -122,15 +122,20 @@ def python_dependencies() -> list[Dependency]:
 def docker_dependencies() -> list[Dependency]:
     dockerfile = ROOT / "Dockerfile"
     deps: list[Dependency] = []
-    pattern = re.compile(r"^FROM\s+([^:\s]+):([^@\s]+)")
+    patterns = [
+        re.compile(r"^FROM\s+([^:\s$]+):([^@\s]+)"),
+        re.compile(r"^ARG\s+[A-Za-z_][A-Za-z0-9_]*=([^:\s]+):([^@\s]+)"),
+    ]
     for line in dockerfile.read_text().splitlines():
-        match = pattern.match(line.strip())
-        if not match:
-            continue
-        image, tag = match.groups()
-        # Docker updates need digest review, so this script reports but does not
-        # rewrite Dockerfile FROM lines automatically.
-        deps.append(Dependency("docker", image, tag, dockerfile, False))
+        for pattern in patterns:
+            match = pattern.match(line.strip())
+            if not match:
+                continue
+            image, tag = match.groups()
+            # Docker updates need tag/digest review, so this script reports but
+            # does not rewrite Dockerfile base image references automatically.
+            deps.append(Dependency("docker", image, tag, dockerfile, False))
+            break
     return deps
 
 
