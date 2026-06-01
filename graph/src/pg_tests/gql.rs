@@ -2386,6 +2386,103 @@ fn gql_delete_edge_removes_source_row_and_tombstones_neighbors() {
 }
 
 #[pg_test]
+fn gql_delete_dynamic_edge_label_deletes_only_matching_label_row() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest
+         ADD COLUMN rel_type text NOT NULL DEFAULT 'colleague'",
+    )
+    .expect("add dynamic relationship label column failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id, rel_type)
+         VALUES ('f2', 'u1', 'u2', 'mentor')",
+    )
+    .expect("insert second dynamic relationship failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                from_table := 'graph_test_friendships_pgtest'::regclass,
+                from_column := 'user_id',
+                to_table := 'graph_test_users_pgtest'::regclass,
+                to_column := 'friend_id',
+                label := 'related_to',
+                bidirectional := false,
+                label_column := 'rel_type'
+            )",
+    )
+    .expect("add dynamic friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable dynamic relationship graph failed");
+
+    let (returned_source, returned_target, colleague_rows, mentor_rows) =
+        Spi::connect(|client| {
+            let deleted = client
+                .select(
+                    "SELECT row #>> '{source}', row #>> '{target}'
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[r:colleague]->(v:graph_test_users_pgtest {id: ''u2''}) DELETE r RETURN u.id AS source, v.id AS target'
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("dynamic label delete failed")
+                .first();
+            let colleague_rows = client
+                .select(
+                    "SELECT count(*)::bigint
+                     FROM public.graph_test_friendships_pgtest
+                     WHERE rel_type = 'colleague'",
+                    None,
+                    &[],
+                )
+                .expect("colleague row count failed")
+                .first()
+                .get::<i64>(1)
+                .expect("colleague count read failed")
+                .unwrap_or_default();
+            let mentor_rows = client
+                .select(
+                    "SELECT count(*)::bigint
+                     FROM public.graph_test_friendships_pgtest
+                     WHERE rel_type = 'mentor'",
+                    None,
+                    &[],
+                )
+                .expect("mentor row count failed")
+                .first()
+                .get::<i64>(1)
+                .expect("mentor count read failed")
+                .unwrap_or_default();
+            Ok::<_, pgrx::spi::Error>((
+                deleted
+                    .get::<String>(1)
+                    .expect("source read failed")
+                    .unwrap_or_default(),
+                deleted
+                    .get::<String>(2)
+                    .expect("target read failed")
+                    .unwrap_or_default(),
+                colleague_rows,
+                mentor_rows,
+            ))
+        })
+        .expect("dynamic label delete verification failed");
+
+    assert_eq!(returned_source, "u1");
+    assert_eq!(returned_target, "u2");
+    assert_eq!(colleague_rows, 0);
+    assert_eq!(mentor_rows, 1);
+}
+
+#[pg_test]
 fn gql_delete_edge_delta_limit_aborts_before_source_delete() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");

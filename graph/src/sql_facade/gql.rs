@@ -1288,7 +1288,7 @@ fn delete_mapped_edge_row(
                 .is_some_and(|oid| oid == plan.edge_table_oid)
                 && edge.from_column == plan.source_column
                 && edge.to_column == plan.target_column
-                && edge.label == plan.rel_type
+                && (edge.label == plan.rel_type || edge.label_column.is_some())
         })
         .ok_or_else(|| {
             safety::GraphError::Internal(format!(
@@ -1311,9 +1311,21 @@ fn delete_mapped_edge_row(
         && plan.edge_source_table_oid == plan.edge_target_table_oid
         && source_id != target_id
     {
-        return delete_bidirectional_self_edge_row(plan, table_name.as_sql(), source_id, target_id);
+        return delete_bidirectional_self_edge_row(
+            plan,
+            table_name.as_sql(),
+            edge.label_column.as_deref(),
+            source_id,
+            target_id,
+        );
     }
-    match try_delete_mapped_edge_row(plan, table_name.as_sql(), source_id, target_id)? {
+    match try_delete_mapped_edge_row(
+        plan,
+        table_name.as_sql(),
+        edge.label_column.as_deref(),
+        source_id,
+        target_id,
+    )? {
         DeleteEdgeRowResult::Deleted => {
             return Ok(MatchedEdgeIds {
                 source_id: source_id.to_string(),
@@ -1330,7 +1342,13 @@ fn delete_mapped_edge_row(
             });
         }
     }
-    match try_delete_mapped_edge_row(plan, table_name.as_sql(), target_id, source_id)? {
+    match try_delete_mapped_edge_row(
+        plan,
+        table_name.as_sql(),
+        edge.label_column.as_deref(),
+        target_id,
+        source_id,
+    )? {
         DeleteEdgeRowResult::Deleted => Ok(MatchedEdgeIds {
             source_id: target_id.to_string(),
             target_id: source_id.to_string(),
@@ -1347,14 +1365,16 @@ fn delete_mapped_edge_row(
 fn delete_bidirectional_self_edge_row(
     plan: &crate::query::physical_plan::PhysicalDeleteEdge,
     table_sql: &str,
+    label_column: Option<&str>,
     source_id: &str,
     target_id: &str,
 ) -> safety::GraphResult<MatchedEdgeIds> {
-    let forward = count_mapped_edge_rows(plan, table_sql, source_id, target_id)?;
-    let reverse = count_mapped_edge_rows(plan, table_sql, target_id, source_id)?;
+    let forward = count_mapped_edge_rows(plan, table_sql, label_column, source_id, target_id)?;
+    let reverse = count_mapped_edge_rows(plan, table_sql, label_column, target_id, source_id)?;
     match (forward, reverse) {
         (1, 0) => {
-            let deleted = try_delete_mapped_edge_row(plan, table_sql, source_id, target_id)?;
+            let deleted =
+                try_delete_mapped_edge_row(plan, table_sql, label_column, source_id, target_id)?;
             if matches!(deleted, DeleteEdgeRowResult::Deleted) {
                 Ok(MatchedEdgeIds {
                     source_id: source_id.to_string(),
@@ -1365,7 +1385,8 @@ fn delete_bidirectional_self_edge_row(
             }
         }
         (0, 1) => {
-            let deleted = try_delete_mapped_edge_row(plan, table_sql, target_id, source_id)?;
+            let deleted =
+                try_delete_mapped_edge_row(plan, table_sql, label_column, target_id, source_id)?;
             if matches!(deleted, DeleteEdgeRowResult::Deleted) {
                 Ok(MatchedEdgeIds {
                     source_id: target_id.to_string(),
@@ -1394,21 +1415,30 @@ enum DeleteEdgeRowResult {
 fn count_mapped_edge_rows(
     plan: &crate::query::physical_plan::PhysicalDeleteEdge,
     table_sql: &str,
+    label_column: Option<&str>,
     source_id: &str,
     target_id: &str,
 ) -> safety::GraphResult<i64> {
+    let label_predicate = label_column
+        .map(|column| format!("\n           AND e.{}::text = $3", quote_ident(column)))
+        .unwrap_or_default();
     let query = format!(
         "SELECT count(*)::bigint
          FROM {} AS e
          WHERE e.{}::text = $1
-           AND e.{}::text = $2",
+           AND e.{}::text = $2{}",
         table_sql,
         quote_ident(&plan.source_column),
         quote_ident(&plan.target_column),
+        label_predicate,
     );
     pgrx::Spi::connect(|client| {
+        let mut params = vec![source_id.into(), target_id.into()];
+        if label_column.is_some() {
+            params.push(plan.rel_type.as_str().into());
+        }
         client
-            .select(&query, None, &[source_id.into(), target_id.into()])
+            .select(&query, None, &params)
             .map_err(|err| safety::GraphError::GqlExecution {
                 reason: format!(
                     "GQL DELETE edge row lookup failed for {}: {}",
@@ -1438,15 +1468,19 @@ fn edge_row_missing(plan: &crate::query::physical_plan::PhysicalDeleteEdge) -> s
 fn try_delete_mapped_edge_row(
     plan: &crate::query::physical_plan::PhysicalDeleteEdge,
     table_sql: &str,
+    label_column: Option<&str>,
     source_id: &str,
     target_id: &str,
 ) -> safety::GraphResult<DeleteEdgeRowResult> {
+    let label_predicate = label_column
+        .map(|column| format!("\n               AND e.{}::text = $3", quote_ident(column)))
+        .unwrap_or_default();
     let query = format!(
         "WITH candidates AS (
              SELECT e.ctid
              FROM {} AS e
              WHERE e.{}::text = $1
-               AND e.{}::text = $2
+               AND e.{}::text = $2{}
              LIMIT 2
          ),
          deleted AS (
@@ -1462,14 +1496,19 @@ fn try_delete_mapped_edge_row(
         table_sql,
         quote_ident(&plan.source_column),
         quote_ident(&plan.target_column),
+        label_predicate,
         table_sql
     );
     pgrx::Spi::connect_mut(|client| {
-        let rows = client
-            .update(&query, None, &[source_id.into(), target_id.into()])
-            .map_err(|err| safety::GraphError::GqlExecution {
+        let mut params = vec![source_id.into(), target_id.into()];
+        if label_column.is_some() {
+            params.push(plan.rel_type.as_str().into());
+        }
+        let rows = client.update(&query, None, &params).map_err(|err| {
+            safety::GraphError::GqlExecution {
                 reason: format!("GQL DELETE edge row failed for {}: {}", table_sql, err),
-            })?;
+            }
+        })?;
         let row = rows.first();
         let candidates = row
             .get::<i64>(1)
