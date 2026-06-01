@@ -1,6 +1,6 @@
 //! JSON value projection and hydrated predicate evaluation for GQL rows.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 use crate::safety::{GraphError, GraphResult};
 
@@ -335,13 +335,19 @@ where
             .map(serde_json::Value::to_string)
             .collect::<Vec<_>>()
             .join("\u{1f}");
-        let group = groups.entry(key).or_insert_with(|| AggregateGroup {
-            group_values,
-            states: aggregate_slots
-                .iter()
-                .map(|slot| AggregateState::new(slot))
-                .collect(),
-        });
+        let group = match groups.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let states = aggregate_slots
+                    .iter()
+                    .map(|slot| AggregateState::new(slot))
+                    .collect::<GraphResult<Vec<_>>>()?;
+                entry.insert(AggregateGroup {
+                    group_values,
+                    states,
+                })
+            }
+        };
         for (state, slot) in group.states.iter_mut().zip(aggregate_slots.iter()) {
             let ReturnSlot::Aggregate { arg, .. } = slot else {
                 continue;
@@ -358,7 +364,7 @@ where
                 states: aggregate_slots
                     .iter()
                     .map(|slot| AggregateState::new(slot))
-                    .collect(),
+                    .collect::<GraphResult<Vec<_>>>()?,
             },
         );
     }
@@ -429,8 +435,8 @@ enum AggregateState {
 }
 
 impl AggregateState {
-    fn new(slot: &ReturnSlot) -> Self {
-        match slot {
+    fn new(slot: &ReturnSlot) -> GraphResult<Self> {
+        let state = match slot {
             ReturnSlot::Aggregate {
                 func: AggregateFunc::Count,
                 distinct,
@@ -481,8 +487,13 @@ impl AggregateState {
                 values: Vec::new(),
                 distinct: distinct_set(*distinct),
             },
-            _ => unreachable!("aggregate state requires aggregate slot"),
-        }
+            _ => {
+                return Err(GraphError::Internal(
+                    "aggregate state requires aggregate return slot".to_string(),
+                ));
+            }
+        };
+        Ok(state)
     }
 
     fn accumulate(&mut self, value: serde_json::Value) -> GraphResult<()> {
@@ -901,7 +912,9 @@ fn compare_values(lhs: &EvalValue, op: BoundCmpOp, rhs: Option<&EvalValue>) -> G
         return Ok(false);
     }
     let EvalValue::Value(lhs) = lhs else {
-        unreachable!("missing handled above");
+        return Err(GraphError::Internal(
+            "GQL comparison received non-value left-hand side".to_string(),
+        ));
     };
     match op {
         BoundCmpOp::Eq => Ok(lhs == required_rhs(op, rhs)?),
@@ -926,7 +939,9 @@ fn required_rhs(op: BoundCmpOp, rhs: Option<&EvalValue>) -> GraphResult<&serde_j
         reason: format!("GQL comparison {op:?} requires a right-hand side"),
     })?;
     let EvalValue::Value(value) = value else {
-        unreachable!("missing handled by compare_values");
+        return Err(GraphError::Internal(
+            "GQL comparison received non-value right-hand side".to_string(),
+        ));
     };
     Ok(value)
 }
