@@ -3,7 +3,7 @@
 //! This module owns the optional `graph.cypher()` parsing boundary. It accepts
 //! only the openCypher syntax that maps cleanly into pgGraph's PostgreSQL-first
 //! GQL IR and returns explicit unsupported-feature diagnostics for constructs
-//! that would imply broader Neo4j compatibility.
+//! that would imply full openCypher compatibility.
 
 pub(crate) mod ast;
 pub(crate) mod lexer;
@@ -121,9 +121,9 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_matrix_does_not_claim_neo4j_parity() {
-        assert!(ast::COMPATIBILITY_MATRIX
-            .iter()
-            .any(|row| row.feature == "Neo4j compatibility" && row.status == "not claimed"));
+    fn compatibility_matrix_does_not_claim_full_opencypher_parity() {
+        assert!(ast::COMPATIBILITY_MATRIX.iter().any(|row| row.feature
+            == "Full openCypher compatibility"
+            && row.status == "not claimed"));
     }
 }

@@ -46,9 +46,9 @@ pub(crate) const COMPATIBILITY_MATRIX: &[CypherCompatibilityRow] = &[
         notes: "index, constraint, database, and schema DDL remain PostgreSQL responsibilities",
     },
     CypherCompatibilityRow {
-        feature: "Neo4j compatibility",
+        feature: "Full openCypher compatibility",
         status: "not claimed",
-        notes: "graph.cypher() is a narrow compatibility surface, not a Neo4j-compatible database API",
+        notes: "graph.cypher() is a narrow compatibility surface, not a full openCypher-compatible database API",
     },
 ];
 

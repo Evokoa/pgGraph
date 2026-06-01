@@ -634,7 +634,7 @@ graph.cypher(
 ```
 
 Executes the openCypher compatibility subset. This function is separate from
-`graph.gql()` and intentionally does not claim Neo4j compatibility. Supported
+`graph.gql()` and intentionally does not claim full openCypher compatibility. Supported
 overlapping read patterns and mapped writes lower into the same shared IR as
 GQL, so the same PostgreSQL catalog registration, ACL, RLS, constraint, trigger,
 MVCC, and mutable-overlay rules apply. Cypher-only procedure, DDL, import, and
@@ -659,7 +659,7 @@ RETURNS TABLE(feature text, status text, notes text)
 
 Returns the current openCypher compatibility matrix. Use it to distinguish
 supported overlapping syntax from rejected Cypher-only features and from the
-explicit non-claim of Neo4j compatibility.
+explicit non-claim of full openCypher compatibility.
 
 ## Search
 

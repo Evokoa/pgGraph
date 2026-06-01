@@ -310,7 +310,7 @@ planning stages without executing the query.
 
 `graph.cypher()` is a separate compatibility surface for openCypher-shaped text
 that maps into the same pgGraph execution model as `graph.gql()`. It is not a
-Neo4j-compatible database API. Supported overlapping reads and mapped writes
+full openCypher-compatible database API. Supported overlapping reads and mapped writes
 lower into the shared GQL IR, so labels still resolve to registered PostgreSQL
 source tables, relationship types still resolve to registered edge labels, and
 PostgreSQL remains authoritative for ACLs, RLS, constraints, triggers, and

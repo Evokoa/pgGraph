@@ -156,7 +156,7 @@ fn cypher_rejects_unmappable_features_with_gql_sqlstate() {
 fn cypher_compatibility_matrix_is_separate_and_honest() {
     reset_and_create_fixtures();
 
-    let (supported_rows, neo4j_rows) = Spi::connect(|client| {
+    let (supported_rows, full_opencypher_rows) = Spi::connect(|client| {
         let supported_rows = client
             .select(
                 "SELECT count(*)::bigint
@@ -170,23 +170,23 @@ fn cypher_compatibility_matrix_is_separate_and_honest() {
             .get::<i64>(1)
             .expect("supported compatibility count read failed")
             .unwrap_or_default();
-        let neo4j_rows = client
+        let full_opencypher_rows = client
             .select(
                 "SELECT count(*)::bigint
                  FROM graph.cypher_compatibility()
-                 WHERE feature = 'Neo4j compatibility' AND status = 'not claimed'",
+                 WHERE feature = 'Full openCypher compatibility' AND status = 'not claimed'",
                 None,
                 &[],
             )
-            .expect("neo4j compatibility query failed")
+            .expect("full openCypher compatibility query failed")
             .first()
             .get::<i64>(1)
-            .expect("neo4j compatibility count read failed")
+            .expect("full openCypher compatibility count read failed")
             .unwrap_or_default();
-        Ok::<_, pgrx::spi::Error>((supported_rows, neo4j_rows))
+        Ok::<_, pgrx::spi::Error>((supported_rows, full_opencypher_rows))
     })
     .expect("compatibility verification failed");
 
     assert!(supported_rows > 0);
-    assert_eq!(neo4j_rows, 1);
+    assert_eq!(full_opencypher_rows, 1);
 }
