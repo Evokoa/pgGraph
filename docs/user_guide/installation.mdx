@@ -152,12 +152,12 @@ supports **linux/amd64** and **linux/arm64**, so it works on macOS, Linux, and
 Windows (via Docker Desktop or WSL2).
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:0.1.4
+docker pull ghcr.io/evokoa/pggraph:0.1.5
 ```
 
 | Tag | Description |
 |---|---|
-| `0.1.4` | Pinned reproducible tag — always resolves to the same image digest |
+| `0.1.5` | Pinned reproducible tag — always resolves to the same image digest |
 | `latest` | Moving tag that points to the most recent stable release |
 
 Start the container:
@@ -167,7 +167,7 @@ docker run --rm \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=graph \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:0.1.4
+  ghcr.io/evokoa/pggraph:0.1.5
 ```
 
 Verify that `pg_cron` and `graph` are installed and loaded:

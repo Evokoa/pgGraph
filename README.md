@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-0.1.4-2ea44f?style=flat-square" alt="Version 0.1.4">
+    <img src="https://img.shields.io/badge/version-0.1.5-2ea44f?style=flat-square" alt="Version 0.1.5">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -100,12 +100,12 @@ The image is multi-arch (`linux/amd64` and `linux/arm64`) and works on macOS,
 Linux, and Windows via Docker Desktop.
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:0.1.4
+docker pull ghcr.io/evokoa/pggraph:0.1.5
 docker run -d --rm \
   --name pggraph \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:0.1.4
+  ghcr.io/evokoa/pggraph:0.1.5
 ```
 
 The default database is `graph` with `pg_cron` and a maintenance job

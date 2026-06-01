@@ -2,6 +2,59 @@
 
 Release notes are ordered newest first.
 
+## v0.1.5: GQL Mutable Projection Stabilization
+
+`v0.1.5` hardens the GQL mutable-overlay path, fixes several edge-case
+semantics found during review, and makes the Docker-backed playground release
+gate validate the current checkout instead of a stale container image. It keeps
+the `v0.1.4` installation and SQL function surface compatible.
+
+### Highlights
+
+- Fixed mapped dynamic-label edge deletes so rows with `NULL` or blank
+  `label_column` values fall back to the registered relationship label.
+- Preserved transaction-local nodes for non-tenanted tables even when a session
+  tenant scope is active, while still hiding unscoped writes for tenanted tables.
+- Fixed optional aggregate semantics so `collect`, `count(expr)`, `sum`, `avg`,
+  `min`, and `max` ignore JSON `null` values while `count(*)` still counts
+  every input row.
+- Cancelled net-neutral transaction edge deltas before overlay-cap accounting,
+  avoiding false overlay-limit failures for insert/delete pairs that leave no
+  pending edge.
+- Normalized GQL path function names case-insensitively for `nodes(path)`,
+  `relationships(path)`, and `length(path)`.
+- Returned typed GQL errors for value-projection invariants instead of relying
+  on internal panics.
+- Decoupled variable-length path cardinality from whether the query returns a
+  path value, and preserved explicit `*1..1` path-distinct matches.
+- Stabilized `graph.gql_explain()` output around registered table labels and
+  fixed catalog reads of `regclass` fields so explain fixtures no longer drift
+  with table OIDs.
+- Updated the playground release gate to rebuild the Docker image and recreate
+  the playground container during the full release gate, preventing stale
+  extension binaries from passing or failing the fixture suite.
+
+### Testing
+
+- Added regression coverage for dynamic-label delete fallback values,
+  non-tenanted transaction-local node visibility under tenant scope, explicit
+  single-hop variable-length path cardinality, catalog-backed explain labels,
+  and playground release-gate freshness.
+- Spawned a second-opinion Rust review subagent for the GQL/projection changes;
+  all findings from that pass were fixed.
+
+### Validation
+
+The full `pg17` release gate passed, including fmt, clippy, docs, unit tests,
+pgrx SQL tests, cargo-deny, fuzz binary checks, package validation, fresh
+install smoke, metadata audit, SQLSTATE/ACL boundary tests, backup/restore,
+advisory-lock regressions, concurrency, synthetic smoke, rebuilt playground
+fixtures, pgbench sync stress, and GQL transaction lifecycle scripts:
+
+```bash
+PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
+```
+
 ## v0.1.4: PGXN Distribution
 
 `v0.1.4` adds PGXN distribution metadata and a top-level Makefile for

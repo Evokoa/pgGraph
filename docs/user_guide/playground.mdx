@@ -87,6 +87,43 @@ The app warms the graph before reading status so node and edge counts should
 reflect the loaded dataset. If the graph is still building, the app waits for
 the build to complete or reports the build error.
 
+## Built-In Query Catalog
+
+The sidebar query catalog is shared with the playground release gate. It
+currently validates 29 examples:
+
+| Section | Queries |
+|---|---|
+| Core Functions | Status + Catalog; Search Mossack; Find Mossack; Traverse Neighborhood; Expand Neighborhood; Shortest Path; GQL One-Hop Relationships; GQL Aggregated Neighbors; GQL Explain; Component Stats; Largest Component |
+| Sample Workflows | Table Sizes; Relationship Label Counts; Top Connected Officers; Top Connected Entities; Entity Direct Relationships; Officer Context Packet; Search Entity Then Expand; Relationship Filtered Walk; Capped 3-Hop Investigation |
+| Admin | Build Graph; Build Graph Concurrently; Build Status; Sync Health; Apply Sync; Scheduled Maintenance; Vacuum Graph; Maintenance; Maintenance Status |
+
+The GQL examples use the registered Panama `nodes` label and dynamic
+relationship labels from `panama.edges.rel_type`. You can edit those examples
+or run other supported GQL subset queries through `graph.gql()` and
+`graph.gql_explain()`.
+
+Supported GQL in the playground includes:
+
+- node-only `MATCH`;
+- directed, inbound, undirected, and bounded variable-length relationship
+  `MATCH` patterns;
+- top-level single-relationship `OPTIONAL MATCH`;
+- property predicates, inline property maps, JSONB dotted property paths,
+  `$parameters`, null checks, membership, and boolean combinations;
+- `RETURN`, `RETURN DISTINCT`, `WITH DISTINCT`, aliases, `ORDER BY`, `SKIP`,
+  and `LIMIT`;
+- aggregates `count`, `sum`, `avg`, `min`, `max`, and `collect`;
+- named relationship path values plus `nodes(path)`, `relationships(path)`,
+  and `length(path)`;
+- mutable-overlay writes when the graph is built in mutable mode: single-node
+  `CREATE`, single-node `MERGE`, single-property `SET` and `REMOVE`, directed
+  relationship `DELETE` backed by a registered edge row table, and single-node
+  `DETACH DELETE`.
+
+The playground examples run against the default read-only Panama build, so the
+sidebar focuses on read queries and admin/operator checks.
+
 ## Release Gate
 
 The playground SQL examples are part of the heavy release gate. The gate imports
