@@ -7,7 +7,11 @@ PG_MAJOR="${PG_MAJOR:-17}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-docker build --build-arg "PG_MAJOR=${PG_MAJOR}" -t "$IMAGE" "$ROOT_DIR"
+docker build \
+  --build-arg "PG_MAJOR=${PG_MAJOR}" \
+  --build-arg "POSTGRES_IMAGE=postgres:${PG_MAJOR}-bookworm" \
+  -t "$IMAGE" \
+  "$ROOT_DIR"
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" -e "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}" -p 55432:5432 "$IMAGE" >/dev/null
 
