@@ -1461,6 +1461,66 @@ fn optional_path_functions_return_null_for_unmatched_rows() {
 }
 
 #[test]
+fn relationship_node_projection_errors_when_required_hydration_is_missing() {
+    let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u");
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let err = project_rows(
+        rows,
+        &physical,
+        &HydratedRows::new(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err.to_string().contains("could not hydrate"));
+}
+
+#[test]
+fn node_scan_projection_errors_when_required_hydration_is_missing() {
+    let ast = crate::gql::parse_statement("MATCH (u:users) RETURN u").unwrap();
+    let logical = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::NodeScan(scan) = logical else {
+        panic!("expected node scan");
+    };
+    let physical = lower_statement(super::logical_plan::LogicalStatement::NodeScan(scan));
+    let super::physical_plan::PhysicalStatement::NodeScan(physical) = physical else {
+        panic!("expected physical node scan");
+    };
+    let engine = engine_fixture();
+    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let err = project_node_rows(
+        rows,
+        &physical,
+        &HydratedRows::new(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err.to_string().contains("could not hydrate"));
+}
+
+#[test]
+fn missing_hydrated_property_does_not_match_is_null_predicate() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) WHERE u.name IS NULL RETURN u.name AS name",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let err = super::value::filter_rows(rows, &physical, &HydratedRows::new(), &QueryParams::new())
+        .unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err.to_string().contains("could not hydrate"));
+}
+
+#[test]
 fn optional_aggregate_counts_null_extended_rows_like_left_join() {
     let logical = bind_query(
         "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies) \

@@ -213,8 +213,8 @@ row into a registered source table, `SET` can update one mapped property on
 one matched node, `REMOVE` can clear one mapped property on one matched node,
 and directed `DELETE` can remove one matched relationship backed by a
 registered edge row table. `DETACH DELETE` can remove one matched node and its
-incident registered edge-row relationships. `MERGE` can insert or lock one
-mapped node by registered primary-key identity and run one branch update. These
+incident registered edge-row relationships. `MERGE` can insert one mapped node
+or match one mapped node by registered primary-key identity and run one branch update. These
 writes require that the active graph was built with
 `mode := 'mutable_overlay'` and `graph.mutable_enabled = on`:
 
@@ -293,7 +293,8 @@ policy for rewriting arbitrary endpoint-table foreign keys. `MERGE` is
 supported for one mapped node. The registered primary key columns are the match
 identity, tenant scope participates when configured, `ON CREATE` values are
 evaluated only for inserted rows, and `ON MATCH` values are evaluated only for
-matched rows. pgGraph locks an existing row with `FOR UPDATE` and inserts with
+matched rows. pgGraph locks an existing matched row with `FOR UPDATE` only when
+`ON MATCH SET` can update it; insert races use PostgreSQL
 `ON CONFLICT DO NOTHING` on the registered identity, so concurrent sessions
 racing the same key converge on one PostgreSQL source row. `MERGE` requires
 `SELECT` and `INSERT` on the mapped source table; `UPDATE` is required only when

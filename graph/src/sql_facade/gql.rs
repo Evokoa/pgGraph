@@ -150,7 +150,9 @@ fn check_create_acl(plan: &crate::query::physical_plan::PhysicalCreateNode) {
 fn check_merge_acl(plan: &crate::query::physical_plan::PhysicalMergeNode) {
     acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
     acl::check_table_insert_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
-    acl::check_table_update_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+    if plan.on_match.is_some() {
+        acl::check_table_update_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+    }
 }
 
 fn check_node_scan_acl(plan: &crate::query::physical_plan::PhysicalNodeScan) {
@@ -825,12 +827,16 @@ fn try_lock_merge_node(
         }
         _ => String::new(),
     };
+    let lock_clause = if plan.on_match.is_some() {
+        " FOR UPDATE OF src"
+    } else {
+        ""
+    };
     let query = format!(
         "SELECT to_jsonb(src.*), {}
          FROM {} AS src, jsonb_populate_record(NULL::{}, $1::jsonb) AS rec
-         WHERE {} = {}{}
-         FOR UPDATE OF src",
-        pk_expr, table_sql, table_sql, pk_expr, rec_pk_expr, tenant_predicate
+         WHERE {} = {}{}{}",
+        pk_expr, table_sql, table_sql, pk_expr, rec_pk_expr, tenant_predicate, lock_clause
     );
     pgrx::Spi::connect_mut(|client| {
         let rows = client
@@ -2138,9 +2144,7 @@ fn hydrate_gql_rows(
             if hydrated.contains_key(&key) {
                 continue;
             }
-            let node = hydrate_node(coordinate.table_oid, &coordinate.node_id)?
-                .map(|json| json.0)
-                .unwrap_or(serde_json::Value::Null);
+            let node = hydrate_required_node(coordinate)?;
             hydrated.insert(key, node);
         }
     }
@@ -2160,12 +2164,23 @@ fn hydrate_gql_node_rows(
         if hydrated.contains_key(&key) {
             continue;
         }
-        let node = hydrate_node(row.node.table_oid, &row.node.node_id)?
-            .map(|json| json.0)
-            .unwrap_or(serde_json::Value::Null);
+        let node = hydrate_required_node(&row.node)?;
         hydrated.insert(key, node);
     }
     Ok(hydrated)
+}
+
+fn hydrate_required_node(
+    coordinate: &crate::query::execute::GqlNodeCoordinate,
+) -> safety::GraphResult<serde_json::Value> {
+    hydrate_node(coordinate.table_oid, &coordinate.node_id)?
+        .map(|json| json.0)
+        .ok_or_else(|| safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL could not hydrate node `{}` from table OID {}",
+                coordinate.node_id, coordinate.table_oid
+            ),
+        })
 }
 
 #[cfg(feature = "pg_test")]

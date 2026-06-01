@@ -221,6 +221,9 @@ Rules:
 - **`hydrate := false`** returns coordinate-only nodes/relationships (no source
   columns), avoiding the per-row `to_jsonb(src.*)` SPI lookup. Scalars and
   aggregates are unaffected.
+- **Required hydration is fail-closed:** if a coordinate in the graph cannot be
+  hydrated from its backing PostgreSQL source row, GQL raises `PG017` instead of
+  manufacturing an empty hydrated node object or matching `IS NULL` predicates.
 - The `_id` / `_labels` / `_type` / `_start` / `_end` / `_path` reserved keys
   are stable contract and snapshot-tested. Source columns named with a leading
   underscore collide with reserved keys and are a documented bind-time

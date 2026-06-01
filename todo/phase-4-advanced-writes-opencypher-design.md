@@ -80,12 +80,17 @@ GQL/SQL-PGQ primary.
   MATCH branches, constraint interaction.
 
   Status, 2026-05-31: closed for single-node mapped node merge. Execution uses
-  the registered primary-key columns as the identity, probes existing rows with
-  `FOR UPDATE`, inserts through `ON CONFLICT DO NOTHING`, retries the lock path
-  after insert races, and evaluates `ON CREATE`/`ON MATCH` branch values only on
-  the branch taken. Tests cover parser/binder shape, insert/match branches,
+  the registered primary-key columns as the identity, probes existing rows and
+  uses `FOR UPDATE` only when `ON MATCH SET` can update the row, inserts through
+  `ON CONFLICT DO NOTHING`, retries the match path after insert races, and
+  evaluates `ON CREATE`/`ON MATCH` branch values only on the branch taken. Tests
+  cover parser/binder shape, insert/match branches,
   missing identity, readonly projection rejection, branch-lazy parameters,
   delta-limit rollback, and a heavy two-session same-key race.
+
+  Status, 2026-06-01: `MERGE` ACL preflight is branch-sensitive. The statement
+  requires `SELECT` and `INSERT` on the mapped source table; `UPDATE` is required
+  only when the query includes an `ON MATCH SET` branch.
 - **4D — openCypher frontend (optional).** `cypher/` modules + `graph.cypher()`.
   Tests: parser totality fuzzing, rejection corpus for unmappable features,
   SQLSTATE stability across both function surfaces, shared-IR equivalence with

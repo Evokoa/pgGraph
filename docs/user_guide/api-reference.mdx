@@ -604,8 +604,9 @@ creation and multi-row writes are not part of this release's GQL subset.
 `MERGE (n:label {properties}) [ON CREATE SET ...] [ON MATCH SET ...] RETURN ...`
 is supported for a single node whose label maps to a registered source table. It
 requires a `mutable_overlay` projection and uses the registered primary key
-columns as the match identity. Existing rows are locked with `FOR UPDATE`; new
-rows are inserted with PostgreSQL `ON CONFLICT DO NOTHING` on that identity.
+columns as the match identity. Existing rows are locked with `FOR UPDATE` only
+when `ON MATCH SET` can update them; new rows are inserted with PostgreSQL
+`ON CONFLICT DO NOTHING` on that identity.
 `ON CREATE` expressions are evaluated only for inserted rows, and `ON MATCH`
 expressions are evaluated only for matched rows. `MERGE` requires source-table
 `SELECT` and `INSERT`; `UPDATE` is required only for statements that include

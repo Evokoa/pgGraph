@@ -12,6 +12,7 @@ pub(crate) mod logical_plan;
 pub(crate) mod lower;
 pub(crate) mod physical_plan;
 pub(crate) mod semantics;
+#[cfg(test)]
 pub(crate) mod sqlpgq_adapter;
 pub(crate) mod value;
 

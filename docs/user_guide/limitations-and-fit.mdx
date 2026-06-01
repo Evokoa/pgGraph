@@ -43,7 +43,7 @@ data into another system.
 | mmap sharing | Forward graph arrays and resolution bytes are read-only mmap-backed derived artifact sections; reverse CSR and bincode metadata are per-backend heap |
 | Query catch-up | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; set `graph.query_freshness = 'off'` for compatibility/manual catch-up |
 | Search | Search runs against registered source-table columns through PostgreSQL, not against a full-text graph artifact |
-| Hydration | Hydrated rows come from source tables and require source-table privileges |
+| Hydration | Hydrated rows come from source tables and require source-table privileges; required GQL hydration fails closed with `PG017` if a graph coordinate no longer has a readable source row |
 | Components | Connected component functions are global admin operations and touch the whole active graph |
 
 ## Data Freshness Model

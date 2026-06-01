@@ -57,6 +57,9 @@ ORDER BY p.proname, p.oid::regprocedure::text;
 
 Query functions check source-table `SELECT` privileges before accessing graph
 data for the relevant table coordinates. Missing privilege raises `PG002`.
+Mapped GQL writes also preflight the privileges they need on source tables:
+`MERGE` requires `SELECT` and `INSERT`, and it requires `UPDATE` only when the
+query includes `ON MATCH SET`.
 
 <Callout type="info">
 The graph artifact contains source primary keys and topology. ACL checks are
@@ -103,7 +106,7 @@ The extension emits custom SQLSTATEs through PostgreSQL's error reporting API.
 | `PG014` | Unsupported GQL feature | Rewrite the query using supported GQL compatibility-matrix features |
 | `PG015` | GQL semantic error | Verify labels, relationship types, aliases, and return bindings |
 | `PG016` | GQL parameter error | Pass a JSON object containing every `$parameter` referenced by the query |
-| `PG017` | GQL execution error | Reduce result cardinality or rebuild if graph metadata changed |
+| `PG017` | GQL execution error | Reduce result cardinality, fix invalid runtime values, or rebuild/apply sync if a graph coordinate can no longer hydrate its source row |
 | `PG018` | Unsupported graph operation | Use a supported query shape or merge pending overlays before retrying |
 | `PG019` | Overlay limit exceeded | Commit or roll back the transaction, or raise the relevant overlay GUC |
 | `55000` | Extension disabled | `SET graph.enabled = on` |

@@ -170,6 +170,59 @@ fn gql_defaults_to_hydrated_nodes_and_projects_ids_explicitly() {
 }
 
 #[pg_test]
+fn gql_hydration_fails_closed_when_source_row_is_not_visible() {
+    reset_and_create_fixtures();
+    Spi::run("DROP ROLE IF EXISTS graph_gql_hydration_rls").expect("drop role failed");
+    Spi::run("CREATE ROLE graph_gql_hydration_rls").expect("create role failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_gql_hydration_rls_pgtest CASCADE")
+        .expect("drop hydration rls table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_hydration_rls_pgtest (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create hydration rls table failed");
+    Spi::run(
+        "INSERT INTO public.graph_gql_hydration_rls_pgtest (id, name)
+         VALUES ('u1', 'Hidden')",
+    )
+    .expect("insert hydration rls row failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_gql_hydration_rls_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add hydration rls table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build hydration rls graph failed");
+    Spi::run("ALTER TABLE public.graph_gql_hydration_rls_pgtest ENABLE ROW LEVEL SECURITY")
+        .expect("enable hydration rls failed");
+    Spi::run(
+        "GRANT USAGE ON SCHEMA graph, public TO graph_gql_hydration_rls;
+         GRANT SELECT ON public.graph_gql_hydration_rls_pgtest TO graph_gql_hydration_rls",
+    )
+    .expect("grant hydration rls role privileges failed");
+    create_error_sqlstate_helper();
+
+    Spi::run("SET ROLE graph_gql_hydration_rls").expect("set hydration rls role failed");
+    let sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_gql_hydration_rls_pgtest) RETURN u',
+                hydrate := true
+             )"
+        )
+    ))
+    .expect("hydration SQLSTATE capture failed");
+    Spi::run("RESET ROLE").expect("reset hydration rls role failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("PG017"));
+}
+
+#[pg_test]
 fn gql_with_projection_scope_aliases_and_shadows() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();
@@ -1325,6 +1378,68 @@ fn gql_merge_node_inserts_then_updates_mapped_row() {
     assert_eq!(matched_age, 31);
     assert_eq!(source_count, 1);
     assert_eq!(tx_added_nodes, 1);
+}
+
+#[pg_test]
+fn gql_merge_node_without_on_match_does_not_require_update_acl() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+    Spi::run("DROP ROLE IF EXISTS graph_gql_merge_insert_only").expect("drop role failed");
+    Spi::run("CREATE ROLE graph_gql_merge_insert_only").expect("create role failed");
+    Spi::run(
+        "GRANT USAGE ON SCHEMA graph, public TO graph_gql_merge_insert_only;
+         GRANT SELECT, INSERT ON public.graph_test_users_pgtest TO graph_gql_merge_insert_only;
+         REVOKE UPDATE ON public.graph_test_users_pgtest FROM graph_gql_merge_insert_only, PUBLIC",
+    )
+    .expect("grant merge ACL role privileges failed");
+    create_error_sqlstate_helper();
+
+    Spi::run("SET ROLE graph_gql_merge_insert_only").expect("set merge ACL role failed");
+    let inserted_id = Spi::get_one::<String>(
+        "SELECT row #>> '{u,_id,id}'
+         FROM graph.gql(
+            'MERGE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara''})
+             ON CREATE SET u.age = 29
+             RETURN u'
+         )",
+    )
+    .expect("insert-only merge insert failed")
+    .unwrap_or_default();
+    let matched_id = Spi::get_one::<String>(
+        "SELECT row #>> '{u,_id,id}'
+         FROM graph.gql(
+            'MERGE (u:graph_test_users_pgtest {id: ''u3'', name: ''Ignored''})
+             RETURN u'
+         )",
+    )
+    .expect("insert-only merge match failed")
+    .unwrap_or_default();
+    let denied_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MERGE (u:graph_test_users_pgtest {id: ''u3'', name: ''Ignored''})
+                 ON MATCH SET u.name = ''Denied''
+                 RETURN u'
+             )"
+        )
+    ))
+    .expect("merge ACL SQLSTATE capture failed");
+    Spi::run("RESET ROLE").expect("reset role failed");
+
+    assert_eq!(inserted_id, "u3");
+    assert_eq!(matched_id, "u3");
+    assert_eq!(denied_sqlstate.as_deref(), Some("PG002"));
 }
 
 #[pg_test]

@@ -70,6 +70,10 @@ supported subset into the shared GQL AST/binder path, and keeps SQL text parsing
 out of pgGraph. There is still no public SQL/PGQ API. Public exposure remains
 blocked on stable PostgreSQL graph-pattern hooks.
 
+Status, 2026-06-01: the adapter module is compiled only for tests. This keeps
+the compatibility corpus and typed lowering contract available while avoiding a
+production dead-code surface until PostgreSQL provides a stable hook to call it.
+
 ### 5.1 SQL/PGQ Compatibility Matrix
 
 | SQL/PGQ feature area | Status | Notes |

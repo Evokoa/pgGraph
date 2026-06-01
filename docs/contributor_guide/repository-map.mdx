@@ -68,6 +68,7 @@ and keeps shared facade imports local to the SQL boundary:
 | `workflow.rs` | App-friendly workflow wrappers |
 | `components.rs` | Connected component entrypoints |
 | `gql.rs` | `graph.gql()` and `graph.gql_explain()` SQL entrypoints |
+| `cypher.rs` | `graph.cypher()`, `graph.cypher_explain()`, and compatibility matrix entrypoints |
 | `runtime.rs` | Reset, auto-load, current graph validation |
 
 Contributor changes to SQL behavior usually touch one facade file plus one or
