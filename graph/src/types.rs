@@ -175,17 +175,6 @@ impl SearchMode {
     }
 }
 
-/// Build result summary returned by `graph.build()`.
-#[cfg(feature = "development")]
-#[derive(Debug, Clone)]
-pub struct BuildResult {
-    pub nodes_loaded: i64,
-    pub edges_loaded: i64,
-    pub build_time_ms: f64,
-    pub memory_used_mb: f64,
-    pub sync_mode: String,
-}
-
 /// Engine status returned by `graph.status()`.
 #[derive(Debug, Clone)]
 pub struct EngineStatus {

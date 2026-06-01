@@ -337,7 +337,7 @@ Full design: `phase-1-readonly-gql-design.md`.
 **Phase 1 sub-slices** (each is an independently mergeable, TDD-sized PR; the
 public `graph.gql()` function ships only when 1A–1D + SQLSTATE + docs
 reconciliation are all green — it may live behind `#[cfg(feature = "development")]`
-earlier, matching the existing `BuildResult` pattern):
+earlier):
 
 - **1A — Frontend foundation:** docs/contract reconciliation; handwritten lexer
   + recursive-descent parser + AST with spans; parser totality + fuzz target.
