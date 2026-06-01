@@ -1742,6 +1742,35 @@ fn executor_node_scan_reads_graph_and_transaction_nodes() {
 }
 
 #[test]
+fn executor_node_scan_hides_unscoped_transaction_nodes_under_tenant_scope() {
+    crate::projection::tx_delta::clear_for_test();
+    let ast = crate::gql::parse_statement("MATCH (u:users) RETURN u").unwrap();
+    let logical = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::physical_plan::PhysicalStatement::NodeScan(physical) = lower_statement(logical)
+    else {
+        panic!("expected node scan");
+    };
+    let mut engine = engine_fixture();
+    engine.tenanted_table_oids.insert(10);
+    engine.insert_tenant_membership("tenant-a", 0);
+    engine.insert_tenant_membership("tenant-a", 1);
+    crate::projection::tx_delta::record_added_node(10, "u3", None)
+        .expect("record unscoped tx node");
+    crate::projection::tx_delta::record_added_node(10, "u4", Some("tenant-a"))
+        .expect("record tenant tx node");
+
+    let rows = execute_node_scan(&engine, &physical, Some("tenant-a")).unwrap();
+
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["u1", "u2", "u4"]
+    );
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
 fn node_scan_projection_filters_inline_predicates() {
     let ast =
         crate::gql::parse_statement("MATCH (u:users {name: 'Ada'}) RETURN u.name AS name").unwrap();

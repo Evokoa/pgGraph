@@ -178,7 +178,7 @@ pub(crate) fn added_node_keys(table_oid: u32, tenant: Option<&str>) -> Vec<Strin
                     .filter(|node| node.table_oid == table_oid)
                     .filter(|node| match (tenant, node.tenant.as_deref()) {
                         (Some(active), Some(created)) => active == created,
-                        (Some(_), None) => true,
+                        (Some(_), None) => false,
                         (None, _) => true,
                     })
                     .map(|node| node.primary_key.clone())
@@ -605,11 +605,12 @@ mod tests {
         clear_current_transaction_state();
         record_added_node(100, "a1", Some("tenant-a")).expect("record tenant-a");
         record_added_node(100, "b1", Some("tenant-b")).expect("record tenant-b");
+        record_added_node(100, "global", None).expect("record unscoped");
         record_added_node(200, "other", Some("tenant-a")).expect("record other table");
 
         assert_eq!(added_node_keys(100, Some("tenant-a")), vec!["a1"]);
         assert_eq!(added_node_keys(100, Some("tenant-b")), vec!["b1"]);
-        assert_eq!(added_node_keys(100, None), vec!["a1", "b1"]);
+        assert_eq!(added_node_keys(100, None), vec!["a1", "b1", "global"]);
 
         clear_current_transaction_state();
     }
