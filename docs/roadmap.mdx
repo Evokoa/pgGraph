@@ -97,9 +97,9 @@ Work is ranked by user impact:
 | Priority | Focus | Examples |
 |---|---|---|
 | P0 | Operational visibility and resource predictability | No active public rows after instance-level memory sizing visibility was added. |
-| P1 | Query performance follow-ups | No active public rows after source-search rechecks, aggregation hydration ownership, and adaptive traversal metadata. |
-| P2 | SQL ergonomics and documented semantics | No active public rows after structured filters and the edge-label cardinality limit were documented. |
-| P3 | Internals and maintainability | No active public rows; the pgrx SQL test module layout is documented for contributors. |
+| P1 | Query performance follow-ups | Dirty mutable-projection hot-path optimization is tracked in Known Issues and should be benchmark-driven. |
+| P2 | SQL ergonomics and documented semantics | Cypher preview and SQL/PGQ public-surface boundaries are tracked in Known Issues; broader language support remains roadmap-owned. |
+| P3 | Internals and maintainability | Mega-file splits and additional weak-path tests are tracked in Known Issues. |
 
 The bias is to optimize with evidence. For hot paths, we prefer benchmarks or
 release-style SQL tests that show whether an allocation, SPI call, sort, clone,
