@@ -185,8 +185,8 @@ Other read semantics:
 - `OPTIONAL MATCH` null-extends unmatched source rows for single-relationship
   patterns.
 - Aggregate functions ignore JSON `null` inputs for `count(expr)`, `sum`,
-  `avg`, `min`, and `max`; `count(*)` counts every input row.
-- `collect` preserves values in row order.
+  `avg`, `min`, `max`, and `collect`; `count(*)` counts every input row.
+- `collect` preserves non-null values in row order.
 - Aggregate-only empty inputs return one row with `0`, `null`, or `[]`
   according to the aggregate.
 - `DISTINCT` query forms abort if their unique-key working set exceeds the GQL

@@ -520,7 +520,8 @@ Aggregate behavior:
 
 - Non-aggregate return items are implicit grouping keys.
 - `count(*)` counts every input row.
-- `count(expr)`, `sum`, `avg`, `min`, and `max` ignore JSON `null` inputs.
+- `count(expr)`, `sum`, `avg`, `min`, `max`, and `collect` ignore JSON
+  `null` inputs.
 - Aggregate-only empty inputs return one row with `0`, `null`, or `[]`
   according to the aggregate.
 - Aggregate `DISTINCT` is supported.

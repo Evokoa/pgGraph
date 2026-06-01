@@ -768,7 +768,7 @@ fn gql_distinct_matches_sql_distinct_counts() {
                      ),
                      optional_sql AS (
                          SELECT count(DISTINCT v.name)::bigint AS named_friends,
-                                bool_or(v.name IS NULL) AS has_null
+                                false AS has_null
                          FROM public.graph_test_users_pgtest u
                          LEFT JOIN public.graph_test_friendships_pgtest f ON f.user_id = u.id
                          LEFT JOIN public.graph_test_users_pgtest v ON v.id = f.friend_id

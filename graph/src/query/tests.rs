@@ -1544,6 +1544,30 @@ fn optional_aggregate_counts_null_extended_rows_like_left_join() {
 }
 
 #[test]
+fn optional_collect_skips_null_extended_values() {
+    let logical = bind_query(
+        "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE c.name = 'Acme'
+         RETURN collect(c.name) AS names, collect(DISTINCT c.name) AS distinct_names",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["names"], serde_json::json!(["Acme"]));
+    assert_eq!(projected[0]["distinct_names"], serde_json::json!(["Acme"]));
+}
+
+#[test]
 fn distinct_return_deduplicates_before_order_and_limit() {
     let logical = bind_query(
         "MATCH (u:users)-[:works_at]->(c:companies) \

@@ -540,7 +540,7 @@ impl AggregateState {
                 Ok(())
             }
             Self::Collect { values, distinct } => {
-                if accept_distinct_aggregate_value(distinct, &value, false)? {
+                if accept_distinct_aggregate_value(distinct, &value, true)? {
                     values.push(value);
                 }
                 Ok(())
