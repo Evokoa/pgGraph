@@ -27,7 +27,7 @@ ensure_pggraph_image() {
   local root_dir="$1"
   local image_name="$2"
 
-  if docker image inspect "${image_name}" >/dev/null 2>&1; then
+  if [[ "${PGGRAPH_REBUILD_IMAGE:-0}" != "1" ]] && docker image inspect "${image_name}" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -39,6 +39,11 @@ ensure_pggraph_container() {
   local container_name="$1"
   local image_name="$2"
   local pg_port="$3"
+
+  if [[ "${PGGRAPH_RECREATE_CONTAINER:-0}" == "1" ]] \
+    && docker ps -a --format '{{.Names}}' | grep -Fxq "${container_name}"; then
+    docker rm -f "${container_name}" >/dev/null
+  fi
 
   if docker ps --format '{{.Names}}' | grep -Fxq "${container_name}"; then
     wait_for_postgres "${container_name}"

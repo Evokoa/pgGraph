@@ -78,7 +78,7 @@ if [[ "$RUN_SYNTHETIC" == "1" ]]; then
 fi
 
 if [[ "$RUN_PLAYGROUND" == "1" ]]; then
-  ./tests/heavy/playground_release_gate.sh
+  PGGRAPH_REBUILD_IMAGE=1 PGGRAPH_RECREATE_CONTAINER=1 ./tests/heavy/playground_release_gate.sh
 fi
 
 if [[ "$RUN_PGBENCH" == "1" ]]; then
