@@ -166,7 +166,11 @@ pub(crate) fn record_added_node(
 }
 
 /// Return transaction-local node primary keys for a table and tenant scope.
-pub(crate) fn added_node_keys(table_oid: u32, tenant: Option<&str>) -> Vec<String> {
+pub(crate) fn added_node_keys(
+    table_oid: u32,
+    tenant: Option<&str>,
+    table_is_tenanted: bool,
+) -> Vec<String> {
     TX_DELTA.with(|delta| {
         delta
             .borrow()
@@ -176,11 +180,14 @@ pub(crate) fn added_node_keys(table_oid: u32, tenant: Option<&str>) -> Vec<Strin
                     .added_nodes
                     .iter()
                     .filter(|node| node.table_oid == table_oid)
-                    .filter(|node| match (tenant, node.tenant.as_deref()) {
-                        (Some(active), Some(created)) => active == created,
-                        (Some(_), None) => false,
-                        (None, _) => true,
-                    })
+                    .filter(
+                        |node| match (tenant, node.tenant.as_deref(), table_is_tenanted) {
+                            (Some(active), Some(created), true) => active == created,
+                            (Some(_), None, true) => false,
+                            (Some(_), _, false) => true,
+                            (None, _, _) => true,
+                        },
+                    )
                     .map(|node| node.primary_key.clone())
                     .collect()
             })
@@ -638,9 +645,13 @@ mod tests {
         record_added_node(100, "global", None).expect("record unscoped");
         record_added_node(200, "other", Some("tenant-a")).expect("record other table");
 
-        assert_eq!(added_node_keys(100, Some("tenant-a")), vec!["a1"]);
-        assert_eq!(added_node_keys(100, Some("tenant-b")), vec!["b1"]);
-        assert_eq!(added_node_keys(100, None), vec!["a1", "b1", "global"]);
+        assert_eq!(added_node_keys(100, Some("tenant-a"), true), vec!["a1"]);
+        assert_eq!(added_node_keys(100, Some("tenant-b"), true), vec!["b1"]);
+        assert_eq!(
+            added_node_keys(100, Some("tenant-a"), false),
+            vec!["a1", "b1", "global"]
+        );
+        assert_eq!(added_node_keys(100, None, true), vec!["a1", "b1", "global"]);
 
         clear_current_transaction_state();
     }

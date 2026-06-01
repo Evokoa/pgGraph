@@ -32,7 +32,7 @@ EXPECTED_RESULTS: dict[str, list[dict[str, object]]] = {
     "Shortest Path": [{"hash": "0273f33efa04c4ba2bf45e57e703e58d", "row_count": 2}],
     "GQL One-Hop Relationships": [{"hash": "cc43fef5258a696fee573d7ce63d3161", "row_count": 1}],
     "GQL Aggregated Neighbors": [{"hash": "e17964650e3a49bd449fcb1569ac5c31", "row_count": 1}],
-    "GQL Explain": [{"hash": "8dc56777352d78061ee6152ab07c8543", "row_count": 1}],
+    "GQL Explain": [{"hash": "0c52392c32dab707c82a82edb79d1a1c", "row_count": 1}],
     "Component Stats": [
         {"hash": "4d337f672574a60eaa19f44639f30553", "row_count": 1},
         {"hash": "3addbef5dca49ab0f0592d0e69be5b17", "row_count": 20},

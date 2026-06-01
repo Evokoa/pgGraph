@@ -18,12 +18,12 @@ pub(crate) fn explain(plan: &PhysicalPlan) -> String {
     format!(
         "{op}(source={}:{}, rel={}, hops={}..{}, target={}:{}, return=[{}])",
         plan.source_var,
-        plan.source_table_oid,
+        plan.source_label,
         plan.rel_type,
         plan.hops.min,
         plan.hops.max,
         plan.target_var,
-        plan.target_table_oid,
+        plan.target_label,
         returns
     )
 }
@@ -38,6 +38,6 @@ pub(crate) fn explain_node_scan(plan: &PhysicalNodeScan) -> String {
         .join(", ");
     format!(
         "NodeScan(node={}:{}, return=[{}])",
-        plan.var, plan.table_oid, returns
+        plan.var, plan.label, returns
     )
 }

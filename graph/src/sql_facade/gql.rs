@@ -491,7 +491,11 @@ fn delete_edge_read_plan(
         rel_type: plan.rel_type.clone(),
         rel_var: Some(plan.rel_var.clone()),
         direction: plan.direction,
-        hops: crate::query::logical_plan::HopBounds { min: 1, max: 1 },
+        hops: crate::query::logical_plan::HopBounds {
+            variable: false,
+            min: 1,
+            max: 1,
+        },
         target_var: plan.target_var.clone(),
         target_table_oid: plan.target_table_oid,
         target_label: plan.target_label.clone(),
@@ -1315,6 +1319,7 @@ fn delete_mapped_edge_row(
             plan,
             table_name.as_sql(),
             edge.label_column.as_deref(),
+            &edge.label,
             source_id,
             target_id,
         );
@@ -1323,6 +1328,7 @@ fn delete_mapped_edge_row(
         plan,
         table_name.as_sql(),
         edge.label_column.as_deref(),
+        &edge.label,
         source_id,
         target_id,
     )? {
@@ -1346,6 +1352,7 @@ fn delete_mapped_edge_row(
         plan,
         table_name.as_sql(),
         edge.label_column.as_deref(),
+        &edge.label,
         target_id,
         source_id,
     )? {
@@ -1366,15 +1373,37 @@ fn delete_bidirectional_self_edge_row(
     plan: &crate::query::physical_plan::PhysicalDeleteEdge,
     table_sql: &str,
     label_column: Option<&str>,
+    fallback_label: &str,
     source_id: &str,
     target_id: &str,
 ) -> safety::GraphResult<MatchedEdgeIds> {
-    let forward = count_mapped_edge_rows(plan, table_sql, label_column, source_id, target_id)?;
-    let reverse = count_mapped_edge_rows(plan, table_sql, label_column, target_id, source_id)?;
+    let forward = count_mapped_edge_rows(
+        plan,
+        table_sql,
+        label_column,
+        fallback_label,
+        source_id,
+        target_id,
+    )?;
+    let reverse = count_mapped_edge_rows(
+        plan,
+        table_sql,
+        label_column,
+        fallback_label,
+        target_id,
+        source_id,
+    )?;
     match (forward, reverse) {
         (1, 0) => {
             let deleted =
-                try_delete_mapped_edge_row(plan, table_sql, label_column, source_id, target_id)?;
+                try_delete_mapped_edge_row(
+                    plan,
+                    table_sql,
+                    label_column,
+                    fallback_label,
+                    source_id,
+                    target_id,
+                )?;
             if matches!(deleted, DeleteEdgeRowResult::Deleted) {
                 Ok(MatchedEdgeIds {
                     source_id: source_id.to_string(),
@@ -1386,7 +1415,14 @@ fn delete_bidirectional_self_edge_row(
         }
         (0, 1) => {
             let deleted =
-                try_delete_mapped_edge_row(plan, table_sql, label_column, target_id, source_id)?;
+                try_delete_mapped_edge_row(
+                    plan,
+                    table_sql,
+                    label_column,
+                    fallback_label,
+                    target_id,
+                    source_id,
+                )?;
             if matches!(deleted, DeleteEdgeRowResult::Deleted) {
                 Ok(MatchedEdgeIds {
                     source_id: target_id.to_string(),
@@ -1416,11 +1452,17 @@ fn count_mapped_edge_rows(
     plan: &crate::query::physical_plan::PhysicalDeleteEdge,
     table_sql: &str,
     label_column: Option<&str>,
+    fallback_label: &str,
     source_id: &str,
     target_id: &str,
 ) -> safety::GraphResult<i64> {
     let label_predicate = label_column
-        .map(|column| format!("\n           AND e.{}::text = $3", quote_ident(column)))
+        .map(|column| {
+            format!(
+                "\n           AND COALESCE(NULLIF(BTRIM(e.{}::text), ''), $4) = $3",
+                quote_ident(column)
+            )
+        })
         .unwrap_or_default();
     let query = format!(
         "SELECT count(*)::bigint
@@ -1436,6 +1478,7 @@ fn count_mapped_edge_rows(
         let mut params = vec![source_id.into(), target_id.into()];
         if label_column.is_some() {
             params.push(plan.rel_type.as_str().into());
+            params.push(fallback_label.into());
         }
         client
             .select(&query, None, &params)
@@ -1469,11 +1512,17 @@ fn try_delete_mapped_edge_row(
     plan: &crate::query::physical_plan::PhysicalDeleteEdge,
     table_sql: &str,
     label_column: Option<&str>,
+    fallback_label: &str,
     source_id: &str,
     target_id: &str,
 ) -> safety::GraphResult<DeleteEdgeRowResult> {
     let label_predicate = label_column
-        .map(|column| format!("\n               AND e.{}::text = $3", quote_ident(column)))
+        .map(|column| {
+            format!(
+                "\n               AND COALESCE(NULLIF(BTRIM(e.{}::text), ''), $4) = $3",
+                quote_ident(column)
+            )
+        })
         .unwrap_or_default();
     let query = format!(
         "WITH candidates AS (
@@ -1503,6 +1552,7 @@ fn try_delete_mapped_edge_row(
         let mut params = vec![source_id.into(), target_id.into()];
         if label_column.is_some() {
             params.push(plan.rel_type.as_str().into());
+            params.push(fallback_label.into());
         }
         let rows = client.update(&query, None, &params).map_err(|err| {
             safety::GraphError::GqlExecution {

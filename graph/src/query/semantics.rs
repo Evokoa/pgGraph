@@ -643,7 +643,11 @@ fn bind_delete_edge(
             var: Some(rel_var.text.clone()),
             rel_type: rel_info.rel_type,
             direction: bind_direction(rel_pat.direction),
-            hops: HopBounds { min: 1, max: 1 },
+            hops: HopBounds {
+                variable: false,
+                min: 1,
+                max: 1,
+            },
         },
         rel_var: rel_var.text.clone(),
         target,
@@ -809,12 +813,18 @@ fn bind_direction(direction: Direction) -> BoundDirection {
 }
 
 fn bind_hops(rel: &RelPat) -> Result<HopBounds, GqlError> {
-    let hops = rel
-        .var_len
-        .map_or(HopBounds { min: 1, max: 1 }, |var_len| HopBounds {
+    let hops = rel.var_len.map_or(
+        HopBounds {
+            variable: false,
+            min: 1,
+            max: 1,
+        },
+        |var_len| HopBounds {
+            variable: true,
             min: var_len.min,
             max: var_len.max,
-        });
+        },
+    );
     if hops.min == 0 {
         return Err(GqlError::unsupported(
             rel.var_len.map_or(rel.span, |var_len| var_len.span),

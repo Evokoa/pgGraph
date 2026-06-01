@@ -259,6 +259,8 @@ pub(crate) enum BoundDirection {
 /// Bound hop count range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HopBounds {
+    /// Whether the query used an explicit variable-length relationship pattern.
+    pub(crate) variable: bool,
     /// Minimum hop count.
     pub(crate) min: u32,
     /// Maximum hop count.

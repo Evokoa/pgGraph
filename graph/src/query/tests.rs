@@ -1543,6 +1543,72 @@ fn variable_length_cardinality_does_not_depend_on_returning_path_values() {
 }
 
 #[test]
+fn explicit_single_hop_variable_length_preserves_path_distinct_matches() {
+    let path_query = lower(bind_query(
+        "MATCH (u:users)-[p:friend*1..1]-(v:users) \
+         WHERE u.id = 'u1' AND v.id = 'u2' RETURN length(p) AS len ORDER BY len",
+    ));
+    let count_query = lower(bind_query(
+        "MATCH (u:users)-[p:friend*1..1]-(v:users) \
+         WHERE u.id = 'u1' AND v.id = 'u2' RETURN count(*) AS paths",
+    ));
+    let mut engine = Engine::new();
+    for pk in ["u1", "u2"] {
+        let node_idx = engine.node_store.add_node(10, pk.to_string());
+        engine.resolution_insert(10, pk, node_idx);
+        engine.insert_table_membership(10, node_idx);
+    }
+    let friend = engine.register_edge_type("friend").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: friend,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 0,
+                type_id: friend,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+    let hydrated = HashMap::from([
+        ((10, "u1".to_string()), serde_json::json!({"id": "u1"})),
+        ((10, "u2".to_string()), serde_json::json!({"id": "u2"})),
+    ]);
+
+    let path_rows = execute(&engine, &path_query, None).unwrap();
+    let count_rows = execute(&engine, &count_query, None).unwrap();
+    let path_projected =
+        project_rows(path_rows, &path_query, &hydrated, &QueryParams::new(), true).unwrap();
+    let count_projected = project_rows(
+        count_rows,
+        &count_query,
+        &hydrated,
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(path_projected.len(), 2);
+    assert_eq!(
+        path_projected
+            .iter()
+            .map(|row| row["len"].as_u64().expect("path length"))
+            .collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    assert_eq!(count_projected, vec![serde_json::json!({"paths": 2})]);
+}
+
+#[test]
 fn optional_path_functions_return_null_for_unmatched_rows() {
     let logical = bind_query(
         "OPTIONAL MATCH (u:users)-[p:works_at]->(c:companies) \
@@ -1896,6 +1962,30 @@ fn executor_node_scan_hides_unscoped_transaction_nodes_under_tenant_scope() {
             .map(|row| row.node.node_id.as_str())
             .collect::<Vec<_>>(),
         vec!["u1", "u2", "u4"]
+    );
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn executor_node_scan_keeps_unscoped_transaction_nodes_for_nontenanted_tables() {
+    crate::projection::tx_delta::clear_for_test();
+    let ast = crate::gql::parse_statement("MATCH (u:users) RETURN u").unwrap();
+    let logical = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::physical_plan::PhysicalStatement::NodeScan(physical) = lower_statement(logical)
+    else {
+        panic!("expected node scan");
+    };
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None)
+        .expect("record unscoped tx node");
+
+    let rows = execute_node_scan(&engine, &physical, Some("tenant-a")).unwrap();
+
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["u1", "u2", "u3"]
     );
     crate::projection::tx_delta::clear_for_test();
 }
@@ -2272,7 +2362,7 @@ fn explain_contains_stable_1b_plan_shape() {
 
     assert_eq!(
         explain(&physical),
-        "Expand(source=u:10, rel=works_at, hops=1..1, target=c:20, return=[u, c])"
+        "Expand(source=u:users, rel=works_at, hops=1..1, target=c:companies, return=[u, c])"
     );
 }
 
@@ -2283,7 +2373,7 @@ fn explain_marks_optional_relationship_expands() {
 
     assert_eq!(
         explain(&physical),
-        "OptionalExpand(source=u:10, rel=works_at, hops=1..1, target=c:20, return=[u, c])"
+        "OptionalExpand(source=u:users, rel=works_at, hops=1..1, target=c:companies, return=[u, c])"
     );
 }
 

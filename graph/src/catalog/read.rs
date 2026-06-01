@@ -16,7 +16,7 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT table_name, id_column, columns, tenant_column FROM graph._registered_tables",
+                "SELECT table_name::text, id_column, columns, tenant_column FROM graph._registered_tables",
                 None,
                 &[],
             )
@@ -70,7 +70,7 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT from_table, from_column, to_table, to_column, label, bidirectional, weight_column, label_column FROM graph._registered_edges",
+                "SELECT from_table::text, from_column, to_table::text, to_column, label, bidirectional, weight_column, label_column FROM graph._registered_edges",
                 None,
                 &[],
             )
@@ -156,7 +156,7 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT table_name, column_name, column_type FROM graph._registered_filter_columns",
+                "SELECT table_name::text, column_name, column_type FROM graph._registered_filter_columns",
                 None,
                 &[],
             )

@@ -146,7 +146,10 @@ pub(crate) fn execute_node_scan(
             });
         }
     }
-    for node_id in crate::projection::tx_delta::added_node_keys(plan.table_oid, tenant) {
+    let table_is_tenanted = engine.tenanted_table_oids.contains(&plan.table_oid);
+    for node_id in
+        crate::projection::tx_delta::added_node_keys(plan.table_oid, tenant, table_is_tenanted)
+    {
         if seen.insert(node_id.clone()) {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
@@ -205,7 +208,7 @@ fn expand_targets(
         .returns
         .iter()
         .any(|slot| matches!(slot, ReturnSlot::Relationship { .. }));
-    let preserve_path_matches = plan.hops.max > 1;
+    let preserve_path_matches = plan.hops.variable;
     let mut seen_result_nodes = std::collections::HashSet::new();
     let mut seen_result_relationships = std::collections::HashSet::new();
     let mut seen_frontier = std::collections::HashSet::from([source_idx]);
