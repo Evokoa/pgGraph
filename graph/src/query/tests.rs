@@ -1298,6 +1298,87 @@ fn multi_pattern_join_limit_does_not_hide_later_predicate_matches() {
 }
 
 #[test]
+fn multi_pattern_join_orders_before_windowing() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(d:companies) \
+         RETURN u.name AS source, v.name AS peer \
+         ORDER BY peer DESC, source ASC LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert_eq!(logical.order_by.len(), 2);
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["source"], "Ada");
+    assert_eq!(projected[0]["peer"], "Linus");
+}
+
+#[test]
+fn multi_pattern_join_ordering_errors_when_raw_row_cap_is_exceeded() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(d:companies) \
+         RETURN u.name AS source, v.name AS peer ORDER BY peer DESC LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    let mut engine = Engine::new();
+    for idx in 0..10_001 {
+        let user_pk = format!("u{idx}");
+        let company_pk = format!("c{idx}");
+        let user = engine.node_store.add_node(10, user_pk.clone());
+        let company = engine.node_store.add_node(20, company_pk.clone());
+        engine.resolution_insert(10, &user_pk, user);
+        engine.resolution_insert(20, &company_pk, company);
+        engine.insert_table_membership(10, user);
+        engine.insert_table_membership(20, company);
+    }
+    let works_at = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        (0..10_001)
+            .map(|idx| RawEdge {
+                source: idx * 2,
+                target: idx * 2 + 1,
+                type_id: works_at,
+                weight: None,
+            })
+            .collect(),
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+
+    let err = execute_join(&engine, &physical, None).unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err.to_string().contains("row cap"));
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -1322,11 +1403,7 @@ fn multi_pattern_join_rejects_deferred_shapes() {
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH u RETURN u",
-            "WITH and ORDER BY over multi-pattern joins require a later phase",
-        ),
-        (
-            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u ORDER BY u.name",
-            "WITH and ORDER BY over multi-pattern joins require a later phase",
+            "WITH over multi-pattern joins requires a later phase",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN DISTINCT u",

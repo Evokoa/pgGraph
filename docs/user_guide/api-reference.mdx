@@ -547,10 +547,10 @@ Multi-pattern reads support fixed single-hop patterns with concrete labels and
 relationship types. Reused node variables join by graph coordinate, independent
 patterns produce Cartesian combinations up to the GQL result cap, joined
 node-property `WHERE` predicates filter after all referenced slots are bound,
-and `SKIP` and `LIMIT` apply after projection. Multi-pattern reads currently
-reject relationship variables, path variables, `WITH`, `ORDER BY`,
-`RETURN DISTINCT`, aggregates, optional matches, variable-length
-relationships, and relationship properties.
+`ORDER BY` can sort joined node properties or returned property aliases, and
+`SKIP` and `LIMIT` apply after projection. Multi-pattern reads currently reject
+relationship variables, path variables, `WITH`, `RETURN DISTINCT`, aggregates,
+optional matches, variable-length relationships, and relationship properties.
 
 Path behavior:
 
@@ -590,7 +590,7 @@ Not included in this release's GQL subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Variable-length wildcard path variables.
-- Multi-pattern relationship variables, path variables, ordering,
+- Multi-pattern relationship variables, path variables,
   deduplication, aggregates, and variable-length relationships.
 - Property predicates inside wildcard path-variable patterns.
 - Node-only optional matches.

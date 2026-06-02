@@ -189,7 +189,8 @@ FROM graph.gql(
   'MATCH (u:users)-[:works_at]->(c:companies),
          (v:users)-[:works_at]->(c)
    WHERE c.name = $company
-   RETURN u.name AS source, v.name AS peer, c.name AS company',
+   RETURN u.name AS source, v.name AS peer, c.name AS company
+   ORDER BY peer',
   params := '{"company":"Acme"}'::jsonb,
   hydrate := true
 );
@@ -199,10 +200,11 @@ Each new node variable in a multi-pattern join needs a concrete label. A reused
 node variable may omit the label or repeat the same label, and it joins by the
 graph coordinate. Independent patterns produce Cartesian combinations up to the
 GQL result cap. This slice supports node and node-property returns, joined
-node-property `WHERE` predicates, and `SKIP`/`LIMIT`; relationship variables,
-path variables, `WITH`, `ORDER BY`, `RETURN DISTINCT`, aggregates, optional
-multi-pattern joins, variable-length relationships, and relationship
-properties in multi-pattern joins remain outside the current subset.
+node-property `WHERE` predicates, `ORDER BY` over joined node properties or
+returned property aliases, and `SKIP`/`LIMIT`; relationship variables, path
+variables, `WITH`, `RETURN DISTINCT`, aggregates, optional multi-pattern joins,
+variable-length relationships, and relationship properties in multi-pattern
+joins remain outside the current subset.
 
 Scalar properties are returned as their JSON representation: strings,
 numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`
@@ -256,7 +258,7 @@ Planned outside this subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Variable-length wildcard path variables.
-- Multi-pattern relationship variables, path variables, ordering,
+- Multi-pattern relationship variables, path variables,
   deduplication, aggregates, and variable-length relationships.
 - Property predicates inside wildcard path-variable patterns.
 - Multi-pattern optional joins.

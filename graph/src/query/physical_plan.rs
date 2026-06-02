@@ -138,6 +138,8 @@ pub(crate) struct PhysicalJoinPlan {
     pub(crate) returns: Vec<ReturnSlot>,
     /// Optional hydrated-row predicate evaluated after all joined slots bind.
     pub(crate) predicate: Option<Predicate>,
+    /// Sort keys in requested order.
+    pub(crate) order_by: Vec<SortBinding>,
     /// Table OIDs requiring ACL checks before execution.
     pub(crate) required_table_oids: BTreeSet<u32>,
     /// Number of rows to skip after projection.
@@ -488,7 +490,7 @@ impl PhysicalJoinPlan {
 
     /// Maximum matches the executor should collect for this plan.
     pub(crate) fn execution_row_cap(&self) -> usize {
-        if self.predicate.is_none() {
+        if self.predicate.is_none() && self.order_by.is_empty() {
             if let Some(limit) = self.limit {
                 let requested = self.skip.unwrap_or(0).saturating_add(limit);
                 return usize::try_from(requested)
@@ -501,7 +503,7 @@ impl PhysicalJoinPlan {
 
     /// Whether hitting the execution cap means results would be incomplete.
     pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
-        self.limit.is_none() || self.predicate.is_some()
+        self.limit.is_none() || self.predicate.is_some() || !self.order_by.is_empty()
     }
 }
 

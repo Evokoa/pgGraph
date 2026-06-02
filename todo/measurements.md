@@ -59,3 +59,13 @@
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17` from `graph/`: passed, 467 tests, 1 ignored.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes parameterized multi-pattern `WHERE` projection through `graph.gql()`.
+
+## 2026-06-02 Phase 3B Multi-Pattern Ordering Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 8 tests. Includes `ORDER BY` over returned property aliases, a regression that ordering happens before `LIMIT`, and a review-requested regression that raw row-cap exhaustion errors for ordered joins.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 114 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17` from `graph/`: passed, 469 tests, 1 ignored.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test.

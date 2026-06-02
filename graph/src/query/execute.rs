@@ -267,7 +267,7 @@ fn expand_join_pattern(
                 rows,
                 row_cap,
             )?;
-            if plan.limit.is_some() && rows.len() >= row_cap {
+            if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
                 return Ok(());
             }
         }

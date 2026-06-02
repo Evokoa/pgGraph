@@ -100,11 +100,14 @@ pub(crate) fn project_join_rows(
     let mut projected = Vec::with_capacity(rows.len());
     for row in rows {
         if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
-            projected.push(project_join_row(&row, plan, hydrated, hydrate_nodes)?);
+            projected.push(ProjectedRow {
+                row: project_join_row(&row, plan, hydrated, hydrate_nodes)?,
+                sort_values: sort_values_for_join(&row, plan, hydrated, params)?,
+            });
         }
     }
-    apply_value_window(&mut projected, plan.skip, plan.limit);
-    Ok(projected)
+    sort_and_window(&mut projected, plan.skip, plan.limit);
+    Ok(projected.into_iter().map(|row| row.row).collect())
 }
 
 fn collect_projectable_rows(
@@ -815,6 +818,7 @@ pub(crate) fn wildcard_path_requires_hydration(
 pub(crate) fn join_requires_hydration(plan: &PhysicalJoinPlan, hydrate_nodes: bool) -> bool {
     hydrate_nodes
         || plan.returns.iter().any(return_slot_requires_hydration)
+        || plan.order_by.iter().any(sort_binding_requires_hydration)
         || plan
             .predicate
             .as_ref()
@@ -830,6 +834,10 @@ fn return_slot_requires_hydration(slot: &ReturnSlot) -> bool {
                 ..
             }
     )
+}
+
+fn sort_binding_requires_hydration(sort: &super::logical_plan::SortBinding) -> bool {
+    matches!(sort.key, SortBindingKey::Property { .. })
 }
 
 fn predicate_requires_hydration(predicate: &Predicate) -> bool {
@@ -944,6 +952,39 @@ fn sort_values_for_node(
                         property: property.clone(),
                     },
                     &fake,
+                    hydrated,
+                    params,
+                )?
+                .into_json_or_null(),
+            };
+            Ok(SortValue {
+                value,
+                desc: sort.desc,
+            })
+        })
+        .collect()
+}
+
+fn sort_values_for_join(
+    row: &GqlRow,
+    plan: &PhysicalJoinPlan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+) -> GraphResult<Vec<SortValue>> {
+    plan.order_by
+        .iter()
+        .map(|sort| {
+            let value = match &sort.key {
+                SortBindingKey::ReturnName(name) => project_join_row(row, plan, hydrated, true)?
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                SortBindingKey::Property { side, property } => eval_value(
+                    &ValueExpr::Property {
+                        side: *side,
+                        property: property.clone(),
+                    },
+                    row,
                     hydrated,
                     params,
                 )?

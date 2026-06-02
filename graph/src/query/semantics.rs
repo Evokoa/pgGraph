@@ -186,10 +186,10 @@ fn bind_join_read(
             "multi-pattern OPTIONAL MATCH requires a later join phase",
         ));
     }
-    if !query.with_.is_empty() || !query.order_by.is_empty() {
+    if !query.with_.is_empty() {
         return Err(GqlError::unsupported(
             query.span,
-            "WITH and ORDER BY over multi-pattern joins require a later phase",
+            "WITH over multi-pattern joins requires a later phase",
         ));
     }
     if query.return_.distinct {
@@ -254,12 +254,14 @@ fn bind_join_read(
 
     let predicate = bind_join_predicate(query.where_.as_ref(), &node_slots, &slot_by_var)?;
     let returns = bind_join_returns(&query.return_.items, &node_slots, &slot_by_var)?;
+    let order_by = bind_join_sort_items(&query.order_by, &returns, &node_slots, &slot_by_var)?;
     let required_table_oids = node_slots.iter().map(|slot| slot.table_oid).collect();
     Ok(LogicalJoinPlan {
         node_slots,
         patterns,
         returns,
         predicate,
+        order_by,
         required_table_oids,
         skip: query.skip,
         limit: query.limit,
@@ -422,6 +424,68 @@ fn bind_join_operand(
             Ok(ValueExpr::List(values.iter().map(literal_json).collect()))
         }
     }
+}
+
+fn bind_join_sort_items(
+    items: &[SortItem],
+    returns: &[ReturnBinding],
+    node_slots: &[LogicalJoinNodeSlot],
+    slot_by_var: &std::collections::HashMap<String, usize>,
+) -> Result<Vec<SortBinding>, GqlError> {
+    items
+        .iter()
+        .map(|item| {
+            let key = match &item.key {
+                SortKey::Alias { alias, .. } => {
+                    if returns
+                        .iter()
+                        .any(|binding| binding.name() == alias.text && binding.is_sortable_scalar())
+                    {
+                        SortBindingKey::ReturnName(alias.text.clone())
+                    } else if returns.iter().any(|binding| binding.name() == alias.text) {
+                        return Err(GqlError::unsupported(
+                            alias.span,
+                            "ORDER BY aliases must refer to scalar property returns",
+                        ));
+                    } else {
+                        return Err(GqlError::bind(
+                            alias.span,
+                            format!("unknown ORDER BY alias `{}`", alias.text),
+                        ));
+                    }
+                }
+                SortKey::Property {
+                    var,
+                    property,
+                    span: _,
+                } => {
+                    let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
+                        GqlError::bind(
+                            var.span,
+                            format!("unknown ORDER BY variable `{}`", var.text),
+                        )
+                    })?;
+                    if !node_slots[slot].properties.contains(&property.text) {
+                        return Err(GqlError::bind(
+                            property.span,
+                            format!(
+                                "unknown property `{}` for label `{}`",
+                                property.text, node_slots[slot].label
+                            ),
+                        ));
+                    }
+                    SortBindingKey::Property {
+                        side: BindingSide::PathNode(slot),
+                        property: property.text.clone(),
+                    }
+                }
+            };
+            Ok(SortBinding {
+                key,
+                desc: item.desc,
+            })
+        })
+        .collect()
 }
 
 fn bind_join_returns(

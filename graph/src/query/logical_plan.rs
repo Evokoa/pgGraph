@@ -137,6 +137,8 @@ pub(crate) struct LogicalJoinPlan {
     pub(crate) returns: Vec<ReturnBinding>,
     /// Optional hydrated-row predicate evaluated after all joined slots bind.
     pub(crate) predicate: Option<Predicate>,
+    /// Sort keys in requested order.
+    pub(crate) order_by: Vec<SortBinding>,
     /// Table OIDs requiring ACL checks before execution.
     pub(crate) required_table_oids: BTreeSet<u32>,
     /// Number of rows to skip after projection.
