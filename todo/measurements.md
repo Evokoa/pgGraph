@@ -117,6 +117,7 @@
 ## 2026-06-03 Phase 3 Parser Fuzz Gate
 
 - Added `gql_parser` seed corpus entries for path-variable projection and wildcard relationship delete parser shapes.
+- Expanded the `gql_parser` seed corpus with malformed path-variable prefixes, inbound and undirected path forms, bounded wildcard syntax, label/type selector syntax, and duplicate-variable parser shapes.
 - Added the `cypher_parser` fuzz target plus compatible-match and unsupported-call seed corpus entries for the openCypher compatibility parser frontend.
 - `cargo fuzz build` from `graph/`: blocked locally because the `cargo-fuzz` subcommand is not installed.
 - `cargo build --manifest-path graph/fuzz/Cargo.toml --bins` from repository root: blocked locally by pgrx extension dylib linkage outside the pgrx fuzz build path; linker reported unresolved PostgreSQL backend symbols such as `CurrentMemoryContext`, `SPI_execute`, and `TopMemoryContext`.

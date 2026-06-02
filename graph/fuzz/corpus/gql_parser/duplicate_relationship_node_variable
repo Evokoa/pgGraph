@@ -1,0 +1,1 @@
+MATCH p=(s)-[s]->(e) RETURN p

@@ -362,11 +362,20 @@ Wildcard path expansion may exercise overlay neighbor merging and transaction-de
 - Include anonymous/wildcard node and relationship patterns in parser fuzz
   targets. Done for both wildcard path projection and wildcard relationship
   delete seeds.
-- Include malformed path-variable prefixes such as missing `=`, repeated `=`, and path variables before non-pattern clauses.
-- Include mixed directed forms: `->`, `<-`, and `-`.
-- Include bounded syntax that Phase 1 rejects, such as `MATCH p=()-[]*1..3->() RETURN p`, to verify rejection remains typed rather than panicking.
-- Include unsupported but syntactically adjacent labels and types, such as `MATCH p=(:users)-[]->() RETURN p` and `MATCH p=()-[:friend]->() RETURN p`.
-- Include duplicate variable names once Phase 2 starts, such as `MATCH p=(p)-[]->() RETURN p` and `MATCH p=(s)-[s]->(e) RETURN p`.
+- Include malformed path-variable prefixes such as missing `=`, repeated `=`,
+  and path variables before non-pattern clauses. Done in the GQL parser corpus.
+- Include mixed directed forms: `->`, `<-`, and `-`. Done in the GQL parser
+  corpus.
+- Include bounded syntax such as `MATCH p=()-[]*1..3->() RETURN p`. Done in
+  the GQL parser corpus; this is now an accepted Phase 3D shape rather than a
+  Phase 1 rejection.
+- Include syntactically adjacent labels and types, such as
+  `MATCH p=(:users)-[]->() RETURN p` and
+  `MATCH p=()-[:friend]->() RETURN p`. Done in the GQL parser corpus; these
+  are now accepted Phase 2 selector shapes.
+- Include duplicate variable names once Phase 2 starts, such as
+  `MATCH p=(p)-[]->() RETURN p` and `MATCH p=(s)-[s]->(e) RETURN p`. Done in
+  the GQL parser corpus.
 - Add a Cypher parser regression corpus entry only if `graph.cypher()` is intentionally taught to parse the new syntax; otherwise add a compatibility test proving the syntax is rejected with a documented limitation. Done for the current compatibility parser surface with one compatible match seed and one unsupported-call seed.
 - Keep parser fuzzing as a Phase 1 release gate, not a post-implementation cleanup task, because KI-003 explicitly calls out fuzz coverage before broadening language syntax.
 
