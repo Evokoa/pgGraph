@@ -69,12 +69,12 @@ Supported read coverage:
 
 | Area | Supported behavior |
 |---|---|
-| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, comma-separated fixed single-hop patterns with reused node variables, fixed path variables such as `MATCH p=(a)-[]->(b)-[]->(c)`, or top-level single-relationship `OPTIONAL MATCH` |
+| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, comma-separated fixed single-hop patterns with reused node variables and fixed single-hop path variables, fixed path variables such as `MATCH p=(a)-[]->(b)-[]->(c)`, or top-level single-relationship `OPTIONAL MATCH` |
 | Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum and minimum of at least one hop |
 | Predicates | Property comparisons, null checks, membership, boolean combinations, JSONB `$parameters`, and dotted paths into registered JSONB property columns |
-| Return values | Node values, scalar properties, JSONB list/map properties, coordinate-only single-hop relationship identities including supported multi-pattern relationship variables, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
+| Return values | Node values, scalar properties, JSONB list/map properties, coordinate-only single-hop relationship identities including supported multi-pattern relationship variables, fixed single-hop multi-pattern path values, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
 | Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases, shadowing, and `WITH DISTINCT` row-stream deduplication |
 | Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported for non-wildcard path reads, including projected rows from supported multi-pattern joins, with a bounded in-memory key set |
 | Aggregates | `count`, `sum`, `avg`, `min`, `max`, and `collect` in `RETURN`; non-aggregate return items are implicit grouping keys |
@@ -206,11 +206,11 @@ Each new node variable in a multi-pattern join needs a concrete label. A reused
 node variable may omit the label or repeat the same label, and it joins by the
 graph coordinate. Independent patterns produce Cartesian combinations up to the
 GQL result cap. This slice supports node and node-property returns, joined
-node-property `WHERE` predicates, fixed single-hop relationship variable
-returns, `ORDER BY` over joined node properties or returned property aliases,
-projected-row `RETURN DISTINCT`, and `SKIP`/`LIMIT`.
+node-property `WHERE` predicates, fixed single-hop relationship variable and
+path variable returns, `ORDER BY` over joined node properties or returned
+property aliases, projected-row `RETURN DISTINCT`, and `SKIP`/`LIMIT`.
 When `RETURN DISTINCT` is combined with `ORDER BY`, the sort keys must be
-returned scalar expressions. Path variables, `WITH`, aggregates, optional
+returned scalar expressions. Path functions, `WITH`, aggregates, optional
 multi-pattern joins, variable-length relationships, and relationship properties
 in multi-pattern joins remain outside the current subset.
 
@@ -266,8 +266,7 @@ Planned outside this subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Named variables on variable-length wildcard path segments.
-- Multi-pattern relationship variables, path variables,
-  aggregates, and variable-length relationships.
+- Multi-pattern path functions, aggregates, and variable-length relationships.
 - Multi-pattern optional joins.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node

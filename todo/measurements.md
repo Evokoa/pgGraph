@@ -135,3 +135,12 @@
 - `git diff --check` from repository root: passed.
 - `cargo test --features pg17 query::tests::` from `graph/`: passed, 133 tests.
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+
+## 2026-06-03 Phase 3B Multi-Pattern Path Variable Slice
+
+- `cargo test --features pg17 query::tests::multi_pattern_join_projects_path_variables` from `graph/`: passed, 1 test.
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 11 tests. Includes fixed single-hop path variable returns with aliases, duplicate path/node variable rejection, and explicit path-property/path-function deferral for multi-pattern joins.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes path variable projection from a fixed single-hop multi-pattern join through `graph.gql()`.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 134 tests.

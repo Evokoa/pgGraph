@@ -11,8 +11,8 @@ use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundIncidentEdge,
     BoundMappedEdge, BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue,
     HopBounds, LogicalCreateNode, LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalJoinNodeSlot,
-    LogicalJoinPattern, LogicalJoinPlan, LogicalJoinRelSlot, LogicalMergeNode, LogicalNodeScan,
-    LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement,
+    LogicalJoinPathSlot, LogicalJoinPattern, LogicalJoinPlan, LogicalJoinRelSlot, LogicalMergeNode,
+    LogicalNodeScan, LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement,
     LogicalWildcardPathPlan, LogicalWildcardPathSegment, PathFunc, Predicate, ReturnBinding,
     SortBinding, SortBindingKey, ValueExpr,
 };
@@ -198,14 +198,10 @@ fn bind_join_read(
     let mut slot_by_var = std::collections::HashMap::<String, usize>::new();
     let mut rel_slots = Vec::new();
     let mut rel_by_var = std::collections::HashMap::<String, usize>::new();
+    let mut path_slots = Vec::new();
+    let mut path_by_var = std::collections::HashMap::<String, usize>::new();
     let mut patterns = Vec::with_capacity(query.match_.patterns.len());
     for pattern in &query.match_.patterns {
-        if pattern.path_var.is_some() {
-            return Err(GqlError::unsupported(
-                pattern.span,
-                "path variables in multi-pattern joins require a later phase",
-            ));
-        }
         let [(rel, target)] = pattern.tail.as_slice() else {
             return Err(GqlError::unsupported(
                 pattern.span,
@@ -230,6 +226,7 @@ fn bind_join_read(
             &mut node_slots,
             &mut slot_by_var,
             &rel_by_var,
+            &path_by_var,
         )?;
         let target_slot = bind_join_node_slot(
             target,
@@ -237,6 +234,7 @@ fn bind_join_read(
             &mut node_slots,
             &mut slot_by_var,
             &rel_by_var,
+            &path_by_var,
         )?;
         validate_join_relationship(
             catalog,
@@ -249,8 +247,17 @@ fn bind_join_read(
             rel,
             patterns.len(),
             &slot_by_var,
+            &path_by_var,
             &mut rel_slots,
             &mut rel_by_var,
+        )?;
+        bind_join_path_slot(
+            pattern,
+            patterns.len(),
+            &slot_by_var,
+            &rel_by_var,
+            &mut path_slots,
+            &mut path_by_var,
         )?;
         patterns.push(LogicalJoinPattern {
             source_slot,
@@ -266,7 +273,9 @@ fn bind_join_read(
         &node_slots,
         &slot_by_var,
         &rel_by_var,
+        &path_by_var,
         &mut rel_slots,
+        &mut path_slots,
     )?;
     let order_by = bind_join_sort_items(
         &query.order_by,
@@ -279,6 +288,7 @@ fn bind_join_read(
     Ok(LogicalJoinPlan {
         node_slots,
         rel_slots,
+        path_slots,
         patterns,
         returns,
         distinct: query.return_.distinct,
@@ -296,6 +306,7 @@ fn bind_join_node_slot(
     node_slots: &mut Vec<LogicalJoinNodeSlot>,
     slot_by_var: &mut std::collections::HashMap<String, usize>,
     rel_by_var: &std::collections::HashMap<String, usize>,
+    path_by_var: &std::collections::HashMap<String, usize>,
 ) -> Result<usize, GqlError> {
     if !node.props.is_empty() {
         return Err(GqlError::unsupported(
@@ -309,7 +320,7 @@ fn bind_join_node_slot(
             "anonymous nodes in multi-pattern joins require a later phase",
         )
     })?;
-    if rel_by_var.contains_key(&var.text) {
+    if rel_by_var.contains_key(&var.text) || path_by_var.contains_key(&var.text) {
         return Err(GqlError::bind(
             var.span,
             format!("duplicate variable `{}` in MATCH scope", var.text),
@@ -352,13 +363,17 @@ fn bind_join_relationship_slot(
     rel: &RelPat,
     pattern_slot: usize,
     slot_by_var: &std::collections::HashMap<String, usize>,
+    path_by_var: &std::collections::HashMap<String, usize>,
     rel_slots: &mut Vec<LogicalJoinRelSlot>,
     rel_by_var: &mut std::collections::HashMap<String, usize>,
 ) -> Result<(), GqlError> {
     let Some(var) = &rel.var else {
         return Ok(());
     };
-    if slot_by_var.contains_key(&var.text) || rel_by_var.contains_key(&var.text) {
+    if slot_by_var.contains_key(&var.text)
+        || rel_by_var.contains_key(&var.text)
+        || path_by_var.contains_key(&var.text)
+    {
         return Err(GqlError::bind(
             var.span,
             format!("duplicate variable `{}` in MATCH scope", var.text),
@@ -370,6 +385,35 @@ fn bind_join_relationship_slot(
         pattern_slot,
     });
     rel_by_var.insert(var.text.clone(), slot);
+    Ok(())
+}
+
+fn bind_join_path_slot(
+    pattern: &Pattern,
+    pattern_slot: usize,
+    slot_by_var: &std::collections::HashMap<String, usize>,
+    rel_by_var: &std::collections::HashMap<String, usize>,
+    path_slots: &mut Vec<LogicalJoinPathSlot>,
+    path_by_var: &mut std::collections::HashMap<String, usize>,
+) -> Result<(), GqlError> {
+    let Some(var) = &pattern.path_var else {
+        return Ok(());
+    };
+    if slot_by_var.contains_key(&var.text)
+        || rel_by_var.contains_key(&var.text)
+        || path_by_var.contains_key(&var.text)
+    {
+        return Err(GqlError::bind(
+            var.span,
+            format!("duplicate variable `{}` in MATCH scope", var.text),
+        ));
+    }
+    let slot = path_slots.len();
+    path_slots.push(LogicalJoinPathSlot {
+        var: var.text.clone(),
+        pattern_slot,
+    });
+    path_by_var.insert(var.text.clone(), slot);
     Ok(())
 }
 
@@ -584,7 +628,9 @@ fn bind_join_returns(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
     rel_by_var: &std::collections::HashMap<String, usize>,
+    path_by_var: &std::collections::HashMap<String, usize>,
     rel_slots: &mut Vec<LogicalJoinRelSlot>,
+    path_slots: &mut Vec<LogicalJoinPathSlot>,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut returns = Vec::with_capacity(items.len());
@@ -600,6 +646,9 @@ fn bind_join_returns(
                 } else if let Some(rel_slot) = rel_by_var.get(&var.text).copied() {
                     bind_join_relationship_return_alias(&name, rel_slot, rel_slots);
                     ReturnBinding::Relationship { name }
+                } else if let Some(path_slot) = path_by_var.get(&var.text).copied() {
+                    bind_join_path_return_alias(&name, path_slot, path_slots);
+                    ReturnBinding::Path { name }
                 } else {
                     return Err(GqlError::bind(
                         var.span,
@@ -613,6 +662,11 @@ fn bind_join_returns(
                         GqlError::unsupported(
                             property.span,
                             "relationship properties over multi-pattern joins require a later phase",
+                        )
+                    } else if path_by_var.contains_key(&var.text) {
+                        GqlError::unsupported(
+                            property.span,
+                            "path properties over multi-pattern joins require a later phase",
                         )
                     } else {
                         GqlError::bind(
@@ -670,6 +724,21 @@ fn bind_join_relationship_return_alias(
     }
     let pattern_slot = rel_slots[rel_slot].pattern_slot;
     rel_slots.push(LogicalJoinRelSlot {
+        var: name.to_string(),
+        pattern_slot,
+    });
+}
+
+fn bind_join_path_return_alias(
+    name: &str,
+    path_slot: usize,
+    path_slots: &mut Vec<LogicalJoinPathSlot>,
+) {
+    if path_slots.iter().any(|slot| slot.var == name) {
+        return;
+    }
+    let pattern_slot = path_slots[path_slot].pattern_slot;
+    path_slots.push(LogicalJoinPathSlot {
         var: name.to_string(),
         pattern_slot,
     });

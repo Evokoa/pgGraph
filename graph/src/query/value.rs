@@ -1314,9 +1314,13 @@ fn project_join_row(
             ReturnSlot::Relationship { name } => {
                 output.insert(name.clone(), join_relationship_value(row, plan, name)?);
             }
-            ReturnSlot::Path { .. }
-            | ReturnSlot::PathFunction { .. }
-            | ReturnSlot::Aggregate { .. } => {
+            ReturnSlot::Path { name } => {
+                output.insert(
+                    name.clone(),
+                    join_path_value(row, plan, name, hydrated, hydrate_nodes)?,
+                );
+            }
+            ReturnSlot::PathFunction { .. } | ReturnSlot::Aggregate { .. } => {
                 return Err(GraphError::GqlExecution {
                     reason: "unsupported multi-pattern join return slot".to_string(),
                 });
@@ -1622,6 +1626,74 @@ fn join_relationship_value(
         "_type": &relationship.rel_type,
         "_start": join_relationship_endpoint(&relationship.start, plan)?,
         "_end": join_relationship_endpoint(&relationship.end, plan)?,
+    }))
+}
+
+fn join_path_value(
+    row: &GqlRow,
+    plan: &PhysicalJoinPlan,
+    name: &str,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    let slot = plan
+        .path_slots
+        .iter()
+        .find(|slot| slot.var == name)
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!("unknown multi-pattern path slot `{name}`"),
+        })?;
+    let pattern = plan
+        .patterns
+        .get(slot.pattern_slot)
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!(
+                "multi-pattern path slot `{}` points at missing pattern {}",
+                slot.var, slot.pattern_slot
+            ),
+        })?;
+    let source =
+        row.path_nodes
+            .get(pattern.source_slot)
+            .ok_or_else(|| GraphError::GqlExecution {
+                reason: format!(
+                    "multi-pattern path slot `{}` source node slot {} is missing",
+                    slot.var, pattern.source_slot
+                ),
+            })?;
+    let target =
+        row.path_nodes
+            .get(pattern.target_slot)
+            .ok_or_else(|| GraphError::GqlExecution {
+                reason: format!(
+                    "multi-pattern path slot `{}` target node slot {} is missing",
+                    slot.var, pattern.target_slot
+                ),
+            })?;
+    let relationship = row
+        .path_relationships
+        .get(slot.pattern_slot)
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!(
+                "multi-pattern path slot `{}` relationship pattern {} is missing",
+                slot.var, slot.pattern_slot
+            ),
+        })?;
+
+    Ok(serde_json::json!({
+        "_path": {
+            "nodes": [
+                node_value(source, hydrated, join_label(plan, BindingSide::PathNode(pattern.source_slot))?, hydrate_nodes)?,
+                node_value(target, hydrated, join_label(plan, BindingSide::PathNode(pattern.target_slot))?, hydrate_nodes)?,
+            ],
+            "relationships": [
+                {
+                    "_type": &relationship.rel_type,
+                    "_start": join_relationship_endpoint(&relationship.start, plan)?,
+                    "_end": join_relationship_endpoint(&relationship.end, plan)?,
+                }
+            ],
+        }
     }))
 }
 

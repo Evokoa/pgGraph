@@ -1675,12 +1675,60 @@ fn multi_pattern_join_projects_relationship_variables() {
 }
 
 #[test]
+fn multi_pattern_join_projects_path_variables() {
+    let statement = bind_statement_query(
+        "MATCH p=(u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         RETURN p AS path, v.name AS peer ORDER BY peer LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert!(logical
+        .path_slots
+        .iter()
+        .any(|slot| slot.var == "p" && slot.pattern_slot == 0));
+    assert!(logical
+        .path_slots
+        .iter()
+        .any(|slot| slot.var == "path" && slot.pattern_slot == 0));
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["peer"], "Ada");
+    assert_eq!(
+        projected[0]["path"]["_path"]["nodes"][0]["_id"]["table"],
+        "users"
+    );
+    assert_eq!(projected[0]["path"]["_path"]["nodes"][0]["_id"]["id"], "u1");
+    assert_eq!(
+        projected[0]["path"]["_path"]["nodes"][1]["_id"]["table"],
+        "companies"
+    );
+    assert_eq!(projected[0]["path"]["_path"]["nodes"][1]["_id"]["id"], "c1");
+    assert_eq!(
+        projected[0]["path"]["_path"]["relationships"][0]["_type"],
+        "works_at"
+    );
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
-        (
-            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN p",
-            "path variables in multi-pattern joins require a later phase",
-        ),
         (
             "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[r:works_at]->(c) RETURN r",
             "duplicate variable `r` in MATCH scope",
@@ -1690,8 +1738,20 @@ fn multi_pattern_join_rejects_deferred_shapes() {
             "duplicate variable `r` in MATCH scope",
         ),
         (
+            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(p:companies) RETURN p",
+            "duplicate variable `p` in MATCH scope",
+        ),
+        (
             "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN r.role",
             "relationship properties over multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN p.weight",
+            "path properties over multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN nodes(p)",
+            "functions over multi-pattern joins require a later phase",
         ),
         (
             "MATCH (u:users)-[:works_at*1..2]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",

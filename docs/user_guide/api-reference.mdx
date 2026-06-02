@@ -499,7 +499,7 @@ Read pattern support:
 - Single-relationship graph patterns.
 - Comma-separated fixed single-hop patterns with reused node variables, such
   as `MATCH (u:users)-[:works_at]->(c:companies),
-  (v:users)-[:works_at]->(c)`.
+  (v:users)-[:works_at]->(c)`, including fixed single-hop path variables.
 - Fixed path variables: `MATCH p=()-[]->()`,
   `MATCH p=(s)-[r]->(e)`, `MATCH p=()<-[]-()`,
   `MATCH p=()-[]-()`, and `MATCH p=(a)-[]->(b)-[]->(c)`.
@@ -519,6 +519,7 @@ Return value support:
 - Bounded relationship path values with a minimum of at least one hop.
 - Fixed path values, including named node variables and single-hop named
   relationship variables.
+- Fixed single-hop path values from supported multi-pattern joins.
 - `RETURN DISTINCT` for non-wildcard path reads, including projected rows from
   supported multi-pattern joins.
 - `RETURN` aggregates: `count`, `sum`, `avg`, `min`, `max`, and `collect`.
@@ -557,11 +558,12 @@ relationship types. Reused node variables join by graph coordinate, independent
 patterns produce Cartesian combinations up to the GQL result cap, joined
 node-property `WHERE` predicates filter after all referenced slots are bound,
 fixed single-hop relationship variables can be returned as coordinate identity
-objects, `ORDER BY` can sort joined node properties or returned property
-aliases, and `RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection.
-Distinct multi-pattern reads must order by returned scalar expressions.
-Multi-pattern reads currently reject path variables, `WITH`, aggregates,
-optional matches, variable-length relationships, and relationship properties.
+objects, fixed single-hop path variables can be returned as path JSON objects,
+`ORDER BY` can sort joined node properties or returned property aliases, and
+`RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection. Distinct
+multi-pattern reads must order by returned scalar expressions. Multi-pattern
+reads currently reject path functions, `WITH`, aggregates, optional matches,
+variable-length relationships, and relationship properties.
 
 Path behavior:
 
@@ -601,7 +603,7 @@ Not included in this release's GQL subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Named variables on variable-length wildcard path segments.
-- Multi-pattern path variables, aggregates, and variable-length relationships.
+- Multi-pattern path functions, aggregates, and variable-length relationships.
 - Node-only optional matches.
 - Multi-pattern optional joins.
 

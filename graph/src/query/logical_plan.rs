@@ -137,6 +137,8 @@ pub(crate) struct LogicalJoinPlan {
     pub(crate) node_slots: Vec<LogicalJoinNodeSlot>,
     /// Relationship variables in row-slot order.
     pub(crate) rel_slots: Vec<LogicalJoinRelSlot>,
+    /// Path variables in row-slot order.
+    pub(crate) path_slots: Vec<LogicalJoinPathSlot>,
     /// Single-hop patterns in source order.
     pub(crate) patterns: Vec<LogicalJoinPattern>,
     /// Return slots in requested order.
@@ -174,6 +176,15 @@ pub(crate) struct LogicalJoinRelSlot {
     /// Relationship variable.
     pub(crate) var: String,
     /// Pattern index that binds this relationship.
+    pub(crate) pattern_slot: usize,
+}
+
+/// Bound path variable slot in a multi-pattern join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalJoinPathSlot {
+    /// Path variable.
+    pub(crate) var: String,
+    /// Pattern index that binds this path.
     pub(crate) pattern_slot: usize,
 }
 
