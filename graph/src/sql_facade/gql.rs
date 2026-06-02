@@ -27,6 +27,15 @@ pub(super) fn explain_statement(
             check_node_scan_acl(&plan);
             crate::query::explain::explain_node_scan(&plan)
         }
+        crate::query::physical_plan::PhysicalStatement::JoinRead(plan) => {
+            check_join_acl(&plan);
+            format!(
+                "JoinExpand(patterns={}, nodes={}, return={})",
+                plan.patterns.len(),
+                plan.node_slots.len(),
+                plan.returns.len()
+            )
+        }
         crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
             check_wildcard_path_acl(&plan);
             format!(
@@ -168,6 +177,12 @@ fn check_node_scan_acl(plan: &crate::query::physical_plan::PhysicalNodeScan) {
     acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
 }
 
+fn check_join_acl(plan: &crate::query::physical_plan::PhysicalJoinPlan) {
+    for table_oid in plan.required_table_oids() {
+        acl::check_table_acl(table_oid).unwrap_or_else(|err| err.report());
+    }
+}
+
 fn check_wildcard_path_acl(plan: &crate::query::physical_plan::PhysicalWildcardPathPlan) {
     for table_oid in &plan.required_node_table_oids {
         acl::check_table_acl(*table_oid).unwrap_or_else(|err| err.report());
@@ -229,6 +244,17 @@ pub(super) fn execute_statement(
                 crate::query::value::node_scan_requires_hydration(&plan, hydrate),
             )?;
             crate::query::value::project_node_rows(matches, &plan, &hydrated, params, hydrate)
+        }
+        crate::query::physical_plan::PhysicalStatement::JoinRead(plan) => {
+            check_join_acl(&plan);
+            let matches = ENGINE.with(|engine| {
+                crate::query::execute::execute_join(&engine.borrow(), &plan, tenant_scope)
+            })?;
+            let hydrated = hydrate_gql_rows(
+                &matches,
+                crate::query::value::join_requires_hydration(&plan, hydrate),
+            )?;
+            crate::query::value::project_join_rows(matches, &plan, &hydrated, hydrate)
         }
         crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
             check_wildcard_path_acl(&plan);

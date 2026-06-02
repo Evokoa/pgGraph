@@ -1,6 +1,6 @@
 use super::catalog_snapshot::{FakeCatalog, MappedEdgeSpec};
 use super::execute::{
-    execute, execute_node_scan, execute_wildcard_path, GqlNodeCoordinate, GqlNodeRow,
+    execute, execute_join, execute_node_scan, execute_wildcard_path, GqlNodeCoordinate, GqlNodeRow,
 };
 use super::explain::explain;
 use super::lower::{lower, lower_statement};
@@ -13,7 +13,8 @@ use super::sqlpgq_adapter::{
     SqlPgqSortItem, SqlPgqSortKey, COMPATIBILITY_MATRIX,
 };
 use super::value::{
-    project_node_rows, project_rows, project_wildcard_path_rows, HydratedRows, QueryParams,
+    project_join_rows, project_node_rows, project_rows, project_wildcard_path_rows, HydratedRows,
+    QueryParams,
 };
 use crate::edge_store::{EdgeStore, RawEdge};
 use crate::engine::Engine;
@@ -1129,6 +1130,150 @@ fn lowering_preserves_bound_tables_and_return_slots() {
             }
         ]
     );
+}
+
+#[test]
+fn multi_pattern_join_reuses_node_variables_by_coordinate() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) RETURN u.name AS source, v.name AS peer, c.name AS company",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert_eq!(logical.node_slots.len(), 3);
+    assert_eq!(
+        logical.patterns[0].target_slot,
+        logical.patterns[1].target_slot
+    );
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(rows, &physical, &hydrated_fixture(), true).unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["source"], "Ada");
+    assert_eq!(projected[0]["peer"], "Ada");
+    assert_eq!(projected[0]["company"], "Acme");
+    assert_eq!(projected[1]["source"], "Linus");
+    assert_eq!(projected[1]["peer"], "Linus");
+    assert_eq!(projected[1]["company"], "Bell");
+}
+
+#[test]
+fn multi_pattern_join_independent_patterns_are_cartesian() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(d:companies) RETURN u, v LIMIT 3",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(rows, &physical, &hydrated_fixture(), false).unwrap();
+
+    assert_eq!(projected.len(), 3);
+    assert_eq!(projected[0]["u"]["_id"]["id"], "u1");
+    assert_eq!(projected[0]["v"]["_id"]["id"], "u1");
+    assert_eq!(projected[1]["u"]["_id"]["id"], "u1");
+    assert_eq!(projected[1]["v"]["_id"]["id"], "u2");
+    assert_eq!(projected[2]["u"]["_id"]["id"], "u2");
+    assert_eq!(projected[2]["v"]["_id"]["id"], "u1");
+}
+
+#[test]
+fn multi_pattern_join_applies_skip_before_limit() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(d:companies) RETURN u, v SKIP 1 LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(rows, &physical, &hydrated_fixture(), false).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["u"]["_id"]["id"], "u1");
+    assert_eq!(projected[0]["v"]["_id"]["id"], "u2");
+}
+
+#[test]
+fn multi_pattern_join_rejects_deferred_shapes() {
+    for (query, expected) in [
+        (
+            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN r",
+            "relationship variables in multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN p",
+            "path variables in multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at*1..2]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
+            "relationship properties and variable length in multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at {role: 'eng'}]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
+            "relationship properties and variable length in multi-pattern joins require a later phase",
+        ),
+        (
+            "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
+            "multi-pattern OPTIONAL MATCH requires a later join phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WHERE u.age > 1 RETURN u",
+            "WHERE, WITH, and ORDER BY over multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH u RETURN u",
+            "WHERE, WITH, and ORDER BY over multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u ORDER BY u.name",
+            "WHERE, WITH, and ORDER BY over multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN DISTINCT u",
+            "RETURN DISTINCT over multi-pattern joins requires a later phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN count(*)",
+            "aggregates over multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v)-[:works_at]->(c) RETURN v",
+            "new variables in multi-pattern joins require a concrete node label",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (c:users)-[:works_at]->(v:companies) RETURN v",
+            "conflicting label `users` for previously bound variable `c`",
+        ),
+    ] {
+        let ast = crate::gql::parse_statement(query).unwrap();
+        let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+        assert!(
+            err.to_string().contains(expected),
+            "expected `{expected}` for {query}, got {err}"
+        );
+    }
 }
 
 #[test]

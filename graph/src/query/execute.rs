@@ -9,8 +9,8 @@ use crate::types::TraversalDirection;
 
 use super::logical_plan::BoundDirection;
 use super::physical_plan::{
-    PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan, PhysicalWildcardPathSegment,
-    ReturnSlot,
+    PhysicalJoinPlan, PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan,
+    PhysicalWildcardPathSegment, ReturnSlot,
 };
 
 /// Coordinate-only node value returned by Phase 1B.
@@ -173,6 +173,106 @@ pub(crate) fn execute_node_scan(
         }
     }
     Ok(rows)
+}
+
+/// Execute a physical multi-pattern join plan.
+///
+/// # Errors
+///
+/// Returns [`GraphError`] when the graph is not built, a requested relationship
+/// type is not present, or execution exceeds the plan's cardinality cap.
+pub(crate) fn execute_join(
+    engine: &Engine,
+    plan: &PhysicalJoinPlan,
+    tenant: Option<&str>,
+) -> GraphResult<Vec<GqlRow>> {
+    if !engine.built {
+        return Err(GraphError::NotBuilt);
+    }
+    let rel_type_ids = plan
+        .patterns
+        .iter()
+        .map(|pattern| edge_type_id(engine, &pattern.rel_type))
+        .collect::<GraphResult<Vec<_>>>()?;
+    let neighbors = GqlNeighbors::new(engine);
+    let mut rows = Vec::new();
+    let row_cap = plan.execution_row_cap();
+    let state = JoinState {
+        node_slots: vec![None; plan.node_slots.len()],
+        relationships: Vec::with_capacity(plan.patterns.len()),
+    };
+    expand_join_pattern(
+        engine,
+        &neighbors,
+        plan,
+        &rel_type_ids,
+        tenant,
+        state,
+        0,
+        &mut rows,
+        row_cap,
+    )?;
+    Ok(rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_join_pattern(
+    engine: &Engine,
+    neighbors: &GqlNeighbors<'_>,
+    plan: &PhysicalJoinPlan,
+    rel_type_ids: &[u8],
+    tenant: Option<&str>,
+    state: JoinState,
+    pattern_idx: usize,
+    rows: &mut Vec<GqlRow>,
+    row_cap: usize,
+) -> GraphResult<()> {
+    let Some(pattern) = plan.patterns.get(pattern_idx) else {
+        if rows.len() >= row_cap {
+            if plan.cap_exhaustion_is_error() {
+                return Err(GraphError::GqlExecution {
+                    reason: format!("GQL result row cap exceeded ({row_cap})"),
+                });
+            }
+            return Ok(());
+        }
+        rows.push(project_join_state(engine, state)?);
+        return Ok(());
+    };
+    let source_candidates =
+        join_source_candidates(engine, plan, &state, pattern.source_slot, tenant);
+    for source_idx in source_candidates {
+        if !join_node_matches(engine, plan, pattern.source_slot, source_idx, tenant) {
+            continue;
+        }
+        let state = state.with_node(pattern.source_slot, source_idx);
+        for target in neighbors.for_direction_any(pattern.direction, source_idx) {
+            if target.type_id != rel_type_ids[pattern_idx]
+                || !join_node_matches(engine, plan, pattern.target_slot, target.node_idx, tenant)
+            {
+                continue;
+            }
+            if state.node_slots[pattern.target_slot].is_some_and(|idx| idx != target.node_idx) {
+                continue;
+            }
+            let next_state = state.with_target(pattern.target_slot, source_idx, target);
+            expand_join_pattern(
+                engine,
+                neighbors,
+                plan,
+                rel_type_ids,
+                tenant,
+                next_state,
+                pattern_idx + 1,
+                rows,
+                row_cap,
+            )?;
+            if plan.limit.is_some() && rows.len() >= row_cap {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Execute a physical wildcard path plan.
@@ -467,6 +567,32 @@ impl PathState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct JoinState {
+    node_slots: Vec<Option<u32>>,
+    relationships: Vec<GqlRelationshipStep>,
+}
+
+impl JoinState {
+    fn with_node(&self, slot: usize, node_idx: u32) -> Self {
+        let mut next = self.clone();
+        next.node_slots[slot] = Some(node_idx);
+        next
+    }
+
+    fn with_target(&self, slot: usize, source_idx: u32, target: GqlStepTarget) -> Self {
+        let mut next = self.clone();
+        next.node_slots[slot] = Some(target.node_idx);
+        next.relationships.push(GqlRelationshipStep {
+            from_idx: source_idx,
+            to_idx: target.node_idx,
+            orientation: target.orientation,
+            type_id: target.type_id,
+        });
+        next
+    }
+}
+
 struct GqlNeighbors<'a> {
     out_store: &'a EdgeStore,
     in_store: &'a EdgeStore,
@@ -651,6 +777,30 @@ fn append_all_neighbors(
     }));
 }
 
+fn join_source_candidates(
+    engine: &Engine,
+    plan: &PhysicalJoinPlan,
+    state: &JoinState,
+    slot: usize,
+    tenant: Option<&str>,
+) -> Vec<u32> {
+    state.node_slots[slot].map_or_else(
+        || source_nodes(engine, plan.node_slots[slot].table_oid, tenant),
+        |node_idx| vec![node_idx],
+    )
+}
+
+fn join_node_matches(
+    engine: &Engine,
+    plan: &PhysicalJoinPlan,
+    slot: usize,
+    node_idx: u32,
+    tenant: Option<&str>,
+) -> bool {
+    target_matches(engine, node_idx, plan.node_slots[slot].table_oid, tenant)
+        && !crate::projection::tx_delta::node_deleted(node_idx)
+}
+
 fn target_matches(engine: &Engine, target_idx: u32, table_oid: u32, tenant: Option<&str>) -> bool {
     target_idx < engine.node_store.node_count()
         && engine.node_store.is_active(target_idx)
@@ -701,6 +851,51 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
                 })
             })
             .collect::<GraphResult<Vec<_>>>()?,
+    })
+}
+
+fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> {
+    let node_indices = state
+        .node_slots
+        .into_iter()
+        .map(|node| {
+            node.ok_or_else(|| GraphError::GqlExecution {
+                reason: "multi-pattern join produced an unbound node slot".to_string(),
+            })
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
+    let path_nodes = node_indices
+        .iter()
+        .map(|node_idx| coordinate(engine, *node_idx))
+        .collect::<Vec<_>>();
+    let Some(source) = path_nodes.first().cloned() else {
+        return Err(GraphError::GqlExecution {
+            reason: "multi-pattern join produced no node slots".to_string(),
+        });
+    };
+    let target = path_nodes.last().cloned();
+    let path_relationships = state
+        .relationships
+        .iter()
+        .map(|relationship| {
+            let (start_idx, end_idx) = match relationship.orientation {
+                EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
+                EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
+            };
+            Ok(GqlPathRelationship {
+                rel_type: edge_type_label(engine, relationship.type_id)?,
+                start: coordinate(engine, start_idx),
+                end: coordinate(engine, end_idx),
+            })
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
+    Ok(GqlRow {
+        source,
+        target,
+        rel_start: None,
+        rel_end: None,
+        path_nodes,
+        path_relationships,
     })
 }
 

@@ -229,6 +229,8 @@ pub(crate) struct MatchClause {
     pub(crate) optional: bool,
     /// Linear graph pattern.
     pub(crate) pattern: Pattern,
+    /// All graph patterns in the clause, in source order.
+    pub(crate) patterns: Vec<Pattern>,
     /// Clause span.
     pub(crate) span: Span,
 }

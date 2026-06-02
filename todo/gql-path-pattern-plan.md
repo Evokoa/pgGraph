@@ -423,6 +423,13 @@ Tests:
 
 ### Phase 3B: Multi-Pattern Joins
 
+Status: initial fixed single-hop join slice implemented and documented on
+2026-06-02. Reused node variables join by graph coordinate, independent
+patterns produce Cartesian combinations under the result cap, and node/node
+property returns with `SKIP`/`LIMIT` are supported. Relationship variables,
+path variables, predicates, later clauses, optional joins, and variable-length
+relationships remain planned within this phase.
+
 Target examples:
 
 ```sql

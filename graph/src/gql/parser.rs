@@ -414,14 +414,25 @@ impl Parser {
             .expect(TokKind::Match, "expected MATCH clause")?
             .span
             .start as usize;
-        let pattern = self.parse_pattern()?;
-        let end = pattern
-            .tail
+        let first_pattern = self.parse_pattern()?;
+        let mut patterns = vec![first_pattern.clone()];
+        while self.consume(TokKind::Comma).is_some() {
+            patterns.push(self.parse_pattern()?);
+        }
+        let end = patterns
             .last()
-            .map_or(pattern.start.span.end, |(_, node)| node.span.end) as usize;
+            .and_then(|pattern| {
+                pattern
+                    .tail
+                    .last()
+                    .map(|(_, node)| node.span.end)
+                    .or(Some(pattern.start.span.end))
+            })
+            .unwrap_or(first_pattern.start.span.end) as usize;
         Ok(MatchClause {
             optional,
-            pattern,
+            pattern: first_pattern,
+            patterns,
             span: Span::new(start, end),
         })
     }

@@ -1001,6 +1001,9 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
         works_at_rows,
         named_works_at_rows,
         named_shape_matches,
+        join_rows,
+        join_shape_matches,
+        unhydrated_join_property_matches,
         shape_matches,
         coordinate_only_has_name,
     ) =
@@ -1030,6 +1033,24 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                               RETURN p, s, r, e',
                              hydrate := true
                          )
+                     ),
+                     joined_friend AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                                    (v:graph_test_users_pgtest)-[:friend]->(c)
+                              RETURN u.name AS source, v.name AS peer, c.name AS target',
+                             hydrate := true
+                         )
+                     ),
+                     joined_friend_unhydrated_property AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                                    (v:graph_test_users_pgtest)-[:friend]->(c)
+                              RETURN u.name AS source, c.name AS target',
+                             hydrate := false
+                         )
                      )
                      SELECT count(*)::bigint,
                             count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'friend')::bigint,
@@ -1041,6 +1062,15 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                                 AND row->'r'->>'_type' = 'works_at'
                                 AND row->'p'->'_path'->'relationships'->0 = row->'r'
                              ) FROM named_works_at),
+                            (SELECT count(*)::bigint FROM joined_friend),
+                            (SELECT bool_and(
+                                row->>'source' = row->>'peer'
+                                AND row->>'target' = 'Bob'
+                             ) FROM joined_friend),
+                            (SELECT bool_and(
+                                row->>'source' = 'Alice'
+                                AND row->>'target' = 'Bob'
+                             ) FROM joined_friend_unhydrated_property),
                             bool_and(
                                 (row->>'len')::bigint = 1
                                 AND row->'p'->'_path'->'nodes' = row->'ns'
@@ -1071,10 +1101,19 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                 row.get::<bool>(5)
                     .expect("named works_at shape read failed")
                     .unwrap_or(false),
-                row.get::<bool>(6)
+                row.get::<i64>(6)
+                    .expect("join row count read failed")
+                    .unwrap_or_default(),
+                row.get::<bool>(7)
+                    .expect("join shape read failed")
+                    .unwrap_or(false),
+                row.get::<bool>(8)
+                    .expect("unhydrated join property read failed")
+                    .unwrap_or(false),
+                row.get::<bool>(9)
                     .expect("shape equality read failed")
                     .unwrap_or(false),
-                row.get::<bool>(7)
+                row.get::<bool>(10)
                     .expect("coordinate-only shape read failed")
                     .unwrap_or(true),
             ))
@@ -1089,6 +1128,9 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     assert_eq!(works_at_rows, 2, "unexpected works_at path count");
     assert_eq!(named_works_at_rows, works_at_rows);
     assert!(named_shape_matches);
+    assert_eq!(join_rows, 1, "unexpected multi-pattern join count");
+    assert!(join_shape_matches);
+    assert!(unhydrated_join_property_matches);
     assert!(shape_matches);
     assert!(!coordinate_only_has_name);
 }

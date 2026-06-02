@@ -239,15 +239,17 @@ impl SqlPgqRead {
             .transpose()?
             .into_iter()
             .collect();
+        let pattern = Pattern {
+            path_var: None,
+            start,
+            tail,
+            span: ADAPTER_SPAN,
+        };
         Ok(Statement::Read(Query {
             match_: MatchClause {
                 optional: self.optional,
-                pattern: Pattern {
-                    path_var: None,
-                    start,
-                    tail,
-                    span: ADAPTER_SPAN,
-                },
+                pattern: pattern.clone(),
+                patterns: vec![pattern],
                 span: ADAPTER_SPAN,
             },
             where_: None,

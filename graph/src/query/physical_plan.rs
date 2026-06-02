@@ -18,6 +18,8 @@ pub(crate) enum PhysicalStatement {
     Read(PhysicalPlan),
     /// Node-only read query.
     NodeScan(PhysicalNodeScan),
+    /// Multi-pattern read query.
+    JoinRead(PhysicalJoinPlan),
     /// Wildcard single-hop path variable query.
     WildcardPathRead(PhysicalWildcardPathPlan),
     /// PostgreSQL-backed node creation.
@@ -123,6 +125,47 @@ pub(crate) struct PhysicalPlan {
     pub(crate) skip: Option<u64>,
     /// Maximum rows to return.
     pub(crate) limit: Option<u64>,
+}
+
+/// Physical multi-pattern join query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalJoinPlan {
+    /// Node variables in row-slot order.
+    pub(crate) node_slots: Vec<PhysicalJoinNodeSlot>,
+    /// Single-hop patterns in source order.
+    pub(crate) patterns: Vec<PhysicalJoinPattern>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnSlot>,
+    /// Table OIDs requiring ACL checks before execution.
+    pub(crate) required_table_oids: BTreeSet<u32>,
+    /// Number of rows to skip after projection.
+    pub(crate) skip: Option<u64>,
+    /// Maximum rows to return.
+    pub(crate) limit: Option<u64>,
+}
+
+/// Physical node variable slot in a multi-pattern join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhysicalJoinNodeSlot {
+    /// Node variable.
+    pub(crate) var: String,
+    /// Source table OID.
+    pub(crate) table_oid: u32,
+    /// Source label.
+    pub(crate) label: String,
+}
+
+/// Physical fixed single-hop pattern in a multi-pattern join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhysicalJoinPattern {
+    /// Source node slot index.
+    pub(crate) source_slot: usize,
+    /// Relationship type label.
+    pub(crate) rel_type: String,
+    /// Traversal direction.
+    pub(crate) direction: BoundDirection,
+    /// Target node slot index.
+    pub(crate) target_slot: usize,
 }
 
 /// Physical node creation plan.
@@ -418,6 +461,29 @@ impl PhysicalPlan {
 }
 
 impl PhysicalWildcardPathPlan {
+    /// Maximum matches the executor should collect for this plan.
+    pub(crate) fn execution_row_cap(&self) -> usize {
+        if let Some(limit) = self.limit {
+            let requested = self.skip.unwrap_or(0).saturating_add(limit);
+            return usize::try_from(requested)
+                .unwrap_or(usize::MAX)
+                .min(MAX_GQL_RESULT_ROWS);
+        }
+        MAX_GQL_RESULT_ROWS
+    }
+
+    /// Whether hitting the execution cap means results would be incomplete.
+    pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
+        self.limit.is_none()
+    }
+}
+
+impl PhysicalJoinPlan {
+    /// Table OIDs whose rows must be visible to the current SQL role.
+    pub(crate) fn required_table_oids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.required_table_oids.iter().copied()
+    }
+
     /// Maximum matches the executor should collect for this plan.
     pub(crate) fn execution_row_cap(&self) -> usize {
         if let Some(limit) = self.limit {

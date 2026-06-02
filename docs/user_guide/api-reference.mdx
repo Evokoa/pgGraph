@@ -497,6 +497,9 @@ Read pattern support:
 
 - Node-only `MATCH`.
 - Single-relationship graph patterns.
+- Comma-separated fixed single-hop patterns with reused node variables, such
+  as `MATCH (u:users)-[:works_at]->(c:companies),
+  (v:users)-[:works_at]->(c)`.
 - Fixed path variables: `MATCH p=()-[]->()`,
   `MATCH p=(s)-[r]->(e)`, `MATCH p=()<-[]-()`,
   `MATCH p=()-[]-()`, and `MATCH p=(a)-[]->(b)-[]->(c)`.
@@ -509,6 +512,7 @@ row for each source node with no qualifying target. Null-extended rows use JSON
 Return value support:
 
 - Node values and scalar properties.
+- Node values and scalar properties from supported multi-pattern joins.
 - JSONB list/map properties, including dotted paths such as `u.profile.plan`.
 - Coordinate-only single-hop relationship identities.
 - Bounded relationship path values with a minimum of at least one hop.
@@ -538,6 +542,14 @@ relationship types as filters. They reject `ORDER BY`, `RETURN DISTINCT`,
 `WHERE`, `WITH`, aggregates, optional matches, writes, node properties,
 relationship properties, relationship variables in multi-segment paths, and
 variable-length wildcard paths.
+
+Multi-pattern reads support fixed single-hop patterns with concrete labels and
+relationship types. Reused node variables join by graph coordinate, independent
+patterns produce Cartesian combinations up to the GQL result cap, and `SKIP`
+and `LIMIT` apply after projection. Multi-pattern reads currently reject
+relationship variables, path variables, property predicates, `WHERE`, `WITH`,
+`ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches, variable-length
+relationships, and relationship properties.
 
 Path behavior:
 
@@ -577,6 +589,8 @@ Not included in this release's GQL subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Variable-length wildcard path variables.
+- Multi-pattern relationship variables, path variables, predicates, ordering,
+  deduplication, aggregates, and variable-length relationships.
 - Property predicates inside wildcard path-variable patterns.
 - Node-only optional matches.
 - Multi-pattern optional joins.

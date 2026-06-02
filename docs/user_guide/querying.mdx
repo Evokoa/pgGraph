@@ -69,7 +69,7 @@ Supported read coverage:
 
 | Area | Supported behavior |
 |---|---|
-| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, fixed path variables such as `MATCH p=(a)-[]->(b)-[]->(c)`, or top-level single-relationship `OPTIONAL MATCH` |
+| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, comma-separated fixed single-hop patterns with reused node variables, fixed path variables such as `MATCH p=(a)-[]->(b)-[]->(c)`, or top-level single-relationship `OPTIONAL MATCH` |
 | Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum and minimum of at least one hop |
@@ -79,7 +79,7 @@ Supported read coverage:
 | Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported for non-wildcard path reads with a bounded in-memory key set |
 | Aggregates | `count`, `sum`, `avg`, `min`, `max`, and `collect` in `RETURN`; non-aggregate return items are implicit grouping keys |
 | Path functions | `nodes(path)`, `relationships(path)`, and `length(path)` over named relationship patterns and single-hop wildcard path variables |
-| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT` for non-wildcard path reads, and `SKIP`/`LIMIT` for wildcard path reads, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
+| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT` for single-pattern non-wildcard reads, and `SKIP`/`LIMIT` for wildcard path and multi-pattern reads, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
 
 ### GQL JSONB result format
 
@@ -180,6 +180,28 @@ The `nodes(path)` function returns the `_path.nodes` array directly,
 `relationships(path)` returns the `_path.relationships` array directly, and
 `length(path)` returns the relationship count as a JSON number.
 
+Multi-pattern `MATCH` clauses can join fixed single-hop labeled patterns by
+reusing node variables:
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (u:users)-[:works_at]->(c:companies),
+         (v:users)-[:works_at]->(c)
+   RETURN u.name AS source, v.name AS peer, c.name AS company',
+  hydrate := true
+);
+```
+
+Each new node variable in a multi-pattern join needs a concrete label. A reused
+node variable may omit the label or repeat the same label, and it joins by the
+graph coordinate. Independent patterns produce Cartesian combinations up to the
+GQL result cap. This slice supports node and node-property returns plus `SKIP`
+and `LIMIT`; relationship variables, path variables, property predicates,
+`WHERE`, `WITH`, `ORDER BY`, `RETURN DISTINCT`, aggregates, optional
+multi-pattern joins, variable-length relationships, and relationship
+properties in multi-pattern joins remain outside the current subset.
+
 Scalar properties are returned as their JSON representation: strings,
 numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`
 targets and relationships also project as JSON `null`. A missing key inside a
@@ -217,6 +239,8 @@ Other read semantics:
   `_path.relationships`.
 - Fixed path variables return the same path object shape, with each
   relationship carrying its actual registered edge label.
+- Multi-pattern joins reuse node variables by graph coordinate and treat
+  independent patterns as Cartesian combinations under the result cap.
 - `nodes`, `relationships`, and `length` expose path components directly.
 
 Registered JSONB source columns can be addressed with dotted property paths
@@ -230,7 +254,8 @@ Planned outside this subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Variable-length wildcard path variables.
-- Multi-pattern joins.
+- Multi-pattern relationship variables, path variables, predicates, ordering,
+  deduplication, aggregates, and variable-length relationships.
 - Property predicates inside wildcard path-variable patterns.
 - Multi-pattern optional joins.
 

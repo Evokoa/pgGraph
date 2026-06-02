@@ -38,3 +38,14 @@
 - `cargo test --features pg17 query::tests::` from `graph/`: passed, 106 tests.
 - `cargo test --features pg17` from `graph/`: passed, 460 tests, 1 ignored.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test.
+
+## 2026-06-02 Phase 3B Initial Multi-Pattern Join Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 gql::tests::parses_comma_separated_match_patterns` from `graph/`: passed, 1 test.
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 4 tests. Includes reviewer-requested exact unsupported-shape assertions and `SKIP` coverage.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 110 tests.
+- `cargo test --features pg17` from `graph/`: passed, 465 tests, 1 ignored.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes unhydrated multi-pattern property projection through `graph.gql()`.

@@ -10,7 +10,8 @@ use super::logical_plan::{
     ValueExpr,
 };
 use super::physical_plan::{
-    PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan, ReturnSlot, MAX_GQL_DISTINCT_KEYS,
+    PhysicalJoinPlan, PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan, ReturnSlot,
+    MAX_GQL_DISTINCT_KEYS,
 };
 
 /// Hydrated source rows keyed by graph coordinate.
@@ -78,6 +79,26 @@ pub(crate) fn project_wildcard_path_rows(
             hydrated,
             hydrate_nodes,
         )?);
+    }
+    apply_value_window(&mut projected, plan.skip, plan.limit);
+    Ok(projected)
+}
+
+/// Project multi-pattern join matches into canonical JSON rows.
+///
+/// # Errors
+///
+/// Returns [`GraphError::GqlExecution`] when a joined row is missing a required
+/// node slot or hydration needed for a projected value is absent.
+pub(crate) fn project_join_rows(
+    rows: Vec<GqlRow>,
+    plan: &PhysicalJoinPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<Vec<serde_json::Value>> {
+    let mut projected = Vec::with_capacity(rows.len());
+    for row in rows {
+        projected.push(project_join_row(&row, plan, hydrated, hydrate_nodes)?);
     }
     apply_value_window(&mut projected, plan.skip, plan.limit);
     Ok(projected)
@@ -787,6 +808,11 @@ pub(crate) fn wildcard_path_requires_hydration(
         })
 }
 
+/// Return whether this multi-pattern join plan requires SQL row hydration.
+pub(crate) fn join_requires_hydration(plan: &PhysicalJoinPlan, hydrate_nodes: bool) -> bool {
+    hydrate_nodes || plan.returns.iter().any(return_slot_requires_hydration)
+}
+
 fn return_slot_requires_hydration(slot: &ReturnSlot) -> bool {
     matches!(
         slot,
@@ -1167,6 +1193,57 @@ fn project_wildcard_path_row(
                 return Err(GraphError::GqlExecution {
                     reason: "wildcard path plans cannot project properties or aggregates"
                         .to_string(),
+                });
+            }
+        }
+    }
+    Ok(serde_json::Value::Object(output))
+}
+
+fn project_join_row(
+    row: &GqlRow,
+    plan: &PhysicalJoinPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    let mut output = serde_json::Map::new();
+    for slot in &plan.returns {
+        match slot {
+            ReturnSlot::Node { side, name } => {
+                output.insert(
+                    name.clone(),
+                    coordinate(row, *side)
+                        .map(|coordinate| {
+                            node_value(
+                                coordinate,
+                                hydrated,
+                                join_label(plan, *side)?,
+                                hydrate_nodes,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            ReturnSlot::Property {
+                side,
+                property,
+                name,
+            } => {
+                output.insert(
+                    name.clone(),
+                    coordinate(row, *side)
+                        .map(|coordinate| property_value(coordinate, hydrated, property))
+                        .transpose()?
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            ReturnSlot::Relationship { .. }
+            | ReturnSlot::Path { .. }
+            | ReturnSlot::PathFunction { .. }
+            | ReturnSlot::Aggregate { .. } => {
+                return Err(GraphError::GqlExecution {
+                    reason: "unsupported multi-pattern join return slot".to_string(),
                 });
             }
         }
@@ -1595,6 +1672,20 @@ fn label(plan: &PhysicalPlan, side: BindingSide) -> &str {
             unreachable!("path-node bindings are not used by one-hop plans")
         }
     }
+}
+
+fn join_label(plan: &PhysicalJoinPlan, side: BindingSide) -> GraphResult<&str> {
+    let BindingSide::PathNode(slot) = side else {
+        return Err(GraphError::GqlExecution {
+            reason: "multi-pattern join node binding used a non-slot side".to_string(),
+        });
+    };
+    plan.node_slots
+        .get(slot)
+        .map(|node| node.label.as_str())
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!("multi-pattern join node slot {slot} is out of range"),
+        })
 }
 
 fn label_for_table(plan: &PhysicalPlan, table_oid: u32) -> &str {

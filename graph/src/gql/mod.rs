@@ -99,6 +99,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_comma_separated_match_patterns() {
+        let parsed =
+            parse("MATCH (a:users)-[:friend]->(b:users), (b)-[:friend]->(c:users) RETURN a, c")
+                .expect("query should parse");
+
+        assert_eq!(parsed.match_.pattern.start.var_text(), Some("a"));
+        assert_eq!(parsed.match_.patterns.len(), 2);
+        assert_eq!(parsed.match_.patterns[0].start.var_text(), Some("a"));
+        assert_eq!(parsed.match_.patterns[1].start.var_text(), Some("b"));
+        assert_eq!(parsed.match_.patterns[1].tail[0].1.var_text(), Some("c"));
+    }
+
+    #[test]
     fn parses_optional_match_clause() {
         let parsed = parse("OPTIONAL MATCH (a:users)-[:knows]->(b:users) RETURN a, b")
             .expect("query should parse");

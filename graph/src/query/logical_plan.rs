@@ -10,6 +10,8 @@ pub(crate) enum LogicalStatement {
     Read(LogicalPlan),
     /// Node-only read query.
     NodeScan(LogicalNodeScan),
+    /// Multi-pattern read query.
+    JoinRead(LogicalJoinPlan),
     /// Wildcard single-hop path variable read query.
     WildcardPathRead(LogicalWildcardPathPlan),
     /// Node creation write.
@@ -122,6 +124,49 @@ pub(crate) struct LogicalNodeScan {
     pub(crate) skip: Option<u64>,
     /// Maximum rows to return.
     pub(crate) limit: Option<u64>,
+}
+
+/// Bound multi-pattern join query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalJoinPlan {
+    /// Node variables in row-slot order.
+    pub(crate) node_slots: Vec<LogicalJoinNodeSlot>,
+    /// Single-hop patterns in source order.
+    pub(crate) patterns: Vec<LogicalJoinPattern>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnBinding>,
+    /// Table OIDs requiring ACL checks before execution.
+    pub(crate) required_table_oids: BTreeSet<u32>,
+    /// Number of rows to skip after projection.
+    pub(crate) skip: Option<u64>,
+    /// Maximum rows to return.
+    pub(crate) limit: Option<u64>,
+}
+
+/// Bound node variable slot in a multi-pattern join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalJoinNodeSlot {
+    /// Node variable.
+    pub(crate) var: String,
+    /// Source table OID.
+    pub(crate) table_oid: u32,
+    /// Source label.
+    pub(crate) label: String,
+    /// Registered readable properties.
+    pub(crate) properties: BTreeSet<String>,
+}
+
+/// Bound fixed single-hop pattern in a multi-pattern join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalJoinPattern {
+    /// Source node slot index.
+    pub(crate) source_slot: usize,
+    /// Relationship type label.
+    pub(crate) rel_type: String,
+    /// Traversal direction.
+    pub(crate) direction: BoundDirection,
+    /// Target node slot index.
+    pub(crate) target_slot: usize,
 }
 
 /// Bound node creation.
