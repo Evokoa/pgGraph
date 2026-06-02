@@ -94,12 +94,12 @@
 
 ## 2026-06-02 Phase 3D Variable-Length Wildcard Path Slice
 
-- `cargo test --features pg17 query::tests::wildcard_path_` from `graph/`: passed, 11 tests. Includes bounded single-segment wildcard variable-length projection, bounded walk cycle behavior, and the review-requested regression that endpoint labels filter only emitted endpoints, not intermediate hops.
+- `cargo test --features pg17 query::tests::wildcard_path_` from `graph/`: passed, 13 tests. Includes bounded single-segment wildcard variable-length projection, bounded walk cycle behavior, row-cap exhaustion, tenant/overlay hop filtering, and the review-requested regression that endpoint labels filter only emitted endpoints, not intermediate hops.
 - `cargo test --features pg17 query::tests::binder_accepts_variable_length_wildcard_path_without_element_variables` from `graph/`: passed, 1 test.
 - `cargo test --features pg17 query::tests::binder_rejects_deferred_variable_length_wildcard_bindings` from `graph/`: passed, 1 test.
 - `cargo fmt --check` from `graph/`: passed.
 - `git diff --check` from repository root: passed.
-- `cargo test --features pg17 query::tests::` from `graph/`: passed, 124 tests.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 126 tests.
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes unhydrated `graph.gql()` wildcard variable-length path projection and path-function shape checks.
-- `cargo test --features pg17` from `graph/`: passed, 479 tests, 1 ignored.
+- `cargo test --features pg17` from `graph/`: passed, 481 tests, 1 ignored.

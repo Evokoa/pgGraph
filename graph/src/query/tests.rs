@@ -2020,6 +2020,117 @@ fn wildcard_path_executor_bounds_variable_length_walks() {
 }
 
 #[test]
+fn wildcard_path_variable_length_reports_row_cap_exhaustion() {
+    let statement = bind_statement_query("MATCH p=()-[:works_at*1..14]->() RETURN p");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    assert!(physical.cap_exhaustion_is_error());
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 0,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 0,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let err = execute_wildcard_path(&engine, &physical, None).unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("GQL result row cap exceeded (10000)"));
+}
+
+#[test]
+fn wildcard_path_variable_length_filters_tenant_and_overlay_hops() {
+    crate::projection::tx_delta::clear_for_test();
+    let statement = bind_statement_query("MATCH p=()-[:works_at*2..2]->() RETURN p");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = engine_fixture();
+    engine.tenanted_table_oids.insert(10);
+    engine.tenanted_table_oids.insert(20);
+    engine.insert_tenant_membership("tenant-a", 0);
+    engine.insert_tenant_membership("tenant-b", 2);
+    engine.insert_tenant_membership("tenant-a", 1);
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    assert!(execute_wildcard_path(&engine, &physical, Some("tenant-a"))
+        .unwrap()
+        .is_empty());
+
+    crate::projection::tx_delta::record_deleted_edge(0, 2, works_at).expect("record edge delete");
+    assert!(execute_wildcard_path(&engine, &physical, None)
+        .unwrap()
+        .is_empty());
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
 fn wildcard_path_executor_deduplicates_undirected_relationships() {
     let statement = bind_statement_query("MATCH p=()-[]-() RETURN length(p) AS len");
     let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
