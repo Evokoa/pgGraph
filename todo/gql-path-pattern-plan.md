@@ -519,6 +519,13 @@ Tests:
 
 ### Phase 3E: Writes over Wildcard Relationship Patterns
 
+Status: exact single-mapping wildcard relationship deletes implemented and
+documented on 2026-06-02. Endpoint labels and relationship types may be omitted
+only when the pattern resolves to exactly one static-label registered edge-row
+mapping. Ambiguous, dynamic-label, or unmapped wildcard relationship writes
+remain rejected before execution. Verification is recorded in
+`todo/measurements.md` under "Phase 3E Wildcard Relationship Delete Slice".
+
 Target examples:
 
 ```sql

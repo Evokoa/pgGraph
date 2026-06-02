@@ -103,3 +103,13 @@
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes unhydrated `graph.gql()` wildcard variable-length path projection and path-function shape checks.
 - `cargo test --features pg17` from `graph/`: passed, 481 tests, 1 ignored.
+
+## 2026-06-02 Phase 3E Wildcard Relationship Delete Slice
+
+- `cargo test --features pg17 query::tests::binder_` from `graph/`: passed, 61 tests. Includes unique wildcard mapped-edge `DELETE`, named-node wildcard `DELETE` with a relationship type filter, inbound wildcard delete binding, ambiguous wildcard delete rejection, review-requested dynamic-label mapping rejection, review-requested ambiguous endpoint-label rejection, and the existing concrete mapped-edge delete cases.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_delete_edge_resolves_unique_mapped_row` from `graph/`: passed, 1 pgrx test. Deletes through `MATCH (u)-[r]->(v)` with endpoint predicates after the wildcard resolves to one registered edge-row mapping.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 132 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17` from `graph/`: passed, 487 tests, 1 ignored.

@@ -51,6 +51,7 @@ fn fake_catalog() -> FakeCatalog {
             source_column: "user_id",
             target_column: "friend_id",
             bidirectional: false,
+            label_column: None,
         })
 }
 
@@ -429,6 +430,134 @@ fn binder_accepts_delete_for_mapped_edge_row() {
 }
 
 #[test]
+fn binder_accepts_wildcard_delete_for_unique_mapped_edge_row() {
+    let ast = crate::gql::parse_statement("MATCH ()-[r]->() DELETE r RETURN r").unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::DeleteEdge(delete) = plan else {
+        panic!("expected delete edge plan");
+    };
+
+    assert_eq!(delete.source.label, "users");
+    assert_eq!(delete.target.label, "users");
+    assert_eq!(delete.relationship.rel_type, "friend");
+    assert_eq!(delete.rel_var, "r");
+    assert_eq!(delete.edge.edge_table_oid, 30);
+    assert!(matches!(
+        delete.returns[0],
+        super::logical_plan::ReturnBinding::Relationship { .. }
+    ));
+}
+
+#[test]
+fn binder_accepts_wildcard_delete_with_named_nodes_and_type_filter() {
+    let ast =
+        crate::gql::parse_statement("MATCH (u)-[r:friend]->(v) DELETE r RETURN u, v").unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::DeleteEdge(delete) = plan else {
+        panic!("expected delete edge plan");
+    };
+
+    assert_eq!(delete.source.var, "u");
+    assert_eq!(delete.target.var, "v");
+    assert_eq!(delete.source.table_oid, 10);
+    assert_eq!(delete.target.table_oid, 10);
+    assert_eq!(delete.relationship.rel_type, "friend");
+    assert_eq!(delete.edge.edge_table_oid, 30);
+    assert_eq!(delete.returns.len(), 2);
+}
+
+#[test]
+fn binder_accepts_inbound_wildcard_delete_for_unique_mapped_edge_row() {
+    let ast = crate::gql::parse_statement("MATCH ()<-[r:friend]-() DELETE r RETURN r").unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::DeleteEdge(delete) = plan else {
+        panic!("expected delete edge plan");
+    };
+
+    assert_eq!(
+        delete.relationship.direction,
+        super::logical_plan::BoundDirection::In
+    );
+    assert_eq!(delete.relationship.rel_type, "friend");
+    assert_eq!(delete.edge.edge_table_oid, 30);
+}
+
+#[test]
+fn binder_rejects_ambiguous_wildcard_delete_edges() {
+    let catalog = FakeCatalog::new()
+        .with_writable_label("users", 10, ["id", "name"], ["name"])
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "friend",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: None,
+        })
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "colleague",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 40,
+            source_column: "user_id",
+            target_column: "colleague_id",
+            bidirectional: false,
+            label_column: None,
+        });
+    let ast = crate::gql::parse_statement("MATCH ()-[r]->() DELETE r RETURN r").unwrap();
+    let err = bind_statement(&ast, &catalog).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("wildcard DELETE"));
+    assert!(err.to_string().contains("ambiguous"));
+}
+
+#[test]
+fn binder_rejects_wildcard_delete_over_dynamic_label_mappings() {
+    let catalog = FakeCatalog::new()
+        .with_writable_label("users", 10, ["id", "name"], ["name"])
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "colleague",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: Some("rel_type"),
+        });
+    let ast = crate::gql::parse_statement("MATCH ()-[r]->() DELETE r RETURN r").unwrap();
+    let err = bind_statement(&ast, &catalog).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("dynamic relationship labels"));
+}
+
+#[test]
+fn binder_rejects_wildcard_delete_when_endpoint_labels_are_ambiguous() {
+    let catalog = FakeCatalog::new()
+        .with_writable_label("users", 10, ["id", "name"], ["name"])
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "friend",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: None,
+        })
+        .with_ambiguous_node_labels();
+    let ast = crate::gql::parse_statement("MATCH ()-[r:friend]->() DELETE r RETURN r").unwrap();
+    let err = bind_statement(&ast, &catalog).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err.to_string().contains("endpoint labels are ambiguous"));
+}
+
+#[test]
 fn binder_accepts_detach_delete_for_node_with_mapped_incident_edges() {
     let catalog = FakeCatalog::new()
         .with_writable_label("users", 10, ["id", "name"], ["name"])
@@ -440,6 +569,7 @@ fn binder_accepts_detach_delete_for_node_with_mapped_incident_edges() {
             source_column: "user_id",
             target_column: "friend_id",
             bidirectional: false,
+            label_column: None,
         });
     let ast =
         crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) DETACH DELETE u RETURN u.name")

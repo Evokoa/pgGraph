@@ -628,12 +628,15 @@ removes are idempotent. Removing labels is rejected because labels map to
 registered source tables.
 
 `MATCH (a:label)-[r:type]->(b:label) DELETE r RETURN ...` is supported for a
-single matched relationship backed by a registered edge row table. It requires a
-`mutable_overlay` projection, deletes exactly one PostgreSQL edge row first,
-then tombstones the graph edge in the current backend. Bidirectional edge
-registrations hide both neighbor directions after the delete. Endpoint nodes are
-not deleted. Undirected relationship `DELETE` is not part of this release's GQL
-subset.
+single matched relationship backed by a registered edge row table. Endpoint
+labels and the relationship type may be omitted only when the wildcard pattern
+resolves to exactly one static-label registered edge-row mapping; ambiguous
+wildcard delete patterns and dynamic relationship label-column mappings are
+rejected before execution. It requires a `mutable_overlay`
+projection, deletes exactly one PostgreSQL edge row first, then tombstones the
+graph edge in the current backend. Bidirectional edge registrations hide both
+neighbor directions after the delete. Endpoint nodes are not deleted. Undirected
+relationship `DELETE` is not part of this release's GQL subset.
 
 `MATCH (n:label {...}) DETACH DELETE n RETURN ...` is supported for a single
 matched node. It requires a `mutable_overlay` projection, deletes registered

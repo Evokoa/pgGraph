@@ -6,7 +6,7 @@ use crate::gql::ast::{
 };
 use crate::gql::errors::{GqlError, Span};
 
-use super::catalog_snapshot::CatalogSnapshot;
+use super::catalog_snapshot::{CatalogSnapshot, EdgeMappingInfo, NodeLabelInfo, RelTypeInfo};
 use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundIncidentEdge,
     BoundMappedEdge, BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue,
@@ -1609,21 +1609,12 @@ fn bind_delete_edge(
             format!("unknown DELETE variable `{}`", query.delete.var.text),
         ));
     }
-    let source = bind_node(source_pat, catalog)?;
-    let target = bind_node(target_pat, catalog)?;
-    let rel_type = rel_pat.rel_type.as_ref().ok_or_else(|| {
-        GqlError::unsupported(
-            rel_pat.span,
-            "anonymous relationship types require a later phase",
-        )
-    })?;
-    let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
-    let edge_mapping = rel_info.edge_mapping.ok_or_else(|| {
-        GqlError::unsupported(
-            rel_pat.span,
-            "DELETE requires a relationship backed by a registered edge row table",
-        )
-    })?;
+    let DeleteEdgeBinding {
+        source,
+        target,
+        rel_info,
+        edge_mapping,
+    } = bind_delete_edge_mapping(source_pat, rel_pat, target_pat, catalog)?;
     let predicate = bind_predicates(
         query.where_.as_ref(),
         source_pat,
@@ -1665,6 +1656,152 @@ fn bind_delete_edge(
         predicate,
         returns,
     })
+}
+
+#[derive(Debug, Clone)]
+struct DeleteEdgeBinding {
+    source: BoundNode,
+    target: BoundNode,
+    rel_info: RelTypeInfo,
+    edge_mapping: EdgeMappingInfo,
+}
+
+fn bind_delete_edge_mapping(
+    source_pat: &NodePat,
+    rel_pat: &RelPat,
+    target_pat: &NodePat,
+    catalog: &impl CatalogSnapshot,
+) -> Result<DeleteEdgeBinding, GqlError> {
+    if source_pat.label.is_some() && target_pat.label.is_some() && rel_pat.rel_type.is_some() {
+        let source = bind_node(source_pat, catalog)?;
+        let target = bind_node(target_pat, catalog)?;
+        let rel_type = rel_pat.rel_type.as_ref().expect("checked rel type");
+        let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
+        let edge_mapping = rel_info.edge_mapping.clone().ok_or_else(|| {
+            GqlError::unsupported(
+                rel_pat.span,
+                "DELETE requires a relationship backed by a registered edge row table",
+            )
+        })?;
+        return Ok(DeleteEdgeBinding {
+            source,
+            target,
+            rel_info,
+            edge_mapping,
+        });
+    }
+    if source_pat.label.is_none() && !source_pat.props.is_empty() {
+        return Err(GqlError::unsupported(
+            source_pat.span,
+            "wildcard DELETE node property predicates require concrete node labels",
+        ));
+    }
+    if target_pat.label.is_none() && !target_pat.props.is_empty() {
+        return Err(GqlError::unsupported(
+            target_pat.span,
+            "wildcard DELETE node property predicates require concrete node labels",
+        ));
+    }
+    if (source_pat.label.is_none() || target_pat.label.is_none())
+        && catalog.has_ambiguous_node_labels()
+    {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "wildcard DELETE endpoint labels are ambiguous",
+        ));
+    }
+    let source_labels = delete_node_label_candidates(source_pat, catalog)?;
+    let target_labels = delete_node_label_candidates(target_pat, catalog)?;
+    let rel_types = catalog.rel_types();
+    let mut candidates = Vec::new();
+    let mut seen_candidates = std::collections::HashSet::new();
+    for rel_info in rel_types {
+        let Some(edge_mapping) = rel_info.edge_mapping.clone() else {
+            continue;
+        };
+        if edge_mapping.label_column.is_some() {
+            return Err(GqlError::unsupported(
+                rel_pat.span,
+                "wildcard DELETE over dynamic relationship labels requires concrete endpoint labels and relationship type",
+            ));
+        }
+        if rel_pat
+            .rel_type
+            .as_ref()
+            .is_some_and(|rel_type| rel_type.text != rel_info.rel_type)
+        {
+            continue;
+        }
+        let (source_table_oid, target_table_oid) = match rel_pat.direction {
+            Direction::Out => (rel_info.from_table_oid, rel_info.to_table_oid),
+            Direction::In => (rel_info.to_table_oid, rel_info.from_table_oid),
+            Direction::Undirected => unreachable!("undirected DELETE rejected before binding"),
+        };
+        let Some(source_label) = source_labels
+            .iter()
+            .find(|label| label.table_oid == source_table_oid)
+        else {
+            continue;
+        };
+        let Some(target_label) = target_labels
+            .iter()
+            .find(|label| label.table_oid == target_table_oid)
+        else {
+            continue;
+        };
+        if !seen_candidates.insert((
+            rel_info.rel_type.clone(),
+            rel_info.from_table_oid,
+            rel_info.to_table_oid,
+            edge_mapping.edge_table_oid,
+            edge_mapping.source_column.clone(),
+            edge_mapping.target_column.clone(),
+        )) {
+            continue;
+        }
+        candidates.push(DeleteEdgeBinding {
+            source: bound_delete_node(source_pat, source_label, "__pggraph_delete_source"),
+            target: bound_delete_node(target_pat, target_label, "__pggraph_delete_target"),
+            rel_info,
+            edge_mapping,
+        });
+    }
+    if candidates.len() != 1 {
+        let reason = if candidates.is_empty() {
+            "DELETE requires a relationship backed by a registered edge row table".to_string()
+        } else {
+            format!(
+                "wildcard DELETE relationship pattern is ambiguous across {} mapped edge row registrations",
+                candidates.len()
+            )
+        };
+        return Err(GqlError::unsupported(rel_pat.span, reason));
+    }
+    Ok(candidates.remove(0))
+}
+
+fn delete_node_label_candidates(
+    node_pat: &NodePat,
+    catalog: &impl CatalogSnapshot,
+) -> Result<Vec<NodeLabelInfo>, GqlError> {
+    if let Some(label) = &node_pat.label {
+        return catalog
+            .resolve_node_label(&label.text, label.span)
+            .map(|label| vec![label]);
+    }
+    Ok(catalog.node_labels())
+}
+
+fn bound_delete_node(node_pat: &NodePat, label: &NodeLabelInfo, fallback_var: &str) -> BoundNode {
+    BoundNode {
+        var: node_pat
+            .var
+            .as_ref()
+            .map_or_else(|| fallback_var.to_string(), |var| var.text.clone()),
+        label: label.label.clone(),
+        table_oid: label.table_oid,
+        properties: label.properties.clone(),
+    }
 }
 
 fn bind_detach_delete_node(

@@ -56,6 +56,8 @@ pub(crate) struct EdgeMappingInfo {
     pub(crate) target_column: String,
     /// Whether the edge was registered as bidirectional.
     pub(crate) bidirectional: bool,
+    /// Dynamic relationship label column, when the edge registration uses one.
+    pub(crate) label_column: Option<String>,
 }
 
 /// Catalog lookup port for semantic binding.
@@ -80,6 +82,9 @@ pub(crate) trait CatalogSnapshot {
 
     /// Return all registered relationship types visible to wildcard binding.
     fn rel_types(&self) -> Vec<RelTypeInfo>;
+
+    /// Return whether any GQL node label maps ambiguously to multiple tables.
+    fn has_ambiguous_node_labels(&self) -> bool;
 }
 
 /// SPI-backed catalog snapshot.
@@ -153,6 +158,12 @@ impl CatalogSnapshot for CatalogSnapshotImpl {
 
     fn rel_types(&self) -> Vec<RelTypeInfo> {
         self.rels.clone()
+    }
+
+    fn has_ambiguous_node_labels(&self) -> bool {
+        self.labels
+            .values()
+            .any(|entry| matches!(entry, LabelEntry::Ambiguous))
     }
 }
 
@@ -246,6 +257,7 @@ fn load_rels(
                     source_column: edge.from_column.clone(),
                     target_column: edge.to_column.clone(),
                     bidirectional: edge.bidirectional,
+                    label_column: edge.label_column.clone(),
                 });
                 (from_node_table, edge_mapping)
             };
@@ -381,6 +393,7 @@ fn gql_label_from_regclass(regclass: &str) -> Option<String> {
 pub(crate) struct FakeCatalog {
     labels: HashMap<String, NodeLabelInfo>,
     rels: Vec<RelTypeInfo>,
+    ambiguous_node_labels: bool,
 }
 
 /// Test-only relationship mapping specification.
@@ -400,6 +413,8 @@ pub(crate) struct MappedEdgeSpec<'a> {
     pub(crate) target_column: &'a str,
     /// Whether the registration is bidirectional.
     pub(crate) bidirectional: bool,
+    /// Dynamic relationship label column, when present.
+    pub(crate) label_column: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -486,8 +501,15 @@ impl FakeCatalog {
                 source_column: spec.source_column.to_string(),
                 target_column: spec.target_column.to_string(),
                 bidirectional: spec.bidirectional,
+                label_column: spec.label_column.map(str::to_string),
             }),
         });
+        self
+    }
+
+    /// Mark the fake catalog as containing at least one ambiguous node label.
+    pub(crate) fn with_ambiguous_node_labels(mut self) -> Self {
+        self.ambiguous_node_labels = true;
         self
     }
 }
@@ -529,6 +551,10 @@ impl CatalogSnapshot for FakeCatalog {
 
     fn rel_types(&self) -> Vec<RelTypeInfo> {
         self.rels.clone()
+    }
+
+    fn has_ambiguous_node_labels(&self) -> bool {
+        self.ambiguous_node_labels
     }
 }
 

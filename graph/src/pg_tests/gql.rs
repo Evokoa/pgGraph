@@ -2687,6 +2687,77 @@ fn gql_delete_edge_removes_source_row_and_tombstones_neighbors() {
 }
 
 #[pg_test]
+fn gql_wildcard_delete_edge_resolves_unique_mapped_row() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := true
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (returned_source, returned_target, edge_rows) = Spi::connect(|client| {
+        let deleted = client
+            .select(
+                "SELECT row #>> '{source}', row #>> '{target}'
+                 FROM graph.gql(
+                    'MATCH (u)-[r]->(v)
+                     WHERE u.id = ''u1'' AND v.id = ''u2''
+                     DELETE r
+                     RETURN u.id AS source, v.id AS target'
+                 )",
+                None,
+                &[],
+            )
+            .expect("wildcard gql delete failed")
+            .first();
+        let edge_rows = client
+            .select(
+                "SELECT count(*)::bigint FROM public.graph_test_friendships_pgtest",
+                None,
+                &[],
+            )
+            .expect("edge row count failed")
+            .first()
+            .get::<i64>(1)
+            .expect("edge count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((
+            deleted
+                .get::<String>(1)
+                .expect("source read failed")
+                .unwrap_or_default(),
+            deleted
+                .get::<String>(2)
+                .expect("target read failed")
+                .unwrap_or_default(),
+            edge_rows,
+        ))
+    })
+    .expect("wildcard delete verification failed");
+
+    assert_eq!(returned_source, "u1");
+    assert_eq!(returned_target, "u2");
+    assert_eq!(edge_rows, 0);
+}
+
+#[pg_test]
 fn gql_delete_dynamic_edge_label_deletes_only_matching_label_row() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");

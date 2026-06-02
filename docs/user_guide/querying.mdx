@@ -314,6 +314,24 @@ FROM graph.gql(
 );
 ```
 
+Endpoint labels and the relationship type may be omitted for relationship
+`DELETE` only when the wildcard pattern resolves to exactly one static-label
+registered edge-row mapping:
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (a)-[r]->(b)
+   WHERE a.id = $from AND b.id = $to
+   DELETE r
+   RETURN a.id AS source_id, b.id AS target_id',
+  params := '{"from":"c-42","to":"p-9"}'::jsonb
+);
+```
+
+Dynamic relationship label-column mappings still require the fully concrete
+`MATCH (a:label)-[r:type]->(b:label) DELETE r` form.
+
 ```sql
 SELECT row
 FROM graph.gql(
