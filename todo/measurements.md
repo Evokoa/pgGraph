@@ -113,3 +113,14 @@
 - `cargo test --features pg17 query::tests::` from `graph/`: passed, 132 tests.
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17` from `graph/`: passed, 487 tests, 1 ignored.
+
+## 2026-06-03 Phase 3 Parser Fuzz Gate
+
+- Added `gql_parser` seed corpus entries for path-variable projection and wildcard relationship delete parser shapes.
+- Added the `cypher_parser` fuzz target plus compatible-match and unsupported-call seed corpus entries for the openCypher compatibility parser frontend.
+- `cargo fuzz build` from `graph/`: blocked locally because the `cargo-fuzz` subcommand is not installed.
+- `cargo build --manifest-path graph/fuzz/Cargo.toml --bins` from repository root: blocked locally by pgrx extension dylib linkage outside the pgrx fuzz build path; linker reported unresolved PostgreSQL backend symbols such as `CurrentMemoryContext`, `SPI_execute`, and `TopMemoryContext`.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17 cypher::tests::` from `graph/`: passed, 6 tests.

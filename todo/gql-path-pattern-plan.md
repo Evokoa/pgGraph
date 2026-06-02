@@ -354,14 +354,20 @@ Wildcard path expansion may exercise overlay neighbor merging and transaction-de
 
 ### Fuzz and Regression Tests
 
-- Add path variable syntax to the existing GQL parser fuzz corpus.
-- Include anonymous/wildcard node and relationship patterns in parser fuzz targets.
+- Status: GQL and Cypher parser fuzz targets are present. The GQL corpus now
+  includes path-variable and wildcard-delete seeds; the Cypher corpus includes
+  compatible-match and unsupported-call seeds.
+- Add path variable syntax to the existing GQL parser fuzz corpus. Done for
+  `MATCH p=()-[]->() RETURN p, nodes(p), relationships(p), length(p)`.
+- Include anonymous/wildcard node and relationship patterns in parser fuzz
+  targets. Done for both wildcard path projection and wildcard relationship
+  delete seeds.
 - Include malformed path-variable prefixes such as missing `=`, repeated `=`, and path variables before non-pattern clauses.
 - Include mixed directed forms: `->`, `<-`, and `-`.
 - Include bounded syntax that Phase 1 rejects, such as `MATCH p=()-[]*1..3->() RETURN p`, to verify rejection remains typed rather than panicking.
 - Include unsupported but syntactically adjacent labels and types, such as `MATCH p=(:users)-[]->() RETURN p` and `MATCH p=()-[:friend]->() RETURN p`.
 - Include duplicate variable names once Phase 2 starts, such as `MATCH p=(p)-[]->() RETURN p` and `MATCH p=(s)-[s]->(e) RETURN p`.
-- Add a Cypher parser regression corpus entry only if `graph.cypher()` is intentionally taught to parse the new syntax; otherwise add a compatibility test proving the syntax is rejected with a documented limitation.
+- Add a Cypher parser regression corpus entry only if `graph.cypher()` is intentionally taught to parse the new syntax; otherwise add a compatibility test proving the syntax is rejected with a documented limitation. Done for the current compatibility parser surface with one compatible match seed and one unsupported-call seed.
 - Keep parser fuzzing as a Phase 1 release gate, not a post-implementation cleanup task, because KI-003 explicitly calls out fuzz coverage before broadening language syntax.
 
 ### Benchmark and Measurement Tests
@@ -554,3 +560,8 @@ Tests:
 ### Phase 3 Release Criteria
 
 Phase 3 should not be treated as one large all-or-nothing milestone. Each subphase is complete only when it has parser, binder, executor, projection, SQL/PGRX, fuzz, and where applicable benchmark coverage.
+
+Status: parser fuzz target coverage for the GQL and Cypher frontends is in
+place. Local sustained fuzz execution still depends on the `cargo-fuzz` tool and
+the pgrx fuzz build environment; measurements are recorded in
+`todo/measurements.md` under "Phase 3 Parser Fuzz Gate".

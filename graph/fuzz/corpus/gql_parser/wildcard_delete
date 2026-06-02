@@ -1,0 +1,1 @@
+MATCH (u)-[r]->(v) WHERE u.id = 'u1' AND v.id = 'u2' DELETE r RETURN u, v

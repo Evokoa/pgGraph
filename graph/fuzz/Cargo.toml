@@ -59,3 +59,10 @@ path = "fuzz_targets/gql_parser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cypher_parser"
+path = "fuzz_targets/cypher_parser.rs"
+test = false
+doc = false
+bench = false
