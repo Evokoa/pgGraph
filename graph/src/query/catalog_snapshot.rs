@@ -74,6 +74,12 @@ pub(crate) trait CatalogSnapshot {
 
     /// Return registered relationships incident to the table OID.
     fn incident_rel_types(&self, table_oid: u32) -> Vec<RelTypeInfo>;
+
+    /// Return all registered node labels visible to wildcard binding.
+    fn node_labels(&self) -> Vec<NodeLabelInfo>;
+
+    /// Return all registered relationship types visible to wildcard binding.
+    fn rel_types(&self) -> Vec<RelTypeInfo>;
 }
 
 /// SPI-backed catalog snapshot.
@@ -140,6 +146,24 @@ impl CatalogSnapshot for CatalogSnapshotImpl {
     fn incident_rel_types(&self, table_oid: u32) -> Vec<RelTypeInfo> {
         incident_rel_types(&self.rels, table_oid)
     }
+
+    fn node_labels(&self) -> Vec<NodeLabelInfo> {
+        node_labels(&self.labels)
+    }
+
+    fn rel_types(&self) -> Vec<RelTypeInfo> {
+        self.rels.clone()
+    }
+}
+
+fn node_labels(labels: &HashMap<String, LabelEntry>) -> Vec<NodeLabelInfo> {
+    labels
+        .values()
+        .filter_map(|entry| match entry {
+            LabelEntry::Unique(info) => Some(info.clone()),
+            LabelEntry::Ambiguous => None,
+        })
+        .collect()
 }
 
 fn incident_rel_types(rels: &[RelTypeInfo], table_oid: u32) -> Vec<RelTypeInfo> {
@@ -497,6 +521,14 @@ impl CatalogSnapshot for FakeCatalog {
 
     fn incident_rel_types(&self, table_oid: u32) -> Vec<RelTypeInfo> {
         incident_rel_types(&self.rels, table_oid)
+    }
+
+    fn node_labels(&self) -> Vec<NodeLabelInfo> {
+        self.labels.values().cloned().collect()
+    }
+
+    fn rel_types(&self) -> Vec<RelTypeInfo> {
+        self.rels.clone()
     }
 }
 

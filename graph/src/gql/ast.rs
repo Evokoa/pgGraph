@@ -236,12 +236,22 @@ pub(crate) struct MatchClause {
 /// Single linear path pattern.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Pattern {
+    /// Optional path variable bound to the whole pattern.
+    pub(crate) path_var: Option<Ident>,
     /// First node pattern.
     pub(crate) start: NodePat,
     /// Relationship/node pairs after the start node.
     pub(crate) tail: Vec<(RelPat, NodePat)>,
     /// Pattern span.
     pub(crate) span: Span,
+}
+
+impl Pattern {
+    /// Return the path variable text.
+    #[cfg(test)]
+    pub(crate) fn path_var_text(&self) -> Option<&str> {
+        self.path_var.as_ref().map(|ident| ident.text.as_str())
+    }
 }
 
 /// Node pattern.

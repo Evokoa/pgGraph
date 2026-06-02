@@ -497,6 +497,8 @@ Read pattern support:
 
 - Node-only `MATCH`.
 - Single-relationship graph patterns.
+- Single-hop wildcard path variables: `MATCH p=()-[]->()`,
+  `MATCH p=()<-[]-()`, and `MATCH p=()-[]-()`.
 - Top-level single-relationship `OPTIONAL MATCH`.
 
 Optional matches return matched relationship rows, and emit one null-extended
@@ -509,7 +511,8 @@ Return value support:
 - JSONB list/map properties, including dotted paths such as `u.profile.plan`.
 - Coordinate-only single-hop relationship identities.
 - Bounded relationship path values with a minimum of at least one hop.
-- `RETURN DISTINCT`.
+- Single-hop wildcard path values.
+- `RETURN DISTINCT` for non-wildcard path reads.
 - `RETURN` aggregates: `count`, `sum`, `avg`, `min`, `max`, and `collect`.
 
 JSONB arrays and objects keep their JSON shape. A missing key inside a JSONB
@@ -526,10 +529,17 @@ Aggregate behavior:
   according to the aggregate.
 - Aggregate `DISTINCT` is supported.
 
+Wildcard path-variable reads support `RETURN`, `SKIP`, and `LIMIT` in this
+phase. They reject `ORDER BY`, `RETURN DISTINCT`, `WHERE`, `WITH`, aggregates,
+optional matches, writes, labels, relationship types, node variables,
+relationship variables, and variable-length wildcard paths.
+
 Path behavior:
 
 - Named relationship patterns can be returned as path objects with
   `_path.nodes` and `_path.relationships`.
+- Single-hop wildcard path variables return the same path object shape while
+  scanning all registered edge labels.
 - `nodes(path)`, `relationships(path)`, and `length(path)` return those
   components directly.
 
@@ -560,7 +570,8 @@ Not included in this release's GQL subset:
 - Relationship source-row hydration.
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
-- Full path variable syntax.
+- Named node or relationship variables inside path-variable patterns.
+- Multi-segment and variable-length wildcard path variables.
 - Node-only optional matches.
 - Multi-pattern optional joins.
 

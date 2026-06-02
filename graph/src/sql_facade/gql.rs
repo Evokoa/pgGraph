@@ -27,6 +27,15 @@ pub(super) fn explain_statement(
             check_node_scan_acl(&plan);
             crate::query::explain::explain_node_scan(&plan)
         }
+        crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
+            check_wildcard_path_acl(&plan);
+            format!(
+                "WildcardPathExpand(path={}, direction={:?}, rel=*, hops=1..1, return={})",
+                plan.path_var,
+                plan.direction,
+                plan.returns.len()
+            )
+        }
         crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
             check_create_acl(&plan);
             format!(
@@ -159,6 +168,12 @@ fn check_node_scan_acl(plan: &crate::query::physical_plan::PhysicalNodeScan) {
     acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
 }
 
+fn check_wildcard_path_acl(plan: &crate::query::physical_plan::PhysicalWildcardPathPlan) {
+    for table_oid in &plan.required_node_table_oids {
+        acl::check_table_acl(*table_oid).unwrap_or_else(|err| err.report());
+    }
+}
+
 fn check_set_acl(plan: &crate::query::physical_plan::PhysicalSetProperty) {
     acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
     acl::check_table_update_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
@@ -214,6 +229,14 @@ pub(super) fn execute_statement(
                 crate::query::value::node_scan_requires_hydration(&plan, hydrate),
             )?;
             crate::query::value::project_node_rows(matches, &plan, &hydrated, params, hydrate)
+        }
+        crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
+            check_wildcard_path_acl(&plan);
+            let matches = ENGINE.with(|engine| {
+                crate::query::execute::execute_wildcard_path(&engine.borrow(), &plan, tenant_scope)
+            })?;
+            let hydrated = hydrate_gql_rows(&matches, hydrate)?;
+            crate::query::value::project_wildcard_path_rows(matches, &plan, &hydrated, hydrate)
         }
         crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
             check_create_acl(&plan);

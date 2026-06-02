@@ -3,12 +3,13 @@
 use super::logical_plan::{
     CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalDeleteEdge,
     LogicalDetachDeleteNode, LogicalMergeNode, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty,
-    LogicalSetProperty, LogicalStatement, ReturnBinding,
+    LogicalSetProperty, LogicalStatement, LogicalWildcardPathPlan, ReturnBinding,
 };
 use super::physical_plan::{
     CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalDeleteEdge,
     PhysicalDetachDeleteNode, PhysicalIncidentEdge, PhysicalMergeNode, PhysicalNodeScan,
-    PhysicalPlan, PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement, ReturnSlot,
+    PhysicalPlan, PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement,
+    PhysicalWildcardPathPlan, ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
@@ -16,6 +17,9 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
     match statement {
         LogicalStatement::Read(plan) => PhysicalStatement::Read(lower(plan)),
         LogicalStatement::NodeScan(plan) => PhysicalStatement::NodeScan(lower_node_scan(plan)),
+        LogicalStatement::WildcardPathRead(plan) => {
+            PhysicalStatement::WildcardPathRead(lower_wildcard_path(plan))
+        }
         LogicalStatement::CreateNode(plan) => {
             PhysicalStatement::CreateNode(lower_create_node(plan))
         }
@@ -32,6 +36,19 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
             PhysicalStatement::DetachDeleteNode(lower_detach_delete_node(plan))
         }
         LogicalStatement::MergeNode(plan) => PhysicalStatement::MergeNode(lower_merge_node(plan)),
+    }
+}
+
+fn lower_wildcard_path(plan: LogicalWildcardPathPlan) -> PhysicalWildcardPathPlan {
+    PhysicalWildcardPathPlan {
+        path_var: plan.path_var,
+        direction: plan.direction,
+        returns: lower_returns(plan.returns),
+        required_node_table_oids: plan.required_node_table_oids,
+        table_labels: plan.table_labels,
+        rel_type_labels: plan.rel_type_labels,
+        skip: plan.skip,
+        limit: plan.limit,
     }
 }
 

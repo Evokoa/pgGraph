@@ -12,7 +12,8 @@ use super::logical_plan::{
     BoundMappedEdge, BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue,
     HopBounds, LogicalCreateNode, LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalMergeNode,
     LogicalNodeScan, LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement,
-    PathFunc, Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
+    LogicalWildcardPathPlan, PathFunc, Predicate, ReturnBinding, SortBinding, SortBindingKey,
+    ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -143,6 +144,9 @@ pub(crate) fn bind_statement(
     catalog: &impl CatalogSnapshot,
 ) -> Result<LogicalStatement, GqlError> {
     match statement {
+        crate::gql::ast::Statement::Read(query) if query.match_.pattern.path_var.is_some() => {
+            bind_wildcard_path_read(query, catalog).map(LogicalStatement::WildcardPathRead)
+        }
         crate::gql::ast::Statement::Read(query) if query.match_.pattern.tail.is_empty() => {
             bind_node_scan(query, catalog).map(LogicalStatement::NodeScan)
         }
@@ -166,6 +170,144 @@ pub(crate) fn bind_statement(
             bind_merge_node(query, catalog).map(LogicalStatement::MergeNode)
         }
     }
+}
+
+fn bind_wildcard_path_read(
+    query: &crate::gql::ast::Query,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalWildcardPathPlan, GqlError> {
+    validate_row_window(query)?;
+    if query.match_.optional {
+        return Err(GqlError::unsupported(
+            query.match_.span,
+            "OPTIONAL MATCH path variables require a later read phase",
+        ));
+    }
+    if query.where_.is_some()
+        || !query.with_.is_empty()
+        || !query.order_by.is_empty()
+        || query.return_.distinct
+    {
+        return Err(GqlError::unsupported(
+            query.span,
+            "wildcard path variables support only RETURN, SKIP, and LIMIT in this phase",
+        ));
+    }
+    let Pattern {
+        path_var,
+        start,
+        tail,
+        ..
+    } = &query.match_.pattern;
+    let path_var = path_var
+        .as_ref()
+        .expect("caller only routes path-variable patterns")
+        .text
+        .clone();
+    let [(rel, target)] = tail.as_slice() else {
+        return Err(GqlError::unsupported(
+            query.match_.pattern.span,
+            "wildcard path variables support exactly one relationship in this phase",
+        ));
+    };
+    reject_phase1_wildcard_node(start)?;
+    reject_phase1_wildcard_node(target)?;
+    reject_phase1_wildcard_relationship(rel)?;
+    let returns = bind_wildcard_path_returns(&query.return_.items, &path_var)?;
+    let node_labels = catalog.node_labels();
+    let table_labels = node_labels
+        .iter()
+        .map(|label| (label.table_oid, label.label.clone()))
+        .collect();
+    let required_node_table_oids = node_labels
+        .iter()
+        .map(|label| label.table_oid)
+        .collect::<std::collections::BTreeSet<_>>();
+    let rel_type_labels = catalog
+        .rel_types()
+        .into_iter()
+        .map(|rel| rel.rel_type)
+        .collect::<std::collections::BTreeSet<_>>();
+    Ok(LogicalWildcardPathPlan {
+        path_var,
+        direction: bind_direction(rel.direction),
+        returns,
+        required_node_table_oids,
+        table_labels,
+        rel_type_labels,
+        skip: query.skip,
+        limit: query.limit,
+    })
+}
+
+fn reject_phase1_wildcard_node(node: &NodePat) -> Result<(), GqlError> {
+    if node.var.is_some() || node.label.is_some() || !node.props.is_empty() {
+        return Err(GqlError::unsupported(
+            node.span,
+            "wildcard path variables cannot bind node variables, labels, or properties in this phase",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_phase1_wildcard_relationship(rel: &RelPat) -> Result<(), GqlError> {
+    if rel.var.is_some() || rel.rel_type.is_some() || rel.var_len.is_some() || !rel.props.is_empty()
+    {
+        return Err(GqlError::unsupported(
+            rel.span,
+            "wildcard path variables cannot bind relationship variables, types, properties, or variable-length bounds in this phase",
+        ));
+    }
+    Ok(())
+}
+
+fn bind_wildcard_path_returns(
+    items: &[ReturnItem],
+    path_var: &str,
+) -> Result<Vec<ReturnBinding>, GqlError> {
+    let scope = BindingScope::from([(path_var.to_string(), ScopedBinding::Path)]);
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    let mut bindings = Vec::with_capacity(items.len());
+    for item in items {
+        let name = projection_name(item);
+        if !seen.insert(name.clone()) {
+            return Err(GqlError::bind(
+                item.span,
+                format!("duplicate return name `{name}`"),
+            ));
+        }
+        let binding = match &item.expr {
+            ReturnExpr::Var { var, .. } if var.text == path_var => ReturnBinding::Path { name },
+            ReturnExpr::Var { var, span } => {
+                return Err(GqlError::bind(
+                    *span,
+                    format!("unknown return variable `{}`", var.text),
+                ));
+            }
+            ReturnExpr::Func {
+                name: func_name,
+                args,
+                span,
+            } => match bind_path_function(func_name, args, *span, &scope)? {
+                ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction { func, name },
+                _ => unreachable!("path functions bind only to path-function slots"),
+            },
+            ReturnExpr::Property { span, .. } => {
+                return Err(GqlError::unsupported(
+                    *span,
+                    "wildcard path variables do not support property projection in this phase",
+                ));
+            }
+            ReturnExpr::Aggregate { span, .. } => {
+                return Err(GqlError::unsupported(
+                    *span,
+                    "wildcard path variables do not support aggregates in this phase",
+                ));
+            }
+        };
+        bindings.push(binding);
+    }
+    Ok(bindings)
 }
 
 fn bind_create_node(
@@ -870,6 +1012,7 @@ fn bind_node(node: &NodePat, catalog: &impl CatalogSnapshot) -> Result<BoundNode
 enum ScopedBinding {
     Node(BindingSide),
     Relationship { var_len: bool },
+    Path,
     Property { side: BindingSide, property: String },
     PathFunction(PathFunc),
 }
@@ -976,6 +1119,7 @@ fn bind_distinct_stage(
             ScopedBinding::Node(side) => ReturnBinding::Node { side, name },
             ScopedBinding::Relationship { var_len: false } => ReturnBinding::Relationship { name },
             ScopedBinding::Relationship { var_len: true } => ReturnBinding::Path { name },
+            ScopedBinding::Path => ReturnBinding::Path { name },
             ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction { func, name },
             ScopedBinding::Property { side, property } => ReturnBinding::Property {
                 side,
@@ -1060,6 +1204,7 @@ fn bind_scoped_returns(
                     ReturnBinding::Relationship { name }
                 }
                 ScopedBinding::Relationship { var_len: true } => ReturnBinding::Path { name },
+                ScopedBinding::Path => ReturnBinding::Path { name },
                 ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction { func, name },
                 ScopedBinding::Property { side, property } => ReturnBinding::Property {
                     side,
@@ -1141,6 +1286,7 @@ fn bind_path_function(
     };
     match scope.get(&arg.text) {
         Some(ScopedBinding::Relationship { .. }) => Ok(ScopedBinding::PathFunction(func)),
+        Some(ScopedBinding::Path) => Ok(ScopedBinding::PathFunction(func)),
         Some(_) => Err(GqlError::bind(
             arg.span,
             format!(

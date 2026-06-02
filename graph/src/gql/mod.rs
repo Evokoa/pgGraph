@@ -75,6 +75,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_path_variable_pattern_prefixes() {
+        for (query, direction) in [
+            ("MATCH p=()-[]->() RETURN p", Direction::Out),
+            ("MATCH p=()<-[]-() RETURN p", Direction::In),
+            ("MATCH p=()-[]-() RETURN p", Direction::Undirected),
+        ] {
+            let parsed = parse(query).expect("path variable query should parse");
+            let (rel, _) = &parsed.match_.pattern.tail[0];
+
+            assert_eq!(parsed.match_.pattern.path_var_text(), Some("p"));
+            assert_eq!(rel.direction, direction);
+        }
+    }
+
+    #[test]
+    fn rejects_path_variable_prefix_without_equals() {
+        let err = parse("MATCH p ()-[]->() RETURN p")
+            .expect_err("path variable prefix should require '='");
+
+        assert!(matches!(err.kind, GqlErrorKind::Syntax { .. }));
+        assert!(err.to_string().contains("expected node pattern"));
+    }
+
+    #[test]
     fn parses_optional_match_clause() {
         let parsed = parse("OPTIONAL MATCH (a:users)-[:knows]->(b:users) RETURN a, b")
             .expect("query should parse");

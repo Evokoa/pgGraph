@@ -1,6 +1,7 @@
 //! Logical plans produced by GQL semantic binding.
 
 use crate::gql::ast::LiteralValue;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Bound logical statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -9,6 +10,8 @@ pub(crate) enum LogicalStatement {
     Read(LogicalPlan),
     /// Node-only read query.
     NodeScan(LogicalNodeScan),
+    /// Wildcard single-hop path variable read query.
+    WildcardPathRead(LogicalWildcardPathPlan),
     /// Node creation write.
     CreateNode(LogicalCreateNode),
     /// Mapped node property update.
@@ -21,6 +24,27 @@ pub(crate) enum LogicalStatement {
     DetachDeleteNode(LogicalDetachDeleteNode),
     /// Mapped node merge/upsert.
     MergeNode(LogicalMergeNode),
+}
+
+/// Bound wildcard single-hop path query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalWildcardPathPlan {
+    /// Path variable name bound to the whole matched path.
+    pub(crate) path_var: String,
+    /// Traversal direction requested by the relationship pattern.
+    pub(crate) direction: BoundDirection,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnBinding>,
+    /// Source-table OIDs requiring ACL checks before wildcard expansion.
+    pub(crate) required_node_table_oids: BTreeSet<u32>,
+    /// GQL labels keyed by source-table OID.
+    pub(crate) table_labels: BTreeMap<u32, String>,
+    /// Relationship type labels that may appear in wildcard output.
+    pub(crate) rel_type_labels: BTreeSet<String>,
+    /// Number of rows to skip after ordering.
+    pub(crate) skip: Option<u64>,
+    /// Maximum rows to return.
+    pub(crate) limit: Option<u64>,
 }
 
 /// Bound read-only logical query.

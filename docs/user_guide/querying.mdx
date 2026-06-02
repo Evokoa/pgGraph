@@ -69,17 +69,17 @@ Supported read coverage:
 
 | Area | Supported behavior |
 |---|---|
-| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, or top-level single-relationship `OPTIONAL MATCH` |
+| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, one single-hop wildcard path variable such as `MATCH p=()-[]->()`, or top-level single-relationship `OPTIONAL MATCH` |
 | Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum and minimum of at least one hop |
 | Predicates | Property comparisons, null checks, membership, boolean combinations, JSONB `$parameters`, and dotted paths into registered JSONB property columns |
 | Return values | Node values, scalar properties, JSONB list/map properties, coordinate-only single-hop relationship identities, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
 | Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases, shadowing, and `WITH DISTINCT` row-stream deduplication |
-| Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported with a bounded in-memory key set |
+| Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported for non-wildcard path reads with a bounded in-memory key set |
 | Aggregates | `count`, `sum`, `avg`, `min`, `max`, and `collect` in `RETURN`; non-aggregate return items are implicit grouping keys |
-| Path functions | `nodes(path)`, `relationships(path)`, and `length(path)` over named relationship patterns |
-| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT`, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
+| Path functions | `nodes(path)`, `relationships(path)`, and `length(path)` over named relationship patterns and single-hop wildcard path variables |
+| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT` for non-wildcard path reads, and `SKIP`/`LIMIT` for wildcard path reads, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
 
 ### GQL JSONB result format
 
@@ -154,6 +154,25 @@ Path values are JSON objects with a `_path` member:
 }
 ```
 
+Single-hop wildcard path variables can scan every registered edge label and
+return path values without binding synthetic node or relationship variables:
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH p=()-[]->()
+   RETURN p, nodes(p) AS ns, relationships(p) AS rs, length(p) AS len',
+  hydrate := false
+);
+```
+
+The supported wildcard forms are outbound `p=()-[]->()`, inbound
+`p=()<-[]-()`, and undirected `p=()-[]-()`. Phase 1 intentionally keeps this
+shape narrow: labels, relationship types, node variables, relationship variables,
+`WHERE`, `WITH`, `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches,
+writes, and variable-length wildcard paths are rejected for wildcard
+path-variable reads.
+
 The `nodes(path)` function returns the `_path.nodes` array directly,
 `relationships(path)` returns the `_path.relationships` array directly, and
 `length(path)` returns the relationship count as a JSON number.
@@ -193,6 +212,8 @@ Other read semantics:
   result cap.
 - Bounded relationship variables return path objects with `_path.nodes` and
   `_path.relationships`.
+- Single-hop wildcard path variables return the same path object shape, with
+  each relationship carrying its actual registered edge label.
 - `nodes`, `relationships`, and `length` expose path components directly.
 
 Registered JSONB source columns can be addressed with dotted property paths
@@ -205,7 +226,8 @@ Planned outside this subset:
 - Relationship source-row hydration.
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
-- Full path variable syntax.
+- Named node/relationship variables inside path-variable patterns.
+- Multi-segment and variable-length wildcard path variables.
 - Multi-pattern optional joins.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node

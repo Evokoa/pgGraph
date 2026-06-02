@@ -932,6 +932,137 @@ fn gql_path_values_and_functions_have_stable_shape() {
 }
 
 #[pg_test]
+fn gql_wildcard_path_values_and_functions_have_stable_shape() {
+    reset_and_create_fixtures();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_companies_pgtest CASCADE")
+        .expect("drop companies failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_companies_pgtest (
+                id   TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create companies failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest
+         ADD COLUMN company_id TEXT REFERENCES public.graph_test_companies_pgtest(id)",
+    )
+    .expect("add company reference failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_companies_pgtest (id, name)
+         VALUES ('c1', 'Acme')",
+    )
+    .expect("insert company failed");
+    Spi::run("UPDATE public.graph_test_users_pgtest SET company_id = 'c1' WHERE id = 'u1'")
+        .expect("set company failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_companies_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add companies table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_users_pgtest'::regclass,
+                'id',
+                'graph_test_companies_pgtest'::regclass,
+                'company_id',
+                'works_at',
+                bidirectional := false
+            )",
+    )
+    .expect("add works_at edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build wildcard path graph failed");
+
+    let (row_count, friend_rows, works_at_rows, shape_matches, coordinate_only_has_name) =
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "WITH wildcard AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'MATCH p=()-[]->()
+                              RETURN p,
+                                     nodes(p) AS ns,
+                                     relationships(p) AS rs,
+                                     length(p) AS len',
+                             hydrate := true
+                         )
+                     ),
+                     coordinate_only AS (
+                         SELECT row
+                         FROM graph.gql('MATCH p=()-[]->() RETURN nodes(p) AS ns', hydrate := false)
+                         LIMIT 1
+                     )
+                     SELECT count(*)::bigint,
+                            count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'friend')::bigint,
+                            count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'works_at')::bigint,
+                            bool_and(
+                                (row->>'len')::bigint = 1
+                                AND row->'p'->'_path'->'nodes' = row->'ns'
+                                AND row->'p'->'_path'->'relationships' = row->'rs'
+                                AND row->'rs'->0 ? '_start'
+                                AND row->'rs'->0 ? '_end'
+                            ),
+                            (SELECT row->'ns'->0 ? 'name' FROM coordinate_only)
+                     FROM wildcard",
+                    None,
+                    &[],
+                )
+                .expect("wildcard path shape query failed")
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<i64>(1)
+                    .expect("wildcard row count read failed")
+                    .unwrap_or_default(),
+                row.get::<i64>(2)
+                    .expect("friend row count read failed")
+                    .unwrap_or_default(),
+                row.get::<i64>(3)
+                    .expect("works_at row count read failed")
+                    .unwrap_or_default(),
+                row.get::<bool>(4)
+                    .expect("shape equality read failed")
+                    .unwrap_or(false),
+                row.get::<bool>(5)
+                    .expect("coordinate-only shape read failed")
+                    .unwrap_or(true),
+            ))
+        })
+        .expect("wildcard path shape comparison failed");
+
+    assert_eq!(
+        row_count, 3,
+        "unexpected wildcard path row count: friend={friend_rows}, works_at={works_at_rows}"
+    );
+    assert_eq!(friend_rows, 1, "unexpected friend path count");
+    assert_eq!(works_at_rows, 2, "unexpected works_at path count");
+    assert!(shape_matches);
+    assert!(!coordinate_only_has_name);
+}
+
+#[pg_test]
 fn gql_aggregates_return_empty_group_and_optional_null_counts() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

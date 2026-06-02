@@ -119,6 +119,8 @@ fn reset_and_create_fixtures() {
         .expect("drop junction failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_friendships_pgtest CASCADE")
         .expect("drop friendships failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_companies_pgtest CASCADE")
+        .expect("drop companies failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_users_pgtest CASCADE")
         .expect("drop users failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_bad_pgtest CASCADE").expect("drop bad failed");

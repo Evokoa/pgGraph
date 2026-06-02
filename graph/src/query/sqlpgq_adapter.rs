@@ -243,6 +243,7 @@ impl SqlPgqRead {
             match_: MatchClause {
                 optional: self.optional,
                 pattern: Pattern {
+                    path_var: None,
                     start,
                     tail,
                     span: ADAPTER_SPAN,

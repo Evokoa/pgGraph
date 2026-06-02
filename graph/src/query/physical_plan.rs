@@ -4,6 +4,7 @@ use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundDirection, HopBounds, PathFunc, Predicate,
     SortBinding,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum GQL matches collected before sorting/projection.
 pub(crate) const MAX_GQL_RESULT_ROWS: usize = 10_000;
@@ -17,6 +18,8 @@ pub(crate) enum PhysicalStatement {
     Read(PhysicalPlan),
     /// Node-only read query.
     NodeScan(PhysicalNodeScan),
+    /// Wildcard single-hop path variable query.
+    WildcardPathRead(PhysicalWildcardPathPlan),
     /// PostgreSQL-backed node creation.
     CreateNode(PhysicalCreateNode),
     /// PostgreSQL-backed node property update.
@@ -29,6 +32,27 @@ pub(crate) enum PhysicalStatement {
     DetachDeleteNode(PhysicalDetachDeleteNode),
     /// PostgreSQL-backed node merge/upsert.
     MergeNode(PhysicalMergeNode),
+}
+
+/// Physical wildcard single-hop path query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalWildcardPathPlan {
+    /// Path variable name bound to the whole matched path.
+    pub(crate) path_var: String,
+    /// Traversal direction requested by the relationship pattern.
+    pub(crate) direction: BoundDirection,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnSlot>,
+    /// Source-table OIDs requiring ACL checks before wildcard expansion.
+    pub(crate) required_node_table_oids: BTreeSet<u32>,
+    /// GQL labels keyed by source-table OID.
+    pub(crate) table_labels: BTreeMap<u32, String>,
+    /// Relationship type labels that may appear in wildcard output.
+    pub(crate) rel_type_labels: BTreeSet<String>,
+    /// Number of rows to skip after projection.
+    pub(crate) skip: Option<u64>,
+    /// Maximum rows to return.
+    pub(crate) limit: Option<u64>,
 }
 
 /// Single-hop physical plan for Phase 1B.
@@ -361,6 +385,24 @@ impl PhysicalPlan {
             || !self.order_by.is_empty()
             || self.limit.is_none()
             || self.predicate.is_some()
+    }
+}
+
+impl PhysicalWildcardPathPlan {
+    /// Maximum matches the executor should collect for this plan.
+    pub(crate) fn execution_row_cap(&self) -> usize {
+        if let Some(limit) = self.limit {
+            let requested = self.skip.unwrap_or(0).saturating_add(limit);
+            return usize::try_from(requested)
+                .unwrap_or(usize::MAX)
+                .min(MAX_GQL_RESULT_ROWS);
+        }
+        MAX_GQL_RESULT_ROWS
+    }
+
+    /// Whether hitting the execution cap means results would be incomplete.
+    pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
+        self.limit.is_none()
     }
 }
 

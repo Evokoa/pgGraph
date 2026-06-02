@@ -9,7 +9,9 @@ use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, PathFunc, Predicate, SortBindingKey,
     ValueExpr,
 };
-use super::physical_plan::{PhysicalNodeScan, PhysicalPlan, ReturnSlot, MAX_GQL_DISTINCT_KEYS};
+use super::physical_plan::{
+    PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan, ReturnSlot, MAX_GQL_DISTINCT_KEYS,
+};
 
 /// Hydrated source rows keyed by graph coordinate.
 pub(crate) type HydratedRows = HashMap<(u32, String), serde_json::Value>;
@@ -54,6 +56,31 @@ pub(crate) fn project_rows(
     }
     sort_and_window(&mut projected, plan.skip, plan.limit);
     Ok(projected.into_iter().map(|row| row.row).collect())
+}
+
+/// Project wildcard path matches into canonical JSON rows.
+///
+/// # Errors
+///
+/// Returns [`GraphError::GqlExecution`] when a wildcard path references table
+/// metadata absent from the physical plan or hydrated row lookup.
+pub(crate) fn project_wildcard_path_rows(
+    rows: Vec<GqlRow>,
+    plan: &PhysicalWildcardPathPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<Vec<serde_json::Value>> {
+    let mut projected = Vec::with_capacity(rows.len());
+    for row in rows {
+        projected.push(project_wildcard_path_row(
+            &row,
+            plan,
+            hydrated,
+            hydrate_nodes,
+        )?);
+    }
+    apply_value_window(&mut projected, plan.skip, plan.limit);
+    Ok(projected)
 }
 
 fn collect_projectable_rows(
@@ -270,6 +297,18 @@ fn sort_and_window(projected: &mut Vec<ProjectedRow>, skip: Option<u64>, limit: 
         projected.drain(0..drain);
     }
     projected.truncate(limit.min(projected.len()));
+}
+
+fn apply_value_window(values: &mut Vec<serde_json::Value>, skip: Option<u64>, limit: Option<u64>) {
+    let skip = usize::try_from(skip.unwrap_or(0)).unwrap_or(usize::MAX);
+    let limit = limit
+        .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+        .unwrap_or(usize::MAX);
+    if skip > 0 {
+        let drain = skip.min(values.len());
+        values.drain(0..drain);
+    }
+    values.truncate(limit.min(values.len()));
 }
 
 fn aggregate_rows(
@@ -1064,6 +1103,41 @@ fn project_row(
     Ok(serde_json::Value::Object(output))
 }
 
+fn project_wildcard_path_row(
+    row: &GqlRow,
+    plan: &PhysicalWildcardPathPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    let mut output = serde_json::Map::new();
+    for slot in &plan.returns {
+        match slot {
+            ReturnSlot::Path { name } => {
+                output.insert(
+                    name.clone(),
+                    wildcard_path_value(row, plan, hydrated, hydrate_nodes)?,
+                );
+            }
+            ReturnSlot::PathFunction { func, name } => {
+                output.insert(
+                    name.clone(),
+                    wildcard_path_function_value(*func, row, plan, hydrated, hydrate_nodes)?,
+                );
+            }
+            ReturnSlot::Node { .. }
+            | ReturnSlot::Relationship { .. }
+            | ReturnSlot::Property { .. }
+            | ReturnSlot::Aggregate { .. } => {
+                return Err(GraphError::GqlExecution {
+                    reason: "wildcard path plans can project only path values and path functions"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    Ok(serde_json::Value::Object(output))
+}
+
 fn project_slot_value(
     row: &GqlRow,
     slot: &ReturnSlot,
@@ -1252,6 +1326,76 @@ fn path_function_value(
     }
 }
 
+fn wildcard_path_value(
+    row: &GqlRow,
+    plan: &PhysicalWildcardPathPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    Ok(serde_json::json!({
+        "_path": {
+            "nodes": wildcard_path_nodes_value(row, plan, hydrated, hydrate_nodes)?,
+            "relationships": wildcard_path_relationships_value(row, plan)?,
+        }
+    }))
+}
+
+fn wildcard_path_function_value(
+    func: PathFunc,
+    row: &GqlRow,
+    plan: &PhysicalWildcardPathPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    match func {
+        PathFunc::Nodes => Ok(serde_json::Value::Array(wildcard_path_nodes_value(
+            row,
+            plan,
+            hydrated,
+            hydrate_nodes,
+        )?)),
+        PathFunc::Relationships => Ok(serde_json::Value::Array(wildcard_path_relationships_value(
+            row, plan,
+        )?)),
+        PathFunc::Length => Ok(serde_json::Value::from(row.path_relationships.len())),
+    }
+}
+
+fn wildcard_path_nodes_value(
+    row: &GqlRow,
+    plan: &PhysicalWildcardPathPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<Vec<serde_json::Value>> {
+    row.path_nodes
+        .iter()
+        .map(|coordinate| {
+            node_value(
+                coordinate,
+                hydrated,
+                wildcard_label_for_table(plan, coordinate.table_oid)?,
+                hydrate_nodes,
+            )
+        })
+        .collect()
+}
+
+fn wildcard_path_relationships_value(
+    row: &GqlRow,
+    plan: &PhysicalWildcardPathPlan,
+) -> GraphResult<Vec<serde_json::Value>> {
+    row.path_relationships
+        .iter()
+        .map(|relationship| {
+            Ok(serde_json::json!({
+                "_type": &relationship.rel_type,
+                "_start": wildcard_relationship_endpoint(&relationship.start, plan)?,
+                "_end": wildcard_relationship_endpoint(&relationship.end, plan)?,
+            }))
+        })
+        .collect()
+}
+
 fn path_nodes_value(
     row: &GqlRow,
     plan: &PhysicalPlan,
@@ -1276,7 +1420,7 @@ fn path_relationships_value(row: &GqlRow, plan: &PhysicalPlan) -> Vec<serde_json
         .iter()
         .map(|relationship| {
             serde_json::json!({
-                "_type": &plan.rel_type,
+                "_type": &relationship.rel_type,
                 "_start": relationship_endpoint(&relationship.start, plan),
                 "_end": relationship_endpoint(&relationship.end, plan),
             })
@@ -1289,6 +1433,16 @@ fn relationship_endpoint(coordinate: &GqlNodeCoordinate, plan: &PhysicalPlan) ->
         "table": label_for_table(plan, coordinate.table_oid),
         "id": &coordinate.node_id,
     })
+}
+
+fn wildcard_relationship_endpoint(
+    coordinate: &GqlNodeCoordinate,
+    plan: &PhysicalWildcardPathPlan,
+) -> GraphResult<serde_json::Value> {
+    Ok(serde_json::json!({
+        "table": wildcard_label_for_table(plan, coordinate.table_oid)?,
+        "id": &coordinate.node_id,
+    }))
 }
 
 fn node_value(
@@ -1395,4 +1549,13 @@ fn label_for_table(plan: &PhysicalPlan, table_oid: u32) -> &str {
     } else {
         &plan.target_label
     }
+}
+
+fn wildcard_label_for_table(plan: &PhysicalWildcardPathPlan, table_oid: u32) -> GraphResult<&str> {
+    plan.table_labels
+        .get(&table_oid)
+        .map(String::as_str)
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!("wildcard path plan has no label for table OID {table_oid}"),
+        })
 }

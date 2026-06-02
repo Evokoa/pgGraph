@@ -1,5 +1,7 @@
 use super::catalog_snapshot::{FakeCatalog, MappedEdgeSpec};
-use super::execute::{execute, execute_node_scan, GqlNodeCoordinate, GqlNodeRow};
+use super::execute::{
+    execute, execute_node_scan, execute_wildcard_path, GqlNodeCoordinate, GqlNodeRow,
+};
 use super::explain::explain;
 use super::lower::{lower, lower_statement};
 use super::physical_plan::ReturnSlot;
@@ -10,7 +12,9 @@ use super::sqlpgq_adapter::{
     SqlPgqNodePattern, SqlPgqRead, SqlPgqRelationshipPattern, SqlPgqReturnExpr, SqlPgqReturnItem,
     SqlPgqSortItem, SqlPgqSortKey, COMPATIBILITY_MATRIX,
 };
-use super::value::{project_node_rows, project_rows, HydratedRows, QueryParams};
+use super::value::{
+    project_node_rows, project_rows, project_wildcard_path_rows, HydratedRows, QueryParams,
+};
 use crate::edge_store::{EdgeStore, RawEdge};
 use crate::engine::Engine;
 use crate::gql::errors::GqlErrorKind;
@@ -54,6 +58,11 @@ fn bind_query(query: &str) -> super::logical_plan::LogicalPlan {
     bind(&ast, &fake_catalog()).unwrap()
 }
 
+fn bind_statement_query(query: &str) -> super::logical_plan::LogicalStatement {
+    let ast = crate::gql::parse_statement(query).unwrap();
+    bind_statement(&ast, &fake_catalog()).unwrap()
+}
+
 #[test]
 fn binder_accepts_create_node_for_registered_label() {
     let ast =
@@ -67,6 +76,92 @@ fn binder_accepts_create_node_for_registered_label() {
     assert_eq!(create.node.table_oid, 10);
     assert_eq!(create.properties.len(), 2);
     assert_eq!(create.returns.len(), 1);
+}
+
+#[test]
+fn binder_accepts_phase1_wildcard_path_return() {
+    let plan = bind_statement_query("MATCH p=()-[]->() RETURN p");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(plan) = plan else {
+        panic!("expected wildcard path read plan");
+    };
+
+    assert_eq!(plan.path_var, "p");
+    assert_eq!(
+        plan.required_node_table_oids,
+        [10, 20].into_iter().collect()
+    );
+    assert_eq!(
+        plan.table_labels.get(&10).map(String::as_str),
+        Some("users")
+    );
+    assert_eq!(
+        plan.rel_type_labels,
+        ["friend".to_string(), "works_at".to_string()]
+            .into_iter()
+            .collect()
+    );
+    assert!(matches!(
+        plan.returns[0],
+        super::logical_plan::ReturnBinding::Path { .. }
+    ));
+}
+
+#[test]
+fn binder_accepts_phase1_wildcard_path_functions() {
+    let plan = bind_statement_query(
+        "MATCH p=()-[]->() RETURN nodes(p) AS ns, relationships(p) AS rs, length(p) AS len",
+    );
+    let super::logical_plan::LogicalStatement::WildcardPathRead(plan) = plan else {
+        panic!("expected wildcard path read plan");
+    };
+
+    assert!(matches!(
+        plan.returns[0],
+        super::logical_plan::ReturnBinding::PathFunction {
+            func: super::logical_plan::PathFunc::Nodes,
+            ..
+        }
+    ));
+    assert!(matches!(
+        plan.returns[1],
+        super::logical_plan::ReturnBinding::PathFunction {
+            func: super::logical_plan::PathFunc::Relationships,
+            ..
+        }
+    ));
+    assert!(matches!(
+        plan.returns[2],
+        super::logical_plan::ReturnBinding::PathFunction {
+            func: super::logical_plan::PathFunc::Length,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn binder_rejects_phase1_wildcard_path_named_elements_and_filters() {
+    for query in [
+        "MATCH p=(s)-[]->() RETURN p",
+        "MATCH p=()-[r]->() RETURN p",
+        "MATCH p=(:users)-[]->() RETURN p",
+        "MATCH p=()-[:friend]->() RETURN p",
+        "MATCH p=()-[*1..3]->() RETURN p",
+        "MATCH p=()-[]->() WHERE p.id = 'x' RETURN p",
+        "MATCH p=()-[]->() RETURN count(*)",
+        "MATCH p=()-[]->() RETURN DISTINCT p",
+        "MATCH p=()-[]->() RETURN p ORDER BY p",
+    ] {
+        let ast = crate::gql::parse_statement(query).unwrap();
+        let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+        assert!(
+            matches!(
+                err.kind,
+                GqlErrorKind::Unsupported { .. } | GqlErrorKind::Bind { .. }
+            ),
+            "unexpected error for {query}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -967,6 +1062,53 @@ fn lowering_preserves_bound_tables_and_return_slots() {
             }
         ]
     );
+}
+
+#[test]
+fn wildcard_path_executor_projects_actual_relationship_types() {
+    let statement = bind_statement_query(
+        "MATCH p=()-[]->() RETURN p, nodes(p) AS ns, relationships(p) AS rs, length(p) AS len",
+    );
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let engine = engine_fixture();
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let projected = project_wildcard_path_rows(rows, &physical, &hydrated_fixture(), true).unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["len"], 1);
+    assert_eq!(projected[0]["p"]["_path"]["nodes"], projected[0]["ns"]);
+    assert_eq!(
+        projected[0]["p"]["_path"]["relationships"],
+        projected[0]["rs"]
+    );
+    assert_eq!(projected[0]["rs"][0]["_type"], "works_at");
+    assert_eq!(projected[0]["rs"][0]["_start"]["table"], "users");
+    assert_eq!(projected[0]["rs"][0]["_end"]["table"], "companies");
+}
+
+#[test]
+fn wildcard_path_executor_deduplicates_undirected_relationships() {
+    let statement = bind_statement_query("MATCH p=()-[]-() RETURN length(p) AS len");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let engine = engine_fixture();
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.path_relationships.len() == 1));
 }
 
 #[test]

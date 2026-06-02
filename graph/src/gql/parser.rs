@@ -427,6 +427,13 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, GqlError> {
+        let path_var = if self.peek() == TokKind::Ident && self.peek_next() == TokKind::Eq {
+            let var = self.parse_ident()?;
+            self.expect(TokKind::Eq, "expected '=' after path variable")?;
+            Some(var)
+        } else {
+            None
+        };
         let start = self.parse_node_pat()?;
         let mut tail = Vec::new();
         while matches!(self.peek(), TokKind::Dash | TokKind::ArrowLeft) {
@@ -438,7 +445,12 @@ impl Parser {
             .last()
             .map_or(start.span.end, |(_, node)| node.span.end);
         let span = Span::new(start.span.start as usize, end as usize);
-        Ok(Pattern { start, tail, span })
+        Ok(Pattern {
+            path_var,
+            start,
+            tail,
+            span,
+        })
     }
 
     fn parse_node_pat(&mut self) -> Result<NodePat, GqlError> {
@@ -1083,6 +1095,12 @@ impl Parser {
 
     fn peek(&self) -> TokKind {
         self.current().kind
+    }
+
+    fn peek_next(&self) -> TokKind {
+        self.tokens
+            .get(self.pos + 1)
+            .map_or(TokKind::Eof, |token| token.kind)
     }
 
     fn current(&self) -> &Token {
