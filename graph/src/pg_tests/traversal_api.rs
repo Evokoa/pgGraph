@@ -1,3 +1,19 @@
+fn create_composite_follow_junction_fixture() {
+    Spi::run(
+        "CREATE TABLE public.graph_test_junction_pgtest (
+                follower TEXT NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+                followee  TEXT NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+                PRIMARY KEY (follower, followee)
+            )",
+    )
+    .expect("create composite follow junction failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_junction_pgtest (follower, followee)
+             VALUES ('u1', 'u2')",
+    )
+    .expect("insert composite follow junction failed");
+}
+
 #[pg_test]
 fn traversal_helpers_edge_path_and_composition_apis_work() {
     reset_and_create_fixtures();
@@ -85,6 +101,97 @@ fn traversal_helpers_edge_path_and_composition_apis_work() {
     assert_eq!(multi_start_roots, 2);
     assert_eq!(traverse_search_count, 1);
     assert_eq!(search_nodes_count, 1);
+}
+
+#[pg_test]
+fn composite_pk_junction_edge_table_builds_and_traverses_when_to_column_is_source_fk() {
+    reset_and_create_fixtures();
+    create_composite_follow_junction_fixture();
+
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_junction_pgtest'::regclass,
+                from_column := 'follower',
+                to_table := 'graph_test_users_pgtest'::regclass,
+                to_column := 'followee',
+                label := 'follows',
+                bidirectional := true
+            )",
+    )
+    .expect("add junction edge-table edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build composite junction edge graph failed");
+
+    let outbound = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass,
+                'u1',
+                1,
+                edge_types := ARRAY['follows'],
+                hydrate := false
+             )
+             WHERE node_id = 'u2'",
+    )
+    .expect("outbound junction traversal failed")
+    .unwrap_or(0);
+    let inbound = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass,
+                'u2',
+                1,
+                edge_types := ARRAY['follows'],
+                hydrate := false
+             )
+             WHERE node_id = 'u1'",
+    )
+    .expect("bidirectional junction traversal failed")
+    .unwrap_or(0);
+
+    assert_eq!(outbound, 1);
+    assert_eq!(inbound, 1);
+}
+
+#[pg_test]
+fn mixed_mode_junction_registration_is_accepted_but_build_reads_missing_source_column() {
+    reset_and_create_fixtures();
+    create_composite_follow_junction_fixture();
+
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_junction_pgtest'::regclass,
+                from_column := 'follower',
+                to_table := 'graph_test_users_pgtest'::regclass,
+                to_column := 'id',
+                label := 'follows',
+                bidirectional := true
+            )",
+    )
+    .expect("mixed-mode add_edge currently passes validation");
+
+    let error =
+        sql_error_message("SELECT * FROM graph.build()").expect("mixed-mode build should fail");
+
+    assert!(
+        error.contains("column \"id\" does not exist"),
+        "unexpected build error: {error}"
+    );
 }
 
 #[pg_test]

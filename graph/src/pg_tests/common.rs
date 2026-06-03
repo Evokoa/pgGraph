@@ -34,6 +34,23 @@ fn create_error_sqlstate_helper() {
     .expect("create SQLSTATE capture helper failed");
 }
 
+fn create_error_message_helper() {
+    Spi::run(
+        "CREATE OR REPLACE FUNCTION public.graph_test_sql_error_message(statement text)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 EXECUTE statement;
+                 RETURN NULL;
+             EXCEPTION WHEN others THEN
+                 RETURN SQLERRM;
+             END
+             $$",
+    )
+    .expect("create SQL error message capture helper failed");
+}
+
 fn sql_raises(statement: &str) -> bool {
     create_error_capture_helper();
     Spi::get_one::<bool>(&format!(
@@ -51,6 +68,15 @@ fn sqlstate_for_error(statement: &str) -> Option<String> {
         super::sql_literal(statement)
     ))
     .expect("SQLSTATE capture query failed")
+}
+
+fn sql_error_message(statement: &str) -> Option<String> {
+    create_error_message_helper();
+    Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sql_error_message({})",
+        super::sql_literal(statement)
+    ))
+    .expect("SQL error message capture query failed")
 }
 
 fn explain_source_search_query(property_value: &str, mode: &str, table_oid: u32) -> String {
