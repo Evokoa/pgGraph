@@ -62,6 +62,7 @@ fn lower_join(plan: LogicalJoinPlan) -> PhysicalJoinPlan {
             .collect(),
         patterns: plan.patterns.into_iter().map(lower_join_pattern).collect(),
         returns: lower_returns(plan.returns),
+        distinct_stages: lower_return_stages(plan.distinct_stages),
         distinct: plan.distinct,
         predicate: plan.predicate,
         order_by: plan.order_by,

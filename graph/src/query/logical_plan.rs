@@ -143,6 +143,8 @@ pub(crate) struct LogicalJoinPlan {
     pub(crate) patterns: Vec<LogicalJoinPattern>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnBinding>,
+    /// Row-stream DISTINCT projection stages introduced by `WITH DISTINCT`.
+    pub(crate) distinct_stages: Vec<Vec<ReturnBinding>>,
     /// Whether final projected rows should be deduplicated.
     pub(crate) distinct: bool,
     /// Optional hydrated-row predicate evaluated after all joined slots bind.

@@ -100,7 +100,7 @@ pub(crate) fn project_join_rows(
     params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
-    let rows = rows
+    let mut rows = rows
         .into_iter()
         .filter_map(|row| {
             match predicate_matches(plan.predicate.as_ref(), &row, hydrated, params) {
@@ -110,6 +110,7 @@ pub(crate) fn project_join_rows(
             }
         })
         .collect::<GraphResult<Vec<_>>>()?;
+    apply_distinct_stages_to_join_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
     if plan.returns.iter().any(ReturnSlot::is_aggregate) {
         let mut projected =
             aggregate_join_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
@@ -278,6 +279,20 @@ fn apply_distinct_stages_to_node_rows(
     for stage in &plan.distinct_stages {
         dedup_by_slots(rows, stage, |row, slot| {
             project_node_slot_value(row, slot, plan, hydrated, hydrate_nodes)
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_distinct_stages_to_join_rows(
+    rows: &mut Vec<GqlRow>,
+    plan: &PhysicalJoinPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<()> {
+    for stage in &plan.distinct_stages {
+        dedup_by_slots(rows, stage, |row, slot| {
+            project_join_slot_value(row, slot, plan, hydrated, hydrate_nodes)
         })?;
     }
     Ok(())
@@ -859,6 +874,11 @@ pub(crate) fn wildcard_path_requires_hydration(
 pub(crate) fn join_requires_hydration(plan: &PhysicalJoinPlan, hydrate_nodes: bool) -> bool {
     hydrate_nodes
         || plan.returns.iter().any(return_slot_requires_hydration)
+        || plan
+            .distinct_stages
+            .iter()
+            .flatten()
+            .any(return_slot_requires_hydration)
         || plan.order_by.iter().any(sort_binding_requires_hydration)
         || plan
             .predicate

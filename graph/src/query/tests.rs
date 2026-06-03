@@ -1852,6 +1852,125 @@ fn multi_pattern_join_projects_aggregates() {
 }
 
 #[test]
+fn multi_pattern_join_supports_with_node_and_property_aliases() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH c AS company, u.name AS source, v.name AS peer \
+         RETURN company, source, peer ORDER BY peer LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    assert!(physical.distinct_stages.is_empty());
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["source"], "Ada");
+    assert_eq!(projected[0]["peer"], "Ada");
+    assert_eq!(projected[0]["company"]["_id"]["table"], "companies");
+    assert_eq!(projected[0]["company"]["_id"]["id"], "c1");
+
+    let chained = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH c AS company, v.name AS peer \
+         WITH company.name AS company_name, peer \
+         RETURN company_name ORDER BY peer DESC LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(chained_logical) = chained else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(chained_physical) = lower_statement(
+        super::logical_plan::LogicalStatement::JoinRead(chained_logical),
+    ) else {
+        panic!("expected physical join read plan");
+    };
+    let chained_rows = execute_join(&engine_fixture(), &chained_physical, None).unwrap();
+    let chained_projected = project_join_rows(
+        chained_rows,
+        &chained_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        chained_projected,
+        vec![serde_json::json!({"company_name": "Bell"})]
+    );
+}
+
+#[test]
+fn multi_pattern_join_with_distinct_deduplicates_before_aggregate() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH DISTINCT c.name AS company \
+         RETURN count(*) AS companies",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    assert_eq!(physical.distinct_stages.len(), 1);
+    assert!(super::value::join_requires_hydration(&physical, false));
+
+    let mut engine = engine_fixture();
+    let works_at = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute_join(&engine, &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected, vec![serde_json::json!({"companies": 1})]);
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -1887,8 +2006,24 @@ fn multi_pattern_join_rejects_deferred_shapes() {
             "multi-pattern OPTIONAL MATCH requires a later join phase",
         ),
         (
-            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH u RETURN u",
-            "WITH over multi-pattern joins requires a later phase",
+            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH r RETURN r",
+            "relationship WITH projections over multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH p RETURN p",
+            "path WITH projections over multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH length(p) AS len RETURN len",
+            "path-function WITH projections require row-stream value projection from a later read phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH count(*) AS rows RETURN rows",
+            "aggregate WITH projections require row-stream aggregation from a later read phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH c AS company RETURN u",
+            "unknown return variable `u`",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN DISTINCT v.name AS peer ORDER BY u.name",

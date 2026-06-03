@@ -446,7 +446,9 @@ are supported, including `ORDER BY` over joined node properties or returned
 property aliases, fixed single-hop relationship variable returns, fixed
 single-hop path variable returns, path functions over fixed single-hop path
 variables, node and node-property aggregate inputs, and projected-row
-`RETURN DISTINCT`. `WITH`, relationship/path aggregate inputs, optional joins,
+`RETURN DISTINCT`, plus node and node-property `WITH` projections with
+`WITH DISTINCT`. Relationship/path aggregate inputs, relationship/path
+`WITH` projections, aggregate/path-function `WITH` projections, optional joins,
 and variable-length relationships remain planned within this phase.
 
 Target examples:
@@ -476,6 +478,9 @@ Tests:
   single-hop path variables in multi-pattern joins.
 - `count(*)` and node-property aggregates group over fixed single-hop
   multi-pattern join rows.
+- Node and node-property `WITH` projections update downstream multi-pattern
+  join scope, and `WITH DISTINCT` deduplicates before later projection or
+  aggregation.
 
 ### Phase 3C: Property Predicates on Unlabeled Wildcard Nodes
 

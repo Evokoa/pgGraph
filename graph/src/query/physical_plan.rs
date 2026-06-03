@@ -144,6 +144,8 @@ pub(crate) struct PhysicalJoinPlan {
     pub(crate) patterns: Vec<PhysicalJoinPattern>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnSlot>,
+    /// Row-stream DISTINCT projection stages introduced by `WITH DISTINCT`.
+    pub(crate) distinct_stages: Vec<Vec<ReturnSlot>>,
     /// Whether final projected rows should be deduplicated.
     pub(crate) distinct: bool,
     /// Optional hydrated-row predicate evaluated after all joined slots bind.
@@ -522,7 +524,7 @@ impl PhysicalJoinPlan {
 
     /// Maximum matches the executor should collect for this plan.
     pub(crate) fn execution_row_cap(&self) -> usize {
-        if has_aggregate_return(&self.returns) {
+        if !self.distinct_stages.is_empty() || has_aggregate_return(&self.returns) {
             return MAX_GQL_RESULT_ROWS;
         }
         if !self.distinct && self.predicate.is_none() && self.order_by.is_empty() {
@@ -540,6 +542,7 @@ impl PhysicalJoinPlan {
     pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
         self.limit.is_none()
             || self.distinct
+            || !self.distinct_stages.is_empty()
             || has_aggregate_return(&self.returns)
             || self.predicate.is_some()
             || !self.order_by.is_empty()

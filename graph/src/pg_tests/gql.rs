@@ -1287,6 +1287,23 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     .unwrap_or(false);
 
     assert!(join_aggregate_shape);
+
+    let join_with_shape = Spi::get_one::<bool>(
+        "SELECT bool_and(
+                    row->>'targets' = '1'
+                )
+         FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                    (v:graph_test_users_pgtest)-[:friend]->(c)
+              WITH DISTINCT c.name AS target
+              RETURN count(*) AS targets',
+             hydrate := false
+         )",
+    )
+    .expect("multi-pattern WITH projection query failed")
+    .unwrap_or(false);
+
+    assert!(join_with_shape);
 }
 
 #[pg_test]
