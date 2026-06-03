@@ -144,3 +144,13 @@
 - `cargo fmt --check` from `graph/`: passed.
 - `git diff --check` from repository root: passed.
 - `cargo test --features pg17 query::tests::` from `graph/`: passed, 134 tests.
+
+## 2026-06-03 Edge Registration Validation Slice
+
+- `cargo pgrx test --features "pg17 development" mixed_mode_junction_registration_fails_before_build` from `graph/`: passed, 1 pgrx test.
+- `cargo pgrx test --features "pg17 development" public_add_edge_supports_fk_style_registered_source_tables` from `graph/`: passed, 1 pgrx test.
+- `cargo pgrx test --features "pg17 development" public_add_edge_detects_registered_source_by_oid_across_search_path_changes` from `graph/`: passed, 1 pgrx test.
+- `cargo pgrx test pg17 junction` from `graph/`: passed, 8 tests.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17` from `graph/`: passed, 489 tests, 1 ignored.

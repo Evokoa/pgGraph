@@ -1,4 +1,4 @@
-# Edge Registration Validation TODO
+# Edge Registration Validation
 
 ## Context
 
@@ -33,13 +33,12 @@ node primary-key value.
 
 ## Regression Coverage
 
-Added pgrx coverage proving the current behavior:
+Added pgrx coverage for the corrected behavior:
 
 - Valid composite-PK junction edge-table registration builds and traverses when
   `to_column` is the second junction foreign-key column.
-- The mixed-mode registration is currently accepted by `graph.add_edge()`, but
-  `graph.build()` later tries to read the missing edge-table column and fails
-  with `column "id" does not exist`.
+- Mixed-mode registration now fails during `graph.add_edge()` with a
+  registration-mode error instead of later failing during `graph.build()`.
 
 Verification recorded during the investigation:
 
@@ -47,40 +46,52 @@ Verification recorded during the investigation:
 - `git diff --check` from repository root: passed.
 - `cargo pgrx test pg17 junction` from `graph/`: passed.
 
-## Required Fixes
+## Status
 
-1. Tighten `graph.add_edge()` validation so edge-table registrations require
+Completed on 2026-06-03. `graph.add_edge()` now validates endpoint columns
+according to the actual registration mode before writing the catalog row:
+registered source node tables use FK-style validation, while unregistered
+source tables use edge-table validation.
+
+Verification is recorded in `todo/measurements.md` under "Edge Registration
+Validation Slice".
+
+## Completed Fixes
+
+1. Tightened `graph.add_edge()` validation so edge-table registrations require
    `to_column` to exist on the source edge table.
 
-   The current validation accepts `to_column` if it exists on either the target
-   table or the source table. That is too permissive when `from_table` is not a
-   registered node table, because the builder will read both endpoint values
-   from `from_table`.
+   The previous validation accepted `to_column` if it existed on either the
+   target table or the source table. That was too permissive when `from_table`
+   was not a registered node table, because the builder reads both endpoint
+   values from `from_table`.
 
-2. Preserve FK-style registration for registered source node tables.
+2. Preserved FK-style registration for registered source node tables.
 
    When `from_table` is already registered with `graph.add_table()`,
    `from_column` is a target primary-key value on the source row and
-   `to_column` names the target table key. Existing FK-style tests must keep
-   passing.
+   `to_column` names the target table key. Existing FK-style tests pass with
+   this behavior preserved.
 
-3. Return a clear registration-time error for mixed-mode registrations.
+3. Returned a clear registration-time error for mixed-mode registrations.
 
    The error should name the source table and explain that edge-table
    registrations need `to_column` on the source edge table. This should replace
    the current delayed `graph.build()` failure.
 
-4. Clarify the API reference.
+4. Clarified the API reference.
 
    `docs/user_guide/schema-registration.mdx` already explains the two modes,
    but `docs/user_guide/api-reference.mdx` should explicitly state how
    `from_column` and `to_column` are interpreted in FK-style versus edge-table
    style registration.
 
-5. Decide whether to add a more ergonomic many-to-many helper later.
+## Helper Decision
 
-   The inverse registration shape `users.id -> follows.follower` implies a join
-   expansion from one user row to many junction rows. `graph.add_edge()` does
-   not currently model that. If this becomes a common source of confusion,
-   consider a separate helper or richer relationship registration API instead
-   of overloading `add_edge()` further.
+No new many-to-many helper is planned as part of this checkpoint.
+
+The inverse registration shape `users.id -> follows.follower` implies a join
+expansion from one user row to many junction rows. `graph.add_edge()` does not
+currently model that. A separate helper or richer relationship registration API
+would be a separate product change if repeated user reports show this remains
+confusing after the registration-time error and API reference clarification.

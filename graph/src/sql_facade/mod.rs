@@ -9,7 +9,8 @@ pub(crate) use crate::api_types::{
 pub(crate) use crate::catalog::{
     catalog_fingerprint, current_catalog_state, insert_registered_edge, insert_registered_table,
     read_catalog, regclass_text, split_catalog_columns, validate_column_exists,
-    validate_filter_column_type, validate_registered_table, RegisteredEdgeInsert,
+    validate_edge_endpoint_columns, validate_filter_column_type, validate_registered_table,
+    RegisteredEdgeInsert,
 };
 pub(crate) use crate::engine::Engine;
 pub(crate) use crate::sql_aggregation::{aggregate_impl, path_count_estimate_impl};

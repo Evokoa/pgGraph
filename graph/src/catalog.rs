@@ -10,7 +10,7 @@ pub(crate) use read::{catalog_fingerprint, current_catalog_state, read_catalog};
 pub(crate) use validate::validate_numeric_column;
 pub(crate) use validate::{
     estimated_table_rows, primary_key_expr, regclass_text, sql_table_name_from_catalog,
-    table_oid_from_name, validate_column_exists, validate_filter_column_type,
-    validate_registered_table,
+    table_oid_from_name, validate_column_exists, validate_edge_endpoint_columns,
+    validate_filter_column_type, validate_registered_table,
 };
 pub(crate) use write::{insert_registered_edge, insert_registered_table, RegisteredEdgeInsert};

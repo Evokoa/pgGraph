@@ -659,6 +659,61 @@ fn public_add_edge_supports_fk_style_registered_source_tables() {
 }
 
 #[pg_test]
+fn public_add_edge_detects_registered_source_by_oid_across_search_path_changes() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest
+             ADD COLUMN sponsor_id TEXT REFERENCES public.graph_test_users_pgtest(id)",
+    )
+    .expect("add sponsor column failed");
+    Spi::run("UPDATE public.graph_test_users_pgtest SET sponsor_id = 'u2' WHERE id = 'u1'")
+        .expect("update sponsor failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add_table failed");
+    Spi::run("SET search_path = pg_catalog").expect("set search_path failed");
+
+    Spi::run(
+        "SELECT graph.add_edge(
+                'public.graph_test_users_pgtest'::regclass,
+                'sponsor_id',
+                'public.graph_test_users_pgtest'::regclass,
+                'id',
+                'sponsor',
+                bidirectional := false
+            )",
+    )
+    .expect("add schema-qualified FK-style edge failed after search_path change");
+
+    let stored_from_table = Spi::get_one::<String>(
+        "SELECT from_table
+             FROM graph.registered_edges()
+             WHERE label = 'sponsor'",
+    )
+    .expect("registered_edges query failed")
+    .expect("sponsor edge registration missing");
+    assert_eq!(stored_from_table, "graph_test_users_pgtest");
+
+    Spi::run("SET search_path = public, pg_catalog").expect("restore search_path failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+
+    let sponsor_count = Spi::get_one::<i64>(
+            "SELECT count(*)
+             FROM graph.traverse('public.graph_test_users_pgtest'::regclass, 'u1', 1, edge_types := ARRAY['sponsor'], hydrate := false)
+             WHERE node_id = 'u2'",
+        )
+        .expect("schema-qualified FK-style traversal failed")
+        .unwrap_or(0);
+
+    assert_eq!(sponsor_count, 1);
+}
+
+#[pg_test]
 fn add_table_identifier_validation_accepts_pk_and_unique_not_null_indexes() {
     reset_and_create_fixtures();
     Spi::run("DROP TABLE IF EXISTS public.graph_test_identifiers_pgtest CASCADE")

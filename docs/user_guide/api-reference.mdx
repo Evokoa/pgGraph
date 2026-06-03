@@ -191,6 +191,20 @@ Admin-only. Registers a relationship. `weight_column` must be numeric.
 use up to 254 distinct user-facing edge labels; registering or building a graph
 that would require another label fails with `PG004`.
 
+`graph.add_edge()` supports two registration modes:
+
+- FK-style edges: when `from_table` is already registered with
+  `graph.add_table()`, each source row becomes an edge from that row's
+  registered primary key to the value in `from_column`. In this mode,
+  `to_column` names the target table primary-key column on `to_table`.
+- Edge-table relationships: when `from_table` is not a registered node table,
+  it is treated as a table of relationship rows. In this mode, both endpoint
+  values are read from `from_table`: `from_column` is the source endpoint value
+  and `to_column` is the target endpoint value.
+
+For edge-table relationships, `to_column` must exist on the source edge table.
+For FK-style edges, `to_column` must exist on the target table.
+
 ### `graph.add_filter_column()`
 
 ```sql

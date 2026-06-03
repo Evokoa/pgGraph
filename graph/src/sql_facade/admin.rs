@@ -50,6 +50,43 @@ pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
     }
 }
 
+fn registered_table_name(table_oid: u32) -> safety::GraphResult<Option<String>> {
+    Spi::connect(|client| {
+        let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
+        let result = client
+            .select(
+                "SELECT table_name
+                    FROM graph._registered_tables
+                    WHERE to_regclass(table_name) = $1::oid
+                       OR (
+                           position('.' in table_name) = 0
+                           AND EXISTS (
+                               SELECT 1
+                               FROM pg_class
+                               WHERE oid = $1::oid
+                                 AND relname = table_name
+                           )
+                       )
+                    ORDER BY table_name
+                    LIMIT 1",
+                None,
+                &[table_oid.into()],
+            )
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("registered table lookup failed: {}", err))
+            })?;
+        for row in result {
+            return row.get::<String>(1).map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "registered table lookup read failed: {}",
+                    err
+                ))
+            });
+        }
+        Ok(None)
+    })
+}
+
 pub(super) fn with_panic_boundary<T>(_context: &str, f: impl FnOnce() -> T) -> T {
     // pgrx already installs the real panic boundary around #[pg_extern] calls.
     // Catching inside SPI/user-code paths can accidentally intercept pgrx
@@ -907,18 +944,24 @@ fn add_edge(
 ) {
     with_panic_boundary("add_edge()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        validate_column_exists(from_table.to_u32(), from_column).unwrap_or_else(|err| err.report());
-        if validate_column_exists(to_table.to_u32(), to_column).is_err()
-            && validate_column_exists(from_table.to_u32(), to_column).is_err()
-        {
-            safety::GraphError::Internal(format!(
-                "to_column '{}' must exist on target table OID {} for FK-style edges or source table OID {} for edge-table edges",
-                to_column,
-                to_table.to_u32(),
-                from_table.to_u32()
-            ))
-            .report();
-        }
+        let registered_from_table_name =
+            registered_table_name(from_table.to_u32()).unwrap_or_else(|err| err.report());
+        let from_table_name = registered_from_table_name.clone().unwrap_or_else(|| {
+            regclass_text(from_table.to_u32()).unwrap_or_else(|err| err.report())
+        });
+        let to_table_name = registered_table_name(to_table.to_u32())
+            .unwrap_or_else(|err| err.report())
+            .unwrap_or_else(|| regclass_text(to_table.to_u32()).unwrap_or_else(|err| err.report()));
+        validate_edge_endpoint_columns(
+            from_table.to_u32(),
+            &from_table_name,
+            from_column,
+            to_table.to_u32(),
+            &to_table_name,
+            to_column,
+            registered_from_table_name.is_some(),
+        )
+        .unwrap_or_else(|err| err.report());
         if let Some(weight) = weight_column.as_deref() {
             validate_column_exists(from_table.to_u32(), weight).unwrap_or_else(|err| err.report());
         }
@@ -927,12 +970,10 @@ fn add_edge(
                 .unwrap_or_else(|err| err.report());
         }
 
-        let from_table = regclass_text(from_table.to_u32()).unwrap_or_else(|err| err.report());
-        let to_table = regclass_text(to_table.to_u32()).unwrap_or_else(|err| err.report());
         insert_registered_edge(RegisteredEdgeInsert {
-            from_table: &from_table,
+            from_table: &from_table_name,
             from_column,
-            to_table: &to_table,
+            to_table: &to_table_name,
             to_column,
             label,
             bidirectional,

@@ -55,12 +55,21 @@ pub(crate) fn registered_schema_drift_reason(
                 edge.label, edge.from_table, edge.from_column, err
             ));
         }
-        if validate_column_exists(to_oid, &edge.to_column).is_err()
-            && validate_column_exists(from_oid, &edge.to_column).is_err()
-        {
+        let from_table_registered = tables
+            .iter()
+            .any(|table| table.table_name == edge.from_table);
+        if let Err(err) = validate_edge_endpoint_columns(
+            from_oid,
+            &edge.from_table,
+            &edge.from_column,
+            to_oid,
+            &edge.to_table,
+            &edge.to_column,
+            from_table_registered,
+        ) {
             return Some(format!(
-                "registered edge '{}' target column '{}' no longer exists on target table '{}' or source edge table '{}'",
-                edge.label, edge.to_column, edge.to_table, edge.from_table
+                "registered edge '{}' endpoint columns are invalid: {}",
+                edge.label, err
             ));
         }
         if let Some(weight_column) = edge.weight_column.as_deref() {
@@ -257,6 +266,37 @@ pub(crate) fn validate_column_exists(table_oid: u32, column: &str) -> safety::Gr
             "column '{}' does not exist on table OID {}",
             column, table_oid
         )))
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "edge validation needs both endpoint table/column pairs for clear diagnostics"
+)]
+pub(crate) fn validate_edge_endpoint_columns(
+    from_oid: u32,
+    from_table: &str,
+    from_column: &str,
+    to_oid: u32,
+    to_table: &str,
+    to_column: &str,
+    from_table_registered: bool,
+) -> safety::GraphResult<()> {
+    validate_column_exists(from_oid, from_column)?;
+    if from_table_registered {
+        validate_column_exists(to_oid, to_column).map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "FK-style edge registration from source table '{}' requires to_column '{}' on target table '{}': {}",
+                from_table, to_column, to_table, err
+            ))
+        })
+    } else {
+        validate_column_exists(from_oid, to_column).map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "edge-table registration from source table '{}' requires to_column '{}' on the source edge table because both endpoint values are read from '{}': {}",
+                from_table, to_column, from_table, err
+            ))
+        })
     }
 }
 

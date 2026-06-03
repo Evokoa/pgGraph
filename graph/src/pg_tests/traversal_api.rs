@@ -161,7 +161,7 @@ fn composite_pk_junction_edge_table_builds_and_traverses_when_to_column_is_sourc
 }
 
 #[pg_test]
-fn mixed_mode_junction_registration_is_accepted_but_build_reads_missing_source_column() {
+fn mixed_mode_junction_registration_fails_before_build() {
     reset_and_create_fixtures();
     create_composite_follow_junction_fixture();
 
@@ -173,7 +173,7 @@ fn mixed_mode_junction_registration_is_accepted_but_build_reads_missing_source_c
             )",
     )
     .expect("add users table failed");
-    Spi::run(
+    let error = sql_error_message(
         "SELECT graph.add_edge(
                 'graph_test_junction_pgtest'::regclass,
                 from_column := 'follower',
@@ -183,14 +183,13 @@ fn mixed_mode_junction_registration_is_accepted_but_build_reads_missing_source_c
                 bidirectional := true
             )",
     )
-    .expect("mixed-mode add_edge currently passes validation");
-
-    let error =
-        sql_error_message("SELECT * FROM graph.build()").expect("mixed-mode build should fail");
+    .expect("mixed-mode add_edge should fail");
 
     assert!(
-        error.contains("column \"id\" does not exist"),
-        "unexpected build error: {error}"
+        error.contains("edge-table registration")
+            && error.contains("graph_test_junction_pgtest")
+            && error.contains("to_column 'id'"),
+        "unexpected registration error: {error}"
     );
 }
 
