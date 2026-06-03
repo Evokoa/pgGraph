@@ -1194,7 +1194,7 @@ fn project_row(
                     path_value(row, plan, hydrated, hydrate_nodes)?,
                 );
             }
-            ReturnSlot::PathFunction { func, name } => {
+            ReturnSlot::PathFunction { func, name, .. } => {
                 output.insert(
                     name.clone(),
                     path_function_value(*func, row, plan, hydrated, hydrate_nodes)?,
@@ -1236,7 +1236,7 @@ fn project_wildcard_path_row(
                     wildcard_path_value(row, plan, hydrated, hydrate_nodes)?,
                 );
             }
-            ReturnSlot::PathFunction { func, name } => {
+            ReturnSlot::PathFunction { func, name, .. } => {
                 output.insert(
                     name.clone(),
                     wildcard_path_function_value(*func, row, plan, hydrated, hydrate_nodes)?,
@@ -1320,7 +1320,17 @@ fn project_join_row(
                     join_path_value(row, plan, name, hydrated, hydrate_nodes)?,
                 );
             }
-            ReturnSlot::PathFunction { .. } | ReturnSlot::Aggregate { .. } => {
+            ReturnSlot::PathFunction {
+                func,
+                path_var: Some(path_var),
+                name,
+            } => {
+                output.insert(
+                    name.clone(),
+                    join_path_function_value(*func, row, plan, path_var, hydrated, hydrate_nodes)?,
+                );
+            }
+            ReturnSlot::PathFunction { path_var: None, .. } | ReturnSlot::Aggregate { .. } => {
                 return Err(GraphError::GqlExecution {
                     reason: "unsupported multi-pattern join return slot".to_string(),
                 });
@@ -1695,6 +1705,37 @@ fn join_path_value(
             ],
         }
     }))
+}
+
+fn join_path_function_value(
+    func: PathFunc,
+    row: &GqlRow,
+    plan: &PhysicalJoinPlan,
+    path_var: &str,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    let path = join_path_value(row, plan, path_var, hydrated, hydrate_nodes)?;
+    let path = path.get("_path").ok_or_else(|| GraphError::GqlExecution {
+        reason: format!("multi-pattern path `{path_var}` did not project _path"),
+    })?;
+    match func {
+        PathFunc::Nodes => Ok(path
+            .get("nodes")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)),
+        PathFunc::Relationships => Ok(path
+            .get("relationships")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)),
+        PathFunc::Length => {
+            let len = path
+                .get("relationships")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            Ok(serde_json::Value::from(len as i64))
+        }
+    }
 }
 
 fn path_nodes_value(

@@ -1727,6 +1727,59 @@ fn multi_pattern_join_projects_path_variables() {
 }
 
 #[test]
+fn multi_pattern_join_projects_path_functions() {
+    let statement = bind_statement_query(
+        "MATCH p=(u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         RETURN nodes(p) AS ns, relationships(p) AS rs, length(p) AS len",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    assert_eq!(
+        physical.returns,
+        vec![
+            ReturnSlot::PathFunction {
+                func: super::logical_plan::PathFunc::Nodes,
+                name: "ns".to_string(),
+                path_var: Some("p".to_string()),
+            },
+            ReturnSlot::PathFunction {
+                func: super::logical_plan::PathFunc::Relationships,
+                name: "rs".to_string(),
+                path_var: Some("p".to_string()),
+            },
+            ReturnSlot::PathFunction {
+                func: super::logical_plan::PathFunc::Length,
+                name: "len".to_string(),
+                path_var: Some("p".to_string()),
+            },
+        ]
+    );
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["len"], serde_json::json!(1));
+    assert_eq!(projected[0]["ns"][0]["_id"]["table"], "users");
+    assert_eq!(projected[0]["ns"][1]["_id"]["table"], "companies");
+    assert_eq!(projected[0]["rs"][0]["_type"], "works_at");
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -1748,10 +1801,6 @@ fn multi_pattern_join_rejects_deferred_shapes() {
         (
             "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN p.weight",
             "path properties over multi-pattern joins require a later phase",
-        ),
-        (
-            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN nodes(p)",
-            "functions over multi-pattern joins require a later phase",
         ),
         (
             "MATCH (u:users)-[:works_at*1..2]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",

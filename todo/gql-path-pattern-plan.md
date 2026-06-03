@@ -444,9 +444,9 @@ patterns produce Cartesian combinations under the result cap, and node/node
 property returns with joined node-property `WHERE` predicates and `SKIP`/`LIMIT`
 are supported, including `ORDER BY` over joined node properties or returned
 property aliases, fixed single-hop relationship variable returns, fixed
-single-hop path variable returns, and projected-row `RETURN DISTINCT`. Path
-functions, `WITH`, aggregates, optional joins, and variable-length
-relationships remain planned within this phase.
+single-hop path variable returns, path functions over fixed single-hop path
+variables, and projected-row `RETURN DISTINCT`. `WITH`, aggregates, optional
+joins, and variable-length relationships remain planned within this phase.
 
 Target examples:
 
@@ -471,6 +471,8 @@ Tests:
 - Predicates over variables from different patterns are evaluated after both bindings exist.
 - Projected-row `RETURN DISTINCT` deduplicates after projection and before
   ordering/windowing.
+- `nodes(p)`, `relationships(p)`, and `length(p)` project from fixed
+  single-hop path variables in multi-pattern joins.
 
 ### Phase 3C: Property Predicates on Unlabeled Wildcard Nodes
 

@@ -696,11 +696,40 @@ fn bind_join_returns(
                     "aggregates over multi-pattern joins require a later phase",
                 ));
             }
-            ReturnExpr::Func { span, .. } => {
-                return Err(GqlError::unsupported(
-                    *span,
-                    "functions over multi-pattern joins require a later phase",
-                ));
+            ReturnExpr::Func {
+                name: func_name,
+                args,
+                span,
+            } => {
+                let Some(func) = path_func(&func_name.text) else {
+                    return Err(GqlError::unsupported(
+                        *span,
+                        "RETURN functions are implemented in a later read phase",
+                    ));
+                };
+                let [arg] = args.as_slice() else {
+                    return Err(GqlError::bind(
+                        *span,
+                        format!(
+                            "path function `{}` requires exactly one path argument",
+                            func_name.text
+                        ),
+                    ));
+                };
+                if !path_by_var.contains_key(&arg.text) {
+                    return Err(GqlError::bind(
+                        arg.span,
+                        format!(
+                            "path function `{}` requires a path variable from the multi-pattern MATCH",
+                            func_name.text
+                        ),
+                    ));
+                }
+                ReturnBinding::PathFunction {
+                    func,
+                    path_var: Some(arg.text.clone()),
+                    name: projection_name(item),
+                }
             }
         };
         if !seen.insert(binding.name().to_string()) {
@@ -1289,7 +1318,11 @@ fn bind_wildcard_path_returns(
                 args,
                 span,
             } => match bind_path_function(func_name, args, *span, &scope)? {
-                ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction { func, name },
+                ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction {
+                    func,
+                    path_var: None,
+                    name,
+                },
                 _ => unreachable!("path functions bind only to path-function slots"),
             },
             ReturnExpr::Property { span, .. } => {
@@ -2275,7 +2308,11 @@ fn bind_distinct_stage(
             ScopedBinding::Relationship { var_len: false } => ReturnBinding::Relationship { name },
             ScopedBinding::Relationship { var_len: true } => ReturnBinding::Path { name },
             ScopedBinding::Path => ReturnBinding::Path { name },
-            ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction { func, name },
+            ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction {
+                func,
+                path_var: None,
+                name,
+            },
             ScopedBinding::Property { side, property } => ReturnBinding::Property {
                 side,
                 property,
@@ -2360,7 +2397,11 @@ fn bind_scoped_returns(
                 }
                 ScopedBinding::Relationship { var_len: true } => ReturnBinding::Path { name },
                 ScopedBinding::Path => ReturnBinding::Path { name },
-                ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction { func, name },
+                ScopedBinding::PathFunction(func) => ReturnBinding::PathFunction {
+                    func,
+                    path_var: None,
+                    name,
+                },
                 ScopedBinding::Property { side, property } => ReturnBinding::Property {
                     side,
                     property,

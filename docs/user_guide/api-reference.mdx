@@ -534,6 +534,8 @@ Return value support:
 - Fixed path values, including named node variables and single-hop named
   relationship variables.
 - Fixed single-hop path values from supported multi-pattern joins.
+- Path functions over fixed single-hop path values from supported
+  multi-pattern joins.
 - `RETURN DISTINCT` for non-wildcard path reads, including projected rows from
   supported multi-pattern joins.
 - `RETURN` aggregates: `count`, `sum`, `avg`, `min`, `max`, and `collect`.
@@ -573,11 +575,13 @@ patterns produce Cartesian combinations up to the GQL result cap, joined
 node-property `WHERE` predicates filter after all referenced slots are bound,
 fixed single-hop relationship variables can be returned as coordinate identity
 objects, fixed single-hop path variables can be returned as path JSON objects,
+`nodes(path)`, `relationships(path)`, and `length(path)` can project from fixed
+single-hop path variables,
 `ORDER BY` can sort joined node properties or returned property aliases, and
 `RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection. Distinct
 multi-pattern reads must order by returned scalar expressions. Multi-pattern
-reads currently reject path functions, `WITH`, aggregates, optional matches,
-variable-length relationships, and relationship properties.
+reads currently reject `WITH`, aggregates, optional matches, variable-length
+relationships, and relationship properties.
 
 Path behavior:
 
@@ -617,7 +621,7 @@ Not included in this release's GQL subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Named variables on variable-length wildcard path segments.
-- Multi-pattern path functions, aggregates, and variable-length relationships.
+- Multi-pattern aggregates and variable-length relationships.
 - Node-only optional matches.
 - Multi-pattern optional joins.
 

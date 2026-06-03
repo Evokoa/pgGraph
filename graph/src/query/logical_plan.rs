@@ -410,6 +410,8 @@ pub(crate) enum ReturnBinding {
     PathFunction {
         /// Function to evaluate.
         func: PathFunc,
+        /// Source path variable for multi-pattern joins.
+        path_var: Option<String>,
         /// Return column name.
         name: String,
     },

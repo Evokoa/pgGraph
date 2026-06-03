@@ -985,9 +985,9 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     Spi::run(
         "SELECT graph.add_edge(
                 'graph_test_users_pgtest'::regclass,
-                'id',
-                'graph_test_companies_pgtest'::regclass,
                 'company_id',
+                'graph_test_companies_pgtest'::regclass,
+                'id',
                 'works_at',
                 bidirectional := false
             )",
@@ -1187,11 +1187,11 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
         .expect("wildcard path shape comparison failed");
 
     assert_eq!(
-        row_count, 3,
+        row_count, 2,
         "unexpected wildcard path row count: friend={friend_rows}, works_at={works_at_rows}"
     );
     assert_eq!(friend_rows, 1, "unexpected friend path count");
-    assert_eq!(works_at_rows, 2, "unexpected works_at path count");
+    assert_eq!(works_at_rows, 1, "unexpected works_at path count");
     assert_eq!(named_works_at_rows, works_at_rows);
     assert!(named_shape_matches);
     assert_eq!(join_rows, 1, "unexpected multi-pattern join count");
@@ -1250,6 +1250,25 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     .unwrap_or(false);
 
     assert!(join_path_shape);
+
+    let join_path_function_shape = Spi::get_one::<bool>(
+        "SELECT bool_and(
+                    row->'ns'->0->'_id'->>'id' = 'u1'
+                    AND row->'ns'->1->'_id'->>'id' = 'u2'
+                    AND row->'rs'->0->>'_type' = 'friend'
+                    AND (row->>'len')::integer = 1
+                )
+         FROM graph.gql(
+             'MATCH p=(u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                    (v:graph_test_users_pgtest)-[:friend]->(c)
+              RETURN nodes(p) AS ns, relationships(p) AS rs, length(p) AS len',
+             hydrate := false
+         )",
+    )
+    .expect("multi-pattern path-function projection query failed")
+    .unwrap_or(false);
+
+    assert!(join_path_function_shape);
 }
 
 #[pg_test]
