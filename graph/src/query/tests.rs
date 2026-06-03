@@ -1980,6 +1980,69 @@ fn multi_pattern_join_with_distinct_deduplicates_before_aggregate() {
 }
 
 #[test]
+fn multi_pattern_join_supports_with_relationship_and_path_aliases() {
+    let statement = bind_statement_query(
+        "MATCH p=(u:users)-[r:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH r AS rel, p AS path, v.name AS peer \
+         RETURN rel, path ORDER BY peer LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["rel"]["_type"], "works_at");
+    assert_eq!(
+        projected[0]["path"]["_path"]["relationships"][0]["_type"],
+        "works_at"
+    );
+
+    let distinct = bind_statement_query(
+        "MATCH p=(u:users)-[r:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH DISTINCT r AS rel \
+         RETURN count(*) AS rels",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(distinct_logical) = distinct else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(distinct_physical) = lower_statement(
+        super::logical_plan::LogicalStatement::JoinRead(distinct_logical),
+    ) else {
+        panic!("expected physical join read plan");
+    };
+    assert_eq!(distinct_physical.distinct_stages.len(), 1);
+
+    let distinct_rows = execute_join(&engine_fixture(), &distinct_physical, None).unwrap();
+    let distinct_projected = project_join_rows(
+        distinct_rows,
+        &distinct_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(distinct_projected, vec![serde_json::json!({"rels": 2})]);
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -2013,14 +2076,6 @@ fn multi_pattern_join_rejects_deferred_shapes() {
         (
             "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
             "multi-pattern OPTIONAL MATCH requires a later join phase",
-        ),
-        (
-            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH r RETURN r",
-            "relationship WITH projections over multi-pattern joins require a later phase",
-        ),
-        (
-            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH p RETURN p",
-            "path WITH projections over multi-pattern joins require a later phase",
         ),
         (
             "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH length(p) AS len RETURN len",

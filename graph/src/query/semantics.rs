@@ -268,7 +268,9 @@ fn bind_join_read(
         &node_slots,
         &mut slot_by_var,
         &mut property_by_var,
+        &mut rel_slots,
         &mut rel_by_var,
+        &mut path_slots,
         &mut path_by_var,
     )?;
     let returns = bind_join_returns(
@@ -670,7 +672,9 @@ fn bind_join_with_clauses(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &mut std::collections::HashMap<String, usize>,
     property_by_var: &mut std::collections::HashMap<String, (usize, String)>,
+    rel_slots: &mut Vec<LogicalJoinRelSlot>,
     rel_by_var: &mut std::collections::HashMap<String, usize>,
+    path_slots: &mut Vec<LogicalJoinPathSlot>,
     path_by_var: &mut std::collections::HashMap<String, usize>,
 ) -> Result<Vec<Vec<ReturnBinding>>, GqlError> {
     let mut distinct_stages = Vec::new();
@@ -681,7 +685,9 @@ fn bind_join_with_clauses(
                 node_slots,
                 slot_by_var,
                 property_by_var,
+                rel_slots,
                 rel_by_var,
+                path_slots,
                 path_by_var,
             )?);
         }
@@ -690,13 +696,15 @@ fn bind_join_with_clauses(
             node_slots,
             slot_by_var,
             property_by_var,
+            rel_slots,
             rel_by_var,
+            path_slots,
             path_by_var,
         )?;
         *slot_by_var = next.nodes;
         *property_by_var = next.properties;
-        rel_by_var.clear();
-        path_by_var.clear();
+        *rel_by_var = next.relationships;
+        *path_by_var = next.paths;
     }
     Ok(distinct_stages)
 }
@@ -705,6 +713,8 @@ fn bind_join_with_clauses(
 struct JoinProjectionScope {
     nodes: std::collections::HashMap<String, usize>,
     properties: std::collections::HashMap<String, (usize, String)>,
+    relationships: std::collections::HashMap<String, usize>,
+    paths: std::collections::HashMap<String, usize>,
 }
 
 fn bind_join_distinct_stage(
@@ -712,7 +722,9 @@ fn bind_join_distinct_stage(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
     property_by_var: &std::collections::HashMap<String, (usize, String)>,
+    rel_slots: &mut Vec<LogicalJoinRelSlot>,
     rel_by_var: &std::collections::HashMap<String, usize>,
+    path_slots: &mut Vec<LogicalJoinPathSlot>,
     path_by_var: &std::collections::HashMap<String, usize>,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
@@ -732,6 +744,7 @@ fn bind_join_distinct_stage(
                 format!("duplicate return name `{name}`"),
             ));
         }
+        register_join_with_alias(&name, &binding, rel_slots, path_slots);
         stage.push(binding.into_return_binding(name));
     }
     Ok(stage)
@@ -742,11 +755,15 @@ fn bind_join_projection_scope(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
     property_by_var: &std::collections::HashMap<String, (usize, String)>,
+    rel_slots: &mut Vec<LogicalJoinRelSlot>,
     rel_by_var: &std::collections::HashMap<String, usize>,
+    path_slots: &mut Vec<LogicalJoinPathSlot>,
     path_by_var: &std::collections::HashMap<String, usize>,
 ) -> Result<JoinProjectionScope, GqlError> {
     let mut nodes = std::collections::HashMap::with_capacity(items.len());
     let mut properties = std::collections::HashMap::with_capacity(items.len());
+    let mut relationships = std::collections::HashMap::with_capacity(items.len());
+    let mut paths = std::collections::HashMap::with_capacity(items.len());
     for item in items {
         let (name, binding) = bind_join_with_item(
             item,
@@ -756,12 +773,17 @@ fn bind_join_projection_scope(
             rel_by_var,
             path_by_var,
         )?;
-        if nodes.contains_key(&name) || properties.contains_key(&name) {
+        if nodes.contains_key(&name)
+            || properties.contains_key(&name)
+            || relationships.contains_key(&name)
+            || paths.contains_key(&name)
+        {
             return Err(GqlError::bind(
                 item.span,
                 format!("duplicate return name `{name}`"),
             ));
         }
+        register_join_with_alias(&name, &binding, rel_slots, path_slots);
         match binding {
             JoinWithBinding::Node(slot) => {
                 nodes.insert(name, slot);
@@ -769,14 +791,27 @@ fn bind_join_projection_scope(
             JoinWithBinding::Property { slot, property } => {
                 properties.insert(name, (slot, property));
             }
+            JoinWithBinding::Relationship(slot) => {
+                relationships.insert(name, slot);
+            }
+            JoinWithBinding::Path(slot) => {
+                paths.insert(name, slot);
+            }
         }
     }
-    Ok(JoinProjectionScope { nodes, properties })
+    Ok(JoinProjectionScope {
+        nodes,
+        properties,
+        relationships,
+        paths,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum JoinWithBinding {
     Node(usize),
+    Relationship(usize),
+    Path(usize),
     Property { slot: usize, property: String },
 }
 
@@ -792,7 +827,26 @@ impl JoinWithBinding {
                 property,
                 name,
             },
+            Self::Relationship(_) => ReturnBinding::Relationship { name },
+            Self::Path(_) => ReturnBinding::Path { name },
         }
+    }
+}
+
+fn register_join_with_alias(
+    name: &str,
+    binding: &JoinWithBinding,
+    rel_slots: &mut Vec<LogicalJoinRelSlot>,
+    path_slots: &mut Vec<LogicalJoinPathSlot>,
+) {
+    match binding {
+        JoinWithBinding::Relationship(slot) => {
+            bind_join_relationship_return_alias(name, *slot, rel_slots);
+        }
+        JoinWithBinding::Path(slot) => {
+            bind_join_path_return_alias(name, *slot, path_slots);
+        }
+        JoinWithBinding::Node(_) | JoinWithBinding::Property { .. } => {}
     }
 }
 
@@ -813,16 +867,10 @@ fn bind_join_with_item(
                     slot: *slot,
                     property: property.clone(),
                 }
-            } else if rel_by_var.contains_key(&var.text) {
-                return Err(GqlError::unsupported(
-                    var.span,
-                    "relationship WITH projections over multi-pattern joins require a later phase",
-                ));
-            } else if path_by_var.contains_key(&var.text) {
-                return Err(GqlError::unsupported(
-                    var.span,
-                    "path WITH projections over multi-pattern joins require a later phase",
-                ));
+            } else if let Some(slot) = rel_by_var.get(&var.text).copied() {
+                JoinWithBinding::Relationship(slot)
+            } else if let Some(slot) = path_by_var.get(&var.text).copied() {
+                JoinWithBinding::Path(slot)
             } else {
                 return Err(GqlError::bind(
                     var.span,
