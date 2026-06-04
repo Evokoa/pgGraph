@@ -318,3 +318,12 @@
 - `cargo fmt --check` from `graph/`: passed.
 - `git diff --check` from repository root: passed.
 - `cargo test --features pg17` from `graph/`: passed, 489 tests, 1 ignored.
+
+## 2026-06-04 GQL Write Predicate Re-Check Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::binder_` from `graph/`: passed, 64 tests.
+- `cargo test --features pg17` from `graph/`: passed, 506 tests, 1 ignored.
+- `cargo pgrx test --features "pg17 development" gql_set_property_updates_source_row_and_filter_index` from `graph/`: passed, 1 pgrx test.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_write_recheck ./graph/tests/heavy/gql_write_recheck_race.sh` from repository root: passed after running with sandbox escalation so `cargo pgrx install` could copy the extension into the Homebrew PostgreSQL extension directory. The two-session races confirm stale `SET` predicates, tenant-scope drift, and stale `DETACH DELETE` predicates fail after the final row-lock re-check instead of overwriting or deleting concurrent committed source-row changes.

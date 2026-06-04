@@ -40,7 +40,7 @@ production use.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-001 | GQL mutable writes should re-check matched predicates at the final PostgreSQL write boundary under concurrent source-row changes. | Planned hardening | Current narrow writes use PostgreSQL-first DML and row-level behavior, but the remaining hardening item is to make stale-match drift explicit for `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` weak paths. |
+| KI-001 | GQL mutable writes should re-check matched predicates at the final PostgreSQL write boundary under concurrent source-row changes. | Hardened | `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lock the PostgreSQL source row at the write boundary and re-evaluate the matched GQL predicate before mutating. A two-session heavy race gate covers the stale `SET` predicate case. |
 
 ### SQL Contract and Query Semantics
 

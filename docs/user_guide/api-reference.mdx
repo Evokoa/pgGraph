@@ -656,7 +656,8 @@ single matched node and one registered non-key, non-tenant property column. It r
 `mutable_overlay` projection, updates the PostgreSQL source row first, and
 refreshes the backend's typed filter index value when the property is also a
 registered filter column. PostgreSQL rejects type mismatches according to the
-source column type.
+source column type. Before updating, pgGraph locks the matched source row and
+re-checks the matched GQL predicate against the current PostgreSQL row.
 
 `MATCH (n:label {...}) REMOVE n.property RETURN ...` is supported for a single
 matched node and one registered non-key, non-tenant property. It requires a
@@ -664,7 +665,8 @@ matched node and one registered non-key, non-tenant property. It requires a
 scalar columns to SQL `NULL`. For registered dotted JSONB property paths,
 `REMOVE` drops the addressed key and missing keys remain missing, so repeated
 removes are idempotent. Removing labels is rejected because labels map to
-registered source tables.
+registered source tables. Before updating, pgGraph locks the matched source row
+and re-checks the matched GQL predicate against the current PostgreSQL row.
 
 `MATCH (a:label)-[r:type]->(b:label) DELETE r RETURN ...` is supported for a
 single matched relationship backed by a registered edge row table. Endpoint
@@ -675,7 +677,9 @@ rejected before execution. It requires a `mutable_overlay`
 projection, deletes exactly one PostgreSQL edge row first, then tombstones the
 graph edge in the current backend. Bidirectional edge registrations hide both
 neighbor directions after the delete. Endpoint nodes are not deleted. Undirected
-relationship `DELETE` is not part of this release's GQL subset.
+relationship `DELETE` is not part of this release's GQL subset. Before deleting
+the edge row, pgGraph locks the matched endpoint source rows and re-checks the
+matched GQL predicate against the current PostgreSQL rows.
 
 `MATCH (n:label {...}) DETACH DELETE n RETURN ...` is supported for a single
 matched node. It requires a `mutable_overlay` projection, deletes registered
@@ -684,6 +688,9 @@ The current backend records transaction-local edge and node tombstones so later
 reads in the same transaction do not see the deleted topology. Incident
 relationships must be backed by registered edge row tables. Relationship
 creation and multi-row writes are not part of this release's GQL subset.
+Before deleting incident edge rows or the node row, pgGraph locks the matched
+node source row and re-checks the matched GQL predicate against the current
+PostgreSQL row.
 
 `MERGE (n:label {properties}) [ON CREATE SET ...] [ON MATCH SET ...] RETURN ...`
 is supported for a single node whose label maps to a registered source table. It

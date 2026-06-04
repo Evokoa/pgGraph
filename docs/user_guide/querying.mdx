@@ -368,6 +368,11 @@ The write is PostgreSQL-first: pgGraph inserts, updates, or deletes the mapped
 source row through SPI, PostgreSQL enforces table privileges, constraints,
 RLS, triggers, and MVCC, and the GQL result is built from the affected row or
 matched graph coordinates.
+For `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE`, pgGraph locks
+the matched PostgreSQL source row at the final write boundary and re-checks
+the matched GQL predicate before mutating. If another transaction changes the
+source row so the predicate no longer matches, the statement fails instead of
+overwriting the concurrent change.
 Within the same transaction, node-only `MATCH` queries can read newly created
 nodes through the backend-local transaction delta. `SET` updates registered
 non-key, non-tenant property columns and refreshes any registered typed filter index value

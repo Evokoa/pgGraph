@@ -361,7 +361,7 @@ fn execute_set_property(
             ),
         });
     };
-    let updated = update_mapped_property(plan, &row.node.node_id, params)?;
+    let updated = update_mapped_property(plan, &row.node.node_id, params, tenant_scope)?;
     update_filter_index_for_property(
         plan.table_oid,
         &updated.node_id,
@@ -394,7 +394,7 @@ fn execute_remove_property(
             ),
         });
     };
-    let updated = remove_mapped_property(plan, &row.node.node_id)?;
+    let updated = remove_mapped_property(plan, &row.node.node_id, params, tenant_scope)?;
     update_filter_index_for_property(
         plan.table_oid,
         &updated.node_id,
@@ -488,6 +488,15 @@ fn execute_detach_delete_node(
                 ),
             })
     })?;
+    lock_and_recheck_node_write(
+        plan.table_oid,
+        &plan.label,
+        &plan.predicate,
+        &row.node.node_id,
+        params,
+        tenant_scope,
+        "GQL DETACH DELETE",
+    )?;
     let deleted_edges = delete_incident_edge_rows(plan, &row.node.node_id)?;
     crate::projection::tx_delta::ensure_write_capacity(1, deleted_edges.delta_count(), 0)?;
     let deleted = delete_mapped_node_row(plan, &row.node.node_id)?;
@@ -529,6 +538,7 @@ fn execute_delete_edge(
         });
     };
     let matched = matched_edge_ids(row)?;
+    lock_and_recheck_edge_write(&read_plan, row, params, tenant_scope)?;
     let deleted = delete_mapped_edge_row(plan, &matched.source_id, &matched.target_id)?;
     record_deleted_edge_delta(plan, &deleted.source_id, &deleted.target_id)?;
     crate::query::value::project_rows(matches, &read_plan, &hydrated, params, hydrate)
@@ -785,7 +795,7 @@ fn apply_merge_match_branch(
             value: on_match.value.clone(),
             returns: Vec::new(),
         };
-        let updated = update_mapped_property(&set_plan, &locked.node_id, params)?;
+        let updated = update_mapped_property(&set_plan, &locked.node_id, params, None)?;
         return Ok(MergedNode {
             node_id: updated.node_id,
             tenant: locked.tenant,
@@ -972,10 +982,199 @@ fn validate_merge_identity(
     Ok(())
 }
 
+fn lock_and_recheck_node_write(
+    table_oid: u32,
+    label: &str,
+    predicate: &Option<crate::query::logical_plan::Predicate>,
+    node_id: &str,
+    params: &crate::query::value::QueryParams,
+    tenant_scope: Option<&str>,
+    operation: &str,
+) -> safety::GraphResult<()> {
+    let locked = lock_node_coordinate(table_oid, node_id, tenant_scope, operation)?;
+    let scan = crate::query::physical_plan::PhysicalNodeScan {
+        var: String::new(),
+        table_oid,
+        label: label.to_string(),
+        returns: Vec::new(),
+        distinct_stages: Vec::new(),
+        distinct: false,
+        predicate: predicate.clone(),
+        order_by: Vec::new(),
+        skip: None,
+        limit: None,
+    };
+    let row = crate::query::execute::GqlNodeRow {
+        node: crate::query::execute::GqlNodeCoordinate {
+            table_oid,
+            node_id: locked.node_id.clone(),
+        },
+    };
+    let hydrated = [((table_oid, locked.node_id), locked.row)]
+        .into_iter()
+        .collect();
+    let matches = crate::query::value::filter_node_rows(vec![row], &scan, &hydrated, params)?;
+    if matches.len() == 1 {
+        return Ok(());
+    }
+    Err(safety::GraphError::GqlExecution {
+        reason: format!(
+            "{operation} matched `{label}` node `{node_id}` but the PostgreSQL row no longer satisfies the matched predicate"
+        ),
+    })
+}
+
+fn lock_and_recheck_edge_write(
+    plan: &crate::query::physical_plan::PhysicalPlan,
+    row: &crate::query::execute::GqlRow,
+    params: &crate::query::value::QueryParams,
+    tenant_scope: Option<&str>,
+) -> safety::GraphResult<()> {
+    let Some(target) = row.target.as_ref() else {
+        return Err(safety::GraphError::GqlExecution {
+            reason: "GQL DELETE matched a row without a target node".to_string(),
+        });
+    };
+    let source_key = (plan.source_table_oid, row.source.node_id.as_str());
+    let target_key = (plan.target_table_oid, target.node_id.as_str());
+    let (source, target) = if source_key <= target_key {
+        let source = lock_node_coordinate(source_key.0, source_key.1, tenant_scope, "GQL DELETE")?;
+        let target = lock_node_coordinate(target_key.0, target_key.1, tenant_scope, "GQL DELETE")?;
+        (source, target)
+    } else {
+        let target = lock_node_coordinate(target_key.0, target_key.1, tenant_scope, "GQL DELETE")?;
+        let source = lock_node_coordinate(source_key.0, source_key.1, tenant_scope, "GQL DELETE")?;
+        (source, target)
+    };
+    let hydrated = [
+        ((plan.source_table_oid, source.node_id), source.row),
+        ((plan.target_table_oid, target.node_id), target.row),
+    ]
+    .into_iter()
+    .collect();
+    let matches = crate::query::value::filter_rows(vec![row.clone()], plan, &hydrated, params)?;
+    if matches.len() == 1 {
+        return Ok(());
+    }
+    Err(safety::GraphError::GqlExecution {
+        reason: format!(
+            "GQL DELETE matched `{}` relationship but the PostgreSQL endpoint rows no longer satisfy the matched predicate",
+            plan.rel_type
+        ),
+    })
+}
+
+struct LockedNodeRow {
+    node_id: String,
+    row: serde_json::Value,
+}
+
+fn lock_node_coordinate(
+    table_oid: u32,
+    node_id: &str,
+    tenant_scope: Option<&str>,
+    operation: &str,
+) -> safety::GraphResult<LockedNodeRow> {
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let table = tables
+        .iter()
+        .find(|table| {
+            crate::catalog::table_oid_from_name(&table.table_name)
+                .ok()
+                .is_some_and(|oid| oid == table_oid)
+        })
+        .ok_or_else(|| {
+            safety::GraphError::Internal(format!(
+                "{operation} cannot lock unregistered table OID {table_oid}"
+            ))
+        })?;
+    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let pk_expr = primary_key_expr("src", &table.id_columns);
+    let query = format!(
+        "SELECT to_jsonb(src.*), {}
+         FROM {} AS src
+         WHERE {} = $1
+         FOR UPDATE OF src",
+        pk_expr,
+        table_name.as_sql(),
+        pk_expr
+    );
+    pgrx::Spi::connect_mut(|client| {
+        let rows = client
+            .update(&query, None, &[node_id.into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "{operation} row lock failed for {}: {}",
+                    table_name.as_sql(),
+                    err
+                ),
+            })?;
+        if rows.is_empty() {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!("{operation} matched node `{node_id}` but PostgreSQL found no row"),
+            });
+        }
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("{operation} locked row read failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(format!("{operation} locked row returned no JSON"))
+            })?;
+        recheck_locked_row_tenant(
+            &row_json.0,
+            table.tenant_column.as_deref(),
+            tenant_scope,
+            operation,
+            node_id,
+        )?;
+        let node_id = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "{operation} locked primary key read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(format!(
+                    "{operation} locked row returned no primary key"
+                ))
+            })?;
+        Ok(LockedNodeRow {
+            node_id,
+            row: row_json.0,
+        })
+    })
+}
+
+fn recheck_locked_row_tenant(
+    row: &serde_json::Value,
+    tenant_column: Option<&str>,
+    tenant_scope: Option<&str>,
+    operation: &str,
+    node_id: &str,
+) -> safety::GraphResult<()> {
+    let (Some(tenant_column), Some(tenant_scope)) = (tenant_column, tenant_scope) else {
+        return Ok(());
+    };
+    let current_tenant = row.get(tenant_column).and_then(serde_json::Value::as_str);
+    if current_tenant == Some(tenant_scope) {
+        return Ok(());
+    }
+    Err(safety::GraphError::GqlExecution {
+        reason: format!(
+            "{operation} matched node `{node_id}` but the PostgreSQL row no longer satisfies the active tenant scope"
+        ),
+    })
+}
+
 fn update_mapped_property(
     plan: &crate::query::physical_plan::PhysicalSetProperty,
     node_id: &str,
     params: &crate::query::value::QueryParams,
+    tenant_scope: Option<&str>,
 ) -> safety::GraphResult<UpdatedNode> {
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
@@ -992,6 +1191,15 @@ fn update_mapped_property(
             ))
         })?;
     let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    lock_and_recheck_node_write(
+        plan.table_oid,
+        &plan.label,
+        &plan.predicate,
+        node_id,
+        params,
+        tenant_scope,
+        "GQL SET",
+    )?;
     let value = write_value_json(&plan.value, params)?;
     let values = serde_json::json!({ &plan.property: value });
     let pk_expr = primary_key_expr("src", &table.id_columns);
@@ -1053,6 +1261,8 @@ fn update_mapped_property(
 fn remove_mapped_property(
     plan: &crate::query::physical_plan::PhysicalRemoveProperty,
     node_id: &str,
+    params: &crate::query::value::QueryParams,
+    tenant_scope: Option<&str>,
 ) -> safety::GraphResult<UpdatedNode> {
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
@@ -1069,6 +1279,15 @@ fn remove_mapped_property(
             ))
         })?;
     let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    lock_and_recheck_node_write(
+        plan.table_oid,
+        &plan.label,
+        &plan.predicate,
+        node_id,
+        params,
+        tenant_scope,
+        "GQL REMOVE",
+    )?;
     let pk_expr = primary_key_expr("src", &table.id_columns);
     let assignment = remove_property_assignment(&plan.property);
     let query = format!(
