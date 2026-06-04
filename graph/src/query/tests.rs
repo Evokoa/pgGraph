@@ -2418,6 +2418,83 @@ fn multi_pattern_optional_join_null_extends_missing_patterns() {
 }
 
 #[test]
+fn multi_pattern_join_supports_bounded_variable_length_patterns() {
+    let statement = bind_statement_query(
+        "MATCH p=(u:users)-[:friend*1..2]->(w:users), \
+         (v:users)-[:friend]->(w) \
+         RETURN u.name AS source, w.name AS target, v.name AS peer, length(p) AS hops \
+         ORDER BY source, hops, peer",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert!(logical.patterns[0].hops.variable);
+    assert_eq!(logical.patterns[0].hops.min, 1);
+    assert_eq!(logical.patterns[0].hops.max, 2);
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    assert!(physical.patterns[0].hops.variable);
+
+    let mut engine = Engine::new();
+    for (oid, pk) in [(10, "u1"), (10, "u2"), (10, "u3")] {
+        let node_idx = engine.node_store.add_node(oid, pk.to_string());
+        engine.resolution_insert(oid, pk, node_idx);
+        engine.insert_table_membership(oid, node_idx);
+    }
+    let friend = engine.register_edge_type("friend").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: friend,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: friend,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+    let hydrated = HashMap::from([
+        (
+            (10, "u1".to_string()),
+            serde_json::json!({"id": "u1", "name": "Ada"}),
+        ),
+        (
+            (10, "u2".to_string()),
+            serde_json::json!({"id": "u2", "name": "Linus"}),
+        ),
+        (
+            (10, "u3".to_string()),
+            serde_json::json!({"id": "u3", "name": "Grace"}),
+        ),
+    ]);
+
+    let rows = execute_join(&engine, &physical, None).unwrap();
+    let projected =
+        project_join_rows(rows, &physical, &hydrated, &QueryParams::new(), false).unwrap();
+
+    assert_eq!(
+        projected,
+        vec![
+            serde_json::json!({"source": "Ada", "target": "Linus", "peer": "Ada", "hops": 1}),
+            serde_json::json!({"source": "Ada", "target": "Grace", "peer": "Linus", "hops": 2}),
+            serde_json::json!({"source": "Linus", "target": "Grace", "peer": "Linus", "hops": 1}),
+        ]
+    );
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -2441,12 +2518,12 @@ fn multi_pattern_join_rejects_deferred_shapes() {
             "path properties over multi-pattern joins require a later phase",
         ),
         (
-            "MATCH (u:users)-[:works_at*1..2]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
-            "relationship properties and variable length in multi-pattern joins require a later phase",
+            "MATCH (u:users)-[r:works_at*1..2]->(c:companies), (v:users)-[:works_at]->(c) RETURN r",
+            "relationship variables on variable-length multi-pattern joins require path support",
         ),
         (
             "MATCH (u:users)-[:works_at {role: 'eng'}]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
-            "relationship properties and variable length in multi-pattern joins require a later phase",
+            "relationship properties over multi-pattern joins require a later phase",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH c AS company RETURN u",

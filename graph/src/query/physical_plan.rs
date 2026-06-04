@@ -206,6 +206,8 @@ pub(crate) struct PhysicalJoinPattern {
     pub(crate) rel_type: String,
     /// Traversal direction.
     pub(crate) direction: BoundDirection,
+    /// Hop bounds for this relationship pattern.
+    pub(crate) hops: HopBounds,
     /// Target node slot index.
     pub(crate) target_slot: usize,
 }

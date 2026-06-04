@@ -39,8 +39,12 @@ pub(crate) struct GqlRow {
     pub(crate) path_relationships: Vec<GqlPathRelationship>,
     /// Multi-pattern join node slots by logical slot index.
     pub(crate) join_node_slots: Option<Vec<Option<GqlNodeCoordinate>>>,
+    /// Multi-pattern join path node slots by pattern index.
+    pub(crate) join_path_nodes: Option<Vec<Option<Vec<GqlNodeCoordinate>>>>,
     /// Multi-pattern join relationship slots by pattern index.
     pub(crate) join_relationships: Option<Vec<Option<GqlPathRelationship>>>,
+    /// Multi-pattern join path relationship slots by pattern index.
+    pub(crate) join_path_relationships: Option<Vec<Option<Vec<GqlPathRelationship>>>>,
 }
 
 /// One relationship step in a GQL path.
@@ -273,32 +277,23 @@ fn expand_join_pattern(
         }
         let state = state.with_node(pattern.source_slot, source_idx);
         let mut matched_source = false;
-        for target in neighbors.for_direction_any(pattern.direction, source_idx) {
-            if target.type_id != rel_type_ids[pattern_idx]
-                || !join_node_matches(engine, plan, pattern.target_slot, target.node_idx, tenant)
-            {
-                continue;
-            }
-            if state.node_slots[pattern.target_slot].is_some_and(|idx| idx != target.node_idx) {
-                continue;
-            }
-            matched_source = true;
-            let next_state =
-                state.with_target(pattern_idx, pattern.target_slot, source_idx, target);
-            expand_join_pattern(
-                engine,
-                neighbors,
-                plan,
-                rel_type_ids,
-                tenant,
-                next_state,
-                pattern_idx + 1,
-                rows,
-                row_cap,
-            )?;
-            if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
-                return Ok(());
-            }
+        expand_join_pattern_hops(
+            engine,
+            neighbors,
+            plan,
+            rel_type_ids,
+            tenant,
+            state.clone(),
+            pattern_idx,
+            source_idx,
+            0,
+            Vec::new(),
+            &mut matched_source,
+            rows,
+            row_cap,
+        )?;
+        if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
+            return Ok(());
         }
         if null_extend_per_source && !matched_source {
             let next_state = state.without_relationship(pattern_idx);
@@ -329,6 +324,87 @@ fn expand_join_pattern(
             tenant,
             next_state,
             pattern_idx + 1,
+            rows,
+            row_cap,
+        )?;
+        if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_join_pattern_hops(
+    engine: &Engine,
+    neighbors: &GqlNeighbors<'_>,
+    plan: &PhysicalJoinPlan,
+    rel_type_ids: &[u8],
+    tenant: Option<&str>,
+    state: JoinState,
+    pattern_idx: usize,
+    current_idx: u32,
+    hop_count: u32,
+    relationships: Vec<GqlRelationshipStep>,
+    matched_source: &mut bool,
+    rows: &mut Vec<GqlRow>,
+    row_cap: usize,
+) -> GraphResult<()> {
+    let pattern = &plan.patterns[pattern_idx];
+    if hop_count >= pattern.hops.min
+        && join_node_matches(engine, plan, pattern.target_slot, current_idx, tenant)
+        && state.node_slots[pattern.target_slot].is_none_or(|idx| idx == current_idx)
+    {
+        *matched_source = true;
+        let next_state = state.with_target_path(
+            pattern_idx,
+            pattern.target_slot,
+            current_idx,
+            relationships.clone(),
+        );
+        expand_join_pattern(
+            engine,
+            neighbors,
+            plan,
+            rel_type_ids,
+            tenant,
+            next_state,
+            pattern_idx + 1,
+            rows,
+            row_cap,
+        )?;
+        if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
+            return Ok(());
+        }
+    }
+    if hop_count >= pattern.hops.max {
+        return Ok(());
+    }
+    for target in neighbors.for_direction_any(pattern.direction, current_idx) {
+        if target.type_id != rel_type_ids[pattern_idx]
+            || !wildcard_node_visible(engine, target.node_idx, tenant)
+        {
+            continue;
+        }
+        let mut next_relationships = relationships.clone();
+        next_relationships.push(GqlRelationshipStep {
+            from_idx: current_idx,
+            to_idx: target.node_idx,
+            orientation: target.orientation,
+            type_id: target.type_id,
+        });
+        expand_join_pattern_hops(
+            engine,
+            neighbors,
+            plan,
+            rel_type_ids,
+            tenant,
+            state.clone(),
+            pattern_idx,
+            target.node_idx,
+            hop_count + 1,
+            next_relationships,
+            matched_source,
             rows,
             row_cap,
         )?;
@@ -693,7 +769,7 @@ impl PathState {
 #[derive(Debug, Clone)]
 struct JoinState {
     node_slots: Vec<Option<u32>>,
-    relationships: Vec<Option<GqlRelationshipStep>>,
+    relationships: Vec<Option<Vec<GqlRelationshipStep>>>,
 }
 
 impl JoinState {
@@ -703,21 +779,16 @@ impl JoinState {
         next
     }
 
-    fn with_target(
+    fn with_target_path(
         &self,
         pattern_slot: usize,
         node_slot: usize,
-        source_idx: u32,
-        target: GqlStepTarget,
+        target_idx: u32,
+        relationships: Vec<GqlRelationshipStep>,
     ) -> Self {
         let mut next = self.clone();
-        next.node_slots[node_slot] = Some(target.node_idx);
-        next.relationships[pattern_slot] = Some(GqlRelationshipStep {
-            from_idx: source_idx,
-            to_idx: target.node_idx,
-            orientation: target.orientation,
-            type_id: target.type_id,
-        });
+        next.node_slots[node_slot] = Some(target_idx);
+        next.relationships[pattern_slot] = Some(relationships);
         next
     }
 
@@ -987,7 +1058,9 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
             })
             .collect::<GraphResult<Vec<_>>>()?,
         join_node_slots: None,
+        join_path_nodes: None,
         join_relationships: None,
+        join_path_relationships: None,
     })
 }
 
@@ -1007,17 +1080,52 @@ fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> 
         });
     };
     let target = path_nodes.last().cloned();
-    let join_relationships = state
+    let join_path_nodes = state
         .relationships
         .iter()
-        .map(|relationship| {
-            relationship
+        .map(|relationships| {
+            relationships.as_ref().map(|relationships| {
+                let mut nodes = Vec::with_capacity(relationships.len() + 1);
+                if let Some(first) = relationships.first() {
+                    nodes.push(coordinate(engine, first.from_idx));
+                }
+                nodes.extend(
+                    relationships
+                        .iter()
+                        .map(|relationship| coordinate(engine, relationship.to_idx)),
+                );
+                nodes
+            })
+        })
+        .collect::<Vec<_>>();
+    let join_path_relationships = state
+        .relationships
+        .iter()
+        .map(|relationships| {
+            relationships
                 .as_ref()
-                .map(|relationship| gql_path_relationship(engine, relationship))
+                .map(|relationships| {
+                    relationships
+                        .iter()
+                        .map(|relationship| gql_path_relationship(engine, relationship))
+                        .collect::<GraphResult<Vec<_>>>()
+                })
                 .transpose()
         })
         .collect::<GraphResult<Vec<_>>>()?;
-    let path_relationships = join_relationships.iter().filter_map(Clone::clone).collect();
+    let join_relationships = join_path_relationships
+        .iter()
+        .map(|relationships| {
+            relationships
+                .as_ref()
+                .and_then(|path| path.first().cloned())
+        })
+        .collect::<Vec<_>>();
+    let path_relationships = join_path_relationships
+        .iter()
+        .filter_map(Clone::clone)
+        .flatten()
+        .collect();
     Ok(GqlRow {
         source,
         target,
@@ -1026,7 +1134,9 @@ fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> 
         path_nodes,
         path_relationships,
         join_node_slots: Some(join_node_slots),
+        join_path_nodes: Some(join_path_nodes),
         join_relationships: Some(join_relationships),
+        join_path_relationships: Some(join_path_relationships),
     })
 }
 
@@ -1084,7 +1194,9 @@ fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult
         path_nodes,
         path_relationships,
         join_node_slots: None,
+        join_path_nodes: None,
         join_relationships: None,
+        join_path_relationships: None,
     })
 }
 
@@ -1097,7 +1209,9 @@ fn project_optional_row(engine: &Engine, source_idx: u32) -> GqlRow {
         path_nodes: Vec::new(),
         path_relationships: Vec::new(),
         join_node_slots: None,
+        join_path_nodes: None,
         join_relationships: None,
+        join_path_relationships: None,
     }
 }
 

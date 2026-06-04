@@ -197,12 +197,13 @@ fn bind_join_read(
                 "multi-pattern joins currently support fixed single-relationship patterns",
             ));
         };
-        if !rel.props.is_empty() || rel.var_len.is_some() {
+        if !rel.props.is_empty() {
             return Err(GqlError::unsupported(
                 rel.span,
-                "relationship properties and variable length in multi-pattern joins require a later phase",
+                "relationship properties over multi-pattern joins require a later phase",
             ));
         }
+        let hops = bind_hops(rel)?;
         let rel_type = rel.rel_type.as_ref().ok_or_else(|| {
             GqlError::unsupported(
                 rel.span,
@@ -252,6 +253,7 @@ fn bind_join_read(
             source_slot,
             rel_type: rel_type.text.clone(),
             direction: bind_direction(rel.direction),
+            hops,
             target_slot,
         });
     }
@@ -380,6 +382,12 @@ fn bind_join_relationship_slot(
     let Some(var) = &rel.var else {
         return Ok(());
     };
+    if rel.var_len.is_some() {
+        return Err(GqlError::unsupported(
+            var.span,
+            "relationship variables on variable-length multi-pattern joins require path support",
+        ));
+    }
     if slot_by_var.contains_key(&var.text)
         || rel_by_var.contains_key(&var.text)
         || path_by_var.contains_key(&var.text)

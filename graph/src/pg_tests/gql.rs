@@ -1270,6 +1270,25 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
 
     assert!(join_path_function_shape);
 
+    let join_var_len_shape = Spi::get_one::<bool>(
+        "SELECT bool_and(
+                    row->'ns'->0->'_id'->>'id' = 'u1'
+                    AND row->'ns'->1->'_id'->>'id' = 'u2'
+                    AND row->'rs'->0->>'_type' = 'friend'
+                    AND (row->>'len')::integer = 1
+                )
+         FROM graph.gql(
+             'MATCH p=(u:graph_test_users_pgtest)-[:friend*1..1]->(c:graph_test_users_pgtest),
+                    (v:graph_test_users_pgtest)-[:friend]->(c)
+              RETURN nodes(p) AS ns, relationships(p) AS rs, length(p) AS len',
+             hydrate := false
+         )",
+    )
+    .expect("multi-pattern variable-length projection query failed")
+    .unwrap_or(false);
+
+    assert!(join_var_len_shape);
+
     let optional_join_shape = Spi::get_one::<bool>(
         "SELECT bool_and(
                     row->>'source' = 'Alice'

@@ -206,21 +206,22 @@ Each new node variable in a multi-pattern join needs a concrete label. A reused
 node variable may omit the label or repeat the same label, and it joins by the
 graph coordinate. Independent patterns produce Cartesian combinations up to the
 GQL result cap. This slice supports node and node-property returns, joined
-node-property `WHERE` predicates, fixed single-hop relationship variable and
-path variable returns, path functions, aggregates, `WITH` aliases for nodes,
-node properties, relationships, paths, path functions, and supported aggregate
-inputs, including grouped aggregate `WITH` projections, `ORDER BY` over joined
-node properties or returned scalar aliases, projected-row `RETURN DISTINCT`,
-direct aggregate `WITH DISTINCT`, later `WITH DISTINCT` over projected
-aggregate aliases, final aggregate expressions over projected aggregate
-aliases after aggregate `WITH` boundaries, and `SKIP`/`LIMIT`.
+node-property `WHERE` predicates, fixed single-hop relationship variable
+returns, fixed single-hop and bounded variable-length path variable returns,
+path functions, aggregates, `WITH` aliases for nodes, node properties,
+relationships, paths, path functions, and supported aggregate inputs, including
+grouped aggregate `WITH` projections, `ORDER BY` over joined node properties or
+returned scalar aliases, projected-row `RETURN DISTINCT`, direct aggregate
+`WITH DISTINCT`, later `WITH DISTINCT` over projected aggregate aliases, final
+aggregate expressions over projected aggregate aliases after aggregate `WITH`
+boundaries, and `SKIP`/`LIMIT`.
 When `RETURN DISTINCT` is combined with `ORDER BY`, the sort keys must be
 returned scalar expressions. Optional multi-pattern joins null-extend
 unmatched fixed single-hop pattern expansions and return JSON `null` for
-missing node, relationship, and path projections. Variable-length
-relationships, relationship properties, relationship/path property aggregate
-inputs, and numeric aggregates over relationship/path values remain outside the
-current multi-pattern subset.
+missing node, relationship, and path projections. Relationship variables on
+variable-length multi-pattern joins, relationship properties,
+relationship/path property aggregate inputs, and numeric aggregates over
+relationship/path values remain outside the current multi-pattern subset.
 
 Scalar properties are returned as their JSON representation: strings,
 numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`
@@ -272,9 +273,9 @@ Planned outside this subset:
 
 - Relationship source-row hydration.
 - Named variables on variable-length wildcard path segments.
-- Multi-pattern variable-length relationships, relationship properties,
-  relationship/path property aggregate inputs, and numeric aggregates over
-  relationship/path values.
+- Multi-pattern relationship properties, relationship/path property aggregate
+  inputs, numeric aggregates over relationship/path values, and relationship
+  variables on variable-length join patterns.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on

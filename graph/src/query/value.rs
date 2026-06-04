@@ -240,7 +240,9 @@ fn flush_optional_source(
             path_nodes: Vec::new(),
             path_relationships: Vec::new(),
             join_node_slots: None,
+            join_path_nodes: None,
             join_relationships: None,
+            join_path_relationships: None,
         };
         projectable.push(null_row);
     }
@@ -1787,7 +1789,9 @@ fn node_row_as_gql_row(row: &GqlNodeRow) -> GqlRow {
         path_nodes: vec![row.node.clone()],
         path_relationships: Vec::new(),
         join_node_slots: None,
+        join_path_nodes: None,
         join_relationships: None,
+        join_path_relationships: None,
     }
 }
 
@@ -1967,6 +1971,18 @@ fn join_relationship(
     row: &GqlRow,
     pattern_slot: usize,
 ) -> GraphResult<Option<&GqlPathRelationship>> {
+    if let Some(paths) = &row.join_path_relationships {
+        let Some(path) = paths.get(pattern_slot) else {
+            return Err(GraphError::GqlExecution {
+                reason: format!(
+                    "multi-pattern relationship pattern {pattern_slot} is out of range"
+                ),
+            });
+        };
+        return Ok(path
+            .as_ref()
+            .and_then(|relationships| relationships.first()));
+    }
     if let Some(relationships) = &row.join_relationships {
         let Some(relationship) = relationships.get(pattern_slot) else {
             return Err(GraphError::GqlExecution {
@@ -1978,6 +1994,38 @@ fn join_relationship(
         return Ok(relationship.as_ref());
     }
     Ok(row.path_relationships.get(pattern_slot))
+}
+
+fn join_path_nodes(row: &GqlRow, pattern_slot: usize) -> GraphResult<Option<&[GqlNodeCoordinate]>> {
+    if let Some(nodes) = &row.join_path_nodes {
+        let Some(path_nodes) = nodes.get(pattern_slot) else {
+            return Err(GraphError::GqlExecution {
+                reason: format!("multi-pattern path node pattern {pattern_slot} is out of range"),
+            });
+        };
+        return Ok(path_nodes.as_deref());
+    }
+    Ok(None)
+}
+
+fn join_path_relationships(
+    row: &GqlRow,
+    pattern_slot: usize,
+) -> GraphResult<Option<&[GqlPathRelationship]>> {
+    if let Some(paths) = &row.join_path_relationships {
+        let Some(path) = paths.get(pattern_slot) else {
+            return Err(GraphError::GqlExecution {
+                reason: format!(
+                    "multi-pattern relationship pattern {pattern_slot} is out of range"
+                ),
+            });
+        };
+        return Ok(path.as_deref());
+    }
+    Ok(row
+        .path_relationships
+        .get(pattern_slot)
+        .map(std::slice::from_ref))
 }
 
 fn join_path_value(
@@ -2010,38 +2058,41 @@ fn join_path_value_by_slot(
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("unknown multi-pattern path slot {slot_index}"),
         })?;
-    let pattern = plan
-        .patterns
-        .get(slot.pattern_slot)
-        .ok_or_else(|| GraphError::GqlExecution {
-            reason: format!(
-                "multi-pattern path slot `{}` points at missing pattern {}",
-                slot.var, slot.pattern_slot
-            ),
-        })?;
-    let Some(source) = coordinate(row, BindingSide::PathNode(pattern.source_slot)) else {
+    let Some(nodes) = join_path_nodes(row, slot.pattern_slot)? else {
         return Ok(serde_json::Value::Null);
     };
-    let Some(target) = coordinate(row, BindingSide::PathNode(pattern.target_slot)) else {
+    let Some(relationships) = join_path_relationships(row, slot.pattern_slot)? else {
         return Ok(serde_json::Value::Null);
     };
-    let Some(relationship) = join_relationship(row, slot.pattern_slot)? else {
+    if nodes.is_empty() || relationships.is_empty() {
         return Ok(serde_json::Value::Null);
-    };
+    }
+    let node_values = nodes
+        .iter()
+        .map(|node| {
+            node_value(
+                node,
+                hydrated,
+                join_label_for_table(plan, node.table_oid)?,
+                hydrate_nodes,
+            )
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
+    let relationship_values = relationships
+        .iter()
+        .map(|relationship| {
+            Ok(serde_json::json!({
+                "_type": &relationship.rel_type,
+                "_start": join_relationship_endpoint(&relationship.start, plan)?,
+                "_end": join_relationship_endpoint(&relationship.end, plan)?,
+            }))
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
 
     Ok(serde_json::json!({
         "_path": {
-            "nodes": [
-                node_value(source, hydrated, join_label(plan, BindingSide::PathNode(pattern.source_slot))?, hydrate_nodes)?,
-                node_value(target, hydrated, join_label(plan, BindingSide::PathNode(pattern.target_slot))?, hydrate_nodes)?,
-            ],
-            "relationships": [
-                {
-                    "_type": &relationship.rel_type,
-                    "_start": join_relationship_endpoint(&relationship.start, plan)?,
-                    "_end": join_relationship_endpoint(&relationship.end, plan)?,
-                }
-            ],
+            "nodes": node_values,
+            "relationships": relationship_values,
         }
     }))
 }
@@ -2086,11 +2137,9 @@ fn join_path_length(row: &GqlRow, plan: &PhysicalJoinPlan, path_var: &str) -> Gr
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("unknown multi-pattern path slot `{path_var}`"),
         })?;
-    Ok(if join_relationship(row, slot.pattern_slot)?.is_some() {
-        1
-    } else {
-        0
-    })
+    Ok(join_path_relationships(row, slot.pattern_slot)?
+        .map(|relationships| relationships.len() as i64)
+        .unwrap_or(0))
 }
 
 fn path_nodes_value(
@@ -2279,6 +2328,16 @@ fn join_label(plan: &PhysicalJoinPlan, side: BindingSide) -> GraphResult<&str> {
         .map(|node| node.label.as_str())
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("multi-pattern join node slot {slot} is out of range"),
+        })
+}
+
+fn join_label_for_table(plan: &PhysicalJoinPlan, table_oid: u32) -> GraphResult<&str> {
+    plan.node_slots
+        .iter()
+        .find(|node| node.table_oid == table_oid)
+        .map(|node| node.label.as_str())
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!("multi-pattern join plan has no label for table OID {table_oid}"),
         })
 }
 
