@@ -339,6 +339,15 @@
 - `cargo pgrx test --features "pg17 development" gql_rejects_transaction_created_node_traversal_entry_points` from `graph/`: passed, 1 pgrx test. Confirms the typed rejection reaches `graph.gql()` after a GQL `CREATE` records a transaction-local node delta, while a materialized source-id traversal remains allowed.
 - `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
 
+## 2026-06-05 GQL Write Re-Check Follow-Up Slice
+
+- `bash -n graph/tests/heavy/gql_write_recheck_race.sh` from repository root: passed.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
+- `cargo pgrx test --features "pg17 development" gql_delete_edge_write_recheck_rejects_stale_endpoint_predicate` from `graph/`: passed, 1 pgrx test. Confirms mapped edge `DELETE` final write-boundary rechecks fail with `PG017` when a locked endpoint row no longer satisfies the bound target predicate.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_write_recheck ./tests/heavy/gql_write_recheck_race.sh` from `graph/`: passed after running with sandbox escalation so `cargo pgrx install` could copy the extension into the Homebrew PostgreSQL extension directory. The two-session races now include stale `REMOVE` predicates in addition to stale `SET`, tenant-scope drift, and stale `DETACH DELETE`.
+
 ## 2026-06-04 KI-009 GQL SET SQLSTATE Hardening Slice
 
 - `cargo fmt --check` from `graph/`: passed.

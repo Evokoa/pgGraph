@@ -217,6 +217,7 @@ playground query stability.
 | `gql_create_tx_lifecycle.sh` | GQL `CREATE` transaction lifecycle | Installs the extension into a disposable database and checks public mapped `CREATE` rollback and commit behavior. |
 | `gql_set_tx_lifecycle.sh` | GQL `SET` transaction lifecycle | Installs the extension into a disposable database and checks public mapped property `SET` rollback behavior, including typed filter-delta cleanup. |
 | `gql_delete_tx_lifecycle.sh` | GQL `DELETE` transaction lifecycle | Installs the extension into a disposable database and checks public mapped edge-row `DELETE` rollback behavior, including bidirectional tombstone cleanup. |
+| `gql_write_recheck_race.sh` | GQL write predicate rechecks | Installs the extension into a disposable database and runs two-session races proving stale mapped write predicates fail after PostgreSQL row-lock rechecks for `SET`, `REMOVE`, and `DETACH DELETE`. |
 | `gql_merge_race.sh` | GQL `MERGE` same-key race | Installs the extension into a disposable database and checks that concurrent mapped `MERGE` statements converge on one source row. |
 | `tx_delta_crash_recovery.sh` | Mutable-overlay crash/reload | Installs the internal pg_test surface, kills a disposable postmaster with an uncommitted overlay open, restarts it, and verifies the overlay did not persist. |
 | `run_pgbench_sync.sh` | Trigger sync stress | Uses `pgbench_sync.sql` to drive concurrent DML and validate explicit sync apply behavior. |

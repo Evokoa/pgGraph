@@ -2607,3 +2607,77 @@ fn test_record_tx_edge(
         .unwrap_or_else(|err| err.report());
     });
 }
+
+#[cfg(feature = "pg_test")]
+#[pg_extern(schema = "graph", name = "_test_recheck_delete_edge_predicate")]
+fn test_recheck_delete_edge_predicate(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    edge_label: &str,
+    target_property: &str,
+    expected_target_value: i64,
+) -> bool {
+    with_panic_boundary("_test_recheck_delete_edge_predicate()", || {
+        super::admin::require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let source_table_oid = source_table.to_u32();
+        let target_table_oid = target_table.to_u32();
+        let source = crate::query::execute::GqlNodeCoordinate {
+            table_oid: source_table_oid,
+            node_id: source_id.to_string(),
+        };
+        let target = crate::query::execute::GqlNodeCoordinate {
+            table_oid: target_table_oid,
+            node_id: target_id.to_string(),
+        };
+        let plan = crate::query::physical_plan::PhysicalPlan {
+            optional: false,
+            source_var: "u".to_string(),
+            source_table_oid,
+            source_label: "source".to_string(),
+            rel_type: edge_label.to_string(),
+            rel_var: Some("r".to_string()),
+            direction: crate::query::logical_plan::BoundDirection::Out,
+            hops: crate::query::logical_plan::HopBounds {
+                variable: false,
+                min: 1,
+                max: 1,
+            },
+            target_var: "v".to_string(),
+            target_table_oid,
+            target_label: "target".to_string(),
+            returns: Vec::new(),
+            distinct_stages: Vec::new(),
+            distinct: false,
+            predicate: Some(crate::query::logical_plan::Predicate::Compare {
+                lhs: crate::query::logical_plan::ValueExpr::Property {
+                    side: crate::query::logical_plan::BindingSide::Target,
+                    property: target_property.to_string(),
+                },
+                op: crate::query::logical_plan::BoundCmpOp::Eq,
+                rhs: Some(crate::query::logical_plan::ValueExpr::Literal(
+                    serde_json::json!(expected_target_value),
+                )),
+            }),
+            order_by: Vec::new(),
+            skip: None,
+            limit: None,
+        };
+        let row = crate::query::execute::GqlRow {
+            source: source.clone(),
+            target: Some(target.clone()),
+            rel_start: Some(source.clone()),
+            rel_end: Some(target.clone()),
+            path_nodes: vec![source, target],
+            path_relationships: Vec::new(),
+            join_node_slots: None,
+            join_path_nodes: None,
+            join_relationships: None,
+            join_path_relationships: None,
+        };
+        lock_and_recheck_edge_write(&plan, &row, &crate::query::value::QueryParams::new(), None)
+            .unwrap_or_else(|err| err.report());
+        true
+    })
+}

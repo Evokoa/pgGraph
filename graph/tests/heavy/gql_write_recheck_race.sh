@@ -211,6 +211,94 @@ SELECT graph.reset();
 SET graph.mutable_enabled = on;
 SET graph.enforce_tenant_scope = off;
 RESET graph.tenant_setting;
+DROP TABLE IF EXISTS public.graph_gql_write_recheck_remove_nodes CASCADE;
+CREATE TABLE public.graph_gql_write_recheck_remove_nodes (
+    id TEXT PRIMARY KEY,
+    age INT NOT NULL,
+    status TEXT
+);
+INSERT INTO public.graph_gql_write_recheck_remove_nodes (id, age, status)
+VALUES ('u1', 37, 'active'), ('u2', 41, 'active');
+SELECT graph.add_table(
+    'public.graph_gql_write_recheck_remove_nodes'::regclass,
+    id_column := 'id',
+    columns := ARRAY['age', 'status']
+);
+SELECT graph.add_filter_column('public.graph_gql_write_recheck_remove_nodes'::regclass, 'age');
+SELECT * FROM graph.build(mode := 'mutable_overlay');
+SQL
+
+set +e
+psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" >"$tmpdir/remove_writer.out" 2>"$tmpdir/remove_writer.err" <<'SQL' &
+SET graph.mutable_enabled = on;
+SET graph.enforce_tenant_scope = off;
+RESET graph.tenant_setting;
+SELECT * FROM graph.build(mode := 'mutable_overlay');
+SELECT pg_sleep(2);
+SELECT graph.gql(
+    'MATCH (u:graph_gql_write_recheck_remove_nodes {id: ''u2''})
+     WHERE u.age = 41
+     REMOVE u.status
+     RETURN u.status'
+);
+SQL
+remove_writer_pid=$!
+set -e
+
+sleep 1
+
+psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >"$tmpdir/remove_locker.out" &
+BEGIN;
+UPDATE public.graph_gql_write_recheck_remove_nodes
+SET age = 99
+WHERE id = 'u2';
+SELECT pg_sleep(4);
+COMMIT;
+SQL
+remove_locker_pid=$!
+
+set +e
+wait "$remove_writer_pid"
+remove_writer_status=$?
+set -e
+
+wait "$remove_locker_pid"
+
+if [[ "$remove_writer_status" -eq 0 ]]; then
+  echo "GQL REMOVE stale predicate re-check unexpectedly succeeded" >&2
+  cat "$tmpdir/remove_writer.out" >&2
+  exit 1
+fi
+
+if ! grep -q "no longer satisfies the matched predicate" "$tmpdir/remove_writer.err"; then
+  echo "GQL REMOVE stale predicate re-check failed with an unexpected error" >&2
+  cat "$tmpdir/remove_writer.err" >&2
+  exit 1
+fi
+
+psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >/dev/null
+DO $$
+DECLARE
+    source_age integer;
+    source_status text;
+BEGIN
+    SELECT age, status INTO source_age, source_status
+    FROM public.graph_gql_write_recheck_remove_nodes
+    WHERE id = 'u2';
+
+    IF source_age <> 99 OR source_status <> 'active' THEN
+        RAISE EXCEPTION 'GQL REMOVE stale predicate re-check expected 99/active, got %/%',
+            source_age, source_status;
+    END IF;
+END
+$$;
+SQL
+
+psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >/dev/null
+SELECT graph.reset();
+SET graph.mutable_enabled = on;
+SET graph.enforce_tenant_scope = off;
+RESET graph.tenant_setting;
 DROP TABLE IF EXISTS public.graph_gql_write_recheck_detach_edges CASCADE;
 DROP TABLE IF EXISTS public.graph_gql_write_recheck_detach_nodes CASCADE;
 CREATE TABLE public.graph_gql_write_recheck_detach_nodes (

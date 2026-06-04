@@ -3082,6 +3082,57 @@ fn gql_delete_edge_removes_source_row_and_tombstones_neighbors() {
 }
 
 #[pg_test]
+fn gql_delete_edge_write_recheck_rejects_stale_endpoint_predicate() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := true
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT graph.add_filter_column('graph_test_users_pgtest'::regclass, 'age')")
+        .expect("add age filter column failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+    Spi::run("UPDATE public.graph_test_users_pgtest SET age = 99 WHERE id = 'u2'")
+        .expect("stale endpoint update failed");
+
+    let sqlstate = sqlstate_for_error(
+        "SELECT graph._test_recheck_delete_edge_predicate(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             'graph_test_users_pgtest'::regclass,
+             'u2',
+             'friend',
+             'age',
+             41
+         )",
+    );
+    let edge_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_test_friendships_pgtest",
+    )
+    .expect("edge row count failed")
+    .unwrap_or_default();
+
+    assert_eq!(sqlstate.as_deref(), Some("PG017"));
+    assert_eq!(edge_rows, 1);
+}
+
+#[pg_test]
 fn gql_wildcard_delete_edge_resolves_unique_mapped_row() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
