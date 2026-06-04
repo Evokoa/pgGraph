@@ -969,9 +969,12 @@ fn sort_values(
         .iter()
         .map(|sort| {
             let value = match &sort.key {
-                SortBindingKey::ReturnName(name) => project_row(row, plan, hydrated, true)?
-                    .get(name)
-                    .cloned()
+                SortBindingKey::ReturnName(name) => plan
+                    .returns
+                    .iter()
+                    .find(|slot| slot.name() == name)
+                    .map(|slot| project_slot_value(row, slot, plan, hydrated, true))
+                    .transpose()?
                     .unwrap_or(serde_json::Value::Null),
                 SortBindingKey::Property { side, property } => eval_value(
                     &ValueExpr::Property {
@@ -1003,9 +1006,12 @@ fn sort_values_for_node(
         .iter()
         .map(|sort| {
             let value = match &sort.key {
-                SortBindingKey::ReturnName(name) => project_node_row(row, plan, hydrated, true)?
-                    .get(name)
-                    .cloned()
+                SortBindingKey::ReturnName(name) => plan
+                    .returns
+                    .iter()
+                    .find(|slot| slot.name() == name)
+                    .map(|slot| project_node_slot_value(row, slot, plan, hydrated, true))
+                    .transpose()?
                     .unwrap_or(serde_json::Value::Null),
                 SortBindingKey::Property { side, property } => eval_value(
                     &ValueExpr::Property {
@@ -1036,9 +1042,12 @@ fn sort_values_for_join(
         .iter()
         .map(|sort| {
             let value = match &sort.key {
-                SortBindingKey::ReturnName(name) => project_join_row(row, plan, hydrated, true)?
-                    .get(name)
-                    .cloned()
+                SortBindingKey::ReturnName(name) => plan
+                    .returns
+                    .iter()
+                    .find(|slot| slot.name() == name)
+                    .map(|slot| project_join_slot_value(row, slot, plan, hydrated, true))
+                    .transpose()?
                     .unwrap_or(serde_json::Value::Null),
                 SortBindingKey::Property { side, property } => eval_value(
                     &ValueExpr::Property {
@@ -1877,6 +1886,11 @@ fn join_path_function_value(
     hydrated: &HydratedRows,
     hydrate_nodes: bool,
 ) -> GraphResult<serde_json::Value> {
+    if matches!(func, PathFunc::Length) {
+        return Ok(serde_json::Value::from(join_path_length(
+            row, plan, path_var,
+        )?));
+    }
     let path = join_path_value(row, plan, path_var, hydrated, hydrate_nodes)?;
     let path = path.get("_path").ok_or_else(|| GraphError::GqlExecution {
         reason: format!("multi-pattern path `{path_var}` did not project _path"),
@@ -1890,14 +1904,25 @@ fn join_path_function_value(
             .get("relationships")
             .cloned()
             .unwrap_or(serde_json::Value::Null)),
-        PathFunc::Length => {
-            let len = path
-                .get("relationships")
-                .and_then(serde_json::Value::as_array)
-                .map_or(0, Vec::len);
-            Ok(serde_json::Value::from(len as i64))
-        }
+        PathFunc::Length => Ok(serde_json::Value::from(join_path_length(
+            row, plan, path_var,
+        )?)),
     }
+}
+
+fn join_path_length(row: &GqlRow, plan: &PhysicalJoinPlan, path_var: &str) -> GraphResult<i64> {
+    let slot = plan
+        .path_slots
+        .iter()
+        .find(|slot| slot.var == path_var)
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!("unknown multi-pattern path slot `{path_var}`"),
+        })?;
+    Ok(if row.path_relationships.get(slot.pattern_slot).is_some() {
+        1
+    } else {
+        0
+    })
 }
 
 fn path_nodes_value(

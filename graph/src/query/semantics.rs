@@ -263,11 +263,13 @@ fn bind_join_read(
     }
 
     let predicate = bind_join_predicate(query.where_.as_ref(), &node_slots, &slot_by_var)?;
+    let mut value_by_var = std::collections::HashMap::new();
     let distinct_stages = bind_join_with_clauses(
         &query.with_,
         &node_slots,
         &mut slot_by_var,
         &mut property_by_var,
+        &mut value_by_var,
         &mut rel_slots,
         &mut rel_by_var,
         &mut path_slots,
@@ -278,6 +280,7 @@ fn bind_join_read(
         &node_slots,
         &slot_by_var,
         &property_by_var,
+        &value_by_var,
         &rel_by_var,
         &path_by_var,
         &mut rel_slots,
@@ -672,6 +675,7 @@ fn bind_join_with_clauses(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &mut std::collections::HashMap<String, usize>,
     property_by_var: &mut std::collections::HashMap<String, (usize, String)>,
+    value_by_var: &mut std::collections::HashMap<String, ReturnBinding>,
     rel_slots: &mut Vec<LogicalJoinRelSlot>,
     rel_by_var: &mut std::collections::HashMap<String, usize>,
     path_slots: &mut Vec<LogicalJoinPathSlot>,
@@ -685,6 +689,7 @@ fn bind_join_with_clauses(
                 node_slots,
                 slot_by_var,
                 property_by_var,
+                value_by_var,
                 rel_slots,
                 rel_by_var,
                 path_slots,
@@ -696,6 +701,7 @@ fn bind_join_with_clauses(
             node_slots,
             slot_by_var,
             property_by_var,
+            value_by_var,
             rel_slots,
             rel_by_var,
             path_slots,
@@ -703,6 +709,7 @@ fn bind_join_with_clauses(
         )?;
         *slot_by_var = next.nodes;
         *property_by_var = next.properties;
+        *value_by_var = next.values;
         *rel_by_var = next.relationships;
         *path_by_var = next.paths;
     }
@@ -713,6 +720,7 @@ fn bind_join_with_clauses(
 struct JoinProjectionScope {
     nodes: std::collections::HashMap<String, usize>,
     properties: std::collections::HashMap<String, (usize, String)>,
+    values: std::collections::HashMap<String, ReturnBinding>,
     relationships: std::collections::HashMap<String, usize>,
     paths: std::collections::HashMap<String, usize>,
 }
@@ -722,6 +730,7 @@ fn bind_join_distinct_stage(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
     property_by_var: &std::collections::HashMap<String, (usize, String)>,
+    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
     rel_slots: &mut Vec<LogicalJoinRelSlot>,
     rel_by_var: &std::collections::HashMap<String, usize>,
     path_slots: &mut Vec<LogicalJoinPathSlot>,
@@ -735,6 +744,7 @@ fn bind_join_distinct_stage(
             node_slots,
             slot_by_var,
             property_by_var,
+            value_by_var,
             rel_by_var,
             path_by_var,
         )?;
@@ -755,6 +765,7 @@ fn bind_join_projection_scope(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
     property_by_var: &std::collections::HashMap<String, (usize, String)>,
+    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
     rel_slots: &mut Vec<LogicalJoinRelSlot>,
     rel_by_var: &std::collections::HashMap<String, usize>,
     path_slots: &mut Vec<LogicalJoinPathSlot>,
@@ -762,6 +773,7 @@ fn bind_join_projection_scope(
 ) -> Result<JoinProjectionScope, GqlError> {
     let mut nodes = std::collections::HashMap::with_capacity(items.len());
     let mut properties = std::collections::HashMap::with_capacity(items.len());
+    let mut values = std::collections::HashMap::with_capacity(items.len());
     let mut relationships = std::collections::HashMap::with_capacity(items.len());
     let mut paths = std::collections::HashMap::with_capacity(items.len());
     for item in items {
@@ -770,11 +782,13 @@ fn bind_join_projection_scope(
             node_slots,
             slot_by_var,
             property_by_var,
+            value_by_var,
             rel_by_var,
             path_by_var,
         )?;
         if nodes.contains_key(&name)
             || properties.contains_key(&name)
+            || values.contains_key(&name)
             || relationships.contains_key(&name)
             || paths.contains_key(&name)
         {
@@ -791,6 +805,9 @@ fn bind_join_projection_scope(
             JoinWithBinding::Property { slot, property } => {
                 properties.insert(name, (slot, property));
             }
+            JoinWithBinding::Value(binding) => {
+                values.insert(name, binding);
+            }
             JoinWithBinding::Relationship(slot) => {
                 relationships.insert(name, slot);
             }
@@ -802,6 +819,7 @@ fn bind_join_projection_scope(
     Ok(JoinProjectionScope {
         nodes,
         properties,
+        values,
         relationships,
         paths,
     })
@@ -812,6 +830,7 @@ enum JoinWithBinding {
     Node(usize),
     Relationship(usize),
     Path(usize),
+    Value(ReturnBinding),
     Property { slot: usize, property: String },
 }
 
@@ -827,9 +846,39 @@ impl JoinWithBinding {
                 property,
                 name,
             },
+            Self::Value(binding) => renamed_return_binding(binding, name),
             Self::Relationship(_) => ReturnBinding::Relationship { name },
             Self::Path(_) => ReturnBinding::Path { name },
         }
+    }
+}
+
+fn renamed_return_binding(binding: ReturnBinding, name: String) -> ReturnBinding {
+    match binding {
+        ReturnBinding::Node { side, .. } => ReturnBinding::Node { side, name },
+        ReturnBinding::Relationship { .. } => ReturnBinding::Relationship { name },
+        ReturnBinding::Path { .. } => ReturnBinding::Path { name },
+        ReturnBinding::PathFunction { func, path_var, .. } => ReturnBinding::PathFunction {
+            func,
+            path_var,
+            name,
+        },
+        ReturnBinding::Property { side, property, .. } => ReturnBinding::Property {
+            side,
+            property,
+            name,
+        },
+        ReturnBinding::Aggregate {
+            func,
+            arg,
+            distinct,
+            ..
+        } => ReturnBinding::Aggregate {
+            func,
+            arg,
+            distinct,
+            name,
+        },
     }
 }
 
@@ -846,7 +895,8 @@ fn register_join_with_alias(
         JoinWithBinding::Path(slot) => {
             bind_join_path_return_alias(name, *slot, path_slots);
         }
-        JoinWithBinding::Node(_) | JoinWithBinding::Property { .. } => {}
+        JoinWithBinding::Node(_) | JoinWithBinding::Property { .. } | JoinWithBinding::Value(_) => {
+        }
     }
 }
 
@@ -855,6 +905,7 @@ fn bind_join_with_item(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
     property_by_var: &std::collections::HashMap<String, (usize, String)>,
+    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
     rel_by_var: &std::collections::HashMap<String, usize>,
     path_by_var: &std::collections::HashMap<String, usize>,
 ) -> Result<(String, JoinWithBinding), GqlError> {
@@ -867,6 +918,8 @@ fn bind_join_with_item(
                     slot: *slot,
                     property: property.clone(),
                 }
+            } else if let Some(binding) = value_by_var.get(&var.text) {
+                JoinWithBinding::Value(binding.clone())
             } else if let Some(slot) = rel_by_var.get(&var.text).copied() {
                 JoinWithBinding::Relationship(slot)
             } else if let Some(slot) = path_by_var.get(&var.text).copied() {
@@ -919,14 +972,57 @@ fn bind_join_with_item(
                 "aggregate WITH projections require row-stream aggregation from a later read phase",
             ));
         }
-        ReturnExpr::Func { span, .. } => {
-            return Err(GqlError::unsupported(
-                *span,
-                "path-function WITH projections require row-stream value projection from a later read phase",
-            ));
-        }
+        ReturnExpr::Func {
+            name: func_name,
+            args,
+            span,
+        } => JoinWithBinding::Value(bind_join_path_function_return(
+            func_name,
+            args,
+            *span,
+            path_by_var,
+            projection_name(item),
+        )?),
     };
     Ok((projection_name(item), binding))
+}
+
+fn bind_join_path_function_return(
+    func_name: &ast::Ident,
+    args: &[ast::Ident],
+    span: Span,
+    path_by_var: &std::collections::HashMap<String, usize>,
+    name: String,
+) -> Result<ReturnBinding, GqlError> {
+    let Some(func) = path_func(&func_name.text) else {
+        return Err(GqlError::unsupported(
+            span,
+            "RETURN functions are implemented in a later read phase",
+        ));
+    };
+    let [arg] = args else {
+        return Err(GqlError::bind(
+            span,
+            format!(
+                "path function `{}` requires exactly one path argument",
+                func_name.text
+            ),
+        ));
+    };
+    if !path_by_var.contains_key(&arg.text) {
+        return Err(GqlError::bind(
+            arg.span,
+            format!(
+                "path function `{}` requires a path variable from the multi-pattern MATCH",
+                func_name.text
+            ),
+        ));
+    }
+    Ok(ReturnBinding::PathFunction {
+        func,
+        path_var: Some(arg.text.clone()),
+        name,
+    })
 }
 
 fn bind_join_returns(
@@ -934,6 +1030,7 @@ fn bind_join_returns(
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
     property_by_var: &std::collections::HashMap<String, (usize, String)>,
+    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
     rel_by_var: &std::collections::HashMap<String, usize>,
     path_by_var: &std::collections::HashMap<String, usize>,
     rel_slots: &mut Vec<LogicalJoinRelSlot>,
@@ -956,6 +1053,8 @@ fn bind_join_returns(
                         property: property.clone(),
                         name,
                     }
+                } else if let Some(binding) = value_by_var.get(&var.text) {
+                    renamed_return_binding(binding.clone(), name)
                 } else if let Some(rel_slot) = rel_by_var.get(&var.text).copied() {
                     bind_join_relationship_return_alias(&name, rel_slot, rel_slots);
                     ReturnBinding::Relationship { name }
@@ -1030,37 +1129,13 @@ fn bind_join_returns(
                 name: func_name,
                 args,
                 span,
-            } => {
-                let Some(func) = path_func(&func_name.text) else {
-                    return Err(GqlError::unsupported(
-                        *span,
-                        "RETURN functions are implemented in a later read phase",
-                    ));
-                };
-                let [arg] = args.as_slice() else {
-                    return Err(GqlError::bind(
-                        *span,
-                        format!(
-                            "path function `{}` requires exactly one path argument",
-                            func_name.text
-                        ),
-                    ));
-                };
-                if !path_by_var.contains_key(&arg.text) {
-                    return Err(GqlError::bind(
-                        arg.span,
-                        format!(
-                            "path function `{}` requires a path variable from the multi-pattern MATCH",
-                            func_name.text
-                        ),
-                    ));
-                }
-                ReturnBinding::PathFunction {
-                    func,
-                    path_var: Some(arg.text.clone()),
-                    name: projection_name(item),
-                }
-            }
+            } => bind_join_path_function_return(
+                func_name,
+                args,
+                *span,
+                path_by_var,
+                projection_name(item),
+            )?,
         };
         if !seen.insert(binding.name().to_string()) {
             return Err(GqlError::bind(

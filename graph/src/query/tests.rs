@@ -2043,6 +2043,73 @@ fn multi_pattern_join_supports_with_relationship_and_path_aliases() {
 }
 
 #[test]
+fn multi_pattern_join_supports_with_path_function_aliases() {
+    let statement = bind_statement_query(
+        "MATCH p=(u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH length(p) AS len, nodes(p) AS ns, relationships(p) AS rs \
+         RETURN len, ns, rs ORDER BY len DESC",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["len"], serde_json::json!(1));
+    assert_eq!(projected[0]["ns"][0]["_id"]["table"], "users");
+    assert_eq!(projected[0]["rs"][0]["_type"], "works_at");
+
+    let chained = bind_statement_query(
+        "MATCH p=(u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH length(p) AS len \
+         WITH len AS hops \
+         RETURN hops ORDER BY hops DESC",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(chained_logical) = chained else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(chained_physical) = lower_statement(
+        super::logical_plan::LogicalStatement::JoinRead(chained_logical),
+    ) else {
+        panic!("expected physical join read plan");
+    };
+
+    let chained_rows = execute_join(&engine_fixture(), &chained_physical, None).unwrap();
+    let chained_projected = project_join_rows(
+        chained_rows,
+        &chained_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        chained_projected,
+        vec![
+            serde_json::json!({"hops": 1}),
+            serde_json::json!({"hops": 1})
+        ]
+    );
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -2076,10 +2143,6 @@ fn multi_pattern_join_rejects_deferred_shapes() {
         (
             "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
             "multi-pattern OPTIONAL MATCH requires a later join phase",
-        ),
-        (
-            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH length(p) AS len RETURN len",
-            "path-function WITH projections require row-stream value projection from a later read phase",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH count(*) AS rows RETURN rows",

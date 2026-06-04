@@ -448,9 +448,9 @@ single-hop path variable returns, path functions over fixed single-hop path
 variables, node and node-property aggregate inputs, relationship-value and
 path-value `count`/`collect`, and projected-row `RETURN DISTINCT`, plus node
 and node-property, relationship, and path `WITH` projections with
-`WITH DISTINCT`. Relationship/path property aggregate inputs,
-aggregate/path-function `WITH` projections, optional joins, and variable-length
-relationships remain planned within this phase.
+`WITH DISTINCT`, and path-function `WITH` projections. Relationship/path
+property aggregate inputs, aggregate `WITH` projections, optional joins, and
+variable-length relationships remain planned within this phase.
 
 Target examples:
 
@@ -484,6 +484,7 @@ Tests:
 - Node, node-property, relationship, and path `WITH` projections update
   downstream multi-pattern join scope, and `WITH DISTINCT` deduplicates before
   later projection or aggregation.
+- Path-function `WITH` projections update downstream multi-pattern join scope.
 
 ### Phase 3C: Property Predicates on Unlabeled Wildcard Nodes
 
