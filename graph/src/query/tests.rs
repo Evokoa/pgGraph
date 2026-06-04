@@ -174,6 +174,23 @@ fn binder_rejects_wildcard_path_partially_available_node_property_predicates() {
 }
 
 #[test]
+fn binder_rejects_wildcard_path_ambiguous_node_property_predicates() {
+    let catalog = FakeCatalog::new()
+        .with_label("users", 10, ["id", "profile", "profile.plan"])
+        .with_label("companies", 20, ["id", "profile"])
+        .with_edge("works_at", 10, 20);
+    let ast =
+        crate::gql::parse_statement("MATCH p=()-[]-(e) WHERE e.profile = 'pro' RETURN p").unwrap();
+
+    let err = bind_statement(&ast, &catalog).unwrap_err();
+
+    assert!(
+        err.to_string().contains("ambiguous JSONB path semantics"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn binder_accepts_phase2_named_path_elements_and_filters() {
     let plan =
         bind_statement_query("MATCH p=(s:users)-[r:works_at]->(e:companies) RETURN p, s, r, e");

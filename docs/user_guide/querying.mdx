@@ -177,7 +177,8 @@ relationships may repeat within the explicit maximum hop bound, and row caps
 are still enforced before projection. These shapes can use concrete node labels
 or concrete relationship types as filters. `WHERE` may read properties from
 named path-node variables only when every possible concrete table for that
-variable exposes the same registered property or JSONB property path. This phase
+variable exposes the same registered property or JSONB property path, including
+the same registered nested paths under a JSONB root. This phase
 intentionally keeps later clauses narrow: relationship properties, `WITH`,
 `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches, writes,
 and relationship variables in multi-segment paths are rejected for wildcard

@@ -1843,6 +1843,19 @@ fn bind_wildcard_operand(
                     ),
                 ));
             }
+            if !wildcard_property_paths_are_compatible(
+                possible,
+                properties_by_table,
+                &property.text,
+            ) {
+                return Err(GqlError::unsupported(
+                    property.span,
+                    format!(
+                        "wildcard property `{}` has ambiguous JSONB path semantics across possible concrete node labels",
+                        property.text
+                    ),
+                ));
+            }
             Ok(ValueExpr::Property {
                 side: binding.side,
                 property: property.text.clone(),
@@ -1854,6 +1867,30 @@ fn bind_wildcard_operand(
             Ok(ValueExpr::List(values.iter().map(literal_json).collect()))
         }
     }
+}
+
+fn wildcard_property_paths_are_compatible(
+    possible: &std::collections::BTreeSet<u32>,
+    properties_by_table: &std::collections::HashMap<u32, std::collections::BTreeSet<String>>,
+    property: &str,
+) -> bool {
+    let prefix = format!("{property}.");
+    let mut expected: Option<std::collections::BTreeSet<&str>> = None;
+    for table_oid in possible {
+        let Some(properties) = properties_by_table.get(table_oid) else {
+            return false;
+        };
+        let suffixes = properties
+            .iter()
+            .filter_map(|candidate| candidate.strip_prefix(&prefix))
+            .collect::<std::collections::BTreeSet<_>>();
+        match &expected {
+            Some(expected) if expected != &suffixes => return false,
+            Some(_) => {}
+            None => expected = Some(suffixes),
+        }
+    }
+    true
 }
 
 fn bind_wildcard_node_filter(

@@ -568,7 +568,8 @@ semantics: nodes and relationships may repeat within the explicit maximum hop
 bound, and row caps are still enforced before projection.
 `WHERE` can read properties
 from named path-node variables only when every possible concrete table for that
-variable exposes the same registered property or JSONB property path. They
+variable exposes the same registered property or JSONB property path, including
+the same registered nested paths under a JSONB root. They
 reject `ORDER BY`, `RETURN DISTINCT`, `WITH`, aggregates, optional matches,
 writes, relationship properties, relationship variables in multi-segment paths,
 and multi-segment variable-length wildcard paths.

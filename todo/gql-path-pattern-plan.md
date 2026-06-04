@@ -504,8 +504,9 @@ Tests:
 
 Status: compatible path-node property predicates implemented and documented on
 2026-06-02. Verification is recorded in `todo/measurements.md` under
-"Phase 3C Wildcard Property Predicate Slice". Relationship properties and
-partially available or ambiguous node properties remain planned.
+"Phase 3C Wildcard Property Predicate Slice". Partially available and
+ambiguous JSONB path semantics are rejected with typed binding errors as of
+2026-06-04. Relationship properties remain planned.
 
 Target examples:
 
