@@ -209,10 +209,10 @@
 - `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 17 tests. Includes `WITH length(p)`, `WITH nodes(p)`, `WITH relationships(p)`, and chained path-function aliases over fixed single-hop multi-pattern join paths.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes path-function `WITH` aliases through `graph.gql()` with coordinate-only output.
 
-## 2026-06-04 Phase 3B Multi-Pattern Aggregate WITH Slice
+## 2026-06-04 Phase 3B Multi-Pattern Aggregate WITH Slices
 
-- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 18 tests. Includes aggregate-only `WITH` aliases, relationship/path aggregate aliases through `WITH`, chained aggregate aliases, and explicit grouped aggregate `WITH` and aggregate `WITH DISTINCT` deferrals.
-- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes aggregate-only `WITH` aliases through `graph.gql()` with coordinate-only output.
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 18 tests. Includes grouped aggregate `WITH` aliases, relationship/path aggregate aliases through `WITH`, chained aggregate aliases with hidden grouping keys, and explicit aggregate `WITH DISTINCT` and post-aggregate-`WITH` aggregate-expression deferrals.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes grouped aggregate `WITH` aliases through `graph.gql()` with coordinate-only output.
 - `cargo fmt --check` from `graph/`: passed.
 - `git diff --check` from repository root: passed.
 - `cargo test --features pg17 query::tests::` from `graph/`: passed, 141 tests.

@@ -264,7 +264,7 @@ fn bind_join_read(
 
     let predicate = bind_join_predicate(query.where_.as_ref(), &node_slots, &slot_by_var)?;
     let mut value_by_var = std::collections::HashMap::new();
-    let distinct_stages = bind_join_with_clauses(
+    let with_clauses = bind_join_with_clauses(
         &query.with_,
         &node_slots,
         &mut slot_by_var,
@@ -285,6 +285,7 @@ fn bind_join_read(
         &path_by_var,
         &mut rel_slots,
         &mut path_slots,
+        with_clauses.has_aggregate_projection,
     )?;
     let order_by = bind_join_sort_items(
         &query.order_by,
@@ -301,7 +302,8 @@ fn bind_join_read(
         path_slots,
         patterns,
         returns,
-        distinct_stages,
+        aggregate_group_slots: with_clauses.aggregate_group_slots,
+        distinct_stages: with_clauses.distinct_stages,
         distinct: query.return_.distinct,
         predicate,
         order_by,
@@ -680,8 +682,10 @@ fn bind_join_with_clauses(
     rel_by_var: &mut std::collections::HashMap<String, usize>,
     path_slots: &mut Vec<LogicalJoinPathSlot>,
     path_by_var: &mut std::collections::HashMap<String, usize>,
-) -> Result<Vec<Vec<ReturnBinding>>, GqlError> {
+) -> Result<JoinWithClauses, GqlError> {
     let mut distinct_stages = Vec::new();
+    let mut aggregate_group_slots = Vec::new();
+    let mut has_aggregate_projection = false;
     for clause in clauses {
         if clause.distinct {
             distinct_stages.push(bind_join_distinct_stage(
@@ -707,13 +711,34 @@ fn bind_join_with_clauses(
             path_slots,
             path_by_var,
         )?;
+        if next.has_new_aggregate_projection {
+            if has_aggregate_projection {
+                return Err(GqlError::unsupported(
+                    clause.span,
+                    "aggregate WITH projections after aggregate WITH projections require grouped row streams from a later read phase",
+                ));
+            }
+            has_aggregate_projection = true;
+            aggregate_group_slots.extend(next.aggregate_group_slots.clone());
+        }
         *slot_by_var = next.nodes;
         *property_by_var = next.properties;
         *value_by_var = next.values;
         *rel_by_var = next.relationships;
         *path_by_var = next.paths;
     }
-    Ok(distinct_stages)
+    Ok(JoinWithClauses {
+        distinct_stages,
+        aggregate_group_slots,
+        has_aggregate_projection,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JoinWithClauses {
+    distinct_stages: Vec<Vec<ReturnBinding>>,
+    aggregate_group_slots: Vec<ReturnBinding>,
+    has_aggregate_projection: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -723,6 +748,8 @@ struct JoinProjectionScope {
     values: std::collections::HashMap<String, ReturnBinding>,
     relationships: std::collections::HashMap<String, usize>,
     paths: std::collections::HashMap<String, usize>,
+    aggregate_group_slots: Vec<ReturnBinding>,
+    has_new_aggregate_projection: bool,
 }
 
 fn bind_join_distinct_stage(
@@ -754,6 +781,12 @@ fn bind_join_distinct_stage(
             rel_by_var,
             path_by_var,
         )?;
+        if binding.is_aggregate() {
+            return Err(GqlError::unsupported(
+                item.span,
+                "aggregate WITH DISTINCT projections require grouped row streams from a later read phase",
+            ));
+        }
         if !seen.insert(name.clone()) {
             return Err(GqlError::bind(
                 item.span,
@@ -780,27 +813,12 @@ fn bind_join_projection_scope(
     let has_aggregate = items
         .iter()
         .any(|item| matches!(&item.expr, ReturnExpr::Aggregate { .. }));
-    if has_aggregate
-        && items
-            .iter()
-            .any(|item| !matches!(&item.expr, ReturnExpr::Aggregate { .. }))
-    {
-        let span = items
-            .iter()
-            .find_map(|item| {
-                matches!(&item.expr, ReturnExpr::Aggregate { .. }).then_some(item.span)
-            })
-            .expect("has_aggregate found an aggregate item");
-        return Err(GqlError::unsupported(
-            span,
-            "grouped aggregate WITH projections require grouped row streams from a later read phase",
-        ));
-    }
     let mut nodes = std::collections::HashMap::with_capacity(items.len());
     let mut properties = std::collections::HashMap::with_capacity(items.len());
     let mut values = std::collections::HashMap::with_capacity(items.len());
     let mut relationships = std::collections::HashMap::with_capacity(items.len());
     let mut paths = std::collections::HashMap::with_capacity(items.len());
+    let mut aggregate_group_slots = Vec::new();
     for item in items {
         let (name, binding) = bind_join_with_item(
             item,
@@ -823,6 +841,9 @@ fn bind_join_projection_scope(
             ));
         }
         register_join_with_alias(&name, &binding, rel_slots, path_slots);
+        if has_aggregate && !binding.is_aggregate() {
+            aggregate_group_slots.push(binding.clone().into_return_binding(name.clone()));
+        }
         match binding {
             JoinWithBinding::Node(slot) => {
                 nodes.insert(name, slot);
@@ -847,6 +868,8 @@ fn bind_join_projection_scope(
         values,
         relationships,
         paths,
+        aggregate_group_slots,
+        has_new_aggregate_projection: has_aggregate,
     })
 }
 
@@ -860,6 +883,10 @@ enum JoinWithBinding {
 }
 
 impl JoinWithBinding {
+    fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Value(binding) if binding.is_aggregate())
+    }
+
     fn into_return_binding(self, name: String) -> ReturnBinding {
         match self {
             Self::Node(slot) => ReturnBinding::Node {
@@ -1072,6 +1099,7 @@ fn bind_join_returns(
     path_by_var: &std::collections::HashMap<String, usize>,
     rel_slots: &mut Vec<LogicalJoinRelSlot>,
     path_slots: &mut Vec<LogicalJoinPathSlot>,
+    has_aggregate_with_projection: bool,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut returns = Vec::with_capacity(items.len());
@@ -1148,20 +1176,29 @@ fn bind_join_returns(
                 func,
                 distinct,
                 arg,
+                span,
                 ..
-            } => ReturnBinding::Aggregate {
-                func: bind_aggregate_func(*func),
-                arg: bind_join_aggregate_arg(
-                    *func,
-                    arg,
-                    node_slots,
-                    slot_by_var,
-                    rel_by_var,
-                    path_by_var,
-                )?,
-                distinct: *distinct,
-                name: projection_name(item),
-            },
+            } => {
+                if has_aggregate_with_projection {
+                    return Err(GqlError::unsupported(
+                        *span,
+                        "aggregate RETURN expressions after aggregate WITH projections require grouped row streams from a later read phase",
+                    ));
+                }
+                ReturnBinding::Aggregate {
+                    func: bind_aggregate_func(*func),
+                    arg: bind_join_aggregate_arg(
+                        *func,
+                        arg,
+                        node_slots,
+                        slot_by_var,
+                        rel_by_var,
+                        path_by_var,
+                    )?,
+                    distinct: *distinct,
+                    name: projection_name(item),
+                }
+            }
             ReturnExpr::Func {
                 name: func_name,
                 args,

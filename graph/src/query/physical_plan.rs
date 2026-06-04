@@ -144,6 +144,8 @@ pub(crate) struct PhysicalJoinPlan {
     pub(crate) patterns: Vec<PhysicalJoinPattern>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnSlot>,
+    /// Hidden grouping slots introduced by grouped aggregate `WITH` clauses.
+    pub(crate) aggregate_group_slots: Vec<ReturnSlot>,
     /// Row-stream DISTINCT projection stages introduced by `WITH DISTINCT`.
     pub(crate) distinct_stages: Vec<Vec<ReturnSlot>>,
     /// Whether final projected rows should be deduplicated.

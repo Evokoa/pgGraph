@@ -111,7 +111,7 @@ pub(crate) fn project_join_rows(
         })
         .collect::<GraphResult<Vec<_>>>()?;
     apply_distinct_stages_to_join_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
-    if plan.returns.iter().any(ReturnSlot::is_aggregate) {
+    if plan.returns.iter().any(ReturnSlot::is_aggregate) || !plan.aggregate_group_slots.is_empty() {
         let mut projected =
             aggregate_join_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
         if plan.distinct {
@@ -387,6 +387,7 @@ fn aggregate_rows(
     aggregate_by(
         rows,
         returns,
+        &[],
         |row, slot| project_slot_value(row, slot, plan, hydrated, hydrate_nodes),
         |row, arg| aggregate_arg_value(row, arg, plan, hydrated, hydrate_nodes),
         |output| aggregate_sort_values(output, plan.order_by.as_slice()),
@@ -403,6 +404,7 @@ fn aggregate_node_rows(
     aggregate_by(
         rows,
         returns,
+        &[],
         |row, slot| project_node_slot_value(row, slot, plan, hydrated, hydrate_nodes),
         |row, arg| {
             let fake = node_row_as_gql_row(row);
@@ -422,6 +424,7 @@ fn aggregate_join_rows(
     aggregate_by(
         rows,
         returns,
+        &plan.aggregate_group_slots,
         |row, slot| project_join_slot_value(row, slot, plan, hydrated, hydrate_nodes),
         |row, arg| aggregate_arg_value_for_join(row, arg, plan, hydrated, hydrate_nodes),
         |output| aggregate_sort_values(output, plan.order_by.as_slice()),
@@ -431,6 +434,7 @@ fn aggregate_join_rows(
 fn aggregate_by<Row, ProjectValue, AggregateValue, SortValues>(
     rows: &[Row],
     returns: &[ReturnSlot],
+    hidden_group_slots: &[ReturnSlot],
     project_value: ProjectValue,
     aggregate_value: AggregateValue,
     sort_values: SortValues,
@@ -440,8 +444,10 @@ where
     AggregateValue: Fn(&Row, &AggregateArg) -> GraphResult<serde_json::Value>,
     SortValues: Fn(&serde_json::Value) -> Vec<SortValue>,
 {
-    let group_slots: Vec<&ReturnSlot> =
-        returns.iter().filter(|slot| !slot.is_aggregate()).collect();
+    let group_slots: Vec<&ReturnSlot> = hidden_group_slots
+        .iter()
+        .chain(returns.iter().filter(|slot| !slot.is_aggregate()))
+        .collect();
     let aggregate_slots: Vec<&ReturnSlot> =
         returns.iter().filter(|slot| slot.is_aggregate()).collect();
     let mut groups: BTreeMap<String, AggregateGroup> = BTreeMap::new();
@@ -494,7 +500,7 @@ where
         .into_values()
         .map(|group| {
             let mut output = serde_json::Map::new();
-            let mut group_index = 0;
+            let mut group_index = hidden_group_slots.len();
             let mut aggregate_index = 0;
             for slot in returns {
                 if slot.is_aggregate() {
@@ -874,6 +880,10 @@ pub(crate) fn wildcard_path_requires_hydration(
 pub(crate) fn join_requires_hydration(plan: &PhysicalJoinPlan, hydrate_nodes: bool) -> bool {
     hydrate_nodes
         || plan.returns.iter().any(return_slot_requires_hydration)
+        || plan
+            .aggregate_group_slots
+            .iter()
+            .any(return_slot_requires_hydration)
         || plan
             .distinct_stages
             .iter()

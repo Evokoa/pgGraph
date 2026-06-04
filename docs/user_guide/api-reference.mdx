@@ -582,16 +582,16 @@ objects, fixed single-hop path variables can be returned as path JSON objects,
 single-hop path variables, node, node-property, relationship-value, and
 path-value aggregate inputs can be grouped over joined rows, `WITH` can
 project node, node-property, relationship, path, path-function, and
-aggregate-only aliases over supported aggregate inputs between a multi-pattern
-`MATCH` and `RETURN`, and
+grouped aggregate aliases over supported aggregate inputs between a
+multi-pattern `MATCH` and `RETURN`, and
 `WITH DISTINCT` can deduplicate non-aggregate projected row streams,
 `ORDER BY` can sort joined node properties or returned property aliases, and
 `RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection. Distinct
 multi-pattern reads must order by returned scalar expressions. Multi-pattern
 reads currently reject optional matches, variable-length relationships,
 relationship properties, relationship/path property aggregate inputs, numeric
-aggregates over relationship/path values, grouped aggregate `WITH`
-projections, and aggregate `WITH DISTINCT` projections.
+aggregates over relationship/path values, aggregate expressions after aggregate
+`WITH` projections, and aggregate `WITH DISTINCT` projections.
 
 Path behavior:
 
@@ -631,8 +631,8 @@ Not included in this release's GQL subset:
 - Named variables on variable-length wildcard path segments.
 - Multi-pattern relationship/path property aggregate inputs, numeric
   aggregates over relationship/path values, aggregate `WITH DISTINCT`
-  projections, grouped aggregate `WITH` projections, optional joins, and
-  variable-length relationships.
+  projections, aggregate expressions after aggregate `WITH` projections,
+  optional joins, and variable-length relationships.
 - Node-only optional matches.
 
 `CREATE (n:label {properties}) RETURN ...` is supported for a single node whose

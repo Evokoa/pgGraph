@@ -1353,16 +1353,18 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
 
     let join_aggregate_with_shape = Spi::get_one::<bool>(
         "SELECT bool_and(
-                    (row->>'rows')::integer = 1
+                    row->>'target' = 'Bob'
+                    AND (row->>'rows')::integer = 1
                     AND (row->>'rels')::integer = 1
                     AND row #>> '{paths,0,_path,relationships,0,_type}' = 'friend'
                 )
          FROM graph.gql(
              'MATCH p=(u:graph_test_users_pgtest)-[r:friend]->(c:graph_test_users_pgtest),
                     (v:graph_test_users_pgtest)-[:friend]->(c)
-              WITH count(*) AS rows, count(DISTINCT r) AS rels, collect(p) AS paths
-              RETURN rows, rels, paths
-              ORDER BY rows DESC',
+              WITH c.name AS target, count(*) AS rows, count(DISTINCT r) AS rels,
+                   collect(p) AS paths
+              RETURN target, rows, rels, paths
+              ORDER BY rows DESC, target',
              hydrate := false
          )",
     )

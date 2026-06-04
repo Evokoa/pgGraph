@@ -449,10 +449,10 @@ variables, node and node-property aggregate inputs, relationship-value and
 path-value `count`/`collect`, and projected-row `RETURN DISTINCT`, plus node
 and node-property, relationship, and path `WITH` projections with
 `WITH DISTINCT`, path-function `WITH` projections, and aggregate `WITH`
-projections for aggregate-only `WITH` clauses. Relationship/path property
-aggregate inputs, grouped aggregate `WITH` projections, aggregate
-`WITH DISTINCT` projections, optional joins, and variable-length relationships
-remain planned within this phase.
+projections. Relationship/path property aggregate inputs, aggregate
+`WITH DISTINCT` projections, aggregate expressions after aggregate `WITH`
+boundaries, optional joins, and variable-length relationships remain planned
+within this phase.
 
 Target examples:
 
@@ -487,10 +487,11 @@ Tests:
   downstream multi-pattern join scope, and `WITH DISTINCT` deduplicates before
   later projection or aggregation.
 - Path-function `WITH` projections update downstream multi-pattern join scope.
-- Aggregate-only `WITH` projections update downstream multi-pattern join scope
-  for supported aggregate inputs; grouped aggregate `WITH` projections and
-  aggregate `WITH DISTINCT` projections remain deferred because they require a
-  grouped row-stream boundary.
+- Aggregate `WITH` projections update downstream multi-pattern join scope for
+  supported aggregate inputs, including grouped aggregate `WITH` clauses with
+  hidden grouping keys. Aggregate `WITH DISTINCT` projections and aggregate
+  expressions after aggregate `WITH` boundaries remain deferred because they
+  require a grouped row-stream boundary as the next aggregate input.
 
 ### Phase 3C: Property Predicates on Unlabeled Wildcard Nodes
 
