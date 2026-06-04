@@ -280,6 +280,17 @@
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17` from `graph/`: passed, 502 tests, 1 ignored.
 
+## 2026-06-04 Phase 3D Multi-Segment Variable-Length Wildcard Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::wildcard_path_executor_projects_multi_segment_variable_length_paths` from `graph/`: passed, 1 test. Confirms unnamed multi-segment wildcard path variables can include bounded variable-length relationship segments and still project the full path value.
+- `cargo test --features pg17 query::tests::binder_rejects_deferred_variable_length_wildcard_bindings` from `graph/`: passed, 1 test. Confirms named target nodes on multi-segment variable-length wildcard boundaries remain rejected until slot semantics are designed.
+- `cargo test --features pg17 query::tests::wildcard_path_` from `graph/`: passed, 15 tests.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 148 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17` from `graph/`: passed, 503 tests, 1 ignored.
+
 ## 2026-06-03 Edge Registration Validation Slice
 
 - `cargo pgrx test --features "pg17 development" mixed_mode_junction_registration_fails_before_build` from `graph/`: passed, 1 pgrx test.

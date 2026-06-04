@@ -1461,12 +1461,6 @@ fn bind_wildcard_path_read(
             "wildcard path variables require at least one relationship",
         ));
     }
-    if tail.len() > 1 && tail.iter().any(|(rel, _)| rel.var_len.is_some()) {
-        return Err(GqlError::unsupported(
-            query.match_.pattern.span,
-            "variable-length wildcard paths with multiple segments require a later phase",
-        ));
-    }
     let source_table_filter = bind_wildcard_node_filter(start, catalog)?;
     let mut segments = Vec::with_capacity(tail.len());
     let mut previous_table_filter = source_table_filter;
@@ -1478,6 +1472,12 @@ fn bind_wildcard_path_read(
             return Err(GqlError::unsupported(
                 rel.span,
                 "relationship variables in multi-segment path variables require a later phase",
+            ));
+        }
+        if tail.len() > 1 && rel.var_len.is_some() && target.var.is_some() {
+            return Err(GqlError::unsupported(
+                target.span,
+                "named target nodes on multi-segment variable-length wildcard paths require a later phase",
             ));
         }
         if let (Some(source_table_oid), Some(target_table_oid), Some(rel_type)) = (

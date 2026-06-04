@@ -169,9 +169,12 @@ FROM graph.gql(
 
 The supported wildcard forms include outbound `p=()-[]->()`, inbound
 `p=()<-[]-()`, undirected `p=()-[]-()`, and fixed multi-segment chains such as
-`p=()-[]->()-[]->()`. A single wildcard segment may use bounded variable length,
-such as `p=(s)-[r*1..3]->(e)`. Named relationship variables on that bounded
-segment are path values, and named target nodes bind to the emitted endpoint.
+`p=()-[]->()-[]->()`. One or more wildcard segments may use bounded variable
+length, such as `p=()-[*1..3]->()-[]->()`, when those variable-length segments
+do not bind segment-local node or relationship variables. A single bounded
+wildcard segment may also bind names, such as `p=(s)-[r*1..3]->(e)`. Named
+relationship variables on that bounded segment are path values, and named target
+nodes bind to the emitted endpoint.
 Variable-length wildcard paths use bounded walk semantics: nodes and
 relationships may repeat within the explicit maximum hop bound, and row caps
 are still enforced before projection. These shapes can use concrete node labels
@@ -181,8 +184,9 @@ variable exposes the same registered property or JSONB property path, including
 the same registered nested paths under a JSONB root. This phase
 intentionally keeps later clauses narrow: relationship properties, `WITH`,
 `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches, writes,
-and relationship variables in multi-segment paths are rejected for wildcard
-path-variable reads.
+relationship variables in multi-segment paths, and named target variables on
+multi-segment variable-length boundaries are rejected for wildcard path-variable
+reads.
 
 The `nodes(path)` function returns the `_path.nodes` array directly,
 `relationships(path)` returns the `_path.relationships` array directly, and

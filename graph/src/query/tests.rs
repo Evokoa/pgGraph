@@ -285,10 +285,16 @@ fn binder_rejects_unsupported_wildcard_path_shapes() {
 
 #[test]
 fn binder_rejects_deferred_variable_length_wildcard_bindings() {
-    for (query, expected) in [(
-        "MATCH p=()-[*1..3]->()-[]->() RETURN p",
-        "variable-length wildcard paths with multiple segments",
-    )] {
+    for (query, expected) in [
+        (
+            "MATCH p=()-[*1..3]->(e)-[]->() RETURN p",
+            "named target nodes on multi-segment variable-length wildcard paths",
+        ),
+        (
+            "MATCH p=()-[]->()-[*1..3]->(e) RETURN p",
+            "named target nodes on multi-segment variable-length wildcard paths",
+        ),
+    ] {
         let ast = crate::gql::parse_statement(query).unwrap();
         let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
         assert!(
@@ -3051,6 +3057,64 @@ fn wildcard_path_executor_projects_bounded_variable_length_paths() {
     assert_eq!(two_hop["rs"].as_array().unwrap().len(), 2);
     assert_eq!(two_hop["rs"][0]["_type"], "works_at");
     assert_eq!(two_hop["rs"][1]["_type"], "works_at");
+}
+
+#[test]
+fn wildcard_path_executor_projects_multi_segment_variable_length_paths() {
+    let statement =
+        bind_statement_query("MATCH p=()-[:works_at*1..2]->()-[]->() RETURN length(p) AS len");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let projected = project_wildcard_path_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert!(projected.iter().any(|row| row["len"] == 2));
+    assert!(projected.iter().any(|row| row["len"] == 3));
 }
 
 #[test]
