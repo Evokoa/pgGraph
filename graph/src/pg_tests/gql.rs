@@ -2853,25 +2853,29 @@ fn gql_remove_property_requires_mutable_overlay_projection() {
 }
 
 #[pg_test]
-fn gql_set_property_rejects_type_mismatch_and_readonly_projection() {
+fn gql_set_property_readonly_projection_reports_sqlstate() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    build_friendship_fixture_graph();
+
+    let readonly_sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest {id: ''u2''}) SET u.age = 42 RETURN u.age'
+             )",
+    );
+
+    assert_eq!(readonly_sqlstate.as_deref(), Some("PG018"));
+}
+
+#[pg_test]
+fn gql_set_property_type_mismatch_does_not_mutate_source_row() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
     build_friendship_fixture_graph();
     create_error_capture_helper();
-
-    let readonly_denied = Spi::get_one::<bool>(&format!(
-        "SELECT public.graph_test_sql_raises({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
-                'MATCH (u:graph_test_users_pgtest {id: ''u2''}) SET u.age = 42 RETURN u.age'
-             )"
-        )
-    ))
-    .expect("readonly set capture failed")
-    .unwrap_or(false);
-
     Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
         .expect("build mutable graph failed");
+
     let type_denied = Spi::get_one::<bool>(&format!(
         "SELECT public.graph_test_sql_raises({})",
         super::sql_literal(
@@ -2888,7 +2892,6 @@ fn gql_set_property_rejects_type_mismatch_and_readonly_projection() {
     .expect("source age query failed")
     .unwrap_or_default();
 
-    assert!(readonly_denied);
     assert!(type_denied);
     assert_eq!(source_age, 41);
 }

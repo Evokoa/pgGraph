@@ -338,3 +338,11 @@
 - `cargo test --features pg17 bound_later_source_slots` from `graph/`: passed, 1 test. Confirms non-optional multi-pattern joins do not reject transaction-created rows for later source slots already bound by an earlier materialized hop.
 - `cargo pgrx test --features "pg17 development" gql_rejects_transaction_created_node_traversal_entry_points` from `graph/`: passed, 1 pgrx test. Confirms the typed rejection reaches `graph.gql()` after a GQL `CREATE` records a transaction-local node delta, while a materialized source-id traversal remains allowed.
 - `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
+
+## 2026-06-04 KI-009 GQL SET SQLSTATE Hardening Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo pgrx test --features "pg17 development" gql_set_property_readonly_projection_reports_sqlstate` from `graph/`: passed, 1 pgrx test. Confirms readonly mapped `SET` rejects through the client-visible unsupported-operation SQLSTATE `PG018`.
+- `cargo pgrx test --features "pg17 development" gql_set_property_type_mismatch_does_not_mutate_source_row` from `graph/`: passed, 1 pgrx test. Confirms mapped `SET` type mismatches still leave the source row unchanged.
+- `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
