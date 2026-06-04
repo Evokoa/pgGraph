@@ -585,6 +585,6 @@ Tests:
 Phase 3 should not be treated as one large all-or-nothing milestone. Each subphase is complete only when it has parser, binder, executor, projection, SQL/PGRX, fuzz, and where applicable benchmark coverage.
 
 Status: parser fuzz target coverage for the GQL and Cypher frontends is in
-place. Local sustained fuzz execution still depends on the `cargo-fuzz` tool and
-the pgrx fuzz build environment; measurements are recorded in
+place. Local macOS fuzz builds use `graph/fuzz/build.sh` so `cargo-fuzz`
+preserves the pgrx dynamic-lookup linker flag; measurements are recorded in
 `todo/measurements.md` under "Phase 3 Parser Fuzz Gate".

@@ -119,12 +119,25 @@
 - Added `gql_parser` seed corpus entries for path-variable projection and wildcard relationship delete parser shapes.
 - Expanded the `gql_parser` seed corpus with malformed path-variable prefixes, inbound and undirected path forms, bounded wildcard syntax, label/type selector syntax, and duplicate-variable parser shapes.
 - Added the `cypher_parser` fuzz target plus compatible-match and unsupported-call seed corpus entries for the openCypher compatibility parser frontend.
-- `cargo fuzz build` from `graph/`: blocked locally because the `cargo-fuzz` subcommand is not installed.
-- `cargo build --manifest-path graph/fuzz/Cargo.toml --bins` from repository root: blocked locally by pgrx extension dylib linkage outside the pgrx fuzz build path; linker reported unresolved PostgreSQL backend symbols such as `CurrentMemoryContext`, `SPI_execute`, and `TopMemoryContext`.
+- Initial `cargo fuzz build` from `graph/`: blocked locally because the `cargo-fuzz` subcommand was not installed.
+- Initial `cargo build --manifest-path graph/fuzz/Cargo.toml --bins` from repository root: blocked locally by pgrx extension dylib linkage outside the pgrx fuzz build path; linker reported unresolved PostgreSQL backend symbols such as `CurrentMemoryContext`, `SPI_execute`, and `TopMemoryContext`.
 - `cargo fmt --check` from `graph/`: passed.
 - `git diff --check` from repository root: passed.
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17 cypher::tests::` from `graph/`: passed, 6 tests.
+
+## 2026-06-04 Phase 3 Parser Fuzz Gate Follow-Up
+
+- `sfw cargo install cargo-fuzz`: installed `cargo-fuzz` 0.13.1.
+- `rustup toolchain install nightly`: installed `nightly-aarch64-apple-darwin`, `rustc 1.98.0-nightly (b354133fb 2026-06-03)`.
+- `cargo +nightly fuzz build` from `graph/`: blocked on macOS because `cargo-fuzz` sets `RUSTFLAGS` and drops the pgrx dynamic-lookup linker flag from `graph/.cargo/config.toml`; the linker reports unresolved PostgreSQL backend symbols such as `AllocSetContextCreateInternal`, `CurrentMemoryContext`, and `DataDir`.
+- `bash fuzz/build.sh` from `graph/`: passed, all fuzz targets.
+- `cargo build --features pg17` from `graph/`: passed.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17 cypher::tests::` from `graph/`: passed, 6 tests.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test.
 
 ## 2026-06-03 Phase 3B Multi-Pattern Relationship Variable Slice
 
