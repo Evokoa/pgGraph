@@ -237,9 +237,10 @@ fn bind_join_read(
             rel,
             patterns.len(),
             &slot_by_var,
-            &path_by_var,
             &mut rel_slots,
             &mut rel_by_var,
+            &mut path_slots,
+            &mut path_by_var,
         )?;
         bind_join_path_slot(
             pattern,
@@ -375,19 +376,14 @@ fn bind_join_relationship_slot(
     rel: &RelPat,
     pattern_slot: usize,
     slot_by_var: &std::collections::HashMap<String, usize>,
-    path_by_var: &std::collections::HashMap<String, usize>,
     rel_slots: &mut Vec<LogicalJoinRelSlot>,
     rel_by_var: &mut std::collections::HashMap<String, usize>,
+    path_slots: &mut Vec<LogicalJoinPathSlot>,
+    path_by_var: &mut std::collections::HashMap<String, usize>,
 ) -> Result<(), GqlError> {
     let Some(var) = &rel.var else {
         return Ok(());
     };
-    if rel.var_len.is_some() {
-        return Err(GqlError::unsupported(
-            var.span,
-            "relationship variables on variable-length multi-pattern joins require path support",
-        ));
-    }
     if slot_by_var.contains_key(&var.text)
         || rel_by_var.contains_key(&var.text)
         || path_by_var.contains_key(&var.text)
@@ -396,6 +392,15 @@ fn bind_join_relationship_slot(
             var.span,
             format!("duplicate variable `{}` in MATCH scope", var.text),
         ));
+    }
+    if rel.var_len.is_some() {
+        let slot = path_slots.len();
+        path_slots.push(LogicalJoinPathSlot {
+            var: var.text.clone(),
+            pattern_slot,
+        });
+        path_by_var.insert(var.text.clone(), slot);
+        return Ok(());
     }
     let slot = rel_slots.len();
     rel_slots.push(LogicalJoinRelSlot {

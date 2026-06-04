@@ -450,8 +450,8 @@ path-value `count`/`collect`, and projected-row `RETURN DISTINCT`, plus node
 and node-property, relationship, and path `WITH` projections with
 `WITH DISTINCT`, path-function `WITH` projections, and aggregate `WITH`
 projections, plus bounded variable-length relationship patterns. Relationship
-properties, relationship/path property aggregate inputs, and relationship
-variables on variable-length join patterns remain planned within this phase.
+properties and relationship/path property aggregate inputs remain planned within
+this phase.
 
 Target examples:
 
@@ -497,6 +497,8 @@ Tests:
   relationship and path projections return JSON `null`.
 - Bounded variable-length multi-pattern joins preserve path length and path
   values while joining later patterns against the bounded endpoint.
+- Variable-length relationship variables in multi-pattern joins are treated as
+  path values.
 
 ### Phase 3C: Property Predicates on Unlabeled Wildcard Nodes
 

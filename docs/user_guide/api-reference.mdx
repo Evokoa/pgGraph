@@ -594,10 +594,10 @@ multi-pattern reads must order by returned scalar expressions. Optional
 multi-pattern reads null-extend unmatched fixed single-hop pattern expansions
 and return JSON `null` for missing node, relationship, and path projections.
 Bounded variable-length relationship patterns can participate in
-multi-pattern joins for node and path projections. Relationship variables on
-variable-length join patterns, relationship properties, relationship/path
-property aggregate inputs, and numeric aggregates over relationship/path values
-remain rejected.
+multi-pattern joins for node and path projections. Variable-length relationship
+variables are treated as path values. Relationship properties,
+relationship/path property aggregate inputs, and numeric aggregates over
+relationship/path values remain rejected.
 
 Path behavior:
 
@@ -636,8 +636,7 @@ Not included in this release's GQL subset:
 - Relationship source-row hydration.
 - Named variables on variable-length wildcard path segments.
 - Multi-pattern relationship/path property aggregate inputs, numeric
-  aggregates over relationship/path values, relationship properties, and
-  relationship variables on variable-length join patterns.
+  aggregates over relationship/path values, and relationship properties.
 - Node-only optional matches.
 
 `CREATE (n:label {properties}) RETURN ...` is supported for a single node whose

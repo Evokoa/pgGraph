@@ -249,6 +249,16 @@
 - `cargo test --features pg17` from `graph/`: passed, 498 tests, 1 ignored.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes bounded variable-length multi-pattern join path functions through `graph.gql()`.
 
+## 2026-06-04 Phase 3B Multi-Pattern Variable-Length Relationship Variable Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::multi_pattern` from `graph/`: passed, 21 tests. Includes variable-length relationship variables in multi-pattern joins as path values.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 144 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17` from `graph/`: passed, 499 tests, 1 ignored.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes variable-length relationship variables as path values through `graph.gql()`.
+
 ## 2026-06-03 Edge Registration Validation Slice
 
 - `cargo pgrx test --features "pg17 development" mixed_mode_junction_registration_fails_before_build` from `graph/`: passed, 1 pgrx test.
