@@ -291,6 +291,19 @@
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17` from `graph/`: passed, 503 tests, 1 ignored.
 
+## 2026-06-04 Phase 3D Relationship Type Alternation Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 gql::tests::parses_relationship_type_alternation` from `graph/`: passed, 1 test.
+- `cargo test --features pg17 query::tests::binder_routes_relationship_type_alternation_to_wildcard_paths_only` from `graph/`: passed, 1 test. Confirms wildcard path variables accept relationship type alternation while concrete single-hop reads, multi-pattern joins, and mapped DELETE reject alternation until their slot semantics are designed.
+- `cargo test --features pg17 query::tests::wildcard_path_executor_filters_relationship_type_alternation` from `graph/`: passed, 1 test. Confirms alternation includes each selected relationship type and excludes unrelated registered types.
+- `cargo test --features pg17 query::tests::wildcard_path_` from `graph/`: passed, 16 tests.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 150 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 24 tests.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes `graph.gql()` relationship type alternation for wildcard path variables.
+- `cargo test --features pg17` from `graph/`: passed, 506 tests, 1 ignored.
+
 ## 2026-06-03 Edge Registration Validation Slice
 
 - `cargo pgrx test --features "pg17 development" mixed_mode_junction_registration_fails_before_build` from `graph/`: passed, 1 pgrx test.

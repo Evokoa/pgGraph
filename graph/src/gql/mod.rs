@@ -67,6 +67,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_relationship_type_alternation() {
+        let parsed = parse("MATCH p=(s)-[:friend|works_at*1..3]->(e) RETURN length(p)")
+            .expect("query should parse");
+        let (rel, _) = &parsed.match_.pattern.tail[0];
+
+        assert_eq!(rel.rel_type_text(), None);
+        assert_eq!(rel.rel_type_texts(), vec!["friend", "works_at"]);
+        let var_len = rel.var_len.expect("relationship should be variable length");
+        assert_eq!(var_len.min, 1);
+        assert_eq!(var_len.max, 3);
+    }
+
+    #[test]
     fn parses_inbound_relationship() {
         let parsed = parse("MATCH (a)<-[:knows]-(b) RETURN a").expect("query should parse");
         let (rel, _) = &parsed.match_.pattern.tail[0];

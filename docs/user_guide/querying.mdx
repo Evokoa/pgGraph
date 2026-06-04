@@ -178,7 +178,8 @@ nodes bind to the emitted endpoint.
 Variable-length wildcard paths use bounded walk semantics: nodes and
 relationships may repeat within the explicit maximum hop bound, and row caps
 are still enforced before projection. These shapes can use concrete node labels
-or concrete relationship types as filters. `WHERE` may read properties from
+or concrete relationship types as filters, including relationship type
+alternation such as `p=()-[:friend|works_at]->()`. `WHERE` may read properties from
 named path-node variables only when every possible concrete table for that
 variable exposes the same registered property or JSONB property path, including
 the same registered nested paths under a JSONB root. This phase
@@ -186,7 +187,8 @@ intentionally keeps later clauses narrow: relationship properties, `WITH`,
 `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches, writes,
 relationship variables in multi-segment paths, and named target variables on
 multi-segment variable-length boundaries are rejected for wildcard path-variable
-reads.
+reads. Relationship type alternation outside wildcard path-variable reads is
+also reserved for a later phase.
 
 The `nodes(path)` function returns the `_path.nodes` array directly,
 `relationships(path)` returns the `_path.relationships` array directly, and

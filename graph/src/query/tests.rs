@@ -204,7 +204,10 @@ fn binder_accepts_phase2_named_path_elements_and_filters() {
     assert_eq!(plan.target_var.as_deref(), Some("e"));
     assert_eq!(plan.source_table_filter, Some(10));
     assert_eq!(plan.target_table_filter, Some(20));
-    assert_eq!(plan.rel_type_filter.as_deref(), Some("works_at"));
+    assert_eq!(
+        plan.rel_type_filters,
+        ["works_at".to_string()].into_iter().collect()
+    );
     assert!(matches!(
         plan.returns[0],
         super::logical_plan::ReturnBinding::Path { .. }
@@ -279,6 +282,42 @@ fn binder_rejects_unsupported_wildcard_path_shapes() {
                 GqlErrorKind::Unsupported { .. } | GqlErrorKind::Bind { .. }
             ),
             "unexpected error for {query}: {err}"
+        );
+    }
+}
+
+#[test]
+fn binder_routes_relationship_type_alternation_to_wildcard_paths_only() {
+    let plan = bind_statement_query("MATCH p=()-[:friend|works_at]->() RETURN p");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(plan) = plan else {
+        panic!("expected wildcard path read plan");
+    };
+    assert_eq!(
+        plan.segments[0].rel_type_filters,
+        ["friend".to_string(), "works_at".to_string()]
+            .into_iter()
+            .collect()
+    );
+
+    for (query, expected) in [
+        (
+            "MATCH (u:users)-[:friend|works_at]->(v:users) RETURN u",
+            "relationship type alternation outside wildcard path variables",
+        ),
+        (
+            "MATCH (u:users)-[:friend|works_at]->(v:users), (v)-[:friend]->(u) RETURN u",
+            "relationship type alternation in multi-pattern joins",
+        ),
+        (
+            "MATCH (u:users)-[r:friend|works_at]->(v:users) DELETE r RETURN u",
+            "relationship type alternation in DELETE",
+        ),
+    ] {
+        let ast = crate::gql::parse_statement(query).unwrap();
+        let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+        assert!(
+            err.to_string().contains(expected),
+            "expected `{expected}` for {query}, got {err}"
         );
     }
 }
@@ -2716,6 +2755,70 @@ fn wildcard_path_executor_projects_actual_relationship_types() {
     assert_eq!(projected[0]["rs"][0]["_type"], "works_at");
     assert_eq!(projected[0]["rs"][0]["_start"]["table"], "users");
     assert_eq!(projected[0]["rs"][0]["_end"]["table"], "companies");
+}
+
+#[test]
+fn wildcard_path_executor_filters_relationship_type_alternation() {
+    let statement =
+        bind_statement_query("MATCH p=()-[:friend|works_at]->() RETURN relationships(p) AS rs");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    let friend = engine.register_edge_type("friend").unwrap();
+    let owns = engine.register_edge_type("owns").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: friend,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 1,
+                type_id: owns,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let projected = project_wildcard_path_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+    let rel_types = projected
+        .iter()
+        .map(|row| row["rs"][0]["_type"].as_str().expect("type should be text"))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(rel_types, ["friend", "works_at"].into_iter().collect());
+    assert!(!projected.iter().any(|row| row["rs"][0]["_type"] == "owns"));
 }
 
 #[test]

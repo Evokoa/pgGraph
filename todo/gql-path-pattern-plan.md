@@ -535,11 +535,13 @@ Status: bounded single-segment wildcard variable-length path variables
 implemented and documented on 2026-06-02 using bounded walk semantics. Named
 endpoint variables and relationship variables as path values were added on
 2026-06-04, and unnamed multi-segment variable-length wildcard paths were added
-later the same day. Nodes and relationships may repeat within the explicit
-maximum hop bound, and row caps are enforced before projection. Verification is
-recorded in `todo/measurements.md` under "Phase 3D Variable-Length Wildcard Path
-Slice", "Phase 3D Named Variable-Length Wildcard Segment Slice", and "Phase 3D
-Multi-Segment Variable-Length Wildcard Slice". Type alternation remains planned.
+later the same day. Relationship type alternation for wildcard path variables
+was also added on 2026-06-04. Nodes and relationships may repeat within the
+explicit maximum hop bound, and row caps are enforced before projection.
+Verification is recorded in `todo/measurements.md` under "Phase 3D
+Variable-Length Wildcard Path Slice", "Phase 3D Named Variable-Length Wildcard
+Segment Slice", "Phase 3D Multi-Segment Variable-Length Wildcard Slice", and
+"Phase 3D Relationship Type Alternation Slice".
 
 Target examples:
 

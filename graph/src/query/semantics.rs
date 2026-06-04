@@ -37,12 +37,11 @@ pub(crate) fn bind(
     let (source_pat, rel_pat, target_pat) = single_outbound_hop(&query.match_)?;
     let source = bind_node(source_pat, catalog)?;
     let target = bind_node(target_pat, catalog)?;
-    let rel_type = rel_pat.rel_type.as_ref().ok_or_else(|| {
-        GqlError::unsupported(
-            rel_pat.span,
-            "anonymous relationship types require a later phase",
-        )
-    })?;
+    let rel_type = require_single_relationship_type(
+        rel_pat,
+        "anonymous relationship types require a later phase",
+        "relationship type alternation outside wildcard path variables requires a later phase",
+    )?;
     let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
     let predicate = bind_predicates(
         query.where_.as_ref(),
@@ -176,6 +175,18 @@ pub(crate) fn bind_statement(
     }
 }
 
+fn require_single_relationship_type<'a>(
+    rel: &'a RelPat,
+    anonymous_message: &'static str,
+    alternation_message: &'static str,
+) -> Result<&'a ast::Ident, GqlError> {
+    match rel.rel_types.as_slice() {
+        [] => Err(GqlError::unsupported(rel.span, anonymous_message)),
+        [rel_type] => Ok(rel_type),
+        _ => Err(GqlError::unsupported(rel.span, alternation_message)),
+    }
+}
+
 fn bind_join_read(
     query: &crate::gql::ast::Query,
     catalog: &impl CatalogSnapshot,
@@ -204,12 +215,11 @@ fn bind_join_read(
             ));
         }
         let hops = bind_hops(rel)?;
-        let rel_type = rel.rel_type.as_ref().ok_or_else(|| {
-            GqlError::unsupported(
-                rel.span,
-                "anonymous relationship types in multi-pattern joins require a later phase",
-            )
-        })?;
+        let rel_type = require_single_relationship_type(
+            rel,
+            "anonymous relationship types in multi-pattern joins require a later phase",
+            "relationship type alternation in multi-pattern joins requires a later phase",
+        )?;
         let source_slot = bind_join_node_slot(
             &pattern.start,
             catalog,
@@ -1466,7 +1476,7 @@ fn bind_wildcard_path_read(
     let mut previous_table_filter = source_table_filter;
     for (rel, target) in tail {
         let target_table_filter = bind_wildcard_node_filter(target, catalog)?;
-        let rel_type_filter = bind_wildcard_relationship_filter(rel, catalog)?;
+        let rel_type_filters = bind_wildcard_relationship_filter(rel, catalog)?;
         let hops = bind_hops(rel)?;
         if tail.len() > 1 && rel.var.is_some() {
             return Err(GqlError::unsupported(
@@ -1480,11 +1490,9 @@ fn bind_wildcard_path_read(
                 "named target nodes on multi-segment variable-length wildcard paths require a later phase",
             ));
         }
-        if let (Some(source_table_oid), Some(target_table_oid), Some(rel_type)) = (
-            previous_table_filter,
-            target_table_filter,
-            rel_type_filter.as_ref(),
-        ) {
+        if let (Some(source_table_oid), Some(target_table_oid)) =
+            (previous_table_filter, target_table_filter)
+        {
             let source = BoundNode {
                 var: String::new(),
                 label: String::new(),
@@ -1503,12 +1511,10 @@ fn bind_wildcard_path_read(
                 table_oid: target_table_oid,
                 properties: std::collections::BTreeSet::new(),
             };
-            let rel_ident = rel
-                .rel_type
-                .as_ref()
-                .expect("rel_type_filter came from rel");
-            resolve_relationship(catalog, rel, rel_ident, &source, &target_node)?;
-            debug_assert_eq!(rel_type, &rel_ident.text);
+            for rel_ident in &rel.rel_types {
+                resolve_relationship(catalog, rel, rel_ident, &source, &target_node)?;
+                debug_assert!(rel_type_filters.contains(&rel_ident.text));
+            }
         }
         segments.push(LogicalWildcardPathSegment {
             rel_var: rel.var.as_ref().map(|var| var.text.clone()),
@@ -1516,19 +1522,19 @@ fn bind_wildcard_path_read(
             direction: bind_direction(rel.direction),
             hops,
             target_table_filter,
-            rel_type_filter,
+            rel_type_filters,
         });
         previous_table_filter = target_table_filter;
     }
     let source_var = start.var.as_ref().map(|var| var.text.clone());
-    let (rel_var, target_var, direction, target_table_filter, rel_type_filter) = {
+    let (rel_var, target_var, direction, target_table_filter, rel_type_filters) = {
         let first_segment = &segments[0];
         (
             first_segment.rel_var.clone(),
             first_segment.target_var.clone(),
             first_segment.direction,
             first_segment.target_table_filter,
-            first_segment.rel_type_filter.clone(),
+            first_segment.rel_type_filters.clone(),
         )
     };
     let returns =
@@ -1557,7 +1563,7 @@ fn bind_wildcard_path_read(
         returns,
         source_table_filter,
         target_table_filter,
-        rel_type_filter,
+        rel_type_filters,
         segments,
         required_node_table_oids,
         table_labels,
@@ -1697,10 +1703,11 @@ fn wildcard_segment_table_pairs(
 ) -> Vec<(u32, u32)> {
     let mut pairs = std::collections::BTreeSet::new();
     for rel_info in rels {
-        if rel
-            .rel_type
-            .as_ref()
-            .is_some_and(|filter| filter.text != rel_info.rel_type)
+        if !rel.rel_types.is_empty()
+            && !rel
+                .rel_types
+                .iter()
+                .any(|filter| filter.text == rel_info.rel_type)
         {
             continue;
         }
@@ -1916,27 +1923,29 @@ fn bind_wildcard_node_filter(
 fn bind_wildcard_relationship_filter(
     rel: &RelPat,
     catalog: &impl CatalogSnapshot,
-) -> Result<Option<String>, GqlError> {
+) -> Result<std::collections::BTreeSet<String>, GqlError> {
     if !rel.props.is_empty() {
         return Err(GqlError::unsupported(
             rel.span,
             "wildcard path variables cannot bind relationship properties in this phase",
         ));
     }
-    let Some(rel_type) = &rel.rel_type else {
-        return Ok(None);
-    };
-    if catalog
+    let known_types = catalog
         .rel_types()
         .into_iter()
-        .any(|info| info.rel_type == rel_type.text)
-    {
-        return Ok(Some(rel_type.text.clone()));
+        .map(|info| info.rel_type)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut filters = std::collections::BTreeSet::new();
+    for rel_type in &rel.rel_types {
+        if !known_types.contains(&rel_type.text) {
+            return Err(GqlError::bind(
+                rel_type.span,
+                format!("unknown relationship type `{}`", rel_type.text),
+            ));
+        }
+        filters.insert(rel_type.text.clone());
     }
-    Err(GqlError::bind(
-        rel_type.span,
-        format!("unknown relationship type `{}`", rel_type.text),
-    ))
+    Ok(filters)
 }
 
 fn bind_wildcard_path_returns(
@@ -2548,10 +2557,18 @@ fn bind_delete_edge_mapping(
     target_pat: &NodePat,
     catalog: &impl CatalogSnapshot,
 ) -> Result<DeleteEdgeBinding, GqlError> {
-    if source_pat.label.is_some() && target_pat.label.is_some() && rel_pat.rel_type.is_some() {
+    if rel_pat.rel_types.len() > 1 {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "relationship type alternation in DELETE requires a later phase",
+        ));
+    }
+    if source_pat.label.is_some() && target_pat.label.is_some() && !rel_pat.rel_types.is_empty() {
         let source = bind_node(source_pat, catalog)?;
         let target = bind_node(target_pat, catalog)?;
-        let rel_type = rel_pat.rel_type.as_ref().expect("checked rel type");
+        let [rel_type] = rel_pat.rel_types.as_slice() else {
+            unreachable!("checked rel type");
+        };
         let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
         let edge_mapping = rel_info.edge_mapping.clone().ok_or_else(|| {
             GqlError::unsupported(
@@ -2602,8 +2619,8 @@ fn bind_delete_edge_mapping(
             ));
         }
         if rel_pat
-            .rel_type
-            .as_ref()
+            .rel_types
+            .first()
             .is_some_and(|rel_type| rel_type.text != rel_info.rel_type)
         {
             continue;

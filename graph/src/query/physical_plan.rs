@@ -55,8 +55,8 @@ pub(crate) struct PhysicalWildcardPathPlan {
     pub(crate) source_table_filter: Option<u32>,
     /// Optional target-table filter.
     pub(crate) target_table_filter: Option<u32>,
-    /// Optional relationship type filter.
-    pub(crate) rel_type_filter: Option<String>,
+    /// Relationship type filters. Empty means any registered relationship type.
+    pub(crate) rel_type_filters: BTreeSet<String>,
     /// Fixed relationship segments in path order.
     pub(crate) segments: Vec<PhysicalWildcardPathSegment>,
     /// Source-table OIDs requiring ACL checks before wildcard expansion.
@@ -86,8 +86,8 @@ pub(crate) struct PhysicalWildcardPathSegment {
     pub(crate) hops: HopBounds,
     /// Optional target-table filter.
     pub(crate) target_table_filter: Option<u32>,
-    /// Optional relationship type filter.
-    pub(crate) rel_type_filter: Option<String>,
+    /// Relationship type filters. Empty means any registered relationship type.
+    pub(crate) rel_type_filters: BTreeSet<String>,
 }
 
 /// Single-hop physical plan for Phase 1B.

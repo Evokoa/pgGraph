@@ -435,10 +435,10 @@ pub(crate) fn execute_wildcard_path(
         .iter()
         .map(|segment| {
             segment
-                .rel_type_filter
-                .as_deref()
+                .rel_type_filters
+                .iter()
                 .map(|rel_type| edge_type_id(engine, rel_type))
-                .transpose()
+                .collect::<GraphResult<std::collections::BTreeSet<_>>>()
         })
         .collect::<GraphResult<Vec<_>>>()?;
     let row_cap = plan.execution_row_cap();
@@ -475,7 +475,7 @@ fn expand_wildcard_segments(
     engine: &Engine,
     neighbors: &GqlNeighbors<'_>,
     plan: &PhysicalWildcardPathPlan,
-    segment_filters: &[Option<u8>],
+    segment_filters: &[std::collections::BTreeSet<u8>],
     tenant: Option<&str>,
     source_idx: u32,
     rows: &mut Vec<GqlRow>,
@@ -506,7 +506,7 @@ fn expand_wildcard_segment(
     engine: &Engine,
     neighbors: &GqlNeighbors<'_>,
     plan: &PhysicalWildcardPathPlan,
-    segment_filters: &[Option<u8>],
+    segment_filters: &[std::collections::BTreeSet<u8>],
     tenant: Option<&str>,
     state: PathState,
     segment_idx: usize,
@@ -561,7 +561,7 @@ fn expand_wildcard_segment_hops(
     engine: &Engine,
     neighbors: &GqlNeighbors<'_>,
     plan: &PhysicalWildcardPathPlan,
-    segment_filters: &[Option<u8>],
+    segment_filters: &[std::collections::BTreeSet<u8>],
     tenant: Option<&str>,
     segment: &PhysicalWildcardPathSegment,
     state: PathState,
@@ -594,7 +594,9 @@ fn expand_wildcard_segment_hops(
         return Ok(());
     }
     for target in neighbors.for_direction_any(segment.direction, state.node_idx) {
-        if segment_filters[segment_idx].is_some_and(|type_id| target.type_id != type_id) {
+        if !segment_filters[segment_idx].is_empty()
+            && !segment_filters[segment_idx].contains(&target.type_id)
+        {
             continue;
         }
         if !wildcard_node_visible(engine, target.node_idx, tenant) {

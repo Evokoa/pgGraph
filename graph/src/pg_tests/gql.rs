@@ -1009,6 +1009,7 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
         wildcard_predicate_coordinate_only,
         wildcard_var_len_rows,
         wildcard_var_len_shape,
+        wildcard_type_alternation_shape,
         shape_matches,
         coordinate_only_has_name,
     ) =
@@ -1085,6 +1086,14 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                               RETURN p, length(p) AS len, relationships(p) AS rs',
                              hydrate := false
                          )
+                     ),
+                     wildcard_type_alternation AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'MATCH p=()-[:friend|works_at]->()
+                              RETURN relationships(p) AS rs',
+                             hydrate := false
+                         )
                      )
                      SELECT count(*)::bigint,
                             count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'friend')::bigint,
@@ -1122,6 +1131,10 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                                 AND jsonb_array_length(row->'rs') = (row->>'len')::integer
                                 AND row->'p'->'_path'->'relationships' = row->'rs'
                              ) FROM wildcard_var_len),
+                            (SELECT count(*) = 2
+                                AND count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'friend') = 1
+                                AND count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'works_at') = 1
+                             FROM wildcard_type_alternation),
                             bool_and(
                                 (row->>'len')::bigint = 1
                                 AND row->'p'->'_path'->'nodes' = row->'ns'
@@ -1177,9 +1190,12 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                     .expect("wildcard var-len shape read failed")
                     .unwrap_or(false),
                 row.get::<bool>(14)
-                    .expect("shape equality read failed")
+                    .expect("wildcard type alternation shape read failed")
                     .unwrap_or(false),
                 row.get::<bool>(15)
+                    .expect("shape equality read failed")
+                    .unwrap_or(false),
+                row.get::<bool>(16)
                     .expect("coordinate-only shape read failed")
                     .unwrap_or(true),
             ))
@@ -1208,6 +1224,7 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
         "unexpected wildcard var-len count: {wildcard_var_len_rows}"
     );
     assert!(wildcard_var_len_shape);
+    assert!(wildcard_type_alternation_shape);
     assert!(shape_matches);
     assert!(!coordinate_only_has_name);
 

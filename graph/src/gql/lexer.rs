@@ -24,6 +24,8 @@ pub(crate) enum TokKind {
     Colon,
     /// `,`
     Comma,
+    /// `|`
+    Pipe,
     /// `.`
     Dot,
     /// `$`
@@ -186,6 +188,7 @@ impl Lexer<'_> {
             '}' => Ok(self.single(start, TokKind::RBrace)),
             ':' => Ok(self.single(start, TokKind::Colon)),
             ',' => Ok(self.single(start, TokKind::Comma)),
+            '|' => Ok(self.single(start, TokKind::Pipe)),
             '$' => Ok(self.single(start, TokKind::Dollar)),
             '*' => Ok(self.single(start, TokKind::Star)),
             '=' => Ok(self.single(start, TokKind::Eq)),

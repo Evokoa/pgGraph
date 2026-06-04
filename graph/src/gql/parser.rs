@@ -14,7 +14,7 @@ const MAX_PREFIX_NOT: usize = 512;
 
 type RelDetail = (
     Option<Ident>,
-    Option<Ident>,
+    Vec<Ident>,
     Option<VarLen>,
     Vec<(Ident, Operand)>,
 );
@@ -499,14 +499,14 @@ impl Parser {
     fn parse_rel_pat(&mut self) -> Result<RelPat, GqlError> {
         if self.peek() == TokKind::ArrowLeft {
             let start = self.advance().span.start as usize;
-            let (var, rel_type, var_len, props) = self.parse_optional_rel_detail()?;
+            let (var, rel_types, var_len, props) = self.parse_optional_rel_detail()?;
             let end = self
                 .expect(TokKind::Dash, "expected '-' after inbound relationship")?
                 .span
                 .end as usize;
             return Ok(RelPat {
                 var,
-                rel_type,
+                rel_types,
                 direction: Direction::In,
                 var_len,
                 props,
@@ -518,7 +518,7 @@ impl Parser {
             .expect(TokKind::Dash, "expected relationship pattern")?
             .span
             .start as usize;
-        let (var, rel_type, var_len, props) = self.parse_optional_rel_detail()?;
+        let (var, rel_types, var_len, props) = self.parse_optional_rel_detail()?;
         let direction = if self.consume(TokKind::ArrowRight).is_some() {
             Direction::Out
         } else {
@@ -528,7 +528,7 @@ impl Parser {
         let end = self.previous().span.end as usize;
         Ok(RelPat {
             var,
-            rel_type,
+            rel_types,
             direction,
             var_len,
             props,
@@ -538,17 +538,21 @@ impl Parser {
 
     fn parse_optional_rel_detail(&mut self) -> Result<RelDetail, GqlError> {
         if self.consume(TokKind::LBracket).is_none() {
-            return Ok((None, None, None, Vec::new()));
+            return Ok((None, Vec::new(), None, Vec::new()));
         }
         let var = if self.peek() == TokKind::Ident {
             Some(self.parse_ident()?)
         } else {
             None
         };
-        let rel_type = if self.consume(TokKind::Colon).is_some() {
-            Some(self.parse_ident()?)
+        let rel_types = if self.consume(TokKind::Colon).is_some() {
+            let mut rel_types = vec![self.parse_ident()?];
+            while self.consume(TokKind::Pipe).is_some() {
+                rel_types.push(self.parse_ident()?);
+            }
+            rel_types
         } else {
-            None
+            Vec::new()
         };
         let var_len = if self.consume(TokKind::Star).is_some() {
             Some(self.parse_var_len()?)
@@ -561,7 +565,7 @@ impl Parser {
             Vec::new()
         };
         self.expect(TokKind::RBracket, "expected ']' after relationship detail")?;
-        Ok((var, rel_type, var_len, props))
+        Ok((var, rel_types, var_len, props))
     }
 
     fn parse_var_len(&mut self) -> Result<VarLen, GqlError> {

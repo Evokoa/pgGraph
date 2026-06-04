@@ -47,8 +47,8 @@ pub(crate) struct LogicalWildcardPathPlan {
     pub(crate) source_table_filter: Option<u32>,
     /// Optional target-table filter.
     pub(crate) target_table_filter: Option<u32>,
-    /// Optional relationship type filter.
-    pub(crate) rel_type_filter: Option<String>,
+    /// Relationship type filters. Empty means any registered relationship type.
+    pub(crate) rel_type_filters: BTreeSet<String>,
     /// Fixed relationship segments in path order.
     pub(crate) segments: Vec<LogicalWildcardPathSegment>,
     /// Source-table OIDs requiring ACL checks before wildcard expansion.
@@ -78,8 +78,8 @@ pub(crate) struct LogicalWildcardPathSegment {
     pub(crate) hops: HopBounds,
     /// Optional target-table filter.
     pub(crate) target_table_filter: Option<u32>,
-    /// Optional relationship type filter.
-    pub(crate) rel_type_filter: Option<String>,
+    /// Relationship type filters. Empty means any registered relationship type.
+    pub(crate) rel_type_filters: BTreeSet<String>,
 }
 
 /// Bound read-only logical query.

@@ -300,7 +300,7 @@ fn rel_pat(rel: &SqlPgqRelationshipPattern) -> Result<RelPat, GqlError> {
         .transpose()?;
     Ok(RelPat {
         var: rel.var.as_deref().map(ident),
-        rel_type: Some(ident(&rel.rel_type)),
+        rel_types: vec![ident(&rel.rel_type)],
         direction: match rel.direction {
             SqlPgqDirection::Out => Direction::Out,
             SqlPgqDirection::In => Direction::In,

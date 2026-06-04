@@ -118,7 +118,7 @@ fn lower_wildcard_path(plan: LogicalWildcardPathPlan) -> PhysicalWildcardPathPla
         returns: lower_returns(plan.returns),
         source_table_filter: plan.source_table_filter,
         target_table_filter: plan.target_table_filter,
-        rel_type_filter: plan.rel_type_filter,
+        rel_type_filters: plan.rel_type_filters,
         segments: plan
             .segments
             .into_iter()
@@ -140,7 +140,7 @@ fn lower_wildcard_path_segment(segment: LogicalWildcardPathSegment) -> PhysicalW
         direction: segment.direction,
         hops: segment.hops,
         target_table_filter: segment.target_table_filter,
-        rel_type_filter: segment.rel_type_filter,
+        rel_type_filters: segment.rel_type_filters,
     }
 }
 

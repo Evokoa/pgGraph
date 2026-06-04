@@ -288,8 +288,8 @@ impl NodePat {
 pub(crate) struct RelPat {
     /// Optional variable.
     pub(crate) var: Option<Ident>,
-    /// Optional relationship type.
-    pub(crate) rel_type: Option<Ident>,
+    /// Relationship type selector alternatives.
+    pub(crate) rel_types: Vec<Ident>,
     /// Traversal direction.
     pub(crate) direction: Direction,
     /// Optional bounded variable-length relationship.
@@ -310,7 +310,19 @@ impl RelPat {
     /// Return the relationship type text.
     #[cfg(test)]
     pub(crate) fn rel_type_text(&self) -> Option<&str> {
-        self.rel_type.as_ref().map(|ident| ident.text.as_str())
+        let [rel_type] = self.rel_types.as_slice() else {
+            return None;
+        };
+        Some(rel_type.text.as_str())
+    }
+
+    /// Return relationship type selector texts.
+    #[cfg(test)]
+    pub(crate) fn rel_type_texts(&self) -> Vec<&str> {
+        self.rel_types
+            .iter()
+            .map(|ident| ident.text.as_str())
+            .collect()
     }
 }
 

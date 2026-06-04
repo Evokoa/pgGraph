@@ -560,7 +560,8 @@ Aggregate behavior:
 Wildcard path-variable reads support `WHERE`, `RETURN`, `SKIP`, and `LIMIT` in this
 phase. They can bind node variables across fixed paths, bind relationship
 variables for single-hop paths, and use concrete node labels or concrete
-relationship types as filters. A single wildcard segment may use bounded
+relationship types as filters, including type alternation such as
+`p=()-[:friend|works_at]->()`. A single wildcard segment may use bounded
 variable length, such as `p=(s)-[r*1..3]->(e)`. Multi-segment wildcard paths may
 also include bounded variable-length segments when those segments do not bind
 segment-local node or relationship variables. Named relationship variables on
@@ -574,7 +575,8 @@ variable exposes the same registered property or JSONB property path, including
 the same registered nested paths under a JSONB root. They
 reject `ORDER BY`, `RETURN DISTINCT`, `WITH`, aggregates, optional matches,
 writes, relationship properties, relationship variables in multi-segment paths,
-and named target variables on multi-segment variable-length boundaries.
+named target variables on multi-segment variable-length boundaries, and
+relationship type alternation outside wildcard path-variable reads.
 
 Multi-pattern reads support fixed single-hop patterns with concrete labels and
 relationship types. Reused node variables join by graph coordinate, independent
