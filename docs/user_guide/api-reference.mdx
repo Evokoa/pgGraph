@@ -649,7 +649,10 @@ label maps to a registered source table. It requires a `mutable_overlay`
 projection and inserts the PostgreSQL source row first, so table privileges,
 constraints, triggers, RLS, and MVCC remain authoritative. `CREATE` is rejected
 on `csr_readonly`. The same transaction can read created nodes through
-node-only `MATCH`.
+node-only `MATCH`. Relationship traversal, multi-pattern joins, and wildcard
+path reads reject transaction-created nodes when they would be used as
+traversal entry points until temporary graph node indexes are available for
+path expansion.
 
 `MATCH (n:label {...}) SET n.property = value RETURN ...` is supported for a
 single matched node and one registered non-key, non-tenant property column. It requires a

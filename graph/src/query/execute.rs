@@ -7,7 +7,7 @@ use crate::projection::neighbors::{CsrNeighbors, NeighborSource, OverlayNeighbor
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
-use super::logical_plan::BoundDirection;
+use super::logical_plan::{BindingSide, BoundCmpOp, BoundDirection, Predicate, ValueExpr};
 use super::physical_plan::{
     PhysicalJoinPlan, PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan,
     PhysicalWildcardPathSegment, ReturnSlot,
@@ -80,6 +80,14 @@ pub(crate) fn execute(
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
+    reject_tx_created_traversal_entry_points(
+        engine,
+        [TxTraversalEntryScope {
+            table_oid: plan.source_table_oid,
+            allowed_node_ids: source_id_equalities(plan.predicate.as_ref(), BindingSide::Source),
+        }],
+        tenant,
+    )?;
     let rel_type_id = edge_type_id(engine, &plan.rel_type)?;
     let neighbors = GqlNeighbors::new(engine);
     let mut rows = Vec::new();
@@ -197,6 +205,7 @@ pub(crate) fn execute_join(
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
+    reject_tx_created_traversal_entry_points(engine, join_tx_traversal_entry_scopes(plan), tenant)?;
     let rel_type_ids = plan
         .patterns
         .iter()
@@ -448,6 +457,20 @@ pub(crate) fn execute_wildcard_path(
         || plan.required_node_table_oids.iter().copied().collect(),
         |oid| vec![oid],
     );
+    reject_tx_created_traversal_entry_points(
+        engine,
+        scan_table_oids
+            .iter()
+            .copied()
+            .map(|table_oid| TxTraversalEntryScope {
+                table_oid,
+                allowed_node_ids: source_id_equalities(
+                    plan.predicate.as_ref(),
+                    BindingSide::PathNode(0),
+                ),
+            }),
+        tenant,
+    )?;
     for table_oid in scan_table_oids {
         for source_idx in source_nodes(engine, table_oid, tenant) {
             if !engine.node_store.is_active(source_idx)
@@ -665,6 +688,121 @@ fn source_nodes(engine: &Engine, table_oid: u32, tenant: Option<&str>) -> Vec<u3
         .into_iter()
         .filter(|&idx| tenant_allows_node(engine, idx, tenant))
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TxTraversalEntryScope {
+    table_oid: u32,
+    allowed_node_ids: Option<std::collections::BTreeSet<String>>,
+}
+
+fn reject_tx_created_traversal_entry_points(
+    engine: &Engine,
+    scopes: impl IntoIterator<Item = TxTraversalEntryScope>,
+    tenant: Option<&str>,
+) -> GraphResult<()> {
+    let mut checked = std::collections::BTreeSet::new();
+    for scope in scopes {
+        if !checked.insert((scope.table_oid, scope.allowed_node_ids.clone())) {
+            continue;
+        }
+        let table_is_tenanted = engine.tenanted_table_oids.contains(&scope.table_oid);
+        let added = crate::projection::tx_delta::added_node_keys(
+            scope.table_oid,
+            tenant,
+            table_is_tenanted,
+        );
+        let rejected = added.iter().find(|node_id| {
+            scope
+                .allowed_node_ids
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(*node_id))
+        });
+        if let Some(node_id) = rejected {
+            let table_oid = scope.table_oid;
+            return Err(GraphError::GqlExecution {
+                reason: format!(
+                    "transaction-created nodes cannot be used as traversal entry points \
+                     until temporary-id traversal support is implemented (table_oid={table_oid}, \
+                     node_id={node_id})"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn join_tx_traversal_entry_scopes(plan: &PhysicalJoinPlan) -> Vec<TxTraversalEntryScope> {
+    let mut bound_by_prior_pattern = std::collections::BTreeSet::new();
+    let mut scopes = Vec::new();
+    for pattern in &plan.patterns {
+        if plan.optional || !bound_by_prior_pattern.contains(&pattern.source_slot) {
+            let source_side = BindingSide::PathNode(pattern.source_slot);
+            scopes.push(TxTraversalEntryScope {
+                table_oid: plan.node_slots[pattern.source_slot].table_oid,
+                allowed_node_ids: source_id_equalities(plan.predicate.as_ref(), source_side),
+            });
+        }
+        bound_by_prior_pattern.insert(pattern.source_slot);
+        bound_by_prior_pattern.insert(pattern.target_slot);
+    }
+    scopes
+}
+
+fn source_id_equalities(
+    predicate: Option<&Predicate>,
+    side: BindingSide,
+) -> Option<std::collections::BTreeSet<String>> {
+    let predicate = predicate?;
+    match predicate {
+        Predicate::And(lhs, rhs) => {
+            let lhs = source_id_equalities(Some(lhs), side);
+            let rhs = source_id_equalities(Some(rhs), side);
+            match (lhs, rhs) {
+                (Some(lhs), Some(rhs)) => Some(lhs.intersection(&rhs).cloned().collect()),
+                (Some(ids), None) | (None, Some(ids)) => Some(ids),
+                (None, None) => None,
+            }
+        }
+        Predicate::Or(lhs, rhs) => {
+            let lhs = source_id_equalities(Some(lhs), side);
+            let rhs = source_id_equalities(Some(rhs), side);
+            match (lhs, rhs) {
+                (Some(mut lhs), Some(rhs)) => {
+                    lhs.extend(rhs);
+                    Some(lhs)
+                }
+                _ => None,
+            }
+        }
+        Predicate::Compare {
+            lhs,
+            op: BoundCmpOp::Eq,
+            rhs: Some(rhs),
+        } => literal_id_equality(lhs, rhs, side).or_else(|| literal_id_equality(rhs, lhs, side)),
+        _ => None,
+    }
+}
+
+fn literal_id_equality(
+    property_expr: &ValueExpr,
+    value_expr: &ValueExpr,
+    side: BindingSide,
+) -> Option<std::collections::BTreeSet<String>> {
+    let ValueExpr::Property {
+        side: property_side,
+        property,
+    } = property_expr
+    else {
+        return None;
+    };
+    if *property_side != side || property != "id" {
+        return None;
+    }
+    let ValueExpr::Literal(serde_json::Value::String(node_id)) = value_expr else {
+        return None;
+    };
+    Some(std::collections::BTreeSet::from([node_id.clone()]))
 }
 
 fn expand_targets(

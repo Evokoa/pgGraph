@@ -327,3 +327,14 @@
 - `cargo test --features pg17` from `graph/`: passed, 506 tests, 1 ignored.
 - `cargo pgrx test --features "pg17 development" gql_set_property_updates_source_row_and_filter_index` from `graph/`: passed, 1 pgrx test.
 - `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_write_recheck ./graph/tests/heavy/gql_write_recheck_race.sh` from repository root: passed after running with sandbox escalation so `cargo pgrx install` could copy the extension into the Homebrew PostgreSQL extension directory. The two-session races confirm stale `SET` predicates, tenant-scope drift, and stale `DETACH DELETE` predicates fail after the final row-lock re-check instead of overwriting or deleting concurrent committed source-row changes.
+
+## 2026-06-04 GQL Transaction-Created Traversal Policy Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 transaction_created_node` from `graph/`: passed, 5 tests. Confirms node-only reads still see transaction-created nodes while concrete traversal, multi-pattern joins, and wildcard paths reject matching transaction-created entry points.
+- `cargo test --features pg17 excluded_by_source_id` from `graph/`: passed, 3 tests. Confirms literal source-id predicates do not reject unrelated transaction-created rows in the same source table, including unlabeled wildcard source scans.
+- `cargo test --features pg17 source_id` from `graph/`: passed, 5 tests. Confirms contradictory source-id predicates do not over-reject transaction-created rows, while source-id disjunctions still reject matching transaction-created rows.
+- `cargo test --features pg17 bound_later_source_slots` from `graph/`: passed, 1 test. Confirms non-optional multi-pattern joins do not reject transaction-created rows for later source slots already bound by an earlier materialized hop.
+- `cargo pgrx test --features "pg17 development" gql_rejects_transaction_created_node_traversal_entry_points` from `graph/`: passed, 1 pgrx test. Confirms the typed rejection reaches `graph.gql()` after a GQL `CREATE` records a transaction-local node delta, while a materialized source-id traversal remains allowed.
+- `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.

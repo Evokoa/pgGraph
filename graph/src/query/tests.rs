@@ -4576,6 +4576,210 @@ fn executor_node_scan_keeps_unscoped_transaction_nodes_for_nontenanted_tables() 
 }
 
 #[test]
+fn executor_rejects_transaction_created_node_traversal_entry_points() {
+    crate::projection::tx_delta::clear_for_test();
+    let physical = lower(bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c",
+    ));
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+
+    let err = execute(&engine, &physical, None).unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err
+        .to_string()
+        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn executor_allows_transaction_created_nodes_outside_traversal_scope() {
+    crate::projection::tx_delta::clear_for_test();
+    let physical = lower(bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c",
+    ));
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(20, "c3", None).expect("record tx node");
+
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    assert_eq!(rows.len(), 2);
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn executor_allows_unrelated_transaction_created_nodes_excluded_by_source_id() {
+    crate::projection::tx_delta::clear_for_test();
+    let physical = lower(bind_query(
+        "MATCH (u:users {id: 'u1'})-[:works_at]->(c:companies) RETURN u, c",
+    ));
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    assert_eq!(rows.len(), 2);
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn executor_allows_tx_nodes_excluded_by_contradictory_source_ids() {
+    crate::projection::tx_delta::clear_for_test();
+    let physical = lower(bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE u.id = 'u1' AND u.id = 'u2' \
+         RETURN u, c",
+    ));
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u1", None).expect("record tx node");
+
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    assert_eq!(rows.len(), 2);
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn executor_rejects_tx_nodes_matching_source_id_disjunctions() {
+    crate::projection::tx_delta::clear_for_test();
+    let physical = lower(bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE u.id = 'u1' OR u.id = 'u2' \
+         RETURN u, c",
+    ));
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u2", None).expect("record tx node");
+
+    let err = execute(&engine, &physical, None).unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err
+        .to_string()
+        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn multi_pattern_join_rejects_transaction_created_node_entry_points() {
+    crate::projection::tx_delta::clear_for_test();
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         RETURN u, v, c",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+
+    let err = execute_join(&engine, &physical, None).unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err
+        .to_string()
+        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn multi_pattern_join_allows_tx_nodes_for_bound_later_source_slots() {
+    crate::projection::tx_delta::clear_for_test();
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (c)<-[:works_at]-(v:users) \
+         RETURN u, v, c",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(20, "c3", None).expect("record tx node");
+
+    let rows = execute_join(&engine, &physical, None).unwrap();
+
+    assert_eq!(rows.len(), 2);
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn wildcard_path_rejects_transaction_created_node_entry_points() {
+    crate::projection::tx_delta::clear_for_test();
+    let statement = bind_statement_query("MATCH p=(u:users)-[]->() RETURN p, u");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+
+    let err = execute_wildcard_path(&engine, &physical, None).unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err
+        .to_string()
+        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn wildcard_path_allows_unrelated_tx_nodes_excluded_by_source_id() {
+    crate::projection::tx_delta::clear_for_test();
+    let statement = bind_statement_query("MATCH p=(u:users)-[]->() WHERE u.id = 'u1' RETURN p, u");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+
+    assert_eq!(rows.len(), 2);
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
+fn unlabeled_wildcard_path_allows_unrelated_tx_nodes_excluded_by_source_id() {
+    crate::projection::tx_delta::clear_for_test();
+    let statement = bind_statement_query("MATCH p=(u)-[]->() WHERE u.id = 'u1' RETURN p, u");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let engine = engine_fixture();
+    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+
+    assert_eq!(rows.len(), 2);
+    crate::projection::tx_delta::clear_for_test();
+}
+
+#[test]
 fn node_scan_projection_filters_inline_predicates() {
     let ast =
         crate::gql::parse_statement("MATCH (u:users {name: 'Ada'}) RETURN u.name AS name").unwrap();

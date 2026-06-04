@@ -374,7 +374,10 @@ the matched GQL predicate before mutating. If another transaction changes the
 source row so the predicate no longer matches, the statement fails instead of
 overwriting the concurrent change.
 Within the same transaction, node-only `MATCH` queries can read newly created
-nodes through the backend-local transaction delta. `SET` updates registered
+nodes through the backend-local transaction delta. Relationship traversal,
+multi-pattern joins, and wildcard path reads reject transaction-created nodes
+when they would be used as traversal entry points because those rows do not yet
+have temporary graph node indexes for path expansion. `SET` updates registered
 non-key, non-tenant property columns and refreshes any registered typed filter index value
 for that backend. `REMOVE` sets a mapped scalar column to SQL `NULL` or removes
 a registered dotted key from a JSONB property column; repeated `REMOVE` calls

@@ -290,7 +290,7 @@ Undirected wildcard matching can see the same stored edge from both forward and 
 
 Wildcard expansion must merge base CSR edges and transaction overlay edges the same way existing concrete traversal does. Deleted nodes and deleted edges must remain hidden.
 
-Transaction-created node entry points remain a known policy gap. Phase 1 must include a test proving either the typed rejection behavior or the implemented temporary-ID traversal behavior.
+Transaction-created node entry points use the typed rejection policy as of 2026-06-04. Node-only GQL reads can see transaction-created rows, but concrete traversal, multi-pattern join, and wildcard path entry-point scans reject matching transaction-created nodes until temporary-ID traversal support exists.
 
 ### Scope Drift
 

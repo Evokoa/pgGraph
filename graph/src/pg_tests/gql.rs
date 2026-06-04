@@ -1876,6 +1876,106 @@ fn gql_create_node_inserts_mapped_row_and_records_delta() {
 }
 
 #[pg_test]
+fn gql_rejects_transaction_created_node_traversal_entry_points() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add friend edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (node_match_count, materialized_match_count, relationship_error, wildcard_error) =
+        Spi::connect(|client| {
+        client
+            .select(
+                "SELECT *
+                 FROM graph.gql(
+                    'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("gql create failed");
+        let node_match_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u3''}) RETURN u',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("node scan query failed")
+            .first()
+            .get::<i64>(1)
+            .expect("node scan count read failed")
+            .unwrap_or_default();
+        let materialized_match_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[:friend]->(v:graph_test_users_pgtest) RETURN u, v',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("materialized traversal query failed")
+            .first()
+            .get::<i64>(1)
+            .expect("materialized traversal count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((
+            node_match_count,
+            materialized_match_count,
+            sql_error_message(
+                "SELECT *
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest) RETURN u, v',
+                    hydrate := false
+                 )",
+            )
+            .unwrap_or_default(),
+            sql_error_message(
+                "SELECT *
+                 FROM graph.gql(
+                    'MATCH p=(u:graph_test_users_pgtest)-[]->() RETURN p, u',
+                    hydrate := false
+                 )",
+            )
+            .unwrap_or_default(),
+        ))
+        })
+        .expect("transaction-created traversal verification failed");
+
+    assert_eq!(node_match_count, 1);
+    assert_eq!(materialized_match_count, 1);
+    assert!(relationship_error
+        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    assert!(wildcard_error
+        .contains("transaction-created nodes cannot be used as traversal entry points"));
+}
+
+#[pg_test]
 fn gql_merge_node_inserts_then_updates_mapped_row() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
