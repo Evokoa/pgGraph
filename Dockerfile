@@ -1,7 +1,7 @@
 FROM rust:1.95.0-bookworm@sha256:503651ea31e66ecb74623beabde781059a5978df1595a9e8ed03974d5fec1bf0 AS builder
 
 ARG PG_MAJOR=17
-ARG PGRX_VERSION=0.18.0
+ARG PGRX_VERSION=0.18.1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

@@ -190,12 +190,12 @@ Rust/pgrx extension, building from source requires the Rust toolchain.
 
 - PostgreSQL development headers and `pg_config`
 - Rust toolchain (`1.95`, pinned by `graph/rust-toolchain.toml`)
-- `cargo-pgrx` 0.18.0
+- `cargo-pgrx` 0.18.1
 
 ### Install with pgxn-client
 
 ```bash
-cargo install cargo-pgrx --version 0.18.0 --locked
+cargo install cargo-pgrx --version 0.18.1 --locked
 # Register the installed PostgreSQL with pgrx (auto-detects the major):
 PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
 cargo pgrx init --pg${PG_MAJOR}="$(which pg_config)"

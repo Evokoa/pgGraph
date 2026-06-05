@@ -16,11 +16,10 @@
 
 mod graph_gen;
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use graph::bench_support::*;
 use std::collections::{HashMap, HashSet};
+use std::hint::black_box;
 use std::time::Duration;
 
 // ─── Scale parameters approximating Panama Papers size ───

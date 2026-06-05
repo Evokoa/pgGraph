@@ -169,12 +169,12 @@ pgGraph 在 PGXN 上以源码分发包的形式提供。因为 pgGraph 是一个
 
 - PostgreSQL 开发头文件和 `pg_config`
 - Rust 工具链（`1.95`，由 `graph/rust-toolchain.toml` 锁定）
-- `cargo-pgrx` 0.18.0
+- `cargo-pgrx` 0.18.1
 
 ### 使用 pgxn-client 安装
 
 ```bash
-cargo install cargo-pgrx --version 0.18.0 --locked
+cargo install cargo-pgrx --version 0.18.1 --locked
 # 用 pgrx 注册已安装的 PostgreSQL（自动识别主版本）：
 PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
 cargo pgrx init --pg${PG_MAJOR}="$(which pg_config)"

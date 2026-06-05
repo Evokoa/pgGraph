@@ -368,3 +368,21 @@
 - `cargo pgrx test --features "pg17 development" gql_set_property_readonly_projection_reports_sqlstate` from `graph/`: passed, 1 pgrx test. Confirms readonly mapped `SET` rejects through the client-visible unsupported-operation SQLSTATE `PG018`.
 - `cargo pgrx test --features "pg17 development" gql_set_property_type_mismatch_does_not_mutate_source_row` from `graph/`: passed, 1 pgrx test. Confirms mapped `SET` type mismatches still leave the source row unchanged.
 - `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
+
+## 2026-06-05 Dependency Refresh Slice
+
+- `python3 scripts/check_dependency_updates.py` from repository root with network access: reported updates for `pgrx`, `pgrx-tests`, `roaring`, `serde_json`, `criterion`, `libfuzzer-sys`, `streamlit`, `psycopg`, `bincode`, `nixpkgs`, and `rust-overlay`.
+- `python3 scripts/check_dependency_updates.py --update cargo:pgrx --update cargo:pgrx-tests --update cargo:roaring --update cargo:serde_json --update cargo:criterion --update cargo:libfuzzer-sys --update pypi:streamlit --update pypi:psycopg --yes` from repository root with network access: updated supported Cargo and PyPI manifest pins.
+- `sfw cargo update` from `graph/`: passed. Refreshed `graph/Cargo.lock` through the safety wrapper.
+- `sfw cargo update` from `graph/fuzz/`: passed. Refreshed `graph/fuzz/Cargo.lock` through the safety wrapper.
+- `nix flake lock --update-input nixpkgs --update-input rust-overlay` from repository root: blocked because `nix` is not installed in this environment.
+- Updated `cargo-pgrx` documentation and Docker build arg references from `0.18.0` to `0.18.1`.
+- `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
+- `scripts/check_docs_drift.sh` from repository root: passed.
+- `cargo tree -d --features pg17` from `graph/`: passed after sandbox escalation to unpack newly downloaded crates. Duplicate transitive versions remain from `pgrx`, `criterion`, and platform dependency paths.
+- `cargo deny check` from `graph/`: passed after sandbox escalation. Reported warnings for duplicate transitive versions and an unmatched `BSD-2-Clause` license allowance; advisories, bans, licenses, and sources passed.
+- `bash fuzz/build.sh` from `graph/`: passed after sandbox escalation to fetch `libfuzzer-sys 0.4.13`. The fuzz build emitted the existing dead-code warnings for fuzz-only compilation of `sync_replace_pk` and `sync_delete`.
+- `cargo doc --features pg17 --no-deps` from `graph/`: passed.
+- `cargo bench --features pg17 --no-run` from `graph/`: initially passed with `criterion::black_box` deprecation warnings after the `criterion 0.8.2` update; after switching the benchmark to `std::hint::black_box`, rerun passed without warnings.
+- `cargo fmt --check` from `graph/`: passed after the benchmark import update.
+- Follow-up `python3 scripts/check_dependency_updates.py` from repository root with network access: all supported Cargo, PyPI, and Docker pins are current. Remaining reported items are `bincode 1.3.3 -> 3.0.0`, deferred because it is a persisted artifact format risk, and `nixpkgs`/`rust-overlay`, blocked locally because `nix` is unavailable.
