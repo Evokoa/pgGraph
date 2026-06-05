@@ -1,5 +1,52 @@
 # Measurements
 
+## 2026-06-05 Release Hardening Phase 1 Clippy Slice
+
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 22 tests.
+- `cargo test --features pg17 query::tests::wildcard_path_` from `graph/`: passed, 18 tests.
+- `cargo test --features pg17 query::tests::binder_` from `graph/`: passed, 64 tests.
+- `cargo test --features pg17 sql_facade::admin` from `graph/`: passed, 3 tests.
+- `cargo clippy --features pg17 --all-targets -- -D warnings` from `graph/`: passed.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
+- `cargo doc --features pg17 --no-deps` from `graph/`: passed.
+- `scripts/check_docs_drift.sh` from repository root: passed.
+- `python3 scripts/check_dependency_updates.py` from repository root: completed with the expected deferred updates only: `bincode 1.3.3 -> 3.0.0`, `nixpkgs`, and `rust-overlay`.
+- `cargo pgrx test --features "pg17 development" gql` from `graph/`: passed, 81 tests. The extension build emitted existing dead-code warnings.
+- `cargo tree -d --features pg17` from `graph/`: passed; duplicate transitive versions remain limited to known pgrx/dev-tooling dependency paths.
+- `cargo deny check` from `graph/`: passed with warnings for known duplicate transitive versions and the unmatched `BSD-2-Clause` allowance.
+- `bash fuzz/build.sh` from `graph/`: passed; the library build emitted existing dead-code warnings.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta ./tests/heavy/tx_delta_lifecycle.sh` from `graph/`: passed.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_merge_race ./tests/heavy/gql_merge_race.sh` from `graph/`: passed.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_write_recheck ./tests/heavy/gql_write_recheck_race.sh` from `graph/`: passed after rerunning with extension-install filesystem approval.
+- `cargo pgrx test --features "pg17 development"` from `graph/`: passed, 683 tests, 1 ignored. The build emitted existing dead-code warnings.
+
+## 2026-06-05 Release Hardening Gate Follow-Up
+
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_build_lock ./tests/heavy/build_lock_regression.sh` from `graph/`: initially failed because the slow-build fixture rewired a registered table to a view while trigger sync was active; passed after forcing manual sync mode for that fixture and the concurrent owner build.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_gql_set_tx ./tests/heavy/gql_set_tx_lifecycle.sh` from `graph/`: initially failed because `apply_pending_sync` could materialize uncommitted trigger rows into the backend-local base filter index during a dirty transaction overlay; passed after skipping auto-apply while transaction-local deltas are dirty.
+- `cargo fmt --check` from `graph/`: passed after the rollback fix.
+- `cargo test --features pg17 projection::tx_delta::tests::` from `graph/`: passed, 14 tests.
+- `cargo test --features pg17 filter_index::tests::transaction_filter_update_overrides_base_value` from `graph/`: passed, 1 test.
+- `cargo clippy --features pg17 --all-targets -- -D warnings` from `graph/`: passed after the rollback fix.
+- `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
+- `scripts/check_docs_drift.sh` from repository root: passed.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_gql_delete_tx ./tests/heavy/gql_delete_tx_lifecycle.sh` from `graph/`: passed.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_gql_merge_race ./tests/heavy/gql_merge_race.sh` from `graph/`: passed.
+- `PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh` from `graph/`: passed. This includes docs, unit tests, pgrx tests, deny/fuzz/package validation, install/metadata/ACL/backup/lock/concurrency/synthetic/playground/pgbench checks, and GQL transaction lifecycle/race checks.
+- `cargo update -p bincode --precise 2.0.1` from `graph/`: updated bincode from `1.3.3` to the latest usable major release. `bincode 3.0.0` was tested and rejected because the published crate contains a top-level compile error.
+- `.pggraph` format version remains bumped to `2`; the bincode 2 migration deliberately requires old derived artifacts to be regenerated with `SELECT graph.build()`.
+- `python3 scripts/check_dependency_updates.py` from repository root: `bincode` is OK at `2.0.1`; remaining reported updates are `nixpkgs` and `rust-overlay`.
+- `cargo fmt --check` from `graph/`: passed after the bincode 2 migration.
+- `cargo test --features pg17 persistence::tests::` from `graph/`: passed, 27 tests.
+- `cargo clippy --features pg17 --all-targets -- -D warnings` from `graph/`: passed.
+- `cargo test --features pg17` from `graph/`: passed, 516 tests, 1 ignored.
+- `scripts/check_docs_drift.sh` from repository root: passed.
+- `cargo pgrx test --features "pg17 development"` from `graph/`: passed, 683 tests, 1 ignored. The build emitted existing dead-code warnings.
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_bincode_fresh ./tests/heavy/fresh_install_smoke.sh` from `graph/`: passed.
+- `PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh` from `graph/`: passed after the bincode 2 metadata-format migration. This includes docs, clippy, unit tests, pgrx tests, deny/fuzz/package validation, install/metadata/ACL/backup/lock/concurrency/synthetic/playground/pgbench checks, and GQL transaction lifecycle/race checks.
+
 ## 2026-06-02 Phase 1 Parser Slice
 
 - `cargo fmt` from `graph/`: passed.

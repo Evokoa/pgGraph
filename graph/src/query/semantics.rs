@@ -273,26 +273,31 @@ fn bind_join_read(
     let mut value_by_var = std::collections::HashMap::new();
     let with_clauses = bind_join_with_clauses(
         &query.with_,
-        &node_slots,
-        &mut slot_by_var,
-        &mut property_by_var,
-        &mut value_by_var,
-        &mut rel_slots,
-        &mut rel_by_var,
-        &mut path_slots,
-        &mut path_by_var,
+        &mut JoinWithState {
+            node_slots: &node_slots,
+            slot_by_var: &mut slot_by_var,
+            property_by_var: &mut property_by_var,
+            value_by_var: &mut value_by_var,
+            rel_slots: &mut rel_slots,
+            rel_by_var: &mut rel_by_var,
+            path_slots: &mut path_slots,
+            path_by_var: &mut path_by_var,
+        },
     )?;
     let returns = bind_join_returns(
         &query.return_.items,
-        &node_slots,
-        &slot_by_var,
-        &property_by_var,
-        &value_by_var,
-        &rel_by_var,
-        &path_by_var,
-        &mut rel_slots,
-        &mut path_slots,
-        with_clauses.has_aggregate_projection,
+        &mut JoinBindingScope {
+            lookup: JoinLookupScope {
+                node_slots: &node_slots,
+                slot_by_var: &slot_by_var,
+                property_by_var: &property_by_var,
+                value_by_var: &value_by_var,
+                rel_by_var: &rel_by_var,
+                path_by_var: &path_by_var,
+            },
+            rel_slots: &mut rel_slots,
+            path_slots: &mut path_slots,
+        },
     )?;
     let order_by = bind_join_sort_items(
         &query.order_by,
@@ -694,14 +699,7 @@ fn returned_join_property_binding<'a>(
 
 fn bind_join_with_clauses(
     clauses: &[WithClause],
-    node_slots: &[LogicalJoinNodeSlot],
-    slot_by_var: &mut std::collections::HashMap<String, usize>,
-    property_by_var: &mut std::collections::HashMap<String, (usize, String)>,
-    value_by_var: &mut std::collections::HashMap<String, ReturnBinding>,
-    rel_slots: &mut Vec<LogicalJoinRelSlot>,
-    rel_by_var: &mut std::collections::HashMap<String, usize>,
-    path_slots: &mut Vec<LogicalJoinPathSlot>,
-    path_by_var: &mut std::collections::HashMap<String, usize>,
+    state: &mut JoinWithState<'_>,
 ) -> Result<JoinWithClauses, GqlError> {
     let mut distinct_stages = Vec::new();
     let mut post_aggregate_distinct_stages = Vec::new();
@@ -716,14 +714,18 @@ fn bind_join_with_clauses(
         if clause.distinct && !has_direct_aggregate {
             let stage = bind_join_distinct_stage(
                 &clause.items,
-                node_slots,
-                slot_by_var,
-                property_by_var,
-                value_by_var,
-                rel_slots,
-                rel_by_var,
-                path_slots,
-                path_by_var,
+                &mut JoinBindingScope {
+                    lookup: JoinLookupScope {
+                        node_slots: state.node_slots,
+                        slot_by_var: state.slot_by_var,
+                        property_by_var: state.property_by_var,
+                        value_by_var: state.value_by_var,
+                        rel_by_var: state.rel_by_var,
+                        path_by_var: state.path_by_var,
+                    },
+                    rel_slots: state.rel_slots,
+                    path_slots: state.path_slots,
+                },
             )?;
             if has_aggregate_projection {
                 post_aggregate_distinct_stages.push(stage);
@@ -733,14 +735,18 @@ fn bind_join_with_clauses(
         }
         let next = bind_join_projection_scope(
             &clause.items,
-            node_slots,
-            slot_by_var,
-            property_by_var,
-            value_by_var,
-            rel_slots,
-            rel_by_var,
-            path_slots,
-            path_by_var,
+            &mut JoinBindingScope {
+                lookup: JoinLookupScope {
+                    node_slots: state.node_slots,
+                    slot_by_var: state.slot_by_var,
+                    property_by_var: state.property_by_var,
+                    value_by_var: state.value_by_var,
+                    rel_by_var: state.rel_by_var,
+                    path_by_var: state.path_by_var,
+                },
+                rel_slots: state.rel_slots,
+                path_slots: state.path_slots,
+            },
         )?;
         if next.has_new_aggregate_projection {
             if has_aggregate_projection {
@@ -754,21 +760,21 @@ fn bind_join_with_clauses(
             aggregate_group_slots.extend(next.aggregate_group_slots.clone());
         }
         if has_aggregate_projection {
-            slot_by_var.clear();
-            property_by_var.clear();
-            *value_by_var = if next.has_new_aggregate_projection {
+            state.slot_by_var.clear();
+            state.property_by_var.clear();
+            *state.value_by_var = if next.has_new_aggregate_projection {
                 projected_value_scope(&next.projection_slots)
             } else {
                 projected_alias_scope(&next.projection_slots)
             };
-            rel_by_var.clear();
-            path_by_var.clear();
+            state.rel_by_var.clear();
+            state.path_by_var.clear();
         } else {
-            *slot_by_var = next.nodes;
-            *property_by_var = next.properties;
-            *value_by_var = next.values;
-            *rel_by_var = next.relationships;
-            *path_by_var = next.paths;
+            *state.slot_by_var = next.nodes;
+            *state.property_by_var = next.properties;
+            *state.value_by_var = next.values;
+            *state.rel_by_var = next.relationships;
+            *state.path_by_var = next.paths;
         }
     }
     Ok(JoinWithClauses {
@@ -778,6 +784,33 @@ fn bind_join_with_clauses(
         aggregate_group_slots,
         has_aggregate_projection,
     })
+}
+
+struct JoinWithState<'a> {
+    node_slots: &'a [LogicalJoinNodeSlot],
+    slot_by_var: &'a mut std::collections::HashMap<String, usize>,
+    property_by_var: &'a mut std::collections::HashMap<String, (usize, String)>,
+    value_by_var: &'a mut std::collections::HashMap<String, ReturnBinding>,
+    rel_slots: &'a mut Vec<LogicalJoinRelSlot>,
+    rel_by_var: &'a mut std::collections::HashMap<String, usize>,
+    path_slots: &'a mut Vec<LogicalJoinPathSlot>,
+    path_by_var: &'a mut std::collections::HashMap<String, usize>,
+}
+
+#[derive(Clone, Copy)]
+struct JoinLookupScope<'a> {
+    node_slots: &'a [LogicalJoinNodeSlot],
+    slot_by_var: &'a std::collections::HashMap<String, usize>,
+    property_by_var: &'a std::collections::HashMap<String, (usize, String)>,
+    value_by_var: &'a std::collections::HashMap<String, ReturnBinding>,
+    rel_by_var: &'a std::collections::HashMap<String, usize>,
+    path_by_var: &'a std::collections::HashMap<String, usize>,
+}
+
+struct JoinBindingScope<'a> {
+    lookup: JoinLookupScope<'a>,
+    rel_slots: &'a mut Vec<LogicalJoinRelSlot>,
+    path_slots: &'a mut Vec<LogicalJoinPathSlot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -830,14 +863,7 @@ fn projected_alias_scope(
 
 fn bind_join_distinct_stage(
     items: &[ReturnItem],
-    node_slots: &[LogicalJoinNodeSlot],
-    slot_by_var: &std::collections::HashMap<String, usize>,
-    property_by_var: &std::collections::HashMap<String, (usize, String)>,
-    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
-    rel_slots: &mut Vec<LogicalJoinRelSlot>,
-    rel_by_var: &std::collections::HashMap<String, usize>,
-    path_slots: &mut Vec<LogicalJoinPathSlot>,
-    path_by_var: &std::collections::HashMap<String, usize>,
+    scope: &mut JoinBindingScope<'_>,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut stage = Vec::with_capacity(items.len());
@@ -848,15 +874,7 @@ fn bind_join_distinct_stage(
                 "aggregate WITH DISTINCT projections require grouped row streams from a later read phase",
             ));
         }
-        let (name, binding) = bind_join_with_item(
-            item,
-            node_slots,
-            slot_by_var,
-            property_by_var,
-            value_by_var,
-            rel_by_var,
-            path_by_var,
-        )?;
+        let (name, binding) = bind_join_with_item(item, scope.lookup)?;
         if binding.is_aggregate() {
             return Err(GqlError::unsupported(
                 item.span,
@@ -869,7 +887,7 @@ fn bind_join_distinct_stage(
                 format!("duplicate return name `{name}`"),
             ));
         }
-        register_join_with_alias(&name, &binding, rel_slots, path_slots);
+        register_join_with_alias(&name, &binding, scope.rel_slots, scope.path_slots);
         stage.push(binding.into_return_binding(name));
     }
     Ok(stage)
@@ -877,14 +895,7 @@ fn bind_join_distinct_stage(
 
 fn bind_join_projection_scope(
     items: &[ReturnItem],
-    node_slots: &[LogicalJoinNodeSlot],
-    slot_by_var: &std::collections::HashMap<String, usize>,
-    property_by_var: &std::collections::HashMap<String, (usize, String)>,
-    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
-    rel_slots: &mut Vec<LogicalJoinRelSlot>,
-    rel_by_var: &std::collections::HashMap<String, usize>,
-    path_slots: &mut Vec<LogicalJoinPathSlot>,
-    path_by_var: &std::collections::HashMap<String, usize>,
+    scope: &mut JoinBindingScope<'_>,
 ) -> Result<JoinProjectionScope, GqlError> {
     let has_aggregate = items
         .iter()
@@ -897,15 +908,7 @@ fn bind_join_projection_scope(
     let mut projection_slots = Vec::with_capacity(items.len());
     let mut aggregate_group_slots = Vec::new();
     for item in items {
-        let (name, binding) = bind_join_with_item(
-            item,
-            node_slots,
-            slot_by_var,
-            property_by_var,
-            value_by_var,
-            rel_by_var,
-            path_by_var,
-        )?;
+        let (name, binding) = bind_join_with_item(item, scope.lookup)?;
         if nodes.contains_key(&name)
             || properties.contains_key(&name)
             || values.contains_key(&name)
@@ -917,7 +920,7 @@ fn bind_join_projection_scope(
                 format!("duplicate return name `{name}`"),
             ));
         }
-        register_join_with_alias(&name, &binding, rel_slots, path_slots);
+        register_join_with_alias(&name, &binding, scope.rel_slots, scope.path_slots);
         let projection_slot = binding.clone().into_return_binding(name.clone());
         if has_aggregate && !binding.is_aggregate() {
             aggregate_group_slots.push(projection_slot.clone());
@@ -1035,27 +1038,22 @@ fn register_join_with_alias(
 
 fn bind_join_with_item(
     item: &ReturnItem,
-    node_slots: &[LogicalJoinNodeSlot],
-    slot_by_var: &std::collections::HashMap<String, usize>,
-    property_by_var: &std::collections::HashMap<String, (usize, String)>,
-    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
-    rel_by_var: &std::collections::HashMap<String, usize>,
-    path_by_var: &std::collections::HashMap<String, usize>,
+    scope: JoinLookupScope<'_>,
 ) -> Result<(String, JoinWithBinding), GqlError> {
     let binding = match &item.expr {
         ReturnExpr::Var { var, .. } => {
-            if let Some(slot) = slot_by_var.get(&var.text).copied() {
+            if let Some(slot) = scope.slot_by_var.get(&var.text).copied() {
                 JoinWithBinding::Node(slot)
-            } else if let Some((slot, property)) = property_by_var.get(&var.text) {
+            } else if let Some((slot, property)) = scope.property_by_var.get(&var.text) {
                 JoinWithBinding::Property {
                     slot: *slot,
                     property: property.clone(),
                 }
-            } else if let Some(binding) = value_by_var.get(&var.text) {
+            } else if let Some(binding) = scope.value_by_var.get(&var.text) {
                 JoinWithBinding::Value(binding.clone())
-            } else if let Some(slot) = rel_by_var.get(&var.text).copied() {
+            } else if let Some(slot) = scope.rel_by_var.get(&var.text).copied() {
                 JoinWithBinding::Relationship(slot)
-            } else if let Some(slot) = path_by_var.get(&var.text).copied() {
+            } else if let Some(slot) = scope.path_by_var.get(&var.text).copied() {
                 JoinWithBinding::Path(slot)
             } else {
                 return Err(GqlError::bind(
@@ -1065,18 +1063,18 @@ fn bind_join_with_item(
             }
         }
         ReturnExpr::Property { var, property, .. } => {
-            let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
-                if rel_by_var.contains_key(&var.text) {
+            let slot = scope.slot_by_var.get(&var.text).copied().ok_or_else(|| {
+                if scope.rel_by_var.contains_key(&var.text) {
                     GqlError::unsupported(
                         property.span,
                         "relationship properties over multi-pattern joins require a later phase",
                     )
-                } else if path_by_var.contains_key(&var.text) {
+                } else if scope.path_by_var.contains_key(&var.text) {
                     GqlError::unsupported(
                         property.span,
                         "path properties over multi-pattern joins require a later phase",
                     )
-                } else if property_by_var.contains_key(&var.text) {
+                } else if scope.property_by_var.contains_key(&var.text) {
                     GqlError::bind(
                         var.span,
                         format!("variable `{}` does not bind a node", var.text),
@@ -1085,12 +1083,12 @@ fn bind_join_with_item(
                     GqlError::bind(var.span, format!("unknown WITH variable `{}`", var.text))
                 }
             })?;
-            if !node_slots[slot].properties.contains(&property.text) {
+            if !scope.node_slots[slot].properties.contains(&property.text) {
                 return Err(GqlError::bind(
                     property.span,
                     format!(
                         "unknown property `{}` for label `{}`",
-                        property.text, node_slots[slot].label
+                        property.text, scope.node_slots[slot].label
                     ),
                 ));
             }
@@ -1106,15 +1104,7 @@ fn bind_join_with_item(
             ..
         } => JoinWithBinding::Value(ReturnBinding::Aggregate {
             func: bind_aggregate_func(*func),
-            arg: bind_join_aggregate_arg(
-                *func,
-                arg,
-                node_slots,
-                slot_by_var,
-                value_by_var,
-                rel_by_var,
-                path_by_var,
-            )?,
+            arg: bind_join_aggregate_arg(*func, arg, scope)?,
             distinct: *distinct,
             name: projection_name(item),
         }),
@@ -1126,7 +1116,7 @@ fn bind_join_with_item(
             func_name,
             args,
             *span,
-            path_by_var,
+            scope.path_by_var,
             projection_name(item),
         )?),
     };
@@ -1173,15 +1163,7 @@ fn bind_join_path_function_return(
 
 fn bind_join_returns(
     items: &[ReturnItem],
-    node_slots: &[LogicalJoinNodeSlot],
-    slot_by_var: &std::collections::HashMap<String, usize>,
-    property_by_var: &std::collections::HashMap<String, (usize, String)>,
-    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
-    rel_by_var: &std::collections::HashMap<String, usize>,
-    path_by_var: &std::collections::HashMap<String, usize>,
-    rel_slots: &mut Vec<LogicalJoinRelSlot>,
-    path_slots: &mut Vec<LogicalJoinPathSlot>,
-    _has_aggregate_with_projection: bool,
+    scope: &mut JoinBindingScope<'_>,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut returns = Vec::with_capacity(items.len());
@@ -1189,24 +1171,24 @@ fn bind_join_returns(
         let binding = match &item.expr {
             ReturnExpr::Var { var, .. } => {
                 let name = projection_name(item);
-                if let Some(slot) = slot_by_var.get(&var.text).copied() {
+                if let Some(slot) = scope.lookup.slot_by_var.get(&var.text).copied() {
                     ReturnBinding::Node {
                         side: BindingSide::PathNode(slot),
                         name,
                     }
-                } else if let Some((slot, property)) = property_by_var.get(&var.text) {
+                } else if let Some((slot, property)) = scope.lookup.property_by_var.get(&var.text) {
                     ReturnBinding::Property {
                         side: BindingSide::PathNode(*slot),
                         property: property.clone(),
                         name,
                     }
-                } else if let Some(binding) = value_by_var.get(&var.text) {
+                } else if let Some(binding) = scope.lookup.value_by_var.get(&var.text) {
                     renamed_return_binding(binding.clone(), name)
-                } else if let Some(rel_slot) = rel_by_var.get(&var.text).copied() {
-                    bind_join_relationship_return_alias(&name, rel_slot, rel_slots);
+                } else if let Some(rel_slot) = scope.lookup.rel_by_var.get(&var.text).copied() {
+                    bind_join_relationship_return_alias(&name, rel_slot, scope.rel_slots);
                     ReturnBinding::Relationship { name }
-                } else if let Some(path_slot) = path_by_var.get(&var.text).copied() {
-                    bind_join_path_return_alias(&name, path_slot, path_slots);
+                } else if let Some(path_slot) = scope.lookup.path_by_var.get(&var.text).copied() {
+                    bind_join_path_return_alias(&name, path_slot, scope.path_slots);
                     ReturnBinding::Path { name }
                 } else {
                     return Err(GqlError::bind(
@@ -1216,18 +1198,18 @@ fn bind_join_returns(
                 }
             }
             ReturnExpr::Property { var, property, .. } => {
-                let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
-                    if rel_by_var.contains_key(&var.text) {
+                let slot = scope.lookup.slot_by_var.get(&var.text).copied().ok_or_else(|| {
+                    if scope.lookup.rel_by_var.contains_key(&var.text) {
                         GqlError::unsupported(
                             property.span,
                             "relationship properties over multi-pattern joins require a later phase",
                         )
-                    } else if path_by_var.contains_key(&var.text) {
+                    } else if scope.lookup.path_by_var.contains_key(&var.text) {
                         GqlError::unsupported(
                             property.span,
                             "path properties over multi-pattern joins require a later phase",
                         )
-                    } else if property_by_var.contains_key(&var.text) {
+                    } else if scope.lookup.property_by_var.contains_key(&var.text) {
                         GqlError::bind(
                             var.span,
                             format!("variable `{}` does not bind a node", var.text),
@@ -1239,12 +1221,15 @@ fn bind_join_returns(
                         )
                     }
                 })?;
-                if !node_slots[slot].properties.contains(&property.text) {
+                if !scope.lookup.node_slots[slot]
+                    .properties
+                    .contains(&property.text)
+                {
                     return Err(GqlError::bind(
                         property.span,
                         format!(
                             "unknown property `{}` for label `{}`",
-                            property.text, node_slots[slot].label
+                            property.text, scope.lookup.node_slots[slot].label
                         ),
                     ));
                 }
@@ -1262,15 +1247,7 @@ fn bind_join_returns(
                 ..
             } => ReturnBinding::Aggregate {
                 func: bind_aggregate_func(*func),
-                arg: bind_join_aggregate_arg(
-                    *func,
-                    arg,
-                    node_slots,
-                    slot_by_var,
-                    value_by_var,
-                    rel_by_var,
-                    path_by_var,
-                )?,
+                arg: bind_join_aggregate_arg(*func, arg, scope.lookup)?,
                 distinct: *distinct,
                 name: projection_name(item),
             },
@@ -1282,7 +1259,7 @@ fn bind_join_returns(
                 func_name,
                 args,
                 *span,
-                path_by_var,
+                scope.lookup.path_by_var,
                 projection_name(item),
             )?,
         };
@@ -1300,11 +1277,7 @@ fn bind_join_returns(
 fn bind_join_aggregate_arg(
     func: ast::AggregateFunc,
     arg: &ast::AggregateArg,
-    node_slots: &[LogicalJoinNodeSlot],
-    slot_by_var: &std::collections::HashMap<String, usize>,
-    value_by_var: &std::collections::HashMap<String, ReturnBinding>,
-    rel_by_var: &std::collections::HashMap<String, usize>,
-    path_by_var: &std::collections::HashMap<String, usize>,
+    scope: JoinLookupScope<'_>,
 ) -> Result<AggregateArg, GqlError> {
     match arg {
         ast::AggregateArg::All { span } => {
@@ -1318,7 +1291,7 @@ fn bind_join_aggregate_arg(
             }
         }
         ast::AggregateArg::Var { var, span } => {
-            if let Some(slot) = slot_by_var.get(&var.text).copied() {
+            if let Some(slot) = scope.slot_by_var.get(&var.text).copied() {
                 if aggregate_accepts_value(func) {
                     Ok(AggregateArg::Node(BindingSide::PathNode(slot)))
                 } else {
@@ -1330,7 +1303,7 @@ fn bind_join_aggregate_arg(
                         ),
                     ))
                 }
-            } else if let Some(rel_slot) = rel_by_var.get(&var.text).copied() {
+            } else if let Some(rel_slot) = scope.rel_by_var.get(&var.text).copied() {
                 if aggregate_accepts_value(func) {
                     Ok(AggregateArg::JoinRelationship(rel_slot))
                 } else {
@@ -1342,7 +1315,7 @@ fn bind_join_aggregate_arg(
                         ),
                     ))
                 }
-            } else if let Some(path_slot) = path_by_var.get(&var.text).copied() {
+            } else if let Some(path_slot) = scope.path_by_var.get(&var.text).copied() {
                 if aggregate_accepts_value(func) {
                     Ok(AggregateArg::JoinPath(path_slot))
                 } else {
@@ -1355,7 +1328,7 @@ fn bind_join_aggregate_arg(
                     ))
                 }
             } else if let Some(ReturnBinding::Projected { source, .. }) =
-                value_by_var.get(&var.text)
+                scope.value_by_var.get(&var.text)
             {
                 Ok(AggregateArg::Projected {
                     name: source.clone(),
@@ -1372,13 +1345,13 @@ fn bind_join_aggregate_arg(
             property,
             span: _,
         } => {
-            let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
-                if rel_by_var.contains_key(&var.text) {
+            let slot = scope.slot_by_var.get(&var.text).copied().ok_or_else(|| {
+                if scope.rel_by_var.contains_key(&var.text) {
                     GqlError::unsupported(
                         property.span,
                         "relationship properties over multi-pattern joins require a later phase",
                     )
-                } else if path_by_var.contains_key(&var.text) {
+                } else if scope.path_by_var.contains_key(&var.text) {
                     GqlError::unsupported(
                         property.span,
                         "path properties over multi-pattern joins require a later phase",
@@ -1390,12 +1363,12 @@ fn bind_join_aggregate_arg(
                     )
                 }
             })?;
-            if !node_slots[slot].properties.contains(&property.text) {
+            if !scope.node_slots[slot].properties.contains(&property.text) {
                 return Err(GqlError::bind(
                     property.span,
                     format!(
                         "unknown property `{}` for label `{}`",
-                        property.text, node_slots[slot].label
+                        property.text, scope.node_slots[slot].label
                     ),
                 ));
             }
@@ -1460,11 +1433,13 @@ fn bind_wildcard_path_read(
         tail,
         ..
     } = &query.match_.pattern;
-    let path_var = path_var
-        .as_ref()
-        .expect("caller only routes path-variable patterns")
-        .text
-        .clone();
+    let Some(path_var) = path_var.as_ref() else {
+        return Err(GqlError::unsupported(
+            query.match_.pattern.span,
+            "wildcard path reads require a path variable",
+        ));
+    };
+    let path_var = path_var.text.clone();
     if tail.is_empty() {
         return Err(GqlError::unsupported(
             query.match_.pattern.span,

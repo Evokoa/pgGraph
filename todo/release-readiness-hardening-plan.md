@@ -12,24 +12,29 @@ behavior, new crates, new services, or new architectural boundaries.
 
 ## Current Status
 
-Not release-ready as of 2026-06-05.
+Release-ready as of 2026-06-06 after the post-bincode `pg17` release gate.
 
 Passing local checks:
 
 - `cargo fmt --check` from `graph/`
+- `cargo clippy --features pg17 --all-targets -- -D warnings` from `graph/`
 - `scripts/check_docs_drift.sh` from repository root
 - `cargo test --features pg17` from `graph/`: 516 passed, 1 ignored
 - `cargo doc --features pg17 --no-deps` from `graph/`
 - `git diff --check origin/feat/mutable-graph-projections..HEAD`
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_build_lock ./tests/heavy/build_lock_regression.sh` from `graph/`
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_gql_set_tx ./tests/heavy/gql_set_tx_lifecycle.sh` from `graph/`
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_gql_delete_tx ./tests/heavy/gql_delete_tx_lifecycle.sh` from `graph/`
+- `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_gql_merge_race ./tests/heavy/gql_merge_race.sh` from `graph/`
+- `PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh` from `graph/`: passed after the bincode 2 metadata-format migration
 
-Blocking checks before the dependency refresh:
+Deferred non-blocking items:
 
-- `cargo clippy --features pg17 --all-targets -- -D warnings`
-- `python3 scripts/check_dependency_updates.py`
+- `nixpkgs` and `rust-overlay`: still stale, but blocked locally because `nix`
+  is not installed. This deferral is tracked in `docs/known-issues.mdx`.
 
-The branch is also 41 commits ahead of
-`origin/feat/mutable-graph-projections`, so earlier `v0.1.5` release-gate
-evidence is not sufficient for this HEAD.
+Earlier `v0.1.5` release-gate evidence is not sufficient for this HEAD; use the
+checks recorded above and in `todo/measurements.md`.
 
 ## Constraints
 
@@ -132,13 +137,15 @@ Required checks:
 ## Phase 2: Dependency Update And Supply-Chain Review
 
 Status: partially complete on 2026-06-05. Supported Cargo and PyPI pins were
-updated, lockfiles were refreshed through `sfw cargo update`, pgrx docs were
-aligned to `0.18.1`, and unit/docs/fuzz/deny/bench compile checks passed. The
-remaining dependency items are:
+updated, lockfiles were refreshed, pgrx docs were aligned to `0.18.1`, and
+unit/docs/fuzz/deny/bench compile checks passed. `bincode` moved from `1.3.3`
+to the latest usable major, `2.0.1`, with a deliberate `.pggraph` format version
+bump so old derived artifacts fail closed and are regenerated through
+`SELECT graph.build()`. The published `bincode 3.0.0` crate is intentionally
+skipped because it contains a top-level compile error.
 
-- `bincode 1.3.3 -> 3.0.0`: intentionally deferred until persisted artifact
-  compatibility is designed and tested, or a deliberate artifact format bump is
-  planned.
+The remaining dependency items are:
+
 - `nixpkgs` and `rust-overlay`: blocked in this environment because `nix` is
   not installed.
 
@@ -152,8 +159,8 @@ python3 scripts/check_dependency_updates.py
 
 Expected current update classes:
 
-- Cargo: `pgrx`, `pgrx-tests`, `roaring`, `bincode`, `serde_json`,
-  `criterion`, `libfuzzer-sys`
+- Cargo: `pgrx`, `pgrx-tests`, `roaring`, `serde_json`, `criterion`,
+  `libfuzzer-sys`
 - Python: `streamlit`, `psycopg`
 - GitHub lock inputs: `nixpkgs`, `rust-overlay`
 - Docker: currently OK in the latest observed check
@@ -176,15 +183,11 @@ python3 scripts/check_dependency_updates.py --update pypi:psycopg --yes
 sfw cargo update -p pgrx -p pgrx-tests -p serde_json -p roaring -p libfuzzer-sys
 ```
 
-Review `criterion` and `bincode` before applying:
+Review `criterion` before applying:
 
 - `criterion` `0.5.1 -> 0.8.2` is a dev-dependency major update. Apply if the
   bench harness compiles without large rewrites; otherwise record the deferral
   and reason.
-- `bincode` `1.3.3 -> 3.0.0` is a persisted-format risk. Do not update it as a
-  mechanical bump unless compatibility tests prove current `.pggraph` artifact
-  behavior remains stable or the release intentionally bumps the artifact
-  format and documents rebuild requirements.
 
 ### 2.3 Review Manual Pins
 

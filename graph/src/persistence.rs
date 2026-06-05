@@ -266,6 +266,30 @@ fn length_prefixed_payload<'a>(
     Ok(&mmap[payload_start..end])
 }
 
+fn decode_bincode_section<T, C>(
+    data: &[u8],
+    config: C,
+    section_label: &str,
+    error_label: &str,
+) -> GraphResult<T>
+where
+    T: serde::de::DeserializeOwned,
+    C: bincode::config::Config,
+{
+    let (value, bytes_read) = bincode::serde::decode_from_slice(data, config)
+        .map_err(|e| GraphError::Internal(format!("{}: {}", error_label, e)))?;
+    if bytes_read != data.len() {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "{} bincode payload has {} trailing byte(s)",
+                section_label,
+                data.len() - bytes_read
+            ),
+        });
+    }
+    Ok(value)
+}
+
 fn read_le_array<const N: usize>(mmap: &[u8], offset: usize) -> [u8; N] {
     let end = offset + N;
     let mut bytes = [0u8; N];
@@ -555,14 +579,16 @@ fn write_graph_file_internal(
     }
 
     writer.begin_section(9, None)?;
-    let filter_bytes = bincode::serialize(&engine.filter_index)
+    let bincode_config = bincode::config::standard();
+    let filter_bytes = bincode::serde::encode_to_vec(&engine.filter_index, bincode_config)
         .map_err(|e| GraphError::Internal(format!("FilterIndex serialization failed: {}", e)))?;
     writer.write_length_prefixed_payload(&filter_bytes, "filter index")?;
 
     writer.begin_section(10, None)?;
-    let edge_type_bytes = bincode::serialize(&engine.edge_type_registry).map_err(|e| {
-        GraphError::Internal(format!("edge_type_registry serialization failed: {}", e))
-    })?;
+    let edge_type_bytes = bincode::serde::encode_to_vec(&engine.edge_type_registry, bincode_config)
+        .map_err(|e| {
+            GraphError::Internal(format!("edge_type_registry serialization failed: {}", e))
+        })?;
     writer.write_length_prefixed_payload(&edge_type_bytes, "edge type registry")?;
 
     let file = writer.finish(
@@ -763,14 +789,22 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     // FilterIndex and edge_type_registry are variable-size bincode sections.
     // They are deserialized into backend-local heap rather than kept as
     // mmap-backed stores.
+    let bincode_config = bincode::config::standard();
     let filter_data = length_prefixed_payload(&mmap, &section_ranges, 9, "filter index")?;
-    let filter_index: FilterIndex = bincode::deserialize(filter_data)
-        .map_err(|e| GraphError::Internal(format!("FilterIndex deserialization failed: {}", e)))?;
+    let filter_index: FilterIndex = decode_bincode_section(
+        filter_data,
+        bincode_config,
+        "filter index",
+        "FilterIndex deserialization failed",
+    )?;
 
     let registry_data = length_prefixed_payload(&mmap, &section_ranges, 10, "edge type registry")?;
-    let edge_type_registry: Vec<String> = bincode::deserialize(registry_data).map_err(|e| {
-        GraphError::Internal(format!("edge_type_registry deserialization failed: {}", e))
-    })?;
+    let edge_type_registry: Vec<String> = decode_bincode_section(
+        registry_data,
+        bincode_config,
+        "edge type registry",
+        "edge_type_registry deserialization failed",
+    )?;
     if edge_type_registry
         .first()
         .is_none_or(|label| !label.is_empty())

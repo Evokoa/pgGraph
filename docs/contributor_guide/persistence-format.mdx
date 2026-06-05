@@ -9,7 +9,7 @@ as length-prefixed bincode payloads.
 ```text
 Header, 128 bytes
   magic              4 bytes   "PGGH"
-  version            u32       current version = 1
+  version            u32       current version = 2
   flags              u32       currently 0
   node_count         u32
   edge_count         u32
@@ -25,8 +25,8 @@ Section 5   weights                     empty or edge_count * 4
 Section 6   resolution index            4 + entry_count * 16
 Section 7   primary key offsets         (node_count + 1) * 8
 Section 8   primary key bytes           UTF-8
-Section 9   filter index                u32 length + bincode payload
-Section 10  edge type registry          u32 length + bincode payload
+Section 9   filter index                u32 length + bincode 2 standard payload
+Section 10  edge type registry          u32 length + bincode 2 standard payload
 ```
 
 ## Write Path
@@ -39,8 +39,8 @@ Section 10  edge type registry          u32 length + bincode payload
 4. Aligns fixed-width sections as needed.
 5. Streams primary-key offsets and primary-key bytes in separate passes so the
    writer does not stage the full artifact body in memory.
-6. Serializes `FilterIndex` and edge type registry as length-prefixed metadata
-   sections.
+6. Serializes `FilterIndex` and edge type registry as length-prefixed bincode 2
+   standard metadata sections.
 7. Computes CRC32 incrementally over the payload after the header.
 8. Backpatches header fields and section offsets.
 9. `sync_all()`.
@@ -80,8 +80,8 @@ return Engine
 <Callout type="info">
 The persisted forward graph arrays and resolution section are mmap-backed after
 load. The reverse CSR is not mmap-backed today; it is derived into backend-local
-heap. The bincode sections, including `FilterIndex` and `edge_type_registry`,
-are also deserialized into backend-local heap.
+heap. The bincode 2 standard sections, including `FilterIndex` and
+`edge_type_registry`, are also deserialized into backend-local heap.
 </Callout>
 
 ## Validation Boundaries
@@ -100,6 +100,7 @@ Loader validation rejects:
 | Weights section wrong size | Parallel arrays would diverge |
 | Resolution section malformed | Lookup index invalid |
 | Length-prefixed payload exceeds section | Bincode would read outside section |
+| Bincode payload leaves trailing bytes | Metadata section has ambiguous payload content |
 | CSR offsets not monotonic | Neighbor slices invalid |
 | Final CSR offset not equal to edge count | Missing or extra edges |
 | Target node index out of range | Traversal could index invalid node |
@@ -125,10 +126,15 @@ Engine
 
 ## Compatibility Rules
 
-Any change to fixed section ordering, binary representation, header semantics,
-or bincode payload interpretation should bump the format version and provide a
-clear regeneration path. The current loader rejects non-current versions with an
-incompatible-version error instructing users to rebuild.
+Version 2 deliberately moved the variable metadata sections from bincode 1 to
+bincode 2 standard encoding. Version 1 artifacts are derived state and are not
+read by this loader; users should run `SELECT graph.build()` to regenerate the
+current artifact after upgrading.
+
+Any future change to fixed section ordering, binary representation, header
+semantics, or bincode payload interpretation should bump the format version and
+provide a clear regeneration path. The current loader rejects non-current
+versions with an incompatible-version error instructing users to rebuild.
 
 ## Fuzz Surface
 

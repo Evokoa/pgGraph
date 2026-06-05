@@ -250,6 +250,7 @@ pub(crate) fn ensure_write_capacity(
     additional_edges: usize,
     additional_memory_bytes: usize,
 ) -> GraphResult<()> {
+    ensure_transaction_callbacks_registered();
     let stats = stats();
     enforce_limit(
         "tx_delta_nodes",
@@ -470,6 +471,12 @@ pub(crate) fn register_transaction_callbacks() {
     #[cfg(test)]
     {
         CALLBACKS_REGISTERED.store(true, Ordering::SeqCst);
+    }
+}
+
+fn ensure_transaction_callbacks_registered() {
+    if !CALLBACKS_REGISTERED.load(Ordering::SeqCst) {
+        register_transaction_callbacks();
     }
 }
 

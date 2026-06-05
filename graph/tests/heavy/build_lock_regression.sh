@@ -250,6 +250,7 @@ psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
 SELECT graph.reset();
 SET graph.auto_load = off;
 SET graph.persist_on_build = off;
+SET graph.sync_mode = manual;
 CREATE TABLE public.graph_lock_slow_nodes (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL
@@ -276,7 +277,7 @@ WHERE table_name IN ('graph_lock_slow_nodes', 'public.graph_lock_slow_nodes');
 SQL
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" \
-  -c "SET graph.persist_on_build = on; SET statement_timeout = '30s'; SELECT * FROM graph.build();" \
+  -c "SET graph.sync_mode = 'manual'; SET graph.persist_on_build = on; SET statement_timeout = '30s'; SELECT * FROM graph.build();" \
   >"$WORKDIR/concurrent-owner.log" 2>&1 &
 OWNER_PID=$!
 

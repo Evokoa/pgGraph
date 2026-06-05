@@ -113,6 +113,7 @@ not block use of the current documented SQL surface.
 |---|---|---|---|
 | KI-008 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | Planned refactor | Highest-priority split candidates are `graph/src/pg_tests/gql.rs`, `graph/src/sql_facade/gql.rs`, `graph/src/query/tests.rs`, `graph/src/engine.rs`, `graph/src/query/semantics.rs`, `graph/src/query/value.rs`, `graph/src/bfs.rs`, and `graph/src/gql/parser.rs`. |
 | KI-009 | GQL write weak-path tests can be expanded for more SQLSTATE and rollback scenarios. | Partially hardened | Pgrx coverage now asserts readonly mapped `SET` reports `PG018` and keeps a mapped `SET` type-mismatch source-row preservation guard. Transaction lifecycle scripts still cover mapped `CREATE`, `SET`, and `DELETE` rollback. Additional weak paths should be added close to the code they constrain. |
+| KI-010 | `nixpkgs` and `rust-overlay` lock inputs are stale in environments where `nix` is unavailable. | Deferred tooling refresh | The dependency checker reports these lock inputs, but refreshing them requires a Nix-capable environment to run `nix flake lock --update-input nixpkgs` and `nix flake lock --update-input rust-overlay`, then verify the development shell still exposes the expected Rust, PostgreSQL, and pgrx tooling. |
 
 ## Roadmap-Owned Future Work
 

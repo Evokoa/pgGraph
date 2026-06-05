@@ -663,8 +663,8 @@ impl FilterColumnStorage {
 }
 
 fn serialized_bitmap_size(bitmap: &RoaringBitmap) -> usize {
-    bincode::serialized_size(bitmap)
-        .map(|size| size as usize)
+    bincode::serde::encode_to_vec(bitmap, bincode::config::standard())
+        .map(|bytes| bytes.len())
         .unwrap_or(0)
 }
 

@@ -229,6 +229,13 @@ pub(super) fn ensure_current_graph_for_query(
             ),
         }),
         config::QueryFreshness::ApplyPendingSync => {
+            // Transaction-local overlays already provide read-your-own-writes.
+            // Applying pending sync here would fold uncommitted trigger rows into
+            // the backend-local base projection and make rollback leak until reset.
+            if crate::projection::tx_delta::stats().dirty {
+                return Ok(());
+            }
+
             let high_watermark = max_sync_log_id()?;
             apply_sync_until(Some(high_watermark), config::sync_batch_size())?;
             let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;

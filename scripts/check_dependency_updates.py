@@ -23,6 +23,11 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MIN_AGE_HOURS = 6
+UNSUPPORTED_RELEASES: dict[tuple[str, str], dict[str, str]] = {
+    ("cargo", "bincode"): {
+        "3.0.0": "published crate contains a top-level compile_error",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -246,6 +251,11 @@ def choose_releases(
     dep: Dependency, releases: Iterable[Release], cutoff: dt.datetime
 ) -> tuple[Release | None, Release | None]:
     candidates = list(releases)
+    unsupported = UNSUPPORTED_RELEASES.get((dep.ecosystem, dep.name), {})
+    if unsupported:
+        candidates = [
+            release for release in candidates if release.version not in unsupported
+        ]
     if dep.ecosystem in {"cargo", "pypi"} and not is_prerelease(dep.current):
         candidates = [release for release in candidates if not is_prerelease(release.version)]
     if dep.ecosystem == "docker":

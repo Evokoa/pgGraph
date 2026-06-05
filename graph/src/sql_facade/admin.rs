@@ -53,7 +53,7 @@ pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
 fn registered_table_name(table_oid: u32) -> safety::GraphResult<Option<String>> {
     Spi::connect(|client| {
         let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
-        let result = client
+        let mut result = client
             .select(
                 "SELECT table_name
                     FROM graph._registered_tables
@@ -75,7 +75,7 @@ fn registered_table_name(table_oid: u32) -> safety::GraphResult<Option<String>> 
             .map_err(|err| {
                 safety::GraphError::Internal(format!("registered table lookup failed: {}", err))
             })?;
-        for row in result {
+        if let Some(row) = result.next() {
             return row.get::<String>(1).map_err(|err| {
                 safety::GraphError::Internal(format!(
                     "registered table lookup read failed: {}",

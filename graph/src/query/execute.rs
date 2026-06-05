@@ -479,31 +479,37 @@ pub(crate) fn execute_wildcard_path(
                 continue;
             }
             expand_wildcard_segments(
-                engine,
-                &neighbors,
-                plan,
-                &segment_filters,
-                tenant,
+                &WildcardExpansion {
+                    engine,
+                    neighbors: &neighbors,
+                    plan,
+                    segment_filters: &segment_filters,
+                    tenant,
+                    row_cap,
+                },
                 source_idx,
                 &mut rows,
                 &mut seen_paths,
-                row_cap,
             )?;
         }
     }
     Ok(rows)
 }
 
+struct WildcardExpansion<'a> {
+    engine: &'a Engine,
+    neighbors: &'a GqlNeighbors<'a>,
+    plan: &'a PhysicalWildcardPathPlan,
+    segment_filters: &'a [std::collections::BTreeSet<u8>],
+    tenant: Option<&'a str>,
+    row_cap: usize,
+}
+
 fn expand_wildcard_segments(
-    engine: &Engine,
-    neighbors: &GqlNeighbors<'_>,
-    plan: &PhysicalWildcardPathPlan,
-    segment_filters: &[std::collections::BTreeSet<u8>],
-    tenant: Option<&str>,
+    expansion: &WildcardExpansion<'_>,
     source_idx: u32,
     rows: &mut Vec<GqlRow>,
     seen_paths: &mut std::collections::HashSet<Vec<(u32, u32, u8)>>,
-    row_cap: usize,
 ) -> GraphResult<()> {
     let state = PathState {
         node_idx: source_idx,
@@ -511,16 +517,16 @@ fn expand_wildcard_segments(
         path_relationships: Vec::new(),
     };
     expand_wildcard_segment(
-        engine,
-        neighbors,
-        plan,
-        segment_filters,
-        tenant,
+        expansion.engine,
+        expansion.neighbors,
+        expansion.plan,
+        expansion.segment_filters,
+        expansion.tenant,
         state,
         0,
         rows,
         seen_paths,
-        row_cap,
+        expansion.row_cap,
     )
 }
 
@@ -594,23 +600,23 @@ fn expand_wildcard_segment_hops(
     seen_paths: &mut std::collections::HashSet<Vec<(u32, u32, u8)>>,
     row_cap: usize,
 ) -> GraphResult<()> {
-    if hop_count >= segment.hops.min {
-        if wildcard_segment_endpoint_matches(engine, segment, state.node_idx, tenant) {
-            expand_wildcard_segment(
-                engine,
-                neighbors,
-                plan,
-                segment_filters,
-                tenant,
-                state.clone(),
-                segment_idx + 1,
-                rows,
-                seen_paths,
-                row_cap,
-            )?;
-            if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
-                return Ok(());
-            }
+    if hop_count >= segment.hops.min
+        && wildcard_segment_endpoint_matches(engine, segment, state.node_idx, tenant)
+    {
+        expand_wildcard_segment(
+            engine,
+            neighbors,
+            plan,
+            segment_filters,
+            tenant,
+            state.clone(),
+            segment_idx + 1,
+            rows,
+            seen_paths,
+            row_cap,
+        )?;
+        if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
+            return Ok(());
         }
     }
     if hop_count >= segment.hops.max {

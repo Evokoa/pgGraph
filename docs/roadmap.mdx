@@ -62,7 +62,7 @@ flowchart LR
 | Build observability | Better progress, sizing, and failure diagnostics around `graph.build()` and persisted artifacts. |
 | CI/CD rollout | First gate `cargo fmt --check`, `cargo clippy`, `cargo test`, `cargo doc`, and docs drift checks; next gate `cargo pgrx test`; final gate synthetic/heavy release scripts. |
 | Sync operations | Clearer scheduling, monitoring, and failure handling around trigger-buffered sync and background maintenance jobs. |
-| Artifact tooling | More direct inspection and compatibility checks for persisted graph files. |
+| Artifact tooling | More direct inspection and compatibility checks for persisted graph files, plus a future pgGraph-owned binary encoding for variable metadata sections so artifact compatibility is not tied to serializer crate behavior. |
 | Query ergonomics | More examples around strict traversal specs, typed filters, workflow helpers, and pagination. |
 | Benchmarks | More end-to-end SQL benchmarks that separate PostgreSQL execution, graph traversal, hydration, client overhead, and PostgreSQL SQL/PGQ comparisons as PostgreSQL 19 matures. |
 
