@@ -108,6 +108,13 @@ The builder first tries table-specific endpoint resolution. If needed, it falls
 back to resolving the endpoint primary-key value across registered tables,
 ordered by table OID. Prefer unambiguous primary keys across graph tables.
 
+Junction tables use this same edge-table form. For a table such as
+`public.follows(follower, followee)`, register `from_column := 'follower'` and
+`to_column := 'followee'`. `to_table` is the preferred target node table when
+that table is registered; otherwise endpoint resolution falls back across the
+registered node tables. `to_column` still names the target endpoint column on
+the junction table, not the node table primary-key column.
+
 ## Dynamic Edge Labels
 
 When `label_column` is set, each edge row may provide its own label. Empty or
