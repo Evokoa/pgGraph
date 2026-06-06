@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "generation_id": 1,
+  "previous_generation_id": null,
+  "base_artifact_path": "base.pggraph",
+  "base_artifact_checksum": "xxh3:base",
+  "base_artifact_version": 2,
+  "segments": [],
+  "base_chunks": [],
+  "obsolete_files": [],
+  "sync_watermark": 0,
+  "validation_status": "valid",
+  "created_at_unix_micros": 1
+}

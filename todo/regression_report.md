@@ -47,3 +47,14 @@ decision.
 | Command | `cd graph && cargo test --features pg17 projection::manifest`; `cd graph && cargo check --features pg17`; `python3 scripts/check_doc_references.py` |
 | Result | Publish/load manifest tests, non-test compile, and doc references passed. Full `cargo test --features pg17` is intentionally red with 534 passed, 5 future durable-projection contract failures, and 1 ignored scale test. |
 | Decision | No benchmark comparison required until manifests are loaded by engine status, reads, ingestion, cleanup, or repair paths |
+
+## 2026-06-07: Microphase 3 Complete Segment Format
+
+| Field | Value |
+|---|---|
+| Scope | Delta segment writer/loader, corruption validation, segment contract tests, and fuzz seeds |
+| Code changes | Projection segment artifact codec under test/fuzz/development gates; no traversal/read-path runtime adoption |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo test --features pg17 projection::segment`; `cd graph && cargo test --features pg17 projection::test_contracts`; `cargo check --manifest-path graph/fuzz/Cargo.toml` |
+| Result | Segment tests passed, two segment contract tests turned green, fuzz package compiled with existing sync-helper dead-code warnings. Full `cargo test --features pg17` is intentionally red with 542 passed, 3 future durable-projection contract failures, and 1 ignored scale test. |
+| Decision | No benchmark comparison required until segments are produced by ingestion or consumed by layered reads, compaction, cleanup, or repair paths |

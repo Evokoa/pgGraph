@@ -16,6 +16,7 @@ every backend-local engine.
 | `sql_jobs.rs` | Durable job rows and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
 | `projection/manifest.rs` | Projection manifest metadata and active-generation heartbeats |
+| `projection/segment.rs` | Durable delta segment format for future layered projections |
 
 ## Durable Tables
 
@@ -131,6 +132,13 @@ directory fsync, atomic rename, and final directory fsync. Loaders select the
 highest final `projection-generation-*.json` file, ignore unrelated or temp
 files, then validate the manifest and its active base, segment, and chunk
 references before exposing a generation to later read paths.
+
+Projection segments use a fixed little-endian header with magic bytes, version,
+kind, level, direction coverage, source-node range, sync watermark, section row
+counts, payload offsets, CRC32 checksum, and reserved bytes that must remain
+zero. The loader validates offsets, checksum, row bounds, and section ownership
+before decoding edge topology/delete/weight sections or node, resolution,
+filter, and tenant sections.
 
 Scheduler ownership intentionally stays outside the extension. PostgreSQL
 background-worker lifecycle, crash recovery, privilege boundaries, and cadence

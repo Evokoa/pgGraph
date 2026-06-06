@@ -10,6 +10,10 @@ use super::test_fixtures::{
 };
 use crate::projection::manifest::{ProjectionManifest, VALIDATION_STATUS_VALID};
 use crate::projection::neighbors::CsrNeighbors;
+use crate::projection::segment::{
+    DeltaSegment, SegmentEdge, SegmentEdgeWeight, SegmentFilterValue, SegmentKind,
+    SegmentNodeState, SegmentResolution, SegmentTenant,
+};
 use crate::types::TraversalDirection;
 
 fn production_feature_absent(feature: &str) -> ! {
@@ -41,8 +45,8 @@ fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
     let dir = ProjectionArtifactDir::new(
         "delta_segment_roundtrips_edge_topology_weight_and_delete_sections",
     );
-    let _segment_path = dir.segment_path(1, 0);
-    let _weighted = NormalizedMutation {
+    let segment_path = dir.segment_path(1, 0);
+    let weighted = NormalizedMutation {
         generation_id: 1,
         direction: TraversalDirection::Out,
         source: 0,
@@ -51,12 +55,37 @@ fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
         weight: Some(7),
         tombstone: false,
     };
-    let _delete = NormalizedMutation {
+    let delete = NormalizedMutation {
         tombstone: true,
-        .._weighted.clone()
+        ..weighted.clone()
     };
+    let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 42)
+        .expect("segment constructs");
+    segment.edge_inserts.push(SegmentEdge {
+        source: weighted.source,
+        target: weighted.target,
+        type_id: weighted.type_id,
+    });
+    segment.edge_weights.push(SegmentEdgeWeight {
+        source: weighted.source,
+        target: weighted.target,
+        type_id: weighted.type_id,
+        weight: weighted.weight.expect("fixture has weight"),
+    });
+    segment.edge_deletes.push(SegmentEdge {
+        source: delete.source,
+        target: delete.target,
+        type_id: delete.type_id,
+    });
 
-    production_feature_absent("edge topology, weight, and delete segment sections");
+    segment
+        .write_to_path(&segment_path)
+        .expect("segment writes");
+    let decoded = DeltaSegment::read_from_path(&segment_path).expect("segment reads");
+
+    assert_eq!(decoded.edge_inserts, segment.edge_inserts);
+    assert_eq!(decoded.edge_weights, segment.edge_weights);
+    assert_eq!(decoded.edge_deletes, segment.edge_deletes);
 }
 
 #[test]
@@ -64,9 +93,40 @@ fn delta_segment_roundtrips_node_resolution_filter_tenant_sections() {
     let dir = ProjectionArtifactDir::new(
         "delta_segment_roundtrips_node_resolution_filter_tenant_sections",
     );
-    let _segment_path = dir.segment_path(1, 1);
+    let segment_path = dir.segment_path(1, 1);
+    let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 4, 43)
+        .expect("segment constructs");
+    segment.node_states.push(SegmentNodeState {
+        node_idx: 1,
+        active: true,
+    });
+    segment.resolutions.push(SegmentResolution {
+        table_oid: 100,
+        pk_hash: 7_001,
+        node_idx: 1,
+        tombstone: false,
+    });
+    segment.filters.push(SegmentFilterValue {
+        node_idx: 1,
+        column_id: 2,
+        value: 99,
+        tombstone: false,
+    });
+    segment.tenants.push(SegmentTenant {
+        node_idx: 1,
+        tenant_hash: 8_002,
+        tombstone: true,
+    });
 
-    production_feature_absent("node, resolution, filter, and tenant segment sections");
+    segment
+        .write_to_path(&segment_path)
+        .expect("segment writes");
+    let decoded = DeltaSegment::read_from_path(&segment_path).expect("segment reads");
+
+    assert_eq!(decoded.node_states, segment.node_states);
+    assert_eq!(decoded.resolutions, segment.resolutions);
+    assert_eq!(decoded.filters, segment.filters);
+    assert_eq!(decoded.tenants, segment.tenants);
 }
 
 #[test]

@@ -116,6 +116,23 @@ pub mod fuzz_support {
         crate::parse_node_ref_json_parts(value).is_ok()
     }
 
+    /// Decode a projection segment without touching PostgreSQL. Intended for
+    /// fuzz targets and unit tests.
+    pub fn load_projection_segment(bytes: &[u8]) -> bool {
+        crate::projection::segment::DeltaSegment::from_bytes(bytes).is_ok()
+    }
+
+    /// Return valid projection segment seed bytes for named fuzz corpus tokens.
+    pub fn projection_segment_seed_bytes(name: &str) -> Option<Vec<u8>> {
+        crate::projection::segment::fuzz_seed_bytes(name)
+    }
+
+    /// Decode a projection manifest without touching PostgreSQL. Intended for
+    /// fuzz targets and unit tests.
+    pub fn load_projection_manifest(raw: &str) -> bool {
+        crate::projection::manifest::ProjectionManifest::from_json(raw).is_ok()
+    }
+
     /// Parse a GQL query through the pgrx-free frontend. Intended for fuzz
     /// targets and unit tests.
     pub fn parse_gql_query(query: &str) -> bool {

@@ -66,3 +66,17 @@ path = "fuzz_targets/cypher_parser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "load_projection_segment"
+path = "fuzz_targets/load_projection_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_projection_manifest"
+path = "fuzz_targets/load_projection_manifest.rs"
+test = false
+doc = false
+bench = false
