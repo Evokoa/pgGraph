@@ -1,10 +1,17 @@
-name: Publish Packages
+name: Prepare Or Publish Packages
 
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Prepare builds before release, or publish prepared artifacts after release
+        required: true
+        type: choice
+        options:
+          - prepare
+          - publish
       tag:
-        description: Existing release tag in vX.Y.Z form
+        description: Release tag in vX.Y.Z form
         required: true
         type: string
 
@@ -19,24 +26,33 @@ jobs:
     name: Validate release
     runs-on: ubuntu-latest
     outputs:
+      mode: ${{ steps.release.outputs.mode }}
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
       short_sha: ${{ steps.commit.outputs.short_sha }}
     steps:
-      - name: Resolve release tag
+      - name: Resolve release input
         id: release
         run: |
+          mode="${{ inputs.mode }}"
           tag="${{ inputs.tag }}"
+
+          if [[ "$mode" != "prepare" && "$mode" != "publish" ]]; then
+            echo "Mode must be prepare or publish: $mode" >&2
+            exit 1
+          fi
 
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release tag must use vX.Y.Z form: $tag" >&2
             exit 1
           fi
 
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Verify GitHub Release exists
+        if: steps.release.outputs.mode == 'publish'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -55,29 +71,9 @@ jobs:
         id: commit
         run: echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
 
-  docker-smoke:
-    name: Test Docker image PG${{ matrix.pg }}
-    needs: validate
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        pg: [14, 15, 16, 17, 18]
-    steps:
-      - name: Checkout release tag
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.tag }}
-
-      - name: Smoke test image
-        env:
-          PG_MAJOR: ${{ matrix.pg }}
-          IMAGE: pggraph:release-smoke-pg${{ matrix.pg }}
-          CONTAINER: pggraph-release-smoke-pg${{ matrix.pg }}
-        run: graph/tests/heavy/docker_smoke.sh
-
   pgxn-artifact:
     name: Build PGXN artifact
+    if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-latest
     steps:
@@ -132,10 +128,9 @@ jobs:
 
   approve-publishing:
     name: Approve package publishing
+    if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
-      - docker-smoke
-      - pgxn-artifact
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -144,6 +139,7 @@ jobs:
 
   publish-pgxn:
     name: Publish PGXN package
+    if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
       - approve-publishing
@@ -166,6 +162,7 @@ jobs:
 
   pgxn-verify:
     name: Verify PGXN package
+    if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
       - publish-pgxn
@@ -200,6 +197,7 @@ jobs:
 
   attach-pgxn-artifact:
     name: Attach PGXN artifact to GitHub Release
+    if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
       - approve-publishing
@@ -226,10 +224,10 @@ jobs:
             --clobber
 
   docker:
-    name: Publish Docker image PG${{ matrix.pg }}
+    name: Prepare Docker image PG${{ matrix.pg }}
+    if: needs.validate.outputs.mode == 'prepare'
     needs:
       - validate
-      - approve-publishing
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -265,17 +263,13 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}
-            type=raw,value=pg${{ matrix.pg }}-${{ needs.validate.outputs.version }}
-            type=raw,value=pg${{ matrix.pg }}
             type=raw,value=pg${{ matrix.pg }}-sha-${{ needs.validate.outputs.short_sha }}
-            type=raw,value=${{ needs.validate.outputs.tag }},enable=${{ matrix.pg == 17 }}
-            type=raw,value=${{ needs.validate.outputs.version }},enable=${{ matrix.pg == 17 }}
-            type=raw,value=latest,enable=${{ matrix.pg == 17 }}
-            type=raw,value=sha-${{ needs.validate.outputs.short_sha }},enable=${{ matrix.pg == 17 }}
+            type=raw,value=pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}-prepared
+            type=raw,value=pg${{ matrix.pg }}-${{ needs.validate.outputs.version }}-prepared
           labels: |
             org.opencontainers.image.version=${{ needs.validate.outputs.version }}
             org.opencontainers.image.postgresql.major=${{ matrix.pg }}
+            org.opencontainers.image.revision=${{ needs.validate.outputs.short_sha }}
 
       - name: Build and push
         id: build
@@ -298,7 +292,8 @@ jobs:
           push-to-registry: true
 
   docker-verify:
-    name: Verify published image PG${{ matrix.pg }}
+    name: Verify prepared image PG${{ matrix.pg }}
+    if: needs.validate.outputs.mode == 'prepare'
     needs:
       - validate
       - docker
@@ -318,6 +313,133 @@ jobs:
           password: ${{ github.token }}
 
       - name: Pull and start release image
+        run: |
+          image="${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}-prepared"
+          docker pull "$image"
+          docker run -d --rm \
+            --name pggraph-release-verify-pg${{ matrix.pg }} \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 55432:5432 \
+            "$image"
+
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in {1..60}; do
+            if docker exec pggraph-release-verify-pg${{ matrix.pg }} pg_isready -U postgres >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs pggraph-release-verify-pg${{ matrix.pg }}
+          exit 1
+
+      - name: Verify extensions
+        run: |
+          count="$(docker exec pggraph-release-verify-pg${{ matrix.pg }} \
+            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+            -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"
+
+          if [[ "$count" != "2" ]]; then
+            echo "Expected graph and pg_cron extensions, found $count" >&2
+            docker exec pggraph-release-verify-pg${{ matrix.pg }} \
+              psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+              -c "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
+            exit 1
+          fi
+
+          server_version_num="$(docker exec pggraph-release-verify-pg${{ matrix.pg }} \
+            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+            -tAc "SHOW server_version_num;")"
+
+          if [[ "${server_version_num:0:2}" != "${{ matrix.pg }}" ]]; then
+            echo "Expected PostgreSQL ${{ matrix.pg }}, got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f pggraph-release-verify-pg${{ matrix.pg }} >/dev/null 2>&1 || true
+
+  publish-docker:
+    name: Publish Docker image PG${{ matrix.pg }}
+    if: needs.validate.outputs.mode == 'publish'
+    needs:
+      - validate
+      - approve-publishing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Promote prepared image tags
+        run: |
+          source="${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}-prepared"
+          sha_source="${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-sha-${{ needs.validate.outputs.short_sha }}"
+          docker buildx imagetools inspect "$source" >/dev/null
+          docker buildx imagetools inspect "$sha_source" >/dev/null
+
+          source_digest="$(docker buildx imagetools inspect "$source" | awk '/Digest:/ { print $2; exit }')"
+          sha_digest="$(docker buildx imagetools inspect "$sha_source" | awk '/Digest:/ { print $2; exit }')"
+
+          if [[ "$source_digest" != "$sha_digest" ]]; then
+            echo "Prepared tag digest $source_digest does not match commit tag digest $sha_digest" >&2
+            exit 1
+          fi
+
+          tags=(
+            -t "${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}"
+            -t "${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.version }}"
+            -t "${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}"
+            -t "${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-sha-${{ needs.validate.outputs.short_sha }}"
+          )
+
+          if [[ "${{ matrix.pg }}" == "17" ]]; then
+            tags+=(
+              -t "${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.tag }}"
+              -t "${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.version }}"
+              -t "${{ env.IMAGE_NAME }}:latest"
+              -t "${{ env.IMAGE_NAME }}:sha-${{ needs.validate.outputs.short_sha }}"
+            )
+          fi
+
+          docker buildx imagetools create "${tags[@]}" "$source"
+
+  publish-docker-verify:
+    name: Verify published image PG${{ matrix.pg }}
+    if: needs.validate.outputs.mode == 'publish'
+    needs:
+      - validate
+      - publish-docker
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull and start published image
         run: |
           image="${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}"
           docker pull "$image"
@@ -367,9 +489,10 @@ jobs:
 
   docker-verify-default:
     name: Verify default published image
+    if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
-      - docker
+      - publish-docker
     runs-on: ubuntu-latest
     permissions:
       packages: read
@@ -431,11 +554,12 @@ jobs:
 
   publish-summary:
     name: Publish summary
+    if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
       - pgxn-verify
       - attach-pgxn-artifact
-      - docker-verify
+      - publish-docker-verify
       - docker-verify-default
     runs-on: ubuntu-latest
     steps:
@@ -451,4 +575,27 @@ jobs:
             echo "- Docker: ${{ env.IMAGE_NAME }}:pg16-${{ needs.validate.outputs.tag }}"
             echo "- Docker: ${{ env.IMAGE_NAME }}:pg17-${{ needs.validate.outputs.tag }}"
             echo "- Docker: ${{ env.IMAGE_NAME }}:pg18-${{ needs.validate.outputs.tag }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  prepare-summary:
+    name: Prepare summary
+    if: needs.validate.outputs.mode == 'prepare'
+    needs:
+      - validate
+      - pgxn-artifact
+      - docker-verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize prepared packages
+        run: |
+          {
+            echo "## Prepared packages"
+            echo
+            echo "- Commit: ${{ needs.validate.outputs.short_sha }}"
+            echo "- PGXN workflow artifact: pgxn-source-${{ needs.validate.outputs.version }}"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg14-${{ needs.validate.outputs.tag }}-prepared"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg15-${{ needs.validate.outputs.tag }}-prepared"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg16-${{ needs.validate.outputs.tag }}-prepared"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg17-${{ needs.validate.outputs.tag }}-prepared"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg18-${{ needs.validate.outputs.tag }}-prepared"
           } >> "$GITHUB_STEP_SUMMARY"
