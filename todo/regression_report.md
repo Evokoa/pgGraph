@@ -15,3 +15,13 @@ decision.
 | Result | Baseline captured successfully |
 | Decision | Use `pre_durable_projection` as the comparison baseline until a phase-specific baseline is recorded |
 
+## 2026-06-07: Microphase 0 Test Harness
+
+| Field | Value |
+|---|---|
+| Scope | Test-only fixture helpers and ignored durable-projection contract tests |
+| Code changes | `#[cfg(test)]` projection modules only |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo test --features pg17 projection::` |
+| Result | Passed; ignored contract tests remain out of the default suite |
+| Decision | No benchmark comparison required because no runtime, memory, traversal, SQL, or artifact production code changed |
