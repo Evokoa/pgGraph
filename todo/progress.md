@@ -24,3 +24,39 @@ Microphase 0 started and completed the test-harness checkpoint:
     production feature.
 - Regression report: no runtime or memory-sensitive code changed in this
   checkpoint; existing `pre_durable_projection` baseline remains current.
+
+Microphase 1 implemented the manifest and generation-table checkpoint:
+
+- Added `graph/src/projection/manifest.rs` with the JSON manifest model,
+  validation, pretty JSON encoding/decoding, base-only manifest constructor,
+  segment/chunk/obsolete-file references, and active-generation heartbeat
+  model helpers. Manifest JSON decoding rejects unknown top-level and nested
+  fields so schema/version drift fails closed.
+- Added extension-build SQL helpers for active-generation heartbeat upsert and
+  stale heartbeat expiration. Heartbeat upserts preserve subsecond TTLs and
+  refresh diagnostic `updated_at` metadata on conflict.
+- Added `graph._projection_generations` to the bootstrap SQL with generation,
+  backend PID, database OID, heartbeat, sync watermark, validation, repair,
+  current-generation, retention, and timestamp fields.
+- Updated public contributor docs to describe projection generation metadata as
+  extension-owned operational state while PostgreSQL source tables remain
+  authoritative.
+- Changed durable projection contract tests to run by default. Implemented
+  contracts now pass; future-phase contracts fail normally until their modules
+  exist.
+- Tests run:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 projection::manifest`: passed
+    with 7 manifest/heartbeat tests.
+  - `cd graph && cargo test --features pg17 projection::`: passed before
+    making future contracts default-red.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    expected red; 1 passed, 5 failed for future production features.
+  - `cd graph && cargo test --features pg17`: expected red; 528 passed, 5
+    failed future contracts, 1 ignored scale test.
+  - `git diff --check`: passed.
+- Regression report: no traversal, ingestion, compaction, GC, or runtime
+  read-path code changed; benchmark baseline remains `pre_durable_projection`.

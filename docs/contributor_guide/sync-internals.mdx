@@ -15,6 +15,7 @@ every backend-local engine.
 | `sql_build.rs` | Maintenance rebuild and vacuum orchestration |
 | `sql_jobs.rs` | Durable job rows and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
+| `projection/manifest.rs` | Projection manifest metadata and active-generation heartbeats |
 
 ## Durable Tables
 
@@ -39,6 +40,19 @@ graph._sync_log
 
 graph._sync_buffer
   legacy compatibility buffer
+
+graph._projection_generations
+  generation_id bigint
+  backend_pid integer
+  database_oid oid
+  heartbeat_at timestamptz
+  expires_at timestamptz
+  sync_watermark bigint
+  validation_status text
+  repair_status text
+  is_current boolean
+  published_at timestamptz
+  retained_until timestamptz
 ```
 
 Replay treats `id`, `op`, and `table_name` as required structural fields. The
@@ -104,6 +118,13 @@ combines backend-local replay progress, durable `_sync_log` high-water state,
 freshness configuration, trigger health, projection mode, transaction-delta
 counts, and overlay pressure into one row for external schedulers and
 monitoring checks.
+
+The durable projection metadata table records published generations and the
+backend heartbeats that keep older generations alive while a backend is still
+using them. Cleanup logic can only remove derived projection files after they
+are no longer referenced by retained manifests or unexpired active-generation
+rows. The table is extension-owned operational state; PostgreSQL source tables
+remain the authoritative graph data.
 
 Scheduler ownership intentionally stays outside the extension. PostgreSQL
 background-worker lifecycle, crash recovery, privilege boundaries, and cadence

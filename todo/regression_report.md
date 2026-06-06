@@ -25,3 +25,14 @@ decision.
 | Command | `cd graph && cargo test --features pg17 projection::` |
 | Result | Passed; ignored contract tests remain out of the default suite |
 | Decision | No benchmark comparison required because no runtime, memory, traversal, SQL, or artifact production code changed |
+
+## 2026-06-07: Microphase 1 Manifest And Generation Table
+
+| Field | Value |
+|---|---|
+| Scope | Manifest JSON model, active-generation heartbeat helpers, generation metadata table, and public sync docs |
+| Code changes | Pure manifest metadata plus SQL bootstrap; no traversal/read-path runtime adoption |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo test --features pg17 projection::manifest`; `cd graph && cargo check --features pg17`; `python3 scripts/check_doc_references.py` |
+| Result | Manifest tests, non-test compile, and doc references passed. Full `cargo test --features pg17` is intentionally red with 528 passed, 5 future durable-projection contract failures, and 1 ignored scale test. |
+| Decision | No benchmark comparison required until manifest loading affects engine status, reads, ingestion, or artifact publication |

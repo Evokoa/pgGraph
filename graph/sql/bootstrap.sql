@@ -242,6 +242,30 @@ CREATE TABLE IF NOT EXISTS graph._sync_log (
 CREATE INDEX IF NOT EXISTS idx_sync_log_id ON graph._sync_log (id);
 CREATE INDEX IF NOT EXISTS idx_sync_log_created ON graph._sync_log (created_at);
 
+CREATE TABLE IF NOT EXISTS graph._projection_generations (
+    generation_id     BIGINT NOT NULL CHECK (generation_id > 0),
+    backend_pid       INTEGER NOT NULL DEFAULT 0,
+    database_oid      OID NOT NULL,
+    heartbeat_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sync_watermark    BIGINT NOT NULL DEFAULT 0 CHECK (sync_watermark >= 0),
+    validation_status TEXT NOT NULL DEFAULT 'valid'
+        CHECK (validation_status IN ('valid', 'corrupt', 'repairing')),
+    repair_status     TEXT,
+    is_current        BOOLEAN NOT NULL DEFAULT false,
+    published_at      TIMESTAMPTZ,
+    retained_until    TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (generation_id, backend_pid, database_oid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_projection_generations_current
+    ON graph._projection_generations (is_current, generation_id DESC);
+CREATE INDEX IF NOT EXISTS idx_projection_generations_active
+    ON graph._projection_generations (database_oid, expires_at)
+    WHERE backend_pid <> 0;
+
 CREATE TABLE IF NOT EXISTS graph._sync_buffer (
     id         BIGSERIAL PRIMARY KEY,
     op         CHAR(1) NOT NULL,
@@ -269,6 +293,7 @@ SELECT pg_catalog.pg_extension_config_dump('graph._build_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._maintenance_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log_id_seq', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._projection_generations', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_buffer', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_buffer_id_seq', '');
 
@@ -290,6 +315,7 @@ REVOKE ALL ON TABLE graph._registered_filter_columns FROM PUBLIC;
 REVOKE ALL ON TABLE graph._build_jobs             FROM PUBLIC;
 REVOKE ALL ON TABLE graph._maintenance_jobs       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
+REVOKE ALL ON TABLE graph._projection_generations FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_buffer            FROM PUBLIC;
 GRANT SELECT ON TABLE graph._registered_tables       TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_edges        TO PUBLIC;
@@ -297,6 +323,7 @@ GRANT SELECT ON TABLE graph._registered_filter_columns TO PUBLIC;
 GRANT SELECT ON TABLE graph._build_jobs             TO PUBLIC;
 GRANT SELECT ON TABLE graph._maintenance_jobs       TO PUBLIC;
 GRANT SELECT ON TABLE graph._sync_log               TO PUBLIC;
+GRANT SELECT ON TABLE graph._projection_generations TO PUBLIC;
 GRANT SELECT ON TABLE graph._sync_buffer            TO PUBLIC;
 GRANT SELECT ON SEQUENCE graph._sync_log_id_seq     TO PUBLIC;
 GRANT SELECT ON SEQUENCE graph._sync_buffer_id_seq  TO PUBLIC;
