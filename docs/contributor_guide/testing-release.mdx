@@ -392,6 +392,48 @@ PostgreSQL major through `run_pg_matrix.sh`. Set `RUN_RSS=1` to include a
 large-build peak RSS measurement; use `MAX_RSS_MB` when there is a recorded
 release threshold.
 
+## Package Release Workflow
+
+The package workflow is manually dispatched in two phases so the expensive
+multi-architecture Docker builds can run before the public release window.
+
+After release metadata is updated and merged, create and push the intended
+release tag:
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+Run the `Prepare Or Publish Packages` GitHub Actions workflow with:
+
+```text
+mode: prepare
+tag: vX.Y.Z
+```
+
+The prepare phase validates the tag and metadata, builds PostgreSQL 14 through
+18 Docker images, pushes prepared GHCR tags, verifies those prepared images, and
+uploads the PGXN source archive as a workflow artifact. Prepared Docker tags use
+the release tag plus a `-prepared` suffix, for example:
+
+```text
+ghcr.io/<owner>/pggraph:pg17-vX.Y.Z-prepared
+```
+
+After prepare passes, create the GitHub Release for the same tag. Then dispatch
+the workflow again with:
+
+```text
+mode: publish
+tag: vX.Y.Z
+```
+
+The publish phase verifies the GitHub Release exists, checks that the prepared
+tag matches the prepared commit-sha tag, promotes prepared Docker manifests to
+the public release tags, publishes PGXN, attaches the PGXN archive to the GitHub
+Release, and verifies the final GHCR tags. It must not rebuild the Docker images.
+
 ## Fuzzing
 
 Fuzz targets cover:
