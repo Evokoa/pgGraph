@@ -2,7 +2,7 @@
   "name": "pgGraph",
   "abstract": "Graph database superpowers for your existing Postgres",
   "description": "pgGraph lets you run complex graph queries, like finding shortest paths, mapping relationships, and discovering networks, directly on your existing PostgreSQL tables using standard SQL. Postgres remains your single source of truth.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "maintainer": [
     "Damien Lim <damien@evokoa.com>",
     "Dalton Prescott <dalton@evokoa.com>",
@@ -12,7 +12,7 @@
   "provides": {
     "graph": {
       "file": "graph/graph.control",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "docfile": "README.md"
     }
   },
