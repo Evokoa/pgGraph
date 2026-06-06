@@ -53,6 +53,7 @@ use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
 use crate::engine::{Engine, MmapResolutionState};
 use crate::filter_index::FilterIndex;
 use crate::node_store::{MmapNodeArrayParts, MmapNodeArrays, NodeStore};
+use crate::projection::manifest::{ProjectionManifest, ProjectionManifestStore};
 use crate::resolution_index::{ResolutionIndex, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
 use crate::safety::{GraphError, GraphResult};
 
@@ -826,8 +827,68 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
         engine.record_applied_sync_id(applied_sync_id);
     }
+    if let Some(manifest) = load_base_only_projection_manifest(path, computed_crc)? {
+        engine.install_projection_manifest(&manifest);
+    }
 
     Ok(engine)
+}
+
+fn load_base_only_projection_manifest(
+    path: &Path,
+    artifact_crc: u32,
+) -> GraphResult<Option<ProjectionManifest>> {
+    let store = ProjectionManifestStore::new(projection_manifest_root(path));
+    let Some(manifest) = store.load_latest_current()? else {
+        return Ok(None);
+    };
+    validate_base_only_projection_manifest(path, artifact_crc, &manifest)?;
+    Ok(Some(manifest))
+}
+
+fn validate_base_only_projection_manifest(
+    path: &Path,
+    artifact_crc: u32,
+    manifest: &ProjectionManifest,
+) -> GraphResult<()> {
+    if !manifest.is_base_only() {
+        return Err(GraphError::CorruptFile {
+            reason: "projection manifest: engine can only load base-only manifests in this phase"
+                .to_string(),
+        });
+    }
+    if manifest.base_artifact_version != VERSION {
+        return Err(GraphError::IncompatibleVersion(format!(
+            "projection manifest references base artifact version {}; expected {}",
+            manifest.base_artifact_version, VERSION
+        )));
+    }
+    let expected_base = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| GraphError::Internal("graph artifact path has no file name".into()))?;
+    if manifest.base_artifact_path != expected_base {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "projection manifest: base artifact '{}' does not match loaded artifact '{}'",
+                manifest.base_artifact_path, expected_base
+            ),
+        });
+    }
+    let expected_checksum = graph_artifact_checksum(artifact_crc);
+    if manifest.base_artifact_checksum != expected_checksum {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "projection manifest: base artifact checksum '{}' does not match loaded artifact '{}'",
+                manifest.base_artifact_checksum, expected_checksum
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn graph_artifact_checksum(crc: u32) -> String {
+    format!("crc32:{crc:08x}")
 }
 
 /// Get the default .pggraph file path under $PGDATA/{data_dir}/.
@@ -857,6 +918,12 @@ pub fn graph_file_path() -> GraphResult<PathBuf> {
         ))
     })?;
     Ok(dir.join("main.pggraph"))
+}
+
+pub fn projection_manifest_root(path: &Path) -> PathBuf {
+    path.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
@@ -907,7 +974,10 @@ mod tests {
 
     use super::*;
     use crate::edge_store::RawEdge;
-    use crate::types::{FilterCondition, FilterOp};
+    use crate::projection::manifest::{
+        ManifestSegmentRef, ProjectionManifest, ProjectionManifestStore,
+    };
+    use crate::types::{FilterCondition, FilterOp, TraversalDirection, TraversalStrategy};
 
     #[cfg(not(feature = "pg_test"))]
     use std::sync::Mutex;
@@ -958,6 +1028,7 @@ mod tests {
             append_path_suffix(&sync_checkpoint_path(&path), ".tmp"),
             PathBuf::from("/tmp/graph/main.pggraph.sync.tmp")
         );
+        assert_eq!(projection_manifest_root(&path), PathBuf::from("/tmp/graph"));
     }
 
     #[cfg(not(feature = "pg_test"))]
@@ -1079,6 +1150,179 @@ mod tests {
         assert!(loaded
             .filter_index
             .check_filter(b, &FilterOp::new(loaded_status, FilterCondition::IsNull)));
+    }
+
+    #[test]
+    fn engine_loads_base_only_projection_manifest() {
+        let mut engine = graph_with_relationship();
+        engine.record_applied_sync_id(41);
+        let path = temp_graph_path("base-manifest-load");
+        write_graph_file(&engine, &path).unwrap();
+        publish_base_manifest(&path, 7, 41);
+
+        let loaded = load_graph_file(&path).unwrap();
+        let status = loaded.base_projection_manifest_status();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert_eq!(status, (Some(7), Some(41)));
+    }
+
+    #[test]
+    fn engine_base_only_manifest_keeps_csr_neighbors_unchanged() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("base-manifest-csr");
+        write_graph_file(&engine, &path).unwrap();
+        publish_base_manifest(&path, 8, 0);
+
+        let loaded = load_graph_file(&path).unwrap();
+        let results = loaded
+            .traverse(
+                10,
+                "A",
+                1,
+                100,
+                100,
+                None,
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::Out,
+            )
+            .unwrap();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let ids = results
+            .iter()
+            .map(|result| result.node_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn engine_rejects_base_manifest_for_different_graph_artifact() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("base-manifest-wrong-base");
+        write_graph_file(&engine, &path).unwrap();
+        let other_path = path.with_file_name("other.pggraph");
+        write_graph_file(&engine, &other_path).unwrap();
+        publish_base_manifest(&other_path, 9, 0);
+
+        let err = match load_graph_file(&path) {
+            Ok(_) => panic!("wrong base manifest was accepted"),
+            Err(err) => err,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(
+            matches!(err, GraphError::CorruptFile { reason } if reason.contains("does not match loaded artifact"))
+        );
+    }
+
+    #[test]
+    fn engine_rejects_stale_base_manifest_checksum() {
+        let mut engine = graph_with_relationship();
+        let path = temp_graph_path("base-manifest-stale-checksum");
+        write_graph_file(&engine, &path).unwrap();
+        publish_base_manifest(&path, 10, 0);
+        let c = engine.node_store.add_node(10, "C".to_string());
+        engine.resolution_insert(10, "C", c);
+        engine.edge_store = EdgeStore::from_edges(
+            3,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: Some(7),
+            }],
+            true,
+        );
+        engine.reverse_edge_store = engine.edge_store.reversed();
+        write_graph_file(&engine, &path).unwrap();
+
+        let err = match load_graph_file(&path) {
+            Ok(_) => panic!("stale base manifest checksum was accepted"),
+            Err(err) => err,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(err, GraphError::CorruptFile { reason } if reason.contains("checksum")));
+    }
+
+    #[test]
+    fn engine_rejects_base_manifest_with_wrong_artifact_version() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("base-manifest-wrong-version");
+        write_graph_file(&engine, &path).unwrap();
+        let checksum = checksum_graph_artifact(&path);
+        publish_manifest(
+            projection_manifest_root(&path),
+            ProjectionManifest::base_only(
+                11,
+                path.file_name().unwrap().to_string_lossy(),
+                checksum,
+                VERSION + 1,
+                0,
+                1,
+            ),
+        );
+
+        let err = match load_graph_file(&path) {
+            Ok(_) => panic!("wrong-version base manifest was accepted"),
+            Err(err) => err,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(err, GraphError::IncompatibleVersion(_)));
+    }
+
+    #[test]
+    fn engine_rejects_non_base_only_projection_manifest() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("base-manifest-segmented");
+        write_graph_file(&engine, &path).unwrap();
+        let root = projection_manifest_root(&path);
+        let segment_path = root.join("segment.pggraph-delta");
+        std::fs::write(&segment_path, b"segment").unwrap();
+        let checksum = checksum_graph_artifact(&path);
+        let mut manifest = ProjectionManifest::base_only(
+            12,
+            path.file_name().unwrap().to_string_lossy(),
+            checksum,
+            VERSION,
+            0,
+            1,
+        );
+        manifest.segments.push(ManifestSegmentRef {
+            path: "segment.pggraph-delta".to_string(),
+            checksum: "crc32:00000000".to_string(),
+            level: 0,
+            source_start: 0,
+            source_end: 2,
+            sync_watermark: 0,
+        });
+        publish_manifest(root, manifest);
+
+        let err = match load_graph_file(&path) {
+            Ok(_) => panic!("segmented manifest was accepted as base-only"),
+            Err(err) => err,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(err, GraphError::CorruptFile { reason } if reason.contains("base-only")));
+    }
+
+    #[test]
+    fn graph_status_reports_base_manifest_generation() {
+        let mut engine = Engine::new();
+        let manifest =
+            ProjectionManifest::base_only(11, "main.pggraph", "checksum", VERSION, 99, 1);
+
+        engine.install_projection_manifest(&manifest);
+
+        assert_eq!(
+            engine.base_projection_manifest_status(),
+            (Some(11), Some(99))
+        );
     }
 
     #[test]
@@ -1492,6 +1736,31 @@ mod tests {
         );
         engine.built = true;
         engine
+    }
+
+    fn publish_base_manifest(path: &Path, generation_id: u64, sync_watermark: i64) {
+        let base_name = path.file_name().unwrap().to_string_lossy();
+        let checksum = checksum_graph_artifact(path);
+        let manifest = ProjectionManifest::base_only(
+            generation_id,
+            base_name,
+            checksum,
+            VERSION,
+            sync_watermark,
+            1,
+        );
+        publish_manifest(projection_manifest_root(path), manifest);
+    }
+
+    fn publish_manifest(root: PathBuf, manifest: ProjectionManifest) {
+        ProjectionManifestStore::new(root)
+            .publish(&manifest)
+            .expect("base manifest publishes");
+    }
+
+    fn checksum_graph_artifact(path: &Path) -> String {
+        let data = std::fs::read(path).unwrap();
+        graph_artifact_checksum(crc32fast::hash(&data[HEADER_SIZE..]))
     }
 
     fn temp_graph_path(name: &str) -> PathBuf {

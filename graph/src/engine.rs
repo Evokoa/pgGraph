@@ -10,6 +10,7 @@ use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
+use crate::projection::manifest::ProjectionManifest;
 use crate::projection::neighbors::{
     CsrNeighbors, EdgeOverlay, OverlayDeletes, OverlayInserts, OverlayNeighbors,
 };
@@ -92,6 +93,8 @@ pub struct Engine {
     pub(crate) edge_buffer: Vec<EdgeMutation>,
     /// Runtime projection mode selected at build/load time.
     pub(crate) projection_mode: crate::config::ProjectionMode,
+    /// Durable projection generation loaded with the base artifact, if any.
+    pub(crate) projection_manifest: Option<ProjectionManifestSnapshot>,
 
     /// When true, the engine is in read-only mode.
     /// Sync inserts/updates/deletes are rejected until a rebuild installs a
@@ -192,6 +195,22 @@ pub enum MutationKind {
     Delete,
 }
 
+/// Minimal manifest metadata held by a backend-local engine snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectionManifestSnapshot {
+    pub(crate) generation_id: u64,
+    pub(crate) sync_watermark: i64,
+}
+
+impl From<&ProjectionManifest> for ProjectionManifestSnapshot {
+    fn from(manifest: &ProjectionManifest) -> Self {
+        Self {
+            generation_id: manifest.generation_id,
+            sync_watermark: manifest.sync_watermark,
+        }
+    }
+}
+
 impl Engine {
     pub fn new() -> Self {
         let edge_type_registry = vec!["".to_string()];
@@ -213,6 +232,7 @@ impl Engine {
             _mmap: None,
             edge_buffer: Vec::new(),
             projection_mode: crate::config::ProjectionMode::CsrReadonly,
+            projection_manifest: None,
             is_read_only: false,
             read_only_reason: None,
             applied_sync_id: 0,
@@ -316,6 +336,22 @@ impl Engine {
 
     pub fn set_projection_mode(&mut self, projection_mode: crate::config::ProjectionMode) {
         self.projection_mode = projection_mode;
+    }
+
+    pub(crate) fn install_projection_manifest(&mut self, manifest: &ProjectionManifest) {
+        self.projection_manifest = Some(ProjectionManifestSnapshot::from(manifest));
+    }
+
+    pub(crate) fn base_projection_manifest_status(&self) -> (Option<i64>, Option<i64>) {
+        let generation = self
+            .projection_manifest
+            .as_ref()
+            .and_then(|manifest| i64::try_from(manifest.generation_id).ok());
+        let watermark = self
+            .projection_manifest
+            .as_ref()
+            .map(|manifest| manifest.sync_watermark);
+        (generation, watermark)
     }
 
     pub fn record_applied_sync_id(&mut self, sync_id: i64) {
@@ -865,6 +901,8 @@ impl Engine {
             || self.edge_buffer.len() >= compaction_threshold
             || edge_buffer_tombstones >= compaction_threshold
             || durable_overlay_memory_bytes >= crate::config::max_overlay_memory_bytes();
+        let (base_manifest_generation, base_manifest_sync_watermark) =
+            self.base_projection_manifest_status();
         EngineStatus {
             node_count: self.node_store.node_count() as i32,
             edge_count: self.edge_store.edge_count() as i32,
@@ -888,6 +926,8 @@ impl Engine {
             read_only: self.is_read_only,
             read_only_reason: self.read_only_reason.map(|reason| reason.to_string()),
             projection_mode: self.projection_mode.as_str().to_string(),
+            base_manifest_generation,
+            base_manifest_sync_watermark,
             overlay_tombstone_count: overlay_tombstones.min(i32::MAX as usize) as i32,
             overlay_memory_bytes: overlay_memory_bytes.min(i64::MAX as usize) as i64,
             compaction_recommended,

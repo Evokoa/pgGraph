@@ -69,3 +69,14 @@ decision.
 | Command | `cd graph && cargo test --features pg17 projection::normalize`; `cd graph && cargo test --features pg17 projection::segment`; `cd graph && cargo test --features pg17 projection::test_contracts`; `cargo check --manifest-path graph/fuzz/Cargo.toml` |
 | Result | Normalization tests and segment writer integration passed, including node/edge domain separation and deterministic duplicate-sync tie breaks. The fuzz package compiled with existing sync-helper dead-code warnings. Full `cargo test --features pg17` is intentionally red with 553 passed, 3 future durable-projection contract failures, and 1 ignored scale test. |
 | Decision | No benchmark comparison required until normalized rows are produced by ingestion or consumed by live segment publication |
+
+## 2026-06-07: Microphase 5 Base-Only Engine Manifest Load
+
+| Field | Value |
+|---|---|
+| Scope | Base-only projection manifest discovery during `.pggraph` load and backend-local status metadata |
+| Code changes | Persistence load path and engine status metadata only; CSR remains the active read path |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo test --features pg17 persistence::tests::`; `cd graph && cargo check --features pg17`; `cd graph && cargo test --features pg17 --doc`; `python3 scripts/check_doc_references.py` |
+| Result | Persistence/load-path tests passed, including base-only manifest load, CSR traversal preservation, base manifest status metadata, wrong-base rejection, stale checksum rejection, wrong-version rejection, and non-base-only rejection. Full `cargo test --features pg17` is intentionally red with 560 passed, 3 future durable-projection contract failures, and 1 ignored scale test. |
+| Decision | No benchmark comparison required because traversal, GQL, components, shortest-path, ingestion, compaction, GC, and SQL read-path adoption are unchanged |

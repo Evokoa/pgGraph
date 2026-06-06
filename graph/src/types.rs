@@ -200,6 +200,16 @@ pub struct EngineStatus {
     pub read_only: bool,
     pub read_only_reason: Option<String>,
     pub projection_mode: String,
+    #[allow(
+        dead_code,
+        reason = "Rust status carries base manifest metadata before the SQL status tuple is refactored"
+    )]
+    pub base_manifest_generation: Option<i64>,
+    #[allow(
+        dead_code,
+        reason = "Rust status carries base manifest metadata before the SQL status tuple is refactored"
+    )]
+    pub base_manifest_sync_watermark: Option<i64>,
     pub overlay_tombstone_count: i32,
     pub overlay_memory_bytes: i64,
     pub compaction_recommended: bool,

@@ -147,6 +147,11 @@ impl ProjectionManifest {
         manifest.validate()?;
         Ok(manifest)
     }
+
+    /// Whether this generation references only the base `.pggraph` artifact.
+    pub(crate) fn is_base_only(&self) -> bool {
+        self.segments.is_empty() && self.base_chunks.is_empty()
+    }
 }
 
 /// Filesystem store for durable projection manifest generations.

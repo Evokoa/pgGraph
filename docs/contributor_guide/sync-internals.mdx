@@ -15,6 +15,7 @@ every backend-local engine.
 | `sql_build.rs` | Maintenance rebuild and vacuum orchestration |
 | `sql_jobs.rs` | Durable job rows and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
+| `persistence.rs` | `.pggraph` load/write plus base-only projection manifest discovery |
 | `projection/manifest.rs` | Projection manifest metadata and active-generation heartbeats |
 | `projection/normalize.rs` | Deterministic committed-mutation normalization and ingest buffer limits |
 | `projection/segment.rs` | Durable delta segment format for future layered projections |
@@ -148,6 +149,17 @@ conflicts that still have a net effect. The bounded normalization buffer
 rejects oversized batches before segment encoding starts.
 Edge segment writers reject normalized node rows so node and edge deltas remain
 separate segment domains.
+
+When a `.pggraph` artifact is loaded, the loader scans the artifact directory
+for the latest `projection-generation-*.json` manifest. In the base-only phase,
+the engine installs only manifests that reference the loaded `.pggraph` file,
+match the current artifact format version and CRC32 checksum, and have no
+segment or chunk references. The active read path remains CSR for those
+manifests; the engine keeps only the base manifest generation and sync watermark
+as status metadata.
+The SQL `graph.status()` table is already at pgrx's tuple-return arity limit, so
+new durable projection SQL status fields are deferred to the status/diagnostics
+phase that can refactor the SQL shape deliberately.
 
 Scheduler ownership intentionally stays outside the extension. PostgreSQL
 background-worker lifecycle, crash recovery, privilege boundaries, and cadence

@@ -163,3 +163,35 @@ Microphase 4 implemented the mutation-normalization checkpoint:
     failed future contracts, 1 ignored scale test.
 - Regression report: no traversal, ingestion, compaction, GC, SQL, or runtime
   read-path code changed; benchmark baseline remains `pre_durable_projection`.
+
+Microphase 5 implemented the base-only engine manifest-load checkpoint:
+
+- Added backend-local projection manifest snapshot state to `Engine` with base
+  manifest generation and sync watermark metadata.
+- Added base-only manifest discovery during `.pggraph` artifact load. The
+  loader scans the artifact directory, validates the latest manifest through
+  `ProjectionManifestStore`, requires a base-only manifest, checks the manifest
+  base artifact version and checksum, and rejects manifests that do not
+  reference the loaded `.pggraph` file.
+- Kept CSR as the active read path for base-only manifests and added a
+  traversal regression proving loaded base-only manifests preserve neighbor
+  results.
+- Documented that SQL `graph.status()` is already at pgrx's tuple-return arity
+  limit, so the new Rust `EngineStatus` base-manifest fields are not exposed as
+  SQL columns until the later status/diagnostics SQL-shape refactor.
+- Tests run:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 persistence::tests::`: passed
+    with 34 persistence/load-path tests, including base-only manifest load, CSR
+    traversal preservation, status metadata, wrong-base rejection, stale
+    checksum rejection, wrong-version rejection, and non-base-only rejection.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    expected red; 3 passed, 3 failed for future production features.
+  - `cd graph && cargo test --features pg17`: expected red; 560 passed, 3
+    failed future contracts, 1 ignored scale test.
+- Regression report: no traversal algorithm, GQL, components, shortest-path,
+  ingestion, compaction, GC, or SQL read-path adoption changed; benchmark
+  baseline remains `pre_durable_projection`.
