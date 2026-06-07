@@ -35,6 +35,7 @@ cargo test --features "$PG_VERSION_FEATURE"
 cargo pgrx test "$PG_VERSION_FEATURE"
 cargo deny check advisories bans licenses sources
 (cd fuzz && cargo check --bins)
+./fuzz/run_projection_seed_corpora.sh
 
 if [[ "$RUN_PACKAGE" == "1" ]]; then
   PG_VERSION_FEATURE="$PG_VERSION_FEATURE" ./tests/heavy/package_validate.sh

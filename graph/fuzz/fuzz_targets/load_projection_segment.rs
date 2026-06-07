@@ -1,5 +1,8 @@
 #![no_main]
 
+#[path = "../postgres_stubs.rs"]
+mod postgres_stubs;
+
 use graph::fuzz_support::{load_projection_segment, projection_segment_seed_bytes};
 use libfuzzer_sys::fuzz_target;
 

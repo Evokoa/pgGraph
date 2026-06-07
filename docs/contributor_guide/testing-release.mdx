@@ -405,12 +405,21 @@ Fuzz targets cover:
 | `structured_filter` | Structured filter shape validation |
 | `gql_parser` | GQL parser frontend |
 | `cypher_parser` | openCypher compatibility parser frontend |
+| `load_projection_manifest` | Durable projection manifest loader |
+| `load_projection_segment` | Durable projection segment loader |
 
 Compile smoke:
 
 ```bash
 cd graph/fuzz
 cargo fuzz build
+```
+
+Projection release seed corpus:
+
+```bash
+cd graph
+./fuzz/run_projection_seed_corpora.sh
 ```
 
 ## Benchmarking

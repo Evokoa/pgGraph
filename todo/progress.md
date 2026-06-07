@@ -725,6 +725,17 @@ Microphase 16 is in progress with release benchmark coverage started:
   - `git diff --check`: passed.
   - `cd graph && cargo test --features pg17`: passed with 631 tests and 1
     ignored scale test.
-- Remaining Microphase 16 blockers: pgrx gate, manifest/segment fuzz seeds,
-  heavy release matrix, stable docs merge from `todo/` into `docs/`, and
-  `todo/` deletion before release.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17`: passed
+    with 821 tests and 1 ignored scale test.
+  - `CARGO_NET_OFFLINE=true graph/fuzz/run_projection_seed_corpora.sh`:
+    passed. The manifest seed corpus ran 1 seed file and completed 2
+    libFuzzer executions; the segment seed corpus ran 2 seed files and
+    completed 3 libFuzzer executions.
+- Added `graph/fuzz/run_projection_seed_corpora.sh` and wired it into
+  `graph/tests/heavy/run_release_gate.sh` so the manifest and segment seed
+  corpora are part of repeatable release evidence. The projection seed fuzz
+  targets include fuzz-only PostgreSQL symbol stubs so pgrx-free
+  manifest/segment loader wrappers can run outside a live backend; function
+  stubs abort on use while global stubs satisfy relocation only.
+- Remaining Microphase 16 blockers: heavy release matrix, stable docs merge
+  from `todo/` into `docs/`, and `todo/` deletion before release.
