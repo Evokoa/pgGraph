@@ -152,11 +152,545 @@ pub mod fuzz_support {
 /// data structures. This module is always available (bench targets
 /// compile with `--lib`) but not part of the pgrx extension surface.
 pub mod bench_support {
+    use std::collections::{HashMap, HashSet};
+
     pub use crate::bfs::{execute as bfs_execute, BfsConfig, BfsResult};
     pub use crate::edge_store::{EdgeStore as EdgeStoreBuilder, RawEdge};
     pub use crate::filter_index::{FilterColumnType, FilterIndex as FilterIndexBuilder};
     pub use crate::node_store::NodeStore as NodeStoreBuilder;
+    use crate::projection::layered::{LayeredNeighbors, SegmentProvider};
+    use crate::projection::neighbors::NeighborSource;
+    use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentEdgeWeight, SegmentKind};
     pub use crate::types::{EdgeTypeFilter, FilterCondition, FilterOp};
+    use crate::types::{TraversalDirection, WeightedPathStep};
+
+    /// Durable projection shape exercised by release-readiness benchmarks.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum LayeredProjectionBenchScenario {
+        /// Base CSR routed through the layered projection source without deltas.
+        BaseOnly,
+        /// One small L0 segment with sparse insert/delete rows.
+        SmallL0,
+        /// Many L0 segments, each with a sparse mutation slice.
+        ManyL0,
+        /// One compacted L1 segment carrying the equivalent sparse mutation set.
+        CompactedL1,
+        /// One compacted L2 segment carrying the equivalent sparse mutation set.
+        CompactedL2,
+        /// One compacted L2 segment plus a rewritten dirty base chunk range.
+        DirtyChunkRewrite,
+        /// Durable segment plus Engine-owned committed overlay maps.
+        TxDeltaOverlay,
+        /// Durable weighted edges used by Dijkstra.
+        WeightedPath,
+        /// Relationship-expansion-shaped segment fanout for GQL path matching.
+        GqlRelationshipExpansion,
+    }
+
+    /// Execute BFS over a deterministic durable layered projection scenario.
+    pub fn bfs_layered_projection_execute(
+        node_store: &NodeStoreBuilder,
+        edge_store: &EdgeStoreBuilder,
+        filter_index: &FilterIndexBuilder,
+        config: &BfsConfig,
+        scenario: LayeredProjectionBenchScenario,
+    ) -> BfsResult {
+        let layered = layered_neighbors(edge_store, scenario);
+        crate::bfs::execute_with_neighbors(node_store, &layered, filter_index, config)
+    }
+
+    /// Execute a weighted shortest path over a durable layered projection.
+    pub fn weighted_layered_projection_path(
+        node_store: &NodeStoreBuilder,
+        edge_store: &EdgeStoreBuilder,
+        source: u32,
+        target: u32,
+    ) -> Option<Vec<WeightedPathStep>> {
+        let layered = layered_neighbors(edge_store, LayeredProjectionBenchScenario::WeightedPath);
+        let registry = ["".to_string(), "weighted".to_string()];
+        crate::path_finder::weighted_shortest_path_with_neighbors(
+            node_store, &layered, source, target, &registry,
+        )
+    }
+
+    /// Count the GQL-shaped relationship expansion fanout for one source node.
+    pub fn gql_layered_relationship_expansion_count(
+        edge_store: &EdgeStoreBuilder,
+        source: u32,
+    ) -> usize {
+        let layered = layered_neighbors(
+            edge_store,
+            LayeredProjectionBenchScenario::GqlRelationshipExpansion,
+        );
+        layered
+            .for_direction(TraversalDirection::Out)
+            .neighbors(source)
+            .count()
+    }
+
+    fn layered_neighbors(
+        edge_store: &EdgeStoreBuilder,
+        scenario: LayeredProjectionBenchScenario,
+    ) -> LayeredNeighbors<'_> {
+        match scenario {
+            LayeredProjectionBenchScenario::BaseOnly => LayeredNeighbors::new(edge_store, vec![]),
+            LayeredProjectionBenchScenario::SmallL0 => {
+                LayeredNeighbors::new(edge_store, sparse_segments(edge_store.node_count(), 1, 0))
+            }
+            LayeredProjectionBenchScenario::ManyL0 => {
+                LayeredNeighbors::new(edge_store, sparse_segments(edge_store.node_count(), 8, 0))
+            }
+            LayeredProjectionBenchScenario::CompactedL1 => {
+                LayeredNeighbors::new(edge_store, sparse_segments(edge_store.node_count(), 1, 1))
+            }
+            LayeredProjectionBenchScenario::CompactedL2 => {
+                LayeredNeighbors::new(edge_store, sparse_segments(edge_store.node_count(), 1, 2))
+            }
+            LayeredProjectionBenchScenario::DirtyChunkRewrite => dirty_chunk_neighbors(edge_store),
+            LayeredProjectionBenchScenario::TxDeltaOverlay => {
+                let durable = sparse_segments(edge_store.node_count(), 1, 0);
+                let overlays = committed_overlay(edge_store.node_count());
+                LayeredNeighbors::new_with_options(
+                    edge_store,
+                    None,
+                    durable,
+                    None,
+                    Some(overlays),
+                    None,
+                )
+            }
+            LayeredProjectionBenchScenario::WeightedPath => {
+                LayeredNeighbors::new(edge_store, weighted_path_segments(edge_store.node_count()))
+            }
+            LayeredProjectionBenchScenario::GqlRelationshipExpansion => LayeredNeighbors::new(
+                edge_store,
+                relationship_expansion_segments(edge_store.node_count()),
+            ),
+        }
+    }
+
+    fn sparse_segments(node_count: u32, segment_count: u32, level: u8) -> Vec<DeltaSegment> {
+        (0..segment_count)
+            .map(|segment_idx| {
+                let mut segment = edge_segment(node_count, level, i64::from(segment_idx + 1));
+                let stride = 257 + segment_idx.saturating_mul(17);
+                for source in (segment_idx..node_count).step_by(stride as usize) {
+                    let target = source.wrapping_add(17 + segment_idx) % node_count;
+                    segment.edge_inserts.push(SegmentEdge {
+                        source,
+                        target,
+                        type_id: 1,
+                    });
+                    if source + 1 < node_count {
+                        segment.edge_deletes.push(SegmentEdge {
+                            source,
+                            target: source + 1,
+                            type_id: 1,
+                        });
+                    }
+                }
+                segment
+            })
+            .collect()
+    }
+
+    fn dirty_chunk_segments(node_count: u32) -> Vec<DeltaSegment> {
+        if node_count == 0 {
+            return vec![edge_segment(0, 2, 1)];
+        }
+        let range_end = node_count.min(2_048);
+        let mut segment = DeltaSegment::new(
+            SegmentKind::Edge,
+            2,
+            TraversalDirection::Out,
+            0,
+            range_end,
+            1,
+        )
+        .expect("benchmark dirty chunk segment range is valid");
+        for source in 0..range_end {
+            segment.edge_inserts.push(SegmentEdge {
+                source,
+                target: source.wrapping_add(3) % node_count,
+                type_id: 1,
+            });
+        }
+        vec![segment]
+    }
+
+    fn dirty_chunk_neighbors(edge_store: &EdgeStoreBuilder) -> LayeredNeighbors<'_> {
+        let provider = BenchSegmentProvider {
+            segments: Vec::new(),
+            base_chunks: dirty_chunk_segments(edge_store.node_count()),
+        };
+        LayeredNeighbors::from_provider(edge_store, &provider)
+            .expect("benchmark dirty chunk provider is valid")
+    }
+
+    fn weighted_path_segments(node_count: u32) -> Vec<DeltaSegment> {
+        let mut segment = edge_segment(node_count, 0, 1);
+        let chain_end = node_count.min(128);
+        for source in 0..chain_end.saturating_sub(1) {
+            let target = source + 1;
+            segment.edge_inserts.push(SegmentEdge {
+                source,
+                target,
+                type_id: 1,
+            });
+            segment.edge_weights.push(SegmentEdgeWeight {
+                source,
+                target,
+                type_id: 1,
+                weight: 1,
+            });
+        }
+        vec![segment]
+    }
+
+    fn relationship_expansion_segments(node_count: u32) -> Vec<DeltaSegment> {
+        let mut segment = edge_segment(node_count, 0, 1);
+        let fanout = node_count.min(256);
+        for target in 1..fanout {
+            segment.edge_inserts.push(SegmentEdge {
+                source: 0,
+                target,
+                type_id: 1,
+            });
+        }
+        vec![segment]
+    }
+
+    fn committed_overlay(
+        node_count: u32,
+    ) -> (
+        HashMap<u32, Vec<(u32, u8)>>,
+        HashMap<u32, HashSet<(u32, u8)>>,
+    ) {
+        let mut inserts = HashMap::new();
+        let mut deletes = HashMap::new();
+        for source in (0..node_count).step_by(509) {
+            inserts.insert(source, vec![(source.wrapping_add(23) % node_count, 1)]);
+            deletes.insert(
+                source,
+                HashSet::from([(source.wrapping_add(1) % node_count, 1)]),
+            );
+        }
+        (inserts, deletes)
+    }
+
+    fn edge_segment(node_count: u32, level: u8, sync_watermark: i64) -> DeltaSegment {
+        DeltaSegment::new(
+            SegmentKind::Edge,
+            level,
+            TraversalDirection::Out,
+            0,
+            node_count,
+            sync_watermark,
+        )
+        .expect("benchmark segment range is valid")
+    }
+
+    struct BenchSegmentProvider {
+        segments: Vec<DeltaSegment>,
+        base_chunks: Vec<DeltaSegment>,
+    }
+
+    impl SegmentProvider for BenchSegmentProvider {
+        fn load_segments(&self) -> crate::safety::GraphResult<Vec<DeltaSegment>> {
+            Ok(self.segments.clone())
+        }
+
+        fn load_base_chunks(&self) -> crate::safety::GraphResult<Vec<DeltaSegment>> {
+            Ok(self.base_chunks.clone())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::fs;
+        use std::path::Path;
+        use std::time::{Duration, Instant};
+
+        use super::*;
+        use crate::projection::chunk::EdgeStoreChunkSource;
+        use crate::projection::compact::{compact_generation, CompactionBudgets};
+        use crate::projection::gc::{collect_projection_garbage_with_config, ProjectionGcConfig};
+        use crate::projection::ingest::{ProjectionIngester, ProjectionSyncRow};
+        use crate::projection::manifest::{
+            ManifestChunkRef, ManifestFileRef, ManifestSegmentRef, ProjectionManifest,
+            ProjectionManifestStore,
+        };
+        use crate::projection::normalize::{MutationBufferLimits, MutationOperation};
+        use crate::projection::recovery::repair_active_base_chunks;
+        use crate::projection::test_fixtures::ProjectionArtifactDir;
+
+        const RELEASE_CONTRACT_LIMIT: Duration = Duration::from_millis(250);
+
+        fn release_fixture() -> (NodeStoreBuilder, EdgeStoreBuilder, FilterIndexBuilder) {
+            let mut nodes = NodeStoreBuilder::new();
+            for idx in 0..1_024 {
+                nodes.add_node(100, format!("PK-{idx}"));
+            }
+            let mut edges = Vec::new();
+            for source in 0..1_023 {
+                edges.push(RawEdge {
+                    source,
+                    target: source + 1,
+                    type_id: 1,
+                    weight: None,
+                });
+            }
+            let edge_store = EdgeStoreBuilder::try_from_edges(nodes.node_count(), edges, false)
+                .expect("release fixture edges are in range");
+            (nodes, edge_store, FilterIndexBuilder::new())
+        }
+
+        fn release_bfs_config() -> BfsConfig {
+            BfsConfig {
+                seed_node: 0,
+                max_depth: 8,
+                max_nodes: 10_000,
+                max_frontier: 10_000,
+                edge_type_filter: EdgeTypeFilter::All,
+                filter_ops: Vec::new(),
+                tenant: None,
+                tenanted_table_oids: HashSet::new(),
+                tenant_membership: HashMap::new(),
+                overlay_insert_edges: HashMap::new(),
+                overlay_deleted_edges: HashMap::new(),
+            }
+        }
+
+        #[test]
+        fn bfs_layered_projection_no_unbounded_regression() {
+            let (nodes, edges, filters) = release_fixture();
+            let config = release_bfs_config();
+            let started = Instant::now();
+            let result = bfs_layered_projection_execute(
+                &nodes,
+                &edges,
+                &filters,
+                &config,
+                LayeredProjectionBenchScenario::ManyL0,
+            );
+            assert!(result.visited.len() >= 9);
+            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+        }
+
+        #[test]
+        fn gql_layered_relationship_expansion_no_unbounded_regression() {
+            let (_, edges, _) = release_fixture();
+            let started = Instant::now();
+            let count = gql_layered_relationship_expansion_count(&edges, 0);
+            assert!(count >= 255);
+            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+        }
+
+        #[test]
+        fn weighted_path_layered_projection_no_unbounded_regression() {
+            let (nodes, edges, _) = release_fixture();
+            let started = Instant::now();
+            let path = weighted_layered_projection_path(&nodes, &edges, 0, 127)
+                .expect("durable weighted segment should connect the chain");
+            assert_eq!(path.len(), 128);
+            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+        }
+
+        #[test]
+        fn projection_ingest_publish_latency_under_threshold() {
+            let dir = ProjectionArtifactDir::new("projection_ingest_publish_latency");
+            write_base_artifact(dir.path());
+            let ingester = ProjectionIngester::new(dir.path(), "base.pggraph", "crc32:base", 1);
+            let rows = (0..64)
+                .map(|idx| ProjectionSyncRow {
+                    sync_id: u64::from(idx + 1),
+                    generation_id: 1,
+                    committed: true,
+                    operation: MutationOperation::InsertEdge,
+                    direction: TraversalDirection::Out,
+                    source: idx,
+                    target: (idx + 1) % 64,
+                    type_id: 1,
+                    weight: Some(1),
+                    table_oid: None,
+                    pk_hash: None,
+                    node_idx: None,
+                    filter_column_id: None,
+                    filter_value: None,
+                    tenant_hash: None,
+                })
+                .collect::<Vec<_>>();
+            let started = Instant::now();
+            let result = ingester
+                .ingest_committed_rows(&rows, MutationBufferLimits::new(1_000, 1_000_000))
+                .expect("projection ingest publishes");
+            assert_eq!(result.rows_ingested, 64);
+            assert!(result.segments_published >= 1);
+            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+        }
+
+        #[test]
+        fn projection_compaction_latency_under_threshold() {
+            let dir = ProjectionArtifactDir::new("projection_compaction_latency");
+            let base = release_edge_store();
+            let previous =
+                publish_manifest_with_segments(&dir, 1, sparse_segments(base.node_count(), 8, 0));
+            let budgets = CompactionBudgets {
+                max_rows: 10_000,
+                max_bytes: 10_000_000,
+                max_segments: 1_000,
+                max_elapsed: Duration::from_secs(60),
+                dirty_chunk_segment_threshold: None,
+            };
+            let started = Instant::now();
+            let result = compact_generation(dir.path(), &previous, &base, budgets)
+                .expect("projection compaction publishes");
+            assert_eq!(result.segments_compacted, 8);
+            assert!(result.manifest.generation_id > previous.generation_id);
+            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+        }
+
+        #[test]
+        fn projection_gc_latency_under_threshold() {
+            let dir = ProjectionArtifactDir::new("projection_gc_latency");
+            write_base_artifact(dir.path());
+            let obsolete = dir.path().join("obsolete.pggraph-delta");
+            fs::write(&obsolete, b"obsolete").expect("obsolete file writes");
+            let store = ProjectionManifestStore::new(dir.path());
+            let mut first = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 1, 1);
+            first.obsolete_files.push(ManifestFileRef {
+                path: "obsolete.pggraph-delta".to_string(),
+                bytes: 8,
+            });
+            store.publish(&first).expect("first manifest publishes");
+            let second = ProjectionManifest::base_only(2, "base.pggraph", "crc32:base", 1, 2, 2);
+            store.publish(&second).expect("second manifest publishes");
+            let started = Instant::now();
+            let summary = collect_projection_garbage_with_config(
+                dir.path(),
+                ProjectionGcConfig {
+                    retained_generation_floor: 1,
+                },
+            )
+            .expect("projection GC collects");
+            assert_eq!(summary.deleted_files, 1);
+            assert!(!obsolete.exists());
+            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+        }
+
+        #[test]
+        fn projection_repair_latency_under_threshold() {
+            let dir = ProjectionArtifactDir::new("projection_repair_latency");
+            let base = release_edge_store();
+            let source = EdgeStoreChunkSource::new(&base);
+            let manifest = publish_manifest_with_base_chunk(&dir, &base);
+            let chunk_path = dir.path().join(&manifest.base_chunks[0].path);
+            fs::write(&chunk_path, b"corrupt chunk").expect("chunk corruption writes");
+            let started = Instant::now();
+            let result = repair_active_base_chunks(dir.path(), &source)
+                .expect("projection repair runs")
+                .expect("corrupt chunk is repaired");
+            assert_eq!(result.chunks_rewritten, 1);
+            assert!(result.manifest.generation_id > manifest.generation_id);
+            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+        }
+
+        fn write_base_artifact(root: &Path) {
+            fs::write(root.join("base.pggraph"), b"base").expect("base artifact writes");
+        }
+
+        fn release_edge_store() -> EdgeStoreBuilder {
+            EdgeStoreBuilder::from_edges(
+                128,
+                (0..127)
+                    .map(|source| RawEdge {
+                        source,
+                        target: source + 1,
+                        type_id: 1,
+                        weight: Some(1),
+                    })
+                    .collect(),
+                true,
+            )
+        }
+
+        fn publish_manifest_with_segments(
+            dir: &ProjectionArtifactDir,
+            generation_id: u64,
+            segments: Vec<DeltaSegment>,
+        ) -> ProjectionManifest {
+            write_base_artifact(dir.path());
+            let mut manifest = ProjectionManifest::base_only(
+                generation_id,
+                "base.pggraph",
+                "crc32:base",
+                1,
+                10,
+                1,
+            );
+            for (idx, segment) in segments.iter().enumerate() {
+                let relative = format!(
+                    "projection-generation-{generation_id:020}-segment-{idx:08}.pggraph-delta"
+                );
+                let path = dir.path().join(&relative);
+                segment.write_to_path(&path).expect("segment writes");
+                manifest
+                    .segments
+                    .push(segment_ref(&relative, &path, segment));
+            }
+            ProjectionManifestStore::new(dir.path())
+                .publish(&manifest)
+                .expect("manifest publishes");
+            manifest
+        }
+
+        fn publish_manifest_with_base_chunk(
+            dir: &ProjectionArtifactDir,
+            base: &EdgeStoreBuilder,
+        ) -> ProjectionManifest {
+            let mut manifest = publish_manifest_with_segments(dir, 1, Vec::new());
+            let chunk = dirty_chunk_segments(base.node_count())
+                .into_iter()
+                .next()
+                .expect("chunk fixture exists");
+            let relative =
+                "projection-generation-00000000000000000001-chunk-00000000.pggraph-delta";
+            let path = dir.path().join(relative);
+            chunk.write_to_path(&path).expect("chunk writes");
+            manifest.base_chunks.push(ManifestChunkRef {
+                path: relative.to_string(),
+                checksum: checksum(&path),
+                source_start: chunk.header.source_start,
+                source_end: chunk.header.source_end,
+                dirty_source_count: chunk.header.source_end - chunk.header.source_start,
+                dirty_edge_count: chunk.edge_inserts.len() as u32,
+            });
+            let store = ProjectionManifestStore::new(dir.path());
+            let mut chunk_manifest = manifest.clone();
+            chunk_manifest.generation_id = 2;
+            chunk_manifest.previous_generation_id = Some(1);
+            store
+                .publish(&chunk_manifest)
+                .expect("chunk manifest publishes");
+            chunk_manifest
+        }
+
+        fn segment_ref(relative: &str, path: &Path, segment: &DeltaSegment) -> ManifestSegmentRef {
+            ManifestSegmentRef {
+                path: relative.to_string(),
+                checksum: checksum(path),
+                level: segment.header.level,
+                source_start: segment.header.source_start,
+                source_end: segment.header.source_end,
+                sync_watermark: segment.header.sync_watermark,
+            }
+        }
+
+        fn checksum(path: &Path) -> String {
+            let bytes = fs::read(path).expect("artifact checksum reads");
+            format!("crc32:{:08x}", crc32fast::hash(&bytes))
+        }
+    }
 }
 
 ::pgrx::pg_module_magic!(name, version);

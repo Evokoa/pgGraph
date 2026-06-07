@@ -280,11 +280,78 @@ fn bench_bfs_filter_index_paths(c: &mut Criterion) {
     group.finish();
 }
 
+/// Release-readiness benchmark for durable layered projection traversal.
+///
+/// These scenarios cover the Microphase 16 surfaces that can regress once
+/// committed overlay reads are routed through durable projection segments.
+fn bench_layered_projection_release_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layered_projection_release_paths");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(30);
+
+    let graph = graph_gen::build_benchmark_graph(SMALL, AVG_DEGREE, SEED, 2);
+    let seed = graph_gen::find_supernode(&graph);
+    let config = traversal_config(seed, 3);
+    group.throughput(Throughput::Elements(SMALL as u64));
+
+    for &(label, scenario) in &[
+        ("base_only_d3", LayeredProjectionBenchScenario::BaseOnly),
+        ("small_l0_d3", LayeredProjectionBenchScenario::SmallL0),
+        ("many_l0_d3", LayeredProjectionBenchScenario::ManyL0),
+        (
+            "compacted_l1_d3",
+            LayeredProjectionBenchScenario::CompactedL1,
+        ),
+        (
+            "compacted_l2_d3",
+            LayeredProjectionBenchScenario::CompactedL2,
+        ),
+        (
+            "dirty_chunk_rewrite_d3",
+            LayeredProjectionBenchScenario::DirtyChunkRewrite,
+        ),
+        (
+            "tx_delta_overlay_d3",
+            LayeredProjectionBenchScenario::TxDeltaOverlay,
+        ),
+        (
+            "gql_relationship_expansion_d3",
+            LayeredProjectionBenchScenario::GqlRelationshipExpansion,
+        ),
+    ] {
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                black_box(bfs_layered_projection_execute(
+                    black_box(&graph.node_store),
+                    black_box(&graph.edge_store),
+                    black_box(&graph.filter_index),
+                    black_box(&config),
+                    black_box(scenario),
+                ))
+            })
+        });
+    }
+
+    group.bench_function("weighted_path_dijkstra", |b| {
+        b.iter(|| {
+            black_box(weighted_layered_projection_path(
+                black_box(&graph.node_store),
+                black_box(&graph.edge_store),
+                black_box(0),
+                black_box(127),
+            ))
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_bfs_traverse,
     bench_graph_construction,
     bench_bfs_overlay_paths,
     bench_bfs_filter_index_paths,
+    bench_layered_projection_release_paths,
 );
 criterion_main!(benches);

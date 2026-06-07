@@ -103,3 +103,30 @@ The overlay hot-path group is the first guardrail. Durable layered reads should
 not regress `no_overlay_d3`, `sparse_overlay_d3`, or `dense_overlay_d3` without
 recorded evidence and an explicit release decision.
 
+## Microphase 16 Layered Projection Release Baseline
+
+| Field | Value |
+|---|---|
+| Date | 2026-06-07 |
+| Repository commit | Working tree after Microphase 15 commit `507fafc` |
+| Benchmark command | `cd graph && cargo bench --features pg17 --bench bfs_bench -- layered_projection_release_paths` |
+| Fixture | 100k-node deterministic synthetic graph, depth-3 traversal unless otherwise noted |
+
+The `layered_projection_release_paths` group covers the release-specific
+durable projection shapes required before replacing committed overlay behavior:
+base-only layered reads, small L0, many L0, compacted L1, compacted L2,
+dirty chunk rewrite through the base-chunk provider path, committed overlay on
+top of durable segments, GQL-shaped relationship expansion, and weighted-path
+Dijkstra over durable weight segments.
+
+| Case | Mean time | Throughput |
+|---|---:|---:|
+| `base_only_d3` | `161.55 us` | `618.99 Melem/s` |
+| `small_l0_d3` | `312.32 us` | `320.19 Melem/s` |
+| `many_l0_d3` | `1.3041 ms` | `76.678 Melem/s` |
+| `compacted_l1_d3` | `299.60 us` | `333.78 Melem/s` |
+| `compacted_l2_d3` | `298.87 us` | `334.60 Melem/s` |
+| `dirty_chunk_rewrite_d3` | `455.46 us` | `219.56 Melem/s` |
+| `tx_delta_overlay_d3` | `318.14 us` | `314.33 Melem/s` |
+| `gql_relationship_expansion_d3` | `184.89 us` | `540.87 Melem/s` |
+| `weighted_path_dijkstra` | `72.410 us` | `1.3810 Gelem/s` |

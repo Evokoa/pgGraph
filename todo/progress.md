@@ -681,3 +681,50 @@ signoff resolved by same-environment benchmark follow-up:
   regression on the directly relevant overlay group or a representative raw
   BFS red case. Treat the old baseline as stale/environment-sensitive evidence
   and refresh the long-lived baseline in Microphase 16 production verification.
+
+Microphase 16 is in progress with release benchmark coverage started:
+
+- Added visible, non-ignored release-contract tests for the seven Microphase 16
+  threshold names:
+  `bfs_layered_projection_no_unbounded_regression`,
+  `gql_layered_relationship_expansion_no_unbounded_regression`,
+  `weighted_path_layered_projection_no_unbounded_regression`,
+  `projection_ingest_publish_latency_under_threshold`,
+  `projection_compaction_latency_under_threshold`,
+  `projection_gc_latency_under_threshold`, and
+  `projection_repair_latency_under_threshold`.
+- Updated the latency contract tests after independent review so they exercise
+  real projection operation boundaries: ingestion publication, compaction
+  publication, generation-aware GC deletion, and corrupt base-chunk repair.
+- Added benchmark-only support helpers that construct real decoded durable
+  projection segments internally and route BFS, GQL-shaped relationship
+  expansion, and weighted path checks through the existing `LayeredNeighbors`
+  runtime without exposing projection internals through the SQL/API surface.
+- Extended `graph/benches/bfs_bench.rs` with
+  `layered_projection_release_paths`, covering base-only, small L0, many L0,
+  compacted L1, compacted L2, dirty chunk rewrite through base chunks,
+  committed overlay on top of durable segments, GQL relationship expansion, and
+  weighted path Dijkstra.
+- Recorded the new layered projection release baseline in
+  `todo/measurements.md` and the regression decision in
+  `todo/regression_report.md`.
+- Tests and measurements run so far:
+  - `cd graph && cargo test --features pg17 bench_support::tests`: passed with
+    7 tests.
+  - `cd graph && cargo bench --features pg17 --bench bfs_bench -- --list`:
+    passed and listed all `layered_projection_release_paths` cases.
+  - `cd graph && cargo bench --features pg17 --bench bfs_bench -- layered_projection_release_paths`:
+    passed; mean timings were base-only `161.55 us`, small L0 `312.32 us`,
+    many L0 `1.3041 ms`, compacted L1 `299.60 us`, compacted L2
+    `298.87 us`, dirty chunk rewrite `455.46 us`, tx-delta overlay
+    `318.14 us`, GQL expansion `184.89 us`, and weighted path `72.410 us`.
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `scripts/check_docs_drift.sh`: passed.
+  - `git diff --check`: passed.
+  - `cd graph && cargo test --features pg17`: passed with 631 tests and 1
+    ignored scale test.
+- Remaining Microphase 16 blockers: pgrx gate, manifest/segment fuzz seeds,
+  heavy release matrix, stable docs merge from `todo/` into `docs/`, and
+  `todo/` deletion before release.
