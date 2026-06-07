@@ -695,7 +695,7 @@ pub(crate) fn generation_has_active_heartbeat(_generation_id: u64) -> GraphResul
 #[cfg(not(test))]
 pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
     let rows = pgrx::Spi::connect(|client| {
-        let mut result = client.select(
+        let result = client.select(
             "SELECT DISTINCT generation_id
              FROM graph._projection_generations
              WHERE backend_pid <> 0
@@ -706,7 +706,7 @@ pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
             &[],
         )?;
         let mut generations = Vec::new();
-        while let Some(row) = result.next() {
+        for row in result {
             generations.push(row.get::<i64>(1)?.unwrap_or(0));
         }
         Ok::<_, pgrx::spi::SpiError>(generations)

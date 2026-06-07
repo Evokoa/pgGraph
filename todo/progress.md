@@ -737,5 +737,23 @@ Microphase 16 is in progress with release benchmark coverage started:
   targets include fuzz-only PostgreSQL symbol stubs so pgrx-free
   manifest/segment loader wrappers can run outside a live backend; function
   stubs abort on use while global stubs satisfy relocation only.
-- Remaining Microphase 16 blockers: heavy release matrix, stable docs merge
-  from `todo/` into `docs/`, and `todo/` deletion before release.
+- Fixed the local release gate so it uses the same pgrx feature set as the
+  maintained pgrx evidence command for both clippy and pgrx tests:
+  `pg17 development`.
+- Cleared release-gate clippy failures without changing behavior by replacing
+  panic-prone fixed-slice reads with array copies, removing an iterator
+  `expect`, tightening an active-generation iterator, and documenting narrow
+  pgrx/benchmark helper lint exceptions.
+- `PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_release_m16 RUN_PLAYGROUND=0
+  RUN_PGBENCH=0 RUN_DOCKER=0 RUN_CRASH=0 RUN_TX_DELTA_CRASH=0
+  ./tests/heavy/run_release_gate.sh`: passed outside the sandbox. Covered
+  `pg17 development` clippy, docs, full Rust tests, pgrx tests, cargo-deny,
+  fuzz compile,
+  projection fuzz seed corpora, package validation, fresh install smoke,
+  metadata audit, SQLSTATE/ACL boundary, backup/restore, background lock,
+  build lock, concurrency stress, synthetic release smoke, and GQL
+  create/set/delete/merge lifecycle gates.
+- Remaining Microphase 16 blockers: crash/tx-delta-crash proof with disposable
+  `PGDATA`, playground/pgbench/Docker or explicit release-owner waiver for
+  those external gates, stable docs merge from `todo/` into `docs/`, and
+  `todo/` deletion before release.

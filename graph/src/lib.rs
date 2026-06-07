@@ -164,6 +164,9 @@ pub mod bench_support {
     pub use crate::types::{EdgeTypeFilter, FilterCondition, FilterOp};
     use crate::types::{TraversalDirection, WeightedPathStep};
 
+    type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
+    type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
+
     /// Durable projection shape exercised by release-readiness benchmarks.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum LayeredProjectionBenchScenario {
@@ -294,6 +297,10 @@ pub mod bench_support {
             .collect()
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "benchmark fixture constructs validated static segment ranges"
+    )]
     fn dirty_chunk_segments(node_count: u32) -> Vec<DeltaSegment> {
         if node_count == 0 {
             return vec![edge_segment(0, 2, 1)];
@@ -318,6 +325,10 @@ pub mod bench_support {
         vec![segment]
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "benchmark fixture provider is built from validated local segments"
+    )]
     fn dirty_chunk_neighbors(edge_store: &EdgeStoreBuilder) -> LayeredNeighbors<'_> {
         let provider = BenchSegmentProvider {
             segments: Vec::new(),
@@ -360,12 +371,7 @@ pub mod bench_support {
         vec![segment]
     }
 
-    fn committed_overlay(
-        node_count: u32,
-    ) -> (
-        HashMap<u32, Vec<(u32, u8)>>,
-        HashMap<u32, HashSet<(u32, u8)>>,
-    ) {
+    fn committed_overlay(node_count: u32) -> (OverlayInserts, OverlayDeletes) {
         let mut inserts = HashMap::new();
         let mut deletes = HashMap::new();
         for source in (0..node_count).step_by(509) {
@@ -378,6 +384,10 @@ pub mod bench_support {
         (inserts, deletes)
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "benchmark fixture constructs validated static segment ranges"
+    )]
     fn edge_segment(node_count: u32, level: u8, sync_watermark: i64) -> DeltaSegment {
         DeltaSegment::new(
             SegmentKind::Edge,

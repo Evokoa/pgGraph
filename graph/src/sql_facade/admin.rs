@@ -471,6 +471,10 @@ fn projection_gc() -> TableIterator<
 
 /// Repair or rebuild corrupt durable projection artifacts.
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple shape is the SQL row contract"
+)]
 fn projection_repair() -> TableIterator<
     'static,
     (

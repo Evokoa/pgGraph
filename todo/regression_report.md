@@ -222,3 +222,13 @@ decision.
 | Command | `cd graph && cargo pgrx test --features "pg17 development" pg17`; `CARGO_NET_OFFLINE=true graph/fuzz/run_projection_seed_corpora.sh` |
 | Result | pgrx SQL tests passed with 821 tests and 1 ignored scale test. The manifest seed corpus ran 1 seed file and completed 2 libFuzzer executions. The segment seed corpus ran 2 seed files and completed 3 libFuzzer executions. Both seed corpora completed without crashes after the fuzz-only symbol stubs made the pgrx-free loader wrappers runnable outside a live PostgreSQL backend. |
 | Decision | Mark the Microphase 16 pgrx and manifest/segment fuzz seed gates complete for pg17 local release evidence. No runtime benchmark comparison is required because this checkpoint changes only fuzz harness/release-gate wiring and docs. Final release promotion still requires the heavy release matrix, stable docs merge, and release-owner decision on deleting `todo/`. |
+
+## 2026-06-08: Microphase 16 Local Release Gate
+
+| Field | Value |
+|---|---|
+| Scope | Local pg17 release-gate script with external crash, Docker, playground, and pgbench gates disabled |
+| Code changes | Updated `run_release_gate.sh` to invoke clippy and pgrx tests with `pg17 development`, matching the maintained pgrx evidence commands. Cleared clippy release-gate failures by removing panic-prone fixed-slice `expect()` calls, replacing an empty-group normalization `expect()` with `?`, using iterator style for active heartbeat rows, documenting narrow pgrx/benchmark/development helper lint exceptions, and simplifying a default string path. |
+| Command | `PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_release_m16 RUN_PLAYGROUND=0 RUN_PGBENCH=0 RUN_DOCKER=0 RUN_CRASH=0 RUN_TX_DELTA_CRASH=0 ./tests/heavy/run_release_gate.sh` |
+| Result | Passed outside the sandbox. The gate covered `pg17 development` clippy, docs, full Rust tests, pgrx tests, cargo-deny, fuzz compile, projection fuzz seed corpora, package validation, fresh install smoke, metadata audit, SQLSTATE/ACL boundary, backup/restore, background lock, build lock, concurrency stress, synthetic release smoke, and GQL create/set/delete/merge lifecycle gates. The sandboxed attempt failed at pgrx port binding with `Operation not permitted`, which is an environment restriction rather than a code failure. |
+| Decision | Treat this as strong local pg17 release evidence for non-crash, non-Docker, non-playground, non-pgbench gates. No runtime benchmark comparison is required because the code changes are release-gate lint cleanups and script feature alignment. Final release promotion still requires disposable-`PGDATA` crash/tx-delta-crash proof, playground/pgbench/Docker execution or release-owner waiver, stable docs merge, and final `todo/` deletion decision. |

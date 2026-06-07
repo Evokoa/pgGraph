@@ -20,6 +20,10 @@ impl fmt::Display for TableOid {
 
 /// Node index into the SoA arrays. Range: `0..node_count`.
 #[cfg(any(test, feature = "development"))]
+#[allow(
+    dead_code,
+    reason = "development/test type-safety wrappers are kept for direct API checks"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeIdx(pub u32);
 
@@ -32,10 +36,18 @@ impl fmt::Display for NodeIdx {
 
 /// Edge type ID. Range: `1..=254`. 0 = untyped, 255 = reserved sentinel.
 #[cfg(any(test, feature = "development"))]
+#[allow(
+    dead_code,
+    reason = "development/test type-safety wrappers are kept for direct API checks"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EdgeTypeId(pub u8);
 
 #[cfg(any(test, feature = "development"))]
+#[allow(
+    dead_code,
+    reason = "development/test constants document reserved edge-type ids"
+)]
 impl EdgeTypeId {
     /// Reserved: untyped/null edge.
     pub const UNTYPED: Self = Self(0);

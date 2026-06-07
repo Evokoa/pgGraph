@@ -895,6 +895,10 @@ fn projection_rows_from_sync_entries_with_engine(
     Ok(rows)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "sync replay projection rows require entry, parsed row images, tenant state, and output sink"
+)]
 fn append_projection_rows_for_entry(
     eng: &engine::Engine,
     context: &SyncReplayContext,
@@ -968,10 +972,7 @@ fn append_projection_rows_for_entry(
                 MutationOperation::UpsertNode,
                 tenant_change.new.as_deref().or_else(|| {
                     properties
-                        .get(
-                            &tenant_column_for_table(table_oid, context)
-                                .unwrap_or_else(String::new),
-                        )
+                        .get(&tenant_column_for_table(table_oid, context).unwrap_or_default())
                         .map(String::as_str)
                 }),
                 out,
@@ -1217,6 +1218,10 @@ fn append_projection_filter_rows(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "filter projection needs source row state, operation, and output sink at one replay boundary"
+)]
 fn append_projection_filter_rows_for_pk(
     eng: &mut engine::Engine,
     context: &SyncReplayContext,

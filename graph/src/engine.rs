@@ -566,6 +566,10 @@ impl Engine {
     }
 
     #[cfg(feature = "development")]
+    #[allow(
+        dead_code,
+        reason = "development SQL helpers keep tenant-removal behavior available for targeted replay checks"
+    )]
     pub fn remove_tenant_membership(&mut self, tenant: &str, node_idx: u32) {
         if let Some(bitmap) = self.tenant_membership.get_mut(tenant) {
             bitmap.remove(node_idx);

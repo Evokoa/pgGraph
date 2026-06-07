@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PG_VERSION_FEATURE="${PG_VERSION_FEATURE:-pg17}"
+DEVELOPMENT_FEATURES="$PG_VERSION_FEATURE development"
 DB_PREFIX="${DB_PREFIX:-pggraph_release}"
 RUN_DOCKER="${RUN_DOCKER:-0}"
 RUN_FULL_MATRIX="${RUN_FULL_MATRIX:-0}"
@@ -29,10 +30,10 @@ if [[ "$RUN_FULL_MATRIX" == "1" ]]; then
 fi
 
 cargo fmt --check
-cargo clippy --features "$PG_VERSION_FEATURE" --all-targets -- -D warnings
+cargo clippy --features "$DEVELOPMENT_FEATURES" --all-targets -- -D warnings
 cargo doc --features "$PG_VERSION_FEATURE" --no-deps
 cargo test --features "$PG_VERSION_FEATURE"
-cargo pgrx test "$PG_VERSION_FEATURE"
+cargo pgrx test --features "$DEVELOPMENT_FEATURES" "$PG_VERSION_FEATURE"
 cargo deny check advisories bans licenses sources
 (cd fuzz && cargo check --bins)
 ./fuzz/run_projection_seed_corpora.sh

@@ -805,27 +805,27 @@ fn read_u32(bytes: &[u8], offset: usize) -> GraphResult<u32> {
     let raw = bytes
         .get(offset..offset + 4)
         .ok_or_else(|| segment_corrupt("unexpected end of segment"))?;
-    Ok(u32::from_le_bytes(
-        raw.try_into().expect("slice length is 4"),
-    ))
+    let mut value = [0_u8; 4];
+    value.copy_from_slice(raw);
+    Ok(u32::from_le_bytes(value))
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> GraphResult<u64> {
     let raw = bytes
         .get(offset..offset + 8)
         .ok_or_else(|| segment_corrupt("unexpected end of segment"))?;
-    Ok(u64::from_le_bytes(
-        raw.try_into().expect("slice length is 8"),
-    ))
+    let mut value = [0_u8; 8];
+    value.copy_from_slice(raw);
+    Ok(u64::from_le_bytes(value))
 }
 
 fn read_i64(bytes: &[u8], offset: usize) -> GraphResult<i64> {
     let raw = bytes
         .get(offset..offset + 8)
         .ok_or_else(|| segment_corrupt("unexpected end of segment"))?;
-    Ok(i64::from_le_bytes(
-        raw.try_into().expect("slice length is 8"),
-    ))
+    let mut value = [0_u8; 8];
+    value.copy_from_slice(raw);
+    Ok(i64::from_le_bytes(value))
 }
 
 fn write_u32_at(bytes: &mut [u8], offset: usize, value: u32) {

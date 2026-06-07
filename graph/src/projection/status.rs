@@ -198,6 +198,10 @@ enum StatusScan {
     MetadataOnly,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "status assembly keeps each release-gate field explicit at the manifest boundary"
+)]
 fn status_from_manifest(
     root: &Path,
     manifest: &ProjectionManifest,

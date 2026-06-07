@@ -41,6 +41,10 @@ impl ResolutionIndexBuilder {
     }
 
     #[cfg(any(test, feature = "development"))]
+    #[allow(
+        dead_code,
+        reason = "development/test builders use explicit capacity in focused index checks"
+    )]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: Vec::with_capacity(capacity),
@@ -90,6 +94,10 @@ impl ResolutionIndexBuilder {
     /// [`Self::resolve_verified`] so hash collisions cannot resolve the wrong
     /// primary key.
     #[cfg(any(test, feature = "development"))]
+    #[allow(
+        dead_code,
+        reason = "hash-only resolution remains available for direct development index checks"
+    )]
     pub fn resolve(&self, table_oid: u32, pk: &str) -> Option<u32> {
         let pk_hash = Self::hash_pk(pk);
         self.entries
@@ -133,6 +141,10 @@ impl ResolutionIndexBuilder {
     }
 
     #[cfg(any(test, feature = "development"))]
+    #[allow(
+        dead_code,
+        reason = "development/test callers use this to assert empty index state directly"
+    )]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -200,6 +212,10 @@ impl ResolutionDeltaIndex {
     }
 
     #[cfg(any(test, feature = "development"))]
+    #[allow(
+        dead_code,
+        reason = "development/test callers inspect pending delta size directly"
+    )]
     pub fn len(&self) -> usize {
         self.by_key.values().map(Vec::len).sum()
     }
@@ -279,6 +295,10 @@ impl<'a> ResolutionIndex<'a> {
     ///
     /// O(log n) — ~23 comparisons for 10M entries, ~115ns.
     #[cfg(any(test, feature = "development"))]
+    #[allow(
+        dead_code,
+        reason = "hash-only resolution remains available for direct development index checks"
+    )]
     pub fn resolve(&self, table_oid: u32, pk: &str) -> Option<u32> {
         self.resolve_verified(table_oid, pk, |_| true)
     }
@@ -339,6 +359,10 @@ impl<'a> ResolutionIndex<'a> {
     }
 
     #[cfg(any(test, feature = "development"))]
+    #[allow(
+        dead_code,
+        reason = "development/test callers use this to assert empty persisted index state directly"
+    )]
     pub fn is_empty(&self) -> bool {
         self.entry_count == 0
     }

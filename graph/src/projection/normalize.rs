@@ -179,8 +179,7 @@ fn normalize_group(group: &[CommittedMutation]) -> Option<NormalizedMutation> {
     }
     let selected = group
         .iter()
-        .max_by(|left, right| compare_precedence(left, right))
-        .expect("normalization groups are nonempty");
+        .max_by(|left, right| compare_precedence(left, right))?;
     Some(NormalizedMutation {
         generation_id: selected.generation_id,
         sync_id: selected.sync_id,

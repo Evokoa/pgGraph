@@ -148,6 +148,10 @@ pub fn sync_update_tenant(
 /// Edge CSR storage is immutable. Callers add delete/insert edge overlays from
 /// old and new row images before invoking this helper.
 #[cfg(any(test, feature = "development", feature = "fuzzing"))]
+#[allow(
+    dead_code,
+    reason = "development and fuzz surfaces keep primary-key replacement replay available outside SQL"
+)]
 pub fn sync_replace_pk(
     engine: &mut Engine,
     table_oid: u32,
@@ -168,6 +172,10 @@ pub fn sync_replace_pk(
 /// Tombstones the node (sets is_active = false).
 /// The node slot remains allocated until the next vacuum/rebuild.
 #[cfg(any(test, feature = "development", feature = "fuzzing"))]
+#[allow(
+    dead_code,
+    reason = "development and fuzz surfaces keep delete replay available outside SQL"
+)]
 pub fn sync_delete(engine: &mut Engine, table_oid: u32, pk: &str) -> GraphResult<()> {
     sync_delete_tenant(engine, table_oid, pk, None)
 }
