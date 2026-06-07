@@ -193,6 +193,15 @@ does not remove older chunk files, so older generations remain readable until
 generation-aware cleanup makes them obsolete. If a chunk checksum fails,
 targeted repair rewrites the corrupted range into a new generation.
 
+Compaction reduces durable segment fanout by publishing a new generation with
+higher-level segment files that preserve the prior layered output. L0 segments
+compact to L1, L1 segments compact to L2, and delete/tombstone precedence is
+preserved by comparing the final layered view against the base CSR for the
+affected source ranges. When segment pressure crosses the configured dirty
+chunk threshold, compaction can publish base chunk replacements instead of more
+segments. Budget failures abort before manifest publication, leaving the
+previous generation current and readable.
+
 When a `.pggraph` artifact is loaded, the loader scans the artifact directory
 for the latest `projection-generation-*.json` manifest. In the base-only phase,
 the engine installs only manifests that reference the loaded `.pggraph` file,

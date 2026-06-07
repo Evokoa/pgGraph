@@ -5,6 +5,11 @@
     reason = "Microphase 9 adds base chunk rewrite helpers before compaction and SQL repair scheduling consume them"
 )]
 pub(crate) mod chunk;
+#[allow(
+    dead_code,
+    reason = "Microphase 10 adds compaction helpers before scheduled maintenance wires compaction policy"
+)]
+pub(crate) mod compact;
 pub(crate) mod ingest;
 #[allow(
     dead_code,

@@ -109,6 +109,22 @@ pub(crate) fn publish_base_chunk_rewrite(
     source: &impl BaseChunkSource,
     dirty_ranges: &[SourceRange],
 ) -> GraphResult<BaseChunkRewriteResult> {
+    publish_base_chunk_rewrite_with_segments(
+        root,
+        previous,
+        source,
+        dirty_ranges,
+        previous.segments.clone(),
+    )
+}
+
+pub(crate) fn publish_base_chunk_rewrite_with_segments(
+    root: &Path,
+    previous: &ProjectionManifest,
+    source: &impl BaseChunkSource,
+    dirty_ranges: &[SourceRange],
+    retained_segments: Vec<crate::projection::manifest::ManifestSegmentRef>,
+) -> GraphResult<BaseChunkRewriteResult> {
     if dirty_ranges.is_empty() {
         return Ok(BaseChunkRewriteResult {
             manifest: previous.clone(),
@@ -167,7 +183,7 @@ pub(crate) fn publish_base_chunk_rewrite(
         now_unix_micros()?,
     );
     manifest.previous_generation_id = Some(previous.generation_id);
-    manifest.segments = previous.segments.clone();
+    manifest.segments = retained_segments;
     manifest.base_chunks = base_chunks;
     manifest.obsolete_files = obsolete_files;
     let store = ProjectionManifestStore::new(root);

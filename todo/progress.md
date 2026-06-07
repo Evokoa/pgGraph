@@ -397,3 +397,37 @@ Microphase 9 added base chunk rewrite and targeted repair:
   default CSR/base-only reads or add a SQL scheduling path yet, so no new
   benchmark comparison is required until compaction/GC or SQL repair scheduling
   makes chunk rewrite operationally active.
+
+Microphase 10 added compaction publication:
+
+- Added `graph/src/projection/compact.rs` with bounded compaction over active
+  manifest edge segments. L0 fanout compacts to L1, L1 fanout compacts to L2,
+  and tombstone/delete precedence is preserved by materializing the previous
+  layered view and writing a compacted delta against base CSR.
+- Added dirty chunk pressure handling: when the configured segment threshold is
+  reached, compaction publishes base chunk replacements and drops the compacted
+  segment fanout from the new manifest.
+- Independent-review fixes ensure compaction preserves non-edge manifest
+  segments, carries durable edge weights through segment and chunk compaction,
+  and normalizes overlapping dirty source ranges before chunk publication.
+- Added row, byte, segment-count, and elapsed-time budget checks that fail
+  before manifest publication so the previous generation remains current.
+- Tests run:
+  - `cd graph && cargo test --features pg17 projection::compact`: passed with
+    9 compaction tests.
+  - `cd graph && cargo test --features pg17 compaction_`: passed with the 9
+    compaction tests plus the existing compaction-lock ingestion test.
+  - `cd graph && cargo test --features pg17 base_chunk_`: passed with 7 chunk
+    rewrite/repair tests.
+  - `cd graph && cargo test --features pg17 projection::layered`: passed with
+    12 layered-runtime tests.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed with 0 doctests.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cd graph && cargo test --features pg17`: expected red; 608 passed, 1
+    failed future status/diagnostics contract, 1 ignored scale test.
+- Regression report: Microphase 10 changes opt-in compacted manifest artifacts
+  but does not alter default CSR/base-only reads or SQL scheduling. No benchmark
+  comparison is required until scheduled maintenance invokes compaction in a
+  production-visible path.

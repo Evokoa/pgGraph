@@ -135,3 +135,14 @@ decision.
 | Command | `cd graph && cargo fmt --check`; `cd graph && cargo check --features pg17`; `cd graph && cargo test --features pg17 base_chunk_`; `cd graph && cargo test --features pg17 projection::manifest`; `cd graph && cargo test --features pg17 projection::layered`; `cd graph && cargo test --features pg17 projection::test_contracts` |
 | Result | Base chunk manifest, rewrite equivalence, old-generation readability, partial-overlap expansion, unchanged-edge preservation, malformed inbound chunk rejection, and corruption repair tests passed. Manifest and layered tests passed. Feature contracts remain intentionally red only for the future status/diagnostics contract: 5 passed, 1 failed. |
 | Decision | No new benchmark comparison required for this checkpoint because chunk rewrite is a publication/repair boundary and only affects manifests that already opt into chunked generations. Default CSR/base-only reads and existing SQL read-path selection are unchanged; benchmark chunked generation reads when compaction or repair scheduling makes chunks operationally active. |
+
+## 2026-06-07: Microphase 10 Compaction
+
+| Field | Value |
+|---|---|
+| Scope | Durable segment fanout compaction, tombstone-preserving merged segments, dirty chunk pressure rewrite, and bounded publication failure |
+| Code changes | Added `projection::compact`; L0 segments compact to L1, L1 segments compact to L2, compacted output is derived from the previous layered view against base CSR, high segment pressure can publish base chunks instead, non-edge segments and durable weights are retained, overlapping dirty ranges are normalized, and budget failures leave the previous manifest current |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo test --features pg17 projection::compact`; `cd graph && cargo test --features pg17 compaction_`; `cd graph && cargo test --features pg17 base_chunk_`; `cd graph && cargo test --features pg17 projection::layered`; `cd graph && cargo check --features pg17`; `cd graph && cargo fmt --check`; `cd graph && cargo test --features pg17 --doc`; `python3 scripts/check_doc_references.py`; `cd graph && cargo test --features pg17` |
+| Result | L0-to-L1, L1-to-L2, tombstone precedence, non-edge segment retention, weighted edge retention, dirty chunk pressure, dirty chunk weight/non-edge retention, overlapping dirty-range normalization, and interruption tests passed. Chunk, layered, compile, format, doctest, and docs gates passed. Full tests remain intentionally red only for the future status/diagnostics contract: 608 passed, 1 failed, 1 ignored. |
+| Decision | No benchmark comparison required for this checkpoint because compaction is not yet invoked by SQL or scheduled maintenance. It creates opt-in compacted artifacts that preserve layered output; measure when compaction is connected to an operational maintenance path. |
