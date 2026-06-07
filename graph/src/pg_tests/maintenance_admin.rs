@@ -1467,7 +1467,7 @@ fn sync_health_exposes_operator_contract_field_names() {
     let signature_matches = Spi::get_one::<bool>(
             "WITH expected(result_type) AS (
                 VALUES (
-                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, read_only_reason text, projection_mode text, overlay_tombstone_count integer, overlay_memory_bytes bigint, compaction_recommended boolean, tx_delta_dirty boolean, tx_delta_added_nodes integer, tx_delta_deleted_nodes integer, tx_delta_added_edges integer, tx_delta_deleted_edges integer, tx_delta_memory_bytes bigint, apply_sync_recommended boolean, maintenance_recommended boolean)'
+                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, read_only_reason text, projection_mode text, overlay_tombstone_count integer, overlay_memory_bytes bigint, compaction_recommended boolean, tx_delta_dirty boolean, tx_delta_added_nodes integer, tx_delta_deleted_nodes integer, tx_delta_added_edges integer, tx_delta_deleted_edges integer, tx_delta_memory_bytes bigint, apply_sync_recommended boolean, maintenance_recommended boolean, durable_ingest_recommended boolean, durable_compaction_recommended boolean, durable_gc_recommended boolean, durable_repair_recommended boolean)'
                 )
              )
              SELECT pg_get_function_result(p.oid) = expected.result_type
@@ -1481,6 +1481,150 @@ fn sync_health_exposes_operator_contract_field_names() {
         .unwrap_or(false);
 
     assert!(signature_matches);
+}
+
+#[pg_test]
+fn projection_status_exposes_operator_contract_field_names() {
+    reset_and_create_fixtures();
+    let signature_matches = Spi::get_one::<bool>(
+            "WITH expected(result_type) AS (
+                VALUES (
+                    'TABLE(manifest_generation bigint, manifest_watermark bigint, pending_durable_rows bigint, segment_count integer, segment_bytes bigint, l0_segment_count integer, l1_segment_count integer, l2_segment_count integer, edge_segment_count integer, node_segment_count integer, dirty_chunk_count integer, dirty_chunk_bytes bigint, tombstone_ratio double precision, compaction_backlog integer, obsolete_file_count integer, obsolete_bytes bigint, active_generation_count integer, artifact_validation_state text, last_ingestion_unix_micros bigint, last_compaction_unix_micros bigint, last_gc_unix_micros bigint, last_repair_unix_micros bigint, ingest_recommended boolean, compaction_recommended boolean, gc_recommended boolean, repair_recommended boolean)'
+                )
+             )
+             SELECT pg_get_function_result(p.oid) = expected.result_type
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             CROSS JOIN expected
+             WHERE n.nspname = 'graph'
+               AND p.proname = 'projection_status'",
+        )
+        .expect("projection_status signature inspection failed")
+        .unwrap_or(false);
+
+    assert!(signature_matches);
+}
+
+#[pg_test]
+fn sync_health_distinguishes_tx_delta_edge_buffer_and_durable_projection_pressure() {
+    let fixture = setup_projection_status_pressure_fixture(
+        "graph_test_projection_sync_health_pressure_pgtest",
+        9_401_001,
+    );
+
+    let (tx_dirty, edge_buffer_used, durable_ingest, durable_compaction, durable_gc, durable_repair) =
+        Spi::connect(|client| {
+            let result = client
+                .select(
+                    "SELECT tx_delta_dirty,
+                            edge_buffer_used,
+                            durable_ingest_recommended,
+                            durable_compaction_recommended,
+                            durable_gc_recommended,
+                            durable_repair_recommended
+                       FROM graph.sync_health()",
+                    None,
+                    &[],
+                )
+                .expect("sync health projection pressure query failed");
+            let row = result.first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<bool>(1)?.unwrap_or(true),
+                row.get::<i32>(2)?.unwrap_or(-1),
+                row.get::<bool>(3)?.unwrap_or(false),
+                row.get::<bool>(4)?.unwrap_or(false),
+                row.get::<bool>(5)?.unwrap_or(false),
+                row.get::<bool>(6)?.unwrap_or(false),
+            ))
+        })
+        .expect("sync health projection pressure read failed");
+
+    assert!(!tx_dirty);
+    assert_eq!(edge_buffer_used, 0);
+    assert!(durable_ingest);
+    assert!(durable_compaction);
+    assert!(durable_gc);
+    assert!(!durable_repair);
+    cleanup_projection_status_pressure_fixture(fixture);
+    Spi::run("RESET graph.compaction_threshold").expect("reset compaction threshold failed");
+    Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
+    Spi::run("RESET graph.default_projection_mode").expect("reset projection mode failed");
+}
+
+#[pg_test]
+fn status_reports_active_generation_heartbeat_count() {
+    Spi::run("DELETE FROM graph._projection_generations WHERE generation_id = 9402001")
+        .expect("clear heartbeat fixture failed");
+    crate::projection::manifest::record_active_generation_heartbeat(
+        9_402_001,
+        std::time::Duration::from_secs(30),
+        12,
+        crate::projection::manifest::VALIDATION_STATUS_VALID,
+    )
+    .expect("heartbeat records");
+
+    let active_count = Spi::get_one::<i32>(
+        "SELECT active_generation_count
+         FROM graph.projection_status()",
+    )
+    .expect("projection status active count query failed")
+    .unwrap_or(0);
+
+    assert!(active_count >= 1);
+    Spi::run("DELETE FROM graph._projection_generations WHERE generation_id = 9402001")
+        .expect("clear heartbeat fixture failed");
+}
+
+#[pg_test]
+fn status_recommends_ingest_compaction_gc_or_repair_by_threshold() {
+    let fixture = setup_projection_status_pressure_fixture(
+        "graph_test_projection_status_pressure_pgtest",
+        9_403_001,
+    );
+
+    let (pending, backlog, obsolete_bytes, validation, ingest, compaction, gc, repair) =
+        Spi::connect(|client| {
+            let result = client
+                .select(
+                    "SELECT pending_durable_rows,
+                            compaction_backlog,
+                            obsolete_bytes,
+                            artifact_validation_state,
+                            ingest_recommended,
+                            compaction_recommended,
+                            gc_recommended,
+                            repair_recommended
+                       FROM graph.projection_status()",
+                    None,
+                    &[],
+                )
+                .expect("projection status recommendation query failed");
+            let row = result.first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<i64>(1)?.unwrap_or(0),
+                row.get::<i32>(2)?.unwrap_or(0),
+                row.get::<i64>(3)?.unwrap_or(0),
+                row.get::<String>(4)?.unwrap_or_default(),
+                row.get::<bool>(5)?.unwrap_or(false),
+                row.get::<bool>(6)?.unwrap_or(false),
+                row.get::<bool>(7)?.unwrap_or(false),
+                row.get::<bool>(8)?.unwrap_or(false),
+            ))
+        })
+        .expect("projection status recommendation read failed");
+
+    assert!(pending > 0);
+    assert!(backlog > 0);
+    assert_eq!(obsolete_bytes, 3);
+    assert_eq!(validation, "targeted_chunk_repair");
+    assert!(ingest);
+    assert!(compaction);
+    assert!(gc);
+    assert!(repair);
+    cleanup_projection_status_pressure_fixture(fixture);
+    Spi::run("RESET graph.compaction_threshold").expect("reset compaction threshold failed");
+    Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
+    Spi::run("RESET graph.default_projection_mode").expect("reset projection mode failed");
 }
 
 #[pg_test]
@@ -1836,6 +1980,182 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
     let _ = std::fs::remove_file(&chunk_path);
     Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
     Spi::run("RESET graph.default_projection_mode").expect("reset projection mode failed");
+}
+
+struct ProjectionStatusPressureFixture {
+    manifest: std::path::PathBuf,
+    segment_a: std::path::PathBuf,
+    segment_b: std::path::PathBuf,
+    chunk: std::path::PathBuf,
+    obsolete: std::path::PathBuf,
+}
+
+impl Drop for ProjectionStatusPressureFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.segment_a);
+        let _ = std::fs::remove_file(&self.segment_b);
+        let _ = std::fs::remove_file(&self.chunk);
+        let _ = std::fs::remove_file(&self.obsolete);
+        let _ = std::fs::remove_file(&self.manifest);
+        let _ = Spi::run("RESET graph.compaction_threshold");
+        let _ = Spi::run("SET graph.persist_on_build = off");
+        let _ = Spi::run("RESET graph.default_projection_mode");
+    }
+}
+
+fn setup_projection_status_pressure_fixture(
+    table_name: &str,
+    generation_id: u64,
+) -> ProjectionStatusPressureFixture {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    reset_and_create_fixtures();
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.default_projection_mode = 'csr_readonly'")
+        .expect("set projection mode failed");
+    Spi::run("SET graph.compaction_threshold = 1").expect("set compaction threshold failed");
+    Spi::run(&format!("DROP TABLE IF EXISTS public.{table_name} CASCADE"))
+        .expect("drop projection status table failed");
+    Spi::run(&format!(
+        "CREATE TABLE public.{table_name} (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )"
+    ))
+    .expect("create projection status table failed");
+    Spi::run(&format!(
+        "INSERT INTO public.{table_name} (id, name)
+         VALUES ('a', 'Alice'), ('b', 'Bob')"
+    ))
+    .expect("insert projection status rows failed");
+    Spi::run(&format!(
+        "SELECT graph.add_table(
+            '{table_name}'::regclass,
+            id_column := 'id',
+            columns := ARRAY['name']
+        )"
+    ))
+    .expect("add projection status table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build projection status graph failed");
+    Spi::run(&format!(
+        "INSERT INTO graph._sync_log (op, table_name, pk, new_row)
+         VALUES ('I', '{table_name}', 'z', '{{\"id\":\"z\",\"name\":\"Zed\"}}'::jsonb)"
+    ))
+    .expect("insert projection status sync log failed");
+
+    let graph_path = crate::persistence::graph_file_path().expect("graph path failed");
+    let root = crate::persistence::projection_manifest_root(&graph_path);
+    let store = crate::projection::manifest::ProjectionManifestStore::new(&root);
+    let manifest_path = store.manifest_path(generation_id);
+    let segment_a = root.join(format!("{table_name}-a.pggraph-delta"));
+    let segment_b = root.join(format!("{table_name}-b.pggraph-delta"));
+    let chunk = root.join(format!("{table_name}.pggraph-chunk"));
+    let obsolete = root.join(format!("{table_name}-old.pggraph-delta"));
+    for path in [&manifest_path, &segment_a, &segment_b, &chunk, &obsolete] {
+        let _ = std::fs::remove_file(path);
+    }
+
+    write_projection_status_segment(&segment_a, 0);
+    write_projection_status_segment(&segment_b, 1);
+    write_projection_status_segment(&chunk, 0);
+    std::fs::write(&obsolete, b"old").expect("obsolete projection file writes");
+    let mut manifest = crate::projection::manifest::ProjectionManifest::base_only(
+        generation_id,
+        "main.pggraph",
+        crate::persistence::graph_artifact_checksum_for_path(&graph_path)
+            .expect("graph checksum reads"),
+        crate::persistence::graph_artifact_version(),
+        0,
+        1,
+    );
+    manifest
+        .segments
+        .push(projection_status_segment_ref(&root, &segment_a, 0));
+    manifest
+        .segments
+        .push(projection_status_segment_ref(&root, &segment_b, 1));
+    manifest
+        .base_chunks
+        .push(crate::projection::manifest::ManifestChunkRef {
+            path: relative_projection_test_path(&root, &chunk),
+            checksum: checksum_for_test_path(&chunk),
+            source_start: 0,
+            source_end: 2,
+            dirty_source_count: 2,
+            dirty_edge_count: 1,
+        });
+    manifest
+        .obsolete_files
+        .push(crate::projection::manifest::ManifestFileRef {
+            path: relative_projection_test_path(&root, &obsolete),
+            bytes: 3,
+        });
+    store.publish(&manifest)
+        .expect("projection status manifest publishes");
+    std::fs::write(&chunk, b"corrupt chunk").expect("chunk corruption writes");
+
+    ProjectionStatusPressureFixture {
+        manifest: manifest_path,
+        segment_a,
+        segment_b,
+        chunk,
+        obsolete,
+    }
+}
+
+fn cleanup_projection_status_pressure_fixture(fixture: ProjectionStatusPressureFixture) {
+    drop(fixture);
+}
+
+fn write_projection_status_segment(path: &std::path::Path, level: u8) {
+    let mut segment = crate::projection::segment::DeltaSegment::new(
+        crate::projection::segment::SegmentKind::Edge,
+        level,
+        crate::types::TraversalDirection::Out,
+        0,
+        2,
+        1,
+    )
+    .expect("projection status segment creates");
+    segment
+        .edge_inserts
+        .push(crate::projection::segment::SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+        });
+    segment
+        .edge_deletes
+        .push(crate::projection::segment::SegmentEdge {
+            source: 1,
+            target: 0,
+            type_id: 1,
+        });
+    segment
+        .write_to_path(path)
+        .expect("projection status segment writes");
+}
+
+fn projection_status_segment_ref(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    level: u8,
+) -> crate::projection::manifest::ManifestSegmentRef {
+    crate::projection::manifest::ManifestSegmentRef {
+        path: relative_projection_test_path(root, path),
+        checksum: checksum_for_test_path(path),
+        level,
+        source_start: 0,
+        source_end: 2,
+        sync_watermark: 1,
+    }
+}
+
+fn checksum_for_test_path(path: &std::path::Path) -> String {
+    format!(
+        "crc32:{:08x}",
+        crc32fast::hash(&std::fs::read(path).expect("file reads"))
+    )
 }
 
 fn relative_projection_test_path(root: &std::path::Path, path: &std::path::Path) -> String {

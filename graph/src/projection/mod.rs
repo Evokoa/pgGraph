@@ -34,6 +34,7 @@ pub(crate) mod normalize;
 )]
 pub(crate) mod recovery;
 pub(crate) mod segment;
+pub(crate) mod status;
 #[cfg(test)]
 mod test_contracts;
 #[cfg(test)]

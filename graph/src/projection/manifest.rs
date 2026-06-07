@@ -55,6 +55,15 @@ pub(crate) struct ProjectionManifest {
     pub(crate) validation_status: String,
     /// Manifest creation timestamp as Unix microseconds.
     pub(crate) created_at_unix_micros: i64,
+    /// Last ingestion publication timestamp carried forward across generations.
+    #[serde(default)]
+    pub(crate) last_ingestion_unix_micros: Option<i64>,
+    /// Last compaction publication timestamp carried forward across generations.
+    #[serde(default)]
+    pub(crate) last_compaction_unix_micros: Option<i64>,
+    /// Last repair publication timestamp carried forward across generations.
+    #[serde(default)]
+    pub(crate) last_repair_unix_micros: Option<i64>,
 }
 
 impl ProjectionManifest {
@@ -80,7 +89,32 @@ impl ProjectionManifest {
             sync_watermark,
             validation_status: VALIDATION_STATUS_VALID.to_string(),
             created_at_unix_micros,
+            last_ingestion_unix_micros: None,
+            last_compaction_unix_micros: None,
+            last_repair_unix_micros: None,
         }
+    }
+
+    /// Carry forward persisted operation timestamps from the previous manifest.
+    pub(crate) fn inherit_operation_timestamps(&mut self, previous: &Self) {
+        self.last_ingestion_unix_micros = previous.last_ingestion_unix_micros;
+        self.last_compaction_unix_micros = previous.last_compaction_unix_micros;
+        self.last_repair_unix_micros = previous.last_repair_unix_micros;
+    }
+
+    /// Mark this generation as the result of an ingestion publication.
+    pub(crate) fn mark_ingestion(&mut self) {
+        self.last_ingestion_unix_micros = Some(self.created_at_unix_micros);
+    }
+
+    /// Mark this generation as the result of a compaction publication.
+    pub(crate) fn mark_compaction(&mut self) {
+        self.last_compaction_unix_micros = Some(self.created_at_unix_micros);
+    }
+
+    /// Mark this generation as the result of a repair publication.
+    pub(crate) fn mark_repair(&mut self) {
+        self.last_repair_unix_micros = Some(self.created_at_unix_micros);
     }
 
     /// Validate required semantic fields after JSON decoding.

@@ -224,8 +224,12 @@ backend-locally, and `graph.active_generation_count()` exposes the active
 generation heartbeat count so operators can see whether concurrent backends are
 retaining projection generations.
 The SQL `graph.status()` table is already at pgrx's tuple-return arity limit, so
-the broader durable projection diagnostics are deferred to the
-status/diagnostics phase that can refactor the SQL shape deliberately.
+durable projection diagnostics live in `graph.projection_status()`. That row is
+computed by `projection::status` from the latest manifest, persisted operation
+timestamps, and referenced artifact metadata. `graph.sync_health()` uses the
+metadata-only status collector so scheduler polling does not decode every
+durable projection segment; full artifact validation remains on
+`graph.projection_status()` and repair paths.
 
 Scheduler ownership intentionally stays outside the extension. PostgreSQL
 background-worker lifecycle, crash recovery, privilege boundaries, and cadence

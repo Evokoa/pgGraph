@@ -125,6 +125,8 @@ fn collect_projection_garbage_with_active_generation_ids(
         deleted_bytes = deleted_bytes.saturating_add(bytes);
     }
 
+    crate::projection::status::record_projection_gc(root)?;
+
     Ok(ProjectionGcSummary {
         valid_generations_scanned: manifests.len(),
         retained_generations,

@@ -190,7 +190,11 @@ impl ProjectionIngester {
             sync_watermark,
             now_unix_micros()?,
         );
+        if let Some(previous) = previous.as_ref() {
+            manifest.inherit_operation_timestamps(previous);
+        }
         manifest.previous_generation_id = previous.map(|manifest| manifest.generation_id);
+        manifest.mark_ingestion();
         self.store.publish(&manifest)?;
         Ok(ProjectionIngestResult {
             manifest: Some(manifest),
@@ -253,7 +257,11 @@ impl ProjectionIngester {
             sync_watermark,
             now_unix_micros()?,
         );
+        if let Some(previous) = previous.as_ref() {
+            manifest.inherit_operation_timestamps(previous);
+        }
         manifest.previous_generation_id = previous.map(|manifest| manifest.generation_id);
+        manifest.mark_ingestion();
         manifest.segments = segment_refs;
         if let Err(err) = self.store.publish(&manifest) {
             if !self.store.manifest_path(generation_id).exists() {

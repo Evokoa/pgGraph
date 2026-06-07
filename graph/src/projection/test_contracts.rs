@@ -10,7 +10,8 @@ use super::test_fixtures::{
 use crate::projection::ingest::{ProjectionIngester, ProjectionSyncRow};
 use crate::projection::layered::LayeredNeighbors;
 use crate::projection::manifest::{
-    ProjectionManifest, ProjectionManifestStore, VALIDATION_STATUS_VALID,
+    ManifestChunkRef, ManifestFileRef, ManifestSegmentRef, ProjectionManifest,
+    ProjectionManifestStore, VALIDATION_STATUS_VALID,
 };
 use crate::projection::neighbors::CsrNeighbors;
 use crate::projection::normalize::{MutationBufferLimits, MutationOperation};
@@ -19,10 +20,6 @@ use crate::projection::segment::{
     SegmentNodeState, SegmentResolution, SegmentTenant,
 };
 use crate::types::TraversalDirection;
-
-fn production_feature_absent(feature: &str) -> ! {
-    panic!("{feature} is not implemented yet")
-}
 
 #[test]
 fn projection_manifest_roundtrips_base_only_generation() {
@@ -211,5 +208,96 @@ fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {
 
 #[test]
 fn status_reports_manifest_watermark_segments_chunks_gc_and_repair() {
-    production_feature_absent("durable projection status and diagnostics");
+    let dir = ProjectionArtifactDir::new(
+        "status_reports_manifest_watermark_segments_chunks_gc_and_repair_contract",
+    );
+    std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+    let segment_path = dir.segment_path(1, 0);
+    let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 2, 4)
+        .expect("segment constructs");
+    segment.edge_inserts.push(SegmentEdge {
+        source: 0,
+        target: 1,
+        type_id: 1,
+    });
+    segment.edge_deletes.push(SegmentEdge {
+        source: 1,
+        target: 0,
+        type_id: 1,
+    });
+    segment
+        .write_to_path(&segment_path)
+        .expect("segment writes");
+    let chunk_path = dir.path().join("active.pggraph-chunk");
+    segment
+        .write_to_path(&chunk_path)
+        .expect("chunk segment writes");
+    let obsolete_path = dir.path().join("obsolete.pggraph-delta");
+    std::fs::write(&obsolete_path, b"old").expect("obsolete writes");
+
+    let mut manifest = ProjectionManifest::base_only(7, "base.pggraph", "crc32:base", 1, 4, 99);
+    manifest.mark_ingestion();
+    manifest.mark_compaction();
+    manifest.mark_repair();
+    manifest.segments.push(ManifestSegmentRef {
+        path: relative_path(dir.path(), &segment_path),
+        checksum: checksum_for_path(&segment_path),
+        level: 0,
+        source_start: 0,
+        source_end: 2,
+        sync_watermark: 4,
+    });
+    manifest.base_chunks.push(ManifestChunkRef {
+        path: relative_path(dir.path(), &chunk_path),
+        checksum: checksum_for_path(&chunk_path),
+        source_start: 0,
+        source_end: 2,
+        dirty_source_count: 2,
+        dirty_edge_count: 1,
+    });
+    manifest.obsolete_files.push(ManifestFileRef {
+        path: relative_path(dir.path(), &obsolete_path),
+        bytes: 3,
+    });
+    ProjectionManifestStore::new(dir.path())
+        .publish(&manifest)
+        .expect("manifest publishes");
+    crate::projection::status::record_projection_gc(dir.path()).expect("GC timestamp records");
+
+    let status = crate::projection::status::collect_projection_status(dir.path(), None, 9, 1, 0)
+        .expect("status collects");
+
+    assert_eq!(status.manifest_generation, Some(7));
+    assert_eq!(status.manifest_watermark, Some(4));
+    assert_eq!(status.pending_durable_rows, 5);
+    assert_eq!(status.segment_count, 1);
+    assert_eq!(status.l0_segment_count, 1);
+    assert_eq!(status.edge_segment_count, 1);
+    assert_eq!(status.dirty_chunk_count, 1);
+    assert_eq!(status.obsolete_file_count, 1);
+    assert_eq!(status.obsolete_bytes, 3);
+    assert_eq!(status.active_generation_count, 1);
+    assert_eq!(status.artifact_validation_state, "healthy");
+    assert!(status.ingest_recommended);
+    assert!(status.compaction_recommended);
+    assert!(status.gc_recommended);
+    assert!(!status.repair_recommended);
+    assert_eq!(status.last_ingestion_unix_micros, Some(99));
+    assert_eq!(status.last_compaction_unix_micros, Some(99));
+    assert!(status.last_gc_unix_micros.is_some());
+    assert_eq!(status.last_repair_unix_micros, Some(99));
+}
+
+fn relative_path(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .expect("path is under root")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn checksum_for_path(path: &std::path::Path) -> String {
+    format!(
+        "crc32:{:08x}",
+        crc32fast::hash(&std::fs::read(path).expect("file reads"))
+    )
 }

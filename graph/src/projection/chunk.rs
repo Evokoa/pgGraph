@@ -102,6 +102,13 @@ pub(crate) struct BaseChunkRewriteResult {
     pub(crate) chunks_rewritten: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseChunkRewriteReason {
+    None,
+    Compaction,
+    Repair,
+}
+
 /// Publish a new generation with replacement base chunks for dirty ranges.
 pub(crate) fn publish_base_chunk_rewrite(
     root: &Path,
@@ -109,12 +116,13 @@ pub(crate) fn publish_base_chunk_rewrite(
     source: &impl BaseChunkSource,
     dirty_ranges: &[SourceRange],
 ) -> GraphResult<BaseChunkRewriteResult> {
-    publish_base_chunk_rewrite_with_segments(
+    publish_base_chunk_rewrite_with_segments_and_reason(
         root,
         previous,
         source,
         dirty_ranges,
         previous.segments.clone(),
+        BaseChunkRewriteReason::None,
     )
 }
 
@@ -124,6 +132,24 @@ pub(crate) fn publish_base_chunk_rewrite_with_segments(
     source: &impl BaseChunkSource,
     dirty_ranges: &[SourceRange],
     retained_segments: Vec<crate::projection::manifest::ManifestSegmentRef>,
+) -> GraphResult<BaseChunkRewriteResult> {
+    publish_base_chunk_rewrite_with_segments_and_reason(
+        root,
+        previous,
+        source,
+        dirty_ranges,
+        retained_segments,
+        BaseChunkRewriteReason::Compaction,
+    )
+}
+
+fn publish_base_chunk_rewrite_with_segments_and_reason(
+    root: &Path,
+    previous: &ProjectionManifest,
+    source: &impl BaseChunkSource,
+    dirty_ranges: &[SourceRange],
+    retained_segments: Vec<crate::projection::manifest::ManifestSegmentRef>,
+    reason: BaseChunkRewriteReason,
 ) -> GraphResult<BaseChunkRewriteResult> {
     if dirty_ranges.is_empty() {
         return Ok(BaseChunkRewriteResult {
@@ -183,6 +209,12 @@ pub(crate) fn publish_base_chunk_rewrite_with_segments(
         now_unix_micros()?,
     );
     manifest.previous_generation_id = Some(previous.generation_id);
+    manifest.inherit_operation_timestamps(previous);
+    match reason {
+        BaseChunkRewriteReason::None => {}
+        BaseChunkRewriteReason::Compaction => manifest.mark_compaction(),
+        BaseChunkRewriteReason::Repair => manifest.mark_repair(),
+    }
     manifest.segments = retained_segments;
     manifest.base_chunks = base_chunks;
     manifest.obsolete_files = obsolete_files;
@@ -217,7 +249,14 @@ pub(crate) fn repair_corrupt_base_chunks(
             }),
         })
         .collect::<Vec<_>>();
-    publish_base_chunk_rewrite(root, manifest, source, &dirty_ranges)
+    publish_base_chunk_rewrite_with_segments_and_reason(
+        root,
+        manifest,
+        source,
+        &dirty_ranges,
+        manifest.segments.clone(),
+        BaseChunkRewriteReason::Repair,
+    )
 }
 
 fn validate_ranges(source: &impl BaseChunkSource, ranges: &[SourceRange]) -> GraphResult<()> {

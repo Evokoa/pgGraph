@@ -88,6 +88,65 @@ RETURNS int
 Returns the number of unexpired backend heartbeats currently retaining durable
 projection generations for generation-aware cleanup.
 
+### `graph.ingest_projection()`
+
+```sql
+graph.ingest_projection(
+  max_rows bigint DEFAULT NULL,
+  max_bytes bigint DEFAULT NULL
+)
+RETURNS TABLE (
+  rows_ingested bigint,
+  segments_published bigint,
+  sync_watermark bigint
+)
+```
+
+Admin-only. Publishes committed sync-log rows into durable projection segments
+above the active manifest watermark. `max_rows` and `max_bytes` bound one
+ingestion pass; `NULL` uses the configured defaults.
+
+### `graph.projection_status()`
+
+```sql
+graph.projection_status()
+RETURNS TABLE (
+  manifest_generation bigint,
+  manifest_watermark bigint,
+  pending_durable_rows bigint,
+  segment_count int,
+  segment_bytes bigint,
+  l0_segment_count int,
+  l1_segment_count int,
+  l2_segment_count int,
+  edge_segment_count int,
+  node_segment_count int,
+  dirty_chunk_count int,
+  dirty_chunk_bytes bigint,
+  tombstone_ratio double precision,
+  compaction_backlog int,
+  obsolete_file_count int,
+  obsolete_bytes bigint,
+  active_generation_count int,
+  artifact_validation_state text,
+  last_ingestion_unix_micros bigint,
+  last_compaction_unix_micros bigint,
+  last_gc_unix_micros bigint,
+  last_repair_unix_micros bigint,
+  ingest_recommended boolean,
+  compaction_recommended boolean,
+  gc_recommended boolean,
+  repair_recommended boolean
+)
+```
+
+Reports durable projection manifest, segment, chunk, GC, heartbeat, validation,
+and recommendation state. `artifact_validation_state` is `healthy`,
+`targeted_chunk_repair`, `full_rebuild`, or `no_projection`. The `last_*`
+timestamp columns are persisted operation timestamps: ingestion, compaction,
+and repair are carried in the active manifest lineage, and GC is recorded when
+`graph.projection_gc()` completes.
+
 ### `graph.projection_gc()`
 
 ```sql
@@ -179,7 +238,11 @@ RETURNS TABLE (
   tx_delta_deleted_edges int,
   tx_delta_memory_bytes bigint,
   apply_sync_recommended boolean,
-  maintenance_recommended boolean
+  maintenance_recommended boolean,
+  durable_ingest_recommended boolean,
+  durable_compaction_recommended boolean,
+  durable_gc_recommended boolean,
+  durable_repair_recommended boolean
 )
 ```
 
@@ -187,7 +250,10 @@ Reports the sync and compaction signals most useful to schedulers and external
 monitors. Use `apply_sync_recommended` to decide when a lightweight replay is
 useful for a writable backend-local engine, and `maintenance_recommended` to
 decide when overlay/read-only/rebuild state should be folded back into the base
-graph.
+graph. The `durable_*_recommended` columns mirror `graph.projection_status()`
+for projection ingestion, compaction, GC, and persisted repair pressure without
+decoding projection artifacts. Use `graph.projection_status()` when you need
+full artifact validation.
 
 ### `graph.reset()`
 

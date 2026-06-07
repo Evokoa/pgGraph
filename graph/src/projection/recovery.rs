@@ -157,7 +157,7 @@ pub(crate) fn publish_rebuilt_base_manifest(
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| GraphError::Internal("graph artifact path has no file name".into()))?;
-    let manifest = ProjectionManifest::base_only(
+    let mut manifest = ProjectionManifest::base_only(
         generation_id,
         base_artifact_path,
         graph_artifact_checksum_for_path(graph_path)?,
@@ -165,6 +165,7 @@ pub(crate) fn publish_rebuilt_base_manifest(
         sync_watermark,
         now_unix_micros()?,
     );
+    manifest.mark_repair();
     ProjectionManifestStore::new(root).publish(&manifest)?;
     Ok(manifest)
 }

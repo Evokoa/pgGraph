@@ -130,6 +130,10 @@ FROM graph.sync_health();
 | `read_only_reason` | Typed reason such as `memory_limit` or `edge_buffer_full` when read-only |
 | `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` while the engine is writable |
 | `maintenance_recommended` | Overlay, read-only, vacuum, or rebuild state should be compacted |
+| `durable_ingest_recommended` | Durable projection rows are waiting to be ingested |
+| `durable_compaction_recommended` | Durable segment fanout exceeds the configured compaction threshold |
+| `durable_gc_recommended` | Manifest-declared obsolete projection files can be evaluated by GC |
+| `durable_repair_recommended` | Active projection artifacts need targeted repair or full rebuild |
 
 Use `graph.run_scheduled_maintenance()` from `pg_cron` or an external scheduler
 when you want one call that applies sync if recommended and then starts
@@ -278,6 +282,21 @@ FROM graph.status();
 
 Use `graph.active_generation_count()` to inspect unexpired backend heartbeats
 that retain durable projection generations for generation-aware cleanup.
+Use `graph.projection_status()` for the full durable projection diagnostic row:
+
+```sql
+SELECT *
+FROM graph.projection_status();
+```
+
+The row reports the active manifest generation and watermark, pending durable
+rows, segment and chunk counts/bytes, tombstone ratio, compaction backlog,
+obsolete file counts/bytes, active generation count, artifact validation state,
+persisted last-ingestion/compaction/GC/repair timestamps, and
+ingestion/compaction/GC/repair recommendations. `graph.sync_health()` keeps only
+the lightweight durable recommendation booleans; use `graph.projection_status()`
+for full artifact validation.
+
 Run `graph.projection_gc()` to delete manifest-declared obsolete projection
 files after the configured generation retention floor and active-generation
 heartbeats no longer protect them:

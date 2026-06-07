@@ -548,3 +548,60 @@ Microphase 13 added recovery and repair orchestration:
   metadata paths. No traversal benchmark comparison is required because normal
   read execution is unchanged; preserve the expected-red future
   status/diagnostics contract before commit.
+
+Microphase 14 added durable projection status and diagnostics:
+
+- Added `graph/src/projection/status.rs` to summarize the latest durable
+  projection manifest, watermark, pending durable rows, segment counts/bytes by
+  level and kind, dirty chunk counts/bytes, tombstone ratio, compaction backlog,
+  obsolete files/bytes, active generation count, artifact validation state, and
+  ingest/compaction/GC/repair recommendations.
+- Added `graph.projection_status()` as the full projection-specific SQL
+  diagnostic row because `graph.status()` remains at pgrx's 32-field tuple
+  limit. `graph.sync_health()` now exposes compact durable recommendation
+  booleans for scheduler decisions through a metadata-only collector, so
+  scheduler polling does not decode projection artifacts.
+- Persisted operation timestamps for ingestion, compaction, GC, and repair
+  diagnostics. Ingestion/compaction/repair timestamps are carried forward in
+  manifest metadata, and successful GC records a small durable status sidecar.
+- Turned the final durable projection contract green:
+  `status_reports_manifest_watermark_segments_chunks_gc_and_repair`.
+- Added pgrx coverage for projection status signature, active generation
+  heartbeat counts, durable pressure in `sync_health()`, and recommendation
+  thresholds for ingest, compaction, GC, and repair.
+- Tests run so far:
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 projection::status`: passed.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    passed with all 6 durable projection contract tests green.
+  - `cd graph && cargo test --features pg17 projection::manifest`: passed with
+    13 manifest tests after adding defaulted operation timestamp metadata.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 projection_status`:
+    passed with SQL signature coverage.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 sync_health_exposes_operator_contract_field_names`:
+    passed with the extended sync-health ABI.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 sync_health_distinguishes_tx_delta_edge_buffer_and_durable_projection_pressure`:
+    passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 status_reports_active_generation_heartbeat_count`:
+    passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 status_recommends_ingest_compaction_gc_or_repair_by_threshold`:
+    passed.
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed with 0 doctests.
+  - `git diff --check`: passed.
+  - `scripts/check_docs_drift.sh`: passed after documenting
+    `graph.ingest_projection()`.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cd graph && cargo test --features pg17`: passed with 623 tests, 1 ignored
+    scale test.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 status`:
+    passed with 13 status-family tests.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 sync_health`:
+    passed with 3 sync-health tests.
+- Independent review found and the implementation fixed misleading `last_*`
+  timestamp derivation and heavyweight `sync_health()` polling before commit.
+- Regression report: Microphase 14 changes status/diagnostic metadata and
+  scheduler recommendation surfaces. It does not alter traversal read
+  execution; no benchmark comparison is required because `sync_health()` now
+  uses metadata-only projection status; revisit if full
+  `graph.projection_status()` polling becomes a measured hot path.

@@ -361,6 +361,76 @@ fn active_generation_count() -> i32 {
     })
 }
 
+/// Return durable projection status and maintenance recommendations.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn projection_status() -> TableIterator<
+    'static,
+    (
+        name!(manifest_generation, Option<i64>),
+        name!(manifest_watermark, Option<i64>),
+        name!(pending_durable_rows, i64),
+        name!(segment_count, i32),
+        name!(segment_bytes, i64),
+        name!(l0_segment_count, i32),
+        name!(l1_segment_count, i32),
+        name!(l2_segment_count, i32),
+        name!(edge_segment_count, i32),
+        name!(node_segment_count, i32),
+        name!(dirty_chunk_count, i32),
+        name!(dirty_chunk_bytes, i64),
+        name!(tombstone_ratio, f64),
+        name!(compaction_backlog, i32),
+        name!(obsolete_file_count, i32),
+        name!(obsolete_bytes, i64),
+        name!(active_generation_count, i32),
+        name!(artifact_validation_state, String),
+        name!(last_ingestion_unix_micros, Option<i64>),
+        name!(last_compaction_unix_micros, Option<i64>),
+        name!(last_gc_unix_micros, Option<i64>),
+        name!(last_repair_unix_micros, Option<i64>),
+        name!(ingest_recommended, bool),
+        name!(compaction_recommended, bool),
+        name!(gc_recommended, bool),
+        name!(repair_recommended, bool),
+    ),
+> {
+    with_panic_boundary("projection_status()", || {
+        let s = projection_status_snapshot().unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            s.manifest_generation,
+            s.manifest_watermark,
+            s.pending_durable_rows,
+            s.segment_count,
+            s.segment_bytes,
+            s.l0_segment_count,
+            s.l1_segment_count,
+            s.l2_segment_count,
+            s.edge_segment_count,
+            s.node_segment_count,
+            s.dirty_chunk_count,
+            s.dirty_chunk_bytes,
+            s.tombstone_ratio,
+            s.compaction_backlog,
+            s.obsolete_file_count,
+            s.obsolete_bytes,
+            s.active_generation_count,
+            s.artifact_validation_state,
+            s.last_ingestion_unix_micros,
+            s.last_compaction_unix_micros,
+            s.last_gc_unix_micros,
+            s.last_repair_unix_micros,
+            s.ingest_recommended,
+            s.compaction_recommended,
+            s.gc_recommended,
+            s.repair_recommended,
+        )])
+    })
+}
+
 /// Delete obsolete durable projection files that are no longer retained.
 #[pg_extern(schema = "graph")]
 #[allow(
@@ -614,6 +684,10 @@ fn sync_health() -> TableIterator<
         name!(tx_delta_memory_bytes, i64),
         name!(apply_sync_recommended, bool),
         name!(maintenance_recommended, bool),
+        name!(durable_ingest_recommended, bool),
+        name!(durable_compaction_recommended, bool),
+        name!(durable_gc_recommended, bool),
+        name!(durable_repair_recommended, bool),
     ),
 > {
     with_panic_boundary("sync_health()", || {
@@ -621,6 +695,7 @@ fn sync_health() -> TableIterator<
         let max_sync_log_id = max_sync_log_id().unwrap_or_else(|err| err.report());
         let edge_buffer_size = config::EDGE_BUFFER_SIZE.get();
         let decision = scheduled_maintenance_decision((&s).into());
+        let projection = projection_metadata_status_snapshot().unwrap_or_else(|err| err.report());
 
         TableIterator::new(vec![(
             s.sync_mode,
@@ -648,6 +723,10 @@ fn sync_health() -> TableIterator<
             s.tx_delta_memory_bytes,
             decision.apply_sync,
             decision.start_maintenance,
+            projection.ingest_recommended,
+            projection.compaction_recommended,
+            projection.gc_recommended,
+            projection.repair_recommended,
         )])
     })
 }
@@ -732,6 +811,33 @@ fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> 
         }
         Ok(eng.status())
     })
+}
+
+fn projection_status_snapshot() -> safety::GraphResult<crate::projection::status::ProjectionStatus>
+{
+    crate::projection::manifest::expire_stale_generation_heartbeats()?;
+    let artifact = crate::persistence::graph_file_path()?;
+    let root = crate::persistence::projection_manifest_root(&artifact);
+    crate::projection::status::collect_projection_status(
+        &root,
+        Some(&artifact),
+        max_sync_log_id()?,
+        crate::projection::manifest::active_generation_count()?,
+        crate::config::compaction_threshold(),
+    )
+}
+
+fn projection_metadata_status_snapshot(
+) -> safety::GraphResult<crate::projection::status::ProjectionStatus> {
+    crate::projection::manifest::expire_stale_generation_heartbeats()?;
+    let artifact = crate::persistence::graph_file_path()?;
+    let root = crate::persistence::projection_manifest_root(&artifact);
+    crate::projection::status::collect_projection_metadata_status(
+        &root,
+        max_sync_log_id()?,
+        crate::projection::manifest::active_generation_count()?,
+        crate::config::compaction_threshold(),
+    )
 }
 
 /// Build the graph from registered tables and edges.
