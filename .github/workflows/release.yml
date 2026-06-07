@@ -335,12 +335,24 @@ jobs:
 
       - name: Verify extensions
         run: |
-          count="$(docker exec pggraph-release-verify-pg${{ matrix.pg }} \
-            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
-            -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"
+          count=""
+          for _ in {1..60}; do
+            if count="$(docker exec pggraph-release-verify-pg${{ matrix.pg }} \
+              psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+              -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"; then
+              if [[ "$count" == "2" ]]; then
+                break
+              fi
+            else
+              count=""
+            fi
+
+            sleep 2
+          done
 
           if [[ "$count" != "2" ]]; then
             echo "Expected graph and pg_cron extensions, found $count" >&2
+            docker logs pggraph-release-verify-pg${{ matrix.pg }}
             docker exec pggraph-release-verify-pg${{ matrix.pg }} \
               psql -U postgres -d graph -v ON_ERROR_STOP=1 \
               -c "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
@@ -462,12 +474,24 @@ jobs:
 
       - name: Verify extensions
         run: |
-          count="$(docker exec pggraph-release-verify-pg${{ matrix.pg }} \
-            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
-            -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"
+          count=""
+          for _ in {1..60}; do
+            if count="$(docker exec pggraph-release-verify-pg${{ matrix.pg }} \
+              psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+              -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"; then
+              if [[ "$count" == "2" ]]; then
+                break
+              fi
+            else
+              count=""
+            fi
+
+            sleep 2
+          done
 
           if [[ "$count" != "2" ]]; then
             echo "Expected graph and pg_cron extensions, found $count" >&2
+            docker logs pggraph-release-verify-pg${{ matrix.pg }}
             docker exec pggraph-release-verify-pg${{ matrix.pg }} \
               psql -U postgres -d graph -v ON_ERROR_STOP=1 \
               -c "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
@@ -527,12 +551,24 @@ jobs:
 
       - name: Verify extensions and default PostgreSQL major
         run: |
-          count="$(docker exec pggraph-release-verify-default \
-            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
-            -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"
+          count=""
+          for _ in {1..60}; do
+            if count="$(docker exec pggraph-release-verify-default \
+              psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+              -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"; then
+              if [[ "$count" == "2" ]]; then
+                break
+              fi
+            else
+              count=""
+            fi
+
+            sleep 2
+          done
 
           if [[ "$count" != "2" ]]; then
             echo "Expected graph and pg_cron extensions, found $count" >&2
+            docker logs pggraph-release-verify-default
             docker exec pggraph-release-verify-default \
               psql -U postgres -d graph -v ON_ERROR_STOP=1 \
               -c "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
