@@ -1,6 +1,5 @@
 //! Projection read helpers shared by graph algorithms.
 
-#[cfg(any(test, feature = "development"))]
 pub(crate) mod ingest;
 #[allow(
     dead_code,
@@ -8,9 +7,7 @@ pub(crate) mod ingest;
 )]
 pub(crate) mod manifest;
 pub(crate) mod neighbors;
-#[cfg(any(test, feature = "development"))]
 pub(crate) mod normalize;
-#[cfg(any(test, feature = "fuzzing", feature = "development"))]
 pub(crate) mod segment;
 #[cfg(test)]
 mod test_contracts;

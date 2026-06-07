@@ -10,7 +10,6 @@ use std::path::Path;
 
 use crc32fast::Hasher;
 
-#[cfg(any(test, feature = "development"))]
 use crate::projection::normalize::NormalizedMutationBatch;
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
@@ -194,7 +193,6 @@ impl DeltaSegment {
     ///
     /// Returns [`GraphError::CorruptFile`] if normalized rows are not valid for
     /// the requested source range.
-    #[cfg(any(test, feature = "development"))]
     pub(crate) fn from_normalized_edges(
         batch: &NormalizedMutationBatch,
         level: u8,
@@ -287,7 +285,8 @@ impl DeltaSegment {
     /// # Errors
     ///
     /// Returns encoding errors or filesystem errors.
-    #[cfg_attr(all(feature = "fuzzing", not(test)), allow(dead_code))]
+    #[cfg(any(test, feature = "development", feature = "fuzzing"))]
+    #[cfg_attr(any(feature = "development", feature = "fuzzing"), allow(dead_code))]
     pub(crate) fn write_to_path(&self, path: &Path) -> GraphResult<()> {
         let bytes = self.to_bytes()?;
         fs::write(path, bytes)

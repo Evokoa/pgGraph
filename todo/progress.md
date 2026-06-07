@@ -225,3 +225,35 @@ Microphase 6 core ingestion checkpoint implemented testable L0 publication:
   publication logic but does not yet change SQL, scheduled maintenance,
   traversal reads, GQL, components, shortest-path, compaction, GC, or runtime
   read-path adoption; benchmark baseline remains `pre_durable_projection`.
+
+Microphase 6 SQL ingestion checkpoint wired committed sync-log publication:
+
+- Added production visibility for projection ingestion, normalization, and
+  segment modules, plus artifact checksum/version helpers and read-only
+  resolution helpers needed to resolve tombstoned nodes after `apply_sync()`.
+- Added `graph.ingest_projection(max_rows bigint DEFAULT NULL, max_bytes bigint
+  DEFAULT NULL)`, committed `graph._sync_log` conversion into edge, node,
+  resolution, filter, and tenant `ProjectionSyncRow` values, persisted-base
+  manifest publication, and scheduled-maintenance ingestion after sync apply.
+- Kept `graph.apply_sync()` and backend-local `Engine.edge_buffer` behavior
+  active; durable segments are published but not yet consumed by runtime reads.
+- Preserved the default-red feature-contract policy: the two remaining future
+  contracts still fail normally rather than being ignored.
+- Tests run:
+  - `cd graph && cargo fmt`: passed.
+  - `cd graph && cargo test --features pg17 projection::ingest -- --list`:
+    passed and confirmed the unit-test binary no longer aborts on pgrx symbols.
+  - `cd graph && cargo test --features pg17 projection::ingest`: passed with
+    6 core ingestion tests.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17
+    ingest_projection`: passed with 3 pgrx ingestion tests.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17
+    scheduled_maintenance`: passed with 6 tests.
+  - `cd graph && cargo test --features pg17`: expected red; 567 passed, 2
+    failed future contracts, 1 ignored scale test.
+- Regression report: SQL ingestion now writes durable projection artifacts on
+  explicit calls and scheduled maintenance when a persisted base artifact
+  exists. Runtime traversal, GQL, components, shortest-path, compaction, GC, and
+  durable read-path adoption remain unchanged; benchmark baseline remains
+  `pre_durable_projection`.

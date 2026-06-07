@@ -891,6 +891,36 @@ fn graph_artifact_checksum(crc: u32) -> String {
     format!("crc32:{crc:08x}")
 }
 
+pub(crate) fn graph_artifact_version() -> u32 {
+    VERSION
+}
+
+pub(crate) fn graph_artifact_checksum_for_path(path: &Path) -> GraphResult<String> {
+    let bytes = fs::read(path)
+        .map_err(|err| GraphError::Internal(format!("read graph artifact checksum: {err}")))?;
+    if bytes.len() < HEADER_SIZE {
+        return Err(GraphError::CorruptFile {
+            reason: "file too small for header".to_string(),
+        });
+    }
+    if &bytes[0..4] != MAGIC {
+        return Err(GraphError::CorruptFile {
+            reason: "invalid magic bytes".to_string(),
+        });
+    }
+    let stored_crc = read_u32_at(&bytes, CRC_OFFSET);
+    let computed_crc = crc32fast::hash(&bytes[HEADER_SIZE..]);
+    if stored_crc != computed_crc {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "CRC32 mismatch: stored={:#x}, computed={:#x}",
+                stored_crc, computed_crc
+            ),
+        });
+    }
+    Ok(graph_artifact_checksum(computed_crc))
+}
+
 /// Get the default .pggraph file path under $PGDATA/{data_dir}/.
 ///
 /// Uses the `graph.data_dir` GUC (default: "graph").

@@ -157,8 +157,17 @@ direction, writes node/resolution/filter/tenant L0 deltas into node segments,
 publishes durable no-overwrite segment files, validates segment reloads, and
 publishes the next manifest under an artifact-root ingestion publication lock.
 Aborted transaction rows are ignored, and the manifest watermark advances only
-after segment publication succeeds. SQL entrypoints, scheduled maintenance
-wiring, and rollback-heavy verification are added in the later ingestion slice.
+after segment publication succeeds.
+
+The admin-only `graph.ingest_projection(max_rows bigint DEFAULT NULL,
+max_bytes bigint DEFAULT NULL)` entrypoint reads committed `graph._sync_log`
+rows after the current projection manifest watermark, converts rows through the
+same registered table, edge, filter, and tenant catalog semantics as
+`graph.apply_sync()`, and publishes the resulting L0 generation beside the
+persisted `main.pggraph` artifact. The base graph must be persisted, such as by
+building with `graph.persist_on_build = on`; scheduled maintenance treats a
+missing persisted artifact as a no-op so existing in-memory sync maintenance
+keeps its behavior.
 
 When a `.pggraph` artifact is loaded, the loader scans the artifact directory
 for the latest `projection-generation-*.json` manifest. In the base-only phase,

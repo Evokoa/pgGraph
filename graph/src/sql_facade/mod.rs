@@ -28,7 +28,8 @@ pub(crate) use crate::sql_jobs::{
 pub(crate) use crate::sql_search::{source_table_search_rows, validate_search_request};
 pub(crate) use crate::sql_sync::{
     apply_sync_internal, apply_sync_until, current_sync_mode, disabled_graph_trigger_count,
-    install_sync_triggers, max_sync_log_id, pending_sync_rows, resolve_tenant_scope,
+    ingest_projection_internal, install_sync_triggers, max_sync_log_id, pending_sync_rows,
+    resolve_tenant_scope,
 };
 pub(crate) use crate::sql_traversal::{
     apply_traversal_uniqueness, canonical_node_ref_string, execute_traverse_candidates,

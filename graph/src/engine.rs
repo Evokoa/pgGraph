@@ -418,6 +418,13 @@ impl Engine {
         Ok(id)
     }
 
+    pub(crate) fn edge_type_id(&self, label: &str) -> Option<u8> {
+        self.edge_type_registry
+            .iter()
+            .position(|registered| registered == label)
+            .map(|idx| idx as u8)
+    }
+
     /// Resolve a (table_oid, pk) → node_idx.
     ///
     /// Dispatches to the active resolution backend:
@@ -429,6 +436,31 @@ impl Engine {
             idx < self.node_store.node_count()
                 && self.node_store.is_active(idx)
                 && !tx_delta::node_deleted(idx)
+                && self.node_store.table_oid(idx) == table_oid
+                && self.node_store.primary_key(idx) == pk
+        };
+        if let Some(idx) = self
+            .resolution_delta
+            .resolve_verified(table_oid, pk, verify)
+        {
+            return Some(idx);
+        }
+        match &self.resolution_store {
+            ResolutionStore::Builder(builder) => builder.resolve_verified(table_oid, pk, verify),
+            ResolutionStore::Finalized(bytes) => {
+                ResolutionIndex::from_bytes(bytes)?.resolve_verified(table_oid, pk, verify)
+            }
+            ResolutionStore::MmapBacked(resolution_state) => {
+                let mmap = self._mmap.as_ref()?;
+                let data = &mmap[resolution_state.range()];
+                ResolutionIndex::from_bytes(data)?.resolve_verified(table_oid, pk, verify)
+            }
+        }
+    }
+
+    pub(crate) fn resolve_existing_node(&self, table_oid: u32, pk: &str) -> Option<u32> {
+        let verify = |idx: u32| {
+            idx < self.node_store.node_count()
                 && self.node_store.table_oid(idx) == table_oid
                 && self.node_store.primary_key(idx) == pk
         };

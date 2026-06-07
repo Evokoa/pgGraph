@@ -1506,6 +1506,186 @@ fn scheduled_maintenance_exposes_operator_contract_field_names() {
 }
 
 #[pg_test]
+fn ingest_projection_exposes_operator_contract_field_names() {
+    reset_and_create_fixtures();
+    let signature_matches = Spi::get_one::<bool>(
+            "WITH expected(result_type) AS (
+                VALUES (
+                    'TABLE(rows_ingested bigint, segments_published bigint, sync_watermark bigint)'
+                )
+             )
+             SELECT pg_get_function_result(p.oid) = expected.result_type
+                AND pg_get_function_arguments(p.oid) = 'max_rows bigint DEFAULT NULL::bigint, max_bytes bigint DEFAULT NULL::bigint'
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             CROSS JOIN expected
+             WHERE n.nspname = 'graph'
+               AND p.proname = 'ingest_projection'",
+        )
+        .expect("ingest_projection signature inspection failed")
+        .unwrap_or(false);
+
+    assert!(signature_matches);
+}
+
+#[pg_test]
+fn ingest_projection_publishes_committed_sync_log_rows() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_ingest_pgtest CASCADE")
+        .expect("drop projection ingest table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_projection_ingest_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL
+                    REFERENCES public.graph_test_projection_ingest_pgtest(id),
+                score BIGINT NOT NULL,
+                tenant_id TEXT NOT NULL
+            )",
+    )
+    .expect("create projection ingest table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_ingest_pgtest (id, parent_id, score, tenant_id)
+             VALUES ('root', NULL, 1, 'tenant-a')",
+    )
+    .expect("insert projection ingest root failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_projection_ingest_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['parent_id', 'score'],
+                tenant_column := 'tenant_id'
+            )",
+    )
+    .expect("add projection ingest table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_projection_ingest_pgtest'::regclass,
+                from_column := 'parent_id',
+                to_table := 'graph_test_projection_ingest_pgtest'::regclass,
+                to_column := 'id',
+                label := 'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add projection ingest edge failed");
+    Spi::run(
+        "SELECT graph.add_filter_column(
+                'graph_test_projection_ingest_pgtest'::regclass,
+                'score',
+                column_type := 'numeric'
+            )",
+    )
+    .expect("add projection ingest filter failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build projection ingest graph failed");
+    let initial = Spi::get_one::<i64>("SELECT rows_ingested FROM graph.ingest_projection()")
+        .expect("initial ingest projection query failed")
+        .unwrap_or(-1);
+    assert_eq!(
+        initial, 0,
+        "initial projection ingest must not replay rows included in persisted build"
+    );
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_ingest_pgtest (id, parent_id, score, tenant_id)
+             VALUES ('child', 'root', 99, 'tenant-a')",
+    )
+    .expect("insert projection ingest child failed");
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("apply projection ingest sync failed");
+
+    let (rows_ingested, segments_published, sync_watermark) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT rows_ingested, segments_published, sync_watermark
+                   FROM graph.ingest_projection()",
+                None,
+                &[],
+            )
+            .expect("ingest_projection query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)?.unwrap_or(0),
+            row.get::<i64>(2)?.unwrap_or(0),
+            row.get::<i64>(3)?.unwrap_or(0),
+        ))
+    })
+    .expect("ingest_projection row read failed");
+    let max_sync_id = Spi::get_one::<i64>("SELECT max(id) FROM graph._sync_log")
+        .expect("max sync id read failed")
+        .unwrap_or(0);
+
+    assert!(rows_ingested >= 3);
+    assert!(segments_published >= 2);
+    assert_eq!(sync_watermark, max_sync_id);
+    Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
+    Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
+}
+
+#[pg_test]
+fn ingest_projection_advances_watermark_for_no_row_sync_batches() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_no_rows_pgtest CASCADE")
+        .expect("drop projection no-row table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_projection_no_rows_pgtest (
+                id TEXT PRIMARY KEY,
+                note TEXT NOT NULL
+            )",
+    )
+    .expect("create projection no-row table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_no_rows_pgtest (id, note)
+             VALUES ('a', 'A')",
+    )
+    .expect("insert projection no-row root failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_projection_no_rows_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['note']
+            )",
+    )
+    .expect("add projection no-row table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build projection no-row graph failed");
+    Spi::run("TRUNCATE public.graph_test_projection_no_rows_pgtest")
+        .expect("truncate projection no-row table failed");
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("apply projection no-row sync failed");
+
+    let (rows_ingested, segments_published, sync_watermark) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT rows_ingested, segments_published, sync_watermark
+                   FROM graph.ingest_projection()",
+                None,
+                &[],
+            )
+            .expect("ingest no-row projection query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)?.unwrap_or(-1),
+            row.get::<i64>(2)?.unwrap_or(-1),
+            row.get::<i64>(3)?.unwrap_or(-1),
+        ))
+    })
+    .expect("ingest no-row projection row read failed");
+    let max_sync_id = Spi::get_one::<i64>("SELECT max(id) FROM graph._sync_log")
+        .expect("max sync id read failed")
+        .unwrap_or(0);
+    let repeat_rows = Spi::get_one::<i64>("SELECT rows_ingested FROM graph.ingest_projection()")
+        .expect("repeat ingest no-row projection query failed")
+        .unwrap_or(-1);
+
+    assert_eq!(rows_ingested, 0);
+    assert_eq!(segments_published, 0);
+    assert_eq!(sync_watermark, max_sync_id);
+    assert_eq!(repeat_rows, 0);
+    Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
+    Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
+}
+
+#[pg_test]
 fn scheduled_maintenance_noops_when_graph_is_healthy() {
     reset_and_create_fixtures();
     Spi::run(

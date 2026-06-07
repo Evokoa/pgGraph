@@ -20,6 +20,18 @@ fn reset() {
         if checkpoint_path.exists() {
             std::fs::remove_file(&checkpoint_path).ok();
         }
+        let projection_root = persistence::projection_manifest_root(&path);
+        if let Ok(entries) = std::fs::read_dir(&projection_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if name.starts_with("projection-generation-") {
+                    std::fs::remove_file(&path).ok();
+                }
+            }
+        }
     });
 }
 

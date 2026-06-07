@@ -2,12 +2,22 @@
 
 use crate::catalog::{read_catalog, table_oid_from_name};
 use crate::filter_index::{EncodedFilterValue, FilterColumnType};
+use crate::persistence::{
+    graph_artifact_checksum_for_path, graph_artifact_version, graph_file_path,
+    projection_manifest_root, read_sync_checkpoint,
+};
+use crate::projection::ingest::{ProjectionIngestResult, ProjectionIngester, ProjectionSyncRow};
+use crate::projection::manifest::ProjectionManifestStore;
+use crate::projection::normalize::{MutationBufferLimits, MutationOperation};
+use crate::resolution_index::ResolutionIndexBuilder;
 use crate::sql_filters::{
     encode_date_filter_value, encode_timestamptz_filter_value, parse_uuid_u128,
 };
+use crate::types::TraversalDirection;
 use crate::{builder, config, engine, safety, sync, ENGINE};
 use pgrx::prelude::*;
 use std::collections::{HashMap, HashSet};
+use xxhash_rust::xxh3::xxh3_64;
 
 pub(crate) fn current_sync_mode() -> safety::GraphResult<config::SyncMode> {
     match config::parsed_sync_mode() {
@@ -138,6 +148,13 @@ pub(crate) struct SyncApplyStats {
     pub(crate) updates: i64,
     pub(crate) deletes: i64,
     pub(crate) truncates: i64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ProjectionIngestStats {
+    pub(crate) rows_ingested: i64,
+    pub(crate) segments_published: i64,
+    pub(crate) sync_watermark: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -401,6 +418,87 @@ pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
     Ok(stats)
 }
 
+pub(crate) fn ingest_projection_internal(
+    max_rows: Option<i64>,
+    max_bytes: Option<i64>,
+) -> safety::GraphResult<ProjectionIngestStats> {
+    let graph_path = graph_file_path()?;
+    if !graph_path.exists() {
+        return Err(safety::GraphError::NotBuilt);
+    }
+    let root = projection_manifest_root(&graph_path);
+    let store = ProjectionManifestStore::new(root.clone());
+    let previous = store.load_latest_current()?;
+    let previous_watermark = previous.as_ref().map_or(
+        read_sync_checkpoint(&graph_path)?.unwrap_or(0),
+        |manifest| manifest.sync_watermark,
+    );
+    let row_limit = optional_nonnegative_usize(max_rows, "max_rows")?
+        .unwrap_or_else(|| config::sync_batch_size().max(1));
+    let byte_limit = optional_nonnegative_usize(max_bytes, "max_bytes")?
+        .unwrap_or_else(config::max_overlay_memory_bytes);
+    let entries = read_sync_log_entries_after(previous_watermark, row_limit, None)?;
+    if entries.is_empty() {
+        return Ok(ProjectionIngestStats {
+            sync_watermark: previous_watermark,
+            ..ProjectionIngestStats::default()
+        });
+    }
+    let consumed_watermark = entries
+        .iter()
+        .map(|entry| entry.id)
+        .max()
+        .unwrap_or(previous_watermark);
+    let mut context = SyncReplayContext::load()?;
+    let rows = projection_rows_from_sync_entries(&entries, &mut context)?;
+    let base_artifact_path = graph_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            safety::GraphError::Internal("graph artifact path has no file name".to_string())
+        })?
+        .to_string();
+    let ingester = ProjectionIngester::new(
+        root,
+        base_artifact_path,
+        graph_artifact_checksum_for_path(&graph_path)?,
+        graph_artifact_version(),
+    );
+    let result = if rows.is_empty() {
+        ingester.publish_empty_watermark(consumed_watermark)?
+    } else {
+        ingester.ingest_committed_rows(&rows, MutationBufferLimits::new(row_limit, byte_limit))?
+    };
+    Ok(projection_ingest_stats(result, previous_watermark))
+}
+
+fn projection_ingest_stats(
+    result: ProjectionIngestResult,
+    previous_watermark: i64,
+) -> ProjectionIngestStats {
+    ProjectionIngestStats {
+        rows_ingested: result.rows_ingested.min(i64::MAX as usize) as i64,
+        segments_published: result.segments_published.min(i64::MAX as usize) as i64,
+        sync_watermark: result
+            .manifest
+            .as_ref()
+            .map_or(previous_watermark, |manifest| manifest.sync_watermark),
+    }
+}
+
+fn optional_nonnegative_usize(
+    value: Option<i64>,
+    name: &str,
+) -> safety::GraphResult<Option<usize>> {
+    value
+        .map(|value| {
+            usize::try_from(value).map_err(|_| safety::GraphError::InvalidFilter {
+                reason: format!("{name} must be nonnegative"),
+            })
+        })
+        .transpose()
+}
+
 pub(crate) fn apply_sync_until(
     target_sync_id: Option<i64>,
     batch_size: usize,
@@ -653,6 +751,455 @@ fn apply_sync_row_operation(
         }
         SyncRowOperation::Truncate => sync::sync_truncate(eng, table_oid).map(|_| ()),
     }
+}
+
+fn projection_rows_from_sync_entries(
+    entries: &[SyncLogEntry],
+    context: &mut SyncReplayContext,
+) -> safety::GraphResult<Vec<ProjectionSyncRow>> {
+    ENGINE.with(|e| {
+        projection_rows_from_sync_entries_with_engine(&mut e.borrow_mut(), entries, context)
+    })
+}
+
+fn projection_rows_from_sync_entries_with_engine(
+    eng: &mut engine::Engine,
+    entries: &[SyncLogEntry],
+    context: &mut SyncReplayContext,
+) -> safety::GraphResult<Vec<ProjectionSyncRow>> {
+    let mut rows = Vec::new();
+    for entry in entries {
+        let table_oid = match entry.table_oid {
+            Some(oid) => oid,
+            None => context.table_oid_or_lookup(&entry.table_name)?,
+        };
+        let parsed = parse_sync_properties(entry.properties.as_deref());
+        let properties = parsed.iter().cloned().collect::<HashMap<_, _>>();
+        let row_images = ParsedSyncRows::from_entry(entry)?;
+        let tenant_change = tenant_change_from_entry(table_oid, &row_images, &parsed, context)?;
+        append_projection_rows_for_entry(
+            eng,
+            context,
+            table_oid,
+            entry,
+            &row_images,
+            &properties,
+            &tenant_change,
+            &mut rows,
+        )?;
+        append_projection_filter_rows(
+            eng,
+            context,
+            table_oid,
+            entry,
+            &row_images,
+            &properties,
+            &mut rows,
+        )?;
+    }
+    Ok(rows)
+}
+
+fn append_projection_rows_for_entry(
+    eng: &engine::Engine,
+    context: &SyncReplayContext,
+    table_oid: u32,
+    entry: &SyncLogEntry,
+    rows: &ParsedSyncRows,
+    properties: &HashMap<String, String>,
+    tenant_change: &TenantChange,
+    out: &mut Vec<ProjectionSyncRow>,
+) -> safety::GraphResult<()> {
+    match entry.op {
+        SyncOp::Insert => {
+            let pk = entry
+                .new_pk
+                .as_deref()
+                .or(entry.old_pk.as_deref())
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(format!("sync row {} missing insert pk", entry.id))
+                })?;
+            append_projection_node_row(
+                eng,
+                table_oid,
+                entry,
+                pk,
+                MutationOperation::UpsertNode,
+                tenant_change.new.as_deref(),
+                out,
+            );
+            append_projection_edge_rows(
+                eng,
+                context,
+                table_oid,
+                entry,
+                rows.new.as_ref(),
+                MutationOperation::InsertEdge,
+                out,
+            )?;
+        }
+        SyncOp::Update => {
+            let old_pk = entry.old_pk.as_deref().ok_or_else(|| {
+                safety::GraphError::Internal(format!("sync row {} missing old_pk", entry.id))
+            })?;
+            let new_pk = entry.new_pk.as_deref().ok_or_else(|| {
+                safety::GraphError::Internal(format!("sync row {} missing new_pk", entry.id))
+            })?;
+            append_projection_edge_rows(
+                eng,
+                context,
+                table_oid,
+                entry,
+                rows.old.as_ref(),
+                MutationOperation::DeleteEdge,
+                out,
+            )?;
+            if old_pk != new_pk || tenant_change.old != tenant_change.new {
+                append_projection_node_row(
+                    eng,
+                    table_oid,
+                    entry,
+                    old_pk,
+                    MutationOperation::DeleteNode,
+                    tenant_change.old.as_deref(),
+                    out,
+                );
+            }
+            append_projection_node_row(
+                eng,
+                table_oid,
+                entry,
+                new_pk,
+                MutationOperation::UpsertNode,
+                tenant_change.new.as_deref().or_else(|| {
+                    properties
+                        .get(
+                            &tenant_column_for_table(table_oid, context)
+                                .unwrap_or_else(String::new),
+                        )
+                        .map(String::as_str)
+                }),
+                out,
+            );
+            append_projection_edge_rows(
+                eng,
+                context,
+                table_oid,
+                entry,
+                rows.new.as_ref(),
+                MutationOperation::InsertEdge,
+                out,
+            )?;
+        }
+        SyncOp::Delete => {
+            let pk = entry
+                .old_pk
+                .as_deref()
+                .or(entry.new_pk.as_deref())
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(format!("sync row {} missing delete pk", entry.id))
+                })?;
+            append_projection_edge_rows(
+                eng,
+                context,
+                table_oid,
+                entry,
+                rows.old.as_ref(),
+                MutationOperation::DeleteEdge,
+                out,
+            )?;
+            append_projection_node_row(
+                eng,
+                table_oid,
+                entry,
+                pk,
+                MutationOperation::DeleteNode,
+                tenant_change.old.as_deref(),
+                out,
+            );
+        }
+        SyncOp::Truncate => {}
+    }
+    Ok(())
+}
+
+fn append_projection_node_row(
+    eng: &engine::Engine,
+    table_oid: u32,
+    entry: &SyncLogEntry,
+    pk: &str,
+    operation: MutationOperation,
+    tenant: Option<&str>,
+    out: &mut Vec<ProjectionSyncRow>,
+) {
+    let Some(node_idx) = eng.resolve_existing_node(table_oid, pk) else {
+        return;
+    };
+    out.push(ProjectionSyncRow {
+        sync_id: entry.id as u64,
+        generation_id: entry.id as u64,
+        committed: true,
+        operation,
+        direction: TraversalDirection::Any,
+        source: node_idx,
+        target: node_idx,
+        type_id: 0,
+        weight: None,
+        table_oid: Some(table_oid),
+        pk_hash: Some(ResolutionIndexBuilder::hash_pk(pk)),
+        node_idx: Some(node_idx),
+        filter_column_id: None,
+        filter_value: None,
+        tenant_hash: tenant.map(|tenant| xxh3_64(tenant.as_bytes())),
+    });
+}
+
+fn append_projection_edge_rows(
+    eng: &engine::Engine,
+    context: &SyncReplayContext,
+    table_oid: u32,
+    entry: &SyncLogEntry,
+    row: Option<&serde_json::Value>,
+    operation: MutationOperation,
+    out: &mut Vec<ProjectionSyncRow>,
+) -> safety::GraphResult<()> {
+    let Some(row) = row else {
+        return Ok(());
+    };
+    for edge in &context.edges {
+        if context.table_oid(&edge.from_table) != Some(table_oid) {
+            continue;
+        }
+        let Some(from_table) = context
+            .tables
+            .iter()
+            .find(|table| table.table_name == edge.from_table)
+        else {
+            continue;
+        };
+        let Some(from_pk) = row_pk_value(row, &from_table.id_columns) else {
+            continue;
+        };
+        let Some(to_pk) = row_text_value(row, &edge.from_column) else {
+            continue;
+        };
+        let edge_label = edge
+            .label_column
+            .as_deref()
+            .and_then(|column| row_text_value(row, column))
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| edge.label.clone());
+        let weight = edge
+            .weight_column
+            .as_deref()
+            .and_then(|column| row_u32_value(row, column))
+            .transpose()?;
+        let Some(type_id) = eng.edge_type_id(&edge_label) else {
+            continue;
+        };
+        let source = resolve_projection_endpoint(
+            eng,
+            context.table_oid(&edge.from_table),
+            &from_pk,
+            &context.all_table_oids,
+        );
+        let target = resolve_projection_endpoint(
+            eng,
+            context.table_oid(&edge.to_table),
+            &to_pk,
+            &context.all_table_oids,
+        );
+        if let (Some(source), Some(target)) = (source, target) {
+            push_projection_edge_row(entry, source, target, type_id, weight, operation, out);
+            if edge.bidirectional {
+                push_projection_edge_row(entry, target, source, type_id, weight, operation, out);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_projection_edge_row(
+    entry: &SyncLogEntry,
+    source: u32,
+    target: u32,
+    type_id: u8,
+    weight: Option<u32>,
+    operation: MutationOperation,
+    out: &mut Vec<ProjectionSyncRow>,
+) {
+    out.push(ProjectionSyncRow {
+        sync_id: entry.id as u64,
+        generation_id: entry.id as u64,
+        committed: true,
+        operation,
+        direction: TraversalDirection::Out,
+        source,
+        target,
+        type_id,
+        weight,
+        table_oid: None,
+        pk_hash: None,
+        node_idx: None,
+        filter_column_id: None,
+        filter_value: None,
+        tenant_hash: None,
+    });
+}
+
+fn append_projection_filter_rows(
+    eng: &mut engine::Engine,
+    context: &SyncReplayContext,
+    table_oid: u32,
+    entry: &SyncLogEntry,
+    rows: &ParsedSyncRows,
+    properties: &HashMap<String, String>,
+    out: &mut Vec<ProjectionSyncRow>,
+) -> safety::GraphResult<()> {
+    match entry.op {
+        SyncOp::Insert => {
+            let Some(pk) = entry.new_pk.as_deref().or(entry.old_pk.as_deref()) else {
+                return Ok(());
+            };
+            append_projection_filter_rows_for_pk(
+                eng,
+                context,
+                table_oid,
+                entry,
+                pk,
+                rows.new.as_ref(),
+                properties,
+                MutationOperation::UpsertNode,
+                out,
+            )?;
+        }
+        SyncOp::Update => {
+            if let Some(old_pk) = entry.old_pk.as_deref() {
+                append_projection_filter_rows_for_pk(
+                    eng,
+                    context,
+                    table_oid,
+                    entry,
+                    old_pk,
+                    rows.old.as_ref(),
+                    properties,
+                    MutationOperation::DeleteNode,
+                    out,
+                )?;
+            }
+            if let Some(new_pk) = entry.new_pk.as_deref() {
+                append_projection_filter_rows_for_pk(
+                    eng,
+                    context,
+                    table_oid,
+                    entry,
+                    new_pk,
+                    rows.new.as_ref(),
+                    properties,
+                    MutationOperation::UpsertNode,
+                    out,
+                )?;
+            }
+        }
+        SyncOp::Delete => {
+            let Some(pk) = entry.old_pk.as_deref().or(entry.new_pk.as_deref()) else {
+                return Ok(());
+            };
+            append_projection_filter_rows_for_pk(
+                eng,
+                context,
+                table_oid,
+                entry,
+                pk,
+                rows.old.as_ref(),
+                properties,
+                MutationOperation::DeleteNode,
+                out,
+            )?;
+        }
+        SyncOp::Truncate => {}
+    }
+    Ok(())
+}
+
+fn append_projection_filter_rows_for_pk(
+    eng: &mut engine::Engine,
+    context: &SyncReplayContext,
+    table_oid: u32,
+    entry: &SyncLogEntry,
+    pk: &str,
+    row: Option<&serde_json::Value>,
+    properties: &HashMap<String, String>,
+    operation: MutationOperation,
+    out: &mut Vec<ProjectionSyncRow>,
+) -> safety::GraphResult<()> {
+    let Some(node_idx) = eng.resolve_existing_node(table_oid, pk) else {
+        return Ok(());
+    };
+    for filter in &context.filters {
+        if context.table_oid(&filter.table_name) != Some(table_oid) {
+            continue;
+        }
+        let Some(column_idx) = eng.filter_index.find_column(&filter.column_name) else {
+            continue;
+        };
+        let encoded = filter_value_from_row_or_properties(
+            &filter.column_name,
+            eng.filter_index.column_type(column_idx),
+            row,
+            properties,
+            &mut eng.filter_index,
+            column_idx,
+        )?;
+        let Some(value) = encoded.and_then(segment_filter_value) else {
+            continue;
+        };
+        out.push(ProjectionSyncRow {
+            sync_id: entry.id as u64,
+            generation_id: entry.id as u64,
+            committed: true,
+            operation,
+            direction: TraversalDirection::Any,
+            source: node_idx,
+            target: node_idx,
+            type_id: 0,
+            weight: None,
+            table_oid: None,
+            pk_hash: None,
+            node_idx: Some(node_idx),
+            filter_column_id: Some(column_idx as u32),
+            filter_value: Some(value),
+            tenant_hash: None,
+        });
+    }
+    Ok(())
+}
+
+fn segment_filter_value(value: EncodedFilterValue) -> Option<u32> {
+    match value {
+        EncodedFilterValue::Numeric(value)
+        | EncodedFilterValue::Date(value)
+        | EncodedFilterValue::Timestamptz(value) => Some(value.clamp(0, u32::MAX as i64) as u32),
+        EncodedFilterValue::Boolean(value) => Some(u32::from(value)),
+        EncodedFilterValue::Text(value) => Some(value),
+        EncodedFilterValue::Uuid(_) => None,
+    }
+}
+
+fn resolve_projection_endpoint(
+    eng: &engine::Engine,
+    preferred_oid: Option<u32>,
+    pk: &str,
+    all_oids: &[u32],
+) -> Option<u32> {
+    if let Some(oid) = preferred_oid {
+        if let Some(idx) = eng.resolve_existing_node(oid, pk) {
+            return Some(idx);
+        }
+    }
+    all_oids
+        .iter()
+        .find_map(|&oid| eng.resolve_existing_node(oid, pk))
 }
 
 fn sync_entry_edge_mutation_reservation(
@@ -927,6 +1474,16 @@ pub(crate) fn row_text_value(row: &serde_json::Value, column: &str) -> Option<St
         serde_json::Value::String(text) => Some(text.clone()),
         other => Some(other.to_string().trim_matches('"').to_string()),
     }
+}
+
+fn row_u32_value(row: &serde_json::Value, column: &str) -> Option<safety::GraphResult<u32>> {
+    row_text_value(row, column).map(|value| {
+        value
+            .parse::<u32>()
+            .map_err(|_| safety::GraphError::InvalidFilter {
+                reason: format!("{column} sync weight values must be unsigned 32-bit integers"),
+            })
+    })
 }
 
 pub(crate) fn apply_legacy_sync_buffer(stats: &mut SyncApplyStats) -> safety::GraphResult<()> {

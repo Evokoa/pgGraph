@@ -153,6 +153,52 @@ impl ProjectionIngester {
         self.ingest_committed_rows_locked(rows, limits)
     }
 
+    /// Publish a no-segment generation that only advances the sync watermark.
+    ///
+    /// # Errors
+    ///
+    /// Returns filesystem, validation, or publication-lock errors.
+    pub(crate) fn publish_empty_watermark(
+        &self,
+        sync_watermark: i64,
+    ) -> GraphResult<ProjectionIngestResult> {
+        let _guard = self.lock.try_enter()?;
+        let previous = self.store.load_latest_current()?;
+        let previous_watermark = previous
+            .as_ref()
+            .map_or(0, |manifest| manifest.sync_watermark);
+        if sync_watermark <= previous_watermark {
+            return Ok(ProjectionIngestResult {
+                manifest: None,
+                rows_ingested: 0,
+                segments_published: 0,
+            });
+        }
+        let generation_id = previous.as_ref().map_or_else(
+            || Ok(1),
+            |manifest| {
+                manifest.generation_id.checked_add(1).ok_or_else(|| {
+                    GraphError::Internal("projection generation id overflowed".into())
+                })
+            },
+        )?;
+        let mut manifest = ProjectionManifest::base_only(
+            generation_id,
+            self.base_artifact_path.clone(),
+            self.base_artifact_checksum.clone(),
+            self.base_artifact_version,
+            sync_watermark,
+            now_unix_micros()?,
+        );
+        manifest.previous_generation_id = previous.map(|manifest| manifest.generation_id);
+        self.store.publish(&manifest)?;
+        Ok(ProjectionIngestResult {
+            manifest: Some(manifest),
+            rows_ingested: 0,
+            segments_published: 0,
+        })
+    }
+
     fn ingest_committed_rows_locked(
         &self,
         rows: &[ProjectionSyncRow],

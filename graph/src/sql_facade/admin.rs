@@ -494,6 +494,11 @@ fn run_scheduled_maintenance() -> TableIterator<
             status = refreshed_engine_status().unwrap_or_else(|err| err.report());
             decision = scheduled_maintenance_decision((&status).into());
         }
+        if let Err(err) = ingest_projection_internal(None, None) {
+            if !matches!(err, safety::GraphError::NotBuilt) {
+                err.report();
+            }
+        }
 
         let mut maintenance_job_id = None;
         if decision.start_maintenance {
@@ -1476,6 +1481,31 @@ fn apply_sync() -> TableIterator<
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let stats = apply_sync_internal().unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(stats.inserts, stats.updates, stats.deletes)])
+    })
+}
+
+/// Publish committed sync-log rows into durable projection segments.
+#[pg_extern(schema = "graph")]
+fn ingest_projection(
+    max_rows: default!(Option<i64>, "NULL"),
+    max_bytes: default!(Option<i64>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(rows_ingested, i64),
+        name!(segments_published, i64),
+        name!(sync_watermark, i64),
+    ),
+> {
+    with_panic_boundary("ingest_projection()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let stats =
+            ingest_projection_internal(max_rows, max_bytes).unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            stats.rows_ingested,
+            stats.segments_published,
+            stats.sync_watermark,
+        )])
     })
 }
 
