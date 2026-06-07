@@ -78,6 +78,16 @@ Reports backend-local engine state and current catalog/sync validity. When
 memory, and durable compaction policy; `edge_buffer_used` plus `tx_delta_dirty`
 show whether pending sync or transaction-local overlays exist.
 
+### `graph.active_generation_count()`
+
+```sql
+graph.active_generation_count()
+RETURNS int
+```
+
+Returns the number of unexpired backend heartbeats currently retaining durable
+projection generations for generation-aware cleanup.
+
 ### `graph.memory_profile()`
 
 ```sql

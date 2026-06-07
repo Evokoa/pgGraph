@@ -1686,6 +1686,182 @@ fn ingest_projection_advances_watermark_for_no_row_sync_batches() {
 }
 
 #[pg_test]
+fn projection_generation_heartbeat_records_backend_generation() {
+    Spi::run("DELETE FROM graph._projection_generations WHERE backend_pid <> 0")
+        .expect("clear heartbeat fixture failed");
+    crate::ENGINE.with(|engine| {
+        *engine.borrow_mut() = crate::engine::Engine::new();
+        let manifest = crate::projection::manifest::ProjectionManifest::base_only(
+            111,
+            "base.pggraph",
+            "crc32:base",
+            1,
+            42,
+            1,
+        );
+        engine
+            .borrow_mut()
+            .install_projection_manifest(&manifest, std::path::PathBuf::from("."))
+            .expect("projection manifest installs");
+    });
+
+    let active_status_count = Spi::get_one::<i32>(
+        "SELECT graph.active_generation_count()",
+    )
+    .expect("status active generation count failed")
+    .unwrap_or(0);
+
+    let (row_count, backend_matches, generation_id, sync_watermark) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT
+                     count(*)::bigint,
+                     bool_and(backend_pid = pg_backend_pid()),
+                     max(generation_id),
+                     max(sync_watermark)
+                 FROM graph._projection_generations
+                 WHERE database_oid = (
+                       SELECT oid FROM pg_database WHERE datname = current_database()
+                   )
+                   AND expires_at > now()",
+                None,
+                &[],
+            )
+            .expect("heartbeat record query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)?.unwrap_or(0),
+            row.get::<bool>(2)?.unwrap_or(false),
+            row.get::<i64>(3)?.unwrap_or(0),
+            row.get::<i64>(4)?.unwrap_or(-1),
+        ))
+    })
+    .expect("heartbeat record read failed");
+
+    assert_eq!(row_count, 1);
+    assert!(backend_matches);
+    assert_eq!(generation_id, 111);
+    assert_eq!(sync_watermark, 42);
+    assert_eq!(active_status_count, 1);
+}
+
+#[pg_test]
+fn projection_generation_heartbeat_refreshes_existing_backend() {
+    Spi::run("DELETE FROM graph._projection_generations WHERE generation_id = 112")
+        .expect("clear heartbeat fixture failed");
+    crate::projection::manifest::record_active_generation_heartbeat(
+        112,
+        std::time::Duration::from_micros(1),
+        1,
+        crate::projection::manifest::VALIDATION_STATUS_VALID,
+    )
+    .expect("record initial heartbeat failed");
+    let first_expires_at = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>(
+        "SELECT expires_at FROM graph._projection_generations WHERE generation_id = 112",
+    )
+    .expect("initial heartbeat expiry read failed")
+    .expect("initial heartbeat expiry missing");
+
+    crate::projection::manifest::record_active_generation_heartbeat(
+        112,
+        std::time::Duration::from_secs(30),
+        2,
+        crate::projection::manifest::VALIDATION_STATUS_VALID,
+    )
+    .expect("refresh heartbeat failed");
+
+    let (row_count, sync_watermark, refreshed) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT count(*)::bigint, max(sync_watermark), bool_or(expires_at > $1)
+                 FROM graph._projection_generations
+                 WHERE generation_id = 112
+                   AND backend_pid = pg_backend_pid()",
+                None,
+                &[first_expires_at.into()],
+            )
+            .expect("heartbeat refresh query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)?.unwrap_or(0),
+            row.get::<i64>(2)?.unwrap_or(0),
+            row.get::<bool>(3)?.unwrap_or(false),
+        ))
+    })
+    .expect("heartbeat refresh read failed");
+
+    assert_eq!(row_count, 1);
+    assert_eq!(sync_watermark, 2);
+    assert!(refreshed);
+}
+
+#[pg_test]
+fn projection_generation_heartbeat_expires_stale_backend() {
+    Spi::run("DELETE FROM graph._projection_generations WHERE generation_id = 113")
+        .expect("clear heartbeat fixture failed");
+    Spi::run(
+        "INSERT INTO graph._projection_generations (
+             generation_id, backend_pid, database_oid, heartbeat_at, expires_at
+         )
+         VALUES (
+             113, 998877,
+             (SELECT oid FROM pg_database WHERE datname = current_database()),
+             now() - interval '10 minutes',
+             now() - interval '1 minute'
+         )",
+    )
+    .expect("insert stale heartbeat failed");
+
+    crate::projection::manifest::expire_stale_generation_heartbeats()
+        .expect("expire stale heartbeats failed");
+
+    let remaining = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+         FROM graph._projection_generations
+         WHERE generation_id = 113",
+    )
+    .expect("stale heartbeat count failed")
+    .unwrap_or(0);
+    assert_eq!(remaining, 0);
+}
+
+#[pg_test]
+fn projection_generation_heartbeat_blocks_gc_for_active_generation() {
+    Spi::run("DELETE FROM graph._projection_generations WHERE generation_id IN (114, 115)")
+        .expect("clear heartbeat fixture failed");
+    crate::projection::manifest::record_active_generation_heartbeat(
+        114,
+        std::time::Duration::from_secs(60),
+        1,
+        crate::projection::manifest::VALIDATION_STATUS_VALID,
+    )
+    .expect("record active heartbeat failed");
+    Spi::run(
+        "INSERT INTO graph._projection_generations (
+             generation_id, backend_pid, database_oid, heartbeat_at, expires_at
+         )
+         VALUES (
+             115, 998878,
+             (SELECT oid FROM pg_database WHERE datname = current_database()),
+             now() - interval '10 minutes',
+             now() - interval '1 minute'
+         )",
+    )
+    .expect("insert expired heartbeat failed");
+
+    assert!(
+        crate::projection::manifest::generation_has_active_heartbeat(114)
+            .expect("active heartbeat lookup failed"),
+        "active heartbeat must block generation-aware GC"
+    );
+    assert!(
+        !crate::projection::manifest::generation_has_active_heartbeat(115)
+            .expect("expired heartbeat lookup failed"),
+        "expired heartbeat must not block generation-aware GC"
+    );
+}
+
+#[pg_test]
 fn scheduled_maintenance_noops_when_graph_is_healthy() {
     reset_and_create_fixtures();
     Spi::run(

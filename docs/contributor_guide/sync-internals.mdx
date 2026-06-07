@@ -209,11 +209,13 @@ match the current artifact format version and CRC32 checksum, and have no
 segment or chunk references. The active read path remains CSR for those
 manifests. Segment-backed manifests are installed with mutable-overlay read
 mode so public read APIs consume durable L0/L1/L2 segment deltas after reload.
-The engine keeps only the base manifest generation and sync watermark as status
-metadata until the status/diagnostics phase.
+The engine keeps base manifest generation and sync watermark metadata
+backend-locally, and `graph.active_generation_count()` exposes the active
+generation heartbeat count so operators can see whether concurrent backends are
+retaining projection generations.
 The SQL `graph.status()` table is already at pgrx's tuple-return arity limit, so
-new durable projection SQL status fields are deferred to the status/diagnostics
-phase that can refactor the SQL shape deliberately.
+the broader durable projection diagnostics are deferred to the
+status/diagnostics phase that can refactor the SQL shape deliberately.
 
 Scheduler ownership intentionally stays outside the extension. PostgreSQL
 background-worker lifecycle, crash recovery, privilege boundaries, and cadence

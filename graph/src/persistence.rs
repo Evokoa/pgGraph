@@ -832,7 +832,7 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
         if !manifest.segments.is_empty() {
             engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
         }
-        engine.install_projection_manifest(&manifest, manifest_root);
+        engine.install_projection_manifest(&manifest, manifest_root)?;
     }
 
     Ok(engine)
@@ -1344,7 +1344,9 @@ mod tests {
         let manifest =
             ProjectionManifest::base_only(11, "main.pggraph", "checksum", VERSION, 99, 1);
 
-        engine.install_projection_manifest(&manifest, PathBuf::from("."));
+        engine
+            .install_projection_manifest(&manifest, PathBuf::from("."))
+            .expect("projection manifest installs");
 
         assert_eq!(
             engine.base_projection_manifest_status(),

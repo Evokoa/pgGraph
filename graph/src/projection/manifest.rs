@@ -21,6 +21,8 @@ pub(crate) const VALIDATION_STATUS_VALID: &str = "valid";
 pub(crate) const VALIDATION_STATUS_CORRUPT: &str = "corrupt";
 /// Validation state for a generation that is being repaired.
 pub(crate) const VALIDATION_STATUS_REPAIRING: &str = "repairing";
+/// Default TTL for backend active-generation heartbeat rows.
+pub(crate) const DEFAULT_ACTIVE_GENERATION_TTL: Duration = Duration::from_secs(300);
 
 const MANIFEST_FILE_PREFIX: &str = "projection-generation-";
 const MANIFEST_FILE_SUFFIX: &str = ".json";
@@ -447,6 +449,15 @@ impl ProjectionGenerationHeartbeat {
     }
 }
 
+pub(crate) fn record_loaded_generation_heartbeat(manifest: &ProjectionManifest) -> GraphResult<()> {
+    record_active_generation_heartbeat(
+        manifest.generation_id,
+        DEFAULT_ACTIVE_GENERATION_TTL,
+        manifest.sync_watermark,
+        &manifest.validation_status,
+    )
+}
+
 fn validate_status(status: &str) -> GraphResult<()> {
     match status {
         VALIDATION_STATUS_VALID | VALIDATION_STATUS_CORRUPT | VALIDATION_STATUS_REPAIRING => Ok(()),
@@ -562,6 +573,59 @@ pub(crate) fn record_active_generation_heartbeat(
     .map_err(|err| GraphError::Internal(format!("projection heartbeat update failed: {err}")))
 }
 
+#[cfg(test)]
+pub(crate) fn record_active_generation_heartbeat(
+    _generation_id: u64,
+    _ttl: Duration,
+    _sync_watermark: i64,
+    _validation_status: &str,
+) -> GraphResult<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn active_generation_count() -> GraphResult<i32> {
+    Ok(0)
+}
+
+#[cfg(not(test))]
+pub(crate) fn active_generation_count() -> GraphResult<i32> {
+    let count = pgrx::Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+         FROM graph._projection_generations
+         WHERE backend_pid <> 0
+           AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND expires_at > now()",
+    )
+    .map_err(|err| GraphError::Internal(format!("projection heartbeat count failed: {err}")))?
+    .unwrap_or(0);
+    Ok(count.min(i32::MAX as i64) as i32)
+}
+
+#[cfg(not(test))]
+pub(crate) fn generation_has_active_heartbeat(generation_id: u64) -> GraphResult<bool> {
+    let generation_id = i64::try_from(generation_id)
+        .map_err(|_| GraphError::Internal("projection generation id exceeds BIGINT".into()))?;
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM graph._projection_generations
+             WHERE generation_id = $1
+               AND backend_pid <> 0
+               AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND expires_at > now()
+         )",
+        &[generation_id.into()],
+    )
+    .map(|active| active.unwrap_or(false))
+    .map_err(|err| GraphError::Internal(format!("projection heartbeat lookup failed: {err}")))
+}
+
+#[cfg(test)]
+pub(crate) fn generation_has_active_heartbeat(_generation_id: u64) -> GraphResult<bool> {
+    Ok(false)
+}
+
 #[cfg(not(test))]
 pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
     pgrx::Spi::run(
@@ -569,6 +633,11 @@ pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
          WHERE backend_pid <> 0 AND expires_at <= now()",
     )
     .map_err(|err| GraphError::Internal(format!("projection heartbeat expiration failed: {err}")))
+}
+
+#[cfg(test)]
+pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
+    Ok(())
 }
 
 #[cfg(test)]

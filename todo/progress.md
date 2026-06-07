@@ -431,3 +431,39 @@ Microphase 10 added compaction publication:
   but does not alter default CSR/base-only reads or SQL scheduling. No benchmark
   comparison is required until scheduled maintenance invokes compaction in a
   production-visible path.
+
+Microphase 11 added active generation heartbeats:
+
+- Extended active-generation heartbeat SQL helpers so backend rows are
+  idempotently recorded/refreshed with backend PID, database OID, manifest
+  generation, heartbeat timestamp, expiry timestamp, sync watermark, and
+  validation status.
+- Added stale heartbeat expiry and a generation-active predicate that
+  generation-aware GC can use to refuse files still referenced by a live
+  backend.
+- Installing a manifest snapshot now records the current backend's active
+  generation heartbeat immediately. `refreshed_engine_status()` also expires
+  stale heartbeat rows and refreshes the installed manifest heartbeat when a
+  backend continues using the generation.
+- Because pgrx rejects more than 32 tuple fields for `graph.status()`,
+  `graph.active_generation_count()` exposes the active generation count without
+  changing the existing `graph.status()` return ABI.
+- Tests run:
+  - `cd graph && cargo test --features pg17 projection::manifest`: passed with
+    13 manifest/heartbeat tests.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 projection_generation_heartbeat`:
+    passed with backend record, refresh, stale expiry, GC-blocking, and unit
+    heartbeat expiry tests.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 projection_mode_build_and_status_contract`:
+    passed with the status ABI preserved.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 sync_health_exposes_operator_contract_field_names`:
+    passed with the sync-health ABI preserved.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed with 0 doctests.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cd graph && cargo test --features pg17`: expected red; 608 passed, 1
+    failed future status/diagnostics contract, 1 ignored scale test.
+- Regression report: Microphase 11 changes metadata/status paths only. No BFS
+  or read-path benchmark comparison is required; preserve the existing
+  `graph.status()` ABI and verify SQL callers before promotion.

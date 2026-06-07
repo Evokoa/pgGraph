@@ -5359,6 +5359,8 @@ fn install_query_edge_segment_manifest(
         sync_watermark: segment.header.sync_watermark,
     });
     engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
-    engine.install_projection_manifest(&manifest, root);
+    engine
+        .install_projection_manifest(&manifest, root)
+        .expect("projection manifest installs");
     dir
 }

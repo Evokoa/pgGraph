@@ -276,6 +276,9 @@ FROM graph.status();
 | `pending_sync_rows` | Durable sync rows newer than `applied_sync_id` |
 | `disabled_trigger_count` | Registered graph triggers currently disabled |
 
+Use `graph.active_generation_count()` to inspect unexpired backend heartbeats
+that retain durable projection generations for generation-aware cleanup.
+
 ## Operational Patterns
 
 Small manual graph:

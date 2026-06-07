@@ -351,6 +351,16 @@ fn status() -> TableIterator<
     })
 }
 
+/// Return the number of unexpired active-generation backend heartbeats.
+#[pg_extern(schema = "graph")]
+fn active_generation_count() -> i32 {
+    with_panic_boundary("active_generation_count()", || {
+        crate::projection::manifest::expire_stale_generation_heartbeats()
+            .unwrap_or_else(|err| err.report());
+        crate::projection::manifest::active_generation_count().unwrap_or_else(|err| err.report())
+    })
+}
+
 /// Return backend-local and projected instance memory estimates.
 ///
 /// `concurrent_backends` is an operator-supplied sizing assumption, not a live
@@ -532,6 +542,7 @@ fn run_scheduled_maintenance() -> TableIterator<
 }
 
 fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> {
+    crate::projection::manifest::expire_stale_generation_heartbeats()?;
     let disabled_trigger_count = disabled_graph_trigger_count()?;
     let catalog_state = current_catalog_state();
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
@@ -540,6 +551,9 @@ fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
         eng.refresh_observed_state(disabled_trigger_count, pending, &catalog_state);
+        if let Some(manifest) = eng.projection_manifest_full.as_ref() {
+            crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;
+        }
         Ok(eng.status())
     })
 }

@@ -350,10 +350,11 @@ impl Engine {
         &mut self,
         manifest: &ProjectionManifest,
         root: impl Into<PathBuf>,
-    ) {
+    ) -> crate::safety::GraphResult<()> {
         self.projection_manifest = Some(ProjectionManifestSnapshot::from(manifest));
         self.projection_manifest_full = Some(manifest.clone());
         self.projection_manifest_root = Some(root.into());
+        crate::projection::manifest::record_loaded_generation_heartbeat(manifest)
     }
 
     pub(crate) fn base_projection_manifest_status(&self) -> (Option<i64>, Option<i64>) {
@@ -1583,7 +1584,9 @@ mod tests {
                 sync_watermark: segment.header.sync_watermark,
             });
         engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
-        engine.install_projection_manifest(&manifest, root);
+        engine
+            .install_projection_manifest(&manifest, root)
+            .expect("projection manifest installs");
         dir
     }
 
