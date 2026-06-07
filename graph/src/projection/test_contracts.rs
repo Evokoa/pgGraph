@@ -4,12 +4,13 @@
 //! projection modules must turn green. Implemented contracts pass; future
 //! contracts fail by default so phase progress is visible in the normal suite.
 
-use super::test_fixtures::{
-    edge_store_from_tuples, NormalizedMutation, ProjectionArtifactDir, SyntheticSyncOperation,
-    SyntheticSyncRow,
+use super::test_fixtures::{edge_store_from_tuples, NormalizedMutation, ProjectionArtifactDir};
+use crate::projection::ingest::{ProjectionIngester, ProjectionSyncRow};
+use crate::projection::manifest::{
+    ProjectionManifest, ProjectionManifestStore, VALIDATION_STATUS_VALID,
 };
-use crate::projection::manifest::{ProjectionManifest, VALIDATION_STATUS_VALID};
 use crate::projection::neighbors::CsrNeighbors;
+use crate::projection::normalize::{MutationBufferLimits, MutationOperation};
 use crate::projection::segment::{
     DeltaSegment, SegmentEdge, SegmentEdgeWeight, SegmentFilterValue, SegmentKind,
     SegmentNodeState, SegmentResolution, SegmentTenant,
@@ -131,18 +132,54 @@ fn delta_segment_roundtrips_node_resolution_filter_tenant_sections() {
 
 #[test]
 fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
-    let _row = SyntheticSyncRow {
-        log_id: 1,
+    let dir = ProjectionArtifactDir::new("projection_ingest_committed_edge_contract");
+    std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base artifact writes");
+    ProjectionManifestStore::new(dir.path())
+        .publish(&ProjectionManifest::base_only(
+            1,
+            "base.pggraph",
+            "crc32:00000000",
+            1,
+            0,
+            1,
+        ))
+        .expect("base manifest publishes");
+    let ingester = ProjectionIngester::new(dir.path(), "base.pggraph", "crc32:00000000", 1);
+    let row = ProjectionSyncRow {
+        sync_id: 1,
         generation_id: 1,
-        table_oid: 100,
+        committed: true,
+        operation: MutationOperation::InsertEdge,
+        direction: TraversalDirection::Out,
         source: 0,
         target: 1,
         type_id: 2,
         weight: None,
-        operation: SyntheticSyncOperation::InsertEdge,
+        table_oid: None,
+        pk_hash: None,
+        node_idx: None,
+        filter_column_id: None,
+        filter_value: None,
+        tenant_hash: None,
     };
 
-    production_feature_absent("committed edge ingestion and L0 manifest publishing");
+    let result = ingester
+        .ingest_committed_rows(&[row], MutationBufferLimits::new(10, 10_000))
+        .expect("ingestion publishes");
+    let manifest = result.manifest.expect("manifest published");
+    let segment = DeltaSegment::read_from_path(&dir.path().join(&manifest.segments[0].path))
+        .expect("segment reads");
+
+    assert_eq!(manifest.sync_watermark, 1);
+    assert_eq!(manifest.segments.len(), 1);
+    assert_eq!(
+        segment.edge_inserts,
+        vec![SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 2,
+        }]
+    );
 }
 
 #[test]

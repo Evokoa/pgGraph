@@ -74,27 +74,6 @@ impl Drop for ProjectionArtifactDir {
     }
 }
 
-/// Synthetic sync-log row used by projection ingestion tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SyntheticSyncRow {
-    /// Monotonic sync-log identifier.
-    pub(crate) log_id: u64,
-    /// Projection generation that should publish the row.
-    pub(crate) generation_id: u64,
-    /// Source table OID that produced the row.
-    pub(crate) table_oid: u32,
-    /// Source graph node index when the row affects an edge.
-    pub(crate) source: u32,
-    /// Target graph node index when the row affects an edge.
-    pub(crate) target: u32,
-    /// Edge type identifier when the row affects an edge.
-    pub(crate) type_id: u8,
-    /// Optional edge weight carried by the source row.
-    pub(crate) weight: Option<u32>,
-    /// Operation represented by the sync row.
-    pub(crate) operation: SyntheticSyncOperation,
-}
-
 /// Synthetic sync operation for projection test fixtures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyntheticSyncOperation {

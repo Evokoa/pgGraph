@@ -195,3 +195,33 @@ Microphase 5 implemented the base-only engine manifest-load checkpoint:
 - Regression report: no traversal algorithm, GQL, components, shortest-path,
   ingestion, compaction, GC, or SQL read-path adoption changed; benchmark
   baseline remains `pre_durable_projection`.
+
+Microphase 6 core ingestion checkpoint implemented testable L0 publication:
+
+- Added `graph/src/projection/ingest.rs` with a core projection ingester that
+  filters committed rows above the current manifest watermark, ignores aborted
+  rows, normalizes edge and node-surface mutations, writes L0 edge segments by
+  direction, writes node/resolution/filter/tenant deltas into node segments,
+  durably publishes no-overwrite segment files, validates segment reloads, and
+  publishes the next manifest generation under an artifact-root ingestion lock.
+- Turned the committed-edge ingestion contract green while leaving layered
+  neighbor reads and status/diagnostics contracts intentionally failing by
+  default for their later phases.
+- Kept SQL `graph.ingest_projection(...)`, scheduled maintenance wiring, source
+  table/GQL sync-log extraction, and rollback-heavy pgrx tests for the next
+  Microphase 6 slice.
+- Tests run:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 projection::ingest`: passed with
+    6 core ingestion tests.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    expected red; 4 passed, 2 failed for future production features.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cd graph && cargo test --features pg17`: expected red; 567 passed, 2
+    failed future contracts, 1 ignored scale test.
+- Regression report: the checkpoint adds test/development-gated core artifact
+  publication logic but does not yet change SQL, scheduled maintenance,
+  traversal reads, GQL, components, shortest-path, compaction, GC, or runtime
+  read-path adoption; benchmark baseline remains `pre_durable_projection`.

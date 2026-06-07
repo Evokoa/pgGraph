@@ -80,3 +80,14 @@ decision.
 | Command | `cd graph && cargo test --features pg17 persistence::tests::`; `cd graph && cargo check --features pg17`; `cd graph && cargo test --features pg17 --doc`; `python3 scripts/check_doc_references.py` |
 | Result | Persistence/load-path tests passed, including base-only manifest load, CSR traversal preservation, base manifest status metadata, wrong-base rejection, stale checksum rejection, wrong-version rejection, and non-base-only rejection. Full `cargo test --features pg17` is intentionally red with 560 passed, 3 future durable-projection contract failures, and 1 ignored scale test. |
 | Decision | No benchmark comparison required because traversal, GQL, components, shortest-path, ingestion, compaction, GC, and SQL read-path adoption are unchanged |
+
+## 2026-06-07: Microphase 6 Core Ingestion Publisher
+
+| Field | Value |
+|---|---|
+| Scope | Testable committed-row ingestion into L0 projection segments and next-manifest publication |
+| Code changes | Projection ingestion under test/development gates; no SQL entrypoint, scheduler wiring, traversal read-path adoption, compaction, or GC change yet |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo fmt --check`; `cd graph && cargo test --features pg17 projection::ingest`; `cd graph && cargo test --features pg17 projection::test_contracts`; `cd graph && cargo check --features pg17`; `cd graph && cargo test --features pg17 --doc`; `python3 scripts/check_doc_references.py` |
+| Result | Core ingestion tests passed, including committed filtering, aborted-row exclusion, watermark rollback on failed publish, artifact-root publication locking, serialized generations, generation-overflow rejection, node-surface normalization and limits, durable no-overwrite segment publication, edge weights, node state, resolution, filter, tenant, and direction-specific edge segments. Check, doctests, and docs passed. Full `cargo test --features pg17` is intentionally red with 567 passed, 2 future durable-projection contract failures, and 1 ignored scale test. |
+| Decision | No benchmark comparison required until ingestion is wired into SQL/scheduled maintenance or durable segments are consumed by runtime read paths |

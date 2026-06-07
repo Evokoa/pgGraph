@@ -16,6 +16,7 @@ every backend-local engine.
 | `sql_jobs.rs` | Durable job rows and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
 | `persistence.rs` | `.pggraph` load/write plus base-only projection manifest discovery |
+| `projection/ingest.rs` | Core committed-row to L0 segment publication logic |
 | `projection/manifest.rs` | Projection manifest metadata and active-generation heartbeats |
 | `projection/normalize.rs` | Deterministic committed-mutation normalization and ingest buffer limits |
 | `projection/segment.rs` | Durable delta segment format for future layered projections |
@@ -149,6 +150,15 @@ conflicts that still have a net effect. The bounded normalization buffer
 rejects oversized batches before segment encoding starts.
 Edge segment writers reject normalized node rows so node and edge deltas remain
 separate segment domains.
+
+The core projection ingester filters committed sync rows above the latest
+manifest watermark, normalizes edge mutations, writes L0 edge segments by
+direction, writes node/resolution/filter/tenant L0 deltas into node segments,
+publishes durable no-overwrite segment files, validates segment reloads, and
+publishes the next manifest under an artifact-root ingestion publication lock.
+Aborted transaction rows are ignored, and the manifest watermark advances only
+after segment publication succeeds. SQL entrypoints, scheduled maintenance
+wiring, and rollback-heavy verification are added in the later ingestion slice.
 
 When a `.pggraph` artifact is loaded, the loader scans the artifact directory
 for the latest `projection-generation-*.json` manifest. In the base-only phase,

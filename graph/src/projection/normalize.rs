@@ -27,11 +27,11 @@ pub(crate) enum MutationOperation {
 }
 
 impl MutationOperation {
-    fn is_insert(self) -> bool {
+    pub(crate) fn is_insert(self) -> bool {
         matches!(self, Self::InsertEdge | Self::UpsertNode)
     }
 
-    fn is_delete(self) -> bool {
+    pub(crate) fn is_delete(self) -> bool {
         matches!(self, Self::DeleteEdge | Self::DeleteNode)
     }
 
