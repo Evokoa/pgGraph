@@ -251,4 +251,14 @@ decision.
 | Code changes | Documentation/evidence only |
 | Command | `DBNAME=pggraph_release_m16_pgbench CLIENTS=4 JOBS=2 TIME=30 ./tests/heavy/run_pgbench_sync.sh`; `IMAGE=pggraph:m16-smoke CONTAINER=pggraph-m16-smoke PG_MAJOR=17 ./tests/heavy/docker_smoke.sh` |
 | Result | pgbench sync stress passed with 2,997 transactions, 0 failed transactions, 2,997 sync-log rows, `apply_ms=107`, and `query_ms=61`. Docker smoke passed after building `pggraph:m16-smoke`, starting a disposable PostgreSQL 17 container, creating the extension, building a two-node graph, and finding the expected search row. |
-| Decision | Mark pgbench and Docker smoke complete for local pg17 Microphase 16 evidence. The playground release gate was started with `PGGRAPH_PLAYGROUND_YES=1 PGGRAPH_CONTAINER_NAME=pggraph-m16-playground PGGRAPH_IMAGE_NAME=pggraph-postgres:m16-playground PGGRAPH_PG_PORT=55438 ./tests/heavy/playground_release_gate.sh`, but the run was interrupted before completion and the disposable container was removed. Remaining release blockers are playground execution or waiver, stable docs merge, and final `todo/` deletion decision. |
+| Decision | Mark pgbench and Docker smoke complete for local pg17 Microphase 16 evidence. The playground release gate was started with `PGGRAPH_PLAYGROUND_YES=1 PGGRAPH_CONTAINER_NAME=pggraph-m16-playground PGGRAPH_IMAGE_NAME=pggraph-postgres:m16-playground PGGRAPH_PG_PORT=55438 ./tests/heavy/playground_release_gate.sh`, but the run was interrupted before completion and the disposable container was removed. Heavy production release gates are deferred for a later pass; stable docs merge and final `todo/` deletion still remained open at this checkpoint. |
+
+## 2026-06-08: Microphase 16 Stable Docs Merge
+
+| Field | Value |
+|---|---|
+| Scope | Public contributor documentation for durable projection architecture and release-gate operation |
+| Code changes | Documentation-only updates to `docs/contributor_guide/architecture.mdx` and `docs/contributor_guide/testing-release.mdx` |
+| Command | `python3 scripts/check_doc_references.py`; `scripts/check_docs_drift.sh`; `git diff --check` |
+| Result | Documentation references, SQL/GUC/source-map drift checks, and whitespace checks passed. The architecture docs now describe durable projection manifests/segments, transaction-local deltas, and cross-backend committed mutable-overlay visibility. The release docs now describe `run_release_gate.sh`, staged `RUN_*` evidence knobs, disposable crash gates, external pgbench/Docker/playground gates, and the rule that skipped or interrupted gates need rerun or explicit release-owner waiver. |
+| Decision | Mark the stable docs merge complete for Microphase 16. No runtime benchmark comparison is required because this checkpoint changes docs only. Heavy production release gates are deferred for a later pass, and the final `todo/` deletion decision remains open until after the user's additional fixes. |

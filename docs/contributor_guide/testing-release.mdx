@@ -379,6 +379,59 @@ cd graph
 PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
 ```
 
+`run_release_gate.sh` is the release-evidence aggregator. It runs formatting,
+clippy, docs, Rust tests, pgrx SQL tests, cargo-deny, fuzz binary compile,
+projection manifest/segment fuzz seed corpora, package validation, install
+smoke, metadata audit, SQLSTATE/ACL boundaries, backup/restore, lock
+regressions, concurrency stress, synthetic release smoke, GQL write lifecycle
+gates, pgbench sync stress, playground validation, optional crash gates, and
+optional Docker smoke depending on its `RUN_*` environment variables.
+
+The default command is not the full production release gate: Docker and crash
+gates are off unless explicitly enabled, and crash gates also require a
+disposable `PGDATA`. For staged release evidence, keep skipped pieces explicit
+in the command and record the reason:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_release_m16 \
+  RUN_PLAYGROUND=0 RUN_PGBENCH=0 RUN_DOCKER=0 \
+  RUN_CRASH=0 RUN_TX_DELTA_CRASH=0 \
+  ./tests/heavy/run_release_gate.sh
+```
+
+Enable the heavy production-only pieces explicitly when the environment is
+ready:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_release \
+  RUN_DOCKER=1 RUN_CRASH=1 RUN_TX_DELTA_CRASH=1 \
+  PGDATA=/path/to/disposable/pgdata \
+  ./tests/heavy/run_release_gate.sh
+```
+
+Run crash gates only against a disposable PostgreSQL cluster because they kill
+and restart the postmaster:
+
+```bash
+cd graph
+PGHOST=/tmp/pggraph-crash PGPORT=55437 PGDATA=/tmp/pggraph-crash/data \
+  POSTGRES_CTL=/path/to/pg_ctl POSTGRES_OPTS="-p 55437 -k /tmp/pggraph-crash" \
+  DBNAME=pggraph_release_crash ./tests/heavy/crash_recovery.sh
+
+PGHOST=/tmp/pggraph-crash PGPORT=55437 PGDATA=/tmp/pggraph-crash/data \
+  POSTGRES_CTL=/path/to/pg_ctl POSTGRES_OPTS="-p 55437 -k /tmp/pggraph-crash" \
+  PG_CONFIG=/path/to/pg_config PG_VERSION_FEATURE=pg17 \
+  DBNAME=pggraph_release_tx_delta_crash \
+  ./tests/heavy/tx_delta_crash_recovery.sh
+```
+
+`crash_recovery.sh` proves committed trigger rows survive postmaster death,
+explicit sync replay works after restart, maintenance can rebuild/persist, and
+corrupt persisted artifacts are rejected. `tx_delta_crash_recovery.sh` proves
+transaction-local overlays are visible before crash but do not survive restart.
+
 Use Docker for PostgreSQL major matrix validation when local headers are not
 available:
 
@@ -391,6 +444,23 @@ Set `RUN_FULL_MATRIX=1` on `run_release_gate.sh` to run every configured
 PostgreSQL major through `run_pg_matrix.sh`. Set `RUN_RSS=1` to include a
 large-build peak RSS measurement; use `MAX_RSS_MB` when there is a recorded
 release threshold.
+
+External gates can also be run independently:
+
+```bash
+cd graph
+DBNAME=pggraph_release_pgbench CLIENTS=4 JOBS=2 TIME=30 \
+  ./tests/heavy/run_pgbench_sync.sh
+
+IMAGE=pggraph:smoke CONTAINER=pggraph-smoke PG_MAJOR=17 \
+  ./tests/heavy/docker_smoke.sh
+
+PGGRAPH_PLAYGROUND_YES=1 ./tests/heavy/playground_release_gate.sh
+```
+
+Do not mark release verification complete when a gate is skipped or
+interrupted. Either rerun the gate successfully or record an explicit
+release-owner waiver with the measured evidence that justifies it.
 
 ## Fuzzing
 

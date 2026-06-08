@@ -106,7 +106,9 @@ pages.
 | `FilterIndex` after load | `Engine` heap | Deserialized per backend from bincode |
 | `edge_type_registry` after load | `Engine` heap | Deserialized per backend from bincode |
 | `ResolutionIndex` mmap mode | Byte slice inside `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
-| `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local sync overlay state |
+| Durable projection manifests and segments | Files beside `main.pggraph` | Shared through the filesystem and retained by active-generation metadata |
+| `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local compatibility sync overlay state |
+| `TxGraphDelta` | Current backend transaction | Transaction-local read-your-own-writes state only |
 
 ## Data Flow: Build
 
@@ -179,6 +181,9 @@ Trigger sync records source-table changes in `graph._sync_log`. Topology query
 functions apply pending trigger-sync rows by default up to a captured high-water
 mark; operators can set `graph.query_freshness = 'off'` for compatibility/manual
 catch-up or `error_on_pending` to fail instead of reading stale topology.
+Persisted `mutable_overlay` graphs publish committed edge changes as durable L0
+projection segments and reload the latest projection manifest, so other
+backends can observe committed topology changes without a full rebuild.
 
 <TreeDiagram>
   <TreeNode title="source table change">
@@ -186,13 +191,14 @@ catch-up or `error_on_pending` to fail instead of reading stale topology.
       <TreeNode title="graph._sync_log">
         <TreeBranch>
           <TreeNode title="graph.apply_sync()">
-            <TreeNode title="backend-local overlays and node materialization" />
+            <TreeNode title="durable projection ingest or backend-local replay" />
           </TreeNode>
           <TreeNode title="graph.maintenance()">
             <TreeNode title="fresh build from source tables">
               <TreeBranch>
                 <TreeNode title="new active Engine" />
                 <TreeNode title="new .pggraph artifact" />
+                <TreeNode title="base-only projection generation" />
               </TreeBranch>
             </TreeNode>
           </TreeNode>
@@ -202,8 +208,12 @@ catch-up or `error_on_pending` to fail instead of reading stale topology.
   </TreeNode>
 </TreeDiagram>
 
-Node inserts and tombstones can update backend-local state. Edge mutations use
-overlay buffers until maintenance or vacuum rebuilds the base CSR.
+Node inserts and tombstones can update backend-local state. For persisted
+`mutable_overlay` graphs, committed edge mutations publish durable projection
+segments that layered reads merge with the base CSR. Non-persisted or
+compatibility paths may still use backend-local overlays until maintenance or
+vacuum rebuilds the base CSR. Transaction-local deltas remain backend-local and
+are applied last for read-your-own-writes behavior.
 
 ## Design Decisions
 
@@ -217,6 +227,7 @@ overlay buffers until maintenance or vacuum rebuilds the base CSR.
 | Read-only mmap for persisted forward arrays | Later backends can start quickly and share immutable derived artifact pages through the OS page cache without replacing PostgreSQL's buffer pool. |
 | Bincode metadata is heap-loaded | Filter and registry structures are variable-size Rust data that are easier to validate and use as owned values. |
 | Explicit maintenance | Expensive rebuild work is visible and controllable from SQL. |
+| Durable projection generations | Committed mutable-overlay topology changes become cross-backend-visible without turning pgGraph into a second source of truth. |
 | Circuit breakers everywhere | The extension runs in PostgreSQL backends and must bound memory and traversal work. |
 
 ## Safety Boundaries

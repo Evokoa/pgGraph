@@ -785,6 +785,24 @@ Microphase 16 is in progress with release benchmark coverage started:
     ./tests/heavy/playground_release_gate.sh`, but the run was interrupted
     before completion. The disposable `pggraph-m16-playground` container was
     removed afterwards.
-- Remaining Microphase 16 blockers: playground release gate or explicit
-  release-owner waiver, stable docs merge from `todo/` into `docs/`, and
+- Remaining Microphase 16 blockers: heavy production release gates are
+  deferred for a later pass, stable docs merge from `todo/` into `docs/`, and
   `todo/` deletion before release.
+- Merged stable TODO architecture and release-operation material into public
+  docs:
+  - `docs/contributor_guide/architecture.mdx` now describes durable projection
+    manifests/segments, transaction-local deltas, cross-backend committed
+    mutable-overlay visibility, and the base-only generation produced by
+    maintenance.
+  - `docs/contributor_guide/testing-release.mdx` now documents
+    `run_release_gate.sh` as the release-evidence aggregator, staged-release
+    `RUN_*` knobs, disposable-`PGDATA` crash-gate invocation, external
+    pgbench/Docker/playground gate commands, and the rule that skipped or
+    interrupted gates require rerun or explicit release-owner waiver.
+- Docs checks after the merge passed:
+  - `python3 scripts/check_doc_references.py`
+  - `scripts/check_docs_drift.sh`
+  - `git diff --check`
+- Remaining Microphase 16 blockers: heavy production release gates are
+  deferred for a later pass, and final `todo/` deletion decision remains open
+  until after the user's additional fixes.
