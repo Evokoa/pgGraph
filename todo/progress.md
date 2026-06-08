@@ -772,6 +772,19 @@ Microphase 16 is in progress with release benchmark coverage started:
     PG_CONFIG=/opt/homebrew/opt/postgresql@17/bin/pg_config
     PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_m16_tx_delta_crash
     ./tests/heavy/tx_delta_crash_recovery.sh`: passed.
-- Remaining Microphase 16 blockers: playground/pgbench/Docker or explicit
-  release-owner waiver for those external gates, stable docs merge from
-  `todo/` into `docs/`, and `todo/` deletion before release.
+- External pg17 release gates progressed:
+  - `DBNAME=pggraph_release_m16_pgbench CLIENTS=4 JOBS=2 TIME=30
+    ./tests/heavy/run_pgbench_sync.sh`: passed with 2,997 pgbench
+    transactions, 2,997 sync-log rows, `apply_ms=107`, and `query_ms=61`.
+  - `IMAGE=pggraph:m16-smoke CONTAINER=pggraph-m16-smoke PG_MAJOR=17
+    ./tests/heavy/docker_smoke.sh`: passed after building the local Docker
+    image and validating extension install/search in a disposable container.
+  - Playground release gate was started with
+    `PGGRAPH_PLAYGROUND_YES=1 PGGRAPH_CONTAINER_NAME=pggraph-m16-playground
+    PGGRAPH_IMAGE_NAME=pggraph-postgres:m16-playground PGGRAPH_PG_PORT=55438
+    ./tests/heavy/playground_release_gate.sh`, but the run was interrupted
+    before completion. The disposable `pggraph-m16-playground` container was
+    removed afterwards.
+- Remaining Microphase 16 blockers: playground release gate or explicit
+  release-owner waiver, stable docs merge from `todo/` into `docs/`, and
+  `todo/` deletion before release.
