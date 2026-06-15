@@ -714,6 +714,331 @@ fn projection_generation_heartbeats_are_graph_scoped() {
     assert_eq!(graph_rows, 2);
 }
 
+#[pg_test]
+fn drop_graph_removes_operational_rows_without_raw_fk_errors() {
+    Spi::run("SELECT graph.create_graph('drop_ops', namespace := 'app')")
+        .expect("create drop_ops failed");
+    let graph_id = Spi::get_one::<String>(
+        "SELECT graph_id::text
+           FROM graph._graphs
+          WHERE graph_name = 'drop_ops'
+            AND namespace = 'app'",
+    )
+    .expect("drop_ops graph id query failed")
+    .expect("drop_ops graph id missing");
+    Spi::run(&format!(
+        "INSERT INTO graph._build_jobs (build_id, graph_id, status, sync_mode, projection_mode)
+         VALUES ('drop-build-job', {}::uuid, 'completed', 'manual', 'csr_readonly')",
+        super::sql_literal(&graph_id)
+    ))
+    .expect("insert drop_ops build job failed");
+    Spi::run(&format!(
+        "INSERT INTO graph._maintenance_jobs (job_id, graph_id, status)
+         VALUES ('drop-maintenance-job', {}::uuid, 'completed')",
+        super::sql_literal(&graph_id)
+    ))
+    .expect("insert drop_ops maintenance job failed");
+    Spi::run(&format!(
+        "INSERT INTO graph._projection_generations (
+             graph_id, generation_id, backend_pid, database_oid
+         )
+         VALUES (
+             {}::uuid, 9606001, 0,
+             (SELECT oid FROM pg_database WHERE datname = current_database())
+         )",
+        super::sql_literal(&graph_id)
+    ))
+    .expect("insert drop_ops projection generation failed");
+
+    let dropped = Spi::get_one::<String>(
+        "SELECT graph_name
+           FROM graph.drop_graph('drop_ops', namespace := 'app')",
+    )
+    .expect("drop_ops drop failed")
+    .expect("drop_ops drop row missing");
+    let operational_rows = Spi::get_one::<i64>(&format!(
+        "SELECT
+             (SELECT count(*) FROM graph._build_jobs WHERE graph_id = {}::uuid)
+           + (SELECT count(*) FROM graph._maintenance_jobs WHERE graph_id = {}::uuid)
+           + (SELECT count(*) FROM graph._projection_generations WHERE graph_id = {}::uuid)",
+        super::sql_literal(&graph_id),
+        super::sql_literal(&graph_id),
+        super::sql_literal(&graph_id)
+    ))
+    .expect("drop_ops operational row count failed")
+    .unwrap_or(-1);
+
+    assert_eq!(dropped, "drop_ops");
+    assert_eq!(operational_rows, 0);
+}
+
+#[pg_test]
+fn legacy_job_status_apis_are_scoped_to_selected_graph() {
+    Spi::run("SELECT graph.create_graph('status_a', namespace := 'app')")
+        .expect("create status_a failed");
+    Spi::run("SELECT graph.create_graph('status_b', namespace := 'app')")
+        .expect("create status_b failed");
+    let graph_a = Spi::get_one::<String>(
+        "SELECT graph_id::text FROM graph._graphs WHERE graph_name = 'status_a' AND namespace = 'app'",
+    )
+    .expect("status_a graph id query failed")
+    .expect("status_a graph id missing");
+    let graph_b = Spi::get_one::<String>(
+        "SELECT graph_id::text FROM graph._graphs WHERE graph_name = 'status_b' AND namespace = 'app'",
+    )
+    .expect("status_b graph id query failed")
+    .expect("status_b graph id missing");
+    Spi::run(&format!(
+        "INSERT INTO graph._build_jobs (build_id, graph_id, status, sync_mode, projection_mode)
+         VALUES
+             ('status-build-a', {}::uuid, 'queued', 'manual', 'csr_readonly'),
+             ('status-build-b', {}::uuid, 'queued', 'manual', 'csr_readonly')",
+        super::sql_literal(&graph_a),
+        super::sql_literal(&graph_b)
+    ))
+    .expect("insert status build jobs failed");
+    Spi::run(&format!(
+        "INSERT INTO graph._maintenance_jobs (job_id, graph_id, status)
+         VALUES
+             ('status-maintenance-a', {}::uuid, 'queued'),
+             ('status-maintenance-b', {}::uuid, 'queued')",
+        super::sql_literal(&graph_a),
+        super::sql_literal(&graph_b)
+    ))
+    .expect("insert status maintenance jobs failed");
+
+    Spi::run("SELECT graph.set_current_graph('status_b', namespace := 'app')")
+        .expect("select status_b failed");
+    let hidden_build_status = Spi::get_one::<String>(
+        "SELECT status FROM graph.build_status('status-build-a')",
+    )
+    .expect("hidden build status query failed")
+    .expect("hidden build status row missing");
+    let visible_build_status = Spi::get_one::<String>(
+        "SELECT status FROM graph.build_status('status-build-b')",
+    )
+    .expect("visible build status query failed")
+    .expect("visible build status row missing");
+    let hidden_maintenance_status = Spi::get_one::<String>(
+        "SELECT status FROM graph.maintenance_status('status-maintenance-a')",
+    )
+    .expect("hidden maintenance status query failed")
+    .expect("hidden maintenance status row missing");
+    let visible_maintenance_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.maintenance_status(NULL)
+          WHERE job_id = 'status-maintenance-b'",
+    )
+    .expect("visible maintenance list query failed")
+    .unwrap_or(0);
+    let hidden_maintenance_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.maintenance_status(NULL)
+          WHERE job_id = 'status-maintenance-a'",
+    )
+    .expect("hidden maintenance list query failed")
+    .unwrap_or(0);
+
+    assert_eq!(hidden_build_status, "not_found");
+    assert_eq!(visible_build_status, "queued");
+    assert_eq!(hidden_maintenance_status, "not_found");
+    assert_eq!(visible_maintenance_rows, 1);
+    assert_eq!(hidden_maintenance_rows, 0);
+}
+
+#[pg_test]
+fn runtime_selection_does_not_reuse_previous_graph_engine() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('runtime_a', namespace := 'app')")
+        .expect("create runtime_a failed");
+    Spi::run("SELECT graph.create_graph('runtime_b', namespace := 'app')")
+        .expect("create runtime_b failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'runtime_a',
+                'graph_test_users_pgtest'::regclass,
+                'id',
+                ARRAY['name'],
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add runtime_a table failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'runtime_b',
+                'graph_test_bad_pgtest'::regclass,
+                'id',
+                ARRAY['note'],
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add runtime_b table failed");
+    Spi::run("INSERT INTO public.graph_test_bad_pgtest (id, note) VALUES ('r1', 'runtime')")
+        .expect("insert runtime_b row failed");
+
+    assert_eq!(
+        sqlstate_for_error("SELECT * FROM graph.load_graph('runtime_a', namespace := 'app')"),
+        Some("PG003".to_string())
+    );
+
+    Spi::run("SELECT graph.build_graph('runtime_a', force_persist := true, graph_namespace := 'app')")
+        .expect("runtime_a build failed");
+    Spi::run("SELECT graph.build_graph('runtime_b', force_persist := true, graph_namespace := 'app')")
+        .expect("runtime_b build failed");
+
+    let loaded_b_nodes =
+        Spi::get_one::<i64>("SELECT node_count FROM graph.loaded_graphs()")
+            .expect("loaded_graphs after runtime_b failed")
+            .unwrap_or(0);
+    let select_a_loaded = Spi::get_one::<bool>(
+        "SELECT loaded
+           FROM graph.select_graph('runtime_a', namespace := 'app')",
+    )
+    .expect("select runtime_a failed")
+    .unwrap_or(true);
+    let loaded_after_select_a =
+        Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+            .expect("loaded_graphs after select_a failed")
+            .unwrap_or(-1);
+    let load_a_nodes = Spi::get_one::<i64>(
+        "SELECT node_count
+           FROM graph.load_graph('runtime_a', namespace := 'app')",
+    )
+    .expect("load runtime_a failed")
+    .unwrap_or(0);
+    let select_b_loaded = Spi::get_one::<bool>(
+        "SELECT loaded
+           FROM graph.select_graph('runtime_b', namespace := 'app')",
+    )
+    .expect("select runtime_b failed")
+    .unwrap_or(true);
+    let load_b_nodes = Spi::get_one::<i64>(
+        "SELECT node_count
+           FROM graph.load_graph('runtime_b', namespace := 'app')",
+    )
+    .expect("load runtime_b failed")
+    .unwrap_or(0);
+    let unloaded_b = Spi::get_one::<bool>(
+        "SELECT unloaded
+           FROM graph.unload_graph('runtime_b', namespace := 'app')",
+    )
+    .expect("unload runtime_b failed")
+    .unwrap_or(false);
+    let loaded_after_unload =
+        Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+            .expect("loaded_graphs after unload failed")
+            .unwrap_or(-1);
+
+    assert_eq!(loaded_b_nodes, 1);
+    assert!(!select_a_loaded);
+    assert_eq!(loaded_after_select_a, 0);
+    assert_eq!(load_a_nodes, 2);
+    assert!(!select_b_loaded);
+    assert_eq!(load_b_nodes, 1);
+    assert!(unloaded_b);
+    assert_eq!(loaded_after_unload, 0);
+}
+
+#[pg_test]
+fn development_worker_entrypoints_restore_job_graph_context() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('worker_a', namespace := 'app')")
+        .expect("create worker_a failed");
+    Spi::run("SELECT graph.create_graph('worker_b', namespace := 'app')")
+        .expect("create worker_b failed");
+    let graph_a = Spi::get_one::<String>(
+        "SELECT graph_id::text
+           FROM graph._graphs
+          WHERE graph_name = 'worker_a'
+            AND namespace = 'app'",
+    )
+    .expect("worker_a graph id query failed")
+    .expect("worker_a graph id missing");
+    let graph_b = Spi::get_one::<String>(
+        "SELECT graph_id::text
+           FROM graph._graphs
+          WHERE graph_name = 'worker_b'
+            AND namespace = 'app'",
+    )
+    .expect("worker_b graph id query failed")
+    .expect("worker_b graph id missing");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'worker_a',
+                'graph_test_users_pgtest'::regclass,
+                'id',
+                ARRAY['name'],
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add worker_a table failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'worker_b',
+                'graph_test_bad_pgtest'::regclass,
+                'id',
+                ARRAY['note'],
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add worker_b table failed");
+    Spi::run("INSERT INTO public.graph_test_bad_pgtest (id, note) VALUES ('w1', 'worker')")
+        .expect("insert worker_b row failed");
+    Spi::run(&format!(
+        "INSERT INTO graph._build_jobs (build_id, graph_id, status, sync_mode, projection_mode)
+         VALUES ('worker-build-a', {}::uuid, 'queued', 'manual', 'csr_readonly')",
+        super::sql_literal(&graph_a)
+    ))
+    .expect("insert worker_a build job failed");
+    Spi::run(&format!(
+        "INSERT INTO graph._maintenance_jobs (job_id, graph_id, status)
+         VALUES ('worker-maintenance-a', {}::uuid, 'queued')",
+        super::sql_literal(&graph_a)
+    ))
+    .expect("insert worker_a maintenance job failed");
+
+    Spi::run("SELECT graph.set_current_graph('worker_b', namespace := 'app')")
+        .expect("select worker_b before build runner failed");
+    let build_error = Spi::get_one::<String>("SELECT graph._test_run_build_job('worker-build-a')")
+        .expect("worker_a build runner query failed");
+    let build_nodes = Spi::get_one::<i64>(
+        "SELECT nodes_loaded
+           FROM graph._build_jobs
+          WHERE build_id = 'worker-build-a'",
+    )
+    .expect("worker_a build nodes query failed")
+    .unwrap_or(0);
+    let current_after_build =
+        Spi::get_one::<String>("SELECT graph_id::text FROM graph.current_graph()")
+            .expect("current graph after build worker failed")
+            .expect("current graph after build worker row missing");
+
+    Spi::run("SELECT graph.set_current_graph('worker_b', namespace := 'app')")
+        .expect("select worker_b before maintenance runner failed");
+    let maintenance_error =
+        Spi::get_one::<String>("SELECT graph._test_run_maintenance_job('worker-maintenance-a')")
+            .expect("worker_a maintenance runner query failed");
+    let maintenance_nodes = Spi::get_one::<i64>(
+        "SELECT nodes_after
+           FROM graph._maintenance_jobs
+          WHERE job_id = 'worker-maintenance-a'",
+    )
+    .expect("worker_a maintenance nodes query failed")
+    .unwrap_or(0);
+    let current_after_maintenance =
+        Spi::get_one::<String>("SELECT graph_id::text FROM graph.current_graph()")
+            .expect("current graph after maintenance worker failed")
+            .expect("current graph after maintenance worker row missing");
+
+    assert!(build_error.is_none());
+    assert_eq!(build_nodes, 2);
+    assert_eq!(current_after_build, graph_a);
+    assert!(maintenance_error.is_none());
+    assert_eq!(maintenance_nodes, 2);
+    assert_eq!(current_after_maintenance, graph_a);
+    assert_ne!(graph_a, graph_b);
+}
+
 fn sqlstate_for_prepared_helper(statement: &str) -> Option<String> {
     Spi::get_one::<String>(&format!(
         "SELECT public.graph_test_sqlstate({})",

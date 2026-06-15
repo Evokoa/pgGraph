@@ -38,6 +38,7 @@ mod projection;
 mod query;
 mod quote;
 mod resolution_index;
+mod runtime_state;
 mod safety;
 mod sql_aggregation;
 mod sql_build;

@@ -206,6 +206,7 @@ pub(crate) fn drop_graph_metadata(
             ),
         });
     }
+    delete_graph_operational_state(&existing.graph_id)?;
 
     Spi::connect(|client| {
         let rows = client
@@ -230,6 +231,25 @@ pub(crate) fn drop_graph_metadata(
             .map_err(|err| graph_catalog_error("drop graph", err))?;
         metadata_from_first_row(rows, "dropped graph row missing")
     })
+}
+
+fn delete_graph_operational_state(graph_id: &str) -> safety::GraphResult<()> {
+    Spi::run_with_args(
+        "DELETE FROM graph._build_jobs WHERE graph_id = $1::uuid",
+        &[graph_id.into()],
+    )
+    .map_err(|err| graph_catalog_error("delete graph build jobs", err))?;
+    Spi::run_with_args(
+        "DELETE FROM graph._maintenance_jobs WHERE graph_id = $1::uuid",
+        &[graph_id.into()],
+    )
+    .map_err(|err| graph_catalog_error("delete graph maintenance jobs", err))?;
+    Spi::run_with_args(
+        "DELETE FROM graph._projection_generations WHERE graph_id = $1::uuid",
+        &[graph_id.into()],
+    )
+    .map_err(|err| graph_catalog_error("delete graph projection generations", err))?;
+    Ok(())
 }
 
 /// Resolves the compatibility default graph metadata.

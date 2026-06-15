@@ -9,6 +9,7 @@ All functions live in the `graph` schema.
 |---|---|
 | Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
 | Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph` |
+| Runtime graph loading | `select_graph`, `load_graph`, `unload_graph`, `loaded_graphs` |
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
 | Build jobs | `build`, `build_graph`, `build_async_graph`, `build_status`, `build_status_for_graph` |
@@ -216,6 +217,9 @@ Named graph metadata is the identity and policy catalog for multi-graph
 support. The current release keeps existing build, registration, sync, and
 query functions on the compatibility default graph while this metadata surface
 is introduced. Later graph-scoped APIs use the same graph identity rows.
+Each backend can have at most one loaded graph engine at a time. Selecting a
+different graph clears any previously loaded graph from that backend; it does
+not delete persisted artifacts.
 
 Graph metadata rows include:
 
@@ -326,6 +330,93 @@ SQL surface resolve the selected graph, or the default graph when no graph is
 selected. Selecting a graph does not load a persisted artifact by itself; the
 backend-local engine changes when you build or load graph state. Missing or
 unauthorized graphs return SQLSTATE `PG005`.
+
+## Runtime Graph Loading
+
+Runtime loading controls the backend-local graph engine. It does not mutate
+PostgreSQL source tables or graph metadata.
+
+### `graph.select_graph()`
+
+```sql
+graph.select_graph(
+  graph_name text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  graph_id text,
+  graph_name text,
+  loaded boolean
+)
+```
+
+Selects a visible graph for the current session. If the selected graph is
+already loaded in this backend, `loaded` is true and the engine remains active.
+If another graph is loaded, pgGraph clears the backend-local engine before
+returning. Use `graph.load_graph()` when you want to load the selected graph's
+persisted artifact immediately.
+
+### `graph.load_graph()`
+
+```sql
+graph.load_graph(
+  graph_name text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  graph_id text,
+  graph_name text,
+  loaded boolean,
+  node_count bigint,
+  edge_count bigint,
+  memory_used_mb double precision,
+  projection_mode text
+)
+```
+
+Admin-only. Selects the graph, loads its persisted `main.pggraph` artifact into
+the backend-local engine, and returns the loaded engine summary. This explicit
+load path does not depend on `graph.auto_load`; missing or invalid artifacts
+raise an error so operators can rebuild or repair the graph.
+
+### `graph.unload_graph()`
+
+```sql
+graph.unload_graph(
+  graph_name text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  graph_id text,
+  graph_name text,
+  unloaded boolean
+)
+```
+
+Admin-only. Clears the backend-local engine when the requested graph is the one
+currently loaded in this backend. The persisted graph files remain on disk.
+
+### `graph.loaded_graphs()`
+
+```sql
+graph.loaded_graphs()
+RETURNS TABLE (
+  graph_id text,
+  graph_name text,
+  node_count bigint,
+  edge_count bigint,
+  memory_used_mb double precision,
+  projection_mode text,
+  last_access_unix_micros bigint
+)
+```
+
+Reports the graph currently loaded in this backend. The current implementation
+returns zero or one row because each PostgreSQL backend has one graph engine
+slot.
 
 ### `graph.sync_health()`
 

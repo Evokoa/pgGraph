@@ -96,12 +96,18 @@ That means there is no shared Rust heap between connections. Sharing happens
 only through PostgreSQL storage, the filesystem, and OS page-cache backed mmap
 pages.
 
-The current release line has one compatibility graph per database. SQL calls
-such as `graph.add_table()`, `graph.build()`, `graph.status()`,
-`graph.traverse()`, and `graph.reset()` operate on that default graph. The
-named-graph work keeps this default behavior as a compatibility path while it
-adds first-class graph identity to catalogs, jobs, artifacts, runtime loading,
-sync replay, and projection metadata.
+Each backend also tracks one loaded graph slot beside the engine. The slot is
+tagged with the graph id/name that produced the active engine, so runtime calls
+can reject or clear a stale engine before serving a different selected graph.
+`graph.select_graph()` changes the session selection, `graph.load_graph()`
+loads one persisted artifact into the backend-local slot, and
+`graph.loaded_graphs()` reports zero or one row for the current backend.
+
+Compatibility SQL calls such as `graph.add_table()`, `graph.build()`,
+`graph.status()`, `graph.traverse()`, and `graph.reset()` resolve the selected
+graph, or the default graph when no graph has been selected. The default graph
+behavior remains available while named graph identity is explicit in catalogs,
+jobs, artifacts, runtime loading, sync replay, and projection metadata.
 
 The default graph identity is intentionally explicit in the Rust policy layer:
 the compatibility graph is named `default`, uses the `public` graph namespace,
@@ -111,7 +117,8 @@ from paths, backend globals, or session state.
 
 | Object | Owner | Lifetime |
 |---|---|---|
-| `Engine` | One PostgreSQL backend process | Backend lifetime or until `graph.reset()` |
+| `Engine` | One PostgreSQL backend process | Backend lifetime, graph selection change, explicit unload, or `graph.reset()` |
+| Loaded graph slot | One PostgreSQL backend process | Tracks the graph id/name for the active `Engine` |
 | `NodeStore` owned mode | `Engine` heap | Mutable build/sync lifetime |
 | `NodeStore` mmap mode | Raw pointers into `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
 | Forward `EdgeStore` mmap mode | Raw pointers into `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
@@ -131,7 +138,7 @@ places named-graph support must update:
 | Area | Current behavior |
 |---|---|
 | Registration catalogs | `graph._registered_tables`, `graph._registered_edges`, and `graph._registered_filter_columns` are keyed by `graph_id`; compatibility SQL resolves the selected or default graph before reading or writing them. |
-| Runtime | `ENGINE` stores one backend-local graph engine. `ensure_current_graph()` validates build/load/schema freshness; it is not a named graph selector. |
+| Runtime | `ENGINE` stores one backend-local graph engine tagged by a loaded graph slot. `ensure_current_graph()` validates that the loaded slot matches the selected graph before query execution. |
 | Build jobs | `graph._build_jobs` and `graph._maintenance_jobs` are keyed by `graph_id`; workers restore database, user, and graph context before running. |
 | Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph`. |
 | Sync | `graph._sync_log` and `graph._sync_buffer` are global sync streams. |

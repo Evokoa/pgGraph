@@ -208,7 +208,7 @@ fsync, and `validating_persistence` covers immediate mmap reload validation.
 
 ## Auto-Load
 
-When a query needs a graph and the backend-local engine is empty:
+When a query needs the selected graph and the backend-local engine is empty:
 
 1. `ensure_current_graph()` calls `maybe_auto_load()`.
 2. If `graph.auto_load = false`, it does nothing.
@@ -216,6 +216,22 @@ When a query needs a graph and the backend-local engine is empty:
 4. If the artifact exists, `load_graph_file()` validates it and maps immutable
    sections read-only.
 5. The engine is marked built and can answer queries.
+
+Each backend has one loaded graph slot. If a different graph is selected, the
+previous engine is cleared from that backend before another graph is loaded.
+Use `graph.loaded_graphs()` to inspect the graph currently loaded in the active
+backend.
+
+For explicit operator-controlled loading, use:
+
+```sql
+SELECT * FROM graph.load_graph('customer_360', namespace := 'analytics');
+SELECT * FROM graph.unload_graph('customer_360', namespace := 'analytics');
+```
+
+`graph.load_graph()` loads the persisted artifact immediately and does not
+depend on `graph.auto_load`. Missing, corrupt, or incompatible artifacts raise
+an error so they can be rebuilt from the PostgreSQL source tables.
 
 <Callout type="warning">
 Corrupt or incompatible artifacts are rejected. A corrupt file raises or logs a

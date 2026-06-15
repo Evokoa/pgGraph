@@ -144,6 +144,7 @@ fn execute_build_inner(
     progress: &mut ProgressCallback<'_>,
 ) -> safety::GraphResult<BuildExecutionResult> {
     let start = std::time::Instant::now();
+    let graph = selected_or_default_graph_metadata()?;
     let sync_mode = current_sync_mode()?;
     if mode_gate == ProjectionModeGate::CheckGuc {
         validate_projection_mode_enabled(projection_mode)?;
@@ -189,6 +190,7 @@ fn execute_build_inner(
     ENGINE.with(|e| {
         *e.borrow_mut() = persisted_engine.unwrap_or(new_engine);
     });
+    crate::runtime_state::mark_loaded_graph(&graph);
 
     match sync_mode {
         config::SyncMode::Manual => {

@@ -987,12 +987,12 @@ pub(crate) fn graph_artifact_checksum_for_path(path: &Path) -> GraphResult<Strin
     Ok(graph_artifact_checksum(computed_crc))
 }
 
-/// Get the graph root directory under `$PGDATA/{data_dir}/{graph_id}`.
+/// Resolve the graph root directory under `$PGDATA/{data_dir}/{graph_id}`.
 ///
 /// The graph id must be canonical UUID text. Graph names are intentionally not
 /// accepted here because filesystem paths must be derived from stable catalog
 /// identity, not user-controlled display names.
-pub fn graph_root_path_for(graph_id: &str) -> GraphResult<PathBuf> {
+fn graph_root_path_for_uncreated(graph_id: &str) -> GraphResult<PathBuf> {
     let graph_id = GraphId::parse(graph_id)
         .map_err(|err| GraphError::Internal(format!("invalid graph artifact id: {err}")))?;
     let pgdata = std::env::var("PGDATA")
@@ -1009,7 +1009,14 @@ pub fn graph_root_path_for(graph_id: &str) -> GraphResult<PathBuf> {
         ));
     }
     let subdir = graph_data_dir();
-    let dir = PathBuf::from(&pgdata).join(&subdir).join(graph_id.as_str());
+    Ok(PathBuf::from(&pgdata).join(&subdir).join(graph_id.as_str()))
+}
+
+/// Get the graph root directory under `$PGDATA/{data_dir}/{graph_id}`.
+///
+/// The directory is created for callers that intend to write artifacts.
+pub fn graph_root_path_for(graph_id: &str) -> GraphResult<PathBuf> {
+    let dir = graph_root_path_for_uncreated(graph_id)?;
     fs::create_dir_all(&dir).map_err(|e| {
         GraphError::Internal(format!(
             "Cannot create graph data directory {}: {}",
@@ -1059,7 +1066,7 @@ pub fn projection_manifest_root_for(graph_id: &str) -> GraphResult<PathBuf> {
 pub fn remove_graph_artifacts_for(graph_id: &str) -> GraphResult<()> {
     let graph_id = GraphId::parse(graph_id)
         .map_err(|err| GraphError::Internal(format!("invalid graph artifact id: {err}")))?;
-    let root = graph_root_path_for(graph_id.as_str())?;
+    let root = graph_root_path_for_uncreated(graph_id.as_str())?;
     if root.file_name().and_then(|name| name.to_str()) != Some(graph_id.as_str()) {
         return Err(GraphError::Internal(format!(
             "refusing to remove graph artifact root outside graph id directory: {}",
@@ -1285,6 +1292,27 @@ mod tests {
         assert!(
             matches!(result, Err(GraphError::Internal(message)) if message.contains("graph id"))
         );
+    }
+
+    #[cfg(not(feature = "pg_test"))]
+    #[test]
+    fn remove_graph_artifacts_for_missing_graph_does_not_create_root() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture("PGDATA");
+        let pgdata = std::env::temp_dir().join(format!(
+            "graph-pgdata-remove-missing-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::remove_dir_all(&pgdata);
+        std::env::set_var("PGDATA", &pgdata);
+
+        let graph_id = "00000000-0000-0000-0000-0000000000cc";
+
+        remove_graph_artifacts_for(graph_id).unwrap();
+
+        assert!(!pgdata.join("graph").join(graph_id).exists());
+        let _ = std::fs::remove_dir_all(&pgdata);
     }
 
     #[test]

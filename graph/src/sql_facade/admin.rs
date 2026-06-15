@@ -1543,7 +1543,13 @@ fn build_status(
     ),
 > {
     with_panic_boundary("build_status()", || {
+        let selected_graph_id = catalog::selected_or_default_graph_metadata()
+            .unwrap_or_else(|err| err.report())
+            .graph_id;
         if let Some(row) = build_job_row(build_id).unwrap_or_else(|err| err.report()) {
+            if row.graph_id != selected_graph_id {
+                return build_not_found_status(build_id);
+            }
             return TableIterator::new(vec![(
                 row.build_id,
                 row.status,
@@ -1580,6 +1586,39 @@ fn build_status(
             None,
         )])
     })
+}
+
+fn build_not_found_status(
+    build_id: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(build_id, String),
+        name!(status, String),
+        name!(nodes_loaded, Option<i64>),
+        name!(edges_loaded, Option<i64>),
+        name!(build_time_ms, Option<f64>),
+        name!(memory_used_mb, Option<f64>),
+        name!(progress_phase, String),
+        name!(progress_message, Option<String>),
+        name!(started_at, Option<TimestampWithTimeZone>),
+        name!(finished_at, Option<TimestampWithTimeZone>),
+        name!(error, Option<String>),
+    ),
+> {
+    TableIterator::new(vec![(
+        build_id.to_string(),
+        "not_found".to_string(),
+        None,
+        None,
+        None,
+        None,
+        "not_found".to_string(),
+        None,
+        None,
+        None,
+        None,
+    )])
 }
 
 /// Return recent durable build jobs for a named graph.
@@ -2833,8 +2872,14 @@ fn maintenance_status(
     ),
 > {
     with_panic_boundary("maintenance_status()", || {
+        let selected_graph_id = catalog::selected_or_default_graph_metadata()
+            .unwrap_or_else(|err| err.report())
+            .graph_id;
         if let Some(job_id) = job_id {
             if let Some(row) = maintenance_job_row(job_id).unwrap_or_else(|err| err.report()) {
+                if row.graph_id != selected_graph_id {
+                    return maintenance_not_found_status(job_id);
+                }
                 return TableIterator::new(vec![(
                     row.job_id,
                     row.status,
@@ -2849,19 +2894,7 @@ fn maintenance_status(
                     row.error,
                 )]);
             }
-            return TableIterator::new(vec![(
-                job_id.to_string(),
-                "not_found".to_string(),
-                None,
-                None,
-                None,
-                None,
-                "not_found".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )]);
+            return maintenance_not_found_status(job_id);
         }
 
         let rows = Spi::connect(|client| {
@@ -2870,10 +2903,11 @@ fn maintenance_status(
                         vacuum_time_ms, progress_phase, progress_message,
                         started_at, finished_at, error
                  FROM graph._maintenance_jobs
+                 WHERE graph_id = $1::uuid
                  ORDER BY created_at DESC
                  LIMIT 50",
                 None,
-                &[],
+                &[selected_graph_id.into()],
             )?;
             let mut out = Vec::new();
             for row in selected {
@@ -2901,6 +2935,39 @@ fn maintenance_status(
         });
         TableIterator::new(rows)
     })
+}
+
+fn maintenance_not_found_status(
+    job_id: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(job_id, String),
+        name!(status, String),
+        name!(sync_rows_applied, Option<i64>),
+        name!(nodes_after, Option<i64>),
+        name!(edges_after, Option<i64>),
+        name!(vacuum_time_ms, Option<f64>),
+        name!(progress_phase, String),
+        name!(progress_message, Option<String>),
+        name!(started_at, Option<TimestampWithTimeZone>),
+        name!(finished_at, Option<TimestampWithTimeZone>),
+        name!(error, Option<String>),
+    ),
+> {
+    TableIterator::new(vec![(
+        job_id.to_string(),
+        "not_found".to_string(),
+        None,
+        None,
+        None,
+        None,
+        "not_found".to_string(),
+        None,
+        None,
+        None,
+        None,
+    )])
 }
 
 #[pg_extern(schema = "graph")]

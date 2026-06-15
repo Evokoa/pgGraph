@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 5, Graph-Scoped Persistence and Projection Generations.
-- Status: Phase 5 reviewed; checkpoint commit pending.
+- Active phase: Phase 6, Backend Runtime Graph Selection and Loading.
+- Status: Phase 6 reviewed; checkpoint commit pending.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -16,6 +16,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 3: complete - made auto-discovery graph-aware, added write-free preview APIs, supported targeted named-graph discovery/build flows, and explicitly rejected arbitrary row-predicate subgraphs.
 - Phase 4: complete - scoped build and maintenance jobs by `graph_id`, restored graph context in workers, made build/vacuum advisory locks graph-specific, added named graph build/maintenance/status helpers, and documented graph-scoped job behavior.
 - Phase 5: complete - moved artifacts under per-graph UUID roots, scoped projection generation heartbeats by `graph_id`, made reset/drop cleanup graph-root-local, kept `_PG_init()` catalog-free for fresh installs, and documented the new persistence layout.
+- Phase 6: complete - added backend-local loaded graph slot metadata, exposed `select_graph`, `load_graph`, `unload_graph`, and `loaded_graphs`, made auto-load/build state graph-tagged, cleared stale engines on graph switches, fixed graph-scoped operational cleanup/status review blockers, and documented runtime loading.
 
 ## Verification Log
 
@@ -93,6 +94,19 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
 - 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
 - 2026-06-15: `git diff --check` passed.
+- 2026-06-15: `cargo test --features "pg17 development" graph_file_path` passed, 4 tests.
+- 2026-06-15: `cargo test --features "pg17 development" remove_graph_artifacts_for_missing_graph_does_not_create_root` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" runtime_selection_does_not_reuse_previous_graph_engine` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" development_worker_entrypoints_restore_job_graph_context` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" drop_graph_removes_operational_rows_without_raw_fk_errors` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" legacy_job_status_apis_are_scoped_to_selected_graph` passed, 1 test.
+- 2026-06-15: `cargo fmt --check` passed from `graph/`.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed.
+- 2026-06-15: `cargo test --features "pg17 development" graph_policy` passed, 4 tests.
+- 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
+- 2026-06-15: `cargo test --features "pg17 development"` passed, 644 tests, 1 ignored.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" runtime_selection_does_not_reuse_previous_graph_engine` passed again after explicit-load SQLSTATE coverage, 1 test.
 
 ## Working Notes
 
@@ -105,4 +119,6 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 3 review found no blocking issues. Discovery writes now route through explicit graph ids; preview APIs return discovery rows without registration writes; row-predicate subgraphs return `PG018`.
 - Phase 4 local review found no blocking issue in graph context restoration, graph-scoped locks, job migration, SQL overload compatibility, or docs/API drift. Strict clippy still reports existing SQL ABI row type-complexity warnings outside the Phase 4 scope.
 - Phase 5 local review found no blocking issue in fresh-install safety, selected graph path resolution, graph-local reset/drop cleanup, or projection heartbeat scoping. One path comparison hardening fix was made and covered by focused path tests.
-- Next checkpoint: Phase 6 introduces backend runtime selection and an engine registry.
+- Independent review after Phase 5 ran in subagent `019ecb3f-40a8-7dc2-a3b2-949acfc10406` and found graph-drop operational-row cleanup, legacy job status scoping, worker context coverage, and delete-path side-effect issues. All four were fixed and covered by focused tests before the Phase 6 checkpoint.
+- Phase 6 local review found no blocking issue in runtime graph slot isolation, explicit load/unload behavior, selected graph auto-load matching, graph-scoped operational cleanup, or docs/API drift.
+- Next checkpoint: continue with the next incomplete phase in `todo/`.

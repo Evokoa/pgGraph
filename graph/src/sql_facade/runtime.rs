@@ -9,6 +9,7 @@ fn reset() {
         ENGINE.with(|e| {
             *e.borrow_mut() = Engine::new();
         });
+        crate::runtime_state::clear_loaded_graph();
 
         let graph =
             catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
@@ -18,7 +19,157 @@ fn reset() {
             graph.graph_name,
             graph.graph_id
         );
-    });
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn select_graph(
+    graph_name: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(loaded, bool),
+    ),
+> {
+    with_panic_boundary("select_graph()", || {
+        let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
+        catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
+        let loaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
+        if !loaded && crate::runtime_state::loaded_graph_id().is_some() {
+            ENGINE.with(|engine| {
+                *engine.borrow_mut() = Engine::new();
+            });
+            crate::runtime_state::clear_loaded_graph();
+        }
+        TableIterator::new(vec![(graph.graph_id, graph.graph_name, loaded)])
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn load_graph(
+    graph_name: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(loaded, bool),
+        name!(node_count, Option<i64>),
+        name!(edge_count, Option<i64>),
+        name!(memory_used_mb, Option<f64>),
+        name!(projection_mode, Option<String>),
+    ),
+> {
+    with_panic_boundary("load_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
+        catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
+        load_selected_graph_from_disk(&graph, false).unwrap_or_else(|err| err.report());
+        let snapshot =
+            ENGINE.with(|engine| crate::runtime_state::loaded_graph_snapshot(&engine.borrow()));
+        let row = snapshot
+            .filter(|snapshot| snapshot.graph_id == graph.graph_id)
+            .map(|snapshot| {
+                (
+                    graph.graph_id.clone(),
+                    graph.graph_name.clone(),
+                    true,
+                    Some(snapshot.node_count),
+                    Some(snapshot.edge_count),
+                    Some(snapshot.memory_used_mb),
+                    Some(snapshot.projection_mode),
+                )
+            })
+            .unwrap_or((
+                graph.graph_id,
+                graph.graph_name,
+                false,
+                None,
+                None,
+                None,
+                None,
+            ));
+        TableIterator::new(vec![row])
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn unload_graph(
+    graph_name: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(unloaded, bool),
+    ),
+> {
+    with_panic_boundary("unload_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
+        let unloaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
+        if unloaded {
+            ENGINE.with(|engine| {
+                *engine.borrow_mut() = Engine::new();
+            });
+            crate::runtime_state::clear_loaded_graph();
+        }
+        TableIterator::new(vec![(graph.graph_id, graph.graph_name, unloaded)])
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn loaded_graphs() -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(node_count, i64),
+        name!(edge_count, i64),
+        name!(memory_used_mb, f64),
+        name!(projection_mode, String),
+        name!(last_access_unix_micros, i64),
+    ),
+> {
+    with_panic_boundary("loaded_graphs()", || {
+        let row = ENGINE.with(|engine| {
+            crate::runtime_state::loaded_graph_snapshot(&engine.borrow()).map(|snapshot| {
+                (
+                    snapshot.graph_id,
+                    snapshot.graph_name,
+                    snapshot.node_count,
+                    snapshot.edge_count,
+                    snapshot.memory_used_mb,
+                    snapshot.projection_mode,
+                    snapshot.last_access_unix_micros,
+                )
+            })
+        });
+        TableIterator::new(row.into_iter().collect::<Vec<_>>())
+    })
+}
+
+fn resolve_visible_runtime_graph(
+    graph_name: &str,
+    tenant: Option<&str>,
+    namespace: Option<&str>,
+) -> catalog::GraphMetadata {
+    catalog::resolve_visible_graph_metadata(graph_name, tenant, namespace)
+        .unwrap_or_else(|err| err.report())
+        .unwrap_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!("graph '{}' does not exist", graph_name),
+            }
+            .report()
+        })
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -119,27 +270,48 @@ pub(super) fn maybe_auto_load() {
         return;
     }
 
+    let graph = match catalog::selected_or_default_graph_metadata() {
+        Ok(graph) => graph,
+        Err(err) => {
+            pgrx::warning!("graph: auto-load skipped: {}", err);
+            return;
+        }
+    };
+
+    if let Err(err) = load_selected_graph_from_disk(&graph, true) {
+        pgrx::warning!("graph: auto-load skipped: {}", err);
+    }
+}
+
+fn load_selected_graph_from_disk(
+    graph: &catalog::GraphMetadata,
+    quiet_missing: bool,
+) -> safety::GraphResult<bool> {
     ENGINE.with(|e| {
         let eng = e.borrow();
         if eng.built {
-            return; // Already loaded
+            if crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id) {
+                crate::runtime_state::touch_loaded_graph(&graph.graph_id);
+                return Ok(true);
+            }
+            drop(eng);
+            *e.borrow_mut() = Engine::new();
+            crate::runtime_state::clear_loaded_graph();
+        } else {
+            drop(eng);
         }
-        drop(eng); // Release borrow before mutating
 
         // Check if persisted file exists
-        let path = match persistence::graph_file_path() {
-            Ok(path) => path,
-            Err(err) => {
-                pgrx::warning!("graph: auto-load skipped: {}", err);
-                return;
-            }
-        };
+        let path = persistence::graph_file_path_for(&graph.graph_id)?;
         if !path.exists() {
-            return;
+            if !quiet_missing {
+                return Err(safety::GraphError::NotBuilt);
+            }
+            return Ok(false);
         }
 
         // Load from .pggraph file via mmap.
-        pgrx::log!("graph: auto-loading from {} (mmap)", path.display());
+        pgrx::log!("graph: loading from {} (mmap)", path.display());
         match persistence::load_graph_file(&path) {
             Ok(mut loaded_engine) => {
                 if let Ok((tables, edges, filters)) = read_catalog() {
@@ -149,20 +321,24 @@ pub(super) fn maybe_auto_load() {
                 let nc = loaded_engine.node_store.node_count();
                 let ec = loaded_engine.edge_store.edge_count();
                 *e.borrow_mut() = loaded_engine;
+                crate::runtime_state::mark_loaded_graph(&graph);
                 pgrx::log!(
                     "graph: loaded {} nodes, {} edges (resolution via mmap, zero-copy)",
                     nc,
                     ec
                 );
+                Ok(true)
             }
-            Err(err) => {
+            Err(err) if quiet_missing => {
                 pgrx::warning!(
-                    "graph: auto-load failed: {:?}. Call graph.build() to reconstruct.",
+                    "graph: load failed: {:?}. Call graph.build() to reconstruct.",
                     err
                 );
+                Ok(false)
             }
+            Err(err) => Err(err),
         }
-    });
+    })
 }
 
 pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
