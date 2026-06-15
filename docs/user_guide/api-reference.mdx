@@ -8,8 +8,8 @@ All functions live in the `graph` schema.
 | Category | Functions |
 |---|---|
 | Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
-| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph`, `grant_graph`, `revoke_graph`, `graph_privileges`, `transfer_graph_ownership`, `set_graph_quota`, `graph_quotas`, `graph_quota_usage` |
-| Runtime graph loading | `select_graph`, `load_graph`, `unload_graph`, `loaded_graphs` |
+| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph`, `set_graph_residency`, `grant_graph`, `revoke_graph`, `graph_privileges`, `transfer_graph_ownership`, `set_graph_quota`, `graph_quotas`, `graph_quota_usage` |
+| Runtime graph loading | `select_graph`, `load_graph`, `unload_graph`, `loaded_graphs`, `graph_runtime_status` |
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
 | Build jobs | `build`, `build_graph`, `build_async_graph`, `build_status`, `build_status_for_graph` |
@@ -402,6 +402,23 @@ RETURNS TABLE (...)
 Owner/admin-only. Transfers a non-default graph to another PostgreSQL role.
 The compatibility default graph cannot be transferred.
 
+### `graph.set_graph_residency()`
+
+```sql
+graph.set_graph_residency(
+  graph_name text,
+  residency text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Admin-only. Updates a graph's runtime residency policy. `hot` and `warm` graphs
+are eligible for persisted auto-load when `graph.auto_load` is enabled. `cold`
+graphs keep their persisted artifacts available for explicit
+`graph.load_graph()` calls but are not auto-loaded by query execution.
+
 ### `graph.set_graph_quota()`
 
 ```sql
@@ -418,8 +435,10 @@ RETURNS TABLE (...)
 Graph schema admin only. Upserts a quota policy row. Supported scopes are
 `cluster`, `tenant`, `owner`, `namespace`, and `graph`; supported enforcement
 modes are `hard` and `warn`. `owner` scope keys are PostgreSQL role names and
-are stored as role OIDs. The current enforcement point is
-`max_named_graphs`, checked before graph metadata is created.
+are stored as role OIDs. Current hard enforcement points are
+`max_named_graphs`, checked before graph metadata is created, and
+`max_loaded_graphs_per_backend`, checked before a persisted artifact is loaded
+into a backend-local engine.
 
 ### `graph.graph_quotas()`
 
@@ -447,7 +466,8 @@ RETURNS TABLE (
 
 Reports SQL-computable quota usage for supported dimensions. A `hard`
 `max_named_graphs` quota blocks new graph metadata before catalog rows are
-created; a `warn` quota reports `exceeded = true` without blocking creation.
+created. A `hard` `max_loaded_graphs_per_backend` quota blocks runtime loads.
+A `warn` quota reports `exceeded = true` without blocking the operation.
 
 ## Runtime Graph Loading
 
@@ -524,6 +544,7 @@ graph.loaded_graphs()
 RETURNS TABLE (
   graph_id text,
   graph_name text,
+  residency text,
   node_count bigint,
   edge_count bigint,
   memory_used_mb double precision,
@@ -535,6 +556,31 @@ RETURNS TABLE (
 Reports the graph currently loaded in this backend. The current implementation
 returns zero or one row because each PostgreSQL backend has one graph engine
 slot.
+
+### `graph.graph_runtime_status()`
+
+```sql
+graph.graph_runtime_status()
+RETURNS TABLE (
+  graph_id text,
+  graph_name text,
+  residency text,
+  loaded boolean,
+  artifact_exists boolean,
+  artifact_bytes bigint,
+  node_count bigint,
+  edge_count bigint,
+  memory_used_mb double precision,
+  projection_mode text,
+  last_access_unix_micros bigint
+)
+```
+
+Lists visible graphs with their runtime residency, backend-local loaded state,
+persisted artifact presence, and loaded-engine metrics when that graph is
+active in the current backend. This is the primary inspection API for deciding
+whether a graph is cold, missing an artifact, blocked by quota, or already
+loaded.
 
 ### `graph.sync_health()`
 

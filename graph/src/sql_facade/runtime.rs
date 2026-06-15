@@ -38,12 +38,18 @@ fn select_graph(
     with_panic_boundary("select_graph()", || {
         let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
-        let loaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
+        let mut loaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
         if !loaded && crate::runtime_state::loaded_graph_id().is_some() {
             ENGINE.with(|engine| {
                 *engine.borrow_mut() = Engine::new();
             });
             crate::runtime_state::clear_loaded_graph();
+        }
+        if !loaded && graph.residency == "hot" && config::HOT_EAGER_LOAD.get() {
+            if let Err(err) = load_selected_graph_from_disk(&graph, true) {
+                pgrx::warning!("graph: hot eager-load skipped: {}", err);
+            }
+            loaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
         }
         TableIterator::new(vec![(graph.graph_id, graph.graph_name, loaded)])
     })
@@ -67,8 +73,9 @@ fn load_graph(
     ),
 > {
     with_panic_boundary("load_graph()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
         let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
+        catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Admin)
+            .unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         load_selected_graph_from_disk(&graph, false).unwrap_or_else(|err| err.report());
         let snapshot =
@@ -113,8 +120,9 @@ fn unload_graph(
     ),
 > {
     with_panic_boundary("unload_graph()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
         let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
+        catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Admin)
+            .unwrap_or_else(|err| err.report());
         let unloaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
         if unloaded {
             ENGINE.with(|engine| {
@@ -132,6 +140,7 @@ fn loaded_graphs() -> TableIterator<
     (
         name!(graph_id, String),
         name!(graph_name, String),
+        name!(residency, String),
         name!(node_count, i64),
         name!(edge_count, i64),
         name!(memory_used_mb, f64),
@@ -141,10 +150,19 @@ fn loaded_graphs() -> TableIterator<
 > {
     with_panic_boundary("loaded_graphs()", || {
         let row = ENGINE.with(|engine| {
-            crate::runtime_state::loaded_graph_snapshot(&engine.borrow()).map(|snapshot| {
+            crate::runtime_state::loaded_graph_snapshot(&engine.borrow()).map(|mut snapshot| {
+                if let Ok(graphs) = catalog::list_graph_metadata() {
+                    if let Some(graph) = graphs
+                        .into_iter()
+                        .find(|graph| graph.graph_id == snapshot.graph_id)
+                    {
+                        snapshot.residency = graph.residency;
+                    }
+                }
                 (
                     snapshot.graph_id,
                     snapshot.graph_name,
+                    snapshot.residency,
                     snapshot.node_count,
                     snapshot.edge_count,
                     snapshot.memory_used_mb,
@@ -154,6 +172,57 @@ fn loaded_graphs() -> TableIterator<
             })
         });
         TableIterator::new(row.into_iter().collect::<Vec<_>>())
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn graph_runtime_status() -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(residency, String),
+        name!(loaded, bool),
+        name!(artifact_exists, bool),
+        name!(artifact_bytes, Option<i64>),
+        name!(node_count, Option<i64>),
+        name!(edge_count, Option<i64>),
+        name!(memory_used_mb, Option<f64>),
+        name!(projection_mode, Option<String>),
+        name!(last_access_unix_micros, Option<i64>),
+    ),
+> {
+    with_panic_boundary("graph_runtime_status()", || {
+        let loaded =
+            ENGINE.with(|engine| crate::runtime_state::loaded_graph_snapshot(&engine.borrow()));
+        let rows = catalog::list_graph_metadata()
+            .unwrap_or_else(|err| err.report())
+            .into_iter()
+            .map(|graph| {
+                let artifact = persistence::graph_file_path_for_uncreated(&graph.graph_id).ok();
+                let artifact_metadata = artifact.as_ref().and_then(|path| path.metadata().ok());
+                let artifact_exists = artifact_metadata.is_some();
+                let artifact_bytes =
+                    artifact_metadata.and_then(|metadata| i64::try_from(metadata.len()).ok());
+                let snapshot = loaded
+                    .as_ref()
+                    .filter(|snapshot| snapshot.graph_id == graph.graph_id);
+                (
+                    graph.graph_id,
+                    graph.graph_name,
+                    graph.residency,
+                    snapshot.is_some(),
+                    artifact_exists,
+                    artifact_bytes,
+                    snapshot.map(|snapshot| snapshot.node_count),
+                    snapshot.map(|snapshot| snapshot.edge_count),
+                    snapshot.map(|snapshot| snapshot.memory_used_mb),
+                    snapshot.map(|snapshot| snapshot.projection_mode.clone()),
+                    snapshot.map(|snapshot| snapshot.last_access_unix_micros),
+                )
+            })
+            .collect::<Vec<_>>();
+        TableIterator::new(rows)
     })
 }
 
@@ -266,10 +335,6 @@ pub(super) fn hydrate_component_page(
 /// backend-local heap, and the reverse EdgeStore CSR is rebuilt into heap for
 /// inbound traversal.
 pub(super) fn maybe_auto_load() {
-    if !config::AUTO_LOAD.get() {
-        return;
-    }
-
     let graph = match catalog::selected_or_default_graph_metadata() {
         Ok(graph) => graph,
         Err(err) => {
@@ -278,8 +343,25 @@ pub(super) fn maybe_auto_load() {
         }
     };
 
+    clear_loaded_graph_if_mismatched(&graph.graph_id);
+
+    if !config::AUTO_LOAD.get() {
+        return;
+    }
+
     if let Err(err) = load_selected_graph_from_disk(&graph, true) {
         pgrx::warning!("graph: auto-load skipped: {}", err);
+    }
+}
+
+fn clear_loaded_graph_if_mismatched(graph_id: &str) {
+    if let Some(loaded_graph_id) = crate::runtime_state::loaded_graph_id() {
+        if loaded_graph_id != graph_id {
+            ENGINE.with(|engine| {
+                *engine.borrow_mut() = Engine::new();
+            });
+            crate::runtime_state::clear_loaded_graph();
+        }
     }
 }
 
@@ -287,6 +369,9 @@ fn load_selected_graph_from_disk(
     graph: &catalog::GraphMetadata,
     quiet_missing: bool,
 ) -> safety::GraphResult<bool> {
+    if quiet_missing && graph.residency == "cold" {
+        return Ok(false);
+    }
     ENGINE.with(|e| {
         let eng = e.borrow();
         if eng.built {
@@ -301,13 +386,22 @@ fn load_selected_graph_from_disk(
             drop(eng);
         }
 
-        // Check if persisted file exists
-        let path = persistence::graph_file_path_for(&graph.graph_id)?;
+        // Check if persisted file exists without creating artifact directories
+        // during query-time auto-load or operator load inspection.
+        let path = persistence::graph_file_path_for_uncreated(&graph.graph_id)?;
         if !path.exists() {
             if !quiet_missing {
                 return Err(safety::GraphError::NotBuilt);
             }
             return Ok(false);
+        }
+
+        catalog::enforce_loaded_graph_quota(1)?;
+        if config::MAX_LOADED_GRAPHS_PER_BACKEND.get() < 1 {
+            return Err(safety::GraphError::InvalidFilter {
+                reason: "graph.max_loaded_graphs_per_backend blocks runtime graph loads"
+                    .to_string(),
+            });
         }
 
         // Load from .pggraph file via mmap.
@@ -342,10 +436,10 @@ fn load_selected_graph_from_disk(
 }
 
 pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
-    maybe_auto_load();
-
     let graph = catalog::selected_or_default_graph_metadata()?;
+    clear_loaded_graph_if_mismatched(&graph.graph_id);
     catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Read)?;
+    maybe_auto_load();
 
     let sync_mode = current_sync_mode()?;
 

@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 7, Graph Ownership, Grants, Tenant Scope, and RLS Semantics.
-- Status: Phase 7 quota/tenant checkpoint implemented; commit pending.
+- Active phase: Phase 9, Graph-Scoped Sync Replay and Automated Sync Policies.
+- Status: Phase 8 complete after independent three-phase review; commit pending.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -18,6 +18,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 5: complete - moved artifacts under per-graph UUID roots, scoped projection generation heartbeats by `graph_id`, made reset/drop cleanup graph-root-local, kept `_PG_init()` catalog-free for fresh installs, and documented the new persistence layout.
 - Phase 6: complete - added backend-local loaded graph slot metadata, exposed `select_graph`, `load_graph`, `unload_graph`, and `loaded_graphs`, made auto-load/build state graph-tagged, cleared stale engines on graph switches, fixed graph-scoped operational cleanup/status review blockers, and documented runtime loading.
 - Phase 7: complete - added graph grants, grant/revoke/inspect/transfer APIs, grant-aware graph visibility, graph read enforcement before queries, build-grant support for build/vacuum/maintenance, source-table ACL regression coverage, quota policy/usage APIs with hard `max_named_graphs` enforcement, graph-tenant default/conflict resolution, and public security docs.
+- Phase 8: complete - added `set_graph_residency`, cold/warm/hot runtime semantics, opt-in hot eager-load, backend load-cap lifecycle GUCs, loaded/runtime status APIs with residency/artifact metrics, runtime load quota enforcement, non-creating artifact status checks, and public lifecycle docs.
 
 ## Verification Log
 
@@ -120,6 +121,27 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo fmt --check` passed from `graph/`.
 - 2026-06-15: `cargo test --features "pg17 development" graph_policy` passed, 4 tests.
 - 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" graph_residency_controls_auto_load_and_runtime_status` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" guc_contract_defaults_ranges_and_contexts_are_registered` passed, 1 test.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed.
+- 2026-06-15: `cargo fmt --check` passed from `graph/`.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" graph_residency_controls_auto_load_and_runtime_status` passed again after non-creating load-path review fix, 1 test.
+- 2026-06-15: `cargo test --features "pg17 development" graph_policy` passed, 4 tests.
+- 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" default_graph_compatibility_workflow_still_uses_legacy_sql_surface` passed, 1 test.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-15: `git diff --check` passed.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" graph_grants_gate_visibility_queries_and_builds` passed after graph-admin load/unload coverage, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" graph_residency_controls_auto_load_and_runtime_status` passed after independent review fixes, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" runtime_selection_does_not_reuse_previous_graph_engine` passed after `set_current_graph()` stale-engine regression coverage, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" guc_contract_defaults_ranges_and_contexts_are_registered` passed, 1 test.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed.
+- 2026-06-15: `cargo fmt --check` passed from `graph/`.
+- 2026-06-15: `cargo test --features "pg17 development"` passed, 644 tests, 1 ignored.
+- 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" default_graph_compatibility_workflow_still_uses_legacy_sql_surface` passed, 1 test.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-15: `git diff --check` passed.
 
 ## Working Notes
 
@@ -136,4 +158,6 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 6 local review found no blocking issue in runtime graph slot isolation, explicit load/unload behavior, selected graph auto-load matching, graph-scoped operational cleanup, or docs/API drift.
 - Phase 7 graph-grants checkpoint local review found no blocking issue in grant visibility, graph read gating, build-grant build access, default global graph compatibility, or source-table ACL preservation.
 - Phase 7 quota/tenant checkpoint local review found no blocking issue in hard/warn named-graph quotas, pre-insert quota enforcement, quota usage visibility, graph tenant defaults, tenant conflict handling, or docs/API drift.
-- Next checkpoint: Phase 8 hot/warm/cold residency and lifecycle policy.
+- Phase 8 local review found no blocking issue in residency privilege checks, cold auto-load gating, warm/hot load behavior, backend load-cap enforcement, runtime status visibility, or docs/API drift. One review hardening fix moved artifact existence checks to the non-creating path before quota enforcement.
+- Independent review after Phases 6-8 ran in subagent `019ecb67-2ad5-7551-9d76-8fa26f800e57` and found stale loaded-engine reuse after `set_current_graph()`, schema-admin-only load/unload, incomplete loaded-slot quota usage/warnings, and stale `loaded_graphs()` residency. All four were fixed with focused regression coverage before the Phase 8 commit.
+- Next checkpoint: Phase 9 graph-scoped sync replay and automated sync policies.

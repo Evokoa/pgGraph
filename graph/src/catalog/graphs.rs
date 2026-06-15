@@ -613,7 +613,9 @@ pub(crate) fn graph_quotas() -> safety::GraphResult<Vec<GraphQuota>> {
 }
 
 /// Returns current usage for supported quota dimensions.
-pub(crate) fn graph_quota_usage() -> safety::GraphResult<Vec<GraphQuotaUsage>> {
+pub(crate) fn graph_quota_usage(
+    loaded_graphs_per_backend: i64,
+) -> safety::GraphResult<Vec<GraphQuotaUsage>> {
     let cluster_graphs = graph_count(None)?;
     let owner_oid = current_user_oid()?;
     let owner_key = owner_oid.to_string();
@@ -632,8 +634,37 @@ pub(crate) fn graph_quota_usage() -> safety::GraphResult<Vec<GraphQuotaUsage>> {
         "max_named_graphs",
         owner_graphs,
     )?);
+    rows.push(quota_usage_row(
+        "cluster",
+        "",
+        "max_loaded_graphs_per_backend",
+        loaded_graphs_per_backend,
+    )?);
+    rows.push(quota_usage_row(
+        "owner",
+        &owner_key,
+        "max_loaded_graphs_per_backend",
+        loaded_graphs_per_backend,
+    )?);
 
     Ok(rows)
+}
+
+/// Enforces runtime loaded-graph quota policies before loading a graph.
+pub(crate) fn enforce_loaded_graph_quota(projected_loaded_graphs: i64) -> safety::GraphResult<()> {
+    let owner_oid = current_user_oid()?;
+    enforce_quota_limit(
+        "cluster",
+        "",
+        "max_loaded_graphs_per_backend",
+        projected_loaded_graphs,
+    )?;
+    enforce_quota_limit(
+        "owner",
+        &owner_oid.to_string(),
+        "max_loaded_graphs_per_backend",
+        projected_loaded_graphs,
+    )
 }
 
 fn delete_graph_operational_state(graph_id: &str) -> safety::GraphResult<()> {
@@ -1146,6 +1177,15 @@ fn enforce_quota_limit(
                     policy.limit_value
                 ),
             });
+        } else if policy.enforcement == "warn" && projected_usage > policy.limit_value {
+            pgrx::warning!(
+                "graph: quota warning for {}:{} {}: projected {}, limit {}",
+                scope_type,
+                scope_key,
+                dimension,
+                projected_usage,
+                policy.limit_value
+            );
         }
     }
     Ok(())

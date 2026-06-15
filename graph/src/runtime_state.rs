@@ -14,6 +14,7 @@ use crate::engine::Engine;
 pub(crate) struct LoadedGraphSnapshot {
     pub(crate) graph_id: String,
     pub(crate) graph_name: String,
+    pub(crate) residency: String,
     pub(crate) node_count: i64,
     pub(crate) edge_count: i64,
     pub(crate) memory_used_mb: f64,
@@ -25,6 +26,7 @@ pub(crate) struct LoadedGraphSnapshot {
 struct LoadedGraphSlot {
     graph_id: String,
     graph_name: String,
+    residency: String,
     last_access_unix_micros: i64,
 }
 
@@ -41,6 +43,7 @@ pub(crate) fn mark_loaded_graph(graph: &GraphMetadata) {
         *slot.borrow_mut() = Some(LoadedGraphSlot {
             graph_id: graph.graph_id.clone(),
             graph_name: graph.graph_name.clone(),
+            residency: graph.residency.clone(),
             last_access_unix_micros: now_unix_micros(),
         });
     });
@@ -77,6 +80,7 @@ pub(crate) fn loaded_graph_snapshot(engine: &Engine) -> Option<LoadedGraphSnapsh
         Some(LoadedGraphSnapshot {
             graph_id: slot.graph_id.clone(),
             graph_name: slot.graph_name.clone(),
+            residency: slot.residency.clone(),
             node_count: engine.node_store.node_count() as i64,
             edge_count: engine.edge_store.edge_count() as i64,
             memory_used_mb: engine.estimated_memory_used_mb(),

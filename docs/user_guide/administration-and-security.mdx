@@ -68,10 +68,11 @@ SELECT * FROM graph.graph_quota_usage();
 ```
 
 Quota scopes are `cluster`, `tenant`, `owner`, `namespace`, and `graph`.
-Enforcement can be `hard` or `warn`. The current hard enforcement point is
-`max_named_graphs`: pgGraph checks cluster and owner limits before creating a
-graph metadata row. Warning quotas are visible through
-`graph.graph_quota_usage()` but do not block the operation.
+Enforcement can be `hard` or `warn`. Hard `max_named_graphs` quotas check
+cluster and owner limits before creating a graph metadata row. Hard
+`max_loaded_graphs_per_backend` quotas check cluster and owner limits before
+loading a persisted graph artifact into the current backend. Warning quotas are
+visible through `graph.graph_quota_usage()` but do not block the operation.
 
 ## Reader Functions
 

@@ -227,20 +227,24 @@ fn graph_grants_gate_visibility_queries_and_builds() {
          DROP ROLE IF EXISTS graph_phase7_no_graph;
          DROP ROLE IF EXISTS graph_phase7_no_source;
          DROP ROLE IF EXISTS graph_phase7_builder;
+         DROP ROLE IF EXISTS graph_phase7_admin;
          CREATE ROLE graph_phase7_reader;
          CREATE ROLE graph_phase7_no_graph;
          CREATE ROLE graph_phase7_no_source;
          CREATE ROLE graph_phase7_builder;
+         CREATE ROLE graph_phase7_admin;
          GRANT USAGE ON SCHEMA graph, public TO
              graph_phase7_reader,
              graph_phase7_no_graph,
              graph_phase7_no_source,
-             graph_phase7_builder;
+             graph_phase7_builder,
+             graph_phase7_admin;
          REVOKE SELECT ON public.graph_test_users_pgtest FROM PUBLIC;
          GRANT SELECT ON public.graph_test_users_pgtest TO
              graph_phase7_reader,
              graph_phase7_no_graph,
-             graph_phase7_builder",
+             graph_phase7_builder,
+             graph_phase7_admin",
     )
     .expect("create phase7 roles and grants failed");
     Spi::run("SELECT graph.create_graph('secure_graph', namespace := 'app')")
@@ -258,13 +262,14 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     Spi::run(
         "SELECT graph.grant_graph('secure_graph', 'graph_phase7_reader', 'read', namespace := 'app');
          SELECT graph.grant_graph('secure_graph', 'graph_phase7_no_source', 'read', namespace := 'app');
-         SELECT graph.grant_graph('secure_graph', 'graph_phase7_builder', 'build', namespace := 'app')",
+         SELECT graph.grant_graph('secure_graph', 'graph_phase7_builder', 'build', namespace := 'app');
+         SELECT graph.grant_graph('secure_graph', 'graph_phase7_admin', 'admin', namespace := 'app')",
     )
     .expect("grant graph privileges failed");
     let owner_grant_rows = Spi::get_one::<i64>(
         "SELECT count(*)
            FROM graph.graph_privileges('secure_graph', namespace := 'app')
-          WHERE privilege IN ('read', 'build')",
+          WHERE privilege IN ('read', 'build', 'admin')",
     )
     .expect("owner graph_privileges failed")
     .unwrap_or(0);
@@ -272,11 +277,26 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     Spi::run("SET ROLE graph_phase7_builder").expect("set builder role failed");
     let builder_nodes = Spi::get_one::<i64>(
         "SELECT nodes_loaded
-           FROM graph.build_graph('secure_graph', graph_namespace := 'app')",
+           FROM graph.build_graph('secure_graph', force_persist := true, graph_namespace := 'app')",
     )
     .expect("builder build_graph failed")
     .unwrap_or(0);
     Spi::run("RESET ROLE").expect("reset builder role failed");
+
+    Spi::run("SET ROLE graph_phase7_admin").expect("set graph admin role failed");
+    let admin_unloaded = Spi::get_one::<bool>(
+        "SELECT unloaded
+           FROM graph.unload_graph('secure_graph', namespace := 'app')",
+    )
+    .expect("graph admin unload_graph failed")
+    .unwrap_or(false);
+    let admin_loaded_nodes = Spi::get_one::<i64>(
+        "SELECT node_count
+           FROM graph.load_graph('secure_graph', namespace := 'app')",
+    )
+    .expect("graph admin load_graph failed")
+    .unwrap_or(0);
+    Spi::run("RESET ROLE").expect("reset graph admin role failed");
 
     Spi::run("SET ROLE graph_phase7_reader").expect("set reader role failed");
     let reader_current = Spi::get_one::<String>(
@@ -320,13 +340,15 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     );
     Spi::run("RESET ROLE").expect("reset no_source role failed");
 
-    assert_eq!(owner_grant_rows, 3);
+    assert_eq!(owner_grant_rows, 4);
     assert_eq!(reader_current, "secure_graph");
     assert!(reader_nodes >= 1);
     assert_eq!(no_graph_sqlstate, Some("PG005".to_string()));
     assert_eq!(no_source_current, "secure_graph");
     assert_eq!(no_source_sqlstate, Some("PG002".to_string()));
     assert_eq!(builder_nodes, 2);
+    assert!(admin_unloaded);
+    assert_eq!(admin_loaded_nodes, 2);
 }
 
 #[pg_test]
@@ -506,6 +528,162 @@ fn graph_tenant_defaults_and_conflicts_are_enforced() {
     assert_eq!(defaulted_rows, 1);
     assert_eq!(explicit_conflict, Some("PG005".to_string()));
     assert_eq!(session_conflict, Some("PG005".to_string()));
+}
+
+#[pg_test]
+fn graph_residency_controls_auto_load_and_runtime_status() {
+    reset_and_create_fixtures();
+    create_error_sqlstate_helper();
+    Spi::run("SET graph.auto_load = on").expect("enable auto_load failed");
+    Spi::run("SELECT graph.create_graph('resident_graph', namespace := 'app', residency := 'cold')")
+        .expect("create resident graph failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+             'resident_graph',
+             'graph_test_users_pgtest'::regclass,
+             'id',
+             ARRAY['name'],
+             graph_namespace := 'app'
+         )",
+    )
+    .expect("add resident graph table failed");
+    Spi::run(
+        "SELECT graph.build_graph(
+             'resident_graph',
+             force_persist := true,
+             graph_namespace := 'app'
+         )",
+    )
+    .expect("build resident graph failed");
+    Spi::run("SELECT graph.unload_graph('resident_graph', namespace := 'app')")
+        .expect("unload resident graph failed");
+    Spi::run("SELECT graph.select_graph('resident_graph', namespace := 'app')")
+        .expect("select resident graph failed");
+
+    let cold_auto_load_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             1,
+             hydrate := false
+         )",
+    );
+    let explicit_load_nodes = Spi::get_one::<i64>(
+        "SELECT node_count
+           FROM graph.load_graph('resident_graph', namespace := 'app')",
+    )
+    .expect("explicit cold load failed")
+    .unwrap_or(0);
+    let cold_status = Spi::get_one::<String>(
+        "SELECT residency || ':' || loaded::text || ':' || artifact_exists::text
+           FROM graph.graph_runtime_status()
+          WHERE graph_name = 'resident_graph'",
+    )
+    .expect("cold runtime status failed")
+    .expect("resident runtime status missing");
+    let unloaded = Spi::get_one::<bool>(
+        "SELECT unloaded
+           FROM graph.unload_graph('resident_graph', namespace := 'app')",
+    )
+    .expect("unload resident graph second failed")
+    .unwrap_or(false);
+
+    Spi::run("SELECT graph.set_graph_residency('resident_graph', 'warm', namespace := 'app')")
+        .expect("set resident graph warm failed");
+    Spi::run("SELECT graph.select_graph('resident_graph', namespace := 'app')")
+        .expect("select warm resident graph failed");
+    let warm_auto_loaded = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             1,
+             hydrate := false
+           )",
+    )
+    .expect("warm auto-load traverse failed")
+    .unwrap_or(0);
+    let warm_status = Spi::get_one::<String>(
+        "SELECT residency || ':' || loaded::text
+           FROM graph.graph_runtime_status()
+          WHERE graph_name = 'resident_graph'",
+    )
+    .expect("warm runtime status failed")
+    .expect("warm runtime status missing");
+
+    Spi::run("SELECT graph.unload_graph('resident_graph', namespace := 'app')")
+        .expect("unload before hot eager-load failed");
+    Spi::run("SELECT graph.set_graph_residency('resident_graph', 'hot', namespace := 'app')")
+        .expect("set resident graph hot failed");
+    Spi::run("SET graph.hot_eager_load = on").expect("enable hot eager-load failed");
+    let hot_eager_loaded = Spi::get_one::<bool>(
+        "SELECT loaded
+           FROM graph.select_graph('resident_graph', namespace := 'app')",
+    )
+    .expect("select hot resident graph failed")
+    .unwrap_or(false);
+    let hot_status = Spi::get_one::<String>(
+        "SELECT residency || ':' || loaded::text
+           FROM graph.graph_runtime_status()
+          WHERE graph_name = 'resident_graph'",
+    )
+    .expect("hot runtime status failed")
+    .expect("hot runtime status missing");
+    Spi::run(
+        "SELECT graph.set_graph_quota(
+             'cluster',
+             'max_loaded_graphs_per_backend',
+             0,
+             NULL,
+             'warn'
+         )",
+    )
+    .expect("set loaded graph warning quota failed");
+    let loaded_quota_exceeded = Spi::get_one::<bool>(
+        "SELECT exceeded
+           FROM graph.graph_quota_usage()
+          WHERE scope_type = 'cluster'
+            AND dimension = 'max_loaded_graphs_per_backend'",
+    )
+    .expect("loaded graph quota usage query failed")
+    .unwrap_or(false);
+    Spi::run("SELECT graph.set_graph_residency('resident_graph', 'warm', namespace := 'app')")
+        .expect("set loaded resident graph warm failed");
+    let refreshed_loaded_residency = Spi::get_one::<String>(
+        "SELECT residency
+           FROM graph.loaded_graphs()
+          WHERE graph_name = 'resident_graph'",
+    )
+    .expect("loaded_graphs residency query failed")
+    .expect("loaded graph row missing");
+    Spi::run("SET graph.hot_eager_load = off").expect("disable hot eager-load failed");
+    Spi::run("SELECT graph.unload_graph('resident_graph', namespace := 'app')")
+        .expect("unload before quota failed");
+    Spi::run(
+        "SELECT graph.set_graph_quota(
+             'cluster',
+             'max_loaded_graphs_per_backend',
+             0,
+             NULL,
+             'hard'
+         )",
+    )
+    .expect("set loaded graph quota failed");
+    let quota_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.load_graph('resident_graph', namespace := 'app')",
+    );
+
+    assert_eq!(cold_auto_load_sqlstate, Some("PG003".to_string()));
+    assert_eq!(explicit_load_nodes, 2);
+    assert_eq!(cold_status, "cold:true:true");
+    assert!(unloaded);
+    assert!(warm_auto_loaded >= 1);
+    assert_eq!(warm_status, "warm:true");
+    assert!(hot_eager_loaded);
+    assert_eq!(hot_status, "hot:true");
+    assert!(loaded_quota_exceeded);
+    assert_eq!(refreshed_loaded_residency, "warm");
+    assert_eq!(quota_sqlstate, Some("PG005".to_string()));
 }
 
 #[pg_test]
@@ -1208,6 +1386,30 @@ fn runtime_selection_does_not_reuse_previous_graph_engine() {
     )
     .expect("load runtime_b failed")
     .unwrap_or(0);
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load for stale runtime test failed");
+    Spi::run("SELECT graph.set_graph_residency('runtime_a', 'cold', namespace := 'app')")
+        .expect("set runtime_a cold failed");
+    Spi::run("SELECT graph.set_current_graph('runtime_a', namespace := 'app')")
+        .expect("set_current_graph runtime_a failed");
+    let stale_engine_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             1,
+             hydrate := false
+         )",
+    );
+    let loaded_after_set_current =
+        Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+            .expect("loaded_graphs after set_current_graph failed")
+            .unwrap_or(-1);
+    Spi::run("SET graph.auto_load = on").expect("restore auto_load for runtime test failed");
+    let reload_b_nodes = Spi::get_one::<i64>(
+        "SELECT node_count
+           FROM graph.load_graph('runtime_b', namespace := 'app')",
+    )
+    .expect("reload runtime_b failed")
+    .unwrap_or(0);
     let unloaded_b = Spi::get_one::<bool>(
         "SELECT unloaded
            FROM graph.unload_graph('runtime_b', namespace := 'app')",
@@ -1225,6 +1427,9 @@ fn runtime_selection_does_not_reuse_previous_graph_engine() {
     assert_eq!(load_a_nodes, 2);
     assert!(!select_b_loaded);
     assert_eq!(load_b_nodes, 1);
+    assert_eq!(stale_engine_sqlstate, Some("PG003".to_string()));
+    assert_eq!(loaded_after_set_current, 0);
+    assert_eq!(reload_b_nodes, 1);
     assert!(unloaded_b);
     assert_eq!(loaded_after_unload, 0);
 }

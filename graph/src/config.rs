@@ -74,6 +74,18 @@ pub static PERSIST_ON_BUILD: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Default: true.
 pub static AUTO_LOAD: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+/// Maximum loaded graph slots permitted in one backend.
+/// Default: 1. Range: 0-1.
+pub static MAX_LOADED_GRAPHS_PER_BACKEND: GucSetting<i32> = GucSetting::<i32>::new(1);
+
+/// Whether selecting a hot graph should try to load it immediately.
+/// Default: false.
+pub static HOT_EAGER_LOAD: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// Reserved idle-unload threshold for backend-local graph slots.
+/// Default: 0 seconds, disabled. Range: 0-86400.
+pub static IDLE_UNLOAD_SECS: GucSetting<i32> = GucSetting::<i32>::new(0);
+
 // ─── Sync ───
 
 /// Maximum pending edge mutations in the backend-local sync overlay.
@@ -546,6 +558,37 @@ pub fn register_gucs() {
         c"Auto-load persisted graph on first query.",
         c"When true, backends load the .pggraph file on first query if the engine is empty.",
         &AUTO_LOAD,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.max_loaded_graphs_per_backend",
+        c"Maximum loaded graph slots in one backend.",
+        c"The current runtime has one backend-local engine slot; set to 0 to block runtime loads.",
+        &MAX_LOADED_GRAPHS_PER_BACKEND,
+        0,
+        1,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"graph.hot_eager_load",
+        c"Try to load hot graphs immediately when selected.",
+        c"When enabled, graph.select_graph() attempts a quiet load for hot graphs with persisted artifacts.",
+        &HOT_EAGER_LOAD,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.idle_unload_secs",
+        c"Reserved backend-local idle unload threshold.",
+        c"Default 0 disables idle unload; future lifecycle scheduling may use positive values.",
+        &IDLE_UNLOAD_SECS,
+        0,
+        86_400,
         GucContext::Suset,
         GucFlags::default(),
     );

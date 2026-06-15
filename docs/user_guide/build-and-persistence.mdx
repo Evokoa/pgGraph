@@ -212,15 +212,17 @@ When a query needs the selected graph and the backend-local engine is empty:
 
 1. `ensure_current_graph()` calls `maybe_auto_load()`.
 2. If `graph.auto_load = false`, it does nothing.
-3. If the artifact does not exist, it does nothing.
-4. If the artifact exists, `load_graph_file()` validates it and maps immutable
+3. If the selected graph has `cold` residency, it does nothing.
+4. If the artifact does not exist, it does nothing.
+5. If the artifact exists, `load_graph_file()` validates it and maps immutable
    sections read-only.
-5. The engine is marked built and can answer queries.
+6. The engine is marked built and can answer queries.
 
 Each backend has one loaded graph slot. If a different graph is selected, the
 previous engine is cleared from that backend before another graph is loaded.
 Use `graph.loaded_graphs()` to inspect the graph currently loaded in the active
-backend.
+backend, and use `graph.graph_runtime_status()` to inspect residency, artifact
+presence, and loaded state for visible graphs.
 
 For explicit operator-controlled loading, use:
 
@@ -230,8 +232,9 @@ SELECT * FROM graph.unload_graph('customer_360', namespace := 'analytics');
 ```
 
 `graph.load_graph()` loads the persisted artifact immediately and does not
-depend on `graph.auto_load`. Missing, corrupt, or incompatible artifacts raise
-an error so they can be rebuilt from the PostgreSQL source tables.
+depend on `graph.auto_load`. It can load a `cold` graph explicitly. Missing,
+corrupt, incompatible, or quota-blocked artifacts raise an error so they can be
+rebuilt from the PostgreSQL source tables or handled by an operator.
 
 <Callout type="warning">
 Corrupt or incompatible artifacts are rejected. A corrupt file raises or logs a

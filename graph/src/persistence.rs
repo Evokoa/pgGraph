@@ -1032,6 +1032,11 @@ pub fn graph_file_path_for(graph_id: &str) -> GraphResult<PathBuf> {
     Ok(graph_root_path_for(graph_id)?.join("main.pggraph"))
 }
 
+/// Resolve the `.pggraph` artifact path for a graph id without creating dirs.
+pub(crate) fn graph_file_path_for_uncreated(graph_id: &str) -> GraphResult<PathBuf> {
+    Ok(graph_root_path_for_uncreated(graph_id)?.join("main.pggraph"))
+}
+
 /// Get the selected graph's `.pggraph` file path.
 ///
 /// Uses the `graph.data_dir` GUC (default: `graph`) and the selected graph id.

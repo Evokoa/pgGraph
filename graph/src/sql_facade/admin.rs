@@ -332,6 +332,47 @@ fn transfer_graph_ownership(
 }
 
 #[pg_extern(schema = "graph")]
+fn set_graph_residency(
+    graph_name: &str,
+    residency: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("set_graph_residency()", || {
+        let graph = resolve_graph_for_registration(graph_name, tenant, namespace);
+        catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Admin)
+            .unwrap_or_else(|err| err.report());
+        let metadata = catalog::update_graph_metadata(
+            graph_name,
+            tenant,
+            namespace,
+            None,
+            Some(residency),
+            None,
+            None,
+        )
+        .unwrap_or_else(|err| err.report());
+        graph_metadata_iterator(vec![metadata])
+    })
+}
+
+#[pg_extern(schema = "graph")]
 fn set_graph_quota(
     scope_type: &str,
     dimension: &str,
@@ -394,7 +435,10 @@ fn graph_quota_usage() -> TableIterator<
     ),
 > {
     with_panic_boundary("graph_quota_usage()", || {
-        let usage = catalog::graph_quota_usage().unwrap_or_else(|err| err.report());
+        let loaded_graphs_per_backend =
+            i64::from(crate::runtime_state::loaded_graph_id().is_some());
+        let usage = catalog::graph_quota_usage(loaded_graphs_per_backend)
+            .unwrap_or_else(|err| err.report());
         graph_quota_usage_iterator(usage)
     })
 }

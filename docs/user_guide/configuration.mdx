@@ -71,6 +71,7 @@ property `SET`/`REMOVE`, mapped edge-row `DELETE`, and mapped node
 | `graph.memory_limit_mb` | int | `2048` | `SUSET` | `64` to `32768` | Pre-build OOM guard and status limit |
 | `graph.build_batch_size` | int | `10000` | `SUSET` | `1` to `1000000` | SPI cursor fetch size and spool batch size |
 | `graph.oom_action` | string | `error` | `SUSET` | `error`, `readonly`, `read_only`, `read-only` | Behavior when estimated build memory exceeds the limit |
+| `graph.max_loaded_graphs_per_backend` | int | `1` | `SUSET` | `0` to `1` | Runtime loaded-graph slot cap for each PostgreSQL backend |
 | `graph.max_tx_delta_nodes` | int | `100000` | `USERSET` | `0` to `10000000` | Maximum transaction-local node deltas before a mapped GQL write aborts |
 | `graph.max_tx_delta_edges` | int | `100000` | `USERSET` | `0` to `10000000` | Maximum transaction-local edge deltas before a mapped GQL write aborts |
 | `graph.max_overlay_memory_mb` | int | `256` | `USERSET` | `1` to `32768` | Maximum estimated transaction-overlay heap before a mapped GQL write aborts |
@@ -95,6 +96,11 @@ The result separates backend-private heap from mmap-backed bytes that are
 physically shareable through the OS page cache, then projects an instance total
 for the supplied backend count.
 
+`graph.max_loaded_graphs_per_backend` is also enforced per backend. The current
+runtime has one backend-local graph engine slot, so the supported range is
+`0` to `1`. Set it to `0` only when you want to block runtime graph loads on a
+server while still allowing metadata and build operations.
+
 Mapped GQL writes use transaction-local overlays. If a node, edge, or overlay
 memory limit would be exceeded, the current SQL statement aborts with `PG019`
 and PostgreSQL rolls back the source-table DML for that statement.
@@ -111,7 +117,14 @@ SELECT pg_reload_conf();
 |---|---:|---:|---|---|
 | `graph.persist_on_build` | bool | `true` | `USERSET` | Writes the `.pggraph` artifact after successful build/vacuum/maintenance paths that request persistence |
 | `graph.auto_load` | bool | `true` | `SUSET` | Loads an existing artifact on first query in an empty backend |
+| `graph.hot_eager_load` | bool | `false` | `SUSET` | Attempts to load `hot` graphs immediately when `graph.select_graph()` selects them |
+| `graph.idle_unload_secs` | int | `0` | `SUSET` | Reserved idle-unload threshold; `0` disables idle unload |
 | `graph.data_dir` | string | `graph` | `SUSET` | Subdirectory under `$PGDATA` that contains one artifact root per graph id |
+
+`graph.auto_load` applies to `hot` and `warm` graphs. `cold` graphs keep their
+artifacts available for explicit `graph.load_graph()` calls but do not
+auto-load during query execution. `graph.hot_eager_load` is an opt-in selection
+policy for `hot` graphs that already have persisted artifacts.
 
 Default graph artifact path:
 

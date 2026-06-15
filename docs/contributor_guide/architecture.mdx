@@ -97,11 +97,13 @@ only through PostgreSQL storage, the filesystem, and OS page-cache backed mmap
 pages.
 
 Each backend also tracks one loaded graph slot beside the engine. The slot is
-tagged with the graph id/name that produced the active engine, so runtime calls
-can reject or clear a stale engine before serving a different selected graph.
-`graph.select_graph()` changes the session selection, `graph.load_graph()`
-loads one persisted artifact into the backend-local slot, and
-`graph.loaded_graphs()` reports zero or one row for the current backend.
+tagged with the graph id/name and residency that produced the active engine, so
+runtime calls can reject or clear a stale engine before serving a different
+selected graph. `graph.select_graph()` changes the session selection,
+`graph.load_graph()` loads one persisted artifact into the backend-local slot,
+and `graph.loaded_graphs()` reports zero or one row for the current backend.
+`graph.graph_runtime_status()` combines the slot with named-graph metadata and
+artifact checks for operator-facing residency/status inspection.
 
 Compatibility SQL calls such as `graph.add_table()`, `graph.build()`,
 `graph.status()`, `graph.traverse()`, and `graph.reset()` resolve the selected

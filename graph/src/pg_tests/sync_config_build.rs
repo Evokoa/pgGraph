@@ -150,6 +150,10 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     Spi::run("RESET graph.enforce_tenant_scope").expect("reset enforce_tenant_scope failed");
     Spi::run("RESET graph.max_exact_path_count").expect("reset max_exact_path_count failed");
     Spi::run("RESET graph.build_batch_size").expect("reset build_batch_size failed");
+    Spi::run("RESET graph.max_loaded_graphs_per_backend")
+        .expect("reset max_loaded_graphs_per_backend failed");
+    Spi::run("RESET graph.hot_eager_load").expect("reset hot_eager_load failed");
+    Spi::run("RESET graph.idle_unload_secs").expect("reset idle_unload_secs failed");
 
     assert_eq!(crate::config::sync_mode(), "trigger");
     assert_eq!(
@@ -175,6 +179,9 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert_eq!(crate::config::MAX_OVERLAY_MEMORY_MB.get(), 256);
     assert_eq!(crate::config::COMPACTION_THRESHOLD.get(), 50_000);
     assert_eq!(crate::config::PROJECTION_RETENTION_GENERATIONS.get(), 2);
+    assert_eq!(crate::config::MAX_LOADED_GRAPHS_PER_BACKEND.get(), 1);
+    assert!(!crate::config::HOT_EAGER_LOAD.get());
+    assert_eq!(crate::config::IDLE_UNLOAD_SECS.get(), 0);
 
     let registered = Spi::get_one::<bool>(
         "WITH expected(name, context, min_val, max_val) AS (
@@ -191,7 +198,9 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                     ('graph.max_tx_delta_edges', 'user', '0', '10000000'),
                     ('graph.max_overlay_memory_mb', 'user', '1', '32768'),
                     ('graph.compaction_threshold', 'user', '1', '10000000'),
-                    ('graph.projection_retention_generations', 'user', '1', '1000')
+                    ('graph.projection_retention_generations', 'user', '1', '1000'),
+                    ('graph.max_loaded_graphs_per_backend', 'superuser', '0', '1'),
+                    ('graph.idle_unload_secs', 'superuser', '0', '86400')
              ),
              matched AS (
                 SELECT e.name,
@@ -201,7 +210,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                 FROM expected e
                 JOIN pg_settings s ON s.name = e.name
              )
-             SELECT count(*) = 13 AND bool_and(ok)
+             SELECT count(*) = 15 AND bool_and(ok)
              FROM matched",
     )
     .expect("pg_settings inspection failed")
@@ -216,6 +225,8 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert!(sql_raises("SET graph.max_overlay_memory_mb = 0"));
     assert!(sql_raises("SET graph.compaction_threshold = 0"));
     assert!(sql_raises("SET graph.projection_retention_generations = 0"));
+    assert!(sql_raises("SET graph.max_loaded_graphs_per_backend = 2"));
+    assert!(sql_raises("SET graph.idle_unload_secs = 86401"));
 }
 
 #[pg_test]
