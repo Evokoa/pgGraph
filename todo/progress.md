@@ -5,7 +5,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 ## Current Checkpoint
 
 - Active phase: Phase 9, Graph-Scoped Sync Replay and Automated Sync Policies.
-- Status: Phase 8 complete after independent three-phase review; commit pending.
+- Status: Phase 9 planning started after Phase 8 commit `df75d37`.
 - Started: 2026-06-15.
 
 ## Phase Updates
