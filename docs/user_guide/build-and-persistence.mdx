@@ -2,8 +2,8 @@
 
 `graph.build()` constructs a backend-local active engine from registered tables,
 edges, and filter columns. When `graph.persist_on_build = true`, the base graph
-is written atomically to a `.pggraph` file and later backends can load it through
-read-only mmap.
+is written atomically under the selected graph's UUID directory and later
+backends can load it through read-only mmap.
 
 When persistence is requested, build, maintenance, and vacuum paths fail closed:
 an artifact write error or immediate mmap reload error aborts the operation
@@ -169,11 +169,12 @@ session C: graph.vacuum() -> PG006
 Default paths:
 
 ```text
-$PGDATA/graph/main.pggraph
-$PGDATA/graph/main.pggraph.sync
+$PGDATA/graph/<graph_id>/main.pggraph
+$PGDATA/graph/<graph_id>/main.pggraph.sync
 ```
 
-`graph.data_dir` changes the subdirectory under `$PGDATA`.
+`graph.data_dir` changes the top-level subdirectory under `$PGDATA`. The graph
+directory name is always the catalog `graph_id`, not `graph_name`.
 
 ```sql
 ALTER SYSTEM SET graph.data_dir = 'graph';
@@ -260,11 +261,11 @@ Rebuild with `graph.build()` when:
 SELECT graph.reset();
 ```
 
-`graph.reset()` clears the backend-local engine and removes persisted
-`main.pggraph` and `main.pggraph.sync` files. It requires graph-admin privileges.
+`graph.reset()` clears the backend-local engine and removes persisted files for
+the selected graph's UUID directory. It requires graph-admin privileges.
 
 <Callout type="error">
-`graph.reset()` removes the persisted artifact. The source tables remain
-unchanged, but graph queries need a rebuild or a new persisted artifact before
-they can run again.
+`graph.reset()` removes the selected graph's persisted artifact root. The source
+tables remain unchanged, but graph queries for that graph need a rebuild or a
+new persisted artifact before they can run again.
 </Callout>

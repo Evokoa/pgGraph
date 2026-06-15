@@ -47,6 +47,7 @@ graph._sync_buffer
   legacy compatibility buffer
 
 graph._projection_generations
+  graph_id uuid
   generation_id bigint
   backend_pid integer
   database_oid oid
@@ -124,14 +125,15 @@ freshness configuration, trigger health, projection mode, transaction-delta
 counts, and overlay pressure into one row for external schedulers and
 monitoring checks.
 
-The durable projection metadata table records published generations and the
-backend heartbeats that keep older generations alive while a backend is still
-using them. Cleanup logic can only remove derived projection files after they
-are no longer referenced by retained manifests or unexpired active-generation
-rows. `projection::gc` scans valid manifest metadata, treats the newest
-`graph.projection_retention_generations` generations and any generation with an
-active heartbeat as protected, and deletes only files that a manifest lists in
-`obsolete_files`. The table is extension-owned operational state; PostgreSQL
+The durable projection metadata table records graph-scoped published generations
+and backend heartbeats that keep older generations alive while a backend is
+still using them. Cleanup logic can only remove derived projection files after
+they are no longer referenced by retained manifests or unexpired
+active-generation rows for the same graph. `projection::gc` scans valid
+manifest metadata, treats the newest `graph.projection_retention_generations`
+generations and any generation with an active heartbeat as protected, and
+deletes only files that a manifest lists in `obsolete_files`. The table is
+extension-owned operational state; PostgreSQL
 source tables remain the authoritative graph data.
 
 Projection manifests are published with a temp-file write, file fsync,
@@ -220,9 +222,9 @@ manifests unless the persisted build-mode sidecar says the graph was built as
 `mutable_overlay`. Segment-backed manifests are installed with mutable-overlay
 read mode so public read APIs consume durable L0/L1/L2 segment deltas after
 reload. The engine keeps base manifest generation and sync watermark metadata
-backend-locally, and `graph.active_generation_count()` exposes the active
-generation heartbeat count so operators can see whether concurrent backends are
-retaining projection generations.
+backend-locally, and `graph.active_generation_count()` exposes the selected
+graph's active heartbeat count so operators can see whether concurrent backends
+are retaining projection generations for that graph.
 The SQL `graph.status()` table is already at pgrx's tuple-return arity limit, so
 durable projection diagnostics live in `graph.projection_status()`. That row is
 computed by `projection::status` from the latest manifest, persisted operation

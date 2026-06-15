@@ -533,6 +533,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_log_id ON graph._sync_log (id);
 CREATE INDEX IF NOT EXISTS idx_sync_log_created ON graph._sync_log (created_at);
 
 CREATE TABLE IF NOT EXISTS graph._projection_generations (
+    graph_id          UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
     generation_id     BIGINT NOT NULL CHECK (generation_id > 0),
     backend_pid       INTEGER NOT NULL DEFAULT 0,
     database_oid      OID NOT NULL,
@@ -547,13 +548,52 @@ CREATE TABLE IF NOT EXISTS graph._projection_generations (
     retained_until    TIMESTAMPTZ,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (generation_id, backend_pid, database_oid)
+    PRIMARY KEY (graph_id, generation_id, backend_pid, database_oid)
 );
 
+ALTER TABLE graph._projection_generations
+    ADD COLUMN IF NOT EXISTS graph_id UUID;
+
+UPDATE graph._projection_generations
+SET graph_id = '00000000-0000-0000-0000-000000000001'::uuid
+WHERE graph_id IS NULL;
+
+ALTER TABLE graph._projection_generations
+    ALTER COLUMN graph_id SET DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+    ALTER COLUMN graph_id SET NOT NULL;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._projection_generations'::regclass
+          AND conname = '_projection_generations_pkey'
+    ) THEN
+        ALTER TABLE graph._projection_generations
+            DROP CONSTRAINT _projection_generations_pkey;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._projection_generations'::regclass
+          AND conname = '_projection_generations_pkey'
+    ) THEN
+        ALTER TABLE graph._projection_generations
+            ADD CONSTRAINT _projection_generations_pkey
+            PRIMARY KEY (graph_id, generation_id, backend_pid, database_oid);
+    END IF;
+
+END $$;
+
+DROP INDEX IF EXISTS graph.idx_projection_generations_current;
+DROP INDEX IF EXISTS graph.idx_projection_generations_active;
+
 CREATE INDEX IF NOT EXISTS idx_projection_generations_current
-    ON graph._projection_generations (is_current, generation_id DESC);
+    ON graph._projection_generations (graph_id, is_current, generation_id DESC);
 CREATE INDEX IF NOT EXISTS idx_projection_generations_active
-    ON graph._projection_generations (database_oid, expires_at)
+    ON graph._projection_generations (graph_id, database_oid, expires_at)
     WHERE backend_pid <> 0;
 
 CREATE TABLE IF NOT EXISTS graph._sync_buffer (

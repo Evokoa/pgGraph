@@ -119,7 +119,7 @@ from paths, backend globals, or session state.
 | `FilterIndex` after load | `Engine` heap | Deserialized per backend from bincode |
 | `edge_type_registry` after load | `Engine` heap | Deserialized per backend from bincode |
 | `ResolutionIndex` mmap mode | Byte slice inside `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
-| Durable projection manifests and segments | Files beside `main.pggraph` | Shared through the filesystem and retained by active-generation metadata |
+| Durable projection manifests and segments | Files beside each graph's `main.pggraph` | Shared through the filesystem and retained by graph-scoped active-generation metadata |
 | `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local compatibility sync overlay state |
 | `TxGraphDelta` | Current backend transaction | Transaction-local read-your-own-writes state only |
 
@@ -133,11 +133,11 @@ places named-graph support must update:
 | Registration catalogs | `graph._registered_tables`, `graph._registered_edges`, and `graph._registered_filter_columns` are keyed by `graph_id`; compatibility SQL resolves the selected or default graph before reading or writing them. |
 | Runtime | `ENGINE` stores one backend-local graph engine. `ensure_current_graph()` validates build/load/schema freshness; it is not a named graph selector. |
 | Build jobs | `graph._build_jobs` and `graph._maintenance_jobs` are keyed by `graph_id`; workers restore database, user, and graph context before running. |
-| Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/main.pggraph`. |
+| Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph`. |
 | Sync | `graph._sync_log` and `graph._sync_buffer` are global sync streams. |
-| Projection generations | `graph._projection_generations` tracks generations for the global projection root. |
+| Projection generations | `graph._projection_generations` is keyed by `graph_id` so active-generation heartbeats and GC protection are graph-local. |
 | Discovery | `graph.auto_discover()` and `graph.auto_discover_tables()` can target a named graph or the selected/default graph. |
-| Reset | `graph.reset()` clears the backend-local engine and removes the global artifact files. |
+| Reset | `graph.reset()` clears the backend-local engine and removes files for the selected graph's artifact root. |
 
 Named-graph changes should move each row above from implicit global state to
 explicit graph-scoped inputs without breaking the default-graph SQL workflow.

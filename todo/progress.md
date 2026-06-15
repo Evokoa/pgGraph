@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 4, Graph-Scoped Build, Locks, Jobs, and Status.
-- Status: Phase 4 reviewed; checkpoint commit pending.
+- Active phase: Phase 5, Graph-Scoped Persistence and Projection Generations.
+- Status: Phase 5 reviewed; checkpoint commit pending.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -15,6 +15,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 2: complete - scoped registration catalogs by `graph_id`, kept selected/default graph compatibility wrappers, added explicit named-graph registration APIs, updated filter resolution, and documented graph-scoped registration.
 - Phase 3: complete - made auto-discovery graph-aware, added write-free preview APIs, supported targeted named-graph discovery/build flows, and explicitly rejected arbitrary row-predicate subgraphs.
 - Phase 4: complete - scoped build and maintenance jobs by `graph_id`, restored graph context in workers, made build/vacuum advisory locks graph-specific, added named graph build/maintenance/status helpers, and documented graph-scoped job behavior.
+- Phase 5: complete - moved artifacts under per-graph UUID roots, scoped projection generation heartbeats by `graph_id`, made reset/drop cleanup graph-root-local, kept `_PG_init()` catalog-free for fresh installs, and documented the new persistence layout.
 
 ## Verification Log
 
@@ -36,6 +37,9 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
 - 2026-06-15: `git diff --check` passed.
 - 2026-06-15: `cargo fmt --check` passed from `graph/`.
+- 2026-06-15: `cargo test --features "pg17 development" graph_file_path` passed, 4 tests.
+- 2026-06-15: `git diff --check` passed.
+- 2026-06-15: `cargo fmt --check` passed from `graph/`.
 - 2026-06-15: `cargo test --features "pg17 development" build_lock_query` passed, 2 tests.
 - 2026-06-15: `cargo test --features "pg17 development" worker_metadata_round_trips_json_with_delimiters` passed, 1 test.
 - 2026-06-15: `cargo pgrx test --features "pg17 development" build_graph_uses_named_graph_catalog` passed, 1 test.
@@ -49,6 +53,16 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo fmt --check` passed from `graph/`.
 - 2026-06-15: `cargo test --features "pg17 development" graph_policy` passed, 4 tests.
 - 2026-06-15: `cargo test --features "pg17 development" build_lock_query` passed, 2 tests.
+- 2026-06-15: `git diff --check` passed.
+- 2026-06-15: `cargo fmt --check` passed from `graph/`.
+- 2026-06-15: `cargo test --features "pg17 development" graph_file_path` passed, 4 tests.
+- 2026-06-15: `cargo test --features "pg17 development" projection_manifest` passed, 16 tests.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" persisted_named_graphs_use_distinct_artifact_roots` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" projection_generation_heartbeats_are_graph_scoped` passed, 1 test.
+- 2026-06-15: `cargo test --features "pg17 development" graph_policy` passed, 4 tests.
+- 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
 - 2026-06-15: `git diff --check` passed.
 - 2026-06-15: `cargo fmt --check` passed from `graph/`.
 - 2026-06-15: `cargo test --features "pg17 development" graph_policy` passed, 4 tests.
@@ -90,4 +104,5 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Independent review after three completed phases ran in subagent `019ecb1a-df0c-7a00-8257-ae3385df7a21` and found three issues: selected graph GUC spoofing, raw FK behavior for dropping non-empty graphs, and stale `set_current_graph()` docs. All three were fixed and covered by follow-up tests/docs.
 - Phase 3 review found no blocking issues. Discovery writes now route through explicit graph ids; preview APIs return discovery rows without registration writes; row-predicate subgraphs return `PG018`.
 - Phase 4 local review found no blocking issue in graph context restoration, graph-scoped locks, job migration, SQL overload compatibility, or docs/API drift. Strict clippy still reports existing SQL ABI row type-complexity warnings outside the Phase 4 scope.
-- Next checkpoint: Phase 5 scopes persistence paths and projection generations by graph id.
+- Phase 5 local review found no blocking issue in fresh-install safety, selected graph path resolution, graph-local reset/drop cleanup, or projection heartbeat scoping. One path comparison hardening fix was made and covered by focused path tests.
+- Next checkpoint: Phase 6 introduces backend runtime selection and an engine registry.

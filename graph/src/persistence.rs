@@ -54,6 +54,7 @@ use crate::config;
 use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
 use crate::engine::{Engine, MmapResolutionState};
 use crate::filter_index::FilterIndex;
+use crate::graph_policy::GraphId;
 use crate::node_store::{MmapNodeArrayParts, MmapNodeArrays, NodeStore};
 use crate::projection::manifest::{ProjectionManifest, ProjectionManifestStore};
 use crate::resolution_index::{ResolutionIndex, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
@@ -986,10 +987,14 @@ pub(crate) fn graph_artifact_checksum_for_path(path: &Path) -> GraphResult<Strin
     Ok(graph_artifact_checksum(computed_crc))
 }
 
-/// Get the default .pggraph file path under $PGDATA/{data_dir}/.
+/// Get the graph root directory under `$PGDATA/{data_dir}/{graph_id}`.
 ///
-/// Uses the `graph.data_dir` GUC (default: "graph").
-pub fn graph_file_path() -> GraphResult<PathBuf> {
+/// The graph id must be canonical UUID text. Graph names are intentionally not
+/// accepted here because filesystem paths must be derived from stable catalog
+/// identity, not user-controlled display names.
+pub fn graph_root_path_for(graph_id: &str) -> GraphResult<PathBuf> {
+    let graph_id = GraphId::parse(graph_id)
+        .map_err(|err| GraphError::Internal(format!("invalid graph artifact id: {err}")))?;
     let pgdata = std::env::var("PGDATA")
         .ok()
         .or_else(postgres_data_directory)
@@ -1004,7 +1009,7 @@ pub fn graph_file_path() -> GraphResult<PathBuf> {
         ));
     }
     let subdir = graph_data_dir();
-    let dir = PathBuf::from(&pgdata).join(&subdir);
+    let dir = PathBuf::from(&pgdata).join(&subdir).join(graph_id.as_str());
     fs::create_dir_all(&dir).map_err(|e| {
         GraphError::Internal(format!(
             "Cannot create graph data directory {}: {}",
@@ -1012,13 +1017,80 @@ pub fn graph_file_path() -> GraphResult<PathBuf> {
             e
         ))
     })?;
-    Ok(dir.join("main.pggraph"))
+    Ok(dir)
+}
+
+/// Get the `.pggraph` artifact path for a graph id.
+pub fn graph_file_path_for(graph_id: &str) -> GraphResult<PathBuf> {
+    Ok(graph_root_path_for(graph_id)?.join("main.pggraph"))
+}
+
+/// Get the selected graph's `.pggraph` file path.
+///
+/// Uses the `graph.data_dir` GUC (default: `graph`) and the selected graph id.
+/// In pure Rust unit tests, where SPI graph selection is unavailable, this
+/// resolves to the compatibility default graph.
+pub fn graph_file_path() -> GraphResult<PathBuf> {
+    graph_file_path_for(&selected_graph_id_for_paths()?)
+}
+
+/// Get the sync checkpoint sidecar path for a graph id.
+#[allow(
+    dead_code,
+    reason = "Phase 5 exposes explicit graph-id path helpers before all checkpoint call sites are graph-id explicit"
+)]
+pub fn sync_checkpoint_path_for(graph_id: &str) -> GraphResult<PathBuf> {
+    Ok(sync_checkpoint_path(&graph_file_path_for(graph_id)?))
+}
+
+/// Get the projection manifest root for a graph id.
+#[allow(
+    dead_code,
+    reason = "Phase 5 exposes explicit graph-id path helpers before all manifest call sites are graph-id explicit"
+)]
+pub fn projection_manifest_root_for(graph_id: &str) -> GraphResult<PathBuf> {
+    Ok(projection_manifest_root(&graph_file_path_for(graph_id)?))
+}
+
+/// Remove all derived artifact files for one graph id.
+///
+/// The target root is derived from a validated graph UUID and the configured
+/// data directory. No caller-provided path is accepted.
+pub fn remove_graph_artifacts_for(graph_id: &str) -> GraphResult<()> {
+    let graph_id = GraphId::parse(graph_id)
+        .map_err(|err| GraphError::Internal(format!("invalid graph artifact id: {err}")))?;
+    let root = graph_root_path_for(graph_id.as_str())?;
+    if root.file_name().and_then(|name| name.to_str()) != Some(graph_id.as_str()) {
+        return Err(GraphError::Internal(format!(
+            "refusing to remove graph artifact root outside graph id directory: {}",
+            root.display()
+        )));
+    }
+    if root.exists() {
+        fs::remove_dir_all(&root).map_err(|err| {
+            GraphError::Internal(format!(
+                "remove graph artifact directory {}: {err}",
+                root.display()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 pub fn projection_manifest_root(path: &Path) -> PathBuf {
     path.parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn selected_graph_id_for_paths() -> GraphResult<String> {
+    crate::catalog::selected_or_default_graph_metadata().map(|graph| graph.graph_id)
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+fn selected_graph_id_for_paths() -> GraphResult<String> {
+    Ok(crate::graph_policy::DEFAULT_GRAPH_ID_TEXT.to_string())
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
@@ -1153,9 +1225,66 @@ mod tests {
 
         let path = graph_file_path().unwrap();
 
-        assert_eq!(path, pgdata.join("graph").join("main.pggraph"));
+        assert_eq!(
+            path,
+            pgdata
+                .join("graph")
+                .join(crate::graph_policy::DEFAULT_GRAPH_ID_TEXT)
+                .join("main.pggraph")
+        );
         assert!(path.parent().unwrap().exists());
         let _ = std::fs::remove_dir_all(&pgdata);
+    }
+
+    #[cfg(not(feature = "pg_test"))]
+    #[test]
+    fn graph_file_path_for_separates_graph_roots() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture("PGDATA");
+        let pgdata = std::env::temp_dir().join(format!(
+            "graph-pgdata-path-for-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::remove_dir_all(&pgdata);
+        std::env::set_var("PGDATA", &pgdata);
+
+        let graph_a = "00000000-0000-0000-0000-0000000000aa";
+        let graph_b = "00000000-0000-0000-0000-0000000000bb";
+        let path_a = graph_file_path_for(graph_a).unwrap();
+        let path_b = graph_file_path_for(graph_b).unwrap();
+        let checkpoint_a = sync_checkpoint_path_for(graph_a).unwrap();
+        let manifest_root_a = projection_manifest_root_for(graph_a).unwrap();
+
+        assert_eq!(
+            path_a,
+            pgdata.join("graph").join(graph_a).join("main.pggraph")
+        );
+        assert_eq!(
+            path_b,
+            pgdata.join("graph").join(graph_b).join("main.pggraph")
+        );
+        assert_eq!(
+            checkpoint_a,
+            pgdata.join("graph").join(graph_a).join("main.pggraph.sync")
+        );
+        assert_eq!(manifest_root_a, pgdata.join("graph").join(graph_a));
+        assert_ne!(path_a.parent(), path_b.parent());
+        let _ = std::fs::remove_dir_all(&pgdata);
+    }
+
+    #[cfg(not(feature = "pg_test"))]
+    #[test]
+    fn graph_file_path_for_rejects_non_uuid_path_input() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture("PGDATA");
+        std::env::set_var("PGDATA", std::env::temp_dir());
+
+        let result = graph_file_path_for("../not-a-uuid");
+
+        assert!(
+            matches!(result, Err(GraphError::Internal(message)) if message.contains("graph id"))
+        );
     }
 
     #[test]

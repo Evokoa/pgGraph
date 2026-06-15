@@ -757,7 +757,7 @@ pub extern "C-unwind" fn _PG_init() {
     projection::tx_delta::register_transaction_callbacks();
 
     // Eagerly pre-warm the OS page cache for the .pggraph file.
-    let Ok(path) = persistence::graph_file_path() else {
+    let Ok(path) = persistence::graph_file_path_for(graph_policy::DEFAULT_GRAPH_ID_TEXT) else {
         return;
     };
     if path.exists() {

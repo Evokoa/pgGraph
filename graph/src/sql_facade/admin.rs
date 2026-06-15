@@ -124,6 +124,13 @@ fn drop_graph(
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let metadata = catalog::drop_graph_metadata(graph_name, tenant, namespace)
             .unwrap_or_else(|err| err.report());
+        persistence::remove_graph_artifacts_for(&metadata.graph_id).unwrap_or_else(|err| {
+            safety::GraphError::Internal(format!(
+                "graph '{}' was dropped but artifact cleanup failed: {}",
+                metadata.graph_name, err
+            ))
+            .report()
+        });
         graph_metadata_iterator(vec![metadata])
     })
 }

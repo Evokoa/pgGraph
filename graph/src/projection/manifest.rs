@@ -607,22 +607,23 @@ pub(crate) fn record_active_generation_heartbeat(
     validation_status: &str,
 ) -> GraphResult<()> {
     validate_status(validation_status)?;
+    let graph_id = current_graph_id()?;
     let generation_id = i64::try_from(generation_id)
         .map_err(|_| GraphError::Internal("projection generation id exceeds BIGINT".into()))?;
     let ttl_micros = i64::try_from(ttl.as_micros())
         .map_err(|_| GraphError::Internal("projection heartbeat TTL is too large".into()))?;
     pgrx::Spi::run_with_args(
         "INSERT INTO graph._projection_generations (
-             generation_id, backend_pid, database_oid, heartbeat_at, expires_at,
+             graph_id, generation_id, backend_pid, database_oid, heartbeat_at, expires_at,
              sync_watermark, validation_status
          )
          VALUES (
-             $1, pg_backend_pid(),
+             $5::uuid, $1, pg_backend_pid(),
              (SELECT oid FROM pg_database WHERE datname = current_database()),
              now(), now() + ($2::double precision * interval '1 microsecond'),
              $3, $4
          )
-         ON CONFLICT (generation_id, backend_pid, database_oid)
+         ON CONFLICT (graph_id, generation_id, backend_pid, database_oid)
          DO UPDATE SET
              heartbeat_at = EXCLUDED.heartbeat_at,
              expires_at = EXCLUDED.expires_at,
@@ -634,6 +635,7 @@ pub(crate) fn record_active_generation_heartbeat(
             ttl_micros.into(),
             sync_watermark.into(),
             validation_status.into(),
+            graph_id.into(),
         ],
     )
     .map_err(|err| GraphError::Internal(format!("projection heartbeat update failed: {err}")))
@@ -656,12 +658,15 @@ pub(crate) fn active_generation_count() -> GraphResult<i32> {
 
 #[cfg(not(test))]
 pub(crate) fn active_generation_count() -> GraphResult<i32> {
-    let count = pgrx::Spi::get_one::<i64>(
+    let graph_id = current_graph_id()?;
+    let count = pgrx::Spi::get_one_with_args::<i64>(
         "SELECT count(*)::bigint
          FROM graph._projection_generations
-         WHERE backend_pid <> 0
+         WHERE graph_id = $1::uuid
+           AND backend_pid <> 0
            AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
            AND expires_at > now()",
+        &[graph_id.into()],
     )
     .map_err(|err| GraphError::Internal(format!("projection heartbeat count failed: {err}")))?
     .unwrap_or(0);
@@ -670,18 +675,20 @@ pub(crate) fn active_generation_count() -> GraphResult<i32> {
 
 #[cfg(not(test))]
 pub(crate) fn generation_has_active_heartbeat(generation_id: u64) -> GraphResult<bool> {
+    let graph_id = current_graph_id()?;
     let generation_id = i64::try_from(generation_id)
         .map_err(|_| GraphError::Internal("projection generation id exceeds BIGINT".into()))?;
     pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (
              SELECT 1
              FROM graph._projection_generations
-             WHERE generation_id = $1
+             WHERE graph_id = $2::uuid
+               AND generation_id = $1
                AND backend_pid <> 0
                AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
                AND expires_at > now()
          )",
-        &[generation_id.into()],
+        &[generation_id.into(), graph_id.into()],
     )
     .map(|active| active.unwrap_or(false))
     .map_err(|err| GraphError::Internal(format!("projection heartbeat lookup failed: {err}")))
@@ -694,16 +701,18 @@ pub(crate) fn generation_has_active_heartbeat(_generation_id: u64) -> GraphResul
 
 #[cfg(not(test))]
 pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
+    let graph_id = current_graph_id()?;
     let rows = pgrx::Spi::connect(|client| {
         let result = client.select(
             "SELECT DISTINCT generation_id
              FROM graph._projection_generations
-             WHERE backend_pid <> 0
+             WHERE graph_id = $1::uuid
+               AND backend_pid <> 0
                AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
                AND expires_at > now()
              ORDER BY generation_id",
             None,
-            &[],
+            &[graph_id.into()],
         )?;
         let mut generations = Vec::new();
         for row in result {
@@ -727,11 +736,20 @@ pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
 
 #[cfg(not(test))]
 pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
-    pgrx::Spi::run(
+    let graph_id = current_graph_id()?;
+    pgrx::Spi::run_with_args(
         "DELETE FROM graph._projection_generations
-         WHERE backend_pid <> 0 AND expires_at <= now()",
+         WHERE graph_id = $1::uuid
+           AND backend_pid <> 0
+           AND expires_at <= now()",
+        &[graph_id.into()],
     )
     .map_err(|err| GraphError::Internal(format!("projection heartbeat expiration failed: {err}")))
+}
+
+#[cfg(not(test))]
+fn current_graph_id() -> GraphResult<String> {
+    crate::catalog::selected_or_default_graph_metadata().map(|graph| graph.graph_id)
 }
 
 #[cfg(test)]

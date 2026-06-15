@@ -10,32 +10,14 @@ fn reset() {
             *e.borrow_mut() = Engine::new();
         });
 
-        // Remove persisted file
-        let path = persistence::graph_file_path().unwrap_or_else(|err| err.report());
-        if path.exists() {
-            std::fs::remove_file(&path).ok();
-            pgrx::notice!("graph: removed persisted file {}", path.display());
-        }
-        let checkpoint_path = persistence::sync_checkpoint_path(&path);
-        if checkpoint_path.exists() {
-            std::fs::remove_file(&checkpoint_path).ok();
-        }
-        let projection_mode_path = persistence::projection_mode_path(&path);
-        if projection_mode_path.exists() {
-            std::fs::remove_file(&projection_mode_path).ok();
-        }
-        let projection_root = persistence::projection_manifest_root(&path);
-        if let Ok(entries) = std::fs::read_dir(&projection_root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
-                if name.starts_with("projection-generation-") {
-                    std::fs::remove_file(&path).ok();
-                }
-            }
-        }
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        persistence::remove_graph_artifacts_for(&graph.graph_id).unwrap_or_else(|err| err.report());
+        pgrx::notice!(
+            "graph: removed persisted files for graph {} ({})",
+            graph.graph_name,
+            graph.graph_id
+        );
     });
 }
 

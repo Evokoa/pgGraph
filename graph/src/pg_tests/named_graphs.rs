@@ -596,6 +596,124 @@ fn build_graph_uses_named_graph_catalog() {
     assert_eq!(current_graph, "build_b");
 }
 
+#[pg_test]
+fn persisted_named_graphs_use_distinct_artifact_roots() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('persist_a', namespace := 'app')")
+        .expect("create persist_a failed");
+    Spi::run("SELECT graph.create_graph('persist_b', namespace := 'app')")
+        .expect("create persist_b failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'persist_a',
+                'graph_test_users_pgtest'::regclass,
+                'id',
+                ARRAY['name'],
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add persist_a table failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'persist_b',
+                'graph_test_bad_pgtest'::regclass,
+                'id',
+                ARRAY['note'],
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add persist_b table failed");
+    Spi::run("INSERT INTO public.graph_test_bad_pgtest (id, note) VALUES ('p1', 'persisted')")
+        .expect("insert persist_b row failed");
+
+    Spi::run("SELECT graph.build_graph('persist_a', force_persist := true, graph_namespace := 'app')")
+        .expect("persist_a build failed");
+    Spi::run("SELECT graph.build_graph('persist_b', force_persist := true, graph_namespace := 'app')")
+        .expect("persist_b build failed");
+
+    let graph_a = Spi::get_one::<String>(
+        "SELECT graph_id::text
+           FROM graph._graphs
+          WHERE graph_name = 'persist_a'
+            AND namespace = 'app'",
+    )
+    .expect("persist_a graph id query failed")
+    .expect("persist_a graph id missing");
+    let graph_b = Spi::get_one::<String>(
+        "SELECT graph_id::text
+           FROM graph._graphs
+          WHERE graph_name = 'persist_b'
+            AND namespace = 'app'",
+    )
+    .expect("persist_b graph id query failed")
+    .expect("persist_b graph id missing");
+    let path_a = crate::persistence::graph_file_path_for(&graph_a).expect("persist_a path failed");
+    let path_b = crate::persistence::graph_file_path_for(&graph_b).expect("persist_b path failed");
+
+    assert!(path_a.exists());
+    assert!(path_b.exists());
+    assert_ne!(path_a, path_b);
+    assert_eq!(
+        path_a
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str()),
+        Some(graph_a.as_str())
+    );
+    assert_eq!(
+        path_b
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str()),
+        Some(graph_b.as_str())
+    );
+}
+
+#[pg_test]
+fn projection_generation_heartbeats_are_graph_scoped() {
+    Spi::run("SELECT graph.create_graph('heartbeat_a', namespace := 'app')")
+        .expect("create heartbeat_a failed");
+    Spi::run("SELECT graph.create_graph('heartbeat_b', namespace := 'app')")
+        .expect("create heartbeat_b failed");
+    Spi::run("DELETE FROM graph._projection_generations WHERE generation_id = 9505001")
+        .expect("clear old heartbeat rows failed");
+
+    Spi::run("SELECT graph.set_current_graph('heartbeat_a', namespace := 'app')")
+        .expect("select heartbeat_a failed");
+    crate::projection::manifest::record_active_generation_heartbeat(
+        9_505_001,
+        std::time::Duration::from_secs(300),
+        10,
+        crate::projection::manifest::VALIDATION_STATUS_VALID,
+    )
+    .expect("heartbeat_a record failed");
+    let heartbeat_a_count = crate::projection::manifest::active_generation_count()
+        .expect("heartbeat_a count failed");
+
+    Spi::run("SELECT graph.set_current_graph('heartbeat_b', namespace := 'app')")
+        .expect("select heartbeat_b failed");
+    crate::projection::manifest::record_active_generation_heartbeat(
+        9_505_001,
+        std::time::Duration::from_secs(300),
+        20,
+        crate::projection::manifest::VALIDATION_STATUS_VALID,
+    )
+    .expect("heartbeat_b record failed");
+    let heartbeat_b_count = crate::projection::manifest::active_generation_count()
+        .expect("heartbeat_b count failed");
+    let graph_rows = Spi::get_one::<i64>(
+        "SELECT count(DISTINCT graph_id)
+           FROM graph._projection_generations
+          WHERE generation_id = 9505001",
+    )
+    .expect("heartbeat graph rows query failed")
+    .unwrap_or(0);
+
+    assert_eq!(heartbeat_a_count, 1);
+    assert_eq!(heartbeat_b_count, 1);
+    assert_eq!(graph_rows, 2);
+}
+
 fn sqlstate_for_prepared_helper(statement: &str) -> Option<String> {
     Spi::get_one::<String>(&format!(
         "SELECT public.graph_test_sqlstate({})",

@@ -111,13 +111,13 @@ SELECT pg_reload_conf();
 |---|---:|---:|---|---|
 | `graph.persist_on_build` | bool | `true` | `USERSET` | Writes the `.pggraph` artifact after successful build/vacuum/maintenance paths that request persistence |
 | `graph.auto_load` | bool | `true` | `SUSET` | Loads an existing artifact on first query in an empty backend |
-| `graph.data_dir` | string | `graph` | `SUSET` | Subdirectory under `$PGDATA` for `main.pggraph` and `main.pggraph.sync` |
+| `graph.data_dir` | string | `graph` | `SUSET` | Subdirectory under `$PGDATA` that contains one artifact root per graph id |
 
-Default artifact path:
+Default graph artifact path:
 
 ```text
-$PGDATA/graph/main.pggraph
-$PGDATA/graph/main.pggraph.sync
+$PGDATA/graph/00000000-0000-0000-0000-000000000001/main.pggraph
+$PGDATA/graph/00000000-0000-0000-0000-000000000001/main.pggraph.sync
 ```
 
 ## Sync Settings
