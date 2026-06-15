@@ -198,6 +198,14 @@ pub(crate) fn drop_graph_metadata(
             reason: "default graph cannot be dropped".to_string(),
         });
     }
+    if graph_has_registrations(&existing.graph_id)? {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: format!(
+                "graph '{}' still has registrations; remove graph registrations before dropping it",
+                graph_name
+            ),
+        });
+    }
 
     Spi::connect(|client| {
         let rows = client
@@ -236,6 +244,47 @@ pub(crate) fn default_graph_metadata() -> safety::GraphResult<GraphMetadata> {
             reason: "default graph metadata is missing".to_string(),
         }
     })
+}
+
+/// Returns the session-selected graph, or the compatibility default graph.
+///
+/// # Errors
+///
+/// Returns [`safety::GraphError::InvalidFilter`] if the selected graph id no
+/// longer resolves. Returns [`safety::GraphError::Internal`] for SPI failures.
+pub(crate) fn selected_or_default_graph_metadata() -> safety::GraphResult<GraphMetadata> {
+    match selected_graph_id()? {
+        Some(graph_id) => resolve_visible_graph_by_id(&graph_id)?.ok_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: "selected graph metadata is missing".to_string(),
+            }
+        }),
+        None => default_graph_metadata(),
+    }
+}
+
+/// Stores a session-local graph selection by graph id.
+///
+/// # Errors
+///
+/// Returns [`safety::GraphError::Internal`] when PostgreSQL rejects the session
+/// setting write.
+pub(crate) fn set_selected_graph_id(graph_id: &str) -> safety::GraphResult<()> {
+    Spi::run_with_args(
+        "SELECT set_config('graph.current_graph_id', $1, false)",
+        &[graph_id.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("current graph setting write failed: {err}"))
+    })
+}
+
+fn selected_graph_id() -> safety::GraphResult<Option<String>> {
+    Spi::get_one::<String>("SELECT current_setting('graph.current_graph_id', true)")
+        .map_err(|err| {
+            safety::GraphError::Internal(format!("current graph setting read failed: {err}"))
+        })
+        .map(|value| value.filter(|value| !value.trim().is_empty()))
 }
 
 /// Resolves graph metadata by graph name, tenant, namespace, and current role.
@@ -329,6 +378,37 @@ pub(crate) fn resolve_visible_graph_metadata(
                 ],
             )
             .map_err(|err| graph_catalog_error("resolve visible graph", err))?;
+        rows.next().map(metadata_from_row).transpose()
+    })
+}
+
+fn resolve_visible_graph_by_id(graph_id: &str) -> safety::GraphResult<Option<GraphMetadata>> {
+    graph_policy::GraphId::parse(graph_id).map_err(|err| safety::GraphError::InvalidFilter {
+        reason: err.to_string(),
+    })?;
+    Spi::connect(|client| {
+        let mut rows = client
+            .select(
+                "SELECT graph_id::text,
+                        graph_name,
+                        owner_role,
+                        created_by,
+                        tenant,
+                        namespace,
+                        graph_kind,
+                        residency,
+                        materialization,
+                        projection_mode,
+                        created_at,
+                        updated_at
+                   FROM graph._graphs
+                  WHERE graph_id = $1::uuid
+                    AND (owner_role = current_user::regrole::oid OR graph_kind = 'global')
+                  LIMIT 1",
+                None,
+                &[graph_id.into()],
+            )
+            .map_err(|err| graph_catalog_error("resolve visible graph by id", err))?;
         rows.next().map(metadata_from_row).transpose()
     })
 }
@@ -484,6 +564,33 @@ fn optional_column<T: FromDatum + IntoDatum>(
 ) -> safety::GraphResult<Option<T>> {
     row.get::<T>(ordinal).map_err(|err| {
         safety::GraphError::Internal(format!("graph metadata {column} read failed: {err}"))
+    })
+}
+
+fn graph_has_registrations(graph_id: &str) -> safety::GraphResult<bool> {
+    Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT EXISTS (
+                    SELECT 1 FROM graph._registered_tables WHERE graph_id = $1::uuid
+                 ) OR EXISTS (
+                    SELECT 1 FROM graph._registered_edges WHERE graph_id = $1::uuid
+                 ) OR EXISTS (
+                    SELECT 1 FROM graph._registered_filter_columns WHERE graph_id = $1::uuid
+                 )",
+                None,
+                &[graph_id.into()],
+            )
+            .map_err(|err| graph_catalog_error("check graph registrations", err))?;
+        result
+            .first()
+            .get::<bool>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("graph registration check failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("graph registration check returned null".to_string())
+            })
     })
 }
 

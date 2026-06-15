@@ -231,6 +231,126 @@ CREATE UNIQUE INDEX IF NOT EXISTS _graphs_identity_idx
         graph_name
     );
 
+ALTER TABLE graph._registered_tables
+    ADD COLUMN IF NOT EXISTS graph_id UUID;
+
+ALTER TABLE graph._registered_edges
+    ADD COLUMN IF NOT EXISTS graph_id UUID;
+
+ALTER TABLE graph._registered_filter_columns
+    ADD COLUMN IF NOT EXISTS graph_id UUID;
+
+UPDATE graph._registered_tables
+SET graph_id = '00000000-0000-0000-0000-000000000001'::uuid
+WHERE graph_id IS NULL;
+
+UPDATE graph._registered_edges
+SET graph_id = '00000000-0000-0000-0000-000000000001'::uuid
+WHERE graph_id IS NULL;
+
+UPDATE graph._registered_filter_columns
+SET graph_id = '00000000-0000-0000-0000-000000000001'::uuid
+WHERE graph_id IS NULL;
+
+ALTER TABLE graph._registered_tables
+    ALTER COLUMN graph_id SET NOT NULL;
+
+ALTER TABLE graph._registered_edges
+    ALTER COLUMN graph_id SET NOT NULL;
+
+ALTER TABLE graph._registered_filter_columns
+    ALTER COLUMN graph_id SET NOT NULL;
+
+ALTER TABLE graph._registered_tables
+    DROP CONSTRAINT IF EXISTS _registered_tables_pkey;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._registered_tables'::regclass
+          AND conname = '_registered_tables_pkey'
+    ) THEN
+        ALTER TABLE graph._registered_tables
+            ADD CONSTRAINT _registered_tables_pkey PRIMARY KEY (graph_id, table_name);
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    constraint_name name;
+BEGIN
+    FOR constraint_name IN
+        SELECT conname
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._registered_edges'::regclass
+          AND contype = 'u'
+    LOOP
+        EXECUTE format('ALTER TABLE graph._registered_edges DROP CONSTRAINT %I', constraint_name);
+    END LOOP;
+
+    FOR constraint_name IN
+        SELECT conname
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._registered_filter_columns'::regclass
+          AND contype = 'u'
+    LOOP
+        EXECUTE format('ALTER TABLE graph._registered_filter_columns DROP CONSTRAINT %I', constraint_name);
+    END LOOP;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS _registered_edges_graph_identity_idx
+    ON graph._registered_edges (
+        graph_id,
+        from_table,
+        from_column,
+        to_table,
+        to_column,
+        label
+    );
+
+CREATE UNIQUE INDEX IF NOT EXISTS _registered_filter_columns_graph_identity_idx
+    ON graph._registered_filter_columns (
+        graph_id,
+        table_name,
+        column_name
+    );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._registered_tables'::regclass
+          AND conname = '_registered_tables_graph_id_fkey'
+    ) THEN
+        ALTER TABLE graph._registered_tables
+            ADD CONSTRAINT _registered_tables_graph_id_fkey
+            FOREIGN KEY (graph_id) REFERENCES graph._graphs(graph_id) ON DELETE RESTRICT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._registered_edges'::regclass
+          AND conname = '_registered_edges_graph_id_fkey'
+    ) THEN
+        ALTER TABLE graph._registered_edges
+            ADD CONSTRAINT _registered_edges_graph_id_fkey
+            FOREIGN KEY (graph_id) REFERENCES graph._graphs(graph_id) ON DELETE RESTRICT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._registered_filter_columns'::regclass
+          AND conname = '_registered_filter_columns_graph_id_fkey'
+    ) THEN
+        ALTER TABLE graph._registered_filter_columns
+            ADD CONSTRAINT _registered_filter_columns_graph_id_fkey
+            FOREIGN KEY (graph_id) REFERENCES graph._graphs(graph_id) ON DELETE RESTRICT;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS graph._build_jobs (
     build_id       TEXT PRIMARY KEY,
     status         TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),

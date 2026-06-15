@@ -173,7 +173,8 @@ fn current_graph() -> TableIterator<
     ),
 > {
     with_panic_boundary("current_graph()", || {
-        let metadata = selected_graph_metadata().unwrap_or_else(|err| err.report());
+        let metadata =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
         graph_metadata_iterator(vec![metadata])
     })
 }
@@ -210,7 +211,7 @@ fn set_current_graph(
                 }
                 .report()
             });
-        set_selected_graph_id(&metadata.graph_id).unwrap_or_else(|err| err.report());
+        catalog::set_selected_graph_id(&metadata.graph_id).unwrap_or_else(|err| err.report());
         graph_metadata_iterator(vec![metadata])
     })
 }
@@ -221,35 +222,6 @@ pub(crate) fn check_enabled_result() -> safety::GraphResult<()> {
     } else {
         Err(safety::GraphError::Disabled)
     }
-}
-
-fn selected_graph_metadata() -> safety::GraphResult<catalog::GraphMetadata> {
-    match selected_graph_id()? {
-        Some(graph_id) => catalog::resolve_graph_by_id(&graph_id)?.ok_or_else(|| {
-            safety::GraphError::InvalidFilter {
-                reason: "selected graph metadata is missing".to_string(),
-            }
-        }),
-        None => catalog::default_graph_metadata(),
-    }
-}
-
-fn selected_graph_id() -> safety::GraphResult<Option<String>> {
-    Spi::get_one::<String>("SELECT current_setting('graph.current_graph_id', true)")
-        .map_err(|err| {
-            safety::GraphError::Internal(format!("current graph setting read failed: {err}"))
-        })
-        .map(|value| value.filter(|value| !value.trim().is_empty()))
-}
-
-fn set_selected_graph_id(graph_id: &str) -> safety::GraphResult<()> {
-    Spi::run_with_args(
-        "SELECT set_config('graph.current_graph_id', $1, false)",
-        &[graph_id.into()],
-    )
-    .map_err(|err| {
-        safety::GraphError::Internal(format!("current graph setting write failed: {err}"))
-    })
 }
 
 fn graph_metadata_iterator(
@@ -289,6 +261,21 @@ fn graph_metadata_iterator(
     }))
 }
 
+fn resolve_graph_for_registration(
+    graph_name: &str,
+    graph_tenant: Option<&str>,
+    graph_namespace: Option<&str>,
+) -> catalog::GraphMetadata {
+    catalog::resolve_visible_graph_metadata(graph_name, graph_tenant, graph_namespace)
+        .unwrap_or_else(|err| err.report())
+        .unwrap_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!("graph '{}' does not exist", graph_name),
+            }
+            .report()
+        })
+}
+
 pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
     let allowed = Spi::connect(|client| {
         let result = client.select(
@@ -321,26 +308,35 @@ pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
 }
 
 fn registered_table_name(table_oid: u32) -> safety::GraphResult<Option<String>> {
+    let graph = catalog::selected_or_default_graph_metadata()?;
+    registered_table_name_for_graph(&graph.graph_id, table_oid)
+}
+
+fn registered_table_name_for_graph(
+    graph_id: &str,
+    table_oid: u32,
+) -> safety::GraphResult<Option<String>> {
     Spi::connect(|client| {
         let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
         let mut result = client
             .select(
                 "SELECT table_name
                     FROM graph._registered_tables
-                    WHERE to_regclass(table_name) = $1::oid
+                    WHERE graph_id = $1::uuid
+                      AND (to_regclass(table_name) = $2::oid
                        OR (
                            position('.' in table_name) = 0
                            AND EXISTS (
                                SELECT 1
                                FROM pg_class
-                               WHERE oid = $1::oid
+                               WHERE oid = $2::oid
                                  AND relname = table_name
                            )
-                       )
+                       ))
                     ORDER BY table_name
                     LIMIT 1",
                 None,
-                &[table_oid.into()],
+                &[graph_id.into(), table_oid.into()],
             )
             .map_err(|err| {
                 safety::GraphError::Internal(format!("registered table lookup failed: {}", err))
@@ -1501,6 +1497,66 @@ fn add_table_with_id_columns(
     add_table(table_name, &id_column, columns, tenant_column);
 }
 
+/// Register a table for a named graph without changing session selection.
+#[pg_extern(schema = "graph")]
+fn add_table_to_graph(
+    graph_name: &str,
+    table_name: pgrx::pg_sys::Oid,
+    id_column: &str,
+    columns: default!(Option<Vec<String>>, "NULL"),
+    tenant_column: default!(Option<String>, "NULL"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    with_panic_boundary("add_table_to_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        validate_registered_table(
+            table_name.to_u32(),
+            id_column,
+            columns.as_deref(),
+            tenant_column.as_deref(),
+        )
+        .unwrap_or_else(|err| err.report());
+
+        let table_regclass = regclass_text(table_name.to_u32()).unwrap_or_else(|err| err.report());
+        let id_columns = builder::PrimaryKeySpec::from_catalog_text(id_column);
+        let cols = builder::PropertyColumns::from_columns(columns.unwrap_or_default());
+
+        insert_registered_table_for_graph(
+            &graph.graph_id,
+            &table_regclass,
+            &id_columns,
+            &cols,
+            tenant_column.as_deref(),
+        )
+        .unwrap_or_else(|err| err.report());
+    });
+}
+
+/// Register a table for a named graph using one or more primary-key columns.
+#[pg_extern(schema = "graph", name = "add_table_to_graph")]
+fn add_table_to_graph_with_id_columns(
+    graph_name: &str,
+    table_name: pgrx::pg_sys::Oid,
+    id_columns: Vec<String>,
+    columns: default!(Option<Vec<String>>, "NULL"),
+    tenant_column: default!(Option<String>, "NULL"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    let id_column = builder::PrimaryKeySpec::from_columns(id_columns).as_catalog_text();
+    add_table_to_graph(
+        graph_name,
+        table_name,
+        &id_column,
+        columns,
+        tenant_column,
+        graph_tenant,
+        graph_namespace,
+    );
+}
+
 /// Register an edge relationship.
 #[pg_extern(schema = "graph")]
 #[allow(
@@ -1559,6 +1615,72 @@ fn add_edge(
     });
 }
 
+/// Register an edge relationship for a named graph without changing session selection.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pgrx SQL ABI exposes each SQL argument"
+)]
+fn add_edge_to_graph(
+    graph_name: &str,
+    from_table: pgrx::pg_sys::Oid,
+    from_column: &str,
+    to_table: pgrx::pg_sys::Oid,
+    to_column: &str,
+    label: &str,
+    bidirectional: default!(bool, true),
+    weight_column: default!(Option<String>, "NULL"),
+    label_column: default!(Option<String>, "NULL"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    with_panic_boundary("add_edge_to_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        let registered_from_table_name =
+            registered_table_name_for_graph(&graph.graph_id, from_table.to_u32())
+                .unwrap_or_else(|err| err.report());
+        let from_table_name = registered_from_table_name.clone().unwrap_or_else(|| {
+            regclass_text(from_table.to_u32()).unwrap_or_else(|err| err.report())
+        });
+        let to_table_name = registered_table_name_for_graph(&graph.graph_id, to_table.to_u32())
+            .unwrap_or_else(|err| err.report())
+            .unwrap_or_else(|| regclass_text(to_table.to_u32()).unwrap_or_else(|err| err.report()));
+        validate_edge_endpoint_columns(
+            from_table.to_u32(),
+            &from_table_name,
+            from_column,
+            to_table.to_u32(),
+            &to_table_name,
+            to_column,
+            registered_from_table_name.is_some(),
+        )
+        .unwrap_or_else(|err| err.report());
+        if let Some(weight) = weight_column.as_deref() {
+            validate_column_exists(from_table.to_u32(), weight).unwrap_or_else(|err| err.report());
+        }
+        if let Some(label_column) = label_column.as_deref() {
+            validate_column_exists(from_table.to_u32(), label_column)
+                .unwrap_or_else(|err| err.report());
+        }
+
+        insert_registered_edge_for_graph(
+            &graph.graph_id,
+            RegisteredEdgeInsert {
+                from_table: &from_table_name,
+                from_column,
+                to_table: &to_table_name,
+                to_column,
+                label,
+                bidirectional,
+                weight_column: weight_column.as_deref(),
+                label_column: label_column.as_deref(),
+            },
+        )
+        .unwrap_or_else(|err| err.report());
+    });
+}
+
 /// List tables registered for graph indexing.
 #[pg_extern(schema = "graph")]
 #[allow(
@@ -1575,35 +1697,77 @@ fn registered_tables() -> TableIterator<
     ),
 > {
     with_panic_boundary("registered_tables()", || {
-        let rows = Spi::connect(|client| {
-            let result = client.select(
-                "SELECT table_name, id_column, columns, tenant_column
-                 FROM graph._registered_tables
-                 ORDER BY table_name",
-                None,
-                &[],
-            )?;
-            let mut rows = Vec::new();
-            for row in result {
-                let table_name = row.get::<String>(1)?.unwrap_or_default();
-                let id_column = row.get::<String>(2)?.unwrap_or_default();
-                let columns = row.get::<String>(3)?.unwrap_or_default();
-                let tenant_column = row.get::<String>(4)?.filter(|s| !s.is_empty());
-                rows.push((
-                    table_name,
-                    split_catalog_columns(&id_column),
-                    split_catalog_columns(&columns),
-                    tenant_column,
-                ));
-            }
-            Ok::<_, pgrx::spi::SpiError>(rows)
-        })
-        .unwrap_or_else(|err| {
-            pgrx::error!("graph.registered_tables() failed: {}", err);
-        });
-
-        TableIterator::new(rows)
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        registered_tables_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
     })
+}
+
+/// List tables registered for a named graph.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn registered_tables_for_graph(
+    graph_name: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(table_name, String),
+        name!(id_columns, Vec<String>),
+        name!(columns, Vec<String>),
+        name!(tenant_column, Option<String>),
+    ),
+> {
+    with_panic_boundary("registered_tables_for_graph()", || {
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        registered_tables_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
+    })
+}
+
+fn registered_tables_for_graph_id(
+    graph_id: &str,
+) -> safety::GraphResult<
+    TableIterator<
+        'static,
+        (
+            name!(table_name, String),
+            name!(id_columns, Vec<String>),
+            name!(columns, Vec<String>),
+            name!(tenant_column, Option<String>),
+        ),
+    >,
+> {
+    let rows = Spi::connect(|client| {
+        let result = client.select(
+            "SELECT table_name, id_column, columns, tenant_column
+                 FROM graph._registered_tables
+                 WHERE graph_id = $1::uuid
+                 ORDER BY table_name",
+            None,
+            &[graph_id.into()],
+        )?;
+        let mut rows = Vec::new();
+        for row in result {
+            let table_name = row.get::<String>(1)?.unwrap_or_default();
+            let id_column = row.get::<String>(2)?.unwrap_or_default();
+            let columns = row.get::<String>(3)?.unwrap_or_default();
+            let tenant_column = row.get::<String>(4)?.filter(|s| !s.is_empty());
+            rows.push((
+                table_name,
+                split_catalog_columns(&id_column),
+                split_catalog_columns(&columns),
+                tenant_column,
+            ));
+        }
+        Ok::<_, pgrx::spi::SpiError>(rows)
+    })
+    .map_err(|err| safety::GraphError::Internal(format!("registered tables read failed: {err}")))?;
+
+    Ok(TableIterator::new(rows))
 }
 
 /// List edge relationships registered for graph indexing.
@@ -1626,13 +1790,66 @@ fn registered_edges() -> TableIterator<
     ),
 > {
     with_panic_boundary("registered_edges()", || {
-        let rows = Spi::connect(|client| {
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        registered_edges_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
+    })
+}
+
+/// List edge relationships registered for a named graph.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn registered_edges_for_graph(
+    graph_name: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(from_table, String),
+        name!(from_column, String),
+        name!(to_table, String),
+        name!(to_column, String),
+        name!(label, String),
+        name!(bidirectional, bool),
+        name!(weight_column, Option<String>),
+        name!(label_column, Option<String>),
+    ),
+> {
+    with_panic_boundary("registered_edges_for_graph()", || {
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        registered_edges_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
+    })
+}
+
+fn registered_edges_for_graph_id(
+    graph_id: &str,
+) -> safety::GraphResult<
+    TableIterator<
+        'static,
+        (
+            name!(from_table, String),
+            name!(from_column, String),
+            name!(to_table, String),
+            name!(to_column, String),
+            name!(label, String),
+            name!(bidirectional, bool),
+            name!(weight_column, Option<String>),
+            name!(label_column, Option<String>),
+        ),
+    >,
+> {
+    let rows = Spi::connect(|client| {
             let result = client.select(
                 "SELECT from_table, from_column, to_table, to_column, label, bidirectional, weight_column, label_column
                  FROM graph._registered_edges
+                 WHERE graph_id = $1::uuid
                  ORDER BY from_table, from_column, to_table, to_column, label",
                 None,
-                &[],
+                &[graph_id.into()],
             )?;
             let mut rows = Vec::new();
             for row in result {
@@ -1649,12 +1866,9 @@ fn registered_edges() -> TableIterator<
             }
             Ok::<_, pgrx::spi::SpiError>(rows)
         })
-        .unwrap_or_else(|err| {
-            pgrx::error!("graph.registered_edges() failed: {}", err);
-        });
+        .map_err(|err| safety::GraphError::Internal(format!("registered edges read failed: {err}")))?;
 
-        TableIterator::new(rows)
-    })
+    Ok(TableIterator::new(rows))
 }
 
 /// Register a column for traversal-time filters.
@@ -1670,20 +1884,54 @@ fn add_filter_column(
         validate_filter_column_type(table_name.to_u32(), column_name, column_type)
             .unwrap_or_else(|err| err.report());
         let table_regclass = regclass_text(table_name.to_u32()).unwrap_or_else(|err| err.report());
-        Spi::run_with_args(
-            "INSERT INTO graph._registered_filter_columns (table_name, column_name, column_type)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (table_name, column_name) DO UPDATE SET column_type = EXCLUDED.column_type",
-            &[
-                table_regclass.into(),
-                column_name.into(),
-                column_type.to_ascii_lowercase().into(),
-            ],
-        )
-        .unwrap_or_else(|e| {
-            pgrx::error!("graph.add_filter_column() failed: {}", e);
-        });
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        insert_filter_column_for_graph(&graph.graph_id, &table_regclass, column_name, column_type)
+            .unwrap_or_else(|err| err.report());
     });
+}
+
+/// Register a traversal-time filter column for a named graph.
+#[pg_extern(schema = "graph")]
+fn add_filter_column_to_graph(
+    graph_name: &str,
+    table_name: pgrx::pg_sys::Oid,
+    column_name: &str,
+    column_type: default!(&str, "'numeric'"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    with_panic_boundary("add_filter_column_to_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        validate_column_exists(table_name.to_u32(), column_name).unwrap_or_else(|err| err.report());
+        validate_filter_column_type(table_name.to_u32(), column_name, column_type)
+            .unwrap_or_else(|err| err.report());
+        let table_regclass = regclass_text(table_name.to_u32()).unwrap_or_else(|err| err.report());
+        insert_filter_column_for_graph(&graph.graph_id, &table_regclass, column_name, column_type)
+            .unwrap_or_else(|err| err.report());
+    });
+}
+
+fn insert_filter_column_for_graph(
+    graph_id: &str,
+    table_regclass: &str,
+    column_name: &str,
+    column_type: &str,
+) -> safety::GraphResult<()> {
+    Spi::run_with_args(
+        "INSERT INTO graph._registered_filter_columns (graph_id, table_name, column_name, column_type)
+         VALUES ($1::uuid, $2, $3, $4)
+         ON CONFLICT (graph_id, table_name, column_name)
+         DO UPDATE SET column_type = EXCLUDED.column_type",
+        &[
+            graph_id.into(),
+            table_regclass.into(),
+            column_name.into(),
+            column_type.to_ascii_lowercase().into(),
+        ],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("filter column write failed: {err}")))
 }
 
 /// Build a structured equality filter for `graph.traverse(filter := ...)`.
@@ -1936,30 +2184,62 @@ fn all(filters: Vec<pgrx::JsonB>) -> pgrx::JsonB {
 fn remove_table(table_name: pgrx::pg_sys::Oid) {
     with_panic_boundary("remove_table()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
         let table = regclass_text(table_name.to_u32()).unwrap_or_else(|err| err.report());
-        Spi::run_with_args(
-            "DELETE FROM graph._registered_tables WHERE table_name = $1",
-            &[table.clone().into()],
-        )
-        .unwrap_or_else(|e| {
-            pgrx::error!("graph.remove_table() failed: {}", e);
-        });
-        // Also remove associated filter columns
-        Spi::run_with_args(
-            "DELETE FROM graph._registered_filter_columns WHERE table_name = $1",
-            &[table.clone().into()],
-        )
-        .ok();
-        Spi::run_with_args(
-            "DELETE FROM graph._registered_edges WHERE from_table = $1 OR to_table = $1",
-            &[table.clone().into()],
-        )
-        .ok();
+        remove_table_from_graph_id(&graph.graph_id, &table).unwrap_or_else(|err| err.report());
         pgrx::notice!(
             "graph: unregistered table {}. Call graph.build() to rebuild.",
             table
         );
     });
+}
+
+/// Unregister a table from a named graph without changing session selection.
+#[pg_extern(schema = "graph")]
+fn remove_table_from_graph(
+    graph_name: &str,
+    table_name: pgrx::pg_sys::Oid,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    with_panic_boundary("remove_table_from_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        let table = regclass_text(table_name.to_u32()).unwrap_or_else(|err| err.report());
+        remove_table_from_graph_id(&graph.graph_id, &table).unwrap_or_else(|err| err.report());
+        pgrx::notice!(
+            "graph: unregistered table {} from graph '{}'. Call graph.build() to rebuild.",
+            table,
+            graph.graph_name
+        );
+    });
+}
+
+fn remove_table_from_graph_id(graph_id: &str, table: &str) -> safety::GraphResult<()> {
+    Spi::run_with_args(
+        "DELETE FROM graph._registered_tables
+          WHERE graph_id = $1::uuid
+            AND table_name = $2",
+        &[graph_id.into(), table.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("registered table delete failed: {err}"))
+    })?;
+    Spi::run_with_args(
+        "DELETE FROM graph._registered_filter_columns
+          WHERE graph_id = $1::uuid
+            AND table_name = $2",
+        &[graph_id.into(), table.into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("filter column delete failed: {err}")))?;
+    Spi::run_with_args(
+        "DELETE FROM graph._registered_edges
+          WHERE graph_id = $1::uuid
+            AND (from_table = $2 OR to_table = $2)",
+        &[graph_id.into(), table.into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("registered edge delete failed: {err}")))
 }
 
 /// Unregister an edge relationship by label.
@@ -1971,18 +2251,44 @@ fn remove_table(table_name: pgrx::pg_sys::Oid) {
 fn remove_edge(label: &str) {
     with_panic_boundary("remove_edge()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        Spi::run_with_args(
-            "DELETE FROM graph._registered_edges WHERE label = $1",
-            &[label.into()],
-        )
-        .unwrap_or_else(|e| {
-            pgrx::error!("graph.remove_edge() failed: {}", e);
-        });
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        remove_edge_from_graph_id(&graph.graph_id, label).unwrap_or_else(|err| err.report());
         pgrx::notice!(
             "graph: unregistered edge '{}'. Call graph.build() to rebuild.",
             label
         );
     });
+}
+
+/// Unregister an edge relationship by label from a named graph.
+#[pg_extern(schema = "graph")]
+fn remove_edge_from_graph(
+    graph_name: &str,
+    label: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    with_panic_boundary("remove_edge_from_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        remove_edge_from_graph_id(&graph.graph_id, label).unwrap_or_else(|err| err.report());
+        pgrx::notice!(
+            "graph: unregistered edge '{}' from graph '{}'. Call graph.build() to rebuild.",
+            label,
+            graph.graph_name
+        );
+    });
+}
+
+fn remove_edge_from_graph_id(graph_id: &str, label: &str) -> safety::GraphResult<()> {
+    Spi::run_with_args(
+        "DELETE FROM graph._registered_edges
+          WHERE graph_id = $1::uuid
+            AND label = $2",
+        &[graph_id.into(), label.into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("registered edge delete failed: {err}")))
 }
 
 /// Estimate RAM requirements without building the graph.

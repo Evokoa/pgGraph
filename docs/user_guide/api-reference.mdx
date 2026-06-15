@@ -9,7 +9,7 @@ All functions live in the `graph` schema.
 |---|---|
 | Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
 | Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph` |
-| Registration | `add_table`, `add_edge`, `add_filter_column`, `registered_tables`, `registered_edges`, `remove_table`, `remove_edge`, `estimate` |
+| Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables` |
 | Build jobs | `build`, `build_status` |
 | Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `projection_gc`, `projection_repair`, `vacuum`, `maintenance`, `maintenance_status` |
@@ -285,8 +285,8 @@ RETURNS TABLE (...)
 
 Admin-only. Drops graph metadata for an existing non-default graph owned by the
 current role and returns the deleted row. The compatibility default graph cannot
-be dropped. Dropping graph-owned registrations, jobs, artifacts, and
-projections is introduced by later graph-scoped phases.
+be dropped. A graph with registered tables, edges, or filter columns must be
+emptied before it can be dropped; non-empty graphs return SQLSTATE `PG005`.
 
 ### `graph.list_graphs()`
 
@@ -321,8 +321,11 @@ RETURNS TABLE (...)
 ```
 
 Selects graph metadata for the current session and returns the selected row.
-Selection is metadata only in this release: it does not load or switch the
-backend-local graph engine. Missing graphs return SQLSTATE `PG005`.
+Registration, build, query, and inspection functions that use the compatibility
+SQL surface resolve the selected graph, or the default graph when no graph is
+selected. Selecting a graph does not load a persisted artifact by itself; the
+backend-local engine changes when you build or load graph state. Missing or
+unauthorized graphs return SQLSTATE `PG005`.
 
 ### `graph.sync_health()`
 
@@ -380,6 +383,11 @@ Admin-only. Clears the backend-local engine and removes persisted graph files.
 
 ## Registration
 
+Registration functions operate on the session-selected graph. If no graph has
+been selected with `graph.set_current_graph()`, they use the compatibility
+default graph. Use the `*_to_graph`, `*_for_graph`, and `*_from_graph`
+functions to target a named graph without changing the session selection.
+
 ### `graph.add_table()`
 
 ```sql
@@ -402,6 +410,35 @@ graph.add_table(
 
 Admin-only. Registers a source table as graph nodes. The identifier columns must
 match a primary key or unique `NOT NULL` index.
+
+### `graph.add_table_to_graph()`
+
+```sql
+graph.add_table_to_graph(
+  graph_name text,
+  table_name regclass,
+  id_column text,
+  columns text[] DEFAULT NULL,
+  tenant_column text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+) RETURNS void
+```
+
+```sql
+graph.add_table_to_graph(
+  graph_name text,
+  table_name regclass,
+  id_columns text[],
+  columns text[] DEFAULT NULL,
+  tenant_column text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+) RETURNS void
+```
+
+Admin-only. Registers a source table in a named graph without changing the
+current session graph. `graph_namespace` defaults to `public` when omitted.
 
 ### `graph.add_edge()`
 
@@ -445,6 +482,28 @@ back across the registered node tables. Use the target table primary-key
 column, such as `'id'`, only for FK-style edges from a registered source node
 table.
 
+### `graph.add_edge_to_graph()`
+
+```sql
+graph.add_edge_to_graph(
+  graph_name text,
+  from_table regclass,
+  from_column text,
+  to_table regclass,
+  to_column text,
+  label text,
+  bidirectional boolean DEFAULT true,
+  weight_column text DEFAULT NULL,
+  label_column text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+) RETURNS void
+```
+
+Admin-only. Registers a relationship in a named graph without changing the
+current session graph. Edge labels are unique and resolved inside the target
+graph's registration set.
+
 ### `graph.add_filter_column()`
 
 ```sql
@@ -458,6 +517,21 @@ graph.add_filter_column(
 Admin-only. Supported types are `numeric`, `text`, `boolean`, `date`,
 `timestamptz`, and `uuid`.
 
+### `graph.add_filter_column_to_graph()`
+
+```sql
+graph.add_filter_column_to_graph(
+  graph_name text,
+  table_name regclass,
+  column_name text,
+  column_type text DEFAULT 'numeric',
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+) RETURNS void
+```
+
+Admin-only. Registers a traversal filter column in a named graph.
+
 ### `graph.registered_tables()`
 
 ```sql
@@ -469,6 +543,27 @@ RETURNS TABLE (
   tenant_column text
 )
 ```
+
+Returns tables registered in the selected graph, or the default graph when no
+session graph has been selected.
+
+### `graph.registered_tables_for_graph()`
+
+```sql
+graph.registered_tables_for_graph(
+  graph_name text,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  table_name text,
+  id_columns text[],
+  columns text[],
+  tenant_column text
+)
+```
+
+Returns tables registered in a named graph.
 
 ### `graph.registered_edges()`
 
@@ -486,6 +581,31 @@ RETURNS TABLE (
 )
 ```
 
+Returns edges registered in the selected graph, or the default graph when no
+session graph has been selected.
+
+### `graph.registered_edges_for_graph()`
+
+```sql
+graph.registered_edges_for_graph(
+  graph_name text,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  from_table text,
+  from_column text,
+  to_table text,
+  to_column text,
+  label text,
+  bidirectional boolean,
+  weight_column text,
+  label_column text
+)
+```
+
+Returns edges registered in a named graph.
+
 ### `graph.remove_table()`
 
 ```sql
@@ -495,6 +615,20 @@ graph.remove_table(table_name regclass) RETURNS void
 Admin-only. Removes table registration, associated filter columns, and edges
 where the table is either endpoint. Rebuild after calling.
 
+### `graph.remove_table_from_graph()`
+
+```sql
+graph.remove_table_from_graph(
+  graph_name text,
+  table_name regclass,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+) RETURNS void
+```
+
+Admin-only. Removes a table registration, associated filter columns, and edges
+from a named graph only. Rebuild that graph after calling.
+
 ### `graph.remove_edge()`
 
 ```sql
@@ -503,6 +637,20 @@ graph.remove_edge(label text) RETURNS void
 
 Admin-only. Removes edge registrations with the given label. Rebuild after
 calling.
+
+### `graph.remove_edge_from_graph()`
+
+```sql
+graph.remove_edge_from_graph(
+  graph_name text,
+  label text,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+) RETURNS void
+```
+
+Admin-only. Removes edge registrations with the given label from a named graph
+only. Rebuild that graph after calling.
 
 ### `graph.estimate()`
 

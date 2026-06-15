@@ -4,6 +4,11 @@ The extension builds its graph from explicit registration metadata stored in
 extension catalog tables. Register node tables, edge relationships, and optional
 filter columns before calling `graph.build()`.
 
+Registration applies to the current graph selection. If you do not call
+`graph.set_current_graph()`, registration uses the compatibility default graph.
+For one-off named graph updates, use the explicit `*_to_graph` and
+`*_from_graph` functions shown below.
+
 ## Registration Flow
 
 <FlowDiagram
@@ -65,6 +70,19 @@ source column, such as `profile.plan` or `profile.tags`. The base column must
 exist and have type `jsonb`; typed filter indexes still use
 `graph.add_filter_column()` on ordinary columns.
 
+To register the same source table in a named graph without changing session
+selection:
+
+```sql
+SELECT graph.add_table_to_graph(
+  graph_name := 'customer_360',
+  table_name := 'public.users'::regclass,
+  id_column := 'id',
+  columns := ARRAY['name', 'email'],
+  graph_namespace := 'analytics'
+);
+```
+
 ## Register FK-Style Edges
 
 FK-style registration reads source rows from `from_table`, takes the row primary
@@ -86,6 +104,20 @@ This models:
 ```text
 orders.id  --placed_by-->  customers.id
 source PK                   target PK from orders.customer_id
+```
+
+Named graphs use the same relationship shapes:
+
+```sql
+SELECT graph.add_edge_to_graph(
+  graph_name := 'customer_360',
+  from_table := 'public.orders'::regclass,
+  from_column := 'customer_id',
+  to_table := 'public.customers'::regclass,
+  to_column := 'id',
+  label := 'placed_by',
+  graph_namespace := 'analytics'
+);
 ```
 
 When `bidirectional := true`, pgGraph stores an additional traversable reverse
@@ -193,11 +225,37 @@ Supported `column_type` values:
 | `timestamptz` | Microseconds from Unix epoch |
 | `uuid` | Canonical 128-bit UUID integer |
 
+For a named graph:
+
+```sql
+SELECT graph.add_filter_column_to_graph(
+  graph_name := 'customer_360',
+  table_name := 'public.users'::regclass,
+  column_name := 'status',
+  column_type := 'text',
+  graph_namespace := 'analytics'
+);
+```
+
 ## Inspect Registration
 
 ```sql
 SELECT * FROM graph.registered_tables();
 SELECT * FROM graph.registered_edges();
+```
+
+These functions inspect the selected graph, or the default graph when no graph
+has been selected. To inspect a named graph without changing session selection:
+
+```sql
+SELECT * FROM graph.registered_tables_for_graph(
+  'customer_360',
+  graph_namespace := 'analytics'
+);
+SELECT * FROM graph.registered_edges_for_graph(
+  'customer_360',
+  graph_namespace := 'analytics'
+);
 ```
 
 ## Remove Registration
@@ -212,6 +270,21 @@ table is either endpoint. Rebuild after removal:
 
 ```sql
 SELECT * FROM graph.build();
+```
+
+Named graph removals affect only that graph:
+
+```sql
+SELECT graph.remove_edge_from_graph(
+  'customer_360',
+  'placed_by',
+  graph_namespace := 'analytics'
+);
+SELECT graph.remove_table_from_graph(
+  'customer_360',
+  'public.orders'::regclass,
+  graph_namespace := 'analytics'
+);
 ```
 
 ## Auto-Discovery

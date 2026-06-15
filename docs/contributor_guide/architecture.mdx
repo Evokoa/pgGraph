@@ -130,7 +130,7 @@ places named-graph support must update:
 
 | Area | Current behavior |
 |---|---|
-| Catalogs | `graph._registered_tables`, `graph._registered_edges`, and `graph._registered_filter_columns` describe one global graph. |
+| Registration catalogs | `graph._registered_tables`, `graph._registered_edges`, and `graph._registered_filter_columns` are keyed by `graph_id`; compatibility SQL resolves the selected or default graph before reading or writing them. |
 | Runtime | `ENGINE` stores one backend-local graph engine. `ensure_current_graph()` validates build/load/schema freshness; it is not a named graph selector. |
 | Build jobs | `graph._build_jobs` and `graph._maintenance_jobs` are global job tables. |
 | Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/main.pggraph`. |

@@ -1,10 +1,23 @@
 use crate::{builder, safety};
 use pgrx::prelude::*;
 
+use super::selected_or_default_graph_metadata;
 use super::validate::registered_schema_drift_reason;
 
-/// Read registered tables and edges from the graph catalog via SPI.
+/// Read registered tables and edges for the selected or default graph.
 pub(crate) fn read_catalog() -> safety::GraphResult<(
+    Vec<builder::RegisteredTable>,
+    Vec<builder::RegisteredEdge>,
+    Vec<builder::RegisteredFilterColumn>,
+)> {
+    let graph = selected_or_default_graph_metadata()?;
+    read_catalog_for_graph(&graph.graph_id)
+}
+
+/// Read registered tables and edges from one graph catalog via SPI.
+pub(crate) fn read_catalog_for_graph(
+    graph_id: &str,
+) -> safety::GraphResult<(
     Vec<builder::RegisteredTable>,
     Vec<builder::RegisteredEdge>,
     Vec<builder::RegisteredFilterColumn>,
@@ -16,9 +29,12 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT table_name::text, id_column, columns, tenant_column FROM graph._registered_tables",
+                "SELECT table_name::text, id_column, columns, tenant_column
+                   FROM graph._registered_tables
+                  WHERE graph_id = $1::uuid
+                  ORDER BY table_name",
                 None,
-                &[],
+                &[graph_id.into()],
             )
             .map_err(|e| {
                 safety::GraphError::Internal(format!(
@@ -70,9 +86,12 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT from_table::text, from_column, to_table::text, to_column, label, bidirectional, weight_column, label_column FROM graph._registered_edges",
+                "SELECT from_table::text, from_column, to_table::text, to_column, label, bidirectional, weight_column, label_column
+                   FROM graph._registered_edges
+                  WHERE graph_id = $1::uuid
+                  ORDER BY from_table, from_column, to_table, to_column, label",
                 None,
-                &[],
+                &[graph_id.into()],
             )
             .map_err(|e| {
                 safety::GraphError::Internal(format!(
@@ -156,9 +175,12 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT table_name::text, column_name, column_type FROM graph._registered_filter_columns",
+                "SELECT table_name::text, column_name, column_type
+                   FROM graph._registered_filter_columns
+                  WHERE graph_id = $1::uuid
+                  ORDER BY table_name, column_name",
                 None,
-                &[],
+                &[graph_id.into()],
             )
             .map_err(|e| {
                 safety::GraphError::Internal(format!(
@@ -248,7 +270,15 @@ pub(crate) fn catalog_fingerprint(
 
 pub(crate) fn current_catalog_state() -> safety::GraphResult<(u64, Option<String>)> {
     let (tables, edges, filter_columns) = read_catalog()?;
-    let fingerprint = catalog_fingerprint(&tables, &edges, &filter_columns);
-    let drift_reason = registered_schema_drift_reason(&tables, &edges, &filter_columns);
+    current_catalog_state_from_rows(&tables, &edges, &filter_columns)
+}
+
+fn current_catalog_state_from_rows(
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    filter_columns: &[builder::RegisteredFilterColumn],
+) -> safety::GraphResult<(u64, Option<String>)> {
+    let fingerprint = catalog_fingerprint(tables, edges, filter_columns);
+    let drift_reason = registered_schema_drift_reason(tables, edges, filter_columns);
     Ok((fingerprint, drift_reason))
 }

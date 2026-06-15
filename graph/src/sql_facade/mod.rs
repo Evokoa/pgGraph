@@ -7,7 +7,8 @@ pub(crate) use crate::api_types::{
     BuildJobRow, ComponentNodeRow, MaintenanceJobRow, TraverseRequest,
 };
 pub(crate) use crate::catalog::{
-    catalog_fingerprint, current_catalog_state, insert_registered_edge, insert_registered_table,
+    catalog_fingerprint, current_catalog_state, insert_registered_edge,
+    insert_registered_edge_for_graph, insert_registered_table, insert_registered_table_for_graph,
     read_catalog, regclass_text, split_catalog_columns, validate_column_exists,
     validate_edge_endpoint_columns, validate_filter_column_type, validate_registered_table,
     RegisteredEdgeInsert,

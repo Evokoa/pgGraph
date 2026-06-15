@@ -7,8 +7,9 @@ mod write;
 
 pub(crate) use crate::builder::split_catalog_columns;
 pub(crate) use graphs::{
-    create_graph_metadata, default_graph_metadata, drop_graph_metadata, list_graph_metadata,
-    resolve_graph_by_id, resolve_visible_graph_metadata, update_graph_metadata, GraphMetadata,
+    create_graph_metadata, drop_graph_metadata, list_graph_metadata,
+    resolve_visible_graph_metadata, selected_or_default_graph_metadata, set_selected_graph_id,
+    update_graph_metadata, GraphMetadata,
 };
 pub(crate) use read::{catalog_fingerprint, current_catalog_state, read_catalog};
 #[cfg(feature = "pg_test")]
@@ -18,4 +19,7 @@ pub(crate) use validate::{
     table_oid_from_name, validate_column_exists, validate_edge_endpoint_columns,
     validate_filter_column_type, validate_registered_table,
 };
-pub(crate) use write::{insert_registered_edge, insert_registered_table, RegisteredEdgeInsert};
+pub(crate) use write::{
+    insert_registered_edge, insert_registered_edge_for_graph, insert_registered_table,
+    insert_registered_table_for_graph, RegisteredEdgeInsert,
+};

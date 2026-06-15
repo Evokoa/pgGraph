@@ -145,9 +145,9 @@ The bootstrap SQL creates:
 | `graph.node_ref` | Composite start-node type for one traversal overload |
 | `graph.node_ref(regclass, text)` | Constructor for `graph.node_ref` |
 | `graph.traverse(graph.node_ref[], ...)` | SQL wrapper over the Rust multi-start traversal overload |
-| `graph._registered_tables` | Durable registration catalog for node source tables |
-| `graph._registered_edges` | Durable registration catalog for edge definitions |
-| `graph._registered_filter_columns` | Durable registration catalog for traversal filter columns |
+| `graph._registered_tables` | Durable graph-scoped registration catalog for node source tables |
+| `graph._registered_edges` | Durable graph-scoped registration catalog for edge definitions |
+| `graph._registered_filter_columns` | Durable graph-scoped registration catalog for traversal filter columns |
 | `graph._graphs` | Durable named graph metadata and default graph identity |
 | `graph._build_jobs` | Durable asynchronous build job state |
 | `graph._maintenance_jobs` | Durable maintenance job state |
