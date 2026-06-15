@@ -57,6 +57,41 @@ pub(crate) struct WorkerMetadata {
     pub(crate) username: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SchedulerWorkerMetadata {
+    pub(crate) max_jobs: i32,
+    pub(crate) database: String,
+    pub(crate) username: String,
+}
+
+impl SchedulerWorkerMetadata {
+    pub(crate) fn new(max_jobs: i32, database: String, username: String) -> Self {
+        Self {
+            max_jobs,
+            database,
+            username,
+        }
+    }
+
+    pub(crate) fn encode(&self) -> safety::GraphResult<String> {
+        serde_json::to_string(self).map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "scheduler worker metadata encoding failed: {}",
+                err
+            ))
+        })
+    }
+
+    pub(crate) fn decode(raw: &str) -> safety::GraphResult<Self> {
+        serde_json::from_str(raw).map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "scheduler worker metadata decoding failed: {}",
+                err
+            ))
+        })
+    }
+}
+
 impl WorkerMetadata {
     pub(crate) fn new(
         job_id: &str,
@@ -521,9 +556,29 @@ pub(crate) fn launch_maintenance_worker(job_id: &str) -> safety::GraphResult<()>
         })
 }
 
+pub(crate) fn launch_due_jobs_worker(max_jobs: i32) -> safety::GraphResult<()> {
+    let (database, username) = current_database_and_user()?;
+    let extra = SchedulerWorkerMetadata::new(max_jobs, database, username).encode()?;
+    BackgroundWorkerBuilder::new("graph due jobs")
+        .set_function("graph_due_jobs_worker_main")
+        .set_library("graph")
+        .enable_spi_access()
+        .set_start_time(BgWorkerStartTime::RecoveryFinished)
+        .set_restart_time(None)
+        .set_notify_pid(current_backend_pid())
+        .set_extra(&extra)
+        .load_dynamic()
+        .map(|_| ())
+        .map_err(|_| {
+            safety::GraphError::Internal(
+                "could not start graph due jobs worker; check max_worker_processes".to_string(),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{JobStatus, WorkerMetadata};
+    use super::{JobStatus, SchedulerWorkerMetadata, WorkerMetadata};
 
     #[test]
     fn job_status_as_str_matches_sql_contract_values() {
@@ -550,6 +605,17 @@ mod tests {
         let encoded = metadata.encode().expect("metadata encodes");
         assert_eq!(
             WorkerMetadata::decode(&encoded).expect("metadata decodes"),
+            metadata
+        );
+    }
+
+    #[test]
+    fn scheduler_worker_metadata_round_trips_json() {
+        let metadata =
+            SchedulerWorkerMetadata::new(32, "graph/db".to_string(), "worker role".to_string());
+        let encoded = metadata.encode().expect("metadata encodes");
+        assert_eq!(
+            SchedulerWorkerMetadata::decode(&encoded).expect("metadata decodes"),
             metadata
         );
     }

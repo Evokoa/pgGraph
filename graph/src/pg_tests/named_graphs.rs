@@ -990,6 +990,55 @@ fn sync_policies_run_through_visible_durable_jobs() {
     let invalid_due_limit = sqlstate_for_prepared_helper("SELECT * FROM graph.run_due_jobs(0)");
     assert_eq!(invalid_due_limit, Some("PG005".to_string()));
 
+    Spi::run(&format!(
+        "UPDATE graph._jobs
+            SET next_run_at = now() - interval '1 second'
+          WHERE job_id = {}::uuid",
+        super::sql_literal(&job_id)
+    ))
+    .expect("mark policy job due for internal runner failed");
+    Spi::run(&format!(
+        "UPDATE graph._sync_policies
+            SET next_run_at = now() - interval '1 second'
+          WHERE job_id = {}::uuid",
+        super::sql_literal(&job_id)
+    ))
+    .expect("mark policy due for internal runner failed");
+    Spi::run("UPDATE public.graph_test_users_pgtest SET name = 'Alice policy 4' WHERE id = 'u1'")
+        .expect("update policy_graph source row for internal runner failed");
+    let internal_error = Spi::get_one::<String>(&format!(
+        "SELECT graph._test_run_job_internal({})",
+        super::sql_literal(&job_id)
+    ))
+    .expect("internal job test runner failed");
+    assert_eq!(internal_error, None);
+    let (internal_status, internal_rows, internal_mode) = Spi::connect(|client| {
+        let latest_run = client
+            .select(
+                "SELECT status, rows_applied, execution_mode
+                   FROM graph.job_runs(job_id := $1)
+                  WHERE execution_mode = 'internal'
+                  ORDER BY started_at DESC
+                  LIMIT 1",
+                None,
+                &[job_id.as_str().into()],
+            )
+            .expect("latest internal job run query failed")
+            .next()
+            .expect("latest internal job run missing");
+        Ok::<_, pgrx::spi::Error>((
+            latest_run.get::<String>(1)?.expect("internal status missing"),
+            latest_run.get::<i64>(2)?,
+            latest_run
+                .get::<String>(3)?
+                .expect("internal mode missing"),
+        ))
+    })
+    .expect("internal job run row read failed");
+    assert_eq!(internal_status, "completed");
+    assert_eq!(internal_rows, Some(1));
+    assert_eq!(internal_mode, "internal");
+
     Spi::run(
         "DROP ROLE IF EXISTS graph_phase9_no_policy;
          CREATE ROLE graph_phase9_no_policy;

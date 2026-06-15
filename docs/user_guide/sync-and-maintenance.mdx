@@ -218,11 +218,23 @@ Hosted schedulers can run all due jobs in one bounded call:
 SELECT * FROM graph.run_due_jobs(max_jobs := 64);
 ```
 
+Installations that allow pgGraph dynamic background workers can launch one
+internal pass instead:
+
+```sql
+SELECT graph.run_due_jobs_async(max_jobs := 64);
+```
+
 Policy execution restores the selected graph context, uses the same replay path
 as `graph.apply_sync()`, and records the result in `graph._job_runs`. Disabled
 jobs produce a `disabled` run row and do not apply sync. Concurrent runners use
 row locking plus a graph/job advisory lock; a contended job records
 `lock_skipped` instead of replaying the same work twice.
+
+`graph.run_due_jobs_async()` is a one-shot worker registration. It uses the same
+durable job catalogs and records `execution_mode = 'internal'`, but it does not
+install an always-on scheduler loop. Use `pg_cron`, a provider scheduler, or an
+application scheduler to choose the cadence.
 
 Inspect policy and job state:
 

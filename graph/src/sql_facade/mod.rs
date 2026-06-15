@@ -23,8 +23,9 @@ pub(crate) use crate::sql_filters::filter_helper;
 pub(crate) use crate::sql_hydration::{hydrate_node, hydrate_nodes};
 pub(crate) use crate::sql_jobs::{
     build_job_row, create_build_job, create_maintenance_job, launch_build_worker,
-    launch_maintenance_worker, maintenance_job_row, run_build_job, run_maintenance_job,
-    update_build_job_failed, update_maintenance_job_failed, JobStatus, WorkerMetadata,
+    launch_due_jobs_worker, launch_maintenance_worker, maintenance_job_row, run_build_job,
+    run_maintenance_job, update_build_job_failed, update_maintenance_job_failed, JobStatus,
+    SchedulerWorkerMetadata, WorkerMetadata,
 };
 pub(crate) use crate::sql_search::{source_table_search_rows, validate_search_request};
 pub(crate) use crate::sql_sync::{

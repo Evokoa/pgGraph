@@ -3,9 +3,11 @@
 Sync bridges mutable source tables and an immutable base CSR graph. The current
 implementation uses durable trigger logs, backend-local apply, node
 tombstones/inserts, filter refresh, tenant refresh, and edge overlays. Background
-workers run build or maintenance jobs. Hosted schedulers can run due durable
-sync policy jobs through `graph.run_due_jobs()`, but pgGraph does not broadcast
-in-place updates to every backend-local engine.
+workers run build, maintenance, or one-shot internal due-job passes. Hosted
+schedulers can run due durable sync policy jobs through `graph.run_due_jobs()`,
+and installations that allow dynamic workers can launch the same path through
+`graph.run_due_jobs_async()`. pgGraph does not broadcast in-place updates to
+every backend-local engine.
 
 ## Modules
 

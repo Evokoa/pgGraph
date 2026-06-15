@@ -1696,6 +1696,34 @@ pub extern "C-unwind" fn graph_maintenance_worker_main(_arg: pgrx::pg_sys::Datum
     );
 }
 
+#[pg_guard]
+/// Background worker entrypoint for one-shot due-job execution.
+///
+/// PostgreSQL invokes this function by name after `graph.run_due_jobs_async()`
+/// registers a dynamic background worker. Worker metadata is read from pgrx's
+/// background-worker `extra` field as typed JSON metadata.
+pub extern "C-unwind" fn graph_due_jobs_worker_main(_arg: pgrx::pg_sys::Datum) {
+    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
+    let extra = BackgroundWorker::get_extra();
+    let metadata = match SchedulerWorkerMetadata::decode(extra) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            pgrx::warning!(
+                "graph due jobs worker received malformed worker metadata: {}",
+                err
+            );
+            return;
+        }
+    };
+
+    BackgroundWorker::connect_worker_to_spi(Some(&metadata.database), Some(&metadata.username));
+    let result =
+        BackgroundWorker::transaction(|| run_due_jobs_result(metadata.max_jobs, "internal"));
+    if let Err(err) = result {
+        pgrx::warning!("graph due jobs worker failed: {}", err);
+    }
+}
+
 /// Overload for `graph.build(concurrently := bool)`.
 ///
 /// With `concurrently := false`, this delegates to the synchronous build path
@@ -3649,6 +3677,20 @@ fn run_job_result(job: &GenericJobRow, execution_mode: &str) -> safety::GraphRes
     run_sync_policy_with_mode(&policy_id, execution_mode)
 }
 
+fn run_due_jobs_result(
+    max_jobs: i32,
+    execution_mode: &str,
+) -> safety::GraphResult<Vec<(GenericJobRow, JobRunRow)>> {
+    let max_jobs = validate_positive_i32(max_jobs, "max_jobs")?;
+    let jobs = due_generic_job_rows(max_jobs)?;
+    let mut rows = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let row = run_job_result(&job, execution_mode)?;
+        rows.push((job, row));
+    }
+    Ok(rows)
+}
+
 /// Add an explicit sync policy for a graph.
 ///
 /// Sync policies are durable records. They are executed by calling
@@ -4260,13 +4302,9 @@ fn run_due_jobs(
     ),
 > {
     with_panic_boundary("run_due_jobs()", || {
-        let max_jobs =
-            validate_positive_i32(max_jobs, "max_jobs").unwrap_or_else(|err| err.report());
-        let jobs = due_generic_job_rows(max_jobs).unwrap_or_else(|err| err.report());
-        let mut rows = Vec::with_capacity(jobs.len());
-        for job in jobs {
-            let row = run_job_result(&job, "hosted").unwrap_or_else(|err| err.report());
-            rows.push((
+        let rows = run_due_jobs_result(max_jobs, "hosted").unwrap_or_else(|err| err.report());
+        TableIterator::new(rows.into_iter().map(|(job, row)| {
+            (
                 row.job_id,
                 row.run_id,
                 row.graph_id,
@@ -4277,9 +4315,20 @@ fn run_due_jobs(
                 row.error,
                 row.started_at,
                 row.finished_at,
-            ));
-        }
-        TableIterator::new(rows)
+            )
+        }))
+    })
+}
+
+/// Launch one internal worker pass for due durable jobs.
+#[pg_extern(schema = "graph")]
+fn run_due_jobs_async(max_jobs: default!(i32, 64)) -> bool {
+    with_panic_boundary("run_due_jobs_async()", || {
+        let max_jobs =
+            validate_positive_i32(max_jobs, "max_jobs").unwrap_or_else(|err| err.report());
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        launch_due_jobs_worker(max_jobs).unwrap_or_else(|err| err.report());
+        true
     })
 }
 
@@ -4910,6 +4959,38 @@ fn test_run_maintenance_job(job_id: &str) -> Option<String> {
             }
             message
         })
+    })
+}
+
+#[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_run_due_jobs_internal")]
+fn test_run_due_jobs_internal(max_jobs: default!(i32, 64)) -> Option<String> {
+    with_panic_boundary("_test_run_due_jobs_internal()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        run_due_jobs_result(max_jobs, "internal")
+            .err()
+            .map(|err| err.to_string())
+    })
+}
+
+#[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_run_job_internal")]
+fn test_run_job_internal(job_id: &str) -> Option<String> {
+    with_panic_boundary("_test_run_job_internal()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let job = generic_job_rows(Some(job_id), None, 1)
+            .unwrap_or_else(|err| err.report())
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                safety::GraphError::InvalidFilter {
+                    reason: format!("job '{job_id}' does not exist"),
+                }
+                .report()
+            });
+        run_job_result(&job, "internal")
+            .err()
+            .map(|err| err.to_string())
     })
 }
 

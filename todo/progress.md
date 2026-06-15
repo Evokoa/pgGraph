@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 9, Graph-Scoped Sync Replay and Automated Sync Policies.
-- Status: Phase 9 remains in progress; graph-scoped sync replay and hosted durable sync policy/job APIs are committed, and the due-job runner/advisory-lock checkpoint is ready to commit after focused pgrx coverage, public docs, local review, and broader library gates passed.
+- Active phase: Phase 10, Dirty-Range Durable Projection and Copy-on-Write Compaction.
+- Status: Phase 9 is complete after graph-scoped sync replay, durable sync policies/jobs, hosted due-job execution, and one-shot internal due-job worker coverage. Phase 10 has not started.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -19,7 +19,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 6: complete - added backend-local loaded graph slot metadata, exposed `select_graph`, `load_graph`, `unload_graph`, and `loaded_graphs`, made auto-load/build state graph-tagged, cleared stale engines on graph switches, fixed graph-scoped operational cleanup/status review blockers, and documented runtime loading.
 - Phase 7: complete - added graph grants, grant/revoke/inspect/transfer APIs, grant-aware graph visibility, graph read enforcement before queries, build-grant support for build/vacuum/maintenance, source-table ACL regression coverage, quota policy/usage APIs with hard `max_named_graphs` enforcement, graph-tenant default/conflict resolution, and public security docs.
 - Phase 8: complete - added `set_graph_residency`, cold/warm/hot runtime semantics, opt-in hot eager-load, backend load-cap lifecycle GUCs, loaded/runtime status APIs with residency/artifact metrics, runtime load quota enforcement, non-creating artifact status checks, and public lifecycle docs.
-- Phase 9: in progress - graph-scoped sync replay/status now filter the global source-table sync log to the selected graph's registered table OIDs, status clears mismatched loaded engines before reporting pending rows, and regression coverage proves unrelated source-table changes do not replay or advance the selected graph. The hosted durable sync policy/job checkpoints add `_jobs`, `_job_runs`, and `_sync_policies`, explicit policy/job SQL APIs, visibility filtering, `max_graph_jobs` quota enforcement, `graph.run_due_jobs()`, row-lock and advisory-lock guarded hosted execution, richer durable status vocabulary, public docs, and pgrx regression coverage for policy execution, due hosted runs, disabled jobs, hidden graph visibility, quota blocks, and cascaded removal.
+- Phase 9: complete - graph-scoped sync replay/status now filter the global source-table sync log to the selected graph's registered table OIDs, status clears mismatched loaded engines before reporting pending rows, and regression coverage proves unrelated source-table changes do not replay or advance the selected graph. Durable sync policy/job work adds `_jobs`, `_job_runs`, and `_sync_policies`, explicit policy/job SQL APIs, visibility filtering, `max_graph_jobs` quota enforcement, `graph.run_due_jobs()`, one-shot `graph.run_due_jobs_async()` internal workers, row-lock and advisory-lock guarded execution, richer durable status vocabulary, public docs, and pgrx regression coverage for policy execution, due hosted runs, internal-mode history, disabled jobs, hidden graph visibility, quota blocks, and cascaded removal.
 
 ## Verification Log
 
@@ -66,6 +66,16 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
 - 2026-06-15: `cargo test --features "pg17 development"` passed, 644 tests, 1 ignored.
 - 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-15: `cargo fmt --check` passed from `graph/` after adding one-shot internal due-job worker support.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed after documenting `graph.run_due_jobs_async()`.
+- 2026-06-15: `cargo test --features "pg17 development" scheduler_worker_metadata_round_trips_json` passed, 1 test.
+- 2026-06-15: `cargo test --features "pg17 development" sql_facade::admin` passed, 3 tests.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" sync_policies_run_through_visible_durable_jobs` passed with internal-mode run history coverage, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" graph_scoped_sync_replay_ignores_unrelated_source_table_changes` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" default_graph_compatibility_workflow_still_uses_legacy_sql_surface` passed, 1 test.
+- 2026-06-15: `cargo test --features "pg17 development"` passed, 645 tests, 1 ignored.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-15: `git diff --check` passed.
 - 2026-06-15: `cargo pgrx test --features "pg17 development" graph_scoped_sync_replay_ignores_unrelated_source_table_changes` passed, 1 test.
 - 2026-06-15: `cargo test --features "pg17 development" sql_sync` passed, 7 tests.
 - 2026-06-15: `scripts/check_docs_drift.sh` passed.
@@ -199,4 +209,5 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 9 sync-replay checkpoint local review found no blocking issue in selected-graph sync-log filtering, pending/max watermark reporting, query freshness scope, or docs/API drift. The remaining Phase 9 work is the durable generic job and sync-policy layer.
 - Phase 9 hosted sync policy/job checkpoint local review found no blocking issue in policy creation, visible job inspection, explicit `run_job()`/`run_sync_policy()` execution, disabled runs, quota enforcement, or docs/API drift.
 - Phase 9 hosted due-job runner checkpoint local review found no blocking issue in due selection, row-lock/advisory-lock guarded execution, durable status vocabulary, failed-run aggregation, or docs/API drift.
-- Next checkpoint: decide whether Phase 9 needs an actual optional internal launcher in this release, or whether the hosted `run_due_jobs()` runner plus documented external schedulers is the intended public automation boundary before moving to Phase 10.
+- Phase 9 one-shot internal worker checkpoint local review found no blocking issue in dynamic due-job worker metadata, internal execution-mode history, hosted/internal shared runner behavior, or docs/API drift. The implementation intentionally avoids an always-on postmaster loop; operators choose cadence through `pg_cron`, provider schedulers, application schedulers, or repeated `run_due_jobs_async()` calls.
+- Next checkpoint: start Phase 10 dirty-range durable projection planning from `todo/named-graphs-complete-plan.md`, create a regression/performance sample before code, and keep docs updated with public copy-on-write projection behavior.
