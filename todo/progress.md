@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 2, Graph-Scoped Registration Catalogs.
-- Status: Phase 2 complete and ready to commit after independent review fixes.
+- Active phase: Phase 4, Graph-Scoped Build, Locks, Jobs, and Status.
+- Status: Phase 3 complete and ready to commit.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -13,6 +13,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 0: complete - pinned default-graph compatibility, recorded the single-graph audit, added named-graph policy vocabulary, and updated contributor docs.
 - Phase 1: complete - added `graph._graphs`, bootstrapped the compatibility default graph, exposed graph metadata SQL functions, documented the public metadata surface, and verified catalog ACL/SQLSTATE behavior.
 - Phase 2: complete - scoped registration catalogs by `graph_id`, kept selected/default graph compatibility wrappers, added explicit named-graph registration APIs, updated filter resolution, and documented graph-scoped registration.
+- Phase 3: complete - made auto-discovery graph-aware, added write-free preview APIs, supported targeted named-graph discovery/build flows, and explicitly rejected arbitrary row-predicate subgraphs.
 
 ## Verification Log
 
@@ -50,6 +51,18 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
 - 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
 - 2026-06-15: `git diff --check` passed.
+- 2026-06-15: `cargo fmt --check` passed from `graph/`.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" preview_discover_tables_writes_no_registration_rows` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" auto_discover_tables_into_named_graph_does_not_mutate_default_graph` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" auto_discover_tables_builds_target_named_graph` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" row_predicate_subgraphs_are_explicitly_rejected` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" auto_discover_tables_registers_only_selected_tables_and_edges` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" auto_discover_tables_discovers_fk_edges_inside_selected_set` passed, 1 test.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed.
+- 2026-06-15: `cargo test --features "pg17 development" graph_policy` passed, 4 tests.
+- 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-15: `git diff --check` passed.
 
 ## Working Notes
 
@@ -59,4 +72,5 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 1 review found no blocking issues. The one review adjustment made global/default graph selection visible to non-owner roles without loosening create, alter, drop, or direct catalog-write permissions.
 - Phase 2 local review found no blocking issues before the required independent review.
 - Independent review after three completed phases ran in subagent `019ecb1a-df0c-7a00-8257-ae3385df7a21` and found three issues: selected graph GUC spoofing, raw FK behavior for dropping non-empty graphs, and stale `set_current_graph()` docs. All three were fixed and covered by follow-up tests/docs.
-- Next checkpoint: Phase 3 adds graph-aware discovery and subgraph definition APIs.
+- Phase 3 review found no blocking issues. Discovery writes now route through explicit graph ids; preview APIs return discovery rows without registration writes; row-predicate subgraphs return `PG018`.
+- Next checkpoint: Phase 4 scopes build jobs, maintenance jobs, locks, and status by graph id.

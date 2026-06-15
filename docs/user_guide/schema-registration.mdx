@@ -290,7 +290,8 @@ SELECT graph.remove_table_from_graph(
 ## Auto-Discovery
 
 `graph.auto_discover(schema_name)` scans tables and foreign keys in one schema,
-registers discovered tables and FK edges, then calls `graph.build()`.
+registers discovered tables and FK edges in the selected/default graph, then
+calls `graph.build()` unless `build := false`.
 
 ```sql
 SELECT * FROM graph.auto_discover('public');
@@ -307,6 +308,36 @@ FROM graph.auto_discover_tables(
     'public.orders'::regclass
   ],
   tenant_column := 'account_id'
+);
+```
+
+For a named graph, pass `graph_name` and optionally `graph_namespace`:
+
+```sql
+SELECT *
+FROM graph.auto_discover_tables(
+  ARRAY[
+    'public.users'::regclass,
+    'public.orders'::regclass
+  ],
+  graph_name := 'customer_360',
+  graph_namespace := 'analytics',
+  build := false
+);
+```
+
+Preview functions return the same discovery rows without writing registration
+catalog state:
+
+```sql
+SELECT *
+FROM graph.preview_discover_tables(
+  ARRAY[
+    'public.users'::regclass,
+    'public.orders'::regclass
+  ],
+  graph_name := 'customer_360',
+  graph_namespace := 'analytics'
 );
 ```
 
@@ -331,6 +362,11 @@ SELECT graph.add_table(
   columns := ARRAY['name', 'email', 'status']
 );
 ```
+
+Subgraph support is catalog-subset based: create a named graph and register the
+selected tables and relationships into that graph. Arbitrary row-predicate
+subgraphs are rejected with SQLSTATE `PG018`; use PostgreSQL views or source
+tables when row filtering needs to be part of the source-of-truth model.
 
 Traversal filters are registered separately from searchable properties:
 

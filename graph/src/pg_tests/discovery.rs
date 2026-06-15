@@ -376,3 +376,142 @@ fn auto_discover_tables_stores_shared_tenant_column_and_enforces_scope() {
     assert_eq!(cross_tenant_rows, 0);
 }
 
+#[pg_test]
+fn preview_discover_tables_writes_no_registration_rows() {
+    reset_and_create_fixtures();
+
+    let preview_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.preview_discover_tables(
+                ARRAY[
+                    'graph_test_users_pgtest'::regclass,
+                    'graph_test_friendships_pgtest'::regclass
+                ]
+           )",
+    )
+    .expect("preview discovery failed")
+    .unwrap_or(0);
+    let table_count = Spi::get_one::<i64>("SELECT count(*) FROM graph.registered_tables()")
+        .expect("registered table count failed")
+        .unwrap_or(-1);
+    let edge_count = Spi::get_one::<i64>("SELECT count(*) FROM graph.registered_edges()")
+        .expect("registered edge count failed")
+        .unwrap_or(-1);
+
+    assert!(preview_rows > 0);
+    assert_eq!(table_count, 0);
+    assert_eq!(edge_count, 0);
+}
+
+#[pg_test]
+fn auto_discover_tables_into_named_graph_does_not_mutate_default_graph() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('discover_a', namespace := 'app')")
+        .expect("create discover_a failed");
+    Spi::run("SELECT graph.create_graph('discover_b', namespace := 'app')")
+        .expect("create discover_b failed");
+
+    Spi::run(
+        "SELECT * FROM graph.auto_discover_tables(
+                ARRAY[
+                    'graph_test_users_pgtest'::regclass,
+                    'graph_test_friendships_pgtest'::regclass
+                ],
+                graph_name := 'discover_a',
+                graph_namespace := 'app',
+                build := false
+            )",
+    )
+    .expect("discover_a targeted discovery failed");
+    Spi::run(
+        "SELECT * FROM graph.auto_discover_tables(
+                ARRAY[
+                    'graph_test_users_pgtest'::regclass,
+                    'graph_test_bad_pgtest'::regclass
+                ],
+                graph_name := 'discover_b',
+                graph_namespace := 'app',
+                build := false
+            )",
+    )
+    .expect("discover_b targeted discovery failed");
+
+    let default_tables = Spi::get_one::<i64>("SELECT count(*) FROM graph.registered_tables()")
+        .expect("default table count failed")
+        .unwrap_or(-1);
+    let discover_a_edges = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.registered_edges_for_graph('discover_a', graph_namespace := 'app')",
+    )
+    .expect("discover_a edge count failed")
+    .unwrap_or(-1);
+    let discover_b_edges = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.registered_edges_for_graph('discover_b', graph_namespace := 'app')",
+    )
+    .expect("discover_b edge count failed")
+    .unwrap_or(-1);
+    let discover_b_tables = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.registered_tables_for_graph('discover_b', graph_namespace := 'app')",
+    )
+    .expect("discover_b table count failed")
+    .unwrap_or(-1);
+
+    assert_eq!(default_tables, 0);
+    assert_eq!(discover_a_edges, 2);
+    assert_eq!(discover_b_edges, 0);
+    assert_eq!(discover_b_tables, 2);
+}
+
+#[pg_test]
+fn auto_discover_tables_builds_target_named_graph() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('discover_build', namespace := 'app')")
+        .expect("create discover_build failed");
+
+    let build_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.auto_discover_tables(
+                ARRAY[
+                    'graph_test_users_pgtest'::regclass,
+                    'graph_test_friendships_pgtest'::regclass
+                ],
+                graph_name := 'discover_build',
+                graph_namespace := 'app',
+                build := true
+           )
+          WHERE item_type = 'build'",
+    )
+    .expect("targeted discovery build failed")
+    .unwrap_or(0);
+    let current_graph = Spi::get_one::<String>("SELECT graph_name FROM graph.current_graph()")
+        .expect("current graph query failed")
+        .expect("current graph row missing");
+    let node_count = Spi::get_one::<i32>("SELECT node_count FROM graph.status()")
+        .expect("targeted graph status failed")
+        .unwrap_or(0);
+    let edge_count = Spi::get_one::<i32>("SELECT edge_count FROM graph.status()")
+        .expect("targeted graph edge status failed")
+        .unwrap_or(0);
+
+    assert_eq!(build_rows, 1);
+    assert_eq!(current_graph, "discover_build");
+    assert!(node_count > 0);
+    assert!(edge_count > 0);
+}
+
+#[pg_test]
+fn row_predicate_subgraphs_are_explicitly_rejected() {
+    reset_and_create_fixtures();
+
+    assert_eq!(
+        sqlstate_for_error(
+            "SELECT graph.create_row_predicate_subgraph(
+                'predicate_graph',
+                '{\"where\":{\"status\":\"active\"}}'::jsonb
+            )"
+        ),
+        Some("PG018".to_string())
+    );
+}

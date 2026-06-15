@@ -10,7 +10,7 @@ All functions live in the `graph` schema.
 | Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
 | Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph` |
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
-| Discovery | `auto_discover`, `auto_discover_tables` |
+| Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
 | Build jobs | `build`, `build_status` |
 | Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `projection_gc`, `projection_repair`, `vacuum`, `maintenance`, `maintenance_status` |
 | GQL | `gql`, `gql_explain` |
@@ -672,7 +672,13 @@ Estimates graph size from `pg_class.reltuples`.
 ### `graph.auto_discover()`
 
 ```sql
-graph.auto_discover(schema_name text DEFAULT 'public')
+graph.auto_discover(
+  schema_name text DEFAULT 'public',
+  graph_name text DEFAULT NULL,
+  build boolean DEFAULT true,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
 RETURNS TABLE (
   item_type text,
   item_name text,
@@ -680,15 +686,20 @@ RETURNS TABLE (
 )
 ```
 
-Admin-only. Discovers tables and FK edges in a schema, registers them, then
-calls `graph.build()`.
+Admin-only. Discovers tables and FK edges in a schema and registers them in the
+selected/default graph, or in `graph_name` when supplied. When `build` is true,
+the target graph is selected and `graph.build()` runs after registration.
 
 ### `graph.auto_discover_tables()`
 
 ```sql
 graph.auto_discover_tables(
   tables regclass[],
-  tenant_column text DEFAULT NULL
+  tenant_column text DEFAULT NULL,
+  graph_name text DEFAULT NULL,
+  build boolean DEFAULT true,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
 )
 RETURNS TABLE (
   item_type text,
@@ -697,8 +708,64 @@ RETURNS TABLE (
 )
 ```
 
-Admin-only. Discovers selected tables and FK edges only among those tables, then
-calls `graph.build()`.
+Admin-only. Discovers selected tables and FK edges only among those tables and
+registers them in the selected/default graph, or in `graph_name` when supplied.
+When `build` is true, the target graph is selected and `graph.build()` runs
+after registration.
+
+### `graph.preview_discover()`
+
+```sql
+graph.preview_discover(
+  schema_name text DEFAULT 'public',
+  graph_name text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  item_type text,
+  item_name text,
+  details text
+)
+```
+
+Previews schema discovery rows without writing registration catalog state.
+
+### `graph.preview_discover_tables()`
+
+```sql
+graph.preview_discover_tables(
+  tables regclass[],
+  tenant_column text DEFAULT NULL,
+  graph_name text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  item_type text,
+  item_name text,
+  details text
+)
+```
+
+Previews selected-table discovery rows without writing registration catalog
+state.
+
+### `graph.create_row_predicate_subgraph()`
+
+```sql
+graph.create_row_predicate_subgraph(
+  graph_name text,
+  row_predicate jsonb,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+) RETURNS void
+```
+
+Always returns SQLSTATE `PG018`. Row-predicate subgraphs are not supported
+because graph writes and sync must continue to obey PostgreSQL source-table
+semantics. Use `graph.auto_discover_tables()` with an explicit table set and
+optional `tenant_column` for catalog-subset subgraphs.
 
 ## Build Jobs
 
