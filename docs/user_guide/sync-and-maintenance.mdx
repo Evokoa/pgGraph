@@ -31,6 +31,12 @@ registered tables. `graph.enable_sync()` is still available when operators want
 to install or reinstall those triggers explicitly. Trigger rows are durable in
 `graph._sync_log`.
 
+For named graphs, the trigger log remains source-table oriented. A source table
+change is written once, and `graph.apply_sync()`, query freshness, and
+`graph.sync_health()` filter that log to the selected graph's registered source
+tables. Changes for unrelated graphs do not advance or replay the selected
+graph's backend-local sync state.
+
 ```text
 source table DML
       |
@@ -70,10 +76,10 @@ Current apply behavior includes:
 | Edge mutations outside durable projection coverage | Stored in the legacy edge overlay buffer until rebuild/vacuum |
 | Truncate | Marks rebuild/vacuum need |
 
-`graph.apply_sync()` drains the durable sync rows that were pending when the
-call started. Internally, replay is bounded by `graph.sync_batch_size`, so large
-backlogs are processed in smaller batches without changing the public admin
-contract.
+`graph.apply_sync()` drains the selected graph's durable sync rows that were
+pending when the call started. Internally, replay is bounded by
+`graph.sync_batch_size`, so large backlogs are processed in smaller batches
+without changing the public admin contract.
 
 <Callout type="warning">
 The base CSR store is immutable. Durable projection segments make committed
@@ -116,8 +122,8 @@ FROM graph.sync_health();
 | `query_freshness` | Current topology-read freshness mode |
 | `sync_batch_size` | Maximum durable sync rows replayed per internal batch |
 | `applied_sync_id` | Last durable sync log row applied by this backend-local engine |
-| `max_sync_log_id` | Current high-water row in `graph._sync_log` |
-| `pending_sync_rows` | Durable sync rows newer than `applied_sync_id` |
+| `max_sync_log_id` | Current high-water row in `graph._sync_log` for the selected graph's registered tables |
+| `pending_sync_rows` | Durable sync rows for the selected graph newer than `applied_sync_id` |
 | `disabled_trigger_count` | Registered graph triggers currently disabled |
 | `edge_buffer_used` | Pending edge overlay mutations |
 | `edge_buffer_size` | Configured edge overlay capacity |

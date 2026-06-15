@@ -687,6 +687,98 @@ fn graph_residency_controls_auto_load_and_runtime_status() {
 }
 
 #[pg_test]
+fn graph_scoped_sync_replay_ignores_unrelated_source_table_changes() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('sync_a', namespace := 'app')")
+        .expect("create sync_a failed");
+    Spi::run("SELECT graph.create_graph('sync_b', namespace := 'app')")
+        .expect("create sync_b failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+             'sync_a',
+             'graph_test_users_pgtest'::regclass,
+             'id',
+             ARRAY['name'],
+             graph_namespace := 'app'
+         )",
+    )
+    .expect("add sync_a table failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+             'sync_b',
+             'graph_test_bad_pgtest'::regclass,
+             'id',
+             ARRAY['note'],
+             graph_namespace := 'app'
+         )",
+    )
+    .expect("add sync_b table failed");
+    Spi::run("INSERT INTO public.graph_test_bad_pgtest (id, note) VALUES ('s1', 'before')")
+        .expect("insert sync_b row failed");
+
+    Spi::run("SELECT graph.set_current_graph('sync_a', namespace := 'app')")
+        .expect("select sync_a for build failed");
+    Spi::run("SELECT graph.build_graph('sync_a', force_persist := true, graph_namespace := 'app')")
+        .expect("build sync_a failed");
+    Spi::run("SELECT graph.set_current_graph('sync_b', namespace := 'app')")
+        .expect("select sync_b for build failed");
+    Spi::run("SELECT graph.build_graph('sync_b', force_persist := true, graph_namespace := 'app')")
+        .expect("build sync_b failed");
+    Spi::run("SELECT graph.set_current_graph('sync_a', namespace := 'app')")
+        .expect("select sync_a for enable_sync failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync_a triggers failed");
+    Spi::run("SELECT graph.set_current_graph('sync_b', namespace := 'app')")
+        .expect("select sync_b for enable_sync failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync_b triggers failed");
+
+    Spi::run("UPDATE public.graph_test_bad_pgtest SET note = 'after' WHERE id = 's1'")
+        .expect("update sync_b table failed");
+    Spi::run("SELECT graph.set_current_graph('sync_a', namespace := 'app')")
+        .expect("reselect sync_a failed");
+    let pending_for_a = Spi::get_one::<i64>(
+        "SELECT pending_sync_rows
+           FROM graph.sync_health()",
+    )
+    .expect("sync_a sync_health failed")
+    .unwrap_or(-1);
+    let applied_unrelated = Spi::get_one::<i64>(
+        "SELECT updates_applied
+           FROM graph.apply_sync()",
+    )
+    .expect("apply_sync sync_a failed")
+    .unwrap_or(-1);
+
+    Spi::run("UPDATE public.graph_test_users_pgtest SET name = 'Alice synced' WHERE id = 'u1'")
+        .expect("update sync_a table failed");
+    let logged_user_updates = Spi::get_one::<i64>(
+        "SELECT count(*)
+          FROM graph._sync_log
+         WHERE table_name = 'public.graph_test_users_pgtest'
+            AND op = 'U'",
+    )
+    .expect("sync log users count failed")
+    .unwrap_or(-1);
+    let pending_after_a_change = Spi::get_one::<i64>(
+        "SELECT pending_sync_rows
+           FROM graph.sync_health()",
+    )
+    .expect("sync_a sync_health after relevant change failed")
+    .unwrap_or(-1);
+    let applied_related = Spi::get_one::<i64>(
+        "SELECT updates_applied
+           FROM graph.apply_sync()",
+    )
+    .expect("apply_sync sync_a relevant row failed")
+    .unwrap_or(-1);
+
+    assert_eq!(pending_for_a, 0);
+    assert_eq!(applied_unrelated, 0);
+    assert_eq!(logged_user_updates, 1);
+    assert_eq!(pending_after_a_change, 1);
+    assert_eq!(applied_related, 1);
+}
+
+#[pg_test]
 fn graph_scoped_registrations_isolate_tables_edges_and_filters() {
     reset_and_create_fixtures();
     Spi::run("SELECT graph.create_graph('tenant_a', namespace := 'app')")

@@ -115,14 +115,23 @@ pub(crate) fn disabled_graph_trigger_count() -> safety::GraphResult<i32> {
 }
 
 pub(crate) fn pending_sync_rows(applied_sync_id: i64) -> safety::GraphResult<i64> {
+    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    if applicable_table_oids.is_empty() {
+        return Ok(0);
+    }
     Spi::connect(|client| {
         let result = client.select(
             "SELECT CASE
                 WHEN to_regclass('graph._sync_log') IS NULL THEN 0::bigint
-                ELSE (SELECT count(*)::bigint FROM graph._sync_log WHERE id > $1)
+                ELSE (
+                    SELECT count(*)::bigint
+                      FROM graph._sync_log
+                     WHERE id > $1
+                       AND table_oid::oid::integer = ANY($2::int4[])
+                )
              END",
             None,
-            &[applied_sync_id.into()],
+            &[applied_sync_id.into(), applicable_table_oids.into()],
         )?;
         Ok::<_, pgrx::spi::SpiError>(result.first().get::<i64>(1)?.unwrap_or(0))
     })
@@ -130,14 +139,22 @@ pub(crate) fn pending_sync_rows(applied_sync_id: i64) -> safety::GraphResult<i64
 }
 
 pub(crate) fn max_sync_log_id() -> safety::GraphResult<i64> {
+    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    if applicable_table_oids.is_empty() {
+        return Ok(0);
+    }
     Spi::connect(|client| {
         let result = client.select(
             "SELECT CASE
                 WHEN to_regclass('graph._sync_log') IS NULL THEN 0::bigint
-                ELSE (SELECT COALESCE(max(id), 0)::bigint FROM graph._sync_log)
+                ELSE (
+                    SELECT COALESCE(max(id), 0)::bigint
+                      FROM graph._sync_log
+                     WHERE table_oid::oid::integer = ANY($1::int4[])
+                )
              END",
             None,
-            &[],
+            &[applicable_table_oids.into()],
         )?;
         Ok::<_, pgrx::spi::SpiError>(result.first().get::<i64>(1)?.unwrap_or(0))
     })
@@ -363,6 +380,18 @@ impl SyncReplayContext {
 
     fn table_oid(&self, table_name: &str) -> Option<u32> {
         self.table_oids.get(table_name).copied()
+    }
+
+    fn applicable_table_oids(&self) -> Vec<i32> {
+        let mut oids = self
+            .all_table_oids
+            .iter()
+            .chain(self.edge_source_oids.iter())
+            .filter_map(|oid| i32::try_from(*oid).ok())
+            .collect::<Vec<_>>();
+        oids.sort_unstable();
+        oids.dedup();
+        oids
     }
 
     fn table_oid_or_lookup(&mut self, table_name: &str) -> safety::GraphResult<u32> {
@@ -667,6 +696,10 @@ pub(crate) fn read_sync_log_entries_after(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    if applicable_table_oids.is_empty() {
+        return Ok(Vec::new());
+    }
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     Spi::connect(|client| {
         let rows = client
@@ -675,11 +708,17 @@ pub(crate) fn read_sync_log_entries_after(
                     old_pk, new_pk, properties::text, old_row::text, new_row::text
              FROM graph._sync_log
              WHERE id > $1
-               AND ($3::bigint IS NULL OR id <= $3)
+               AND table_oid::oid::integer = ANY($3::int4[])
+               AND ($4::bigint IS NULL OR id <= $4)
              ORDER BY id
              LIMIT $2",
                 None,
-                &[applied_sync_id.into(), limit.into(), high_watermark.into()],
+                &[
+                    applied_sync_id.into(),
+                    limit.into(),
+                    applicable_table_oids.into(),
+                    high_watermark.into(),
+                ],
             )
             .map_err(|e| safety::GraphError::Internal(format!("sync log read failed: {e}")))?;
         let mut entries = Vec::new();

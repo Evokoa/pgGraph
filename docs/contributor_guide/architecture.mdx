@@ -143,7 +143,7 @@ places named-graph support must update:
 | Runtime | `ENGINE` stores one backend-local graph engine tagged by a loaded graph slot. `ensure_current_graph()` validates that the loaded slot matches the selected graph before query execution. |
 | Build jobs | `graph._build_jobs` and `graph._maintenance_jobs` are keyed by `graph_id`; workers restore database, user, and graph context before running. |
 | Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph`. |
-| Sync | `graph._sync_log` and `graph._sync_buffer` are global sync streams. |
+| Sync | `graph._sync_log` and `graph._sync_buffer` are global source-table streams; replay, status, and query freshness filter `_sync_log` through the selected graph's registered table OIDs. |
 | Projection generations | `graph._projection_generations` is keyed by `graph_id` so active-generation heartbeats and GC protection are graph-local. |
 | Discovery | `graph.auto_discover()` and `graph.auto_discover_tables()` can target a named graph or the selected/default graph. |
 | Reset | `graph.reset()` clears the backend-local engine and removes files for the selected graph's artifact root. |
@@ -219,9 +219,10 @@ between PostgreSQL coordinates and those internal indexes.
 ## Sync And Maintenance Flow
 
 Trigger sync records source-table changes in `graph._sync_log`. Topology query
-functions apply pending trigger-sync rows by default up to a captured high-water
-mark; operators can set `graph.query_freshness = 'off'` for compatibility/manual
-catch-up or `error_on_pending` to fail instead of reading stale topology.
+functions apply pending trigger-sync rows for the selected graph by default up
+to a captured high-water mark for that graph's registered table OIDs; operators
+can set `graph.query_freshness = 'off'` for compatibility/manual catch-up or
+`error_on_pending` to fail instead of reading stale topology.
 Persisted `mutable_overlay` graphs publish committed edge changes as durable L0
 projection segments and reload the latest projection manifest, so other
 backends can observe committed topology changes without a full rebuild.

@@ -354,7 +354,7 @@ pub(super) fn maybe_auto_load() {
     }
 }
 
-fn clear_loaded_graph_if_mismatched(graph_id: &str) {
+pub(super) fn clear_loaded_graph_if_mismatched(graph_id: &str) {
     if let Some(loaded_graph_id) = crate::runtime_state::loaded_graph_id() {
         if loaded_graph_id != graph_id {
             ENGINE.with(|engine| {

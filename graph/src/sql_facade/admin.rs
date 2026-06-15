@@ -1387,6 +1387,8 @@ fn run_scheduled_maintenance() -> TableIterator<
 
 fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> {
     crate::projection::manifest::expire_stale_generation_heartbeats()?;
+    let graph = catalog::selected_or_default_graph_metadata()?;
+    super::runtime::clear_loaded_graph_if_mismatched(&graph.graph_id);
     let disabled_trigger_count = disabled_graph_trigger_count()?;
     let catalog_state = current_catalog_state();
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
