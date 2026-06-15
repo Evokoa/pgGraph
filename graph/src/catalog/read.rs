@@ -273,7 +273,7 @@ pub(crate) fn current_catalog_state() -> safety::GraphResult<(u64, Option<String
     current_catalog_state_from_rows(&tables, &edges, &filter_columns)
 }
 
-fn current_catalog_state_from_rows(
+pub(crate) fn current_catalog_state_from_rows(
     tables: &[builder::RegisteredTable],
     edges: &[builder::RegisteredEdge],
     filter_columns: &[builder::RegisteredFilterColumn],

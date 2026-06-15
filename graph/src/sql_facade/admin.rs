@@ -2306,6 +2306,9 @@ fn add_edge(
             label_column: label_column.as_deref(),
         })
         .unwrap_or_else(|err| err.report());
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        touch_graph_catalog(&graph.graph_id).unwrap_or_else(|err| err.report());
     });
 }
 
@@ -2372,6 +2375,7 @@ fn add_edge_to_graph(
             },
         )
         .unwrap_or_else(|err| err.report());
+        touch_graph_catalog(&graph.graph_id).unwrap_or_else(|err| err.report());
     });
 }
 
@@ -2563,6 +2567,88 @@ fn registered_edges_for_graph_id(
         .map_err(|err| safety::GraphError::Internal(format!("registered edges read failed: {err}")))?;
 
     Ok(TableIterator::new(rows))
+}
+
+/// List edge relationships registered in a named graph.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn list_edges(
+    graph_name: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(from_table, String),
+        name!(from_column, String),
+        name!(to_table, String),
+        name!(to_column, String),
+        name!(label, String),
+        name!(bidirectional, bool),
+        name!(weight_column, Option<String>),
+        name!(label_column, Option<String>),
+    ),
+> {
+    with_panic_boundary("list_edges()", || {
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        registered_edges_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
+    })
+}
+
+/// Rename edge relationships in a named graph without removing the mapping.
+#[pg_extern(schema = "graph")]
+fn rename_edge(
+    graph_name: &str,
+    old_label: &str,
+    new_label: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    with_panic_boundary("rename_edge()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        rename_edge_for_graph_id(&graph.graph_id, old_label, new_label)
+            .unwrap_or_else(|err| err.report());
+        pgrx::notice!(
+            "graph: renamed edge '{}' to '{}' in graph '{}'. Call graph.build() to rebuild.",
+            old_label,
+            new_label,
+            graph.graph_name
+        );
+    });
+}
+
+/// Alter edge relationship options in a named graph.
+#[pg_extern(schema = "graph")]
+fn alter_edge(
+    graph_name: &str,
+    label: &str,
+    bidirectional: default!(Option<bool>, "NULL"),
+    weight_column: default!(Option<String>, "NULL"),
+    label_column: default!(Option<String>, "NULL"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    with_panic_boundary("alter_edge()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        alter_edge_for_graph_id(
+            &graph.graph_id,
+            label,
+            bidirectional,
+            weight_column.as_deref(),
+            label_column.as_deref(),
+        )
+        .unwrap_or_else(|err| err.report());
+        pgrx::notice!(
+            "graph: altered edge '{}' in graph '{}'. Call graph.build() to rebuild.",
+            label,
+            graph.graph_name
+        );
+    });
 }
 
 /// Register a column for traversal-time filters.
@@ -2956,6 +3042,17 @@ fn remove_edge(label: &str) {
 }
 
 /// Unregister an edge relationship by label from a named graph.
+#[pg_extern(schema = "graph", name = "remove_edge")]
+fn remove_edge_for_named_graph(
+    graph_name: &str,
+    label: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) {
+    remove_edge_from_graph(graph_name, label, graph_tenant, graph_namespace);
+}
+
+/// Unregister an edge relationship by label from a named graph.
 #[pg_extern(schema = "graph")]
 fn remove_edge_from_graph(
     graph_name: &str,
@@ -2982,7 +3079,561 @@ fn remove_edge_from_graph_id(graph_id: &str, label: &str) -> safety::GraphResult
             AND label = $2",
         &[graph_id.into(), label.into()],
     )
-    .map_err(|err| safety::GraphError::Internal(format!("registered edge delete failed: {err}")))
+    .map_err(|err| safety::GraphError::Internal(format!("registered edge delete failed: {err}")))?;
+    touch_graph_catalog(graph_id)
+}
+
+fn rename_edge_for_graph_id(
+    graph_id: &str,
+    old_label: &str,
+    new_label: &str,
+) -> safety::GraphResult<()> {
+    validate_edge_label(new_label, "new_label")?;
+    if old_label == new_label {
+        return Ok(());
+    }
+    let matching_rows = edge_label_count(graph_id, old_label)?;
+    if matching_rows == 0 {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: format!("edge label '{old_label}' is not registered in this graph"),
+        });
+    }
+    if edge_label_count(graph_id, new_label)? > 0 {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: format!("edge label '{new_label}' is already registered in this graph"),
+        });
+    }
+
+    Spi::run_with_args(
+        "UPDATE graph._registered_edges
+            SET label = $3
+          WHERE graph_id = $1::uuid
+            AND label = $2",
+        &[graph_id.into(), old_label.into(), new_label.into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("registered edge rename failed: {err}")))?;
+    touch_graph_catalog(graph_id)
+}
+
+fn alter_edge_for_graph_id(
+    graph_id: &str,
+    label: &str,
+    bidirectional: Option<bool>,
+    weight_column: Option<&str>,
+    label_column: Option<&str>,
+) -> safety::GraphResult<()> {
+    let edges = registered_edge_rows_for_label(graph_id, label)?;
+    if edges.is_empty() {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: format!("edge label '{label}' is not registered in this graph"),
+        });
+    }
+    let (tables, _edges, _filters) = crate::catalog::read_catalog_for_graph(graph_id)?;
+    let registered_tables = tables
+        .iter()
+        .map(|table| table.table_name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+
+    for edge in &edges {
+        let from_oid = crate::catalog::table_oid_from_name(&edge.from_table)?;
+        let to_oid = crate::catalog::table_oid_from_name(&edge.to_table)?;
+        let from_table_registered = registered_tables.contains(edge.from_table.as_str());
+        validate_edge_endpoint_columns(
+            from_oid,
+            &edge.from_table,
+            &edge.from_column,
+            to_oid,
+            &edge.to_table,
+            &edge.to_column,
+            from_table_registered,
+        )?;
+        if let Some(weight) = weight_column {
+            validate_column_exists(from_oid, weight)?;
+        }
+        if let Some(label_column) = label_column {
+            validate_column_exists(from_oid, label_column)?;
+        }
+    }
+
+    Spi::run_with_args(
+        "UPDATE graph._registered_edges
+            SET bidirectional = COALESCE($3, bidirectional),
+                weight_column = COALESCE($4, weight_column),
+                label_column = COALESCE($5, label_column)
+          WHERE graph_id = $1::uuid
+            AND label = $2",
+        &[
+            graph_id.into(),
+            label.into(),
+            bidirectional.into(),
+            weight_column.map(|value| value.to_string()).into(),
+            label_column.map(|value| value.to_string()).into(),
+        ],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("registered edge alter failed: {err}")))?;
+    touch_graph_catalog(graph_id)
+}
+
+fn touch_graph_catalog(graph_id: &str) -> safety::GraphResult<()> {
+    Spi::run_with_args(
+        "UPDATE graph._graphs
+            SET updated_at = now()
+          WHERE graph_id = $1::uuid",
+        &[graph_id.into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("graph metadata touch failed: {err}")))
+}
+
+fn edge_label_count(graph_id: &str, label: &str) -> safety::GraphResult<i64> {
+    Spi::get_one_with_args::<i64>(
+        "SELECT count(*)
+           FROM graph._registered_edges
+          WHERE graph_id = $1::uuid
+            AND label = $2",
+        &[graph_id.into(), label.into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("registered edge lookup failed: {err}")))
+    .map(|count| count.unwrap_or(0))
+}
+
+fn registered_edge_rows_for_label(
+    graph_id: &str,
+    label: &str,
+) -> safety::GraphResult<Vec<builder::RegisteredEdge>> {
+    let (_tables, edges, _filters) = crate::catalog::read_catalog_for_graph(graph_id)?;
+    Ok(edges
+        .into_iter()
+        .filter(|edge| edge.label == label)
+        .collect())
+}
+
+fn validate_edge_label(label: &str, name: &str) -> safety::GraphResult<()> {
+    if !label.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(safety::GraphError::InvalidFilter {
+            reason: format!("{name} must not be empty"),
+        })
+    }
+}
+
+#[pg_extern(schema = "graph")]
+fn graph_map(
+    graph_name: &str,
+    format: default!(&str, "'json'"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> pgrx::JsonB {
+    with_panic_boundary("graph_map()", || {
+        if !format.eq_ignore_ascii_case("json") {
+            safety::GraphError::InvalidFilter {
+                reason: format!("unsupported graph_map format '{format}'; expected 'json'"),
+            }
+            .report();
+        }
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        pgrx::JsonB(graph_map_json(&graph).unwrap_or_else(|err| err.report()))
+    })
+}
+
+fn graph_map_json(graph: &catalog::GraphMetadata) -> safety::GraphResult<serde_json::Value> {
+    let (tables, edges, filter_columns) = crate::catalog::read_catalog_for_graph(&graph.graph_id)?;
+    let catalog_fingerprint = catalog_fingerprint(&tables, &edges, &filter_columns);
+    let mut warnings = graph_map_warnings(graph, &tables, &edges, &filter_columns)?;
+    let status = graph_map_status(graph)?;
+    if status
+        .get("build")
+        .and_then(|build| build.get("needs_rebuild"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        warnings.push(serde_json::json!({
+            "code": "rebuild_required",
+            "message": "The loaded graph was built from an older registration catalog. Run graph.build() after relationship changes."
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "graph": {
+            "graph_id": graph.graph_id,
+            "graph_name": graph.graph_name,
+            "tenant": graph.tenant,
+            "namespace": graph.namespace,
+            "graph_kind": graph.graph_kind,
+            "residency": graph.residency,
+            "materialization": graph.materialization,
+            "projection_mode": graph.projection_mode
+        },
+        "catalog": {
+            "fingerprint": catalog_fingerprint.to_string(),
+            "node_tables": graph_map_tables(&tables, &filter_columns),
+            "relationships": graph_map_edges(&edges),
+            "filter_columns": graph_map_filters(&filter_columns)
+        },
+        "status": status,
+        "warnings": warnings
+    }))
+}
+
+fn graph_map_tables(
+    tables: &[builder::RegisteredTable],
+    filter_columns: &[builder::RegisteredFilterColumn],
+) -> Vec<serde_json::Value> {
+    let mut rows = tables
+        .iter()
+        .map(|table| {
+            let filters = filter_columns
+                .iter()
+                .filter(|filter| filter.table_name == table.table_name)
+                .map(|filter| {
+                    serde_json::json!({
+                        "column": filter.column_name,
+                        "type": filter.column_type
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "table_name": table.table_name,
+                "primary_key": table.id_columns.columns(),
+                "properties": table.columns.to_vec(),
+                "tenant_column": table.tenant_column,
+                "filter_columns": filters
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        json_string(left, "table_name").cmp(&json_string(right, "table_name"))
+    });
+    rows
+}
+
+fn graph_map_edges(edges: &[builder::RegisteredEdge]) -> Vec<serde_json::Value> {
+    let mut rows = edges
+        .iter()
+        .map(|edge| {
+            serde_json::json!({
+                "from_table": edge.from_table,
+                "from_column": edge.from_column,
+                "to_table": edge.to_table,
+                "to_column": edge.to_column,
+                "label": edge.label,
+                "bidirectional": edge.bidirectional,
+                "weight_column": edge.weight_column,
+                "label_column": edge.label_column,
+                "label_source": if edge.label_column.is_some() { "dynamic_column" } else { "static_label" }
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        json_string(left, "from_table")
+            .cmp(&json_string(right, "from_table"))
+            .then(json_string(left, "from_column").cmp(&json_string(right, "from_column")))
+            .then(json_string(left, "to_table").cmp(&json_string(right, "to_table")))
+            .then(json_string(left, "to_column").cmp(&json_string(right, "to_column")))
+            .then(json_string(left, "label").cmp(&json_string(right, "label")))
+    });
+    rows
+}
+
+fn graph_map_filters(filter_columns: &[builder::RegisteredFilterColumn]) -> Vec<serde_json::Value> {
+    let mut rows = filter_columns
+        .iter()
+        .map(|filter| {
+            serde_json::json!({
+                "table_name": filter.table_name,
+                "column": filter.column_name,
+                "type": filter.column_type
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        json_string(left, "table_name")
+            .cmp(&json_string(right, "table_name"))
+            .then(json_string(left, "column").cmp(&json_string(right, "column")))
+    });
+    rows
+}
+
+fn graph_map_warnings(
+    graph: &catalog::GraphMetadata,
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    filter_columns: &[builder::RegisteredFilterColumn],
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    let mut warnings = Vec::new();
+    let (_fingerprint, drift_reason) =
+        crate::catalog::current_catalog_state_from_rows(tables, edges, filter_columns)?;
+    if let Some(reason) = drift_reason {
+        warnings.push(serde_json::json!({
+            "code": "schema_drift",
+            "message": reason
+        }));
+    }
+
+    let latest_build = latest_build_status_for_graph(&graph.graph_id)?;
+    if latest_build.as_deref() != Some(JobStatus::Completed.as_str()) {
+        warnings.push(serde_json::json!({
+            "code": "missing_build",
+            "message": "No completed build job is recorded for this graph."
+        }));
+    }
+
+    let mut labels = std::collections::BTreeMap::<String, Vec<&builder::RegisteredEdge>>::new();
+    for edge in edges {
+        labels.entry(edge.label.clone()).or_default().push(edge);
+    }
+    for (label, rows) in labels {
+        if rows.len() > 1 {
+            warnings.push(serde_json::json!({
+                "code": "ambiguous_relationship_label",
+                "label": label,
+                "count": rows.len(),
+                "relationships": rows.iter().map(|edge| {
+                    serde_json::json!({
+                        "from_table": edge.from_table,
+                        "from_column": edge.from_column,
+                        "to_table": edge.to_table,
+                        "to_column": edge.to_column
+                    })
+                }).collect::<Vec<_>>(),
+                "message": "Multiple relationship mappings share this label. Use endpoint metadata to disambiguate operations."
+            }));
+        }
+    }
+    warnings.sort_by(|left, right| {
+        json_string(left, "code")
+            .cmp(&json_string(right, "code"))
+            .then(json_string(left, "label").cmp(&json_string(right, "label")))
+    });
+    Ok(warnings)
+}
+
+fn graph_map_status(graph: &catalog::GraphMetadata) -> safety::GraphResult<serde_json::Value> {
+    let selected_graph_id = catalog::selected_or_default_graph_metadata()?.graph_id;
+    if selected_graph_id == graph.graph_id {
+        return selected_graph_map_status(graph);
+    }
+    durable_graph_map_status(graph)
+}
+
+fn selected_graph_map_status(
+    graph: &catalog::GraphMetadata,
+) -> safety::GraphResult<serde_json::Value> {
+    let status = refreshed_engine_status()?;
+    let projection = projection_metadata_status_snapshot()?;
+    Ok(serde_json::json!({
+        "build": {
+            "node_count": status.node_count,
+            "edge_count": status.edge_count,
+            "schema_status": status.schema_state,
+            "needs_rebuild": status.needs_rebuild,
+            "invalid_reason": status.invalid_reason,
+            "last_build": status.last_build.map(|timestamp| timestamp.to_string()),
+            "memory_used_mb": status.memory_used_mb
+        },
+        "sync": {
+            "sync_mode": status.sync_mode,
+            "sync_status": status.sync_status,
+            "applied_sync_id": status.applied_sync_id,
+            "pending_sync_rows": status.pending_sync_rows,
+            "disabled_trigger_count": status.disabled_trigger_count,
+            "needs_vacuum": status.needs_vacuum,
+            "read_only": status.read_only,
+            "read_only_reason": status.read_only_reason
+        },
+        "projection": {
+            "projection_mode": graph.projection_mode,
+            "sync_watermark": projection.manifest_watermark,
+            "segment_count": projection.segment_count,
+            "dirty_chunk_count": projection.dirty_chunk_count,
+            "ingest_recommended": projection.ingest_recommended,
+            "compaction_recommended": projection.compaction_recommended,
+            "gc_recommended": projection.gc_recommended,
+            "repair_recommended": projection.repair_recommended
+        }
+    }))
+}
+
+fn durable_graph_map_status(
+    graph: &catalog::GraphMetadata,
+) -> safety::GraphResult<serde_json::Value> {
+    let build = latest_build_for_graph(graph)?;
+    let needs_rebuild = build
+        .as_ref()
+        .map(|row| {
+            row.status.as_str() != JobStatus::Completed.as_str()
+                || row
+                    .finished_at
+                    .map(|finished_at| finished_at < graph.updated_at)
+                    .unwrap_or(true)
+        })
+        .unwrap_or(true);
+    let table_oids = graph_table_oids(&graph.graph_id)?;
+    let pending_sync_rows = sync_log_rows_for_table_oids(&table_oids, 0)?;
+    let max_sync_log_id = max_sync_log_id_for_table_oids(&table_oids)?;
+    let projection = projection_generation_status_for_graph(&graph.graph_id)?;
+    Ok(serde_json::json!({
+        "build": {
+            "latest_status": build.as_ref().map(|row| row.status.clone()),
+            "nodes_loaded": build.as_ref().and_then(|row| row.nodes_loaded),
+            "edges_loaded": build.as_ref().and_then(|row| row.edges_loaded),
+            "build_time_ms": build.as_ref().and_then(|row| row.build_time_ms),
+            "memory_used_mb": build.as_ref().and_then(|row| row.memory_used_mb),
+            "finished_at": build.as_ref().and_then(|row| row.finished_at.map(|timestamp| timestamp.to_string())),
+            "needs_rebuild": needs_rebuild
+        },
+        "sync": {
+            "max_sync_log_id": max_sync_log_id,
+            "pending_sync_rows": pending_sync_rows,
+            "registered_table_oids": table_oids
+        },
+        "projection": {
+            "projection_mode": graph.projection_mode,
+            "generation_id": projection.generation_id,
+            "sync_watermark": projection.sync_watermark,
+            "validation_status": projection.validation_status,
+            "is_current": projection.is_current
+        }
+    }))
+}
+
+fn latest_build_status_for_graph(graph_id: &str) -> safety::GraphResult<Option<String>> {
+    let graph = catalog::list_graph_metadata()?
+        .into_iter()
+        .find(|graph| graph.graph_id == graph_id)
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: format!("graph id '{graph_id}' is not visible"),
+        })?;
+    Ok(latest_build_for_graph(&graph)?.map(|row| row.status))
+}
+
+fn latest_build_for_graph(
+    graph: &catalog::GraphMetadata,
+) -> safety::GraphResult<Option<BuildJobRow>> {
+    Spi::connect(|client| {
+        let mut selected = client.select(
+            "SELECT build_id, graph_id::text, status, nodes_loaded, edges_loaded,
+                    build_time_ms, memory_used_mb, sync_mode, projection_mode,
+                    progress_phase, progress_message, started_at, finished_at, error
+               FROM graph._build_jobs
+              WHERE graph_id = $1::uuid
+              ORDER BY created_at DESC, build_id DESC
+              LIMIT 1",
+            None,
+            &[graph.graph_id.clone().into()],
+        )?;
+        let Some(row) = selected.next() else {
+            return Ok(None);
+        };
+        Ok(Some(BuildJobRow {
+            build_id: row.get::<String>(1)?.unwrap_or_default(),
+            graph_id: row.get::<String>(2)?.unwrap_or_default(),
+            status: row.get::<String>(3)?.unwrap_or_default(),
+            nodes_loaded: row.get::<i64>(4)?,
+            edges_loaded: row.get::<i64>(5)?,
+            build_time_ms: row.get::<f64>(6)?,
+            memory_used_mb: row.get::<f64>(7)?,
+            sync_mode: row
+                .get::<String>(8)?
+                .unwrap_or_else(|| "manual".to_string()),
+            projection_mode: row
+                .get::<String>(9)?
+                .unwrap_or_else(|| graph.projection_mode.clone()),
+            progress_phase: row.get::<String>(10)?.unwrap_or_default(),
+            progress_message: row.get::<String>(11)?,
+            started_at: row.get::<TimestampWithTimeZone>(12)?,
+            finished_at: row.get::<TimestampWithTimeZone>(13)?,
+            error: row.get::<String>(14)?,
+        })) as Result<Option<BuildJobRow>, pgrx::spi::SpiError>
+    })
+    .map_err(|err| safety::GraphError::Internal(format!("build status lookup failed: {err}")))
+}
+
+fn graph_table_oids(graph_id: &str) -> safety::GraphResult<Vec<i32>> {
+    let (tables, _edges, _filters) = crate::catalog::read_catalog_for_graph(graph_id)?;
+    let mut oids = tables
+        .iter()
+        .filter_map(|table| crate::catalog::table_oid_from_name(&table.table_name).ok())
+        .map(|oid| oid as i32)
+        .collect::<Vec<_>>();
+    oids.sort_unstable();
+    oids.dedup();
+    Ok(oids)
+}
+
+fn sync_log_rows_for_table_oids(table_oids: &[i32], after_id: i64) -> safety::GraphResult<i64> {
+    if table_oids.is_empty() {
+        return Ok(0);
+    }
+    Spi::get_one_with_args::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph._sync_log
+          WHERE id > $1
+            AND table_oid::oid::integer = ANY($2::int4[])",
+        &[after_id.into(), table_oids.to_vec().into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("sync log lookup failed: {err}")))
+    .map(|count| count.unwrap_or(0))
+}
+
+fn max_sync_log_id_for_table_oids(table_oids: &[i32]) -> safety::GraphResult<i64> {
+    if table_oids.is_empty() {
+        return Ok(0);
+    }
+    Spi::get_one_with_args::<i64>(
+        "SELECT COALESCE(max(id), 0)::bigint
+           FROM graph._sync_log
+          WHERE table_oid::oid::integer = ANY($1::int4[])",
+        &[table_oids.to_vec().into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("sync log max lookup failed: {err}")))
+    .map(|max_id| max_id.unwrap_or(0))
+}
+
+struct ProjectionGenerationStatus {
+    generation_id: Option<i64>,
+    sync_watermark: Option<i64>,
+    validation_status: Option<String>,
+    is_current: bool,
+}
+
+fn projection_generation_status_for_graph(
+    graph_id: &str,
+) -> safety::GraphResult<ProjectionGenerationStatus> {
+    Spi::connect(|client| {
+        let mut selected = client.select(
+            "SELECT generation_id, sync_watermark, validation_status, is_current
+               FROM graph._projection_generations
+              WHERE graph_id = $1::uuid
+              ORDER BY is_current DESC, generation_id DESC
+              LIMIT 1",
+            None,
+            &[graph_id.into()],
+        )?;
+        let Some(row) = selected.next() else {
+            return Ok(ProjectionGenerationStatus {
+                generation_id: None,
+                sync_watermark: None,
+                validation_status: None,
+                is_current: false,
+            });
+        };
+        Ok(ProjectionGenerationStatus {
+            generation_id: row.get::<i64>(1)?,
+            sync_watermark: row.get::<i64>(2)?,
+            validation_status: row.get::<String>(3)?,
+            is_current: row.get::<bool>(4)?.unwrap_or(false),
+        }) as Result<ProjectionGenerationStatus, pgrx::spi::SpiError>
+    })
+    .map_err(|err| safety::GraphError::Internal(format!("projection status lookup failed: {err}")))
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Estimate RAM requirements without building the graph.

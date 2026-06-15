@@ -258,6 +258,55 @@ SELECT * FROM graph.registered_edges_for_graph(
 );
 ```
 
+`graph.list_edges()` is the graph-scoped relationship inspection API for
+management workflows:
+
+```sql
+SELECT * FROM graph.list_edges(
+  'customer_360',
+  graph_namespace := 'analytics'
+);
+```
+
+For a metadata-only export of the graph definition and maintenance state, use
+`graph.graph_map()`:
+
+```sql
+SELECT graph.graph_map(
+  graph_name := 'customer_360',
+  graph_namespace := 'analytics'
+);
+```
+
+The graph map reports registered node tables, relationship mappings, filter
+columns, build/sync/projection status, and warnings. It does not export source
+rows or graph data.
+
+## Edit Relationships
+
+Relationship definitions can be renamed or updated without removing and
+re-adding the mapping:
+
+```sql
+SELECT graph.rename_edge(
+  graph_name := 'customer_360',
+  old_label := 'placed_by',
+  new_label := 'created_by',
+  graph_namespace := 'analytics'
+);
+
+SELECT graph.alter_edge(
+  graph_name := 'customer_360',
+  label := 'created_by',
+  bidirectional := false,
+  weight_column := 'confidence',
+  graph_namespace := 'analytics'
+);
+```
+
+Relationship edits update registration metadata. Rebuild the graph afterward so
+queries use the new mapping.
+
 ## Remove Registration
 
 ```sql

@@ -3116,6 +3116,335 @@ fn admin_remove_apis_update_catalog_side_effects() {
 }
 
 #[pg_test]
+fn relationship_management_apis_are_graph_scoped() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('phase11_a', namespace := 'app')")
+        .expect("create phase11_a graph failed");
+    Spi::run("SELECT graph.create_graph('phase11_b', namespace := 'app')")
+        .expect("create phase11_b graph failed");
+
+    for graph_name in ["phase11_a", "phase11_b"] {
+        Spi::run(&format!(
+            "SELECT graph.add_table_to_graph(
+                    '{graph_name}',
+                    'graph_test_users_pgtest'::regclass,
+                    id_column := 'id',
+                    columns := ARRAY['name', 'age'],
+                    graph_namespace := 'app'
+                )"
+        ))
+        .expect("add named table failed");
+        Spi::run(&format!(
+            "SELECT graph.add_edge_to_graph(
+                    '{graph_name}',
+                    'graph_test_friendships_pgtest'::regclass,
+                    'user_id',
+                    'graph_test_users_pgtest'::regclass,
+                    'friend_id',
+                    'friend',
+                    false,
+                    graph_namespace := 'app'
+                )"
+        ))
+        .expect("add named edge failed");
+    }
+
+    Spi::run(
+        "SELECT graph.rename_edge(
+                graph_name := 'phase11_a',
+                old_label := 'friend',
+                new_label := 'follows',
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("rename edge failed");
+    Spi::run(
+        "SELECT graph.alter_edge(
+                graph_name := 'phase11_a',
+                label := 'follows',
+                bidirectional := true,
+                label_column := 'id',
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("alter edge failed");
+
+    let renamed = Spi::get_one::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM graph.list_edges('phase11_a', graph_namespace := 'app')
+             WHERE label = 'follows'
+               AND bidirectional
+               AND label_column = 'id'
+         )",
+    )
+    .expect("list renamed edge failed")
+    .unwrap_or(false);
+    let untouched = Spi::get_one::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM graph.list_edges('phase11_b', graph_namespace := 'app')
+             WHERE label = 'friend'
+               AND NOT bidirectional
+         )",
+    )
+    .expect("list untouched edge failed")
+    .unwrap_or(false);
+
+    Spi::run(
+        "SELECT graph.remove_edge(
+                graph_name := 'phase11_a',
+                label := 'follows',
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("remove renamed edge failed");
+    let phase11_a_edges =
+        Spi::get_one::<i64>("SELECT count(*) FROM graph.list_edges('phase11_a', graph_namespace := 'app')")
+            .expect("phase11_a edge count failed")
+            .unwrap_or(0);
+    let phase11_b_edges =
+        Spi::get_one::<i64>("SELECT count(*) FROM graph.list_edges('phase11_b', graph_namespace := 'app')")
+            .expect("phase11_b edge count failed")
+            .unwrap_or(0);
+
+    assert!(renamed);
+    assert!(untouched);
+    assert_eq!(phase11_a_edges, 0);
+    assert_eq!(phase11_b_edges, 1);
+}
+
+#[pg_test]
+fn graph_map_exports_deterministic_metadata_only_json() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('phase11_map', namespace := 'app')")
+        .expect("create phase11_map graph failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'phase11_map',
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age'],
+                tenant_column := NULL,
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add map table failed");
+    Spi::run(
+        "SELECT graph.add_edge_to_graph(
+                'phase11_map',
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                false,
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add map edge failed");
+
+    let map = Spi::get_one::<pgrx::JsonB>(
+        "SELECT graph.graph_map(
+                graph_name := 'phase11_map',
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("graph_map failed")
+    .expect("graph_map row missing")
+    .0;
+
+    assert_eq!(
+        map.pointer("/graph/graph_name").and_then(|value| value.as_str()),
+        Some("phase11_map")
+    );
+    assert_eq!(
+        map.pointer("/catalog/node_tables/0/table_name")
+            .and_then(|value| value.as_str()),
+        Some("graph_test_users_pgtest")
+    );
+    assert_eq!(
+        map.pointer("/catalog/relationships/0/label")
+            .and_then(|value| value.as_str()),
+        Some("friend")
+    );
+    assert_eq!(
+        map.pointer("/catalog/relationships/0/label_source")
+            .and_then(|value| value.as_str()),
+        Some("static_label")
+    );
+    assert!(map.pointer("/catalog/relationships/0/from_column").is_some());
+    assert!(map.pointer("/data").is_none());
+}
+
+#[pg_test]
+fn graph_map_reports_rebuild_after_selected_relationship_edit() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "SELECT graph.rename_edge(
+                graph_name := 'default',
+                old_label := 'friend',
+                new_label := 'follows',
+                graph_namespace := 'public'
+            )",
+    )
+    .expect("rename selected edge failed");
+
+    let has_rebuild_warning = Spi::get_one::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(graph.graph_map('default')->'warnings') AS warning
+             WHERE warning->>'code' = 'rebuild_required'
+         )",
+    )
+    .expect("graph_map warning query failed")
+    .unwrap_or(false);
+
+    assert!(has_rebuild_warning);
+}
+
+#[pg_test]
+fn graph_map_reports_rebuild_after_non_selected_named_relationship_edit() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.create_graph('phase11_rebuild_a', namespace := 'app')")
+        .expect("create phase11_rebuild_a graph failed");
+    Spi::run("SELECT graph.create_graph('phase11_rebuild_b', namespace := 'app')")
+        .expect("create phase11_rebuild_b graph failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'phase11_rebuild_a',
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name'],
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add named table failed");
+    Spi::run(
+        "SELECT graph.add_edge_to_graph(
+                'phase11_rebuild_a',
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                false,
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add named edge failed");
+    Spi::run("SELECT graph.build_graph('phase11_rebuild_a', graph_namespace := 'app')")
+        .expect("build named graph failed");
+    Spi::run("SELECT graph.set_current_graph('phase11_rebuild_b', namespace := 'app')")
+        .expect("select different graph failed");
+    Spi::run(
+        "SELECT graph.rename_edge(
+                graph_name := 'phase11_rebuild_a',
+                old_label := 'friend',
+                new_label := 'follows',
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("rename non-selected graph edge failed");
+
+    let has_rebuild_warning = Spi::get_one::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(
+                 graph.graph_map('phase11_rebuild_a', graph_namespace := 'app')->'warnings'
+             ) AS warning
+             WHERE warning->>'code' = 'rebuild_required'
+         )",
+    )
+    .expect("non-selected graph_map warning query failed")
+    .unwrap_or(false);
+
+    assert!(has_rebuild_warning);
+}
+
+#[pg_test]
+fn relationship_management_requires_graph_admin() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("add edge failed");
+    Spi::run(
+        "CREATE OR REPLACE FUNCTION graph.graph_test_phase11_sql_raises(statement text)
+             RETURNS boolean
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 EXECUTE statement;
+                 RETURN false;
+             EXCEPTION WHEN others THEN
+                 RETURN true;
+             END
+             $$;
+         DROP ROLE IF EXISTS graph_phase11_no_admin;
+         CREATE ROLE graph_phase11_no_admin;
+         GRANT USAGE ON SCHEMA graph TO graph_phase11_no_admin;
+         GRANT EXECUTE ON FUNCTION graph.graph_test_phase11_sql_raises(text)
+             TO graph_phase11_no_admin",
+    )
+    .expect("create restricted role failed");
+
+    Spi::run("SET ROLE graph_phase11_no_admin").expect("set restricted role failed");
+    let rename_blocked = Spi::get_one::<bool>(&format!(
+        "SELECT graph.graph_test_phase11_sql_raises({})",
+        super::sql_literal(
+            "SELECT graph.rename_edge(
+            graph_name := 'default',
+            old_label := 'friend',
+            new_label := 'follows',
+            graph_namespace := 'public'
+        )"
+        )
+    ))
+    .expect("rename ACL helper failed")
+    .unwrap_or(false);
+    let alter_blocked = Spi::get_one::<bool>(&format!(
+        "SELECT graph.graph_test_phase11_sql_raises({})",
+        super::sql_literal(
+            "SELECT graph.alter_edge(
+            graph_name := 'default',
+            label := 'friend',
+            bidirectional := false,
+            graph_namespace := 'public'
+        )"
+        )
+    ))
+    .expect("alter ACL helper failed")
+    .unwrap_or(false);
+    Spi::run("RESET ROLE").expect("reset restricted role failed");
+
+    assert!(rename_blocked);
+    assert!(alter_blocked);
+}
+
+#[pg_test]
 fn failed_apply_sync_rows_remain_buffered() {
     reset_and_create_fixtures();
     super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)

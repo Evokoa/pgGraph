@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 11, Relationship Management and Graph Map Export.
-- Status: Phase 10 is complete after dirty-range ingest, projection compaction SQL, copy-on-write chunk publication wiring, projection storage/fanout/read-amplification observability, artifact storage quota enforcement, public docs, and phase checks. Phase 11 has not started.
+- Active phase: Phase 12, Direct Node Identity Lookup and Neighbor Helpers.
+- Status: Phase 11 is complete after graph-scoped relationship rename/alter/remove/list APIs, deterministic metadata-only graph map export, durable rebuild-required tracking for relationship edits, public docs, review, and phase checks.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -21,6 +21,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 8: complete - added `set_graph_residency`, cold/warm/hot runtime semantics, opt-in hot eager-load, backend load-cap lifecycle GUCs, loaded/runtime status APIs with residency/artifact metrics, runtime load quota enforcement, non-creating artifact status checks, and public lifecycle docs.
 - Phase 9: complete - graph-scoped sync replay/status now filter the global source-table sync log to the selected graph's registered table OIDs, status clears mismatched loaded engines before reporting pending rows, and regression coverage proves unrelated source-table changes do not replay or advance the selected graph. Durable sync policy/job work adds `_jobs`, `_job_runs`, and `_sync_policies`, explicit policy/job SQL APIs, visibility filtering, `max_graph_jobs` quota enforcement, `graph.run_due_jobs()`, one-shot `graph.run_due_jobs_async()` internal workers, row-lock and advisory-lock guarded execution, richer durable status vocabulary, public docs, and pgrx regression coverage for policy execution, due hosted runs, internal-mode history, disabled jobs, hidden graph visibility, quota blocks, and cascaded removal.
 - Phase 10: complete - durable projection ingestion now publishes dirty source-node ranges, `graph.projection_compact()` runs bounded manifest-level copy-on-write compaction with optional dirty chunk replacement, `graph.projection_status()` reports active artifact bytes, segment fanout, and read amplification, `max_artifact_storage_bytes` quotas guard ingest/compaction write budgets, and public docs describe the operator surface.
+- Phase 11: complete - added graph-scoped `rename_edge`, `alter_edge`, `remove_edge`, and `list_edges` relationship management APIs, metadata-only `graph_map()` JSON export with deterministic registration/status/warning output, durable rebuild-required tracking for relationship edits on selected and non-selected graphs, ACL coverage, and public docs.
 
 ## Verification Log
 
@@ -62,6 +63,13 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
 - 2026-06-15: `git diff --check` passed.
 - 2026-06-15: `cargo test --features "pg17 development"` passed, 646 tests, 1 ignored.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" relationship_management` passed, 2 tests.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" graph_map` passed, 3 tests.
+- 2026-06-15: `cargo fmt --check` passed from `graph/` after Phase 11.
+- 2026-06-15: `git diff --check` passed after Phase 11.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed after Phase 11 docs/API updates.
+- 2026-06-15: `cargo test --features "pg17 development"` passed after Phase 11, 646 tests, 1 ignored.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/` after Phase 11.
 - 2026-06-15: `cargo test --features "pg17 development" sql_facade::admin` passed, 3 tests, for the in-progress durable sync policy/job SQL facade edits.
 - 2026-06-15: `cargo fmt --check` passed from `graph/` after formatting the in-progress durable sync policy/job SQL facade edits.
 - 2026-06-15: `cargo pgrx test --features "pg17 development" sync_policies_run_through_visible_durable_jobs` passed, 1 test.
@@ -233,4 +241,6 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 9 hosted due-job runner checkpoint local review found no blocking issue in due selection, row-lock/advisory-lock guarded execution, durable status vocabulary, failed-run aggregation, or docs/API drift.
 - Phase 9 one-shot internal worker checkpoint local review found no blocking issue in dynamic due-job worker metadata, internal execution-mode history, hosted/internal shared runner behavior, or docs/API drift. The implementation intentionally avoids an always-on postmaster loop; operators choose cadence through `pg_cron`, provider schedulers, application schedulers, or repeated `run_due_jobs_async()` calls.
 - Phase 10 local review found no blocking issue in dirty-range segment metadata, manifest-level compaction publication, copy-on-write chunk routing, active artifact byte accounting, fanout/read-amplification metrics, artifact storage quota checks, or docs/API drift. The implementation continues to avoid in-place mutation of mmap'd CSR bytes.
-- Next checkpoint: start Phase 11 relationship management and graph map export planning from `todo/named-graphs-complete-plan.md`.
+- Phase 11 local review found one API-shape gap: the requested named `graph.remove_edge(graph_name := ..., label := ...)` overload was missing. It was added and covered through the relationship-management pgrx test.
+- Independent review after Phases 9-11 ran in subagent `019ecc2e-095d-7a62-bb29-d7f4650f9d96` and found that non-selected named graphs did not report rebuild-required after relationship edits. The fix touches `graph._graphs.updated_at` on relationship catalog edits, compares that timestamp to the latest completed build in `graph_map()`, and adds non-selected named-graph regression coverage.
+- Next checkpoint: start Phase 12 direct node identity lookup and neighbor helper planning from `todo/named-graphs-complete-plan.md`.
