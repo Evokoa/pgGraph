@@ -30,6 +30,7 @@ mod edge_store;
 mod engine;
 mod filter_index;
 mod gql;
+mod graph_policy;
 mod node_store;
 mod path_finder;
 mod persistence;
@@ -816,6 +817,7 @@ mod tests {
     include!("pg_tests/workflow_relationship_api.rs");
     include!("pg_tests/workflow_validation.rs");
     include!("pg_tests/synthetic_release.rs");
+    include!("pg_tests/named_graphs.rs");
     include!("pg_tests/gql.rs");
     include!("pg_tests/cypher.rs");
 }

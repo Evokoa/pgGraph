@@ -96,6 +96,19 @@ That means there is no shared Rust heap between connections. Sharing happens
 only through PostgreSQL storage, the filesystem, and OS page-cache backed mmap
 pages.
 
+The current release line has one compatibility graph per database. SQL calls
+such as `graph.add_table()`, `graph.build()`, `graph.status()`,
+`graph.traverse()`, and `graph.reset()` operate on that default graph. The
+named-graph work keeps this default behavior as a compatibility path while it
+adds first-class graph identity to catalogs, jobs, artifacts, runtime loading,
+sync replay, and projection metadata.
+
+The default graph identity is intentionally explicit in the Rust policy layer:
+the compatibility graph is named `default`, uses the `public` graph namespace,
+and has a reserved canonical UUID. Future catalog rows use PostgreSQL `uuid`
+values, while Rust passes graph identity as a typed value instead of deriving it
+from paths, backend globals, or session state.
+
 | Object | Owner | Lifetime |
 |---|---|---|
 | `Engine` | One PostgreSQL backend process | Backend lifetime or until `graph.reset()` |
@@ -109,6 +122,25 @@ pages.
 | Durable projection manifests and segments | Files beside `main.pggraph` | Shared through the filesystem and retained by active-generation metadata |
 | `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local compatibility sync overlay state |
 | `TxGraphDelta` | Current backend transaction | Transaction-local read-your-own-writes state only |
+
+## Current Single-Graph Assumptions
+
+These assumptions are deliberate in the current implementation and define the
+places named-graph support must update:
+
+| Area | Current behavior |
+|---|---|
+| Catalogs | `graph._registered_tables`, `graph._registered_edges`, and `graph._registered_filter_columns` describe one global graph. |
+| Runtime | `ENGINE` stores one backend-local graph engine. `ensure_current_graph()` validates build/load/schema freshness; it is not a named graph selector. |
+| Build jobs | `graph._build_jobs` and `graph._maintenance_jobs` are global job tables. |
+| Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/main.pggraph`. |
+| Sync | `graph._sync_log` and `graph._sync_buffer` are global sync streams. |
+| Projection generations | `graph._projection_generations` tracks generations for the global projection root. |
+| Discovery | `graph.auto_discover()` writes to the global registration catalog. |
+| Reset | `graph.reset()` clears the backend-local engine and removes the global artifact files. |
+
+Named-graph changes should move each row above from implicit global state to
+explicit graph-scoped inputs without breaking the default-graph SQL workflow.
 
 ## Data Flow: Build
 
