@@ -231,6 +231,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS _graphs_identity_idx
         graph_name
     );
 
+CREATE TABLE IF NOT EXISTS graph._graph_grants (
+    graph_id   UUID NOT NULL REFERENCES graph._graphs(graph_id) ON DELETE CASCADE,
+    grantee    OID NOT NULL,
+    privilege  TEXT NOT NULL CHECK (privilege IN ('read', 'write', 'build', 'admin')),
+    grantor    OID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (graph_id, grantee, privilege)
+);
+
+ALTER TABLE graph._graph_grants
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+UPDATE graph._graph_grants
+SET created_at = COALESCE(created_at, now()),
+    updated_at = COALESCE(updated_at, now());
+
+ALTER TABLE graph._graph_grants
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN updated_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graph_grants'::regclass
+          AND conname = '_graph_grants_privilege_check'
+    ) THEN
+        ALTER TABLE graph._graph_grants
+            ADD CONSTRAINT _graph_grants_privilege_check
+            CHECK (privilege IN ('read', 'write', 'build', 'admin'));
+    END IF;
+END $$;
+
 ALTER TABLE graph._registered_tables
     ADD COLUMN IF NOT EXISTS graph_id UUID;
 
@@ -620,6 +658,7 @@ SELECT pg_catalog.pg_extension_config_dump('graph._registered_tables', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_edges', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_filter_columns', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._graphs', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._graph_grants', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._build_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._maintenance_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log', '');
@@ -644,6 +683,7 @@ REVOKE ALL ON TABLE graph._registered_tables       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._registered_edges        FROM PUBLIC;
 REVOKE ALL ON TABLE graph._registered_filter_columns FROM PUBLIC;
 REVOKE ALL ON TABLE graph._graphs                 FROM PUBLIC;
+REVOKE ALL ON TABLE graph._graph_grants           FROM PUBLIC;
 REVOKE ALL ON TABLE graph._build_jobs             FROM PUBLIC;
 REVOKE ALL ON TABLE graph._maintenance_jobs       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
@@ -653,6 +693,7 @@ GRANT SELECT ON TABLE graph._registered_tables       TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_edges        TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_filter_columns TO PUBLIC;
 GRANT SELECT ON TABLE graph._graphs                 TO PUBLIC;
+GRANT SELECT ON TABLE graph._graph_grants           TO PUBLIC;
 GRANT SELECT ON TABLE graph._build_jobs             TO PUBLIC;
 GRANT SELECT ON TABLE graph._maintenance_jobs       TO PUBLIC;
 GRANT SELECT ON TABLE graph._sync_log               TO PUBLIC;

@@ -8,7 +8,7 @@ All functions live in the `graph` schema.
 | Category | Functions |
 |---|---|
 | Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
-| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph` |
+| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph`, `grant_graph`, `revoke_graph`, `graph_privileges`, `transfer_graph_ownership` |
 | Runtime graph loading | `select_graph`, `load_graph`, `unload_graph`, `loaded_graphs` |
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
@@ -237,6 +237,15 @@ Graph metadata rows include:
 | `projection_mode` | `csr_readonly` or `mutable_overlay` |
 | `created_at`, `updated_at` | Catalog timestamps |
 
+Graph privileges are stored separately from source-table permissions:
+
+| Privilege | Allows |
+|---|---|
+| `read` | Select and query the graph when source-table privileges also allow access |
+| `write` | Reserved for mapped graph writes; PostgreSQL source-table write privileges are still required |
+| `build` | Build, vacuum, and maintenance operations for the graph |
+| `admin` | Grant/revoke graph privileges and manage graph-owned lifecycle operations |
+
 ### `graph.create_graph()`
 
 ```sql
@@ -330,6 +339,68 @@ SQL surface resolve the selected graph, or the default graph when no graph is
 selected. Selecting a graph does not load a persisted artifact by itself; the
 backend-local engine changes when you build or load graph state. Missing or
 unauthorized graphs return SQLSTATE `PG005`.
+
+### `graph.grant_graph()`
+
+```sql
+graph.grant_graph(
+  graph_name text,
+  grantee text,
+  privilege text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Owner/admin-only. Grants `read`, `write`, `build`, or `admin` on a graph to a
+PostgreSQL role. Graph privileges do not bypass PostgreSQL source-table ACL or
+RLS checks.
+
+### `graph.revoke_graph()`
+
+```sql
+graph.revoke_graph(
+  graph_name text,
+  grantee text,
+  privilege text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Owner/admin-only. Revokes one graph privilege from a PostgreSQL role and
+returns the revoked grant row. Missing grants return SQLSTATE `PG005`.
+
+### `graph.graph_privileges()`
+
+```sql
+graph.graph_privileges(
+  graph_name text DEFAULT NULL,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Lists graph grants visible to the current role. Owners and graph admins can
+inspect grants for their graphs.
+
+### `graph.transfer_graph_ownership()`
+
+```sql
+graph.transfer_graph_ownership(
+  graph_name text,
+  new_owner text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Owner/admin-only. Transfers a non-default graph to another PostgreSQL role.
+The compatibility default graph cannot be transferred.
 
 ## Runtime Graph Loading
 

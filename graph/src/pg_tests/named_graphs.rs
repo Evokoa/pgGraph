@@ -219,6 +219,117 @@ fn graph_catalog_mutation_requires_admin_privileges() {
 }
 
 #[pg_test]
+fn graph_grants_gate_visibility_queries_and_builds() {
+    reset_and_create_fixtures();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_phase7_reader;
+         DROP ROLE IF EXISTS graph_phase7_no_graph;
+         DROP ROLE IF EXISTS graph_phase7_no_source;
+         DROP ROLE IF EXISTS graph_phase7_builder;
+         CREATE ROLE graph_phase7_reader;
+         CREATE ROLE graph_phase7_no_graph;
+         CREATE ROLE graph_phase7_no_source;
+         CREATE ROLE graph_phase7_builder;
+         GRANT USAGE ON SCHEMA graph, public TO
+             graph_phase7_reader,
+             graph_phase7_no_graph,
+             graph_phase7_no_source,
+             graph_phase7_builder;
+         REVOKE SELECT ON public.graph_test_users_pgtest FROM PUBLIC;
+         GRANT SELECT ON public.graph_test_users_pgtest TO
+             graph_phase7_reader,
+             graph_phase7_no_graph,
+             graph_phase7_builder",
+    )
+    .expect("create phase7 roles and grants failed");
+    Spi::run("SELECT graph.create_graph('secure_graph', namespace := 'app')")
+        .expect("create secure graph failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+                'secure_graph',
+                'graph_test_users_pgtest'::regclass,
+                'id',
+                ARRAY['name'],
+                graph_namespace := 'app'
+            )",
+    )
+    .expect("add secure graph table failed");
+    Spi::run(
+        "SELECT graph.grant_graph('secure_graph', 'graph_phase7_reader', 'read', namespace := 'app');
+         SELECT graph.grant_graph('secure_graph', 'graph_phase7_no_source', 'read', namespace := 'app');
+         SELECT graph.grant_graph('secure_graph', 'graph_phase7_builder', 'build', namespace := 'app')",
+    )
+    .expect("grant graph privileges failed");
+    let owner_grant_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.graph_privileges('secure_graph', namespace := 'app')
+          WHERE privilege IN ('read', 'build')",
+    )
+    .expect("owner graph_privileges failed")
+    .unwrap_or(0);
+
+    Spi::run("SET ROLE graph_phase7_builder").expect("set builder role failed");
+    let builder_nodes = Spi::get_one::<i64>(
+        "SELECT nodes_loaded
+           FROM graph.build_graph('secure_graph', graph_namespace := 'app')",
+    )
+    .expect("builder build_graph failed")
+    .unwrap_or(0);
+    Spi::run("RESET ROLE").expect("reset builder role failed");
+
+    Spi::run("SET ROLE graph_phase7_reader").expect("set reader role failed");
+    let reader_current = Spi::get_one::<String>(
+        "SELECT graph_name
+           FROM graph.set_current_graph('secure_graph', namespace := 'app')",
+    )
+    .expect("reader set_current_graph failed")
+    .expect("reader selected graph missing");
+    let reader_nodes = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.traverse(
+               'graph_test_users_pgtest'::regclass,
+               'u1',
+               1,
+               hydrate := true
+           )",
+    )
+    .expect("reader traverse failed")
+    .unwrap_or(0);
+    Spi::run("RESET ROLE").expect("reset reader role failed");
+
+    Spi::run("SET ROLE graph_phase7_no_graph").expect("set no_graph role failed");
+    let no_graph_sqlstate =
+        sqlstate_for_prepared_helper("SELECT * FROM graph.set_current_graph('secure_graph', namespace := 'app')");
+    Spi::run("RESET ROLE").expect("reset no_graph role failed");
+
+    Spi::run("SET ROLE graph_phase7_no_source").expect("set no_source role failed");
+    let no_source_current = Spi::get_one::<String>(
+        "SELECT graph_name
+           FROM graph.set_current_graph('secure_graph', namespace := 'app')",
+    )
+    .expect("no_source set_current_graph failed")
+    .expect("no_source selected graph missing");
+    let no_source_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.traverse(
+            'graph_test_users_pgtest'::regclass,
+            'u1',
+            1,
+            hydrate := true
+        )",
+    );
+    Spi::run("RESET ROLE").expect("reset no_source role failed");
+
+    assert_eq!(owner_grant_rows, 3);
+    assert_eq!(reader_current, "secure_graph");
+    assert!(reader_nodes >= 1);
+    assert_eq!(no_graph_sqlstate, Some("PG005".to_string()));
+    assert_eq!(no_source_current, "secure_graph");
+    assert_eq!(no_source_sqlstate, Some("PG002".to_string()));
+    assert_eq!(builder_nodes, 2);
+}
+
+#[pg_test]
 fn graph_scoped_registrations_isolate_tables_edges_and_filters() {
     reset_and_create_fixtures();
     Spi::run("SELECT graph.create_graph('tenant_a', namespace := 'app')")

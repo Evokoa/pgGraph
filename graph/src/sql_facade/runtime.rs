@@ -344,6 +344,9 @@ fn load_selected_graph_from_disk(
 pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
     maybe_auto_load();
 
+    let graph = catalog::selected_or_default_graph_metadata()?;
+    catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Read)?;
+
     let sync_mode = current_sync_mode()?;
 
     let disabled = disabled_graph_trigger_count()?;

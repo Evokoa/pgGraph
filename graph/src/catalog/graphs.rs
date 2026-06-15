@@ -20,6 +20,66 @@ pub(crate) struct GraphMetadata {
     pub(crate) updated_at: TimestampWithTimeZone,
 }
 
+/// Graph-level privileges granted through `graph._graph_grants`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraphPrivilege {
+    Read,
+    Write,
+    Build,
+    Admin,
+}
+
+impl GraphPrivilege {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Build => "build",
+            Self::Admin => "admin",
+        }
+    }
+
+    fn accepted_grants(self) -> &'static [&'static str] {
+        match self {
+            Self::Read => &["read", "write", "admin"],
+            Self::Write => &["write", "admin"],
+            Self::Build => &["build", "admin"],
+            Self::Admin => &["admin"],
+        }
+    }
+}
+
+impl TryFrom<&str> for GraphPrivilege {
+    type Error = safety::GraphError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "read" => Ok(Self::Read),
+            "write" => Ok(Self::Write),
+            "build" => Ok(Self::Build),
+            "admin" => Ok(Self::Admin),
+            other => Err(safety::GraphError::InvalidFilter {
+                reason: format!(
+                    "unsupported graph privilege '{}'; expected read, write, build, or admin",
+                    other
+                ),
+            }),
+        }
+    }
+}
+
+/// SQL-visible graph grant row.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GraphGrant {
+    pub(crate) graph_id: String,
+    pub(crate) graph_name: String,
+    pub(crate) grantee: pgrx::pg_sys::Oid,
+    pub(crate) privilege: String,
+    pub(crate) grantor: pgrx::pg_sys::Oid,
+    pub(crate) created_at: TimestampWithTimeZone,
+    pub(crate) updated_at: TimestampWithTimeZone,
+}
+
 /// Creates graph catalog metadata for the current role.
 ///
 /// # Errors
@@ -233,6 +293,218 @@ pub(crate) fn drop_graph_metadata(
     })
 }
 
+/// Grants one graph privilege to a PostgreSQL role.
+///
+/// # Errors
+///
+/// Returns [`safety::GraphError::AclDenied`] unless the current role owns the
+/// graph, has graph-admin schema privileges, or has graph `admin`. Returns
+/// [`safety::GraphError::InvalidFilter`] for missing graphs, roles, or
+/// unsupported privileges.
+pub(crate) fn grant_graph_privilege(
+    graph_name: &str,
+    tenant: Option<&str>,
+    namespace: Option<&str>,
+    grantee: &str,
+    privilege: &str,
+) -> safety::GraphResult<GraphGrant> {
+    let graph =
+        resolve_visible_graph_metadata(graph_name, tenant, namespace)?.ok_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!("graph '{}' does not exist", graph_name),
+            }
+        })?;
+    require_graph_privilege(&graph, GraphPrivilege::Admin)?;
+    let privilege = GraphPrivilege::try_from(privilege)?.as_str();
+    let grantee_oid = resolve_role_oid(grantee)?;
+
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "INSERT INTO graph._graph_grants (
+                     graph_id, grantee, privilege, grantor
+                 )
+                 VALUES ($1::uuid, $2::oid, $3, current_user::regrole::oid)
+                 ON CONFLICT (graph_id, grantee, privilege)
+                 DO UPDATE
+                    SET grantor = EXCLUDED.grantor,
+                        updated_at = now()
+                 RETURNING graph_id::text,
+                           grantee,
+                           privilege,
+                           grantor,
+                           created_at,
+                           updated_at",
+                None,
+                &[
+                    graph.graph_id.as_str().into(),
+                    grantee_oid.into(),
+                    privilege.into(),
+                ],
+            )
+            .map_err(|err| graph_catalog_error("grant graph privilege", err))?;
+        grant_from_first_row(rows, &graph, "granted graph privilege row missing")
+    })
+}
+
+/// Revokes one graph privilege from a PostgreSQL role.
+pub(crate) fn revoke_graph_privilege(
+    graph_name: &str,
+    tenant: Option<&str>,
+    namespace: Option<&str>,
+    grantee: &str,
+    privilege: &str,
+) -> safety::GraphResult<GraphGrant> {
+    let graph =
+        resolve_visible_graph_metadata(graph_name, tenant, namespace)?.ok_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!("graph '{}' does not exist", graph_name),
+            }
+        })?;
+    require_graph_privilege(&graph, GraphPrivilege::Admin)?;
+    let privilege = GraphPrivilege::try_from(privilege)?.as_str();
+    let grantee_oid = resolve_role_oid(grantee)?;
+
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "DELETE FROM graph._graph_grants
+                  WHERE graph_id = $1::uuid
+                    AND grantee = $2::oid
+                    AND privilege = $3
+                  RETURNING graph_id::text,
+                            grantee,
+                            privilege,
+                            grantor,
+                            created_at,
+                            updated_at",
+                None,
+                &[
+                    graph.graph_id.as_str().into(),
+                    grantee_oid.into(),
+                    privilege.into(),
+                ],
+            )
+            .map_err(|err| graph_catalog_error("revoke graph privilege", err))?;
+        grant_from_first_row(rows, &graph, "graph privilege grant did not exist")
+    })
+}
+
+/// Lists graph privileges visible to the current role.
+pub(crate) fn graph_privileges(
+    graph_name: Option<&str>,
+    tenant: Option<&str>,
+    namespace: Option<&str>,
+) -> safety::GraphResult<Vec<GraphGrant>> {
+    let graph_filter = match graph_name {
+        Some(graph_name) => Some(
+            resolve_visible_graph_metadata(graph_name, tenant, namespace)?.ok_or_else(|| {
+                safety::GraphError::InvalidFilter {
+                    reason: format!("graph '{}' does not exist", graph_name),
+                }
+            })?,
+        ),
+        None => None,
+    };
+    if let Some(graph) = &graph_filter {
+        require_graph_privilege(graph, GraphPrivilege::Admin)?;
+    }
+
+    Spi::connect(|client| {
+        let rows = if let Some(graph) = &graph_filter {
+            client.select(
+                "SELECT g.graph_id::text,
+                        gr.graph_name,
+                        g.grantee,
+                        g.privilege,
+                        g.grantor,
+                        g.created_at,
+                        g.updated_at
+                   FROM graph._graph_grants g
+                   JOIN graph._graphs gr ON gr.graph_id = g.graph_id
+                  WHERE g.graph_id = $1::uuid
+                  ORDER BY g.grantee, g.privilege",
+                None,
+                &[graph.graph_id.as_str().into()],
+            )
+        } else {
+            client.select(
+                "SELECT g.graph_id::text,
+                        gr.graph_name,
+                        g.grantee,
+                        g.privilege,
+                        g.grantor,
+                        g.created_at,
+                        g.updated_at
+                   FROM graph._graph_grants g
+                   JOIN graph._graphs gr ON gr.graph_id = g.graph_id
+                  WHERE gr.owner_role = current_user::regrole::oid
+                     OR gr.graph_kind = 'global'
+                     OR EXISTS (
+                         SELECT 1
+                           FROM graph._graph_grants own
+                          WHERE own.graph_id = gr.graph_id
+                            AND own.grantee = current_user::regrole::oid
+                            AND own.privilege = 'admin'
+                     )
+                  ORDER BY gr.graph_name, g.grantee, g.privilege",
+                None,
+                &[],
+            )
+        }
+        .map_err(|err| graph_catalog_error("list graph privileges", err))?;
+        rows.map(grant_from_row).collect()
+    })
+}
+
+/// Transfers graph ownership to another PostgreSQL role.
+pub(crate) fn transfer_graph_ownership(
+    graph_name: &str,
+    tenant: Option<&str>,
+    namespace: Option<&str>,
+    new_owner: &str,
+) -> safety::GraphResult<GraphMetadata> {
+    let graph =
+        resolve_visible_graph_metadata(graph_name, tenant, namespace)?.ok_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!("graph '{}' does not exist", graph_name),
+            }
+        })?;
+    if graph.graph_id == graph_policy::DEFAULT_GRAPH_ID_TEXT {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: "default graph ownership cannot be transferred".to_string(),
+        });
+    }
+    require_graph_privilege(&graph, GraphPrivilege::Admin)?;
+    let new_owner_oid = resolve_role_oid(new_owner)?;
+
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "UPDATE graph._graphs
+                    SET owner_role = $2::oid,
+                        updated_at = now()
+                  WHERE graph_id = $1::uuid
+                  RETURNING graph_id::text,
+                            graph_name,
+                            owner_role,
+                            created_by,
+                            tenant,
+                            namespace,
+                            graph_kind,
+                            residency,
+                            materialization,
+                            projection_mode,
+                            created_at,
+                            updated_at",
+                None,
+                &[graph.graph_id.as_str().into(), new_owner_oid.into()],
+            )
+            .map_err(|err| graph_catalog_error("transfer graph ownership", err))?;
+        metadata_from_first_row(rows, "transferred graph row missing")
+    })
+}
+
 fn delete_graph_operational_state(graph_id: &str) -> safety::GraphResult<()> {
     Spi::run_with_args(
         "DELETE FROM graph._build_jobs WHERE graph_id = $1::uuid",
@@ -386,7 +658,16 @@ pub(crate) fn resolve_visible_graph_metadata(
                   WHERE graph_name = $1
                     AND COALESCE(tenant, '') = COALESCE($2, '')
                     AND COALESCE(namespace, '') = COALESCE($3, '')
-                    AND (owner_role = current_user::regrole::oid OR graph_kind = 'global')
+                    AND (
+                        owner_role = current_user::regrole::oid
+                        OR graph_kind = 'global'
+                        OR EXISTS (
+                            SELECT 1
+                              FROM graph._graph_grants gg
+                             WHERE gg.graph_id = graph._graphs.graph_id
+                               AND gg.grantee = current_user::regrole::oid
+                        )
+                    )
                   ORDER BY CASE WHEN owner_role = current_user::regrole::oid THEN 0 ELSE 1 END,
                            created_at
                   LIMIT 1",
@@ -423,7 +704,16 @@ fn resolve_visible_graph_by_id(graph_id: &str) -> safety::GraphResult<Option<Gra
                         updated_at
                    FROM graph._graphs
                   WHERE graph_id = $1::uuid
-                    AND (owner_role = current_user::regrole::oid OR graph_kind = 'global')
+                    AND (
+                        owner_role = current_user::regrole::oid
+                        OR graph_kind = 'global'
+                        OR EXISTS (
+                            SELECT 1
+                              FROM graph._graph_grants gg
+                             WHERE gg.graph_id = graph._graphs.graph_id
+                               AND gg.grantee = current_user::regrole::oid
+                        )
+                    )
                   LIMIT 1",
                 None,
                 &[graph_id.into()],
@@ -492,6 +782,12 @@ pub(crate) fn list_graph_metadata() -> safety::GraphResult<Vec<GraphMetadata>> {
                    FROM graph._graphs
                   WHERE owner_role = current_user::regrole::oid
                      OR graph_kind = 'global'
+                     OR EXISTS (
+                         SELECT 1
+                           FROM graph._graph_grants gg
+                          WHERE gg.graph_id = graph._graphs.graph_id
+                            AND gg.grantee = current_user::regrole::oid
+                     )
                   ORDER BY COALESCE(tenant, ''), COALESCE(namespace, ''), graph_name",
                 None,
                 &[],
@@ -584,6 +880,112 @@ fn optional_column<T: FromDatum + IntoDatum>(
 ) -> safety::GraphResult<Option<T>> {
     row.get::<T>(ordinal).map_err(|err| {
         safety::GraphError::Internal(format!("graph metadata {column} read failed: {err}"))
+    })
+}
+
+/// Ensures the current role has the requested graph-level privilege.
+///
+/// Owners and graph schema admins have all graph privileges. `admin` grants all
+/// graph privileges, while `write` grants query/read access for mapped write
+/// workflows that also need to inspect source rows.
+pub(crate) fn require_graph_privilege(
+    graph: &GraphMetadata,
+    privilege: GraphPrivilege,
+) -> safety::GraphResult<()> {
+    if has_graph_privilege(&graph.graph_id, privilege)? {
+        Ok(())
+    } else {
+        Err(safety::GraphError::AclDenied {
+            table: format!("graph {}", graph.graph_name),
+        })
+    }
+}
+
+fn has_graph_privilege(graph_id: &str, privilege: GraphPrivilege) -> safety::GraphResult<bool> {
+    let accepted = privilege
+        .accepted_grants()
+        .iter()
+        .map(|grant| (*grant).to_string())
+        .collect::<Vec<_>>();
+    Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT
+                COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)
+                OR has_schema_privilege(current_user, 'graph', 'CREATE')
+                OR EXISTS (
+                    SELECT 1
+                      FROM graph._graphs
+                     WHERE graph_id = $1::uuid
+                       AND (
+                           owner_role = current_user::regrole::oid
+                           OR (graph_kind = 'global' AND 'read' = ANY($2::text[]))
+                       )
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM graph._graph_grants
+                     WHERE graph_id = $1::uuid
+                       AND grantee = current_user::regrole::oid
+                       AND privilege = ANY($2::text[])
+                )",
+            None,
+            &[graph_id.into(), accepted.into()],
+        )?;
+        Ok::<_, pgrx::spi::Error>(rows.first().get::<bool>(1).ok().flatten().unwrap_or(false))
+    })
+    .map_err(|err| graph_catalog_error("check graph privilege", err))
+}
+
+fn resolve_role_oid(role_name: &str) -> safety::GraphResult<pgrx::pg_sys::Oid> {
+    if role_name.trim().is_empty() {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: "role name must not be empty".to_string(),
+        });
+    }
+    Spi::get_one_with_args::<pgrx::pg_sys::Oid>("SELECT to_regrole($1)::oid", &[role_name.into()])
+        .map_err(|err| graph_catalog_error("resolve role", err))?
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: format!("role '{}' does not exist", role_name),
+        })
+}
+
+fn grant_from_first_row(
+    mut rows: pgrx::spi::SpiTupleTable<'_>,
+    graph: &GraphMetadata,
+    missing: &str,
+) -> safety::GraphResult<GraphGrant> {
+    rows.next()
+        .map(|row| grant_from_row_with_graph(row, graph))
+        .transpose()?
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: missing.to_string(),
+        })
+}
+
+fn grant_from_row_with_graph(
+    row: pgrx::spi::SpiHeapTupleData<'_>,
+    graph: &GraphMetadata,
+) -> safety::GraphResult<GraphGrant> {
+    Ok(GraphGrant {
+        graph_id: required_column(&row, 1, "graph_id")?,
+        graph_name: graph.graph_name.clone(),
+        grantee: required_column(&row, 2, "grantee")?,
+        privilege: required_column(&row, 3, "privilege")?,
+        grantor: required_column(&row, 4, "grantor")?,
+        created_at: required_column(&row, 5, "created_at")?,
+        updated_at: required_column(&row, 6, "updated_at")?,
+    })
+}
+
+fn grant_from_row(row: pgrx::spi::SpiHeapTupleData<'_>) -> safety::GraphResult<GraphGrant> {
+    Ok(GraphGrant {
+        graph_id: required_column(&row, 1, "graph_id")?,
+        graph_name: required_column(&row, 2, "graph_name")?,
+        grantee: required_column(&row, 3, "grantee")?,
+        privilege: required_column(&row, 4, "privilege")?,
+        grantor: required_column(&row, 5, "grantor")?,
+        created_at: required_column(&row, 6, "created_at")?,
+        updated_at: required_column(&row, 7, "updated_at")?,
     })
 }
 

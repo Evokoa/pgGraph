@@ -31,6 +31,27 @@ apply, reset, and global analytics.
 | Sync | `enable_sync`, `apply_sync` |
 | Global analytics | `connected_components`, `component_stats`, component pagination helpers |
 
+## Graph Privileges
+
+Named graphs can grant graph-level privileges to PostgreSQL roles:
+
+```sql
+SELECT * FROM graph.grant_graph('customer_360', 'app_reader', 'read', namespace := 'analytics');
+SELECT * FROM graph.grant_graph('customer_360', 'etl_worker', 'build', namespace := 'analytics');
+SELECT * FROM graph.graph_privileges('customer_360', namespace := 'analytics');
+```
+
+| Privilege | Effect |
+|---|---|
+| `read` | Allows selecting/querying the graph when source-table privileges also allow access |
+| `write` | Reserved for mapped graph writes; source-table write privileges remain required |
+| `build` | Allows build, vacuum, and maintenance for the graph |
+| `admin` | Allows grant/revoke and graph lifecycle administration |
+
+Graph owners, graph schema admins, and graph `admin` grantees can grant and
+revoke graph privileges. Graph owners and graph schema admins retain all graph
+privileges.
+
 ## Reader Functions
 
 Application roles typically need execute privileges on search/traversal/path
@@ -61,6 +82,11 @@ Mapped GQL writes also preflight the privileges they need on source tables:
 `MERGE` requires `SELECT` and `INSERT`, and it requires `UPDATE` only when the
 query includes `ON MATCH SET`.
 
+Graph `read` is necessary but not sufficient for reading source data. A role
+with graph `read` but no source-table `SELECT` still receives `PG002` when a
+query hydrates or otherwise reads source rows. A role with source-table
+`SELECT` but no graph `read` cannot select or query that graph.
+
 <Callout type="info">
 The graph artifact contains source primary keys and topology. ACL checks are
 part of query execution so a role cannot use graph queries to bypass source
@@ -76,6 +102,7 @@ graph._registered_tables
 graph._registered_edges
 graph._registered_filter_columns
 graph._graphs
+graph._graph_grants
 graph._build_jobs
 graph._maintenance_jobs
 graph._sync_log

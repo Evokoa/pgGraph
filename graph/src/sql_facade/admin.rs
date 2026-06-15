@@ -223,6 +223,114 @@ fn set_current_graph(
     })
 }
 
+#[pg_extern(schema = "graph")]
+fn grant_graph(
+    graph_name: &str,
+    grantee: &str,
+    privilege: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(grantee, pgrx::pg_sys::Oid),
+        name!(privilege, String),
+        name!(grantor, pgrx::pg_sys::Oid),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("grant_graph()", || {
+        let grant =
+            catalog::grant_graph_privilege(graph_name, tenant, namespace, grantee, privilege)
+                .unwrap_or_else(|err| err.report());
+        graph_grant_iterator(vec![grant])
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn revoke_graph(
+    graph_name: &str,
+    grantee: &str,
+    privilege: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(grantee, pgrx::pg_sys::Oid),
+        name!(privilege, String),
+        name!(grantor, pgrx::pg_sys::Oid),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("revoke_graph()", || {
+        let grant =
+            catalog::revoke_graph_privilege(graph_name, tenant, namespace, grantee, privilege)
+                .unwrap_or_else(|err| err.report());
+        graph_grant_iterator(vec![grant])
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn graph_privileges(
+    graph_name: default!(Option<&str>, "NULL"),
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(grantee, pgrx::pg_sys::Oid),
+        name!(privilege, String),
+        name!(grantor, pgrx::pg_sys::Oid),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("graph_privileges()", || {
+        let grants = catalog::graph_privileges(graph_name, tenant, namespace)
+            .unwrap_or_else(|err| err.report());
+        graph_grant_iterator(grants)
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn transfer_graph_ownership(
+    graph_name: &str,
+    new_owner: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("transfer_graph_ownership()", || {
+        let metadata = catalog::transfer_graph_ownership(graph_name, tenant, namespace, new_owner)
+            .unwrap_or_else(|err| err.report());
+        graph_metadata_iterator(vec![metadata])
+    })
+}
+
 pub(crate) fn check_enabled_result() -> safety::GraphResult<()> {
     if config::ENABLED.get() {
         Ok(())
@@ -262,6 +370,33 @@ fn graph_metadata_iterator(
             row.residency,
             row.materialization,
             row.projection_mode,
+            row.created_at,
+            row.updated_at,
+        )
+    }))
+}
+
+fn graph_grant_iterator(
+    rows: Vec<catalog::GraphGrant>,
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(grantee, pgrx::pg_sys::Oid),
+        name!(privilege, String),
+        name!(grantor, pgrx::pg_sys::Oid),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    TableIterator::new(rows.into_iter().map(|row| {
+        (
+            row.graph_id,
+            row.graph_name,
+            row.grantee,
+            row.privilege,
+            row.grantor,
             row.created_at,
             row.updated_at,
         )
@@ -312,6 +447,15 @@ pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
             table: "graph schema admin".to_string(),
         })
     }
+}
+
+fn require_selected_graph_build_result() -> safety::GraphResult<()> {
+    let graph = catalog::selected_or_default_graph_metadata()?;
+    catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Build)
+}
+
+fn require_graph_build_result(graph: &catalog::GraphMetadata) -> safety::GraphResult<()> {
+    catalog::require_graph_privilege(graph, catalog::GraphPrivilege::Build)
 }
 
 fn registered_table_name(table_oid: u32) -> safety::GraphResult<Option<String>> {
@@ -1135,7 +1279,7 @@ pub(super) fn build() -> TableIterator<
     ),
 > {
     with_panic_boundary("build()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        require_selected_graph_build_result().unwrap_or_else(|err| err.report());
         let result = execute_build(false).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             result.nodes_loaded,
@@ -1171,8 +1315,8 @@ fn build_graph(
     ),
 > {
     with_panic_boundary("build_graph()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
         let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        require_graph_build_result(&graph).unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         let result = execute_build(force_persist).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
@@ -1213,8 +1357,8 @@ fn build_async_graph(
     ),
 > {
     with_panic_boundary("build_async_graph()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
         let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        require_graph_build_result(&graph).unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         let projection_mode = match projection_mode {
             Some(mode) => config::parse_projection_mode(mode).unwrap_or_else(|| {
@@ -2658,7 +2802,7 @@ fn vacuum() -> TableIterator<
     ),
 > {
     with_panic_boundary("vacuum()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        require_selected_graph_build_result().unwrap_or_else(|err| err.report());
         let result = execute_vacuum(false).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             result.nodes_before,
@@ -2687,8 +2831,8 @@ fn vacuum_graph(
     ),
 > {
     with_panic_boundary("vacuum_graph()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
         let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        require_graph_build_result(&graph).unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         let result = execute_vacuum(false).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
@@ -2721,7 +2865,7 @@ fn maintenance(
     ),
 > {
     with_panic_boundary("maintenance()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        require_selected_graph_build_result().unwrap_or_else(|err| err.report());
         if concurrently {
             let job_id = create_maintenance_job().unwrap_or_else(|err| err.report());
             if let Err(err) = launch_maintenance_worker(&job_id) {
@@ -2795,8 +2939,8 @@ fn maintenance_graph(
     ),
 > {
     with_panic_boundary("maintenance_graph()", || {
-        require_graph_admin_result().unwrap_or_else(|err| err.report());
         let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        require_graph_build_result(&graph).unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         if concurrently {
             let job_id = create_maintenance_job().unwrap_or_else(|err| err.report());
