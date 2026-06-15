@@ -185,8 +185,8 @@ maintenance using its built-in health checks.
 Sync policies store graph-scoped replay intent in PostgreSQL catalogs so hosted
 schedulers can run sync consistently across backends. They do not start an
 always-on scheduler inside PostgreSQL. Use `pg_cron`, an application scheduler,
-or another host-managed worker to call `graph.run_job(job_id)` or
-`graph.run_sync_policy(policy_id)` at the cadence recorded on the policy.
+or another host-managed worker to call `graph.run_due_jobs()` at the cadence
+recorded on the policy.
 
 Create a policy for a named graph:
 
@@ -212,9 +212,17 @@ Or run it through the generic job surface:
 SELECT * FROM graph.run_job('<job-id>');
 ```
 
+Hosted schedulers can run all due jobs in one bounded call:
+
+```sql
+SELECT * FROM graph.run_due_jobs(max_jobs := 64);
+```
+
 Policy execution restores the selected graph context, uses the same replay path
 as `graph.apply_sync()`, and records the result in `graph._job_runs`. Disabled
-jobs produce a `disabled` run row and do not apply sync.
+jobs produce a `disabled` run row and do not apply sync. Concurrent runners use
+row locking plus a graph/job advisory lock; a contended job records
+`lock_skipped` instead of replaying the same work twice.
 
 Inspect policy and job state:
 
@@ -239,6 +247,11 @@ Policy and job listing functions only return graphs visible to the current
 role. Running, altering, or removing a policy/job requires graph administration
 for the target graph. Hard `max_graph_jobs` quotas count generic jobs, build
 jobs, and maintenance jobs before a new sync policy job is created.
+
+Durable job status values are `queued`, `running`, `completed`, `failed`,
+`disabled`, `retryable_failed`, `permanent_failed`, `quota_blocked`, and
+`lock_skipped`. Existing build and maintenance job APIs continue to use their
+legacy queued/running/completed/failed subset.
 
 ## Edge Buffer Limits
 

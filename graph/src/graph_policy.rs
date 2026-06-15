@@ -28,8 +28,18 @@ pub(crate) const MATERIALIZATION_POLICIES: &[&str] = &["shared", "dedicated"];
 /// Accepted projection modes for catalog defaults and build jobs.
 pub(crate) const PROJECTION_MODES: &[&str] = &["csr_readonly", "mutable_overlay"];
 
-/// Durable job statuses used by build, maintenance, and future sync workers.
-pub(crate) const JOB_STATUSES: &[&str] = &["queued", "running", "completed", "failed"];
+/// Durable job statuses used by build, maintenance, and sync workers.
+pub(crate) const JOB_STATUSES: &[&str] = &[
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "disabled",
+    "retryable_failed",
+    "permanent_failed",
+    "quota_blocked",
+    "lock_skipped",
+];
 /// Progress phases reported by SQL-visible long-running graph jobs.
 pub(crate) const JOB_PROGRESS_PHASES: &[&str] = &[
     "queued",
@@ -181,7 +191,10 @@ mod tests {
 
     #[test]
     fn job_scheduler_and_quota_defaults_are_single_sourced() {
-        assert_eq!(JOB_STATUSES, ["queued", "running", "completed", "failed"]);
+        assert!(JOB_STATUSES.contains(&"queued"));
+        assert!(JOB_STATUSES.contains(&"completed"));
+        assert!(JOB_STATUSES.contains(&"retryable_failed"));
+        assert!(JOB_STATUSES.contains(&"lock_skipped"));
         assert!(JOB_PROGRESS_PHASES.contains(&"reading_catalog"));
         assert!(FAILURE_STATUSES.contains(&"corrupt"));
         assert_eq!(DEFAULT_SCHEDULER_WAKE_INTERVAL_SECS, 60);

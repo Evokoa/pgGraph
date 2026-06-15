@@ -655,7 +655,10 @@ CREATE TABLE IF NOT EXISTS graph._jobs (
     CHECK (schedule_interval_secs > 0),
     CHECK (max_runtime_secs IS NULL OR max_runtime_secs > 0),
     CHECK (max_retries >= 0),
-    CHECK (last_status IS NULL OR last_status IN ('queued', 'running', 'completed', 'failed', 'disabled'))
+    CHECK (last_status IS NULL OR last_status IN (
+        'queued', 'running', 'completed', 'failed', 'disabled',
+        'retryable_failed', 'permanent_failed', 'quota_blocked', 'lock_skipped'
+    ))
 );
 
 CREATE INDEX IF NOT EXISTS _jobs_graph_kind_idx
@@ -674,7 +677,10 @@ CREATE TABLE IF NOT EXISTS graph._job_runs (
     retry_count     INTEGER NOT NULL DEFAULT 0,
     worker_identity TEXT,
     execution_mode  TEXT NOT NULL DEFAULT 'hosted',
-    CHECK (status IN ('running', 'completed', 'failed', 'disabled')),
+    CHECK (status IN (
+        'running', 'completed', 'failed', 'disabled',
+        'retryable_failed', 'permanent_failed', 'quota_blocked', 'lock_skipped'
+    )),
     CHECK (retry_count >= 0),
     CHECK (execution_mode IN ('hosted', 'internal'))
 );
@@ -700,7 +706,10 @@ CREATE TABLE IF NOT EXISTS graph._sync_policies (
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (schedule_interval_secs > 0),
     CHECK (max_sync_lag_rows IS NULL OR max_sync_lag_rows >= 0),
-    CHECK (last_status IS NULL OR last_status IN ('queued', 'running', 'completed', 'failed', 'disabled'))
+    CHECK (last_status IS NULL OR last_status IN (
+        'queued', 'running', 'completed', 'failed', 'disabled',
+        'retryable_failed', 'permanent_failed', 'quota_blocked', 'lock_skipped'
+    ))
 );
 
 CREATE INDEX IF NOT EXISTS _sync_policies_graph_enabled_idx

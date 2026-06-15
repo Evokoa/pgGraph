@@ -21,6 +21,15 @@ pub(crate) enum JobStatus {
     Running,
     Completed,
     Failed,
+    Disabled,
+    RetryableFailure,
+    PermanentFailure,
+    #[allow(
+        dead_code,
+        reason = "quota_blocked is part of the durable SQL status contract before runtime quota execution produces it"
+    )]
+    QuotaBlocked,
+    LockSkipped,
 }
 
 impl JobStatus {
@@ -30,6 +39,11 @@ impl JobStatus {
             JobStatus::Running => "running",
             JobStatus::Completed => "completed",
             JobStatus::Failed => "failed",
+            JobStatus::Disabled => "disabled",
+            JobStatus::RetryableFailure => "retryable_failed",
+            JobStatus::PermanentFailure => "permanent_failed",
+            JobStatus::QuotaBlocked => "quota_blocked",
+            JobStatus::LockSkipped => "lock_skipped",
         }
     }
 }
@@ -517,6 +531,11 @@ mod tests {
         assert_eq!(JobStatus::Running.as_str(), "running");
         assert_eq!(JobStatus::Completed.as_str(), "completed");
         assert_eq!(JobStatus::Failed.as_str(), "failed");
+        assert_eq!(JobStatus::Disabled.as_str(), "disabled");
+        assert_eq!(JobStatus::RetryableFailure.as_str(), "retryable_failed");
+        assert_eq!(JobStatus::PermanentFailure.as_str(), "permanent_failed");
+        assert_eq!(JobStatus::QuotaBlocked.as_str(), "quota_blocked");
+        assert_eq!(JobStatus::LockSkipped.as_str(), "lock_skipped");
     }
 
     #[test]

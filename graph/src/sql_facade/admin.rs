@@ -2973,6 +2973,12 @@ struct JobRunRow {
     finished_at: Option<TimestampWithTimeZone>,
 }
 
+/// Advisory lock namespace for generic graph jobs.
+///
+/// The object id is derived from graph and job UUID text so concurrent runners
+/// for the same job skip rather than replaying the same durable work twice.
+const JOB_LOCK_CLASS_ID: i32 = 1_918_928_212;
+
 fn validate_positive_i64(value: i64, name: &str) -> safety::GraphResult<i64> {
     if value > 0 {
         Ok(value)
@@ -2989,6 +2995,16 @@ fn validate_nonnegative_i64(value: i64, name: &str) -> safety::GraphResult<i64> 
     } else {
         Err(safety::GraphError::InvalidFilter {
             reason: format!("{name} must be non-negative"),
+        })
+    }
+}
+
+fn validate_positive_i32(value: i32, name: &str) -> safety::GraphResult<i32> {
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err(safety::GraphError::InvalidFilter {
+            reason: format!("{name} must be greater than zero"),
         })
     }
 }
@@ -3125,6 +3141,49 @@ fn generic_job_rows(
     .map_err(|err| safety::GraphError::Internal(format!("job read failed: {err}")))
 }
 
+fn due_generic_job_rows(limit: i32) -> safety::GraphResult<Vec<GenericJobRow>> {
+    let limit = limit.clamp(1, 500);
+    let visible_graph_ids = visible_graph_ids()?;
+    Spi::connect(|client| {
+        let selected = client.select(
+            "SELECT j.job_id::text, j.graph_id::text, g.graph_name, j.policy_kind,
+                    j.enabled, j.schedule_interval_secs, j.max_runtime_secs,
+                    j.max_retries, j.next_run_at, j.last_run_at, j.last_status,
+                    j.last_error, j.last_sqlstate
+               FROM graph._jobs j
+               JOIN graph._graphs g ON g.graph_id = j.graph_id
+              WHERE j.enabled
+                AND (j.next_run_at IS NULL OR j.next_run_at <= now())
+                AND j.graph_id::text = ANY($2::text[])
+              ORDER BY j.next_run_at NULLS FIRST, j.created_at
+              LIMIT $1
+              FOR UPDATE OF j SKIP LOCKED",
+            None,
+            &[limit.into(), visible_graph_ids.into()],
+        )?;
+        let mut out = Vec::new();
+        for row in selected {
+            out.push(GenericJobRow {
+                job_id: row.get::<String>(1)?.unwrap_or_default(),
+                graph_id: row.get::<String>(2)?.unwrap_or_default(),
+                graph_name: row.get::<String>(3)?.unwrap_or_default(),
+                policy_kind: row.get::<String>(4)?.unwrap_or_default(),
+                enabled: row.get::<bool>(5)?.unwrap_or(false),
+                schedule_interval_secs: row.get::<i64>(6)?.unwrap_or(60),
+                max_runtime_secs: row.get::<i64>(7)?,
+                max_retries: row.get::<i32>(8)?.unwrap_or(0),
+                next_run_at: row.get::<TimestampWithTimeZone>(9)?,
+                last_run_at: row.get::<TimestampWithTimeZone>(10)?,
+                last_status: row.get::<String>(11)?,
+                last_error: row.get::<String>(12)?,
+                last_sqlstate: row.get::<String>(13)?,
+            });
+        }
+        Ok::<_, pgrx::spi::SpiError>(out)
+    })
+    .map_err(|err| safety::GraphError::Internal(format!("due job read failed: {err}")))
+}
+
 fn job_run_rows(
     job_id: Option<&str>,
     graph_id: Option<&str>,
@@ -3180,20 +3239,34 @@ fn job_run_rows(
     .map_err(|err| safety::GraphError::Internal(format!("job run read failed: {err}")))
 }
 
-fn insert_job_run(job_id: &str, graph_id: &str, status: &str) -> safety::GraphResult<JobRunRow> {
+fn insert_job_run(
+    job_id: &str,
+    graph_id: &str,
+    status: &str,
+    retry_count: i32,
+    execution_mode: &str,
+) -> safety::GraphResult<JobRunRow> {
     Spi::connect(|client| {
         let mut rows = client.select(
             "INSERT INTO graph._job_runs (
-                    job_id, graph_id, status, worker_identity, execution_mode
+                    job_id, graph_id, status, retry_count, worker_identity, execution_mode
                 )
                 VALUES (
-                    $1::uuid, $2::uuid, $3, current_user || '@' || inet_server_addr(), 'hosted'
+                    $1::uuid, $2::uuid, $3, $4,
+                    concat(current_user, '@', COALESCE(inet_server_addr()::text, 'local')),
+                    $5
                 )
                 RETURNING run_id::text, job_id::text, graph_id::text, status,
                           rows_applied, retry_count, execution_mode, sqlstate,
                           error, started_at, finished_at",
             None,
-            &[job_id.into(), graph_id.into(), status.into()],
+            &[
+                job_id.into(),
+                graph_id.into(),
+                status.into(),
+                retry_count.into(),
+                execution_mode.into(),
+            ],
         )?;
         let row = rows.next().ok_or(pgrx::spi::SpiError::InvalidPosition)?;
         Ok::<_, pgrx::spi::SpiError>(JobRunRow {
@@ -3216,6 +3289,44 @@ fn insert_job_run(job_id: &str, graph_id: &str, status: &str) -> safety::GraphRe
         })
     })
     .map_err(|err| safety::GraphError::Internal(format!("job run creation failed: {err}")))
+}
+
+fn graph_job_lock_object_id(graph_id: &str, job_id: &str) -> i32 {
+    let mut hash = 0x811c_9dc5_u32;
+    for byte in graph_id
+        .bytes()
+        .chain([b':'])
+        .chain(job_id.bytes())
+        .filter(|byte| *byte != b'-')
+    {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    i32::from_ne_bytes(hash.to_ne_bytes())
+}
+
+fn try_acquire_job_lock(graph_id: &str, job_id: &str) -> safety::GraphResult<bool> {
+    let lock_object_id = graph_job_lock_object_id(graph_id, job_id);
+    Spi::get_one::<bool>(&format!(
+        "SELECT pg_try_advisory_xact_lock({JOB_LOCK_CLASS_ID}, {lock_object_id})"
+    ))
+    .map_err(|err| safety::GraphError::Internal(format!("job lock acquisition failed: {err}")))?
+    .ok_or_else(|| safety::GraphError::Internal("job lock acquisition returned null".to_string()))
+}
+
+fn failed_attempt_count(job_id: &str) -> safety::GraphResult<i32> {
+    let count = Spi::get_one_with_args::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph._job_runs
+          WHERE job_id = $1::uuid
+            AND status IN ('failed', 'retryable_failed', 'permanent_failed')",
+        &[job_id.into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("job retry count read failed: {err}")))?
+    .unwrap_or(0);
+    i32::try_from(count).map_err(|_| {
+        safety::GraphError::Internal("job retry count exceeds supported range".to_string())
+    })
 }
 
 fn job_run_row_by_run_id(run_id: &str) -> safety::GraphResult<JobRunRow> {
@@ -3311,8 +3422,14 @@ fn fail_sync_policy_run(
     policy: &SyncPolicyRow,
     run_id: &str,
     err: &safety::GraphError,
+    retry_count: i32,
+    max_retries: i32,
 ) -> safety::GraphResult<()> {
-    let failed = JobStatus::Failed.as_str();
+    let failed = if retry_count < max_retries {
+        JobStatus::RetryableFailure.as_str()
+    } else {
+        JobStatus::PermanentFailure.as_str()
+    };
     let sqlstate = err.sqlstate();
     let message = err.to_string();
     Spi::run_with_args(
@@ -3363,16 +3480,39 @@ fn fail_sync_policy_run(
 }
 
 fn run_sync_policy_result(policy_id: &str) -> safety::GraphResult<JobRunRow> {
+    run_sync_policy_with_mode(policy_id, "hosted")
+}
+
+fn run_sync_policy_with_mode(
+    policy_id: &str,
+    execution_mode: &str,
+) -> safety::GraphResult<JobRunRow> {
     let policy = sync_policy_row(policy_id)?.ok_or_else(|| safety::GraphError::InvalidFilter {
         reason: format!("sync policy '{policy_id}' does not exist"),
     })?;
     let graph = require_admin_for_graph_id(&policy.graph_id)?;
     catalog::set_selected_graph_id(&graph.graph_id)?;
     super::runtime::clear_loaded_graph_if_mismatched(&graph.graph_id);
+    let job = generic_job_rows(Some(&policy.job_id), None, 1)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            safety::GraphError::Internal(format!(
+                "sync policy '{}' has no backing job",
+                policy.policy_id
+            ))
+        })?;
+    let retry_count = failed_attempt_count(&policy.job_id)?;
 
     if !policy.enabled {
-        let disabled = "disabled";
-        let row = insert_job_run(&policy.job_id, &policy.graph_id, disabled)?;
+        let disabled = JobStatus::Disabled.as_str();
+        let row = insert_job_run(
+            &policy.job_id,
+            &policy.graph_id,
+            disabled,
+            retry_count,
+            execution_mode,
+        )?;
         Spi::run_with_args(
             "UPDATE graph._job_runs
                 SET finished_at = now()
@@ -3414,18 +3554,99 @@ fn run_sync_policy_result(policy_id: &str) -> safety::GraphResult<JobRunRow> {
         });
     }
 
+    if !try_acquire_job_lock(&policy.graph_id, &policy.job_id)? {
+        let skipped = JobStatus::LockSkipped.as_str();
+        let row = insert_job_run(
+            &policy.job_id,
+            &policy.graph_id,
+            skipped,
+            retry_count,
+            execution_mode,
+        )?;
+        let message = "job advisory lock is already held";
+        Spi::run_with_args(
+            "UPDATE graph._job_runs
+                SET error = $2,
+                    finished_at = now()
+              WHERE run_id = $1::uuid",
+            &[row.run_id.clone().into(), message.into()],
+        )
+        .map_err(|err| {
+            safety::GraphError::Internal(format!("lock-skipped job run update failed: {err}"))
+        })?;
+        Spi::run_with_args(
+            "UPDATE graph._jobs
+                SET last_run_at = now(),
+                    last_status = $2,
+                    last_error = $3,
+                    last_sqlstate = NULL,
+                    updated_at = now()
+              WHERE job_id = $1::uuid",
+            &[policy.job_id.clone().into(), skipped.into(), message.into()],
+        )
+        .map_err(|err| {
+            safety::GraphError::Internal(format!("lock-skipped job status update failed: {err}"))
+        })?;
+        Spi::run_with_args(
+            "UPDATE graph._sync_policies
+                SET last_run_at = now(),
+                    last_status = $2,
+                    last_error = $3,
+                    updated_at = now()
+              WHERE policy_id = $1::uuid",
+            &[
+                policy.policy_id.clone().into(),
+                skipped.into(),
+                message.into(),
+            ],
+        )
+        .map_err(|err| {
+            safety::GraphError::Internal(format!("lock-skipped policy status update failed: {err}"))
+        })?;
+        let row = job_run_row_by_run_id(&row.run_id)?;
+        return Ok(JobRunRow {
+            graph_name: graph.graph_name,
+            ..row
+        });
+    }
+
     let running = JobStatus::Running.as_str();
-    let row = insert_job_run(&policy.job_id, &policy.graph_id, running)?;
+    let row = insert_job_run(
+        &policy.job_id,
+        &policy.graph_id,
+        running,
+        retry_count,
+        execution_mode,
+    )?;
     match apply_sync_internal() {
         Ok(stats) => {
             let rows_applied = stats.inserts + stats.updates + stats.deletes;
             complete_sync_policy_run(&policy, &row.run_id, rows_applied)
         }
         Err(err) => {
-            let _ = fail_sync_policy_run(&policy, &row.run_id, &err);
+            let _ = fail_sync_policy_run(&policy, &row.run_id, &err, retry_count, job.max_retries);
             Err(err)
         }
     }
+}
+
+fn run_job_result(job: &GenericJobRow, execution_mode: &str) -> safety::GraphResult<JobRunRow> {
+    require_admin_for_graph_id(&job.graph_id)?;
+    if job.policy_kind != "sync_policy" {
+        return Err(safety::GraphError::UnsupportedOperation {
+            operation: "run_job".to_string(),
+            reason: format!("policy kind '{}' is not executable", job.policy_kind),
+        });
+    }
+    let policy_id = Spi::get_one_with_args::<String>(
+        "SELECT policy_id::text FROM graph._sync_policies WHERE job_id = $1::uuid",
+        &[job.job_id.as_str().into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("sync policy lookup failed: {err}")))?
+    .ok_or_else(|| {
+        safety::GraphError::Internal(format!("job '{}' has no sync policy", job.job_id))
+    })?;
+    run_sync_policy_with_mode(&policy_id, execution_mode)
 }
 
 /// Add an explicit sync policy for a graph.
@@ -3926,7 +4147,12 @@ fn job_stats(
                         count(DISTINCT j.job_id)::bigint AS job_count,
                         count(r.run_id)::bigint AS run_count,
                         count(r.run_id) FILTER (WHERE r.status = 'completed')::bigint AS completed_runs,
-                        count(r.run_id) FILTER (WHERE r.status = 'failed')::bigint AS failed_runs,
+                        count(r.run_id) FILTER (
+                            WHERE r.status IN (
+                                'failed', 'retryable_failed',
+                                'permanent_failed', 'quota_blocked'
+                            )
+                        )::bigint AS failed_runs,
                         max(r.started_at) AS last_run_at
                   FROM graph._jobs j
                   JOIN graph._graphs g ON g.graph_id = j.graph_id
@@ -3994,25 +4220,7 @@ fn run_job(
                 }
                 .report()
             });
-        require_admin_for_graph_id(&job.graph_id).unwrap_or_else(|err| err.report());
-        if job.policy_kind != "sync_policy" {
-            safety::GraphError::UnsupportedOperation {
-                operation: "run_job".to_string(),
-                reason: format!("policy kind '{}' is not executable", job.policy_kind),
-            }
-            .report();
-        }
-        let policy_id = Spi::get_one_with_args::<String>(
-            "SELECT policy_id::text FROM graph._sync_policies WHERE job_id = $1::uuid",
-            &[job_id.into()],
-        )
-        .unwrap_or_else(|err| {
-            safety::GraphError::Internal(format!("sync policy lookup failed: {err}")).report()
-        })
-        .unwrap_or_else(|| {
-            safety::GraphError::Internal(format!("job '{job_id}' has no sync policy")).report()
-        });
-        let row = run_sync_policy_result(&policy_id).unwrap_or_else(|err| err.report());
+        let row = run_job_result(&job, "hosted").unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             row.job_id,
             row.run_id,
@@ -4025,6 +4233,53 @@ fn run_job(
             row.started_at,
             row.finished_at,
         )])
+    })
+}
+
+/// Run due durable jobs through the hosted scheduler path.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn run_due_jobs(
+    max_jobs: default!(i32, 64),
+) -> TableIterator<
+    'static,
+    (
+        name!(job_id, String),
+        name!(run_id, String),
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(policy_kind, String),
+        name!(status, String),
+        name!(rows_applied, Option<i64>),
+        name!(error, Option<String>),
+        name!(started_at, TimestampWithTimeZone),
+        name!(finished_at, Option<TimestampWithTimeZone>),
+    ),
+> {
+    with_panic_boundary("run_due_jobs()", || {
+        let max_jobs =
+            validate_positive_i32(max_jobs, "max_jobs").unwrap_or_else(|err| err.report());
+        let jobs = due_generic_job_rows(max_jobs).unwrap_or_else(|err| err.report());
+        let mut rows = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let row = run_job_result(&job, "hosted").unwrap_or_else(|err| err.report());
+            rows.push((
+                row.job_id,
+                row.run_id,
+                row.graph_id,
+                row.graph_name,
+                job.policy_kind,
+                row.status,
+                row.rows_applied,
+                row.error,
+                row.started_at,
+                row.finished_at,
+            ));
+        }
+        TableIterator::new(rows)
     })
 }
 

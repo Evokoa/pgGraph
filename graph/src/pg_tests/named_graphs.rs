@@ -931,6 +931,65 @@ fn sync_policies_run_through_visible_durable_jobs() {
     .expect("disabled run status missing");
     assert_eq!(disabled_status, "disabled");
 
+    Spi::run(&format!(
+        "SELECT graph.alter_job({}, enabled := true)",
+        super::sql_literal(&job_id)
+    ))
+    .expect("re-enable policy job failed");
+    Spi::run(&format!(
+        "UPDATE graph._jobs
+            SET next_run_at = now() - interval '1 second'
+          WHERE job_id = {}::uuid",
+        super::sql_literal(&job_id)
+    ))
+    .expect("mark policy job due failed");
+    Spi::run(&format!(
+        "UPDATE graph._sync_policies
+            SET next_run_at = now() - interval '1 second'
+          WHERE job_id = {}::uuid",
+        super::sql_literal(&job_id)
+    ))
+    .expect("mark policy due failed");
+    Spi::run("UPDATE public.graph_test_users_pgtest SET name = 'Alice policy 3' WHERE id = 'u1'")
+        .expect("update policy_graph source row for due runner failed");
+    let (due_status, due_rows, due_mode) = Spi::connect(|client| {
+        let mut rows = client
+            .select(
+                "SELECT status, rows_applied
+                   FROM graph.run_due_jobs(1)
+                  WHERE job_id = $1",
+                None,
+                &[job_id.as_str().into()],
+            )
+            .expect("run due jobs failed");
+        let row = rows.next().expect("due job row missing");
+        let latest_run = client
+            .select(
+                "SELECT execution_mode
+                   FROM graph.job_runs(job_id := $1)
+                  ORDER BY started_at DESC
+                  LIMIT 1",
+                None,
+                &[job_id.as_str().into()],
+            )
+            .expect("latest job run query failed")
+            .next()
+            .expect("latest job run missing");
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)?.expect("due status missing"),
+            row.get::<i64>(2)?,
+            latest_run
+                .get::<String>(1)?
+                .expect("due mode missing"),
+        ))
+    })
+    .expect("due job row read failed");
+    assert_eq!(due_status, "completed");
+    assert_eq!(due_rows, Some(1));
+    assert_eq!(due_mode, "hosted");
+    let invalid_due_limit = sqlstate_for_prepared_helper("SELECT * FROM graph.run_due_jobs(0)");
+    assert_eq!(invalid_due_limit, Some("PG005".to_string()));
+
     Spi::run(
         "DROP ROLE IF EXISTS graph_phase9_no_policy;
          CREATE ROLE graph_phase9_no_policy;
