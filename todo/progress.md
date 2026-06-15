@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 13, Label/Type Management Surface.
-- Status: Phase 12 is complete after direct named-graph node lookup, one-hop neighbor helpers, GQL identity lookup planning/execution, public docs, review, and phase checks.
+- Active phase: Phase 14, PostgreSQL-First GQL Writes Beyond Single-Row Node Mutation.
+- Status: Phase 13 is complete after relationship edge-row hydration, node-only optional matches, wildcard typed rejection coverage, explain updates, public docs, review, and phase checks.
 - Started: 2026-06-16.
 
 ## Phase Updates
@@ -23,6 +23,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 10: complete - durable projection ingestion now publishes dirty source-node ranges, `graph.projection_compact()` runs bounded manifest-level copy-on-write compaction with optional dirty chunk replacement, `graph.projection_status()` reports active artifact bytes, segment fanout, and read amplification, `max_artifact_storage_bytes` quotas guard ingest/compaction write budgets, and public docs describe the operator surface.
 - Phase 11: complete - added graph-scoped `rename_edge`, `alter_edge`, `remove_edge`, and `list_edges` relationship management APIs, metadata-only `graph_map()` JSON export with deterministic registration/status/warning output, durable rebuild-required tracking for relationship edits on selected and non-selected graphs, ACL coverage, and public docs.
 - Phase 12: complete - added graph-scoped `get_node` and `get_neighbors` direct business-id lookup APIs, GQL `id(node)` and single-column primary-key property `NodeLookup` planning/execution, source-table ACL/RLS visibility checks, transaction-delta-aware GQL node lookup, regression coverage, and public docs.
+- Phase 13: complete - hydrated whole relationship variables from registered edge-row tables, preserved coordinate-only relationship values for `hydrate := false`, added node-only `OPTIONAL MATCH` null-extension, pinned planner-hostile wildcard forms to typed `PG014` rejections, updated explain output for edge-row hydration, and refreshed public GQL docs.
 
 ## Verification Log
 
@@ -122,6 +123,16 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-16: `scripts/check_docs_drift.sh` passed.
 - 2026-06-16: `git diff --check` passed.
 - 2026-06-16: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-16: `cargo pgrx test --features "pg17 development" relationship_variables_hydrate_registered_edge_rows` passed, 1 test.
+- 2026-06-16: `cargo pgrx test --features "pg17 development" node_only_optional_match_null_extends_missing_rows` passed, 1 test.
+- 2026-06-16: `cargo pgrx test --features "pg17 development" wildcard_planner_hostile_forms_have_stable_sqlstate` initially failed because wildcard unsupported-shape errors map to stable `PG014`, not `PG018`; after pinning `PG014`, it passed, 1 test.
+- 2026-06-16: `cargo pgrx test --features "pg17 development" gql_explain_uses_registered_table_labels_after_catalog_read` passed, 1 test.
+- 2026-06-16: `cargo test --features "pg17 development" query::` passed after Phase 13, 165 tests.
+- 2026-06-16: `cargo pgrx test --features "pg17 development" gql` initially failed in `gql_path_values_and_functions_have_stable_shape` because zero-row relationship hydration surfaced an internal SPI positioning error; after switching relationship hydration to zero-row-safe SPI selection, it passed, 91 tests.
+- 2026-06-16: `cargo fmt --check` passed from `graph/` after Phase 13.
+- 2026-06-16: `scripts/check_docs_drift.sh` passed after Phase 13 docs.
+- 2026-06-16: `git diff --check` passed after Phase 13.
+- 2026-06-16: `cargo doc --features pg17 --no-deps` passed from `graph/` after Phase 13.
 - 2026-06-15: `cargo fmt --check` passed from `graph/`.
 - 2026-06-15: `cargo test --features "pg17 development" graph_file_path` passed, 4 tests.
 - 2026-06-15: `git diff --check` passed.
@@ -246,9 +257,10 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 9 sync-replay checkpoint local review found no blocking issue in selected-graph sync-log filtering, pending/max watermark reporting, query freshness scope, or docs/API drift. The remaining Phase 9 work is the durable generic job and sync-policy layer.
 - Phase 9 hosted sync policy/job checkpoint local review found no blocking issue in policy creation, visible job inspection, explicit `run_job()`/`run_sync_policy()` execution, disabled runs, quota enforcement, or docs/API drift.
 - Phase 12 local review found no blocking issue after tightening GQL property-form identity lookup to registered single-column primary-key columns and removing a no-op lowerer filter. Direct SQL lookup preserves graph privileges, source-table ACL checks, and RLS visibility checks before returning rows.
+- Phase 13 local review found one correctness issue: zero-row relationship hydration used an SPI helper that reported no rows as an internal positioning error. It now uses the node-hydration selection pattern and treats absent edge rows as no hydrated properties while preserving coordinate output.
 - Phase 9 hosted due-job runner checkpoint local review found no blocking issue in due selection, row-lock/advisory-lock guarded execution, durable status vocabulary, failed-run aggregation, or docs/API drift.
 - Phase 9 one-shot internal worker checkpoint local review found no blocking issue in dynamic due-job worker metadata, internal execution-mode history, hosted/internal shared runner behavior, or docs/API drift. The implementation intentionally avoids an always-on postmaster loop; operators choose cadence through `pg_cron`, provider schedulers, application schedulers, or repeated `run_due_jobs_async()` calls.
 - Phase 10 local review found no blocking issue in dirty-range segment metadata, manifest-level compaction publication, copy-on-write chunk routing, active artifact byte accounting, fanout/read-amplification metrics, artifact storage quota checks, or docs/API drift. The implementation continues to avoid in-place mutation of mmap'd CSR bytes.
 - Phase 11 local review found one API-shape gap: the requested named `graph.remove_edge(graph_name := ..., label := ...)` overload was missing. It was added and covered through the relationship-management pgrx test.
 - Independent review after Phases 9-11 ran in subagent `019ecc2e-095d-7a62-bb29-d7f4650f9d96` and found that non-selected named graphs did not report rebuild-required after relationship edits. The fix touches `graph._graphs.updated_at` on relationship catalog edits, compares that timestamp to the latest completed build in `graph_map()`, and adds non-selected named-graph regression coverage.
-- Next checkpoint: start Phase 12 direct node identity lookup and neighbor helper planning from `todo/named-graphs-complete-plan.md`.
+- Next checkpoint: start Phase 14 PostgreSQL-first relationship creation and broader GQL write planning from `todo/named-graphs-complete-plan.md`.

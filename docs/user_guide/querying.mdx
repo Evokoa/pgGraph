@@ -121,7 +121,7 @@ longer has a readable backing source row, the query raises a GQL execution
 error instead of fabricating an empty node object. With `hydrate := false`, the
 node object contains only `_id` and `_labels`.
 
-Relationship values are coordinate identity objects in this release:
+Relationship values always include coordinate identity fields:
 
 ```json
 {
@@ -135,9 +135,13 @@ Relationship values are coordinate identity objects in this release:
 coordinates in the registered schema direction. For bidirectional
 registrations, an inbound or reverse traversal may walk a generated reverse
 adjacency row, but the returned relationship object still uses the original
-registered source endpoint as `_start` and target endpoint as `_end`.
-Relationship source-row hydration, relationship properties, and a separate
-relationship row identity are not part of the current JSONB contract.
+registered source endpoint as `_start` and target endpoint as `_end`. When the
+relationship is backed by a registered edge row table and `hydrate := true`,
+returning the relationship variable also includes readable edge-row columns
+that do not use reserved `_` prefixes. With `hydrate := false`, relationship
+values stay coordinate-only. Relationship property expressions such as
+`r.weight` remain outside the current subset; return the whole relationship
+value to receive hydrated edge-row properties.
 
 Path values are JSON objects with a `_path` member:
 
@@ -187,13 +191,13 @@ or concrete relationship types as filters, including relationship type
 alternation such as `p=()-[:friend|works_at]->()`. `WHERE` may read properties from
 named path-node variables only when every possible concrete table for that
 variable exposes the same registered property or JSONB property path, including
-the same registered nested paths under a JSONB root. This phase
-intentionally keeps later clauses narrow: relationship properties, `WITH`,
+the same registered nested paths under a JSONB root. Wildcard path-variable
+reads intentionally keep later clauses narrow: relationship properties, `WITH`,
 `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches, writes,
 relationship variables in multi-segment paths, and named target variables on
-multi-segment variable-length boundaries are rejected for wildcard path-variable
-reads. Relationship type alternation outside wildcard path-variable reads is
-also reserved for a later phase.
+multi-segment variable-length boundaries are rejected with typed GQL errors.
+Relationship type alternation outside wildcard path-variable reads is also
+reserved for a later phase.
 
 The `nodes(path)` function returns the `_path.nodes` array directly,
 `relationships(path)` returns the `_path.relationships` array directly, and
@@ -237,10 +241,11 @@ relationship/path property aggregate inputs, and numeric aggregates over
 relationship/path values remain outside the current multi-pattern subset.
 
 Scalar properties are returned as their JSON representation: strings,
-numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`
-targets and relationships also project as JSON `null`. A missing key inside a
-registered JSONB property path projects as JSON `null`, but it does not satisfy
-`IS NULL`; explicit JSON `null` does.
+numbers, booleans, arrays, objects, or JSON `null`. Unmatched node-only
+`OPTIONAL MATCH` rows project JSON `null` for the node and its properties.
+Unmatched relationship `OPTIONAL MATCH` targets and relationships also project
+as JSON `null`. A missing key inside a registered JSONB property path projects
+as JSON `null`, but it does not satisfy `IS NULL`; explicit JSON `null` does.
 
 For SDKs and application code, graph values can be identified by their
 reserved-key shape: objects with `_path` are paths, objects with `_type`,
@@ -259,9 +264,10 @@ graph coordinate whose source row cannot be hydrated raises `PG017`.
 
 Other read semantics:
 
-- Relationship values are coordinate identity objects in this release.
-- `OPTIONAL MATCH` null-extends unmatched source rows for single-relationship
-  patterns.
+- Hydrated relationship values for registered edge-row mappings include
+  readable edge-row properties plus `_type`, `_start`, and `_end`.
+- `OPTIONAL MATCH` null-extends unmatched source rows for node-only and
+  single-relationship patterns.
 - Aggregate functions ignore JSON `null` inputs for `count(expr)`, `sum`,
   `avg`, `min`, `max`, and `collect`; `count(*)` counts every input row.
 - `collect` preserves non-null values in row order.
@@ -284,7 +290,7 @@ it does not satisfy `IS NULL`; explicit JSON `null` does.
 
 Planned outside this subset:
 
-- Relationship source-row hydration.
+- Relationship property expressions such as `r.weight`.
 - Multi-pattern relationship properties, relationship/path property aggregate
   inputs, and numeric aggregates over relationship/path values.
 

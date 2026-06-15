@@ -4,6 +4,7 @@ use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundDirection, HopBounds, PathFunc, Predicate,
     SortBinding, ValueExpr,
 };
+use crate::query::catalog_snapshot::EdgeMappingInfo;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum GQL matches collected before sorting/projection.
@@ -109,6 +110,8 @@ pub(crate) struct PhysicalPlan {
     pub(crate) direction: BoundDirection,
     /// Hop bounds.
     pub(crate) hops: HopBounds,
+    /// Registered edge-row mapping for relationship hydration.
+    pub(crate) edge_mapping: Option<EdgeMappingInfo>,
     /// Target node variable.
     pub(crate) target_var: String,
     /// Target table OID.
@@ -360,6 +363,8 @@ pub(crate) struct PhysicalIncidentEdge {
 /// Physical node-only scan plan.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PhysicalNodeScan {
+    /// Whether unmatched node scans should emit one null-extended row.
+    pub(crate) optional: bool,
     /// Node variable.
     pub(crate) var: String,
     /// Source table OID.

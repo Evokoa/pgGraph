@@ -1,6 +1,7 @@
 //! Logical plans produced by GQL semantic binding.
 
 use crate::gql::ast::LiteralValue;
+use crate::query::catalog_snapshot::EdgeMappingInfo;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Bound logical statement.
@@ -112,6 +113,8 @@ pub(crate) struct LogicalPlan {
 /// Bound node-only logical query.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LogicalNodeScan {
+    /// Whether unmatched node scans should emit one null-extended row.
+    pub(crate) optional: bool,
     /// Scanned node binding.
     pub(crate) node: BoundNode,
     /// Return slots in requested order.
@@ -387,6 +390,8 @@ pub(crate) struct BoundRel {
     pub(crate) direction: BoundDirection,
     /// Hop bounds.
     pub(crate) hops: HopBounds,
+    /// Registered edge-row mapping for relationship hydration and writes.
+    pub(crate) edge_mapping: Option<EdgeMappingInfo>,
 }
 
 /// Bound relationship direction.

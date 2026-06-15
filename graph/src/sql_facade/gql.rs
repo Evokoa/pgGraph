@@ -159,6 +159,9 @@ fn check_plan_acl(plan: &crate::query::physical_plan::PhysicalPlan) {
     for table_oid in plan.required_table_oids() {
         acl::check_table_acl(table_oid).unwrap_or_else(|err| err.report());
     }
+    if let Some(edge_mapping) = &plan.edge_mapping {
+        acl::check_table_acl(edge_mapping.edge_table_oid).unwrap_or_else(|err| err.report());
+    }
 }
 
 fn check_create_acl(plan: &crate::query::physical_plan::PhysicalCreateNode) {
@@ -232,7 +235,15 @@ pub(super) fn execute_statement(
                 &matches,
                 crate::query::value::requires_hydration(&plan, hydrate),
             )?;
-            crate::query::value::project_rows(matches, &plan, &hydrated, params, hydrate)
+            let hydrated_relationships = hydrate_gql_relationship_rows(&matches, &plan, hydrate)?;
+            crate::query::value::project_rows_with_relationships(
+                matches,
+                &plan,
+                &hydrated,
+                &hydrated_relationships,
+                params,
+                hydrate,
+            )
         }
         crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
             check_node_scan_acl(&plan);
@@ -413,6 +424,7 @@ fn set_property_node_scan(
     plan: &crate::query::physical_plan::PhysicalSetProperty,
 ) -> crate::query::physical_plan::PhysicalNodeScan {
     crate::query::physical_plan::PhysicalNodeScan {
+        optional: false,
         var: plan.var.clone(),
         table_oid: plan.table_oid,
         label: plan.label.clone(),
@@ -431,6 +443,7 @@ fn remove_property_node_scan(
     plan: &crate::query::physical_plan::PhysicalRemoveProperty,
 ) -> crate::query::physical_plan::PhysicalNodeScan {
     crate::query::physical_plan::PhysicalNodeScan {
+        optional: false,
         var: plan.var.clone(),
         table_oid: plan.table_oid,
         label: plan.label.clone(),
@@ -449,6 +462,7 @@ fn detach_delete_node_scan(
     plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
 ) -> crate::query::physical_plan::PhysicalNodeScan {
     crate::query::physical_plan::PhysicalNodeScan {
+        optional: false,
         var: plan.var.clone(),
         table_oid: plan.table_oid,
         label: plan.label.clone(),
@@ -568,6 +582,7 @@ fn delete_edge_read_plan(
             min: 1,
             max: 1,
         },
+        edge_mapping: None,
         target_var: plan.target_var.clone(),
         target_table_oid: plan.target_table_oid,
         target_label: plan.target_label.clone(),
@@ -1001,6 +1016,7 @@ fn lock_and_recheck_node_write(
 ) -> safety::GraphResult<()> {
     let locked = lock_node_coordinate(table_oid, node_id, tenant_scope, operation)?;
     let scan = crate::query::physical_plan::PhysicalNodeScan {
+        optional: false,
         var: String::new(),
         table_oid,
         label: label.to_string(),
@@ -1018,6 +1034,7 @@ fn lock_and_recheck_node_write(
             table_oid,
             node_id: locked.node_id.clone(),
         },
+        optional_null: false,
     };
     let hydrated = [((table_oid, locked.node_id), locked.row)]
         .into_iter()
@@ -2531,6 +2548,9 @@ fn hydrate_gql_node_rows(
         return Ok(hydrated);
     }
     for row in rows {
+        if row.optional_null {
+            continue;
+        }
         let key = (row.node.table_oid, row.node.node_id.clone());
         if hydrated.contains_key(&key) {
             continue;
@@ -2539,6 +2559,69 @@ fn hydrate_gql_node_rows(
         hydrated.insert(key, node);
     }
     Ok(hydrated)
+}
+
+fn hydrate_gql_relationship_rows(
+    rows: &[crate::query::execute::GqlRow],
+    plan: &crate::query::physical_plan::PhysicalPlan,
+    needed: bool,
+) -> safety::GraphResult<crate::query::value::HydratedRelationships> {
+    let mut hydrated = crate::query::value::HydratedRelationships::new();
+    if !needed {
+        return Ok(hydrated);
+    }
+    let Some(edge_mapping) = &plan.edge_mapping else {
+        return Ok(hydrated);
+    };
+    for row in rows {
+        let (Some(start), Some(end)) = (&row.rel_start, &row.rel_end) else {
+            continue;
+        };
+        let key = crate::query::value::RelationshipKey::new(&plan.rel_type, start, end);
+        if hydrated.contains_key(&key) {
+            continue;
+        }
+        if let Some(relationship) = hydrate_relationship(edge_mapping, &plan.rel_type, start, end)?
+        {
+            hydrated.insert(key, relationship.0);
+        }
+    }
+    Ok(hydrated)
+}
+
+fn hydrate_relationship(
+    edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
+    rel_type: &str,
+    start: &crate::query::execute::GqlNodeCoordinate,
+    end: &crate::query::execute::GqlNodeCoordinate,
+) -> safety::GraphResult<Option<pgrx::JsonB>> {
+    let table_name = regclass_text(edge_mapping.edge_table_oid)?;
+    let source_column = quote_ident(&edge_mapping.source_column);
+    let target_column = quote_ident(&edge_mapping.target_column);
+    let mut sql = format!(
+        "SELECT to_jsonb(edge_row.*)
+         FROM {table_name} edge_row
+         WHERE edge_row.{source_column}::text = $1
+           AND edge_row.{target_column}::text = $2"
+    );
+    let mut args = vec![start.node_id.as_str().into(), end.node_id.as_str().into()];
+    if let Some(label_column) = &edge_mapping.label_column {
+        let label_column = quote_ident(label_column);
+        sql.push_str(&format!(" AND edge_row.{label_column}::text = $3"));
+        args.push(rel_type.into());
+    }
+    sql.push_str(" LIMIT 1");
+    Spi::connect(|client| {
+        let result = client.select(&sql, None, &args).map_err(|err| {
+            safety::GraphError::Internal(format!("relationship hydration failed: {err}"))
+        })?;
+        if result.is_empty() {
+            return Ok(None);
+        }
+        result.first().get::<pgrx::JsonB>(1).map_err(|err| {
+            safety::GraphError::Internal(format!("relationship hydration read failed: {err}"))
+        })
+    })
 }
 
 fn hydrate_required_node(
@@ -2654,6 +2737,7 @@ fn test_recheck_delete_edge_predicate(
                 min: 1,
                 max: 1,
             },
+            edge_mapping: None,
             target_var: "v".to_string(),
             target_table_oid,
             target_label: "target".to_string(),

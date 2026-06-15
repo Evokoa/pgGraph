@@ -147,6 +147,7 @@ fn lower_wildcard_path_segment(segment: LogicalWildcardPathSegment) -> PhysicalW
 fn lower_node_scan(plan: LogicalNodeScan) -> PhysicalNodeScan {
     let identity_lookup = node_scan_identity_lookup(plan.predicate.as_ref(), &plan.node);
     PhysicalNodeScan {
+        optional: plan.optional,
         var: plan.node.var,
         table_oid: plan.node.table_oid,
         label: plan.node.label,
@@ -213,6 +214,7 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
         rel_var: plan.relationship.var,
         direction: plan.relationship.direction,
         hops: plan.relationship.hops,
+        edge_mapping: plan.relationship.edge_mapping,
         target_var: plan.target.var,
         target_table_oid: plan.target.table_oid,
         target_label: plan.target.label,

@@ -64,6 +64,8 @@ pub(crate) struct GqlPathRelationship {
 pub(crate) struct GqlNodeRow {
     /// Node coordinate.
     pub(crate) node: GqlNodeCoordinate,
+    /// Whether this row is the null-extended result of node-only OPTIONAL MATCH.
+    pub(crate) optional_null: bool,
 }
 
 /// Execute a physical one-hop plan.
@@ -145,13 +147,13 @@ pub(crate) fn execute_node_scan(
     if let Some(identity_lookup) = &plan.identity_lookup {
         let Some(node_id) = crate::query::value::identity_lookup_text(identity_lookup, params)?
         else {
-            return Ok(Vec::new());
+            return Ok(optional_node_scan_fallback(plan));
         };
         if let Some(node_idx) = engine.resolve(plan.table_oid, &node_id) {
             if crate::projection::tx_delta::node_deleted(node_idx)
                 || !tenant_allows_node(engine, node_idx, tenant)
             {
-                return Ok(Vec::new());
+                return Ok(optional_node_scan_fallback(plan));
             }
         } else {
             let table_is_tenanted = engine.tenanted_table_oids.contains(&plan.table_oid);
@@ -163,7 +165,7 @@ pub(crate) fn execute_node_scan(
             .iter()
             .any(|added| added == &node_id)
             {
-                return Ok(Vec::new());
+                return Ok(optional_node_scan_fallback(plan));
             }
         }
         return Ok(vec![GqlNodeRow {
@@ -171,6 +173,7 @@ pub(crate) fn execute_node_scan(
                 table_oid: plan.table_oid,
                 node_id,
             },
+            optional_null: false,
         }]);
     }
     let mut rows = Vec::new();
@@ -197,6 +200,7 @@ pub(crate) fn execute_node_scan(
                     table_oid: plan.table_oid,
                     node_id,
                 },
+                optional_null: false,
             });
         }
     }
@@ -218,10 +222,27 @@ pub(crate) fn execute_node_scan(
                     table_oid: plan.table_oid,
                     node_id,
                 },
+                optional_null: false,
             });
         }
     }
+    if rows.is_empty() {
+        rows.extend(optional_node_scan_fallback(plan));
+    }
     Ok(rows)
+}
+
+fn optional_node_scan_fallback(plan: &PhysicalNodeScan) -> Vec<GqlNodeRow> {
+    if !plan.optional {
+        return Vec::new();
+    }
+    vec![GqlNodeRow {
+        node: GqlNodeCoordinate {
+            table_oid: plan.table_oid,
+            node_id: String::new(),
+        },
+        optional_null: true,
+    }]
 }
 
 /// Execute a physical multi-pattern join plan.

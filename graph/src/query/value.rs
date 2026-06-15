@@ -17,6 +17,36 @@ use super::physical_plan::{
 /// Hydrated source rows keyed by graph coordinate.
 pub(crate) type HydratedRows = HashMap<(u32, String), serde_json::Value>;
 
+/// Hydrated edge rows keyed by relationship coordinate.
+pub(crate) type HydratedRelationships = HashMap<RelationshipKey, serde_json::Value>;
+
+/// Stable key for a relationship coordinate in registered edge direction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RelationshipKey {
+    pub(crate) rel_type: String,
+    pub(crate) start_table_oid: u32,
+    pub(crate) start_id: String,
+    pub(crate) end_table_oid: u32,
+    pub(crate) end_id: String,
+}
+
+impl RelationshipKey {
+    /// Create a key from a relationship type and endpoint coordinates.
+    pub(crate) fn new(
+        rel_type: impl Into<String>,
+        start: &GqlNodeCoordinate,
+        end: &GqlNodeCoordinate,
+    ) -> Self {
+        Self {
+            rel_type: rel_type.into(),
+            start_table_oid: start.table_oid,
+            start_id: start.node_id.clone(),
+            end_table_oid: end.table_oid,
+            end_id: end.node_id.clone(),
+        }
+    }
+}
+
 /// Query parameters supplied by SQL callers.
 pub(crate) type QueryParams = serde_json::Map<String, serde_json::Value>;
 
@@ -58,6 +88,31 @@ pub(crate) fn project_rows(
     params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
+    project_rows_with_relationships(
+        rows,
+        plan,
+        hydrated,
+        &HydratedRelationships::new(),
+        params,
+        hydrate_nodes,
+    )
+}
+
+/// Project coordinate matches with optional hydrated relationship rows.
+///
+/// # Errors
+///
+/// Returns [`GraphError::GqlParameter`] when a required parameter is missing
+/// and [`GraphError::GqlExecution`] when predicate evaluation cannot be
+/// completed safely.
+pub(crate) fn project_rows_with_relationships(
+    rows: Vec<GqlRow>,
+    plan: &PhysicalPlan,
+    hydrated: &HydratedRows,
+    hydrated_relationships: &HydratedRelationships,
+    params: &QueryParams,
+    hydrate_nodes: bool,
+) -> GraphResult<Vec<serde_json::Value>> {
     let mut rows = collect_projectable_rows(rows, plan, hydrated, params)?;
     apply_distinct_stages_to_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
     if plan.returns.iter().any(ReturnSlot::is_aggregate) {
@@ -72,7 +127,7 @@ pub(crate) fn project_rows(
     let mut projected = Vec::with_capacity(rows.len());
     for row in rows {
         projected.push(ProjectedRow {
-            row: project_row(&row, plan, hydrated, hydrate_nodes)?,
+            row: project_row(&row, plan, hydrated, hydrated_relationships, hydrate_nodes)?,
             sort_values: sort_values(&row, plan, hydrated, params)?,
         });
     }
@@ -289,10 +344,23 @@ pub(crate) fn project_node_rows(
 ) -> GraphResult<Vec<serde_json::Value>> {
     let mut rows = Vec::new();
     for row in input_rows {
+        if row.optional_null {
+            rows.push(row);
+            continue;
+        }
         let fake = node_row_as_gql_row(&row);
         if predicate_matches(plan.predicate.as_ref(), &fake, hydrated, params)? {
             rows.push(row);
         }
+    }
+    if rows.is_empty() && plan.optional {
+        rows.push(GqlNodeRow {
+            node: GqlNodeCoordinate {
+                table_oid: plan.table_oid,
+                node_id: String::new(),
+            },
+            optional_null: true,
+        });
     }
     apply_distinct_stages_to_node_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
     if plan.returns.iter().any(ReturnSlot::is_aggregate) {
@@ -1353,6 +1421,7 @@ fn project_row(
     row: &GqlRow,
     plan: &PhysicalPlan,
     hydrated: &HydratedRows,
+    hydrated_relationships: &HydratedRelationships,
     hydrate_nodes: bool,
 ) -> GraphResult<serde_json::Value> {
     let mut output = serde_json::Map::new();
@@ -1368,7 +1437,10 @@ fn project_row(
                 output.insert(name.clone(), value);
             }
             ReturnSlot::Relationship { name } => {
-                output.insert(name.clone(), relationship_value(row, plan));
+                output.insert(
+                    name.clone(),
+                    relationship_value(row, plan, hydrated_relationships),
+                );
             }
             ReturnSlot::Path { name } => {
                 output.insert(
@@ -1596,7 +1668,9 @@ fn project_slot_value(
             .map(|coordinate| node_value(coordinate, hydrated, label(plan, *side), hydrate_nodes))
             .transpose()
             .map(|value| value.unwrap_or(serde_json::Value::Null)),
-        ReturnSlot::Relationship { .. } => Ok(relationship_value(row, plan)),
+        ReturnSlot::Relationship { .. } => {
+            Ok(relationship_value(row, plan, &HydratedRelationships::new()))
+        }
         ReturnSlot::Path { .. } => path_value(row, plan, hydrated, hydrate_nodes),
         ReturnSlot::PathFunction { func, .. } => {
             path_function_value(*func, row, plan, hydrated, hydrate_nodes)
@@ -1665,13 +1739,20 @@ fn project_node_row(
     for slot in &plan.returns {
         match slot {
             ReturnSlot::Node { name, .. } => {
-                output.insert(
-                    name.clone(),
-                    node_value(&row.node, hydrated, &plan.label, hydrate_nodes)?,
-                );
+                let value = if row.optional_null {
+                    serde_json::Value::Null
+                } else {
+                    node_value(&row.node, hydrated, &plan.label, hydrate_nodes)?
+                };
+                output.insert(name.clone(), value);
             }
             ReturnSlot::Property { property, name, .. } => {
-                output.insert(name.clone(), property_value(&row.node, hydrated, property)?);
+                let value = if row.optional_null {
+                    serde_json::Value::Null
+                } else {
+                    property_value(&row.node, hydrated, property)?
+                };
+                output.insert(name.clone(), value);
             }
             ReturnSlot::Relationship { .. } => {
                 return Err(GraphError::GqlExecution {
@@ -1704,7 +1785,9 @@ fn project_node_slot_value(
     hydrate_nodes: bool,
 ) -> GraphResult<serde_json::Value> {
     match slot {
+        ReturnSlot::Node { .. } if row.optional_null => Ok(serde_json::Value::Null),
         ReturnSlot::Node { .. } => node_value(&row.node, hydrated, &plan.label, hydrate_nodes),
+        ReturnSlot::Property { .. } if row.optional_null => Ok(serde_json::Value::Null),
         ReturnSlot::Property { property, .. } => property_value(&row.node, hydrated, property),
         ReturnSlot::Relationship { .. } => Err(GraphError::GqlExecution {
             reason: "node-only MATCH cannot group by relationship values".to_string(),
@@ -1736,7 +1819,9 @@ fn aggregate_arg_value(
             .map(|coordinate| node_value(coordinate, hydrated, label(plan, *side), hydrate_nodes))
             .transpose()
             .map(|value| value.unwrap_or(serde_json::Value::Null)),
-        AggregateArg::Relationship => Ok(relationship_value(row, plan)),
+        AggregateArg::Relationship => {
+            Ok(relationship_value(row, plan, &HydratedRelationships::new()))
+        }
         AggregateArg::JoinRelationship(_) | AggregateArg::JoinPath(_) => {
             Err(GraphError::GqlExecution {
                 reason: "single-pattern MATCH cannot aggregate multi-pattern join values"
@@ -1838,15 +1923,36 @@ fn node_row_as_gql_row(row: &GqlNodeRow) -> GqlRow {
     }
 }
 
-fn relationship_value(row: &GqlRow, plan: &PhysicalPlan) -> serde_json::Value {
+fn relationship_value(
+    row: &GqlRow,
+    plan: &PhysicalPlan,
+    hydrated_relationships: &HydratedRelationships,
+) -> serde_json::Value {
     let (Some(rel_start), Some(rel_end)) = (&row.rel_start, &row.rel_end) else {
         return serde_json::Value::Null;
     };
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "_type": &plan.rel_type,
         "_start": relationship_endpoint(rel_start, plan),
         "_end": relationship_endpoint(rel_end, plan),
-    })
+    });
+    let key = RelationshipKey::new(&plan.rel_type, rel_start, rel_end);
+    if let Some(properties) = hydrated_relationships.get(&key) {
+        merge_relationship_properties(&mut value, properties);
+    }
+    value
+}
+
+fn merge_relationship_properties(value: &mut serde_json::Value, properties: &serde_json::Value) {
+    let (Some(value), Some(properties)) = (value.as_object_mut(), properties.as_object()) else {
+        return;
+    };
+    for (key, property) in properties {
+        if key.starts_with('_') {
+            continue;
+        }
+        value.insert(key.clone(), property.clone());
+    }
 }
 
 fn path_value(

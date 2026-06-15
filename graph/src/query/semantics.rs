@@ -73,6 +73,7 @@ pub(crate) fn bind(
             rel_type: rel_info.rel_type,
             direction: bind_direction(rel_pat.direction),
             hops: bind_hops(rel_pat)?,
+            edge_mapping: rel_info.edge_mapping,
         },
         target,
         returns,
@@ -98,12 +99,6 @@ fn bind_node_scan(
             "node scan binding requires a node-only MATCH pattern",
         ));
     }
-    if query.match_.optional {
-        return Err(GqlError::unsupported(
-            query.match_.span,
-            "node-only OPTIONAL MATCH requires multi-stage row semantics from a later read phase",
-        ));
-    }
     let node = bind_node(start, catalog)?;
     let predicate = bind_node_predicates(query.where_.as_ref(), start, &node)?;
     let initial_scope = initial_node_scope(&node);
@@ -121,6 +116,7 @@ fn bind_node_scan(
         query.return_.distinct,
     )?;
     Ok(LogicalNodeScan {
+        optional: query.match_.optional,
         node,
         returns,
         distinct_stages,
@@ -2524,6 +2520,7 @@ fn bind_delete_edge(
                 min: 1,
                 max: 1,
             },
+            edge_mapping: rel_info.edge_mapping,
         },
         rel_var: rel_var.text.clone(),
         target,

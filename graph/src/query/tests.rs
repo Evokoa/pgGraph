@@ -1111,12 +1111,13 @@ fn binder_accepts_optional_relationship_match() {
 }
 
 #[test]
-fn binder_rejects_node_only_optional_match() {
+fn binder_accepts_node_only_optional_match() {
     let ast = crate::gql::parse_statement("OPTIONAL MATCH (u:users) RETURN u").unwrap();
-    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
-
-    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
-    assert!(err.to_string().contains("node-only OPTIONAL MATCH"));
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::NodeScan(scan) = plan else {
+        panic!("expected node scan");
+    };
+    assert!(scan.optional);
 }
 
 #[test]
@@ -4633,6 +4634,7 @@ fn distinct_projection_aborts_when_key_cap_is_exceeded() {
                 table_oid: 10,
                 node_id: format!("u{idx}"),
             },
+            optional_null: false,
         })
         .collect::<Vec<_>>();
     let hydrated = (0..10_001)
@@ -5310,6 +5312,17 @@ fn explain_contains_stable_1b_plan_shape() {
     assert_eq!(
         explain(&physical),
         "Expand(source=u:users, rel=works_at, hops=1..1, target=c:companies, return=[u, c])"
+    );
+}
+
+#[test]
+fn explain_marks_edge_row_relationship_hydration() {
+    let logical = bind_query("MATCH (u:users)-[:friend]->(v:users) RETURN u, v");
+    let physical = lower(logical);
+
+    assert_eq!(
+        explain(&physical),
+        "Expand(source=u:users, rel=friend, hydration=edge_row, hops=1..1, target=v:users, return=[u, v])"
     );
 }
 

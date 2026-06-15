@@ -101,7 +101,7 @@ fn gql_explain_uses_registered_table_labels_after_catalog_read() {
 
     assert_eq!(
         explain,
-        "Expand(source=u:graph_test_users_pgtest, rel=friend, hops=1..1, target=v:graph_test_users_pgtest, return=[source_id, target_id])"
+        "Expand(source=u:graph_test_users_pgtest, rel=friend, hydration=edge_row, hops=1..1, target=v:graph_test_users_pgtest, return=[source_id, target_id])"
     );
 }
 
@@ -287,6 +287,125 @@ fn gql_binds_dynamic_edge_labels_from_registered_label_column() {
     .unwrap_or_default();
 
     assert_eq!(count, 1);
+}
+
+#[pg_test]
+fn gql_relationship_variables_hydrate_registered_edge_rows() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (edge_id, source_id, coordinate_only_has_id) = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT
+                    (SELECT row #>> '{r,id}'
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest) RETURN r'
+                     )
+                     LIMIT 1),
+                    (SELECT row #>> '{r,user_id}'
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest) RETURN r'
+                     )
+                     LIMIT 1),
+                    (SELECT row->'r' ? 'id'
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest) RETURN r',
+                        hydrate := false
+                     )
+                     LIMIT 1)",
+                None,
+                &[],
+            )
+            .expect("relationship hydration query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)
+                .expect("edge id read failed")
+                .unwrap_or_default(),
+            row.get::<String>(2)
+                .expect("source edge column read failed")
+                .unwrap_or_default(),
+            row.get::<bool>(3)
+                .expect("coordinate-only relationship flag read failed")
+                .unwrap_or(true),
+        ))
+    })
+    .expect("relationship hydration verification failed");
+
+    assert_eq!(edge_id, "f1");
+    assert_eq!(source_id, "u1");
+    assert!(!coordinate_only_has_id);
+}
+
+#[pg_test]
+fn gql_wildcard_planner_hostile_forms_have_stable_sqlstate() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    for statement in [
+        "SELECT * FROM graph.gql(
+            'MATCH p=()-[]->() RETURN DISTINCT p'
+         )",
+        "SELECT * FROM graph.gql(
+            'MATCH p=()-[]->() RETURN p ORDER BY p'
+         )",
+        "SELECT * FROM graph.gql(
+            'MATCH p=()-[]->() WITH p RETURN p'
+         )",
+        "SELECT * FROM graph.gql(
+            'MATCH p=()-[]->() RETURN count(*) AS paths'
+         )",
+        "SELECT * FROM graph.gql(
+            'OPTIONAL MATCH p=()-[]->() RETURN p'
+         )",
+    ] {
+        assert_eq!(
+            sqlstate_for_error(statement).as_deref(),
+            Some("PG014"),
+            "unexpected SQLSTATE for {statement}"
+        );
+    }
+}
+
+#[pg_test]
+fn gql_node_only_optional_match_null_extends_missing_rows() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (row_count, node_is_null, property_is_null) = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT count(*),
+                        bool_and(row->'u' = 'null'::jsonb),
+                        bool_and(row->'name' = 'null'::jsonb)
+                 FROM graph.gql(
+                    'OPTIONAL MATCH (u:graph_test_users_pgtest)
+                     WHERE id(u) = ''missing''
+                     RETURN u, u.name AS name'
+                 )",
+                None,
+                &[],
+            )
+            .expect("optional node query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)
+                .expect("optional row count read failed")
+                .unwrap_or_default(),
+            row.get::<bool>(2)
+                .expect("optional node null read failed")
+                .unwrap_or(false),
+            row.get::<bool>(3)
+                .expect("optional property null read failed")
+                .unwrap_or(false),
+        ))
+    })
+    .expect("optional node verification failed");
+
+    assert_eq!(row_count, 1);
+    assert!(node_is_null);
+    assert!(property_is_null);
 }
 
 #[pg_test]

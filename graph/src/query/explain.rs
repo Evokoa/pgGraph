@@ -15,11 +15,16 @@ pub(crate) fn explain(plan: &PhysicalPlan) -> String {
     } else {
         "Expand"
     };
+    let relationship = if plan.edge_mapping.is_some() {
+        format!("{}, hydration=edge_row", plan.rel_type)
+    } else {
+        plan.rel_type.clone()
+    };
     format!(
         "{op}(source={}:{}, rel={}, hops={}..{}, target={}:{}, return=[{}])",
         plan.source_var,
         plan.source_label,
-        plan.rel_type,
+        relationship,
         plan.hops.min,
         plan.hops.max,
         plan.target_var,

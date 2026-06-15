@@ -1634,11 +1634,13 @@ Read pattern support:
 - Fixed path variables: `MATCH p=()-[]->()`,
   `MATCH p=(s)-[r]->(e)`, `MATCH p=()<-[]-()`,
   `MATCH p=()-[]-()`, and `MATCH p=(a)-[]->(b)-[]->(c)`.
-- Top-level single-relationship `OPTIONAL MATCH`.
+- Node-only and top-level single-relationship `OPTIONAL MATCH`.
 
-Optional matches return matched relationship rows, and emit one null-extended
-row for each source node with no qualifying target. Null-extended rows use JSON
-`null` for target nodes, target properties, and relationship values.
+Optional node-only matches emit one JSON `null` row when no node matches.
+Optional relationship matches return matched relationship rows, and emit one
+null-extended row for each source node with no qualifying target.
+Null-extended rows use JSON `null` for missing nodes, node properties,
+relationship values, and path values.
 
 Return value support:
 
@@ -1646,7 +1648,9 @@ Return value support:
 - Node values, scalar properties, and fixed single-hop relationship variables
   from supported multi-pattern joins.
 - JSONB list/map properties, including dotted paths such as `u.profile.plan`.
-- Coordinate-only single-hop relationship identities.
+- Coordinate-only single-hop relationship identities when `hydrate := false`,
+  and hydrated edge-row properties on whole relationship values when the
+  relationship is backed by a registered edge row table and `hydrate := true`.
 - Bounded relationship path values with a minimum of at least one hop.
 - Fixed path values, including named node variables and single-hop named
   relationship variables.
@@ -1746,20 +1750,22 @@ Hydration behavior:
 
 - `hydrate := true` returns hydrated source rows for node values when
   PostgreSQL ACL and RLS allow them.
+- `hydrate := true` also returns readable edge-row columns on whole
+  relationship values for registered edge-row mappings. Reserved graph keys
+  such as `_type`, `_start`, and `_end` remain pgGraph-owned.
 - If a required graph coordinate cannot be read from its backing source table,
   `graph.gql()` raises `PG017` rather than returning a partial empty node
   object.
 - Queries that only need identifiers should project identifier properties,
   such as `RETURN n.id AS id`, rather than returning the whole node.
-- `hydrate := false` returns coordinate-only node objects for callers that
-  explicitly want the compact `{table, id}` shape.
+- `hydrate := false` returns coordinate-only node and relationship objects for
+  callers that explicitly want compact graph coordinates.
 
 Not included in this release's GQL subset:
 
-- Relationship source-row hydration.
+- Relationship property expressions such as `r.weight`.
 - Multi-pattern relationship/path property aggregate inputs, numeric
   aggregates over relationship/path values, and relationship properties.
-- Node-only optional matches.
 
 `CREATE (n:label {properties}) RETURN ...` is supported for a single node whose
 label maps to a registered source table. It requires a `mutable_overlay`
