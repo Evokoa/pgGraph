@@ -8,9 +8,10 @@ mod write;
 pub(crate) use crate::builder::split_catalog_columns;
 pub(crate) use graphs::{
     create_graph_metadata, drop_graph_metadata, grant_graph_privilege, graph_privileges,
-    list_graph_metadata, require_graph_privilege, resolve_visible_graph_metadata,
-    revoke_graph_privilege, selected_or_default_graph_metadata, set_selected_graph_id,
-    transfer_graph_ownership, update_graph_metadata, GraphGrant, GraphMetadata, GraphPrivilege,
+    graph_quota_usage, graph_quotas, list_graph_metadata, require_graph_privilege,
+    resolve_visible_graph_metadata, revoke_graph_privilege, selected_or_default_graph_metadata,
+    set_graph_quota, set_selected_graph_id, transfer_graph_ownership, update_graph_metadata,
+    GraphGrant, GraphMetadata, GraphPrivilege, GraphQuota, GraphQuotaUsage,
 };
 pub(crate) use read::{catalog_fingerprint, current_catalog_state, read_catalog};
 #[cfg(feature = "pg_test")]

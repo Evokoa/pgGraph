@@ -52,6 +52,27 @@ Graph owners, graph schema admins, and graph `admin` grantees can grant and
 revoke graph privileges. Graph owners and graph schema admins retain all graph
 privileges.
 
+## Graph Quotas
+
+Graph schema admins can configure quota policies:
+
+```sql
+SELECT * FROM graph.set_graph_quota(
+  'owner',
+  'max_named_graphs',
+  25,
+  scope_key := 'app_owner',
+  enforcement := 'hard'
+);
+SELECT * FROM graph.graph_quota_usage();
+```
+
+Quota scopes are `cluster`, `tenant`, `owner`, `namespace`, and `graph`.
+Enforcement can be `hard` or `warn`. The current hard enforcement point is
+`max_named_graphs`: pgGraph checks cluster and owner limits before creating a
+graph metadata row. Warning quotas are visible through
+`graph.graph_quota_usage()` but do not block the operation.
+
 ## Reader Functions
 
 Application roles typically need execute privileges on search/traversal/path
@@ -87,6 +108,21 @@ with graph `read` but no source-table `SELECT` still receives `PG002` when a
 query hydrates or otherwise reads source rows. A role with source-table
 `SELECT` but no graph `read` cannot select or query that graph.
 
+## Tenant Scope
+
+When a selected graph has a `tenant` value, pgGraph uses it as the default
+tenant scope for traversal, search, GQL, and Cypher calls. An explicit tenant
+argument or a session tenant from `graph.tenant_setting` must match the
+selected graph tenant; mismatches return `PG005`.
+
+Resolution order is:
+
+1. explicit tenant argument;
+2. session tenant from `graph.tenant_setting`;
+3. selected graph tenant;
+4. no tenant, unless `graph.enforce_tenant_scope = on` and registered tables
+   have `tenant_column`.
+
 <Callout type="info">
 The graph artifact contains source primary keys and topology. ACL checks are
 part of query execution so a role cannot use graph queries to bypass source
@@ -103,6 +139,7 @@ graph._registered_edges
 graph._registered_filter_columns
 graph._graphs
 graph._graph_grants
+graph._graph_quotas
 graph._build_jobs
 graph._maintenance_jobs
 graph._sync_log

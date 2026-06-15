@@ -331,6 +331,74 @@ fn transfer_graph_ownership(
     })
 }
 
+#[pg_extern(schema = "graph")]
+fn set_graph_quota(
+    scope_type: &str,
+    dimension: &str,
+    limit_value: i64,
+    scope_key: default!(Option<&str>, "NULL"),
+    enforcement: default!(&str, "'hard'"),
+) -> TableIterator<
+    'static,
+    (
+        name!(scope_type, String),
+        name!(scope_key, String),
+        name!(dimension, String),
+        name!(limit_value, i64),
+        name!(enforcement, String),
+        name!(updated_by, pgrx::pg_sys::Oid),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("set_graph_quota()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let quota =
+            catalog::set_graph_quota(scope_type, scope_key, dimension, limit_value, enforcement)
+                .unwrap_or_else(|err| err.report());
+        graph_quota_iterator(vec![quota])
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn graph_quotas() -> TableIterator<
+    'static,
+    (
+        name!(scope_type, String),
+        name!(scope_key, String),
+        name!(dimension, String),
+        name!(limit_value, i64),
+        name!(enforcement, String),
+        name!(updated_by, pgrx::pg_sys::Oid),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("graph_quotas()", || {
+        let quotas = catalog::graph_quotas().unwrap_or_else(|err| err.report());
+        graph_quota_iterator(quotas)
+    })
+}
+
+#[pg_extern(schema = "graph")]
+fn graph_quota_usage() -> TableIterator<
+    'static,
+    (
+        name!(scope_type, String),
+        name!(scope_key, String),
+        name!(dimension, String),
+        name!(limit_value, Option<i64>),
+        name!(usage_value, i64),
+        name!(enforcement, Option<String>),
+        name!(exceeded, bool),
+    ),
+> {
+    with_panic_boundary("graph_quota_usage()", || {
+        let usage = catalog::graph_quota_usage().unwrap_or_else(|err| err.report());
+        graph_quota_usage_iterator(usage)
+    })
+}
+
 pub(crate) fn check_enabled_result() -> safety::GraphResult<()> {
     if config::ENABLED.get() {
         Ok(())
@@ -399,6 +467,62 @@ fn graph_grant_iterator(
             row.grantor,
             row.created_at,
             row.updated_at,
+        )
+    }))
+}
+
+fn graph_quota_iterator(
+    rows: Vec<catalog::GraphQuota>,
+) -> TableIterator<
+    'static,
+    (
+        name!(scope_type, String),
+        name!(scope_key, String),
+        name!(dimension, String),
+        name!(limit_value, i64),
+        name!(enforcement, String),
+        name!(updated_by, pgrx::pg_sys::Oid),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    TableIterator::new(rows.into_iter().map(|row| {
+        (
+            row.scope_type,
+            row.scope_key,
+            row.dimension,
+            row.limit_value,
+            row.enforcement,
+            row.updated_by,
+            row.created_at,
+            row.updated_at,
+        )
+    }))
+}
+
+fn graph_quota_usage_iterator(
+    rows: Vec<catalog::GraphQuotaUsage>,
+) -> TableIterator<
+    'static,
+    (
+        name!(scope_type, String),
+        name!(scope_key, String),
+        name!(dimension, String),
+        name!(limit_value, Option<i64>),
+        name!(usage_value, i64),
+        name!(enforcement, Option<String>),
+        name!(exceeded, bool),
+    ),
+> {
+    TableIterator::new(rows.into_iter().map(|row| {
+        (
+            row.scope_type,
+            row.scope_key,
+            row.dimension,
+            row.limit_value,
+            row.usage_value,
+            row.enforcement,
+            row.exceeded,
         )
     }))
 }

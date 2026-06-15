@@ -1,6 +1,8 @@
 //! SQL sync-log replay, trigger management, and tenant-scope helpers.
 
-use crate::catalog::{catalog_fingerprint, read_catalog, table_oid_from_name};
+use crate::catalog::{
+    catalog_fingerprint, read_catalog, selected_or_default_graph_metadata, table_oid_from_name,
+};
 use crate::filter_index::{EncodedFilterValue, FilterColumnType};
 use crate::persistence::{
     graph_artifact_checksum_for_path, graph_artifact_version, graph_file_path, load_graph_file,
@@ -1805,10 +1807,16 @@ fn tenant_from_row(row: &serde_json::Value, tenant_column: &str) -> Option<Strin
 pub(crate) fn resolve_tenant_scope(
     explicit_tenant: Option<&str>,
 ) -> safety::GraphResult<Option<String>> {
+    let graph_tenant = selected_or_default_graph_metadata()
+        .ok()
+        .and_then(|graph| graph.tenant)
+        .map(|tenant| tenant.trim().to_string())
+        .filter(|tenant| !tenant.is_empty());
     if let Some(tenant) = explicit_tenant
         .map(str::trim)
         .filter(|tenant| !tenant.is_empty())
     {
+        ensure_tenant_matches_graph_scope(tenant, graph_tenant.as_deref())?;
         return Ok(Some(tenant.to_string()));
     }
 
@@ -1826,8 +1834,13 @@ pub(crate) fn resolve_tenant_scope(
             safety::GraphError::Internal(format!("tenant session setting read failed: {}", e))
         })?;
         if !session_tenant.trim().is_empty() {
+            ensure_tenant_matches_graph_scope(session_tenant.trim(), graph_tenant.as_deref())?;
             return Ok(Some(session_tenant));
         }
+    }
+
+    if let Some(graph_tenant) = graph_tenant {
+        return Ok(Some(graph_tenant));
     }
 
     if config::ENFORCE_TENANT_SCOPE.get() && graph_has_tenanted_tables()? {
@@ -1837,6 +1850,23 @@ pub(crate) fn resolve_tenant_scope(
     }
 
     Ok(None)
+}
+
+fn ensure_tenant_matches_graph_scope(
+    candidate: &str,
+    graph_tenant: Option<&str>,
+) -> safety::GraphResult<()> {
+    if let Some(graph_tenant) = graph_tenant {
+        if candidate != graph_tenant {
+            return Err(safety::GraphError::InvalidFilter {
+                reason: format!(
+                    "tenant scope '{}' conflicts with selected graph tenant '{}'",
+                    candidate, graph_tenant
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn graph_has_tenanted_tables() -> safety::GraphResult<bool> {

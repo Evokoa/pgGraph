@@ -8,7 +8,7 @@ All functions live in the `graph` schema.
 | Category | Functions |
 |---|---|
 | Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
-| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph`, `grant_graph`, `revoke_graph`, `graph_privileges`, `transfer_graph_ownership` |
+| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph`, `grant_graph`, `revoke_graph`, `graph_privileges`, `transfer_graph_ownership`, `set_graph_quota`, `graph_quotas`, `graph_quota_usage` |
 | Runtime graph loading | `select_graph`, `load_graph`, `unload_graph`, `loaded_graphs` |
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
@@ -229,7 +229,7 @@ Graph metadata rows include:
 | `graph_name` | User-visible graph name |
 | `owner_role` | PostgreSQL role that owns this graph metadata |
 | `created_by` | PostgreSQL role that created this graph metadata |
-| `tenant` | Optional tenant discriminator |
+| `tenant` | Optional tenant discriminator and default tenant scope for selected-graph queries |
 | `namespace` | Optional graph namespace; defaults to `public` |
 | `graph_kind` | `global`, `user`, `tenant`, `workspace`, or `subgraph` |
 | `residency` | `hot`, `warm`, or `cold` |
@@ -401,6 +401,53 @@ RETURNS TABLE (...)
 
 Owner/admin-only. Transfers a non-default graph to another PostgreSQL role.
 The compatibility default graph cannot be transferred.
+
+### `graph.set_graph_quota()`
+
+```sql
+graph.set_graph_quota(
+  scope_type text,
+  dimension text,
+  limit_value bigint,
+  scope_key text DEFAULT NULL,
+  enforcement text DEFAULT 'hard'
+)
+RETURNS TABLE (...)
+```
+
+Graph schema admin only. Upserts a quota policy row. Supported scopes are
+`cluster`, `tenant`, `owner`, `namespace`, and `graph`; supported enforcement
+modes are `hard` and `warn`. `owner` scope keys are PostgreSQL role names and
+are stored as role OIDs. The current enforcement point is
+`max_named_graphs`, checked before graph metadata is created.
+
+### `graph.graph_quotas()`
+
+```sql
+graph.graph_quotas()
+RETURNS TABLE (...)
+```
+
+Lists configured quota policy rows.
+
+### `graph.graph_quota_usage()`
+
+```sql
+graph.graph_quota_usage()
+RETURNS TABLE (
+  scope_type text,
+  scope_key text,
+  dimension text,
+  limit_value bigint,
+  usage_value bigint,
+  enforcement text,
+  exceeded boolean
+)
+```
+
+Reports SQL-computable quota usage for supported dimensions. A `hard`
+`max_named_graphs` quota blocks new graph metadata before catalog rows are
+created; a `warn` quota reports `exceeded = true` without blocking creation.
 
 ## Runtime Graph Loading
 

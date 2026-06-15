@@ -269,6 +269,92 @@ BEGIN
     END IF;
 END $$;
 
+CREATE TABLE IF NOT EXISTS graph._graph_quotas (
+    scope_type  TEXT NOT NULL CHECK (scope_type IN ('cluster', 'tenant', 'owner', 'namespace', 'graph')),
+    scope_key   TEXT NOT NULL DEFAULT '',
+    dimension   TEXT NOT NULL CHECK (
+        dimension IN (
+            'max_named_graphs',
+            'max_physical_graphs',
+            'max_graph_jobs',
+            'max_sync_lag_rows',
+            'max_artifact_storage_bytes',
+            'max_build_memory_mb',
+            'max_loaded_graphs_per_backend',
+            'max_compaction_work'
+        )
+    ),
+    limit_value BIGINT NOT NULL CHECK (limit_value >= 0),
+    enforcement TEXT NOT NULL CHECK (enforcement IN ('hard', 'warn')),
+    updated_by  OID NOT NULL DEFAULT current_user::regrole::oid,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (scope_type, scope_key, dimension)
+);
+
+ALTER TABLE graph._graph_quotas
+    ADD COLUMN IF NOT EXISTS updated_by OID,
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+UPDATE graph._graph_quotas
+SET updated_by = COALESCE(updated_by, current_user::regrole::oid),
+    created_at = COALESCE(created_at, now()),
+    updated_at = COALESCE(updated_at, now());
+
+ALTER TABLE graph._graph_quotas
+    ALTER COLUMN updated_by SET DEFAULT current_user::regrole::oid,
+    ALTER COLUMN updated_by SET NOT NULL,
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN updated_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graph_quotas'::regclass
+          AND conname = '_graph_quotas_scope_type_check'
+    ) THEN
+        ALTER TABLE graph._graph_quotas
+            ADD CONSTRAINT _graph_quotas_scope_type_check
+            CHECK (scope_type IN ('cluster', 'tenant', 'owner', 'namespace', 'graph'));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graph_quotas'::regclass
+          AND conname = '_graph_quotas_dimension_check'
+    ) THEN
+        ALTER TABLE graph._graph_quotas
+            ADD CONSTRAINT _graph_quotas_dimension_check
+            CHECK (
+                dimension IN (
+                    'max_named_graphs',
+                    'max_physical_graphs',
+                    'max_graph_jobs',
+                    'max_sync_lag_rows',
+                    'max_artifact_storage_bytes',
+                    'max_build_memory_mb',
+                    'max_loaded_graphs_per_backend',
+                    'max_compaction_work'
+                )
+            );
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graph_quotas'::regclass
+          AND conname = '_graph_quotas_enforcement_check'
+    ) THEN
+        ALTER TABLE graph._graph_quotas
+            ADD CONSTRAINT _graph_quotas_enforcement_check
+            CHECK (enforcement IN ('hard', 'warn'));
+    END IF;
+END $$;
+
 ALTER TABLE graph._registered_tables
     ADD COLUMN IF NOT EXISTS graph_id UUID;
 
@@ -659,6 +745,7 @@ SELECT pg_catalog.pg_extension_config_dump('graph._registered_edges', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_filter_columns', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._graphs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._graph_grants', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._graph_quotas', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._build_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._maintenance_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log', '');
@@ -684,6 +771,7 @@ REVOKE ALL ON TABLE graph._registered_edges        FROM PUBLIC;
 REVOKE ALL ON TABLE graph._registered_filter_columns FROM PUBLIC;
 REVOKE ALL ON TABLE graph._graphs                 FROM PUBLIC;
 REVOKE ALL ON TABLE graph._graph_grants           FROM PUBLIC;
+REVOKE ALL ON TABLE graph._graph_quotas           FROM PUBLIC;
 REVOKE ALL ON TABLE graph._build_jobs             FROM PUBLIC;
 REVOKE ALL ON TABLE graph._maintenance_jobs       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
@@ -694,6 +782,7 @@ GRANT SELECT ON TABLE graph._registered_edges        TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_filter_columns TO PUBLIC;
 GRANT SELECT ON TABLE graph._graphs                 TO PUBLIC;
 GRANT SELECT ON TABLE graph._graph_grants           TO PUBLIC;
+GRANT SELECT ON TABLE graph._graph_quotas           TO PUBLIC;
 GRANT SELECT ON TABLE graph._build_jobs             TO PUBLIC;
 GRANT SELECT ON TABLE graph._maintenance_jobs       TO PUBLIC;
 GRANT SELECT ON TABLE graph._sync_log               TO PUBLIC;

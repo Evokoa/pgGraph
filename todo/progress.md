@@ -5,7 +5,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 ## Current Checkpoint
 
 - Active phase: Phase 7, Graph Ownership, Grants, Tenant Scope, and RLS Semantics.
-- Status: Phase 7 graph-grants checkpoint implemented; quota and tenant-policy work remains.
+- Status: Phase 7 quota/tenant checkpoint implemented; commit pending.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -17,7 +17,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 4: complete - scoped build and maintenance jobs by `graph_id`, restored graph context in workers, made build/vacuum advisory locks graph-specific, added named graph build/maintenance/status helpers, and documented graph-scoped job behavior.
 - Phase 5: complete - moved artifacts under per-graph UUID roots, scoped projection generation heartbeats by `graph_id`, made reset/drop cleanup graph-root-local, kept `_PG_init()` catalog-free for fresh installs, and documented the new persistence layout.
 - Phase 6: complete - added backend-local loaded graph slot metadata, exposed `select_graph`, `load_graph`, `unload_graph`, and `loaded_graphs`, made auto-load/build state graph-tagged, cleared stale engines on graph switches, fixed graph-scoped operational cleanup/status review blockers, and documented runtime loading.
-- Phase 7: in progress - added graph grants, grant/revoke/inspect/transfer APIs, grant-aware graph visibility, graph read enforcement before queries, build-grant support for build/vacuum/maintenance, source-table ACL regression coverage, and public security docs.
+- Phase 7: complete - added graph grants, grant/revoke/inspect/transfer APIs, grant-aware graph visibility, graph read enforcement before queries, build-grant support for build/vacuum/maintenance, source-table ACL regression coverage, quota policy/usage APIs with hard `max_named_graphs` enforcement, graph-tenant default/conflict resolution, and public security docs.
 
 ## Verification Log
 
@@ -114,6 +114,12 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
 - 2026-06-15: `cargo pgrx test --features "pg17 development" graph_grants_gate_visibility_queries_and_builds` passed, 1 test.
 - 2026-06-15: `cargo pgrx test --features "pg17 development" default_graph_compatibility_workflow_still_uses_legacy_sql_surface` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" graph_quotas_block_named_graph_creation_before_catalog_state` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" graph_tenant_defaults_and_conflicts_are_enforced` passed, 1 test.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed.
+- 2026-06-15: `cargo fmt --check` passed from `graph/`.
+- 2026-06-15: `cargo test --features "pg17 development" graph_policy` passed, 4 tests.
+- 2026-06-15: `cargo test --features "pg17 development" query::` passed, 164 tests.
 
 ## Working Notes
 
@@ -129,4 +135,5 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Independent review after Phase 5 ran in subagent `019ecb3f-40a8-7dc2-a3b2-949acfc10406` and found graph-drop operational-row cleanup, legacy job status scoping, worker context coverage, and delete-path side-effect issues. All four were fixed and covered by focused tests before the Phase 6 checkpoint.
 - Phase 6 local review found no blocking issue in runtime graph slot isolation, explicit load/unload behavior, selected graph auto-load matching, graph-scoped operational cleanup, or docs/API drift.
 - Phase 7 graph-grants checkpoint local review found no blocking issue in grant visibility, graph read gating, build-grant build access, default global graph compatibility, or source-table ACL preservation.
-- Next checkpoint: finish remaining Phase 7 quota and tenant-scope policy items.
+- Phase 7 quota/tenant checkpoint local review found no blocking issue in hard/warn named-graph quotas, pre-insert quota enforcement, quota usage visibility, graph tenant defaults, tenant conflict handling, or docs/API drift.
+- Next checkpoint: Phase 8 hot/warm/cold residency and lifecycle policy.

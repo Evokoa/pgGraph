@@ -330,6 +330,185 @@ fn graph_grants_gate_visibility_queries_and_builds() {
 }
 
 #[pg_test]
+fn graph_quotas_block_named_graph_creation_before_catalog_state() {
+    create_error_sqlstate_helper();
+
+    Spi::run(
+        "SELECT graph.set_graph_quota(
+             'owner',
+             'max_named_graphs',
+             0,
+             current_user,
+             'hard'
+         )",
+    )
+    .expect("set owner hard graph quota failed");
+    let hard_sqlstate =
+        sqlstate_for_prepared_helper("SELECT * FROM graph.create_graph('quota_blocked')");
+    let blocked_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph._graphs
+          WHERE graph_name = 'quota_blocked'",
+    )
+    .expect("quota_blocked count failed")
+    .unwrap_or(-1);
+
+    Spi::run(
+        "SELECT graph.set_graph_quota(
+             'owner',
+             'max_named_graphs',
+             0,
+             current_user,
+             'warn'
+         )",
+    )
+    .expect("set owner warn graph quota failed");
+    let created_under_warning = Spi::get_one::<String>(
+        "SELECT graph_name
+           FROM graph.create_graph('quota_warned')",
+    )
+    .expect("create quota_warned failed")
+    .expect("quota_warned row missing");
+    let warning_usage = Spi::get_one::<bool>(
+        "SELECT exceeded
+           FROM graph.graph_quota_usage()
+          WHERE scope_type = 'owner'
+            AND dimension = 'max_named_graphs'",
+    )
+    .expect("quota usage query failed")
+    .unwrap_or(false);
+
+    Spi::run(
+        "SELECT graph.set_graph_quota(
+             'cluster',
+             'max_named_graphs',
+             1,
+             NULL,
+             'hard'
+         )",
+    )
+    .expect("set cluster hard graph quota failed");
+    let cluster_sqlstate =
+        sqlstate_for_prepared_helper("SELECT * FROM graph.create_graph('quota_cluster_blocked')");
+    let cluster_blocked_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph._graphs
+          WHERE graph_name = 'quota_cluster_blocked'",
+    )
+    .expect("quota_cluster_blocked count failed")
+    .unwrap_or(-1);
+
+    assert_eq!(hard_sqlstate, Some("PG005".to_string()));
+    assert_eq!(blocked_rows, 0);
+    assert_eq!(created_under_warning, "quota_warned");
+    assert!(warning_usage);
+    assert_eq!(cluster_sqlstate, Some("PG005".to_string()));
+    assert_eq!(cluster_blocked_rows, 0);
+}
+
+#[pg_test]
+fn graph_tenant_defaults_and_conflicts_are_enforced() {
+    create_error_sqlstate_helper();
+    Spi::run("SET graph.enforce_tenant_scope = on").expect("enable tenant enforcement failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_phase7_tenant_pgtest CASCADE")
+        .expect("drop phase7 tenant table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_phase7_tenant_pgtest (
+             id TEXT PRIMARY KEY,
+             tenant_id TEXT NOT NULL,
+             name TEXT NOT NULL
+         )",
+    )
+    .expect("create phase7 tenant table failed");
+    Spi::run(
+        "INSERT INTO public.graph_phase7_tenant_pgtest (id, tenant_id, name)
+         VALUES
+             ('a1', 'tenant-a', 'Shared Name'),
+             ('b1', 'tenant-b', 'Shared Name')",
+    )
+    .expect("insert phase7 tenant rows failed");
+    Spi::run(
+        "SELECT graph.create_graph(
+             'tenant_graph',
+             tenant := 'tenant-a',
+             namespace := 'app',
+             graph_kind := 'tenant'
+         )",
+    )
+    .expect("create tenant graph failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+             'tenant_graph',
+             'graph_phase7_tenant_pgtest'::regclass,
+             'id',
+             ARRAY['name'],
+             graph_tenant := 'tenant-a',
+             graph_namespace := 'app',
+             tenant_column := 'tenant_id'
+         )",
+    )
+    .expect("add tenant graph table failed");
+    Spi::run(
+        "SELECT graph.build_graph(
+             'tenant_graph',
+             graph_tenant := 'tenant-a',
+             graph_namespace := 'app'
+         )",
+    )
+    .expect("build tenant graph failed");
+    Spi::run(
+        "SELECT graph.set_current_graph(
+             'tenant_graph',
+             tenant := 'tenant-a',
+             namespace := 'app'
+         )",
+    )
+    .expect("select tenant graph failed");
+
+    let defaulted_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.search(
+               'name',
+               'Shared Name',
+               'graph_phase7_tenant_pgtest'::regclass,
+               mode := 'exact',
+               hydrate := false
+           )",
+    )
+    .expect("tenant default search failed")
+    .unwrap_or(0);
+    let explicit_conflict = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.search(
+             'name',
+             'Shared Name',
+             'graph_phase7_tenant_pgtest'::regclass,
+             mode := 'exact',
+             tenant := 'tenant-b',
+             hydrate := false
+         )",
+    );
+    Spi::run("SET graph.tenant_setting = 'app.phase7_tenant'")
+        .expect("set tenant setting failed");
+    Spi::run("SET app.phase7_tenant = 'tenant-b'").expect("set tenant conflict failed");
+    let session_conflict = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.search(
+             'name',
+             'Shared Name',
+             'graph_phase7_tenant_pgtest'::regclass,
+             mode := 'exact',
+             hydrate := false
+         )",
+    );
+    Spi::run("RESET app.phase7_tenant").expect("reset session tenant failed");
+    Spi::run("RESET graph.tenant_setting").expect("reset tenant setting failed");
+    Spi::run("SET graph.enforce_tenant_scope = off").expect("disable tenant enforcement failed");
+
+    assert_eq!(defaulted_rows, 1);
+    assert_eq!(explicit_conflict, Some("PG005".to_string()));
+    assert_eq!(session_conflict, Some("PG005".to_string()));
+}
+
+#[pg_test]
 fn graph_scoped_registrations_isolate_tables_edges_and_filters() {
     reset_and_create_fixtures();
     Spi::run("SELECT graph.create_graph('tenant_a', namespace := 'app')")
