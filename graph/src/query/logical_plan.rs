@@ -370,6 +370,8 @@ pub(crate) struct BoundNode {
     pub(crate) label: String,
     /// Backing source table OID.
     pub(crate) table_oid: u32,
+    /// Registered primary-key columns in catalog order.
+    pub(crate) primary_key_columns: Vec<String>,
     /// Registered property columns.
     pub(crate) properties: std::collections::BTreeSet<String>,
 }
@@ -605,6 +607,11 @@ pub(crate) enum ValueExpr {
         side: BindingSide,
         /// Property name.
         property: String,
+    },
+    /// Graph identity text for a node binding.
+    NodeId {
+        /// Source or target binding.
+        side: BindingSide,
     },
     /// Literal scalar.
     Literal(serde_json::Value),

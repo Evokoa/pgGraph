@@ -2,7 +2,7 @@
 
 use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundDirection, HopBounds, PathFunc, Predicate,
-    SortBinding,
+    SortBinding, ValueExpr,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -374,6 +374,8 @@ pub(crate) struct PhysicalNodeScan {
     pub(crate) distinct: bool,
     /// Optional hydrated-row predicate.
     pub(crate) predicate: Option<Predicate>,
+    /// Optional direct identity lookup value for this node scan.
+    pub(crate) identity_lookup: Option<ValueExpr>,
     /// Sort keys in requested order.
     pub(crate) order_by: Vec<SortBinding>,
     /// Number of rows to skip after ordering.

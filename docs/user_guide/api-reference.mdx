@@ -1832,6 +1832,8 @@ graph.gql_explain(query text) RETURNS text
 Parses, binds, and lowers a GQL query and returns stable explain text for the
 frontend, logical-plan, and physical-plan stages. It performs the same catalog
 binding and ACL preflight as `graph.gql()` but does not execute the plan.
+Node-only identity predicates explain as `NodeLookup(...)` when the query can
+resolve a registered primary key directly.
 
 ### `graph.cypher()`
 
@@ -1949,6 +1951,67 @@ graph.node_ref_string(table_name regclass, node_id text) RETURNS text
 ```
 
 Returns canonical JSON text for strict traversal specs.
+
+### `graph.get_node()`
+
+```sql
+graph.get_node(
+  graph_name text,
+  label text,
+  id text,
+  hydrate boolean DEFAULT true,
+  tenant text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  graph_id text,
+  graph_name text,
+  node_table oid,
+  node_table_name text,
+  node_id text,
+  node_idx bigint,
+  node jsonb
+)
+```
+
+Resolves one registered node in a named graph by `(graph_name, label, id)`.
+Returns zero rows when the node is absent or the source row is not visible
+through PostgreSQL ACL/RLS. With `hydrate := false`, the coordinate fields are
+returned and `node` is `NULL`.
+
+### `graph.get_neighbors()`
+
+```sql
+graph.get_neighbors(
+  graph_name text,
+  label text,
+  id text,
+  direction text DEFAULT 'any',
+  edge_types text[] DEFAULT NULL,
+  tenant text DEFAULT NULL,
+  hydrate boolean DEFAULT true,
+  max_rows int DEFAULT 1000,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+RETURNS TABLE (
+  root_table oid,
+  root_id text,
+  node_table oid,
+  node_id text,
+  depth int,
+  path jsonb,
+  edge_path jsonb,
+  node jsonb,
+  root_table_name text,
+  node_table_name text
+)
+```
+
+Resolves the start node by registered business id and expands one hop. The
+returned row shape matches `graph.traverse()`. Tenant scope is applied before
+expansion.
 
 ### `graph.traverse()` single-start
 

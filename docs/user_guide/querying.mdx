@@ -74,6 +74,7 @@ Supported read coverage:
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum and minimum of at least one hop |
 | Predicates | Property comparisons, null checks, membership, boolean combinations, JSONB `$parameters`, and dotted paths into registered JSONB property columns |
+| Identity lookup | `id(node) = <scalar>` and unambiguous registered primary-key property equality, such as `u.id = $id`, use direct graph-coordinate lookup instead of scanning a label |
 | Return values | Node values, scalar properties, JSONB list/map properties, coordinate-only single-hop relationship identities including supported multi-pattern relationship variables, fixed single-hop multi-pattern path values, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
 | Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases, shadowing, and `WITH DISTINCT` row-stream deduplication |
 | Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported for non-wildcard path reads, including projected rows from supported multi-pattern joins, with a bounded in-memory key set |
@@ -409,7 +410,60 @@ projections. Relationship creation, multi-row writes, dynamic labels, and
 creating new PostgreSQL schema objects from GQL are future work.
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
-planning stages without executing the query.
+planning stages without executing the query. Node-only matches constrained by
+`id(node) = <scalar>` or by an unambiguous registered primary-key property
+equality explain as `NodeLookup(...)`; other node-only matches explain as
+`NodeScan(...)`.
+
+## Business ID Lookup
+
+Use `graph.get_node()` when application code already has a registered
+business identifier and needs the corresponding graph coordinate or source row:
+
+```sql
+SELECT *
+FROM graph.get_node(
+  graph_name := 'default',
+  label := 'users',
+  id := 'u1',
+  hydrate := true
+);
+```
+
+Return columns:
+
+| Column | Meaning |
+|---|---|
+| `graph_id`, `graph_name` | Graph metadata for the named graph |
+| `node_table`, `node_table_name` | Registered source table |
+| `node_id` | Registered primary key as text |
+| `node_idx` | Backend-local graph node index for the loaded projection |
+| `node` | Hydrated source row when `hydrate = true`; `NULL` when `hydrate = false` |
+
+`graph.get_node()` returns zero rows when the id is absent or the backing
+source row is not visible to the caller. Invalid graph names or labels raise a
+typed pgGraph error. The lookup enforces graph privileges and source-table
+`SELECT`; source-table RLS still decides whether the row is visible.
+
+Use `graph.get_neighbors()` to resolve the same business identifier first and
+then expand one hop:
+
+```sql
+SELECT node_id, depth, node
+FROM graph.get_neighbors(
+  graph_name := 'default',
+  label := 'users',
+  id := 'u1',
+  direction := 'outgoing',
+  edge_types := ARRAY['friend'],
+  hydrate := false
+);
+```
+
+The returned columns match `graph.traverse()`. Tenant scope is applied before
+neighbor expansion when tenant filtering is configured. Composite primary keys
+use the same JSONB-array text encoding that registration and build use, for
+example `["region-1", "customer-42"]`.
 
 ## openCypher Compatibility
 

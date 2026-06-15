@@ -424,6 +424,13 @@ pub(crate) enum Operand {
         /// Full operand span.
         span: Span,
     },
+    /// `id(variable)` graph identity function.
+    Identity {
+        /// Referenced variable name.
+        var: Ident,
+        /// Full operand span.
+        span: Span,
+    },
     /// Literal value.
     Literal(Literal),
     /// Named query parameter.

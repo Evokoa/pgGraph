@@ -21,6 +21,8 @@ pub(crate) struct NodeLabelInfo {
     pub(crate) label: String,
     /// Source table OID backing this label.
     pub(crate) table_oid: u32,
+    /// Registered primary-key columns in catalog order.
+    pub(crate) primary_key_columns: Vec<String>,
     /// Registered property column names for later predicate/property phases.
     pub(crate) properties: BTreeSet<String>,
     /// Registered non-key property columns that writes may update.
@@ -212,6 +214,7 @@ fn load_labels(tables: &[RegisteredTable]) -> GraphResult<HashMap<String, LabelE
             let info = NodeLabelInfo {
                 label: label.clone(),
                 table_oid,
+                primary_key_columns: table.id_columns.columns().to_vec(),
                 properties,
                 writable_properties,
             };
@@ -436,6 +439,7 @@ impl FakeCatalog {
             NodeLabelInfo {
                 label: label.to_string(),
                 table_oid,
+                primary_key_columns: vec!["id".to_string()],
                 properties: properties
                     .into_iter()
                     .map(|property| property.as_ref().to_string())
@@ -459,6 +463,7 @@ impl FakeCatalog {
             NodeLabelInfo {
                 label: label.to_string(),
                 table_oid,
+                primary_key_columns: vec!["id".to_string()],
                 properties: properties
                     .into_iter()
                     .map(|property| property.as_ref().to_string())

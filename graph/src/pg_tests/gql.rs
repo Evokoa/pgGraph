@@ -106,6 +106,147 @@ fn gql_explain_uses_registered_table_labels_after_catalog_read() {
 }
 
 #[pg_test]
+fn direct_node_lookup_resolves_business_id_without_hydration_scan() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (node_id, node_name, has_node_idx, coordinate_only, missing_count) =
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT
+                        (SELECT node_id
+                         FROM graph.get_node('default', 'graph_test_users_pgtest', 'u1')),
+                        (SELECT node->>'name'
+                         FROM graph.get_node('default', 'graph_test_users_pgtest', 'u1')),
+                        (SELECT node_idx >= 0
+                         FROM graph.get_node('default', 'graph_test_users_pgtest', 'u1')),
+                        (SELECT node IS NULL
+                         FROM graph.get_node(
+                            'default',
+                            'graph_test_users_pgtest',
+                            'u1',
+                            hydrate := false
+                         )),
+                        (SELECT count(*)
+                         FROM graph.get_node('default', 'graph_test_users_pgtest', 'missing'))",
+                    None,
+                    &[],
+                )
+                .expect("direct lookup query failed")
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<String>(1)
+                    .expect("node_id read failed")
+                    .unwrap_or_default(),
+                row.get::<String>(2)
+                    .expect("node name read failed")
+                    .unwrap_or_default(),
+                row.get::<bool>(3)
+                    .expect("node_idx flag read failed")
+                    .unwrap_or(false),
+                row.get::<bool>(4)
+                    .expect("coordinate-only flag read failed")
+                    .unwrap_or(false),
+                row.get::<i64>(5)
+                    .expect("missing count read failed")
+                    .unwrap_or_default(),
+            ))
+        })
+        .expect("direct lookup verification failed");
+
+    assert_eq!(node_id, "u1");
+    assert_eq!(node_name, "Alice");
+    assert!(has_node_idx);
+    assert!(coordinate_only);
+    assert_eq!(missing_count, 0);
+}
+
+#[pg_test]
+fn direct_neighbor_lookup_expands_after_business_id_resolution() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (root_id, neighbor_id, depth, coordinate_only) = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT root_id, node_id, depth, node IS NULL
+                 FROM graph.get_neighbors(
+                    'default',
+                    'graph_test_users_pgtest',
+                    'u1',
+                    direction := 'outgoing',
+                    edge_types := ARRAY['friend'],
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("direct neighbor query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)
+                .expect("root id read failed")
+                .unwrap_or_default(),
+            row.get::<String>(2)
+                .expect("neighbor id read failed")
+                .unwrap_or_default(),
+            row.get::<i32>(3).expect("depth read failed").unwrap_or_default(),
+            row.get::<bool>(4)
+                .expect("coordinate-only flag read failed")
+                .unwrap_or(false),
+        ))
+    })
+    .expect("direct neighbor verification failed");
+
+    assert_eq!(root_id, "u1");
+    assert_eq!(neighbor_id, "u2");
+    assert_eq!(depth, 1);
+    assert!(coordinate_only);
+}
+
+#[pg_test]
+fn gql_identity_predicates_lower_to_node_lookup() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let explain = Spi::get_one::<String>(
+        "SELECT graph.gql_explain(
+            'MATCH (u:graph_test_users_pgtest) WHERE id(u) = ''u1'' RETURN u'
+         )",
+    )
+    .expect("identity explain failed")
+    .unwrap_or_default();
+    let property_explain = Spi::get_one::<String>(
+        "SELECT graph.gql_explain(
+            'MATCH (u:graph_test_users_pgtest) WHERE u.id = ''u1'' RETURN u'
+         )",
+    )
+    .expect("property identity explain failed")
+    .unwrap_or_default();
+    let node_id = Spi::get_one::<String>(
+        "SELECT row #>> '{u,_id,id}'
+         FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest) WHERE id(u) = $id RETURN u',
+            params := '{\"id\":\"u1\"}'::jsonb,
+            hydrate := false
+         )",
+    )
+    .expect("identity gql execution failed")
+    .unwrap_or_default();
+
+    assert_eq!(
+        explain,
+        "NodeLookup(node=u:graph_test_users_pgtest, lookup=identity, return=[u])"
+    );
+    assert_eq!(
+        property_explain,
+        "NodeLookup(node=u:graph_test_users_pgtest, lookup=identity, return=[u])"
+    );
+    assert_eq!(node_id, "u1");
+}
+
+#[pg_test]
 fn gql_binds_dynamic_edge_labels_from_registered_label_column() {
     reset_and_create_fixtures();
     Spi::run(

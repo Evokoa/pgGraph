@@ -237,7 +237,12 @@ pub(super) fn execute_statement(
         crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
             check_node_scan_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_node_scan(&engine.borrow(), &plan, tenant_scope)
+                crate::query::execute::execute_node_scan(
+                    &engine.borrow(),
+                    &plan,
+                    tenant_scope,
+                    params,
+                )
             })?;
             let hydrated = hydrate_gql_node_rows(
                 &matches,
@@ -348,7 +353,7 @@ fn execute_set_property(
     crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
     let scan = set_property_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope)
+        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
     })?;
     let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
@@ -381,7 +386,7 @@ fn execute_remove_property(
     crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
     let scan = remove_property_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope)
+        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
     })?;
     let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
@@ -415,6 +420,7 @@ fn set_property_node_scan(
         distinct_stages: Vec::new(),
         distinct: false,
         predicate: plan.predicate.clone(),
+        identity_lookup: None,
         order_by: Vec::new(),
         skip: None,
         limit: None,
@@ -432,6 +438,7 @@ fn remove_property_node_scan(
         distinct_stages: Vec::new(),
         distinct: false,
         predicate: plan.predicate.clone(),
+        identity_lookup: None,
         order_by: Vec::new(),
         skip: None,
         limit: None,
@@ -449,6 +456,7 @@ fn detach_delete_node_scan(
         distinct_stages: Vec::new(),
         distinct: false,
         predicate: plan.predicate.clone(),
+        identity_lookup: None,
         order_by: Vec::new(),
         skip: None,
         limit: None,
@@ -464,7 +472,7 @@ fn execute_detach_delete_node(
     ensure_mutable_projection("GQL DETACH DELETE")?;
     let scan = detach_delete_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope)
+        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
     })?;
     let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
@@ -1000,6 +1008,7 @@ fn lock_and_recheck_node_write(
         distinct_stages: Vec::new(),
         distinct: false,
         predicate: predicate.clone(),
+        identity_lookup: None,
         order_by: Vec::new(),
         skip: None,
         limit: None,

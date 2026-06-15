@@ -466,12 +466,14 @@ fn validate_join_relationship(
         var: source.var.clone(),
         label: source.label.clone(),
         table_oid: source.table_oid,
+        primary_key_columns: Vec::new(),
         properties: source.properties.clone(),
     };
     let target = BoundNode {
         var: target.var.clone(),
         label: target.label.clone(),
         table_oid: target.table_oid,
+        primary_key_columns: Vec::new(),
         properties: target.properties.clone(),
     };
     resolve_relationship(catalog, rel, rel_type, &source, &target)?;
@@ -552,6 +554,14 @@ fn bind_join_operand(
             Ok(ValueExpr::Property {
                 side: BindingSide::PathNode(slot),
                 property: property.text.clone(),
+            })
+        }
+        Operand::Identity { var, .. } => {
+            let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
+                GqlError::bind(var.span, format!("unknown variable `{}`", var.text))
+            })?;
+            Ok(ValueExpr::NodeId {
+                side: BindingSide::PathNode(slot),
             })
         }
         Operand::Literal(literal) => Ok(ValueExpr::Literal(literal_json(literal))),
@@ -1472,6 +1482,7 @@ fn bind_wildcard_path_read(
                 var: String::new(),
                 label: String::new(),
                 table_oid: source_table_oid,
+                primary_key_columns: Vec::new(),
                 properties: std::collections::BTreeSet::new(),
             };
             let target_node = BoundNode {
@@ -1484,6 +1495,7 @@ fn bind_wildcard_path_read(
                     .as_ref()
                     .map_or_else(String::new, |label| label.text.clone()),
                 table_oid: target_table_oid,
+                primary_key_columns: Vec::new(),
                 properties: std::collections::BTreeSet::new(),
             };
             for rel_ident in &rel.rel_types {
@@ -1843,6 +1855,12 @@ fn bind_wildcard_operand(
                 property: property.text.clone(),
             })
         }
+        Operand::Identity { var, .. } => {
+            let binding = node_bindings.get(&var.text).ok_or_else(|| {
+                GqlError::bind(var.span, format!("unknown variable `{}`", var.text))
+            })?;
+            Ok(ValueExpr::NodeId { side: binding.side })
+        }
         Operand::Literal(literal) => Ok(ValueExpr::Literal(literal_json(literal))),
         Operand::Param { name, .. } => Ok(ValueExpr::Param(name.text.clone())),
         Operand::List { values, .. } => {
@@ -2193,6 +2211,10 @@ fn bind_create_value(value: &Operand) -> Result<CreateValue, GqlError> {
         Operand::Property { span, .. } => Err(GqlError::unsupported(
             *span,
             "write property references require MATCH writes from a later phase",
+        )),
+        Operand::Identity { span, .. } => Err(GqlError::unsupported(
+            *span,
+            "write identity function values are not supported",
         )),
     }
 }
@@ -2668,6 +2690,7 @@ fn bound_delete_node(node_pat: &NodePat, label: &NodeLabelInfo, fallback_var: &s
             .map_or_else(|| fallback_var.to_string(), |var| var.text.clone()),
         label: label.label.clone(),
         table_oid: label.table_oid,
+        primary_key_columns: label.primary_key_columns.clone(),
         properties: label.properties.clone(),
     }
 }
@@ -2870,6 +2893,7 @@ fn bind_node(node: &NodePat, catalog: &impl CatalogSnapshot) -> Result<BoundNode
         var: var.text.clone(),
         label: info.label,
         table_oid: info.table_oid,
+        primary_key_columns: info.primary_key_columns,
         properties: info.properties,
     })
 }
@@ -3603,6 +3627,9 @@ fn bind_operand(
                 property: property.text.clone(),
             })
         }
+        Operand::Identity { var, .. } => Ok(ValueExpr::NodeId {
+            side: binding_side(&var.text, source, target, var.span)?,
+        }),
         Operand::Literal(literal) => Ok(ValueExpr::Literal(literal_json(literal))),
         Operand::Param { name, .. } => Ok(ValueExpr::Param(name.text.clone())),
         Operand::List { values, .. } => {

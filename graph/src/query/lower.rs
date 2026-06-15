@@ -145,17 +145,60 @@ fn lower_wildcard_path_segment(segment: LogicalWildcardPathSegment) -> PhysicalW
 }
 
 fn lower_node_scan(plan: LogicalNodeScan) -> PhysicalNodeScan {
+    let identity_lookup = node_scan_identity_lookup(plan.predicate.as_ref(), &plan.node);
     PhysicalNodeScan {
         var: plan.node.var,
         table_oid: plan.node.table_oid,
         label: plan.node.label,
         predicate: plan.predicate,
+        identity_lookup,
         order_by: plan.order_by,
         skip: plan.skip,
         limit: plan.limit,
         distinct_stages: lower_return_stages(plan.distinct_stages),
         distinct: plan.distinct,
         returns: lower_returns(plan.returns),
+    }
+}
+
+fn node_scan_identity_lookup(
+    predicate: Option<&super::logical_plan::Predicate>,
+    node: &super::logical_plan::BoundNode,
+) -> Option<super::logical_plan::ValueExpr> {
+    use super::logical_plan::{BoundCmpOp, Predicate, ValueExpr};
+
+    let predicate = predicate?;
+    match predicate {
+        Predicate::And(lhs, rhs) => node_scan_identity_lookup(Some(lhs), node)
+            .or_else(|| node_scan_identity_lookup(Some(rhs), node)),
+        Predicate::Compare {
+            lhs,
+            op: BoundCmpOp::Eq,
+            rhs: Some(rhs),
+        } => identity_lookup_rhs(lhs, rhs, node).or_else(|| identity_lookup_rhs(rhs, lhs, node)),
+        _ => None,
+    }
+    .filter(|expr| matches!(expr, ValueExpr::Literal(_) | ValueExpr::Param(_)))
+}
+
+fn identity_lookup_rhs(
+    lhs: &super::logical_plan::ValueExpr,
+    rhs: &super::logical_plan::ValueExpr,
+    node: &super::logical_plan::BoundNode,
+) -> Option<super::logical_plan::ValueExpr> {
+    use super::logical_plan::{BindingSide, ValueExpr};
+
+    match lhs {
+        ValueExpr::NodeId {
+            side: BindingSide::Source,
+        } => Some(rhs.clone()),
+        ValueExpr::Property {
+            side: BindingSide::Source,
+            property,
+        } if node.primary_key_columns.len() == 1 && node.primary_key_columns[0] == *property => {
+            Some(rhs.clone())
+        }
+        _ => None,
     }
 }
 

@@ -2,6 +2,16 @@ use super::admin::{check_enabled, check_enabled_result, with_panic_boundary};
 use super::runtime::{current_query_freshness, ensure_current_graph_for_query};
 use super::*;
 
+type DirectNodeRow = (
+    name!(graph_id, String),
+    name!(graph_name, String),
+    name!(node_table, pgrx::pg_sys::Oid),
+    name!(node_table_name, String),
+    name!(node_id, String),
+    name!(node_idx, i64),
+    name!(node, Option<pgrx::JsonB>),
+);
+
 /// BFS traversal from a seed node.
 ///
 /// See: `docs/user_guide/querying.mdx`
@@ -75,6 +85,98 @@ pub(super) fn traverse(
         };
         let rows = execute_traverse_rows(&request).unwrap_or_else(|err| err.report());
 
+        TableIterator::new(rows)
+    })
+}
+
+/// Resolve one registered node by graph name, label, and business id.
+#[pg_extern(schema = "graph", cost = 100)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI exposes each SQL argument and row column"
+)]
+fn get_node(
+    graph_name: &str,
+    label: &str,
+    id: &str,
+    hydrate: default!(bool, "true"),
+    tenant: default!(Option<String>, "NULL"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(node_table, pgrx::pg_sys::Oid),
+        name!(node_table_name, String),
+        name!(node_id, String),
+        name!(node_idx, i64),
+        name!(node, Option<pgrx::JsonB>),
+    ),
+> {
+    with_panic_boundary("get_node()", || {
+        let rows = direct_get_node_rows(
+            graph_name,
+            label,
+            id,
+            hydrate,
+            tenant.as_deref(),
+            graph_tenant,
+            graph_namespace,
+        )
+        .unwrap_or_else(|err| err.report());
+        TableIterator::new(rows)
+    })
+}
+
+/// Return the one-hop neighbors for a registered node business id.
+#[pg_extern(schema = "graph", cost = 1000)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI exposes each SQL argument and row column"
+)]
+fn get_neighbors(
+    graph_name: &str,
+    label: &str,
+    id: &str,
+    direction: default!(&str, "'any'"),
+    edge_types: default!(Option<Vec<String>>, "NULL"),
+    tenant: default!(Option<String>, "NULL"),
+    hydrate: default!(bool, "true"),
+    max_rows: default!(i32, 1000),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(root_table, pgrx::pg_sys::Oid),
+        name!(root_id, String),
+        name!(node_table, pgrx::pg_sys::Oid),
+        name!(node_id, String),
+        name!(depth, i32),
+        name!(path, pgrx::JsonB),
+        name!(edge_path, pgrx::JsonB),
+        name!(node, Option<pgrx::JsonB>),
+        name!(root_table_name, String),
+        name!(node_table_name, String),
+    ),
+> {
+    with_panic_boundary("get_neighbors()", || {
+        let rows = direct_get_neighbors_rows(
+            graph_name,
+            label,
+            id,
+            direction,
+            edge_types.as_deref(),
+            tenant.as_deref(),
+            hydrate,
+            max_rows,
+            graph_tenant,
+            graph_namespace,
+        )
+        .unwrap_or_else(|err| err.report());
         TableIterator::new(rows)
     })
 }
@@ -314,6 +416,201 @@ fn u64_to_bigint(value: u64) -> safety::GraphResult<i64> {
             value
         ))
     })
+}
+
+struct DirectNodeMatch {
+    graph: catalog::GraphMetadata,
+    table: builder::RegisteredTable,
+    table_oid: u32,
+    node_idx: u32,
+}
+
+fn direct_get_node_rows(
+    graph_name: &str,
+    label: &str,
+    id: &str,
+    hydrate: bool,
+    tenant: Option<&str>,
+    graph_tenant: Option<&str>,
+    graph_namespace: Option<&str>,
+) -> safety::GraphResult<Vec<DirectNodeRow>> {
+    check_enabled_result()?;
+    with_named_graph(graph_name, graph_tenant, graph_namespace, || {
+        let tenant_scope = resolve_tenant_scope(tenant)?;
+        let Some(matched) = resolve_direct_node(graph_name, label, id, tenant_scope.as_deref())?
+        else {
+            return Ok(Vec::new());
+        };
+        if !source_row_visible(&matched.table, id)? {
+            return Ok(Vec::new());
+        }
+        let node = if hydrate {
+            hydrate_node(matched.table_oid, id)?
+        } else {
+            None
+        };
+        let row = (
+            matched.graph.graph_id,
+            matched.graph.graph_name,
+            pgrx::pg_sys::Oid::from_u32(matched.table_oid),
+            regclass_text(matched.table_oid)?,
+            id.to_string(),
+            i64::from(matched.node_idx),
+            node,
+        );
+        Ok(vec![row])
+    })
+}
+
+#[allow(clippy::too_many_arguments, reason = "mirrors SQL API parameters")]
+fn direct_get_neighbors_rows(
+    graph_name: &str,
+    label: &str,
+    id: &str,
+    direction: &str,
+    edge_types: Option<&[String]>,
+    tenant: Option<&str>,
+    hydrate: bool,
+    max_rows: i32,
+    graph_tenant: Option<&str>,
+    graph_namespace: Option<&str>,
+) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
+    check_enabled_result()?;
+    with_named_graph(graph_name, graph_tenant, graph_namespace, || {
+        let tenant_scope = resolve_tenant_scope(tenant)?;
+        let Some(matched) = resolve_direct_node(graph_name, label, id, tenant_scope.as_deref())?
+        else {
+            return Ok(Vec::new());
+        };
+        if !source_row_visible(&matched.table, id)? {
+            return Ok(Vec::new());
+        }
+        let (direction, strategy, _uniqueness) = crate::sql_traversal::validate_traverse_options(
+            direction,
+            tenant_scope.as_deref(),
+            "bfs",
+            "node_global",
+        )?;
+        let request = TraverseRequest {
+            root_table: pgrx::pg_sys::Oid::from_u32(matched.table_oid),
+            root_id: id,
+            max_depth: 1,
+            edge_types,
+            node_tables: None,
+            filter: None,
+            tenant: tenant_scope.as_deref(),
+            direction,
+            strategy,
+            include_start: false,
+            hydrate,
+            limit: max_rows,
+            offset: 0,
+            max_nodes: config::MAX_NODES.get(),
+            max_frontier: config::MAX_FRONTIER.get(),
+        };
+        execute_traverse_rows(&request)
+    })
+}
+
+fn with_named_graph<T>(
+    graph_name: &str,
+    graph_tenant: Option<&str>,
+    graph_namespace: Option<&str>,
+    action: impl FnOnce() -> safety::GraphResult<T>,
+) -> safety::GraphResult<T> {
+    let graph = catalog::resolve_visible_graph_metadata(graph_name, graph_tenant, graph_namespace)?
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: format!("graph '{graph_name}' does not exist"),
+        })?;
+    catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Read)?;
+    let previous_graph_id = catalog::selected_graph_id()?;
+    catalog::set_selected_graph_id(&graph.graph_id)?;
+    let result = (|| {
+        let freshness = current_query_freshness()?;
+        ensure_current_graph_for_query(freshness)?;
+        action()
+    })();
+    restore_selected_graph(previous_graph_id)?;
+    result
+}
+
+fn restore_selected_graph(previous_graph_id: Option<String>) -> safety::GraphResult<()> {
+    match previous_graph_id {
+        Some(graph_id) => catalog::set_selected_graph_id(&graph_id),
+        None => catalog::set_selected_graph_id(""),
+    }
+}
+
+fn resolve_direct_node(
+    graph_name: &str,
+    label: &str,
+    id: &str,
+    tenant: Option<&str>,
+) -> safety::GraphResult<Option<DirectNodeMatch>> {
+    let graph = catalog::selected_or_default_graph_metadata()?;
+    let (tables, _, _) = catalog::read_catalog_for_graph(&graph.graph_id)?;
+    let table = registered_table_for_label(&tables, label).ok_or_else(|| {
+        safety::GraphError::InvalidFilter {
+            reason: format!("graph '{graph_name}' has no registered node label '{label}'"),
+        }
+    })?;
+    let table_oid = catalog::table_oid_from_name(&table.table_name)?;
+    acl::check_table_acl(table_oid)?;
+    let node_idx = ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        let node_idx = engine.resolve(table_oid, id)?;
+        tenant_allows_direct_node(&engine, node_idx, tenant).then_some(node_idx)
+    });
+    Ok(node_idx.map(|node_idx| DirectNodeMatch {
+        graph,
+        table,
+        table_oid,
+        node_idx,
+    }))
+}
+
+fn registered_table_for_label(
+    tables: &[builder::RegisteredTable],
+    label: &str,
+) -> Option<builder::RegisteredTable> {
+    tables
+        .iter()
+        .find(|table| table.table_name == label || catalog_label(&table.table_name) == label)
+        .cloned()
+}
+
+fn catalog_label(table_name: &str) -> &str {
+    table_name.rsplit('.').next().unwrap_or(table_name)
+}
+
+fn tenant_allows_direct_node(engine: &Engine, node_idx: u32, tenant: Option<&str>) -> bool {
+    match tenant {
+        Some(tenant)
+            if engine
+                .tenanted_table_oids
+                .contains(&engine.node_store.table_oid(node_idx)) =>
+        {
+            engine
+                .tenant_membership
+                .get(tenant)
+                .is_some_and(|nodes| nodes.contains(node_idx))
+        }
+        _ => true,
+    }
+}
+
+fn source_row_visible(table: &builder::RegisteredTable, id: &str) -> safety::GraphResult<bool> {
+    let table_name = catalog::sql_table_name_from_catalog(&table.table_name)?;
+    let pk_expr = catalog::primary_key_expr("src", &table.id_columns);
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM {} src WHERE {pk_expr} = $1)",
+        table_name.as_sql()
+    );
+    Spi::get_one_with_args::<bool>(&sql, &[id.into()])
+        .map(|visible| visible.unwrap_or(false))
+        .map_err(|err| {
+            safety::GraphError::Internal(format!("source visibility check failed: {err}"))
+        })
 }
 
 /// Aggregate over traversal results without hydrating every row client-side.

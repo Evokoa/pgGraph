@@ -36,8 +36,15 @@ pub(crate) fn explain_node_scan(plan: &PhysicalNodeScan) -> String {
         .map(ReturnSlot::name)
         .collect::<Vec<_>>()
         .join(", ");
-    format!(
-        "NodeScan(node={}:{}, return=[{}])",
-        plan.var, plan.label, returns
-    )
+    if plan.identity_lookup.is_some() {
+        format!(
+            "NodeLookup(node={}:{}, lookup=identity, return=[{}])",
+            plan.var, plan.label, returns
+        )
+    } else {
+        format!(
+            "NodeScan(node={}:{}, return=[{}])",
+            plan.var, plan.label, returns
+        )
+    }
 }

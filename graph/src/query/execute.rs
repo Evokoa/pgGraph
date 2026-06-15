@@ -137,9 +137,41 @@ pub(crate) fn execute_node_scan(
     engine: &Engine,
     plan: &PhysicalNodeScan,
     tenant: Option<&str>,
+    params: &crate::query::value::QueryParams,
 ) -> GraphResult<Vec<GqlNodeRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
+    }
+    if let Some(identity_lookup) = &plan.identity_lookup {
+        let Some(node_id) = crate::query::value::identity_lookup_text(identity_lookup, params)?
+        else {
+            return Ok(Vec::new());
+        };
+        if let Some(node_idx) = engine.resolve(plan.table_oid, &node_id) {
+            if crate::projection::tx_delta::node_deleted(node_idx)
+                || !tenant_allows_node(engine, node_idx, tenant)
+            {
+                return Ok(Vec::new());
+            }
+        } else {
+            let table_is_tenanted = engine.tenanted_table_oids.contains(&plan.table_oid);
+            if !crate::projection::tx_delta::added_node_keys(
+                plan.table_oid,
+                tenant,
+                table_is_tenanted,
+            )
+            .iter()
+            .any(|added| added == &node_id)
+            {
+                return Ok(Vec::new());
+            }
+        }
+        return Ok(vec![GqlNodeRow {
+            node: GqlNodeCoordinate {
+                table_oid: plan.table_oid,
+                node_id,
+            },
+        }]);
     }
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();

@@ -787,7 +787,7 @@ pub(crate) fn set_selected_graph_id(graph_id: &str) -> safety::GraphResult<()> {
     })
 }
 
-fn selected_graph_id() -> safety::GraphResult<Option<String>> {
+pub(crate) fn selected_graph_id() -> safety::GraphResult<Option<String>> {
     Spi::get_one::<String>("SELECT current_setting('graph.current_graph_id', true)")
         .map_err(|err| {
             safety::GraphError::Internal(format!("current graph setting read failed: {err}"))

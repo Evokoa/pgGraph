@@ -329,7 +329,9 @@ impl Parser {
             Operand::Literal(Literal::Value { span, .. }) | Operand::Param { span, .. } => {
                 span.end as usize
             }
-            Operand::Property { span, .. } | Operand::List { span, .. } => span.end as usize,
+            Operand::Property { span, .. }
+            | Operand::Identity { span, .. }
+            | Operand::List { span, .. } => span.end as usize,
         };
         Ok(SetClause {
             target,
@@ -906,6 +908,23 @@ impl Parser {
         match self.peek() {
             TokKind::Ident => {
                 let var = self.parse_ident()?;
+                if self.consume(TokKind::LParen).is_some() {
+                    if var.text != "id" {
+                        return Err(GqlError::unsupported(
+                            var.span,
+                            "only id(variable) function operands are supported in predicates",
+                        ));
+                    }
+                    let node_var = self.parse_ident()?;
+                    let end = self
+                        .expect(TokKind::RParen, "expected ')' after id() argument")?
+                        .span
+                        .end as usize;
+                    return Ok(Operand::Identity {
+                        var: node_var,
+                        span: Span::new(var.span.start as usize, end),
+                    });
+                }
                 self.expect(TokKind::Dot, "expected property reference")?;
                 let property = self.parse_property_path()?;
                 let span = Span::new(var.span.start as usize, property.span.end as usize);

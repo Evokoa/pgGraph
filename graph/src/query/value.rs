@@ -20,6 +20,30 @@ pub(crate) type HydratedRows = HashMap<(u32, String), serde_json::Value>;
 /// Query parameters supplied by SQL callers.
 pub(crate) type QueryParams = serde_json::Map<String, serde_json::Value>;
 
+/// Resolve a bound identity lookup expression to the primary-key text used by
+/// the topology store.
+///
+/// # Errors
+///
+/// Returns [`GraphError::GqlParameter`] when the lookup references a missing
+/// query parameter and [`GraphError::GqlExecution`] when the parameter is not a
+/// scalar value that can be compared to a PostgreSQL primary-key text value.
+pub(crate) fn identity_lookup_text(
+    expr: &ValueExpr,
+    params: &QueryParams,
+) -> GraphResult<Option<String>> {
+    match expr {
+        ValueExpr::Literal(value) => scalar_identity_text(value),
+        ValueExpr::Param(name) => params
+            .get(name)
+            .ok_or_else(|| GraphError::GqlParameter {
+                reason: format!("missing GQL parameter `{name}`"),
+            })
+            .and_then(scalar_identity_text),
+        _ => Ok(None),
+    }
+}
+
 /// Project coordinate matches into canonical JSON rows.
 ///
 /// # Errors
@@ -1189,6 +1213,11 @@ fn eval_value(
         ValueExpr::Property { side, property } => coordinate(row, *side)
             .map(|coordinate| lookup_property_value(coordinate, hydrated, property))
             .unwrap_or(Ok(EvalValue::Value(serde_json::Value::Null))),
+        ValueExpr::NodeId { side } => Ok(EvalValue::Value(
+            coordinate(row, *side)
+                .map(|coordinate| serde_json::Value::String(coordinate.node_id.clone()))
+                .unwrap_or(serde_json::Value::Null),
+        )),
         ValueExpr::Literal(value) => Ok(EvalValue::Value(value.clone())),
         ValueExpr::Param(name) => {
             params
@@ -1200,6 +1229,20 @@ fn eval_value(
                 })
         }
         ValueExpr::List(values) => Ok(EvalValue::Value(serde_json::Value::Array(values.clone()))),
+    }
+}
+
+fn scalar_identity_text(value: &serde_json::Value) -> GraphResult<Option<String>> {
+    match value {
+        serde_json::Value::String(value) => Ok(Some(value.clone())),
+        serde_json::Value::Number(value) => Ok(Some(value.to_string())),
+        serde_json::Value::Bool(value) => Ok(Some(value.to_string())),
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Err(GraphError::GqlExecution {
+                reason: "GQL identity lookup requires a scalar value".to_string(),
+            })
+        }
     }
 }
 

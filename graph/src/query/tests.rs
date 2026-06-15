@@ -4017,7 +4017,7 @@ fn aggregate_projection_returns_empty_group_for_empty_input() {
         panic!("expected node scan");
     };
     let engine = engine_fixture();
-    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let rows = execute_node_scan(&engine, &physical, None, &QueryParams::new()).unwrap();
     let projected = project_node_rows(
         rows,
         &physical,
@@ -4390,7 +4390,7 @@ fn node_scan_projection_errors_when_required_hydration_is_missing() {
         panic!("expected physical node scan");
     };
     let engine = engine_fixture();
-    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let rows = execute_node_scan(&engine, &physical, None, &QueryParams::new()).unwrap();
     let err = project_node_rows(
         rows,
         &physical,
@@ -4662,7 +4662,7 @@ fn executor_node_scan_reads_graph_and_transaction_nodes() {
     let engine = engine_fixture();
     crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
 
-    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let rows = execute_node_scan(&engine, &physical, None, &QueryParams::new()).unwrap();
 
     assert_eq!(
         rows.iter()
@@ -4691,7 +4691,8 @@ fn executor_node_scan_hides_unscoped_transaction_nodes_under_tenant_scope() {
     crate::projection::tx_delta::record_added_node(10, "u4", Some("tenant-a"))
         .expect("record tenant tx node");
 
-    let rows = execute_node_scan(&engine, &physical, Some("tenant-a")).unwrap();
+    let rows =
+        execute_node_scan(&engine, &physical, Some("tenant-a"), &QueryParams::new()).unwrap();
 
     assert_eq!(
         rows.iter()
@@ -4715,7 +4716,8 @@ fn executor_node_scan_keeps_unscoped_transaction_nodes_for_nontenanted_tables() 
     crate::projection::tx_delta::record_added_node(10, "u3", None)
         .expect("record unscoped tx node");
 
-    let rows = execute_node_scan(&engine, &physical, Some("tenant-a")).unwrap();
+    let rows =
+        execute_node_scan(&engine, &physical, Some("tenant-a"), &QueryParams::new()).unwrap();
 
     assert_eq!(
         rows.iter()
@@ -4940,7 +4942,7 @@ fn node_scan_projection_filters_inline_predicates() {
         panic!("expected node scan");
     };
     let engine = engine_fixture();
-    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let rows = execute_node_scan(&engine, &physical, None, &QueryParams::new()).unwrap();
     let projected = project_node_rows(
         rows,
         &physical,
@@ -4966,7 +4968,7 @@ fn node_scan_limit_does_not_hide_later_predicate_matches() {
     let engine = engine_fixture();
     crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
 
-    let rows = execute_node_scan(&engine, &physical, None).unwrap();
+    let rows = execute_node_scan(&engine, &physical, None, &QueryParams::new()).unwrap();
     let mut hydrated = hydrated_fixture();
     hydrated.insert(
         (10, "u3".to_string()),
