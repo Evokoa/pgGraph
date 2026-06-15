@@ -779,6 +779,225 @@ fn graph_scoped_sync_replay_ignores_unrelated_source_table_changes() {
 }
 
 #[pg_test]
+fn sync_policies_run_through_visible_durable_jobs() {
+    reset_and_create_fixtures();
+    create_error_sqlstate_helper();
+    Spi::run("SELECT graph.create_graph('policy_graph', namespace := 'app')")
+        .expect("create policy_graph failed");
+    Spi::run(
+        "SELECT graph.add_table_to_graph(
+             'policy_graph',
+             'graph_test_users_pgtest'::regclass,
+             'id',
+             ARRAY['name'],
+             graph_namespace := 'app'
+         )",
+    )
+    .expect("add policy_graph users failed");
+    Spi::run("SELECT graph.set_current_graph('policy_graph', namespace := 'app')")
+        .expect("select policy_graph failed");
+    Spi::run(
+        "SELECT graph.build_graph(
+             'policy_graph',
+             force_persist := true,
+             graph_namespace := 'app'
+         )",
+    )
+    .expect("build policy_graph failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable policy_graph sync failed");
+
+    let (policy_id, job_id, graph_name, enabled, interval, lag_rows) = Spi::connect(|client| {
+        let mut rows = client
+            .select(
+                "SELECT policy_id, job_id, graph_name, enabled,
+                        schedule_interval_secs, max_sync_lag_rows
+                   FROM graph.add_sync_policy(
+                        'policy_graph',
+                        schedule_interval_secs := 5,
+                        max_sync_lag_rows := 10,
+                        graph_namespace := 'app'
+                   )",
+                None,
+                &[],
+            )
+            .expect("add sync policy failed");
+        let row = rows.next().expect("sync policy row missing");
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)?.expect("policy id missing"),
+            row.get::<String>(2)?.expect("job id missing"),
+            row.get::<String>(3)?.expect("graph name missing"),
+            row.get::<bool>(4)?.unwrap_or(false),
+            row.get::<i64>(5)?.unwrap_or_default(),
+            row.get::<i64>(6)?,
+        ))
+    })
+    .expect("sync policy creation row read failed");
+
+    assert_eq!(graph_name, "policy_graph");
+    assert!(enabled);
+    assert_eq!(interval, 5);
+    assert_eq!(lag_rows, Some(10));
+
+    Spi::run("UPDATE public.graph_test_users_pgtest SET name = 'Alice policy 1' WHERE id = 'u1'")
+        .expect("update policy_graph source row failed");
+    let (run_status, rows_applied) = Spi::connect(|client| {
+        let mut rows = client
+            .select(
+                "SELECT status, rows_applied
+                   FROM graph.run_sync_policy($1)",
+                None,
+                &[policy_id.as_str().into()],
+            )
+            .expect("run sync policy failed");
+        let row = rows.next().expect("run sync policy row missing");
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)?.expect("run status missing"),
+            row.get::<i64>(2)?,
+        ))
+    })
+    .expect("run sync policy row read failed");
+    assert_eq!(run_status, "completed");
+    assert_eq!(rows_applied, Some(1));
+
+    let (job_kind, job_status, policy_status, completed_runs) = Spi::connect(|client| {
+        let job = client
+            .select(
+                "SELECT policy_kind, last_status
+                   FROM graph.jobs('policy_graph', graph_namespace := 'app')
+                  WHERE job_id = $1",
+                None,
+                &[job_id.as_str().into()],
+            )
+            .expect("jobs query failed")
+            .next()
+            .expect("job row missing");
+        let policy = client
+            .select(
+                "SELECT last_status
+                   FROM graph.sync_policy_status('policy_graph', graph_namespace := 'app')
+                  WHERE policy_id = $1",
+                None,
+                &[policy_id.as_str().into()],
+            )
+            .expect("sync policy status query failed")
+            .next()
+            .expect("policy status row missing");
+        let stats = client
+            .select(
+                "SELECT completed_runs
+                   FROM graph.job_stats('policy_graph', graph_namespace := 'app')
+                  WHERE policy_kind = 'sync_policy'",
+                None,
+                &[],
+            )
+            .expect("job stats query failed")
+            .next()
+            .expect("job stats row missing");
+        Ok::<_, pgrx::spi::Error>((
+            job.get::<String>(1)?.expect("job kind missing"),
+            job.get::<String>(2)?,
+            policy.get::<String>(1)?,
+            stats.get::<i64>(1)?.unwrap_or_default(),
+        ))
+    })
+    .expect("job status rows read failed");
+    assert_eq!(job_kind, "sync_policy");
+    assert_eq!(job_status.as_deref(), Some("completed"));
+    assert_eq!(policy_status.as_deref(), Some("completed"));
+    assert_eq!(completed_runs, 1);
+
+    Spi::run("UPDATE public.graph_test_users_pgtest SET name = 'Alice policy 2' WHERE id = 'u1'")
+        .expect("update policy_graph source row for run_job failed");
+    let run_job_rows = Spi::get_one::<i64>(&format!(
+        "SELECT rows_applied
+           FROM graph.run_job({})",
+        super::sql_literal(&job_id)
+    ))
+    .expect("run job failed")
+    .unwrap_or_default();
+    assert_eq!(run_job_rows, 1);
+
+    Spi::run(&format!(
+        "SELECT graph.alter_job({}, enabled := false)",
+        super::sql_literal(&job_id)
+    ))
+    .expect("disable policy job failed");
+    let disabled_status = Spi::get_one::<String>(&format!(
+        "SELECT status
+           FROM graph.run_job({})",
+        super::sql_literal(&job_id)
+    ))
+    .expect("run disabled job failed")
+    .expect("disabled run status missing");
+    assert_eq!(disabled_status, "disabled");
+
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_phase9_no_policy;
+         CREATE ROLE graph_phase9_no_policy;
+         GRANT USAGE ON SCHEMA graph, public TO graph_phase9_no_policy",
+    )
+    .expect("create phase9 no-policy role failed");
+    Spi::run("SET ROLE graph_phase9_no_policy").expect("set no-policy role failed");
+    let visible_policy_jobs = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.jobs()
+          WHERE graph_name = 'policy_graph'",
+    )
+    .expect("restricted jobs query failed")
+    .unwrap_or(-1);
+    let named_policy_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.jobs('policy_graph', graph_namespace := 'app')",
+    );
+    Spi::run("RESET ROLE").expect("reset no-policy role failed");
+    assert_eq!(visible_policy_jobs, 0);
+    assert_eq!(named_policy_sqlstate, Some("PG005".to_string()));
+
+    Spi::run(
+        "SELECT graph.set_graph_quota(
+             'owner'::text,
+             'max_graph_jobs'::text,
+             1::bigint,
+             scope_key := current_user::text,
+             enforcement := 'hard'::text
+         )",
+    )
+    .expect("set graph job quota failed");
+    Spi::run("SELECT graph.create_graph('policy_quota_graph', namespace := 'app')")
+        .expect("create policy quota graph failed");
+    let quota_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.add_sync_policy('policy_quota_graph', graph_namespace := 'app')",
+    );
+    let quota_graph_jobs = Spi::get_one::<i64>(
+        "SELECT usage_value
+           FROM graph.graph_quota_usage()
+          WHERE scope_type = 'owner'
+            AND dimension = 'max_graph_jobs'",
+    )
+    .expect("graph job quota usage query failed")
+    .unwrap_or_default();
+    assert_eq!(quota_sqlstate, Some("PG005".to_string()));
+    assert_eq!(quota_graph_jobs, 1);
+
+    let removed = Spi::get_one::<bool>(&format!(
+        "SELECT removed
+           FROM graph.remove_job({})",
+        super::sql_literal(&job_id)
+    ))
+    .expect("remove policy job failed")
+    .unwrap_or(false);
+    let remaining_policy = Spi::get_one::<i64>(&format!(
+        "SELECT count(*)
+           FROM graph._sync_policies
+          WHERE policy_id = {}::uuid",
+        super::sql_literal(&policy_id)
+    ))
+    .expect("remaining sync policy query failed")
+    .unwrap_or(-1);
+    assert!(removed);
+    assert_eq!(remaining_policy, 0);
+}
+
+#[pg_test]
 fn graph_scoped_registrations_isolate_tables_edges_and_filters() {
     reset_and_create_fixtures();
     Spi::run("SELECT graph.create_graph('tenant_a', namespace := 'app')")

@@ -636,6 +636,76 @@ CREATE INDEX IF NOT EXISTS _maintenance_jobs_status_idx
 CREATE INDEX IF NOT EXISTS _maintenance_jobs_graph_status_idx
     ON graph._maintenance_jobs (graph_id, status, created_at);
 
+CREATE TABLE IF NOT EXISTS graph._jobs (
+    job_id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    graph_id               UUID NOT NULL REFERENCES graph._graphs(graph_id) ON DELETE CASCADE,
+    policy_kind            TEXT NOT NULL,
+    enabled                BOOLEAN NOT NULL DEFAULT true,
+    schedule_interval_secs BIGINT NOT NULL DEFAULT 60,
+    max_runtime_secs       BIGINT,
+    max_retries            INTEGER NOT NULL DEFAULT 0,
+    next_run_at            TIMESTAMPTZ,
+    last_run_at            TIMESTAMPTZ,
+    last_status            TEXT,
+    last_error             TEXT,
+    last_sqlstate          TEXT,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (policy_kind IN ('sync_policy')),
+    CHECK (schedule_interval_secs > 0),
+    CHECK (max_runtime_secs IS NULL OR max_runtime_secs > 0),
+    CHECK (max_retries >= 0),
+    CHECK (last_status IS NULL OR last_status IN ('queued', 'running', 'completed', 'failed', 'disabled'))
+);
+
+CREATE INDEX IF NOT EXISTS _jobs_graph_kind_idx
+    ON graph._jobs (graph_id, policy_kind, enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS graph._job_runs (
+    run_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id          UUID NOT NULL REFERENCES graph._jobs(job_id) ON DELETE CASCADE,
+    graph_id        UUID NOT NULL REFERENCES graph._graphs(graph_id) ON DELETE CASCADE,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at     TIMESTAMPTZ,
+    status          TEXT NOT NULL DEFAULT 'running',
+    sqlstate        TEXT,
+    error           TEXT,
+    rows_applied    BIGINT,
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    worker_identity TEXT,
+    execution_mode  TEXT NOT NULL DEFAULT 'hosted',
+    CHECK (status IN ('running', 'completed', 'failed', 'disabled')),
+    CHECK (retry_count >= 0),
+    CHECK (execution_mode IN ('hosted', 'internal'))
+);
+
+CREATE INDEX IF NOT EXISTS _job_runs_job_started_idx
+    ON graph._job_runs (job_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS _job_runs_graph_started_idx
+    ON graph._job_runs (graph_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS graph._sync_policies (
+    policy_id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    graph_id               UUID NOT NULL REFERENCES graph._graphs(graph_id) ON DELETE CASCADE,
+    job_id                 UUID NOT NULL UNIQUE REFERENCES graph._jobs(job_id) ON DELETE CASCADE,
+    schedule_interval_secs BIGINT NOT NULL DEFAULT 60,
+    max_sync_lag_rows      BIGINT,
+    enabled                BOOLEAN NOT NULL DEFAULT true,
+    last_run_at            TIMESTAMPTZ,
+    next_run_at            TIMESTAMPTZ,
+    last_status            TEXT,
+    last_error             TEXT,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (schedule_interval_secs > 0),
+    CHECK (max_sync_lag_rows IS NULL OR max_sync_lag_rows >= 0),
+    CHECK (last_status IS NULL OR last_status IN ('queued', 'running', 'completed', 'failed', 'disabled'))
+);
+
+CREATE INDEX IF NOT EXISTS _sync_policies_graph_enabled_idx
+    ON graph._sync_policies (graph_id, enabled, next_run_at);
+
 CREATE TABLE IF NOT EXISTS graph._sync_log (
     id             BIGSERIAL PRIMARY KEY,
     op             CHAR(1) NOT NULL,
@@ -748,6 +818,9 @@ SELECT pg_catalog.pg_extension_config_dump('graph._graph_grants', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._graph_quotas', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._build_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._maintenance_jobs', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._jobs', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._job_runs', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._sync_policies', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log_id_seq', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._projection_generations', '');
@@ -774,6 +847,9 @@ REVOKE ALL ON TABLE graph._graph_grants           FROM PUBLIC;
 REVOKE ALL ON TABLE graph._graph_quotas           FROM PUBLIC;
 REVOKE ALL ON TABLE graph._build_jobs             FROM PUBLIC;
 REVOKE ALL ON TABLE graph._maintenance_jobs       FROM PUBLIC;
+REVOKE ALL ON TABLE graph._jobs                   FROM PUBLIC;
+REVOKE ALL ON TABLE graph._job_runs               FROM PUBLIC;
+REVOKE ALL ON TABLE graph._sync_policies          FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
 REVOKE ALL ON TABLE graph._projection_generations FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_buffer            FROM PUBLIC;
@@ -785,6 +861,9 @@ GRANT SELECT ON TABLE graph._graph_grants           TO PUBLIC;
 GRANT SELECT ON TABLE graph._graph_quotas           TO PUBLIC;
 GRANT SELECT ON TABLE graph._build_jobs             TO PUBLIC;
 GRANT SELECT ON TABLE graph._maintenance_jobs       TO PUBLIC;
+GRANT SELECT ON TABLE graph._jobs                   TO PUBLIC;
+GRANT SELECT ON TABLE graph._job_runs               TO PUBLIC;
+GRANT SELECT ON TABLE graph._sync_policies          TO PUBLIC;
 GRANT SELECT ON TABLE graph._sync_log               TO PUBLIC;
 GRANT SELECT ON TABLE graph._projection_generations TO PUBLIC;
 GRANT SELECT ON TABLE graph._sync_buffer            TO PUBLIC;

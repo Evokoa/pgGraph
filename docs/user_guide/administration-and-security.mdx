@@ -28,7 +28,7 @@ apply, reset, and global analytics.
 |---|---|
 | Registration | `add_table`, `add_edge`, `add_filter_column`, `remove_table`, `remove_edge` |
 | Build lifecycle | `build`, `vacuum`, `maintenance`, `reset` |
-| Sync | `enable_sync`, `apply_sync` |
+| Sync | `enable_sync`, `apply_sync`, `add_sync_policy`, `alter_sync_policy`, `drop_sync_policy`, `run_sync_policy`, `run_job`, `alter_job`, `remove_job` |
 | Global analytics | `connected_components`, `component_stats`, component pagination helpers |
 
 ## Graph Privileges
@@ -71,8 +71,10 @@ Quota scopes are `cluster`, `tenant`, `owner`, `namespace`, and `graph`.
 Enforcement can be `hard` or `warn`. Hard `max_named_graphs` quotas check
 cluster and owner limits before creating a graph metadata row. Hard
 `max_loaded_graphs_per_backend` quotas check cluster and owner limits before
-loading a persisted graph artifact into the current backend. Warning quotas are
-visible through `graph.graph_quota_usage()` but do not block the operation.
+loading a persisted graph artifact into the current backend. Hard
+`max_graph_jobs` quotas count generic jobs, build jobs, and maintenance jobs
+before creating a sync policy job. Warning quotas are visible through
+`graph.graph_quota_usage()` but do not block the operation.
 
 ## Reader Functions
 
@@ -143,6 +145,9 @@ graph._graph_grants
 graph._graph_quotas
 graph._build_jobs
 graph._maintenance_jobs
+graph._jobs
+graph._job_runs
+graph._sync_policies
 graph._sync_log
 graph._sync_buffer
 ```

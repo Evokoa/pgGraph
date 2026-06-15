@@ -646,6 +646,18 @@ pub(crate) fn graph_quota_usage(
         "max_loaded_graphs_per_backend",
         loaded_graphs_per_backend,
     )?);
+    rows.push(quota_usage_row(
+        "cluster",
+        "",
+        "max_graph_jobs",
+        graph_job_count(None)?,
+    )?);
+    rows.push(quota_usage_row(
+        "owner",
+        &owner_key,
+        "max_graph_jobs",
+        graph_job_count(Some(owner_oid))?,
+    )?);
 
     Ok(rows)
 }
@@ -664,6 +676,23 @@ pub(crate) fn enforce_loaded_graph_quota(projected_loaded_graphs: i64) -> safety
         &owner_oid.to_string(),
         "max_loaded_graphs_per_backend",
         projected_loaded_graphs,
+    )
+}
+
+/// Enforces durable graph job quota policies before creating a job.
+pub(crate) fn enforce_graph_job_quota() -> safety::GraphResult<()> {
+    let owner_oid = current_user_oid()?;
+    enforce_quota_limit(
+        "cluster",
+        "",
+        "max_graph_jobs",
+        graph_job_count(None)?.saturating_add(1),
+    )?;
+    enforce_quota_limit(
+        "owner",
+        &owner_oid.to_string(),
+        "max_graph_jobs",
+        graph_job_count(Some(owner_oid))?.saturating_add(1),
     )
 }
 
@@ -1260,6 +1289,35 @@ fn graph_count(owner_oid: Option<pgrx::pg_sys::Oid>) -> safety::GraphResult<i64>
     }
     .map_err(|err| graph_catalog_error("count graphs for quota", err))?
     .ok_or_else(|| safety::GraphError::Internal("graph quota count returned null".to_string()))
+}
+
+fn graph_job_count(owner_oid: Option<pgrx::pg_sys::Oid>) -> safety::GraphResult<i64> {
+    match owner_oid {
+        Some(owner_oid) => Spi::get_one_with_args::<i64>(
+            "SELECT
+                (SELECT count(*)::bigint
+                   FROM graph._jobs j
+                   JOIN graph._graphs g ON g.graph_id = j.graph_id
+                  WHERE g.owner_role = $1::oid)
+              + (SELECT count(*)::bigint
+                   FROM graph._build_jobs b
+                   JOIN graph._graphs g ON g.graph_id = b.graph_id
+                  WHERE g.owner_role = $1::oid)
+              + (SELECT count(*)::bigint
+                   FROM graph._maintenance_jobs m
+                   JOIN graph._graphs g ON g.graph_id = m.graph_id
+                  WHERE g.owner_role = $1::oid)",
+            &[owner_oid.into()],
+        ),
+        None => Spi::get_one::<i64>(
+            "SELECT
+                (SELECT count(*)::bigint FROM graph._jobs)
+              + (SELECT count(*)::bigint FROM graph._build_jobs)
+              + (SELECT count(*)::bigint FROM graph._maintenance_jobs)",
+        ),
+    }
+    .map_err(|err| graph_catalog_error("count graph jobs for quota", err))?
+    .ok_or_else(|| safety::GraphError::Internal("graph job quota count returned null".to_string()))
 }
 
 fn current_user_oid() -> safety::GraphResult<pgrx::pg_sys::Oid> {

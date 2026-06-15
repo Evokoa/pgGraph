@@ -180,6 +180,66 @@ application-side scheduler. Keep the scheduled statement to the single
 admin-only call above so pgGraph can continue to apply sync and start
 maintenance using its built-in health checks.
 
+## Sync Policies And Durable Jobs
+
+Sync policies store graph-scoped replay intent in PostgreSQL catalogs so hosted
+schedulers can run sync consistently across backends. They do not start an
+always-on scheduler inside PostgreSQL. Use `pg_cron`, an application scheduler,
+or another host-managed worker to call `graph.run_job(job_id)` or
+`graph.run_sync_policy(policy_id)` at the cadence recorded on the policy.
+
+Create a policy for a named graph:
+
+```sql
+SELECT *
+FROM graph.add_sync_policy(
+  'customer_360',
+  schedule_interval_secs := 60,
+  max_sync_lag_rows := 10000,
+  graph_namespace := 'analytics'
+);
+```
+
+Run the policy immediately:
+
+```sql
+SELECT * FROM graph.run_sync_policy('<policy-id>');
+```
+
+Or run it through the generic job surface:
+
+```sql
+SELECT * FROM graph.run_job('<job-id>');
+```
+
+Policy execution restores the selected graph context, uses the same replay path
+as `graph.apply_sync()`, and records the result in `graph._job_runs`. Disabled
+jobs produce a `disabled` run row and do not apply sync.
+
+Inspect policy and job state:
+
+```sql
+SELECT * FROM graph.sync_policy_status('customer_360', graph_namespace := 'analytics');
+SELECT * FROM graph.jobs('customer_360', graph_namespace := 'analytics');
+SELECT * FROM graph.job_runs(graph_name := 'customer_360', graph_namespace := 'analytics');
+SELECT * FROM graph.job_stats('customer_360', graph_namespace := 'analytics');
+```
+
+Update or remove scheduler records:
+
+```sql
+SELECT * FROM graph.alter_job('<job-id>', enabled := false);
+SELECT * FROM graph.alter_sync_policy('<policy-id>', schedule_interval_secs := 300);
+SELECT * FROM graph.remove_job('<job-id>');
+-- or
+SELECT * FROM graph.drop_sync_policy('<policy-id>');
+```
+
+Policy and job listing functions only return graphs visible to the current
+role. Running, altering, or removing a policy/job requires graph administration
+for the target graph. Hard `max_graph_jobs` quotas count generic jobs, build
+jobs, and maintenance jobs before a new sync policy job is created.
+
 ## Edge Buffer Limits
 
 `graph.edge_buffer_size` limits legacy/backend-local pending edge mutations.

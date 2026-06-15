@@ -151,6 +151,9 @@ The bootstrap SQL creates:
 | `graph._graphs` | Durable named graph metadata and default graph identity |
 | `graph._build_jobs` | Durable graph-scoped asynchronous build job state |
 | `graph._maintenance_jobs` | Durable graph-scoped maintenance job state |
+| `graph._jobs` | Durable graph-scoped generic job state for hosted schedulers |
+| `graph._job_runs` | Durable run history for generic graph jobs |
+| `graph._sync_policies` | Durable graph-scoped sync policy state |
 | `graph._sync_log` | Durable trigger sync log |
 | `graph._sync_buffer` | Legacy sync buffer compatibility table |
 

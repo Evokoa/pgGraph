@@ -141,7 +141,7 @@ places named-graph support must update:
 |---|---|
 | Registration catalogs | `graph._registered_tables`, `graph._registered_edges`, and `graph._registered_filter_columns` are keyed by `graph_id`; compatibility SQL resolves the selected or default graph before reading or writing them. |
 | Runtime | `ENGINE` stores one backend-local graph engine tagged by a loaded graph slot. `ensure_current_graph()` validates that the loaded slot matches the selected graph before query execution. |
-| Build jobs | `graph._build_jobs` and `graph._maintenance_jobs` are keyed by `graph_id`; workers restore database, user, and graph context before running. |
+| Build and hosted jobs | `graph._build_jobs`, `graph._maintenance_jobs`, `graph._jobs`, `graph._job_runs`, and `graph._sync_policies` are keyed by `graph_id`; workers and hosted schedulers restore database, user, and graph context before running. |
 | Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph`. |
 | Sync | `graph._sync_log` and `graph._sync_buffer` are global source-table streams; replay, status, and query freshness filter `_sync_log` through the selected graph's registered table OIDs. |
 | Projection generations | `graph._projection_generations` is keyed by `graph_id` so active-generation heartbeats and GC protection are graph-local. |

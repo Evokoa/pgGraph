@@ -122,6 +122,9 @@ fn clear_graph_catalog_for_test() {
                       graph._registered_edges,
                       graph._registered_tables,
                       graph._build_jobs,
+                      graph._job_runs,
+                      graph._sync_policies,
+                      graph._jobs,
                       graph._sync_log,
                       graph._sync_buffer
              RESTART IDENTITY",

@@ -3,7 +3,8 @@
 Sync bridges mutable source tables and an immutable base CSR graph. The current
 implementation uses durable trigger logs, backend-local apply, node
 tombstones/inserts, filter refresh, tenant refresh, and edge overlays. Background
-workers run build or maintenance jobs; they do not broadcast in-place updates to
+workers run build or maintenance jobs. Hosted schedulers can run durable sync
+policy jobs through SQL, but pgGraph does not broadcast in-place updates to
 every backend-local engine.
 
 ## Modules
@@ -13,7 +14,7 @@ every backend-local engine.
 | `sync.rs` | Generate trigger functions/triggers and create sync tables |
 | `sql_sync.rs` | Parse sync mode, read durable sync log in bounded batches, apply row changes |
 | `sql_build.rs` | Maintenance rebuild and vacuum orchestration |
-| `sql_jobs.rs` | Durable job rows and dynamic background worker launch for build/maintenance |
+| `sql_jobs.rs` | Durable job rows, hosted job helpers, and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
 | `persistence.rs` | `.pggraph` load/write plus base-only projection manifest discovery |
 | `projection/ingest.rs` | Core committed-row to L0 segment publication logic |
@@ -59,6 +60,46 @@ graph._projection_generations
   is_current boolean
   published_at timestamptz
   retained_until timestamptz
+
+graph._jobs
+  job_id uuid primary key
+  graph_id uuid
+  policy_kind text
+  enabled boolean
+  schedule_interval_secs bigint
+  max_runtime_secs bigint
+  max_retries integer
+  next_run_at timestamptz
+  last_run_at timestamptz
+  last_status text
+  last_error text
+  last_sqlstate text
+
+graph._job_runs
+  run_id uuid primary key
+  job_id uuid
+  graph_id uuid
+  started_at timestamptz
+  finished_at timestamptz
+  status text
+  sqlstate text
+  error text
+  rows_applied bigint
+  retry_count integer
+  worker_identity text
+  execution_mode text
+
+graph._sync_policies
+  policy_id uuid primary key
+  graph_id uuid
+  job_id uuid
+  schedule_interval_secs bigint
+  max_sync_lag_rows bigint
+  enabled boolean
+  last_run_at timestamptz
+  next_run_at timestamptz
+  last_status text
+  last_error text
 ```
 
 Replay treats `id`, `op`, and `table_name` as required structural fields. The

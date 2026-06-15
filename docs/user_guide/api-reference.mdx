@@ -13,7 +13,7 @@ All functions live in the `graph` schema.
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
 | Build jobs | `build`, `build_graph`, `build_async_graph`, `build_status`, `build_status_for_graph` |
-| Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `projection_gc`, `projection_repair`, `vacuum`, `vacuum_graph`, `maintenance`, `maintenance_graph`, `maintenance_status`, `maintenance_status_for_graph` |
+| Sync and maintenance | `enable_sync`, `apply_sync`, `add_sync_policy`, `alter_sync_policy`, `drop_sync_policy`, `run_sync_policy`, `sync_policy_status`, `jobs`, `job_runs`, `job_stats`, `run_job`, `alter_job`, `remove_job`, `run_scheduled_maintenance`, `projection_gc`, `projection_repair`, `vacuum`, `vacuum_graph`, `maintenance`, `maintenance_graph`, `maintenance_status`, `maintenance_status_for_graph` |
 | GQL | `gql`, `gql_explain` |
 | Search | `search`, `search_nodes` |
 | Traversal | `traverse`, `traverse_search`, `node_ref`, `node_ref_string`, `format_path` |
@@ -436,9 +436,10 @@ Graph schema admin only. Upserts a quota policy row. Supported scopes are
 `cluster`, `tenant`, `owner`, `namespace`, and `graph`; supported enforcement
 modes are `hard` and `warn`. `owner` scope keys are PostgreSQL role names and
 are stored as role OIDs. Current hard enforcement points are
-`max_named_graphs`, checked before graph metadata is created, and
+`max_named_graphs`, checked before graph metadata is created,
 `max_loaded_graphs_per_backend`, checked before a persisted artifact is loaded
-into a backend-local engine.
+into a backend-local engine, and `max_graph_jobs`, checked before a sync policy
+creates its backing durable job.
 
 ### `graph.graph_quotas()`
 
@@ -467,7 +468,8 @@ RETURNS TABLE (
 Reports SQL-computable quota usage for supported dimensions. A `hard`
 `max_named_graphs` quota blocks new graph metadata before catalog rows are
 created. A `hard` `max_loaded_graphs_per_backend` quota blocks runtime loads.
-A `warn` quota reports `exceeded = true` without blocking the operation.
+A `hard` `max_graph_jobs` quota blocks new sync policy jobs. A `warn` quota
+reports `exceeded = true` without blocking the operation.
 
 ## Runtime Graph Loading
 
@@ -1170,6 +1172,170 @@ are published into durable projection segments and the engine reloads the latest
 manifest so other backends can read them without a full rebuild. Backend-local
 node/filter/tenant replay and legacy overlay paths remain for sync surfaces
 that are not yet represented by durable segments.
+
+### `graph.add_sync_policy()`
+
+```sql
+graph.add_sync_policy(
+  graph_name text,
+  schedule_interval_secs bigint DEFAULT 60,
+  max_sync_lag_rows bigint DEFAULT NULL,
+  enabled boolean DEFAULT true,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Admin-only. Creates a durable sync policy for the named graph and the backing
+generic job row used by hosted schedulers. `schedule_interval_secs` records the
+intended cadence in seconds. `max_sync_lag_rows` is optional policy metadata for
+operator tooling. Hard `max_graph_jobs` quotas are enforced before the backing
+job is inserted.
+
+### `graph.alter_sync_policy()`
+
+```sql
+graph.alter_sync_policy(
+  policy_id text,
+  schedule_interval_secs bigint DEFAULT NULL,
+  max_sync_lag_rows bigint DEFAULT NULL,
+  enabled boolean DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Admin-only. Updates a sync policy and its backing job. `NULL` arguments leave
+the existing values unchanged.
+
+### `graph.drop_sync_policy()`
+
+```sql
+graph.drop_sync_policy(policy_id text)
+RETURNS TABLE (
+  policy_id text,
+  job_id text,
+  graph_id text,
+  graph_name text,
+  dropped boolean
+)
+```
+
+Admin-only. Removes the sync policy and its backing job.
+
+### `graph.run_sync_policy()`
+
+```sql
+graph.run_sync_policy(policy_id text)
+RETURNS TABLE (...)
+```
+
+Admin-only. Runs a sync policy immediately through the same replay path as
+`graph.apply_sync()` and records a durable job run. Disabled policies return a
+`disabled` run row and do not apply sync.
+
+### `graph.sync_policy_status()`
+
+```sql
+graph.sync_policy_status(
+  graph_name text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL,
+  max_rows integer DEFAULT 50
+)
+RETURNS TABLE (...)
+```
+
+Lists sync policies visible to the current role. When a graph name is provided,
+the caller must be able to see that graph.
+
+### `graph.jobs()`
+
+```sql
+graph.jobs(
+  graph_name text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL,
+  max_rows integer DEFAULT 50
+)
+RETURNS TABLE (...)
+```
+
+Lists durable generic jobs visible to the current role. Current generic jobs are
+sync policy jobs.
+
+### `graph.job_runs()`
+
+```sql
+graph.job_runs(
+  job_id text DEFAULT NULL,
+  graph_name text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL,
+  max_rows integer DEFAULT 50
+)
+RETURNS TABLE (...)
+```
+
+Lists durable job runs, newest first. Rows include status, error details,
+`rows_applied`, retry count, worker identity, and execution mode.
+
+### `graph.job_stats()`
+
+```sql
+graph.job_stats(
+  graph_name text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Summarizes visible generic jobs by graph, including run counts, failures,
+disabled jobs, and the latest run timestamp.
+
+### `graph.run_job()`
+
+```sql
+graph.run_job(job_id text)
+RETURNS TABLE (...)
+```
+
+Admin-only. Runs a durable generic job immediately. For sync policy jobs this is
+equivalent to `graph.run_sync_policy(policy_id)` after resolving the policy
+attached to the job.
+
+### `graph.alter_job()`
+
+```sql
+graph.alter_job(
+  job_id text,
+  enabled boolean DEFAULT NULL,
+  schedule_interval_secs bigint DEFAULT NULL,
+  max_runtime_secs bigint DEFAULT NULL,
+  max_retries integer DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Admin-only. Updates durable job controls. For sync policy jobs, `enabled` and
+`schedule_interval_secs` are kept in sync with the policy row.
+
+### `graph.remove_job()`
+
+```sql
+graph.remove_job(job_id text)
+RETURNS TABLE (
+  job_id text,
+  graph_id text,
+  graph_name text,
+  policy_kind text,
+  removed boolean
+)
+```
+
+Admin-only. Removes a durable generic job. Removing a sync policy job also
+removes its policy row.
 
 ### `graph.run_scheduled_maintenance()`
 
