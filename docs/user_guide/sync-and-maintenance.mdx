@@ -3,8 +3,11 @@
 The base graph is immutable CSR once built. Sync captures source table changes
 into durable log tables. In `mutable_overlay` mode, committed edge changes are
 published as durable projection segments so other backends can observe them
-after `graph.apply_sync()` without a full rebuild. Vacuum and maintenance still
-rebuild the base graph to fold accumulated changes back into the core stores.
+after `graph.apply_sync()` without a full rebuild. When sync rows identify the
+affected source nodes, pgGraph stores that narrower dirty range in the segment
+metadata instead of treating the segment as whole-graph coverage. Vacuum and
+maintenance still rebuild the base graph to fold accumulated changes back into
+the core stores.
 
 ## Modes
 
@@ -85,7 +88,9 @@ without changing the public admin contract.
 The base CSR store is immutable. Durable projection segments make committed
 mutable-overlay edge changes visible across backends after sync is applied, but
 `graph.vacuum()` or `graph.maintenance()` is still the normal path for merging
-accumulated projection state into a clean base graph.
+accumulated projection state into a clean base graph. Dirty-range segment
+metadata lets compaction and diagnostics reason about the affected source-node
+span without rewriting existing mmap'd CSR bytes.
 </Callout>
 
 ## Query Freshness

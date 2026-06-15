@@ -128,7 +128,7 @@ from paths, backend globals, or session state.
 | `FilterIndex` after load | `Engine` heap | Deserialized per backend from bincode |
 | `edge_type_registry` after load | `Engine` heap | Deserialized per backend from bincode |
 | `ResolutionIndex` mmap mode | Byte slice inside `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
-| Durable projection manifests and segments | Files beside each graph's `main.pggraph` | Shared through the filesystem and retained by graph-scoped active-generation metadata |
+| Durable projection manifests, segments, and chunks | Files beside each graph's `main.pggraph` | Shared through the filesystem and retained by graph-scoped active-generation metadata |
 | `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local compatibility sync overlay state |
 | `TxGraphDelta` | Current backend transaction | Transaction-local read-your-own-writes state only |
 
@@ -252,10 +252,13 @@ backends can observe committed topology changes without a full rebuild.
 
 Node inserts and tombstones can update backend-local state. For persisted
 `mutable_overlay` graphs, committed edge mutations publish durable projection
-segments that layered reads merge with the base CSR. Non-persisted or
-compatibility paths may still use backend-local overlays until maintenance or
-vacuum rebuilds the base CSR. Transaction-local deltas remain backend-local and
-are applied last for read-your-own-writes behavior.
+segments that layered reads merge with the base CSR. Segment metadata records
+the dirty source-node range when sync replay knows it, and future compaction can
+replace those ranges with copy-on-write base chunks without mutating the mmap'd
+CSR file. Non-persisted or compatibility paths may still use backend-local
+overlays until maintenance or vacuum rebuilds the base CSR. Transaction-local
+deltas remain backend-local and are applied last for read-your-own-writes
+behavior.
 
 ## Design Decisions
 

@@ -5,7 +5,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 ## Current Checkpoint
 
 - Active phase: Phase 10, Dirty-Range Durable Projection and Copy-on-Write Compaction.
-- Status: Phase 9 is complete after graph-scoped sync replay, durable sync policies/jobs, hosted due-job execution, and one-shot internal due-job worker coverage. Phase 10 has not started.
+- Status: Phase 10 dirty-range ingest checkpoint is in progress. The initial regression sample proves edge ingestion still publishes full-range `0..u32::MAX` segment metadata when sync rows identify a narrower dirty source range.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -20,6 +20,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 7: complete - added graph grants, grant/revoke/inspect/transfer APIs, grant-aware graph visibility, graph read enforcement before queries, build-grant support for build/vacuum/maintenance, source-table ACL regression coverage, quota policy/usage APIs with hard `max_named_graphs` enforcement, graph-tenant default/conflict resolution, and public security docs.
 - Phase 8: complete - added `set_graph_residency`, cold/warm/hot runtime semantics, opt-in hot eager-load, backend load-cap lifecycle GUCs, loaded/runtime status APIs with residency/artifact metrics, runtime load quota enforcement, non-creating artifact status checks, and public lifecycle docs.
 - Phase 9: complete - graph-scoped sync replay/status now filter the global source-table sync log to the selected graph's registered table OIDs, status clears mismatched loaded engines before reporting pending rows, and regression coverage proves unrelated source-table changes do not replay or advance the selected graph. Durable sync policy/job work adds `_jobs`, `_job_runs`, and `_sync_policies`, explicit policy/job SQL APIs, visibility filtering, `max_graph_jobs` quota enforcement, `graph.run_due_jobs()`, one-shot `graph.run_due_jobs_async()` internal workers, row-lock and advisory-lock guarded execution, richer durable status vocabulary, public docs, and pgrx regression coverage for policy execution, due hosted runs, internal-mode history, disabled jobs, hidden graph visibility, quota blocks, and cascaded removal.
+- Phase 10: in progress - started dirty-range durable projection ingestion with a regression sample before production code.
 
 ## Verification Log
 
@@ -38,6 +39,14 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo pgrx test --features "pg17 development" current_graph_selection_is_separate_from_engine_load_state` passed, 1 test.
 - 2026-06-15: `cargo pgrx test --features "pg17 development" graph_catalog_mutation_requires_admin_privileges` passed, 1 test.
 - 2026-06-15: `scripts/check_docs_drift.sh` passed.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-15: `git diff --check` passed.
+- 2026-06-15: `cargo test --features "pg17 development" projection_ingest_edges_publish_dirty_source_ranges` failed as the Phase 10 regression sample; the segment manifest range was `0..u32::MAX` instead of the expected dirty range `7..9`.
+- 2026-06-15: `cargo test --features "pg17 development" projection_ingest_edges_publish_dirty_source_ranges` passed after dirty-range segment metadata implementation.
+- 2026-06-15: `cargo test --features "pg17 development" projection::` passed, 109 tests.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed after dirty-range segment documentation.
+- 2026-06-15: `cargo fmt --check` passed from `graph/`.
+- 2026-06-15: `cargo test --features "pg17 development" projection::ingest` passed, 7 tests.
 - 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
 - 2026-06-15: `git diff --check` passed.
 - 2026-06-15: `cargo test --features "pg17 development" sql_facade::admin` passed, 3 tests, for the in-progress durable sync policy/job SQL facade edits.

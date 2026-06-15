@@ -203,10 +203,11 @@ separate segment domains.
 The core projection ingester filters committed sync rows above the latest
 manifest watermark, normalizes edge mutations, writes L0 edge segments by
 direction, writes node/resolution/filter/tenant L0 deltas into node segments,
-publishes durable no-overwrite segment files, validates segment reloads, and
-publishes the next manifest under an artifact-root ingestion publication lock.
-Aborted transaction rows are ignored, and the manifest watermark advances only
-after segment publication succeeds.
+and narrows each segment's source-node range to the rows it actually covers
+when that range is known. It then publishes durable no-overwrite segment files,
+validates segment reloads, and publishes the next manifest under an
+artifact-root ingestion publication lock. Aborted transaction rows are ignored,
+and the manifest watermark advances only after segment publication succeeds.
 
 The admin-only `graph.ingest_projection(max_rows bigint DEFAULT NULL,
 max_bytes bigint DEFAULT NULL)` entrypoint reads committed `graph._sync_log`

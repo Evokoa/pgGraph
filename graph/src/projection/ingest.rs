@@ -15,6 +15,7 @@ use crate::projection::manifest::{
 };
 use crate::projection::normalize::{
     normalize_committed_mutations, CommittedMutation, MutationBufferLimits, MutationOperation,
+    NormalizedMutation,
 };
 use crate::projection::segment::{
     DeltaSegment, SegmentFilterValue, SegmentKind, SegmentNodeState, SegmentResolution,
@@ -23,7 +24,6 @@ use crate::projection::segment::{
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
-const DEFAULT_SOURCE_RANGE_END: u32 = u32::MAX;
 const INGEST_ROW_BYTES: usize = 41;
 static ACTIVE_INGEST_ROOTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
@@ -308,12 +308,14 @@ impl ProjectionIngester {
             if normalized.rows.is_empty() {
                 continue;
             }
+            let (source_start, source_end) = normalized_edge_source_range(&normalized.rows)?
+                .ok_or_else(|| GraphError::Internal("non-empty edge batch had no range".into()))?;
             segments.push(DeltaSegment::from_normalized_edges(
                 &normalized,
                 0,
                 direction,
-                0,
-                DEFAULT_SOURCE_RANGE_END,
+                source_start,
+                source_end,
             )?);
         }
         Ok(segments)
@@ -351,7 +353,7 @@ fn node_segment(
         0,
         TraversalDirection::Any,
         0,
-        DEFAULT_SOURCE_RANGE_END,
+        0,
         sync_watermark,
     )?;
     let mut node_states = BTreeMap::<u32, Vec<NodeStateDelta>>::new();
@@ -440,8 +442,61 @@ fn node_segment(
     {
         Ok(None)
     } else {
+        let (source_start, source_end) = node_segment_source_range(&segment)?.ok_or_else(|| {
+            GraphError::Internal("non-empty node segment had no source range".into())
+        })?;
+        segment.header.source_start = source_start;
+        segment.header.source_end = source_end;
         Ok(Some(segment))
     }
+}
+
+#[derive(Debug, Default)]
+struct DirtySourceRange {
+    start: Option<u32>,
+    end: u32,
+}
+
+impl DirtySourceRange {
+    fn include(&mut self, source: u32) -> GraphResult<()> {
+        let exclusive_end = source
+            .checked_add(1)
+            .ok_or_else(|| GraphError::CorruptFile {
+                reason: "dirty source range exceeds projection segment format".to_string(),
+            })?;
+        self.start = Some(self.start.map_or(source, |start| start.min(source)));
+        self.end = self.end.max(exclusive_end);
+        Ok(())
+    }
+
+    fn finish(self) -> Option<(u32, u32)> {
+        self.start.map(|start| (start, self.end))
+    }
+}
+
+fn normalized_edge_source_range(rows: &[NormalizedMutation]) -> GraphResult<Option<(u32, u32)>> {
+    let mut range = DirtySourceRange::default();
+    for row in rows {
+        range.include(row.source)?;
+    }
+    Ok(range.finish())
+}
+
+fn node_segment_source_range(segment: &DeltaSegment) -> GraphResult<Option<(u32, u32)>> {
+    let mut range = DirtySourceRange::default();
+    for row in &segment.node_states {
+        range.include(row.node_idx)?;
+    }
+    for row in &segment.resolutions {
+        range.include(row.node_idx)?;
+    }
+    for row in &segment.filters {
+        range.include(row.node_idx)?;
+    }
+    for row in &segment.tenants {
+        range.include(row.node_idx)?;
+    }
+    Ok(range.finish())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -713,6 +768,27 @@ mod tests {
     }
 
     #[test]
+    fn projection_ingest_edges_publish_dirty_source_ranges() {
+        let dir = seeded_artifacts("projection_ingest_edges_publish_dirty_ranges");
+        let ingester = ingester(&dir);
+        let rows = vec![
+            edge_row(1, 7, 8, None, MutationOperation::InsertEdge),
+            edge_row(2, 8, 9, None, MutationOperation::DeleteEdge),
+        ];
+
+        let result = ingester
+            .ingest_committed_rows(&rows, MutationBufferLimits::new(10, 10_000))
+            .expect("ingestion publishes");
+        let manifest = result.manifest.expect("manifest published");
+        let segment = load_segment(&dir, &manifest.segments[0].path);
+
+        assert_eq!(manifest.segments[0].source_start, 7);
+        assert_eq!(manifest.segments[0].source_end, 9);
+        assert_eq!(segment.header.source_start, 7);
+        assert_eq!(segment.header.source_end, 9);
+    }
+
+    #[test]
     fn projection_ingest_publishes_weight_node_resolution_filter_tenant_deltas() {
         let dir = seeded_artifacts("projection_ingest_publishes_all_surfaces");
         let ingester = ingester(&dir);
@@ -800,6 +876,10 @@ mod tests {
         assert_eq!(manifest.segments.len(), 2);
         let edge = load_segment(&dir, &manifest.segments[0].path);
         let node = load_segment(&dir, &manifest.segments[1].path);
+        assert_eq!(edge.header.source_start, 0);
+        assert_eq!(edge.header.source_end, 1);
+        assert_eq!(node.header.source_start, 4);
+        assert_eq!(node.header.source_end, 5);
         assert_eq!(edge.edge_weights[0].weight, 7);
         assert_eq!(edge.header.direction, TraversalDirection::Out);
         assert_eq!(node.node_states[0].node_idx, 4);
