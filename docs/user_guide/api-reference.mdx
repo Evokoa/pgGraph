@@ -11,8 +11,8 @@ All functions live in the `graph` schema.
 | Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph` |
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
-| Build jobs | `build`, `build_status` |
-| Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `projection_gc`, `projection_repair`, `vacuum`, `maintenance`, `maintenance_status` |
+| Build jobs | `build`, `build_graph`, `build_async_graph`, `build_status`, `build_status_for_graph` |
+| Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `projection_gc`, `projection_repair`, `vacuum`, `vacuum_graph`, `maintenance`, `maintenance_graph`, `maintenance_status`, `maintenance_status_for_graph` |
 | GQL | `gql`, `gql_explain` |
 | Search | `search`, `search_nodes` |
 | Traversal | `traverse`, `traverse_search`, `node_ref`, `node_ref_string`, `format_path` |
@@ -818,6 +818,37 @@ RETURNS TABLE (
 Admin-only. `false` runs the compatibility synchronous path. `true` creates a
 build job and attempts to launch a dynamic background worker.
 
+### `graph.build_graph()`
+
+```sql
+graph.build_graph(
+  graph_name text,
+  force_persist boolean DEFAULT false,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+```
+
+Admin-only. Selects the named graph and runs the synchronous build path for
+that graph. Use this when a session should target a graph by name without a
+separate `graph.set_current_graph()` call.
+
+### `graph.build_async_graph()`
+
+```sql
+graph.build_async_graph(
+  graph_name text,
+  projection_mode text DEFAULT NULL,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+```
+
+Admin-only. Selects the named graph, creates a durable build job for it, and
+attempts to launch a dynamic background worker. The returned row includes
+`graph_id` and `graph_name` so job ownership is visible without manual catalog
+joins.
+
 ### `graph.build_status()`
 
 ```sql
@@ -839,6 +870,20 @@ RETURNS TABLE (
 
 Reads durable build job state, or returns `completed`/`not_found` for the
 special synchronous zero UUID path.
+
+### `graph.build_status_for_graph()`
+
+```sql
+graph.build_status_for_graph(
+  graph_name text,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL,
+  max_rows integer DEFAULT 50
+)
+```
+
+Returns the latest durable build jobs for the named graph, newest first. Rows
+include graph metadata, progress fields, timestamps, and any recorded error.
 
 ## Sync And Maintenance
 
@@ -905,6 +950,18 @@ RETURNS TABLE (
 Admin-only. Rebuilds from source tables and swaps in the rebuilt backend-local
 engine; persistence writes the rebuilt base graph when requested by the caller.
 
+### `graph.vacuum_graph()`
+
+```sql
+graph.vacuum_graph(
+  graph_name text,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+```
+
+Admin-only. Selects the named graph, then runs `graph.vacuum()` for that graph.
+
 ### `graph.maintenance()`
 
 ```sql
@@ -922,6 +979,20 @@ RETURNS TABLE (
 
 Admin-only. Foreground path applies maintenance rebuild immediately. Background
 path creates a durable maintenance job and launches a dynamic worker.
+
+### `graph.maintenance_graph()`
+
+```sql
+graph.maintenance_graph(
+  graph_name text,
+  concurrently boolean DEFAULT false,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL
+)
+```
+
+Admin-only. Selects the named graph, then runs or queues maintenance for that
+graph. Asynchronous rows include `graph_id` and `graph_name`.
 
 ### `graph.maintenance_status()`
 
@@ -944,6 +1015,21 @@ RETURNS TABLE (
 
 With `NULL`, returns the latest 50 jobs. With a job ID, returns that job or a
 single `not_found` row.
+
+### `graph.maintenance_status_for_graph()`
+
+```sql
+graph.maintenance_status_for_graph(
+  graph_name text,
+  graph_tenant text DEFAULT NULL,
+  graph_namespace text DEFAULT NULL,
+  max_rows integer DEFAULT 50
+)
+```
+
+Returns the latest durable maintenance jobs for the named graph, newest first.
+Rows include graph metadata, progress fields, timestamps, and any recorded
+error.
 
 ## GQL
 

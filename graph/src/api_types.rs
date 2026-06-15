@@ -29,6 +29,7 @@ pub(crate) struct BuildExecutionResult {
 #[derive(Debug, Clone)]
 pub(crate) struct BuildJobRow {
     pub(crate) build_id: String,
+    pub(crate) graph_id: String,
     pub(crate) status: String,
     pub(crate) nodes_loaded: Option<i64>,
     pub(crate) edges_loaded: Option<i64>,
@@ -54,6 +55,7 @@ pub(crate) struct MaintenanceExecutionResult {
 #[derive(Debug, Clone)]
 pub(crate) struct MaintenanceJobRow {
     pub(crate) job_id: String,
+    pub(crate) graph_id: String,
     pub(crate) status: String,
     pub(crate) sync_rows_applied: Option<i64>,
     pub(crate) nodes_after: Option<i64>,

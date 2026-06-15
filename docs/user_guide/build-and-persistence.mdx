@@ -44,12 +44,22 @@ SELECT * FROM graph.build(concurrently := true);
 SELECT * FROM graph.build_status('<build_id>');
 ```
 
+Named graph build:
+
+```sql
+SELECT * FROM graph.build_graph('customer_360', graph_namespace := 'analytics');
+SELECT * FROM graph.build_async_graph('customer_360', graph_namespace := 'analytics');
+SELECT * FROM graph.build_status_for_graph('customer_360', graph_namespace := 'analytics');
+```
+
 The background path creates a row in `graph._build_jobs`, stores the selected
-projection mode, and launches a dynamic background worker. If worker launch
-fails, the job row is marked failed and the SQL call reports the error.
+graph, stores the selected projection mode, and launches a dynamic background
+worker. If worker launch fails, the job row is marked failed and the SQL call
+reports the error.
 If the worker starts and the build later fails, pgGraph records the failed
 status and error detail from a fresh worker transaction so
 `graph.build_status('<build_id>')` remains the operator source of truth.
+Use `graph.build_status_for_graph(...)` to list recent jobs for one named graph.
 
 ## Return Columns
 
@@ -73,6 +83,10 @@ status and error detail from a fresh worker transaction so
 | `nodes_loaded`, `edges_loaded`, `build_time_ms`, `memory_used_mb` | Populated after completion |
 | `sync_mode` | Sync mode captured for the job |
 | `projection_mode` | Projection mode captured for the job |
+
+Named graph job helpers also return `graph_id` and `graph_name` so operators
+can attribute queued, running, completed, and failed work to a graph without
+joining internal catalog tables.
 
 ## Build Pipeline
 

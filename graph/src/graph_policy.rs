@@ -124,7 +124,7 @@ pub(crate) fn is_projection_mode(value: &str) -> bool {
 }
 
 fn contains_policy_value(allowed: &[&str], value: &str) -> bool {
-    allowed.iter().any(|allowed| *allowed == value)
+    allowed.contains(&value)
 }
 
 fn is_canonical_uuid(value: &str) -> bool {

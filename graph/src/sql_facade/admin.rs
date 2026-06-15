@@ -1141,6 +1141,125 @@ pub(super) fn build() -> TableIterator<
     })
 }
 
+/// Build a named graph without requiring a separate `set_current_graph()` call.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn build_graph(
+    graph_name: &str,
+    force_persist: default!(bool, "false"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(nodes_loaded, i64),
+        name!(edges_loaded, i64),
+        name!(build_time_ms, f64),
+        name!(memory_used_mb, f64),
+        name!(sync_mode, String),
+        name!(projection_mode, String),
+    ),
+> {
+    with_panic_boundary("build_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
+        let result = execute_build(force_persist).unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            result.nodes_loaded,
+            result.edges_loaded,
+            result.build_time_ms,
+            result.memory_used_mb,
+            result.sync_mode,
+            result.projection_mode,
+        )])
+    })
+}
+
+/// Queue a background build for a named graph without changing legacy overloads.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn build_async_graph(
+    graph_name: &str,
+    projection_mode: default!(Option<&str>, "NULL"),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(build_id, String),
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(status, String),
+        name!(nodes_loaded, Option<i64>),
+        name!(edges_loaded, Option<i64>),
+        name!(build_time_ms, Option<f64>),
+        name!(memory_used_mb, Option<f64>),
+        name!(sync_mode, String),
+        name!(projection_mode, String),
+    ),
+> {
+    with_panic_boundary("build_async_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
+        let projection_mode = match projection_mode {
+            Some(mode) => config::parse_projection_mode(mode).unwrap_or_else(|| {
+                safety::GraphError::InvalidFilter {
+                    reason: format!(
+                        "unsupported graph projection mode '{mode}'; expected 'csr_readonly' or 'mutable_overlay'"
+                    ),
+                }
+                .report()
+            }),
+            None => configured_projection_mode().unwrap_or_else(|err| err.report()),
+        };
+        let build_id = create_build_job(projection_mode).unwrap_or_else(|err| err.report());
+        if let Err(err) = launch_build_worker(&build_id) {
+            let _ = update_build_job_failed(&build_id, &err.to_string());
+            err.report();
+        }
+        let row = build_job_row(&build_id)
+            .unwrap_or_else(|err| err.report())
+            .unwrap_or(BuildJobRow {
+                build_id,
+                graph_id: graph.graph_id.clone(),
+                status: JobStatus::Queued.as_str().to_string(),
+                nodes_loaded: None,
+                edges_loaded: None,
+                build_time_ms: None,
+                memory_used_mb: None,
+                sync_mode: current_sync_mode()
+                    .map(|mode| mode.as_str().to_string())
+                    .unwrap_or_else(|_| "manual".to_string()),
+                projection_mode: projection_mode.as_str().to_string(),
+                progress_phase: JobStatus::Queued.as_str().to_string(),
+                progress_message: Some("queued for background build".to_string()),
+                started_at: None,
+                finished_at: None,
+                error: None,
+            });
+        TableIterator::new(vec![(
+            row.build_id,
+            graph.graph_id,
+            graph.graph_name,
+            row.status,
+            row.nodes_loaded,
+            row.edges_loaded,
+            row.build_time_ms,
+            row.memory_used_mb,
+            row.sync_mode,
+            row.projection_mode,
+        )])
+    })
+}
+
 #[pg_guard]
 /// Background worker entrypoint for asynchronous graph builds.
 ///
@@ -1295,6 +1414,9 @@ fn build_with_concurrently(
                 .unwrap_or_else(|err| err.report())
                 .unwrap_or(BuildJobRow {
                     build_id,
+                    graph_id: catalog::selected_or_default_graph_metadata()
+                        .map(|graph| graph.graph_id)
+                        .unwrap_or_default(),
                     status: JobStatus::Queued.as_str().to_string(),
                     nodes_loaded: None,
                     edges_loaded: None,
@@ -1450,6 +1572,89 @@ fn build_status(
             None,
             None,
         )])
+    })
+}
+
+/// Return recent durable build jobs for a named graph.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn build_status_for_graph(
+    graph_name: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+    max_rows: default!(i32, 50),
+) -> TableIterator<
+    'static,
+    (
+        name!(build_id, String),
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(status, String),
+        name!(nodes_loaded, Option<i64>),
+        name!(edges_loaded, Option<i64>),
+        name!(build_time_ms, Option<f64>),
+        name!(memory_used_mb, Option<f64>),
+        name!(sync_mode, String),
+        name!(projection_mode, String),
+        name!(progress_phase, String),
+        name!(progress_message, Option<String>),
+        name!(started_at, Option<TimestampWithTimeZone>),
+        name!(finished_at, Option<TimestampWithTimeZone>),
+        name!(error, Option<String>),
+    ),
+> {
+    with_panic_boundary("build_status_for_graph()", || {
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        let limit = max_rows.clamp(1, 500);
+        let rows = Spi::connect(|client| {
+            let selected = client.select(
+                "SELECT b.build_id, b.graph_id::text, g.graph_name, b.status,
+                        b.nodes_loaded, b.edges_loaded, b.build_time_ms,
+                        b.memory_used_mb, b.sync_mode, b.projection_mode,
+                        b.progress_phase, b.progress_message, b.started_at,
+                        b.finished_at, b.error
+                   FROM graph._build_jobs b
+                   JOIN graph._graphs g ON g.graph_id = b.graph_id
+                  WHERE b.graph_id = $1::uuid
+                  ORDER BY b.created_at DESC
+                  LIMIT $2",
+                None,
+                &[graph.graph_id.into(), limit.into()],
+            )?;
+            let mut out = Vec::new();
+            for row in selected {
+                out.push((
+                    row.get::<String>(1)?.unwrap_or_default(),
+                    row.get::<String>(2)?.unwrap_or_default(),
+                    row.get::<String>(3)?.unwrap_or_default(),
+                    row.get::<String>(4)?
+                        .unwrap_or_else(|| "not_found".to_string()),
+                    row.get::<i64>(5)?,
+                    row.get::<i64>(6)?,
+                    row.get::<f64>(7)?,
+                    row.get::<f64>(8)?,
+                    row.get::<String>(9)?
+                        .unwrap_or_else(|| "manual".to_string()),
+                    row.get::<String>(10)?.unwrap_or_else(|| {
+                        config::ProjectionMode::CsrReadonly.as_str().to_string()
+                    }),
+                    row.get::<String>(11)?
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    row.get::<String>(12)?,
+                    row.get::<TimestampWithTimeZone>(13)?,
+                    row.get::<TimestampWithTimeZone>(14)?,
+                    row.get::<String>(15)?,
+                ));
+            }
+            Ok::<_, pgrx::spi::SpiError>(out)
+        })
+        .unwrap_or_else(|err| {
+            safety::GraphError::Internal(format!("build status read failed: {}", err)).report()
+        });
+        TableIterator::new(rows)
     })
 }
 
@@ -2419,6 +2624,37 @@ fn vacuum() -> TableIterator<
     })
 }
 
+/// Vacuum a named graph without requiring a separate `set_current_graph()`.
+#[pg_extern(schema = "graph")]
+fn vacuum_graph(
+    graph_name: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(nodes_before, i64),
+        name!(nodes_after, i64),
+        name!(tombstones_removed, i64),
+        name!(edges_rebuilt, i64),
+        name!(vacuum_time_ms, f64),
+    ),
+> {
+    with_panic_boundary("vacuum_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
+        let result = execute_vacuum(false).unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            result.nodes_before,
+            result.nodes_after,
+            result.tombstones_removed,
+            result.edges_rebuilt,
+            result.vacuum_time_ms,
+        )])
+    })
+}
+
 #[pg_extern(schema = "graph")]
 #[allow(
     clippy::type_complexity,
@@ -2450,6 +2686,9 @@ fn maintenance(
                 .unwrap_or_else(|err| err.report())
                 .unwrap_or(MaintenanceJobRow {
                     job_id,
+                    graph_id: catalog::selected_or_default_graph_metadata()
+                        .map(|graph| graph.graph_id)
+                        .unwrap_or_default(),
                     status: JobStatus::Queued.as_str().to_string(),
                     sync_rows_applied: None,
                     nodes_after: None,
@@ -2475,6 +2714,84 @@ fn maintenance(
         let result = execute_maintenance_rebuild(true).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             "00000000-0000-0000-0000-000000000000".to_string(),
+            JobStatus::Completed.as_str().to_string(),
+            Some(result.sync_rows_applied),
+            Some(result.nodes_after),
+            Some(result.edges_after),
+            Some(result.vacuum_time_ms),
+            None,
+        )])
+    })
+}
+
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn maintenance_graph(
+    graph_name: &str,
+    concurrently: default!(bool, false),
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(job_id, String),
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(status, String),
+        name!(sync_rows_applied, Option<i64>),
+        name!(nodes_after, Option<i64>),
+        name!(edges_after, Option<i64>),
+        name!(vacuum_time_ms, Option<f64>),
+        name!(error, Option<String>),
+    ),
+> {
+    with_panic_boundary("maintenance_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
+        if concurrently {
+            let job_id = create_maintenance_job().unwrap_or_else(|err| err.report());
+            if let Err(err) = launch_maintenance_worker(&job_id) {
+                let _ = update_maintenance_job_failed(&job_id, &err.to_string());
+                err.report();
+            }
+            let row = maintenance_job_row(&job_id)
+                .unwrap_or_else(|err| err.report())
+                .unwrap_or(MaintenanceJobRow {
+                    job_id,
+                    graph_id: graph.graph_id.clone(),
+                    status: JobStatus::Queued.as_str().to_string(),
+                    sync_rows_applied: None,
+                    nodes_after: None,
+                    edges_after: None,
+                    vacuum_time_ms: None,
+                    progress_phase: JobStatus::Queued.as_str().to_string(),
+                    progress_message: Some("queued for background maintenance".to_string()),
+                    started_at: None,
+                    finished_at: None,
+                    error: None,
+                });
+            return TableIterator::new(vec![(
+                row.job_id,
+                graph.graph_id,
+                graph.graph_name,
+                row.status,
+                row.sync_rows_applied,
+                row.nodes_after,
+                row.edges_after,
+                row.vacuum_time_ms,
+                row.error,
+            )]);
+        }
+
+        let result = execute_maintenance_rebuild(true).unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            "00000000-0000-0000-0000-000000000000".to_string(),
+            graph.graph_id,
+            graph.graph_name,
             JobStatus::Completed.as_str().to_string(),
             Some(result.sync_rows_applied),
             Some(result.nodes_after),
@@ -2567,6 +2884,81 @@ fn maintenance_status(
                     row.get::<TimestampWithTimeZone>(9)?,
                     row.get::<TimestampWithTimeZone>(10)?,
                     row.get::<String>(11)?,
+                ));
+            }
+            Ok::<_, pgrx::spi::SpiError>(out)
+        })
+        .unwrap_or_else(|err| {
+            safety::GraphError::Internal(format!("maintenance status read failed: {}", err))
+                .report()
+        });
+        TableIterator::new(rows)
+    })
+}
+
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn maintenance_status_for_graph(
+    graph_name: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+    max_rows: default!(i32, 50),
+) -> TableIterator<
+    'static,
+    (
+        name!(job_id, String),
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(status, String),
+        name!(sync_rows_applied, Option<i64>),
+        name!(nodes_after, Option<i64>),
+        name!(edges_after, Option<i64>),
+        name!(vacuum_time_ms, Option<f64>),
+        name!(progress_phase, String),
+        name!(progress_message, Option<String>),
+        name!(started_at, Option<TimestampWithTimeZone>),
+        name!(finished_at, Option<TimestampWithTimeZone>),
+        name!(error, Option<String>),
+    ),
+> {
+    with_panic_boundary("maintenance_status_for_graph()", || {
+        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        let limit = max_rows.clamp(1, 500);
+        let rows = Spi::connect(|client| {
+            let selected = client.select(
+                "SELECT m.job_id, m.graph_id::text, g.graph_name, m.status,
+                        m.sync_rows_applied, m.nodes_after, m.edges_after,
+                        m.vacuum_time_ms, m.progress_phase, m.progress_message,
+                        m.started_at, m.finished_at, m.error
+                   FROM graph._maintenance_jobs m
+                   JOIN graph._graphs g ON g.graph_id = m.graph_id
+                  WHERE m.graph_id = $1::uuid
+                  ORDER BY m.created_at DESC
+                  LIMIT $2",
+                None,
+                &[graph.graph_id.into(), limit.into()],
+            )?;
+            let mut out = Vec::new();
+            for row in selected {
+                out.push((
+                    row.get::<String>(1)?.unwrap_or_default(),
+                    row.get::<String>(2)?.unwrap_or_default(),
+                    row.get::<String>(3)?.unwrap_or_default(),
+                    row.get::<String>(4)?
+                        .unwrap_or_else(|| "not_found".to_string()),
+                    row.get::<i64>(5)?,
+                    row.get::<i64>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<f64>(8)?,
+                    row.get::<String>(9)?
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    row.get::<String>(10)?,
+                    row.get::<TimestampWithTimeZone>(11)?,
+                    row.get::<TimestampWithTimeZone>(12)?,
+                    row.get::<String>(13)?,
                 ));
             }
             Ok::<_, pgrx::spi::SpiError>(out)

@@ -132,11 +132,11 @@ places named-graph support must update:
 |---|---|
 | Registration catalogs | `graph._registered_tables`, `graph._registered_edges`, and `graph._registered_filter_columns` are keyed by `graph_id`; compatibility SQL resolves the selected or default graph before reading or writing them. |
 | Runtime | `ENGINE` stores one backend-local graph engine. `ensure_current_graph()` validates build/load/schema freshness; it is not a named graph selector. |
-| Build jobs | `graph._build_jobs` and `graph._maintenance_jobs` are global job tables. |
+| Build jobs | `graph._build_jobs` and `graph._maintenance_jobs` are keyed by `graph_id`; workers restore database, user, and graph context before running. |
 | Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/main.pggraph`. |
 | Sync | `graph._sync_log` and `graph._sync_buffer` are global sync streams. |
 | Projection generations | `graph._projection_generations` tracks generations for the global projection root. |
-| Discovery | `graph.auto_discover()` writes to the global registration catalog. |
+| Discovery | `graph.auto_discover()` and `graph.auto_discover_tables()` can target a named graph or the selected/default graph. |
 | Reset | `graph.reset()` clears the backend-local engine and removes the global artifact files. |
 
 Named-graph changes should move each row above from implicit global state to

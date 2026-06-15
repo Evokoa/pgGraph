@@ -1,7 +1,9 @@
 //! SQL-layer build, vacuum, and maintenance execution helpers.
 
 use crate::api_types::{BuildExecutionResult, MaintenanceExecutionResult, VacuumExecutionResult};
-use crate::catalog::{catalog_fingerprint, read_catalog, table_oid_from_name};
+use crate::catalog::{
+    catalog_fingerprint, read_catalog, selected_or_default_graph_metadata, table_oid_from_name,
+};
 use crate::sql_sync::{
     current_sync_mode, install_sync_triggers, max_sync_log_id, remove_sync_triggers,
 };
@@ -12,14 +14,25 @@ use pgrx::prelude::*;
 ///
 /// The two-int PostgreSQL advisory lock API is used so the key remains stable
 /// across 32-bit and 64-bit platforms. The class id `0x7260_8553` is the
-/// reserved pgGraph advisory-lock namespace. The object id `0x6772_6f67`
-/// identifies build/vacuum exclusion within that namespace and must remain
-/// stable so concurrent extension versions do not take different locks.
+/// reserved pgGraph advisory-lock namespace. The object id is derived from the
+/// selected graph id so builds for the same graph serialize while independent
+/// graphs can proceed without sharing the old global build lock.
 pub(crate) const BUILD_LOCK_CLASS_ID: i32 = 1_918_928_211;
-pub(crate) const BUILD_LOCK_OBJECT_ID: i32 = 1_735_552_871;
 
-pub(crate) fn build_lock_query() -> String {
-    format!("SELECT pg_try_advisory_xact_lock({BUILD_LOCK_CLASS_ID}, {BUILD_LOCK_OBJECT_ID})")
+pub(crate) fn build_lock_query_for_graph(graph_id: &str) -> String {
+    format!(
+        "SELECT pg_try_advisory_xact_lock({BUILD_LOCK_CLASS_ID}, {})",
+        graph_build_lock_object_id(graph_id)
+    )
+}
+
+fn graph_build_lock_object_id(graph_id: &str) -> i32 {
+    let mut hash = 0x811c_9dc5_u32;
+    for byte in graph_id.bytes().filter(|byte| *byte != b'-') {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    i32::from_ne_bytes(hash.to_ne_bytes())
 }
 
 pub(crate) type ProgressCallback<'a> =
@@ -298,7 +311,8 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
 }
 
 pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
-    let acquired = Spi::get_one::<bool>(&build_lock_query())
+    let graph = selected_or_default_graph_metadata()?;
+    let acquired = Spi::get_one::<bool>(&build_lock_query_for_graph(&graph.graph_id))
         .map_err(|err| {
             safety::GraphError::Internal(format!(
                 "could not acquire build/vacuum advisory lock: {}",
@@ -413,18 +427,31 @@ pub(crate) fn check_build_acls_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_lock_query, validate_projection_mode_enabled, BUILD_LOCK_CLASS_ID,
-        BUILD_LOCK_OBJECT_ID,
+        build_lock_query_for_graph, validate_projection_mode_enabled, BUILD_LOCK_CLASS_ID,
     };
     use crate::config::ProjectionMode;
 
     #[test]
-    fn build_lock_query_uses_named_advisory_lock_keys() {
+    fn build_lock_query_uses_named_advisory_lock_class() {
         assert_eq!(BUILD_LOCK_CLASS_ID, 1_918_928_211);
-        assert_eq!(BUILD_LOCK_OBJECT_ID, 1_735_552_871);
+        assert!(
+            build_lock_query_for_graph("00000000-0000-0000-0000-000000000001")
+                .starts_with("SELECT pg_try_advisory_xact_lock(1918928211, ")
+        );
+    }
+
+    #[test]
+    fn graph_build_lock_query_is_stable_per_graph() {
+        let graph_a = "00000000-0000-0000-0000-000000000001";
+        let graph_b = "00000000-0000-0000-0000-000000000002";
+
         assert_eq!(
-            build_lock_query(),
-            "SELECT pg_try_advisory_xact_lock(1918928211, 1735552871)"
+            build_lock_query_for_graph(graph_a),
+            build_lock_query_for_graph(graph_a)
+        );
+        assert_ne!(
+            build_lock_query_for_graph(graph_a),
+            build_lock_query_for_graph(graph_b)
         );
     }
 

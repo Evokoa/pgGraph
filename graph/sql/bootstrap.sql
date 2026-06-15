@@ -353,6 +353,7 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS graph._build_jobs (
     build_id       TEXT PRIMARY KEY,
+    graph_id       UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
     status         TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
     nodes_loaded   BIGINT,
     edges_loaded   BIGINT,
@@ -372,9 +373,14 @@ CREATE TABLE IF NOT EXISTS graph._build_jobs (
 );
 
 ALTER TABLE graph._build_jobs
+    ADD COLUMN IF NOT EXISTS graph_id UUID,
     ADD COLUMN IF NOT EXISTS projection_mode TEXT,
     ADD COLUMN IF NOT EXISTS progress_phase TEXT,
     ADD COLUMN IF NOT EXISTS progress_message TEXT;
+
+UPDATE graph._build_jobs
+SET graph_id = '00000000-0000-0000-0000-000000000001'::uuid
+WHERE graph_id IS NULL;
 
 UPDATE graph._build_jobs
 SET projection_mode = 'csr_readonly'
@@ -399,6 +405,8 @@ END
 WHERE progress_message IS NULL;
 
 ALTER TABLE graph._build_jobs
+    ALTER COLUMN graph_id SET DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+    ALTER COLUMN graph_id SET NOT NULL,
     ALTER COLUMN projection_mode SET DEFAULT 'csr_readonly',
     ALTER COLUMN projection_mode SET NOT NULL,
     ALTER COLUMN progress_phase SET DEFAULT 'queued',
@@ -406,6 +414,16 @@ ALTER TABLE graph._build_jobs
 
 DO $$
 BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._build_jobs'::regclass
+          AND conname = '_build_jobs_graph_id_fkey'
+    ) THEN
+        ALTER TABLE graph._build_jobs
+            ADD CONSTRAINT _build_jobs_graph_id_fkey
+            FOREIGN KEY (graph_id) REFERENCES graph._graphs(graph_id) ON DELETE RESTRICT;
+    END IF;
     IF NOT EXISTS (
         SELECT 1
         FROM pg_catalog.pg_constraint
@@ -421,8 +439,12 @@ END $$;
 CREATE INDEX IF NOT EXISTS _build_jobs_status_idx
     ON graph._build_jobs (status, created_at);
 
+CREATE INDEX IF NOT EXISTS _build_jobs_graph_status_idx
+    ON graph._build_jobs (graph_id, status, created_at);
+
 CREATE TABLE IF NOT EXISTS graph._maintenance_jobs (
     job_id            TEXT PRIMARY KEY,
+    graph_id          UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
     status            TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
     sync_rows_applied BIGINT,
     nodes_after       BIGINT,
@@ -439,8 +461,13 @@ CREATE TABLE IF NOT EXISTS graph._maintenance_jobs (
 );
 
 ALTER TABLE graph._maintenance_jobs
+    ADD COLUMN IF NOT EXISTS graph_id UUID,
     ADD COLUMN IF NOT EXISTS progress_phase TEXT,
     ADD COLUMN IF NOT EXISTS progress_message TEXT;
+
+UPDATE graph._maintenance_jobs
+SET graph_id = '00000000-0000-0000-0000-000000000001'::uuid
+WHERE graph_id IS NULL;
 
 UPDATE graph._maintenance_jobs
 SET progress_phase = CASE status
@@ -460,11 +487,30 @@ END
 WHERE progress_message IS NULL;
 
 ALTER TABLE graph._maintenance_jobs
+    ALTER COLUMN graph_id SET DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+    ALTER COLUMN graph_id SET NOT NULL,
     ALTER COLUMN progress_phase SET DEFAULT 'queued',
     ALTER COLUMN progress_phase SET NOT NULL;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._maintenance_jobs'::regclass
+          AND conname = '_maintenance_jobs_graph_id_fkey'
+    ) THEN
+        ALTER TABLE graph._maintenance_jobs
+            ADD CONSTRAINT _maintenance_jobs_graph_id_fkey
+            FOREIGN KEY (graph_id) REFERENCES graph._graphs(graph_id) ON DELETE RESTRICT;
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS _maintenance_jobs_status_idx
     ON graph._maintenance_jobs (status, created_at);
+
+CREATE INDEX IF NOT EXISTS _maintenance_jobs_graph_status_idx
+    ON graph._maintenance_jobs (graph_id, status, created_at);
 
 CREATE TABLE IF NOT EXISTS graph._sync_log (
     id             BIGSERIAL PRIMARY KEY,

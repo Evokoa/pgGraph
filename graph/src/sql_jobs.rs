@@ -3,6 +3,7 @@
 use crate::api_types::{
     BuildExecutionResult, BuildJobRow, MaintenanceExecutionResult, MaintenanceJobRow,
 };
+use crate::catalog;
 use crate::config;
 use crate::safety;
 use crate::sql_build::{
@@ -36,14 +37,24 @@ impl JobStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkerMetadata {
     pub(crate) job_id: String,
+    pub(crate) graph_id: String,
+    pub(crate) graph_name: String,
     pub(crate) database: String,
     pub(crate) username: String,
 }
 
 impl WorkerMetadata {
-    pub(crate) fn new(job_id: &str, database: String, username: String) -> Self {
+    pub(crate) fn new(
+        job_id: &str,
+        graph_id: &str,
+        graph_name: &str,
+        database: String,
+        username: String,
+    ) -> Self {
         Self {
             job_id: job_id.to_string(),
+            graph_id: graph_id.to_string(),
+            graph_name: graph_name.to_string(),
             database,
             username,
         }
@@ -71,21 +82,27 @@ fn current_backend_pid() -> i32 {
 pub(crate) fn create_build_job(
     projection_mode: config::ProjectionMode,
 ) -> safety::GraphResult<String> {
+    let graph = catalog::selected_or_default_graph_metadata()?;
     validate_projection_mode_enabled(projection_mode)?;
     let sync_mode = current_sync_mode()?.as_str().to_string();
     let projection_mode = projection_mode.as_str().to_string();
     let queued = JobStatus::Queued.as_str();
     Spi::get_one_with_args::<String>(
         "INSERT INTO graph._build_jobs (
-            build_id, status, sync_mode, projection_mode,
+            build_id, graph_id, status, sync_mode, projection_mode,
             progress_phase, progress_message
          )
          VALUES (
-            gen_random_uuid()::text, $3, $1, $2, $3,
+            gen_random_uuid()::text, $4::uuid, $3, $1, $2, $3,
             'queued for background build'
          )
          RETURNING build_id",
-        &[sync_mode.into(), projection_mode.into(), queued.into()],
+        &[
+            sync_mode.into(),
+            projection_mode.into(),
+            queued.into(),
+            graph.graph_id.into(),
+        ],
     )
     .map_err(|err| safety::GraphError::Internal(format!("build job creation failed: {}", err)))?
     .ok_or_else(|| safety::GraphError::Internal("build job creation returned no id".to_string()))
@@ -94,7 +111,7 @@ pub(crate) fn create_build_job(
 pub(crate) fn build_job_row(build_id: &str) -> safety::GraphResult<Option<BuildJobRow>> {
     Spi::connect(|client| {
         let rows = client.select(
-            "SELECT build_id, status, nodes_loaded, edges_loaded,
+            "SELECT build_id, graph_id::text, status, nodes_loaded, edges_loaded,
                     build_time_ms, memory_used_mb, sync_mode, projection_mode,
                     progress_phase, progress_message,
                     started_at, finished_at, error
@@ -108,26 +125,27 @@ pub(crate) fn build_job_row(build_id: &str) -> safety::GraphResult<Option<BuildJ
                 build_id: row
                     .get::<String>(1)?
                     .unwrap_or_else(|| build_id.to_string()),
+                graph_id: row.get::<String>(2)?.unwrap_or_default(),
                 status: row
-                    .get::<String>(2)?
+                    .get::<String>(3)?
                     .unwrap_or_else(|| "not_found".to_string()),
-                nodes_loaded: row.get::<i64>(3)?,
-                edges_loaded: row.get::<i64>(4)?,
-                build_time_ms: row.get::<f64>(5)?,
-                memory_used_mb: row.get::<f64>(6)?,
+                nodes_loaded: row.get::<i64>(4)?,
+                edges_loaded: row.get::<i64>(5)?,
+                build_time_ms: row.get::<f64>(6)?,
+                memory_used_mb: row.get::<f64>(7)?,
                 sync_mode: row
-                    .get::<String>(7)?
+                    .get::<String>(8)?
                     .unwrap_or_else(|| "manual".to_string()),
                 projection_mode: row
-                    .get::<String>(8)?
+                    .get::<String>(9)?
                     .unwrap_or_else(|| config::ProjectionMode::CsrReadonly.as_str().to_string()),
                 progress_phase: row
-                    .get::<String>(9)?
+                    .get::<String>(10)?
                     .unwrap_or_else(|| "unknown".to_string()),
-                progress_message: row.get::<String>(10)?,
-                started_at: row.get::<TimestampWithTimeZone>(11)?,
-                finished_at: row.get::<TimestampWithTimeZone>(12)?,
-                error: row.get::<String>(13)?,
+                progress_message: row.get::<String>(11)?,
+                started_at: row.get::<TimestampWithTimeZone>(12)?,
+                finished_at: row.get::<TimestampWithTimeZone>(13)?,
+                error: row.get::<String>(14)?,
             }));
         }
         Ok(None)
@@ -240,6 +258,7 @@ pub(crate) fn run_build_job(build_id: &str) -> safety::GraphResult<()> {
     let row = build_job_row(build_id)?.ok_or_else(|| {
         safety::GraphError::Internal(format!("build job '{}' was not found", build_id))
     })?;
+    catalog::set_selected_graph_id(&row.graph_id)?;
     let projection_mode = config::parse_projection_mode(&row.projection_mode).ok_or_else(|| {
         safety::GraphError::InvalidFilter {
             reason: format!(
@@ -256,17 +275,18 @@ pub(crate) fn run_build_job(build_id: &str) -> safety::GraphResult<()> {
 }
 
 pub(crate) fn create_maintenance_job() -> safety::GraphResult<String> {
+    let graph = catalog::selected_or_default_graph_metadata()?;
     let queued = JobStatus::Queued.as_str();
     Spi::get_one_with_args::<String>(
         "INSERT INTO graph._maintenance_jobs (
-            job_id, status, progress_phase, progress_message
+            job_id, graph_id, status, progress_phase, progress_message
          )
          VALUES (
-            gen_random_uuid()::text, $1, $1,
+            gen_random_uuid()::text, $2::uuid, $1, $1,
             'queued for background maintenance'
          )
          RETURNING job_id",
-        &[queued.into()],
+        &[queued.into(), graph.graph_id.into()],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("maintenance job creation failed: {}", err))
@@ -279,7 +299,7 @@ pub(crate) fn create_maintenance_job() -> safety::GraphResult<String> {
 pub(crate) fn maintenance_job_row(job_id: &str) -> safety::GraphResult<Option<MaintenanceJobRow>> {
     Spi::connect(|client| {
         let rows = client.select(
-            "SELECT job_id, status, sync_rows_applied, nodes_after, edges_after,
+            "SELECT job_id, graph_id::text, status, sync_rows_applied, nodes_after, edges_after,
                     vacuum_time_ms, progress_phase, progress_message,
                     started_at, finished_at, error
              FROM graph._maintenance_jobs
@@ -290,20 +310,21 @@ pub(crate) fn maintenance_job_row(job_id: &str) -> safety::GraphResult<Option<Ma
         if let Some(row) = rows.into_iter().next() {
             return Ok::<_, pgrx::spi::SpiError>(Some(MaintenanceJobRow {
                 job_id: row.get::<String>(1)?.unwrap_or_else(|| job_id.to_string()),
+                graph_id: row.get::<String>(2)?.unwrap_or_default(),
                 status: row
-                    .get::<String>(2)?
+                    .get::<String>(3)?
                     .unwrap_or_else(|| "not_found".to_string()),
-                sync_rows_applied: row.get::<i64>(3)?,
-                nodes_after: row.get::<i64>(4)?,
-                edges_after: row.get::<i64>(5)?,
-                vacuum_time_ms: row.get::<f64>(6)?,
+                sync_rows_applied: row.get::<i64>(4)?,
+                nodes_after: row.get::<i64>(5)?,
+                edges_after: row.get::<i64>(6)?,
+                vacuum_time_ms: row.get::<f64>(7)?,
                 progress_phase: row
-                    .get::<String>(7)?
+                    .get::<String>(8)?
                     .unwrap_or_else(|| "unknown".to_string()),
-                progress_message: row.get::<String>(8)?,
-                started_at: row.get::<TimestampWithTimeZone>(9)?,
-                finished_at: row.get::<TimestampWithTimeZone>(10)?,
-                error: row.get::<String>(11)?,
+                progress_message: row.get::<String>(9)?,
+                started_at: row.get::<TimestampWithTimeZone>(10)?,
+                finished_at: row.get::<TimestampWithTimeZone>(11)?,
+                error: row.get::<String>(12)?,
             }));
         }
         Ok(None)
@@ -401,6 +422,10 @@ pub(crate) fn update_maintenance_job_failed(job_id: &str, error: &str) -> safety
 }
 
 pub(crate) fn run_maintenance_job(job_id: &str) -> safety::GraphResult<()> {
+    let row = maintenance_job_row(job_id)?.ok_or_else(|| {
+        safety::GraphError::Internal(format!("maintenance job '{}' was not found", job_id))
+    })?;
+    catalog::set_selected_graph_id(&row.graph_id)?;
     update_maintenance_job_started(job_id)?;
     let mut progress = |phase, message| update_maintenance_job_progress(job_id, phase, message);
     let result = execute_maintenance_rebuild_with_progress(true, &mut progress)?;
@@ -427,7 +452,15 @@ pub(crate) fn current_database_and_user() -> safety::GraphResult<(String, String
 
 pub(crate) fn launch_build_worker(build_id: &str) -> safety::GraphResult<()> {
     let (database, username) = current_database_and_user()?;
-    let extra = WorkerMetadata::new(build_id, database, username).encode()?;
+    let graph = catalog::selected_or_default_graph_metadata()?;
+    let extra = WorkerMetadata::new(
+        build_id,
+        &graph.graph_id,
+        &graph.graph_name,
+        database,
+        username,
+    )
+    .encode()?;
     BackgroundWorkerBuilder::new("graph concurrent build")
         .set_function("graph_build_worker_main")
         .set_library("graph")
@@ -448,7 +481,15 @@ pub(crate) fn launch_build_worker(build_id: &str) -> safety::GraphResult<()> {
 
 pub(crate) fn launch_maintenance_worker(job_id: &str) -> safety::GraphResult<()> {
     let (database, username) = current_database_and_user()?;
-    let extra = WorkerMetadata::new(job_id, database, username).encode()?;
+    let graph = catalog::selected_or_default_graph_metadata()?;
+    let extra = WorkerMetadata::new(
+        job_id,
+        &graph.graph_id,
+        &graph.graph_name,
+        database,
+        username,
+    )
+    .encode()?;
     BackgroundWorkerBuilder::new("graph maintenance")
         .set_function("graph_maintenance_worker_main")
         .set_library("graph")
@@ -480,7 +521,13 @@ mod tests {
 
     #[test]
     fn worker_metadata_round_trips_json_with_delimiters() {
-        let metadata = WorkerMetadata::new("job|1", "db|name".to_string(), "user|name".to_string());
+        let metadata = WorkerMetadata::new(
+            "job|1",
+            "00000000-0000-0000-0000-000000000001",
+            "default",
+            "db|name".to_string(),
+            "user|name".to_string(),
+        );
         let encoded = metadata.encode().expect("metadata encodes");
         assert_eq!(
             WorkerMetadata::decode(&encoded).expect("metadata decodes"),
