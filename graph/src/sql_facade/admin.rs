@@ -437,7 +437,10 @@ fn graph_quota_usage() -> TableIterator<
     with_panic_boundary("graph_quota_usage()", || {
         let loaded_graphs_per_backend =
             i64::from(crate::runtime_state::loaded_graph_id().is_some());
-        let usage = catalog::graph_quota_usage(loaded_graphs_per_backend)
+        let artifact_storage_bytes = projection_metadata_status_snapshot()
+            .map(|status| status.artifact_bytes)
+            .unwrap_or(0);
+        let usage = catalog::graph_quota_usage(loaded_graphs_per_backend, artifact_storage_bytes)
             .unwrap_or_else(|err| err.report());
         graph_quota_usage_iterator(usage)
     })
@@ -958,8 +961,13 @@ fn projection_status() -> TableIterator<
         name!(manifest_generation, Option<i64>),
         name!(manifest_watermark, Option<i64>),
         name!(pending_durable_rows, i64),
+        name!(base_artifact_bytes, i64),
+        name!(manifest_bytes, i64),
+        name!(artifact_bytes, i64),
         name!(segment_count, i32),
         name!(segment_bytes, i64),
+        name!(segment_fanout, i32),
+        name!(read_amplification, i32),
         name!(l0_segment_count, i32),
         name!(l1_segment_count, i32),
         name!(l2_segment_count, i32),
@@ -989,8 +997,13 @@ fn projection_status() -> TableIterator<
             s.manifest_generation,
             s.manifest_watermark,
             s.pending_durable_rows,
+            s.base_artifact_bytes,
+            s.manifest_bytes,
+            s.artifact_bytes,
             s.segment_count,
             s.segment_bytes,
+            s.segment_fanout,
+            s.read_amplification,
             s.l0_segment_count,
             s.l1_segment_count,
             s.l2_segment_count,
@@ -1014,6 +1027,94 @@ fn projection_status() -> TableIterator<
             s.repair_recommended,
         )])
     })
+}
+
+/// Compact durable projection segments into a new manifest generation.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn projection_compact(
+    max_rows: default!(i32, 10000),
+    max_bytes: default!(Option<i64>, "NULL"),
+    max_segments: default!(i32, 1000),
+    dirty_chunk_segment_threshold: default!(Option<i32>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(manifest_generation, i64),
+        name!(segments_compacted, i32),
+        name!(chunks_rewritten, i32),
+        name!(segment_count, i32),
+        name!(dirty_chunk_count, i32),
+        name!(sync_watermark, i64),
+    ),
+> {
+    with_panic_boundary("projection_compact()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let max_rows =
+            validate_positive_i32(max_rows, "max_rows").unwrap_or_else(|err| err.report());
+        let max_segments =
+            validate_positive_i32(max_segments, "max_segments").unwrap_or_else(|err| err.report());
+        let max_bytes = max_bytes
+            .map(|value| validate_nonnegative_i64(value, "max_bytes"))
+            .transpose()
+            .unwrap_or_else(|err| err.report())
+            .unwrap_or_else(|| {
+                crate::config::max_overlay_memory_bytes().min(i64::MAX as usize) as i64
+            });
+        enforce_projected_artifact_storage(max_bytes).unwrap_or_else(|err| err.report());
+        let dirty_chunk_segment_threshold = dirty_chunk_segment_threshold
+            .map(|value| validate_positive_i32(value, "dirty_chunk_segment_threshold"))
+            .transpose()
+            .unwrap_or_else(|err| err.report())
+            .map(|value| value as usize);
+
+        let artifact = crate::persistence::graph_file_path().unwrap_or_else(|err| err.report());
+        let root = crate::persistence::projection_manifest_root(&artifact);
+        let previous = crate::projection::manifest::ProjectionManifestStore::new(root.clone())
+            .load_latest_current()
+            .unwrap_or_else(|err| err.report())
+            .unwrap_or_else(|| safety::GraphError::NotBuilt.report());
+        reload_persisted_engine_with_projection(&artifact).unwrap_or_else(|err| err.report());
+        let budgets = crate::projection::compact::CompactionBudgets {
+            max_rows: max_rows as usize,
+            max_bytes: max_bytes as usize,
+            max_segments: max_segments as usize,
+            max_elapsed: Duration::from_secs(60),
+            dirty_chunk_segment_threshold,
+        };
+        let result = ENGINE
+            .with(|engine| {
+                let eng = engine.borrow();
+                crate::projection::compact::compact_generation(
+                    &root,
+                    &previous,
+                    &eng.edge_store,
+                    budgets,
+                )
+            })
+            .unwrap_or_else(|err| err.report());
+        if result.manifest.generation_id != previous.generation_id {
+            reload_persisted_engine_with_projection(&artifact).unwrap_or_else(|err| err.report());
+        }
+        TableIterator::new(vec![(
+            saturating_i64(result.manifest.generation_id),
+            saturating_i32(result.segments_compacted),
+            saturating_i32(result.chunks_rewritten),
+            saturating_i32(result.manifest.segments.len()),
+            saturating_i32(result.manifest.base_chunks.len()),
+            result.manifest.sync_watermark,
+        )])
+    })
+}
+
+fn enforce_projected_artifact_storage(write_budget_bytes: i64) -> safety::GraphResult<()> {
+    let current_bytes = projection_metadata_status_snapshot()
+        .map(|status| status.artifact_bytes)
+        .unwrap_or(0);
+    catalog::enforce_artifact_storage_quota(current_bytes.saturating_add(write_budget_bytes))
 }
 
 /// Delete obsolete durable projection files that are no longer retained.

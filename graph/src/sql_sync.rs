@@ -563,6 +563,17 @@ fn ingest_projection_until_internal(
         .unwrap_or_else(|| config::sync_batch_size().max(1));
     let byte_limit = optional_nonnegative_usize(max_bytes, "max_bytes")?
         .unwrap_or_else(config::max_overlay_memory_bytes);
+    let current_artifact_bytes = crate::projection::status::collect_projection_metadata_status(
+        &root,
+        max_sync_log_id()?,
+        0,
+        config::compaction_threshold(),
+    )
+    .map(|status| status.artifact_bytes)
+    .unwrap_or(0);
+    crate::catalog::enforce_artifact_storage_quota(
+        current_artifact_bytes.saturating_add(byte_limit.min(i64::MAX as usize) as i64),
+    )?;
     let entries = read_sync_log_entries_after(previous_watermark, row_limit, target_sync_id)?;
     if entries.is_empty() {
         return Ok(ProjectionIngestStats {

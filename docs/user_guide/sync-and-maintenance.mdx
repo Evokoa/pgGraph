@@ -390,12 +390,31 @@ FROM graph.projection_status();
 ```
 
 The row reports the active manifest generation and watermark, pending durable
-rows, segment and chunk counts/bytes, tombstone ratio, compaction backlog,
+rows, active base/manifest/artifact bytes, segment and chunk counts/bytes,
+segment fanout, durable read amplification, tombstone ratio, compaction backlog,
 obsolete file counts/bytes, active generation count, artifact validation state,
 persisted last-ingestion/compaction/GC/repair timestamps, and
-ingestion/compaction/GC/repair recommendations. `graph.sync_health()` keeps only
-the lightweight durable recommendation booleans; use `graph.projection_status()`
-for full artifact validation.
+ingestion/compaction/GC/repair recommendations. `graph.sync_health()` keeps
+only the lightweight durable recommendation booleans; use
+`graph.projection_status()` for full artifact validation.
+
+Run `graph.projection_compact()` to reduce durable segment fanout through a new
+copy-on-write manifest generation:
+
+```sql
+SELECT *
+FROM graph.projection_compact(
+  max_rows := 10000,
+  max_segments := 1000,
+  dirty_chunk_segment_threshold := 8
+);
+```
+
+When the dirty-chunk threshold is reached, compaction writes replacement chunk
+files for the affected source-node ranges and publishes a manifest that points
+at those chunks. Existing mmap'd base CSR bytes are not overwritten, and older
+generations remain available until retention and active-generation heartbeat
+rules allow cleanup.
 
 Run `graph.projection_gc()` to delete manifest-declared obsolete projection
 files after the configured generation retention floor and active-generation

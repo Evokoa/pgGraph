@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::projection::manifest::{
-    resolve_manifest_reference, ProjectionManifest, ProjectionManifestStore,
+    manifest_file_name, resolve_manifest_reference, ProjectionManifest, ProjectionManifestStore,
     VALIDATION_STATUS_VALID,
 };
 use crate::projection::recovery::{
@@ -26,8 +26,13 @@ pub(crate) struct ProjectionStatus {
     pub(crate) manifest_generation: Option<i64>,
     pub(crate) manifest_watermark: Option<i64>,
     pub(crate) pending_durable_rows: i64,
+    pub(crate) base_artifact_bytes: i64,
+    pub(crate) manifest_bytes: i64,
+    pub(crate) artifact_bytes: i64,
     pub(crate) segment_count: i32,
     pub(crate) segment_bytes: i64,
+    pub(crate) segment_fanout: i32,
+    pub(crate) read_amplification: i32,
     pub(crate) l0_segment_count: i32,
     pub(crate) l1_segment_count: i32,
     pub(crate) l2_segment_count: i32,
@@ -68,8 +73,13 @@ impl ProjectionStatus {
             manifest_generation: None,
             manifest_watermark: None,
             pending_durable_rows,
+            base_artifact_bytes: 0,
+            manifest_bytes: 0,
+            artifact_bytes: 0,
             segment_count: 0,
             segment_bytes: 0,
+            segment_fanout: 0,
+            read_amplification: 0,
             l0_segment_count: 0,
             l1_segment_count: 0,
             l2_segment_count: 0,
@@ -212,6 +222,11 @@ fn status_from_manifest(
     scan: StatusScan,
     artifact_validation_state: &str,
 ) -> GraphResult<ProjectionStatus> {
+    let base_artifact_bytes = file_len_i64(&resolve_manifest_reference(
+        root,
+        &manifest.base_artifact_path,
+    )?);
+    let manifest_bytes = file_len_i64(&root.join(manifest_file_name(manifest.generation_id)));
     let mut segment_bytes = 0_i64;
     let mut l0_segment_count = 0_i32;
     let mut l1_segment_count = 0_i32;
@@ -252,7 +267,22 @@ fn status_from_manifest(
         acc.saturating_add(file.bytes.min(i64::MAX as u64) as i64)
     });
     let segment_count = manifest.segments.len().min(i32::MAX as usize) as i32;
+    let segment_fanout = range_fanout(
+        manifest
+            .segments
+            .iter()
+            .map(|segment| (segment.source_start, segment.source_end)),
+    );
+    let read_amplification = if manifest.is_base_only() {
+        1
+    } else {
+        segment_fanout.saturating_add(1)
+    };
     let dirty_chunk_count = manifest.base_chunks.len().min(i32::MAX as usize) as i32;
+    let artifact_bytes = base_artifact_bytes
+        .saturating_add(manifest_bytes)
+        .saturating_add(segment_bytes)
+        .saturating_add(dirty_chunk_bytes);
     let compaction_backlog = manifest
         .segments
         .len()
@@ -271,8 +301,13 @@ fn status_from_manifest(
         manifest_generation: u64_to_i64(manifest.generation_id),
         manifest_watermark: Some(manifest.sync_watermark),
         pending_durable_rows,
+        base_artifact_bytes,
+        manifest_bytes,
+        artifact_bytes,
         segment_count,
         segment_bytes,
+        segment_fanout,
+        read_amplification,
         l0_segment_count,
         l1_segment_count,
         l2_segment_count,
@@ -295,6 +330,23 @@ fn status_from_manifest(
         gc_recommended: obsolete_file_count > 0 && obsolete_bytes > 0,
         repair_recommended: false,
     })
+}
+
+fn range_fanout(ranges: impl Iterator<Item = (u32, u32)>) -> i32 {
+    let ranges = ranges
+        .filter(|(start, end)| start < end)
+        .collect::<Vec<_>>();
+    let max_fanout = ranges
+        .iter()
+        .map(|(probe, _)| {
+            ranges
+                .iter()
+                .filter(|(start, end)| start <= probe && probe < end)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    max_fanout.min(i32::MAX as usize) as i32
 }
 
 fn validation_status_text(manifest: &ProjectionManifest) -> &'static str {
@@ -510,9 +562,14 @@ mod tests {
         assert_eq!(status.manifest_generation, Some(3));
         assert_eq!(status.manifest_watermark, Some(5));
         assert_eq!(status.pending_durable_rows, 3);
+        assert_eq!(status.base_artifact_bytes, 4);
+        assert!(status.manifest_bytes > 0);
+        assert!(status.artifact_bytes >= status.base_artifact_bytes + status.manifest_bytes);
         assert_eq!(status.segment_count, 2);
         assert_eq!(status.l0_segment_count, 1);
         assert_eq!(status.l1_segment_count, 1);
+        assert_eq!(status.segment_fanout, 2);
+        assert_eq!(status.read_amplification, 3);
         assert_eq!(status.edge_segment_count, 1);
         assert_eq!(status.node_segment_count, 1);
         assert_eq!(status.dirty_chunk_count, 1);

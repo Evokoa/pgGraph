@@ -28,7 +28,7 @@ apply, reset, and global analytics.
 |---|---|
 | Registration | `add_table`, `add_edge`, `add_filter_column`, `remove_table`, `remove_edge` |
 | Build lifecycle | `build`, `vacuum`, `maintenance`, `reset` |
-| Sync | `enable_sync`, `apply_sync`, `add_sync_policy`, `alter_sync_policy`, `drop_sync_policy`, `run_sync_policy`, `run_job`, `run_due_jobs`, `run_due_jobs_async`, `alter_job`, `remove_job` |
+| Sync | `enable_sync`, `apply_sync`, `add_sync_policy`, `alter_sync_policy`, `drop_sync_policy`, `run_sync_policy`, `run_job`, `run_due_jobs`, `run_due_jobs_async`, `alter_job`, `remove_job`, `projection_compact`, `projection_gc`, `projection_repair` |
 | Global analytics | `connected_components`, `component_stats`, component pagination helpers |
 
 ## Graph Privileges
@@ -73,8 +73,10 @@ cluster and owner limits before creating a graph metadata row. Hard
 `max_loaded_graphs_per_backend` quotas check cluster and owner limits before
 loading a persisted graph artifact into the current backend. Hard
 `max_graph_jobs` quotas count generic jobs, build jobs, and maintenance jobs
-before creating a sync policy job. Warning quotas are visible through
-`graph.graph_quota_usage()` but do not block the operation.
+before creating a sync policy job. Hard `max_artifact_storage_bytes` quotas
+check active projection artifact bytes plus the requested ingest or compaction
+write budget before publishing new derived files. Warning quotas are visible
+through `graph.graph_quota_usage()` but do not block the operation.
 
 ## Reader Functions
 

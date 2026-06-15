@@ -615,6 +615,7 @@ pub(crate) fn graph_quotas() -> safety::GraphResult<Vec<GraphQuota>> {
 /// Returns current usage for supported quota dimensions.
 pub(crate) fn graph_quota_usage(
     loaded_graphs_per_backend: i64,
+    artifact_storage_bytes: i64,
 ) -> safety::GraphResult<Vec<GraphQuotaUsage>> {
     let cluster_graphs = graph_count(None)?;
     let owner_oid = current_user_oid()?;
@@ -658,6 +659,18 @@ pub(crate) fn graph_quota_usage(
         "max_graph_jobs",
         graph_job_count(Some(owner_oid))?,
     )?);
+    rows.push(quota_usage_row(
+        "cluster",
+        "",
+        "max_artifact_storage_bytes",
+        artifact_storage_bytes,
+    )?);
+    rows.push(quota_usage_row(
+        "owner",
+        &owner_key,
+        "max_artifact_storage_bytes",
+        artifact_storage_bytes,
+    )?);
 
     Ok(rows)
 }
@@ -693,6 +706,18 @@ pub(crate) fn enforce_graph_job_quota() -> safety::GraphResult<()> {
         &owner_oid.to_string(),
         "max_graph_jobs",
         graph_job_count(Some(owner_oid))?.saturating_add(1),
+    )
+}
+
+/// Enforces durable artifact storage quota policies before publishing files.
+pub(crate) fn enforce_artifact_storage_quota(projected_bytes: i64) -> safety::GraphResult<()> {
+    let owner_oid = current_user_oid()?;
+    enforce_quota_limit("cluster", "", "max_artifact_storage_bytes", projected_bytes)?;
+    enforce_quota_limit(
+        "owner",
+        &owner_oid.to_string(),
+        "max_artifact_storage_bytes",
+        projected_bytes,
     )
 }
 

@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 10, Dirty-Range Durable Projection and Copy-on-Write Compaction.
-- Status: Phase 10 dirty-range ingest checkpoint is in progress. The initial regression sample proves edge ingestion still publishes full-range `0..u32::MAX` segment metadata when sync rows identify a narrower dirty source range.
+- Active phase: Phase 11, Relationship Management and Graph Map Export.
+- Status: Phase 10 is complete after dirty-range ingest, projection compaction SQL, copy-on-write chunk publication wiring, projection storage/fanout/read-amplification observability, artifact storage quota enforcement, public docs, and phase checks. Phase 11 has not started.
 - Started: 2026-06-15.
 
 ## Phase Updates
@@ -20,7 +20,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 7: complete - added graph grants, grant/revoke/inspect/transfer APIs, grant-aware graph visibility, graph read enforcement before queries, build-grant support for build/vacuum/maintenance, source-table ACL regression coverage, quota policy/usage APIs with hard `max_named_graphs` enforcement, graph-tenant default/conflict resolution, and public security docs.
 - Phase 8: complete - added `set_graph_residency`, cold/warm/hot runtime semantics, opt-in hot eager-load, backend load-cap lifecycle GUCs, loaded/runtime status APIs with residency/artifact metrics, runtime load quota enforcement, non-creating artifact status checks, and public lifecycle docs.
 - Phase 9: complete - graph-scoped sync replay/status now filter the global source-table sync log to the selected graph's registered table OIDs, status clears mismatched loaded engines before reporting pending rows, and regression coverage proves unrelated source-table changes do not replay or advance the selected graph. Durable sync policy/job work adds `_jobs`, `_job_runs`, and `_sync_policies`, explicit policy/job SQL APIs, visibility filtering, `max_graph_jobs` quota enforcement, `graph.run_due_jobs()`, one-shot `graph.run_due_jobs_async()` internal workers, row-lock and advisory-lock guarded execution, richer durable status vocabulary, public docs, and pgrx regression coverage for policy execution, due hosted runs, internal-mode history, disabled jobs, hidden graph visibility, quota blocks, and cascaded removal.
-- Phase 10: in progress - started dirty-range durable projection ingestion with a regression sample before production code.
+- Phase 10: complete - durable projection ingestion now publishes dirty source-node ranges, `graph.projection_compact()` runs bounded manifest-level copy-on-write compaction with optional dirty chunk replacement, `graph.projection_status()` reports active artifact bytes, segment fanout, and read amplification, `max_artifact_storage_bytes` quotas guard ingest/compaction write budgets, and public docs describe the operator surface.
 
 ## Verification Log
 
@@ -49,6 +49,19 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-15: `cargo test --features "pg17 development" projection::ingest` passed, 7 tests.
 - 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
 - 2026-06-15: `git diff --check` passed.
+- 2026-06-15: `cargo fmt --check` passed from `graph/` after completing Phase 10.
+- 2026-06-15: `cargo test --features "pg17 development" projection_ingest_edges_publish_dirty_source_ranges` passed as the Phase 10 regression sample.
+- 2026-06-15: `cargo test --features "pg17 development" projection::status` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" projection_status_exposes_operator_contract_field_names` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" projection_compact_exposes_operator_contract_field_names` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" status_recommends_ingest_compaction_gc_or_repair_by_threshold` initially failed because the fixture inserted an unscoped raw sync-log row; after switching the fixture to trigger-backed source DML, it passed, 1 test.
+- 2026-06-15: `cargo test --features "pg17 development" projection::` passed, 109 tests.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" sync_health_distinguishes_tx_delta_edge_buffer_and_durable_projection_pressure` passed, 1 test.
+- 2026-06-15: `cargo pgrx test --features "pg17 development" ingest_projection_publishes_committed_sync_log_rows` passed, 1 test.
+- 2026-06-15: `scripts/check_docs_drift.sh` passed after Phase 10 docs/API updates.
+- 2026-06-15: `cargo doc --features pg17 --no-deps` passed from `graph/`.
+- 2026-06-15: `git diff --check` passed.
+- 2026-06-15: `cargo test --features "pg17 development"` passed, 646 tests, 1 ignored.
 - 2026-06-15: `cargo test --features "pg17 development" sql_facade::admin` passed, 3 tests, for the in-progress durable sync policy/job SQL facade edits.
 - 2026-06-15: `cargo fmt --check` passed from `graph/` after formatting the in-progress durable sync policy/job SQL facade edits.
 - 2026-06-15: `cargo pgrx test --features "pg17 development" sync_policies_run_through_visible_durable_jobs` passed, 1 test.
@@ -219,4 +232,5 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 9 hosted sync policy/job checkpoint local review found no blocking issue in policy creation, visible job inspection, explicit `run_job()`/`run_sync_policy()` execution, disabled runs, quota enforcement, or docs/API drift.
 - Phase 9 hosted due-job runner checkpoint local review found no blocking issue in due selection, row-lock/advisory-lock guarded execution, durable status vocabulary, failed-run aggregation, or docs/API drift.
 - Phase 9 one-shot internal worker checkpoint local review found no blocking issue in dynamic due-job worker metadata, internal execution-mode history, hosted/internal shared runner behavior, or docs/API drift. The implementation intentionally avoids an always-on postmaster loop; operators choose cadence through `pg_cron`, provider schedulers, application schedulers, or repeated `run_due_jobs_async()` calls.
-- Next checkpoint: start Phase 10 dirty-range durable projection planning from `todo/named-graphs-complete-plan.md`, create a regression/performance sample before code, and keep docs updated with public copy-on-write projection behavior.
+- Phase 10 local review found no blocking issue in dirty-range segment metadata, manifest-level compaction publication, copy-on-write chunk routing, active artifact byte accounting, fanout/read-amplification metrics, artifact storage quota checks, or docs/API drift. The implementation continues to avoid in-place mutation of mmap'd CSR bytes.
+- Next checkpoint: start Phase 11 relationship management and graph map export planning from `todo/named-graphs-complete-plan.md`.

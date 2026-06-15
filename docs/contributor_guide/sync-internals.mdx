@@ -254,8 +254,9 @@ compact to L1, L1 segments compact to L2, and delete/tombstone precedence is
 preserved by comparing the final layered view against the base CSR for the
 affected source ranges. When segment pressure crosses the configured dirty
 chunk threshold, compaction can publish base chunk replacements instead of more
-segments. Budget failures abort before manifest publication, leaving the
-previous generation current and readable.
+segments. The admin-facing `graph.projection_compact()` function runs one
+bounded compaction pass. Budget failures abort before manifest publication,
+leaving the previous generation current and readable.
 
 When a `.pggraph` artifact is loaded, the loader scans the artifact directory
 for the latest `projection-generation-*.json` manifest. In the base-only phase,

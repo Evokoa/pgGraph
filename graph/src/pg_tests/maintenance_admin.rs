@@ -1740,7 +1740,7 @@ fn projection_status_exposes_operator_contract_field_names() {
     let signature_matches = Spi::get_one::<bool>(
             "WITH expected(result_type) AS (
                 VALUES (
-                    'TABLE(manifest_generation bigint, manifest_watermark bigint, pending_durable_rows bigint, segment_count integer, segment_bytes bigint, l0_segment_count integer, l1_segment_count integer, l2_segment_count integer, edge_segment_count integer, node_segment_count integer, dirty_chunk_count integer, dirty_chunk_bytes bigint, tombstone_ratio double precision, compaction_backlog integer, obsolete_file_count integer, obsolete_bytes bigint, active_generation_count integer, artifact_validation_state text, last_ingestion_unix_micros bigint, last_compaction_unix_micros bigint, last_gc_unix_micros bigint, last_repair_unix_micros bigint, ingest_recommended boolean, compaction_recommended boolean, gc_recommended boolean, repair_recommended boolean)'
+                    'TABLE(manifest_generation bigint, manifest_watermark bigint, pending_durable_rows bigint, base_artifact_bytes bigint, manifest_bytes bigint, artifact_bytes bigint, segment_count integer, segment_bytes bigint, segment_fanout integer, read_amplification integer, l0_segment_count integer, l1_segment_count integer, l2_segment_count integer, edge_segment_count integer, node_segment_count integer, dirty_chunk_count integer, dirty_chunk_bytes bigint, tombstone_ratio double precision, compaction_backlog integer, obsolete_file_count integer, obsolete_bytes bigint, active_generation_count integer, artifact_validation_state text, last_ingestion_unix_micros bigint, last_compaction_unix_micros bigint, last_gc_unix_micros bigint, last_repair_unix_micros bigint, ingest_recommended boolean, compaction_recommended boolean, gc_recommended boolean, repair_recommended boolean)'
                 )
              )
              SELECT pg_get_function_result(p.oid) = expected.result_type
@@ -1751,6 +1751,29 @@ fn projection_status_exposes_operator_contract_field_names() {
                AND p.proname = 'projection_status'",
         )
         .expect("projection_status signature inspection failed")
+        .unwrap_or(false);
+
+    assert!(signature_matches);
+}
+
+#[pg_test]
+fn projection_compact_exposes_operator_contract_field_names() {
+    reset_and_create_fixtures();
+    let signature_matches = Spi::get_one::<bool>(
+            "WITH expected(result_type) AS (
+                VALUES (
+                    'TABLE(manifest_generation bigint, segments_compacted integer, chunks_rewritten integer, segment_count integer, dirty_chunk_count integer, sync_watermark bigint)'
+                )
+             )
+             SELECT pg_get_function_result(p.oid) = expected.result_type
+                AND pg_get_function_arguments(p.oid) = 'max_rows integer DEFAULT 10000, max_bytes bigint DEFAULT NULL::bigint, max_segments integer DEFAULT 1000, dirty_chunk_segment_threshold integer DEFAULT NULL::integer'
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             CROSS JOIN expected
+             WHERE n.nspname = 'graph'
+               AND p.proname = 'projection_compact'",
+        )
+        .expect("projection_compact signature inspection failed")
         .unwrap_or(false);
 
     assert!(signature_matches);
@@ -2289,11 +2312,12 @@ fn setup_projection_status_pressure_fixture(
     ))
     .expect("add projection status table failed");
     Spi::run("SELECT * FROM graph.build()").expect("build projection status graph failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable projection status sync failed");
     Spi::run(&format!(
-        "INSERT INTO graph._sync_log (op, table_name, pk, new_row)
-         VALUES ('I', '{table_name}', 'z', '{{\"id\":\"z\",\"name\":\"Zed\"}}'::jsonb)"
+        "INSERT INTO public.{table_name} (id, name)
+         VALUES ('z', 'Zed')"
     ))
-    .expect("insert projection status sync log failed");
+    .expect("insert projection status pending row failed");
 
     let graph_path = crate::persistence::graph_file_path().expect("graph path failed");
     let root = crate::persistence::projection_manifest_root(&graph_path);

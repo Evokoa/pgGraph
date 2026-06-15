@@ -13,7 +13,7 @@ All functions live in the `graph` schema.
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
 | Build jobs | `build`, `build_graph`, `build_async_graph`, `build_status`, `build_status_for_graph` |
-| Sync and maintenance | `enable_sync`, `apply_sync`, `add_sync_policy`, `alter_sync_policy`, `drop_sync_policy`, `run_sync_policy`, `sync_policy_status`, `jobs`, `job_runs`, `job_stats`, `run_job`, `run_due_jobs`, `run_due_jobs_async`, `alter_job`, `remove_job`, `run_scheduled_maintenance`, `projection_gc`, `projection_repair`, `vacuum`, `vacuum_graph`, `maintenance`, `maintenance_graph`, `maintenance_status`, `maintenance_status_for_graph` |
+| Sync and maintenance | `enable_sync`, `apply_sync`, `add_sync_policy`, `alter_sync_policy`, `drop_sync_policy`, `run_sync_policy`, `sync_policy_status`, `jobs`, `job_runs`, `job_stats`, `run_job`, `run_due_jobs`, `run_due_jobs_async`, `alter_job`, `remove_job`, `run_scheduled_maintenance`, `projection_compact`, `projection_gc`, `projection_repair`, `vacuum`, `vacuum_graph`, `maintenance`, `maintenance_graph`, `maintenance_status`, `maintenance_status_for_graph` |
 | GQL | `gql`, `gql_explain` |
 | Search | `search`, `search_nodes` |
 | Traversal | `traverse`, `traverse_search`, `node_ref`, `node_ref_string`, `format_path` |
@@ -118,8 +118,13 @@ RETURNS TABLE (
   manifest_generation bigint,
   manifest_watermark bigint,
   pending_durable_rows bigint,
+  base_artifact_bytes bigint,
+  manifest_bytes bigint,
+  artifact_bytes bigint,
   segment_count int,
   segment_bytes bigint,
+  segment_fanout int,
+  read_amplification int,
   l0_segment_count int,
   l1_segment_count int,
   l2_segment_count int,
@@ -145,11 +150,40 @@ RETURNS TABLE (
 ```
 
 Reports durable projection manifest, segment, chunk, GC, heartbeat, validation,
-and recommendation state. `artifact_validation_state` is `healthy`,
-`targeted_chunk_repair`, `full_rebuild`, or `no_projection`. The `last_*`
-timestamp columns are persisted operation timestamps: ingestion, compaction,
-and repair are carried in the active manifest lineage, and GC is recorded when
-`graph.projection_gc()` completes.
+storage, fanout, read-amplification, and recommendation state.
+`artifact_validation_state` is `healthy`, `targeted_chunk_repair`,
+`full_rebuild`, or `no_projection`. `artifact_bytes` is the active base,
+manifest, segment, and replacement-chunk footprint for the selected graph.
+`segment_fanout` is the highest number of durable segments that cover one
+source-node range, and `read_amplification` is the durable base/chunk layer plus
+that segment fanout. The `last_*` timestamp columns are persisted operation
+timestamps: ingestion, compaction, and repair are carried in the active
+manifest lineage, and GC is recorded when `graph.projection_gc()` completes.
+
+### `graph.projection_compact()`
+
+```sql
+graph.projection_compact(
+  max_rows integer DEFAULT 10000,
+  max_bytes bigint DEFAULT NULL,
+  max_segments integer DEFAULT 1000,
+  dirty_chunk_segment_threshold integer DEFAULT NULL
+)
+RETURNS TABLE (
+  manifest_generation bigint,
+  segments_compacted int,
+  chunks_rewritten int,
+  segment_count int,
+  dirty_chunk_count int,
+  sync_watermark bigint
+)
+```
+
+Admin-only. Publishes one copy-on-write projection compaction generation. The
+compactor reads the active manifest, validates the referenced durable segments,
+and either writes a higher-level compacted segment or, when
+`dirty_chunk_segment_threshold` is reached, writes replacement base chunks for
+the affected source-node ranges. Existing base CSR bytes are never overwritten.
 
 ### `graph.projection_gc()`
 
@@ -470,8 +504,11 @@ RETURNS TABLE (
 Reports SQL-computable quota usage for supported dimensions. A `hard`
 `max_named_graphs` quota blocks new graph metadata before catalog rows are
 created. A `hard` `max_loaded_graphs_per_backend` quota blocks runtime loads.
-A `hard` `max_graph_jobs` quota blocks new sync policy jobs. A `warn` quota
-reports `exceeded = true` without blocking the operation.
+A `hard` `max_graph_jobs` quota blocks new sync policy jobs. A `hard`
+`max_artifact_storage_bytes` quota blocks durable projection ingest or
+compaction when active artifact bytes plus the requested write budget would
+exceed the configured limit. A `warn` quota reports `exceeded = true` without
+blocking the operation.
 
 ## Runtime Graph Loading
 
