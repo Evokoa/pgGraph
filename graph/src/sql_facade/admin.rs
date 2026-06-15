@@ -11,12 +11,282 @@ fn test_enabled() -> bool {
     config::ENABLED.get()
 }
 
+/// Create graph metadata for the current role.
+#[pg_extern(schema = "graph")]
+fn create_graph(
+    graph_name: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+    graph_kind: default!(&str, "'user'"),
+    residency: default!(&str, "'hot'"),
+    materialization: default!(&str, "'shared'"),
+    projection_mode: default!(&str, "'csr_readonly'"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("create_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let metadata = catalog::create_graph_metadata(
+            graph_name,
+            tenant,
+            namespace,
+            graph_kind,
+            residency,
+            materialization,
+            projection_mode,
+        )
+        .unwrap_or_else(|err| err.report());
+        graph_metadata_iterator(vec![metadata])
+    })
+}
+
+/// Alter graph metadata for the current role.
+#[pg_extern(schema = "graph")]
+fn alter_graph(
+    graph_name: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+    graph_kind: default!(Option<&str>, "NULL"),
+    residency: default!(Option<&str>, "NULL"),
+    materialization: default!(Option<&str>, "NULL"),
+    projection_mode: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("alter_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let metadata = catalog::update_graph_metadata(
+            graph_name,
+            tenant,
+            namespace,
+            graph_kind,
+            residency,
+            materialization,
+            projection_mode,
+        )
+        .unwrap_or_else(|err| err.report());
+        graph_metadata_iterator(vec![metadata])
+    })
+}
+
+/// Drop graph metadata for the current role.
+#[pg_extern(schema = "graph")]
+fn drop_graph(
+    graph_name: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("drop_graph()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let metadata = catalog::drop_graph_metadata(graph_name, tenant, namespace)
+            .unwrap_or_else(|err| err.report());
+        graph_metadata_iterator(vec![metadata])
+    })
+}
+
+/// List graph metadata visible to the current role.
+#[pg_extern(schema = "graph")]
+fn list_graphs() -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("list_graphs()", || {
+        let rows = catalog::list_graph_metadata().unwrap_or_else(|err| err.report());
+        graph_metadata_iterator(rows)
+    })
+}
+
+/// Return the session-selected graph metadata.
+#[pg_extern(schema = "graph")]
+fn current_graph() -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("current_graph()", || {
+        let metadata = selected_graph_metadata().unwrap_or_else(|err| err.report());
+        graph_metadata_iterator(vec![metadata])
+    })
+}
+
+/// Select graph metadata for later graph-scoped calls.
+#[pg_extern(schema = "graph")]
+fn set_current_graph(
+    graph_name: &str,
+    tenant: default!(Option<&str>, "NULL"),
+    namespace: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    with_panic_boundary("set_current_graph()", || {
+        let metadata = catalog::resolve_visible_graph_metadata(graph_name, tenant, namespace)
+            .unwrap_or_else(|err| err.report())
+            .unwrap_or_else(|| {
+                safety::GraphError::InvalidFilter {
+                    reason: format!("graph '{}' does not exist", graph_name),
+                }
+                .report()
+            });
+        set_selected_graph_id(&metadata.graph_id).unwrap_or_else(|err| err.report());
+        graph_metadata_iterator(vec![metadata])
+    })
+}
+
 pub(crate) fn check_enabled_result() -> safety::GraphResult<()> {
     if config::ENABLED.get() {
         Ok(())
     } else {
         Err(safety::GraphError::Disabled)
     }
+}
+
+fn selected_graph_metadata() -> safety::GraphResult<catalog::GraphMetadata> {
+    match selected_graph_id()? {
+        Some(graph_id) => catalog::resolve_graph_by_id(&graph_id)?.ok_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: "selected graph metadata is missing".to_string(),
+            }
+        }),
+        None => catalog::default_graph_metadata(),
+    }
+}
+
+fn selected_graph_id() -> safety::GraphResult<Option<String>> {
+    Spi::get_one::<String>("SELECT current_setting('graph.current_graph_id', true)")
+        .map_err(|err| {
+            safety::GraphError::Internal(format!("current graph setting read failed: {err}"))
+        })
+        .map(|value| value.filter(|value| !value.trim().is_empty()))
+}
+
+fn set_selected_graph_id(graph_id: &str) -> safety::GraphResult<()> {
+    Spi::run_with_args(
+        "SELECT set_config('graph.current_graph_id', $1, false)",
+        &[graph_id.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("current graph setting write failed: {err}"))
+    })
+}
+
+fn graph_metadata_iterator(
+    rows: Vec<catalog::GraphMetadata>,
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, String),
+        name!(graph_name, String),
+        name!(owner_role, pgrx::pg_sys::Oid),
+        name!(created_by, pgrx::pg_sys::Oid),
+        name!(tenant, Option<String>),
+        name!(namespace, Option<String>),
+        name!(graph_kind, String),
+        name!(residency, String),
+        name!(materialization, String),
+        name!(projection_mode, String),
+        name!(created_at, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+    ),
+> {
+    TableIterator::new(rows.into_iter().map(|row| {
+        (
+            row.graph_id,
+            row.graph_name,
+            row.owner_role,
+            row.created_by,
+            row.tenant,
+            row.namespace,
+            row.graph_kind,
+            row.residency,
+            row.materialization,
+            row.projection_mode,
+            row.created_at,
+            row.updated_at,
+        )
+    }))
 }
 
 pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {

@@ -107,6 +107,130 @@ CREATE TABLE IF NOT EXISTS graph._registered_filter_columns (
 ALTER TABLE graph._registered_filter_columns
     ADD COLUMN IF NOT EXISTS column_type TEXT NOT NULL DEFAULT 'numeric';
 
+CREATE TABLE IF NOT EXISTS graph._graphs (
+    graph_id        UUID PRIMARY KEY,
+    graph_name      TEXT NOT NULL,
+    owner_role      OID NOT NULL,
+    created_by      OID NOT NULL,
+    tenant          TEXT,
+    namespace       TEXT,
+    graph_kind      TEXT NOT NULL CHECK (graph_kind IN ('global', 'user', 'tenant', 'workspace', 'subgraph')),
+    residency       TEXT NOT NULL CHECK (residency IN ('hot', 'warm', 'cold')),
+    materialization TEXT NOT NULL CHECK (materialization IN ('shared', 'dedicated')),
+    projection_mode TEXT NOT NULL CHECK (projection_mode IN ('csr_readonly', 'mutable_overlay')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE graph._graphs
+    ADD COLUMN IF NOT EXISTS tenant TEXT,
+    ADD COLUMN IF NOT EXISTS namespace TEXT,
+    ADD COLUMN IF NOT EXISTS graph_kind TEXT,
+    ADD COLUMN IF NOT EXISTS residency TEXT,
+    ADD COLUMN IF NOT EXISTS materialization TEXT,
+    ADD COLUMN IF NOT EXISTS projection_mode TEXT,
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+UPDATE graph._graphs
+SET namespace = COALESCE(namespace, 'public'),
+    graph_kind = COALESCE(graph_kind, 'global'),
+    residency = COALESCE(residency, 'hot'),
+    materialization = COALESCE(materialization, 'shared'),
+    projection_mode = COALESCE(projection_mode, 'csr_readonly'),
+    created_at = COALESCE(created_at, now()),
+    updated_at = COALESCE(updated_at, now());
+
+ALTER TABLE graph._graphs
+    ALTER COLUMN graph_kind SET NOT NULL,
+    ALTER COLUMN residency SET NOT NULL,
+    ALTER COLUMN materialization SET NOT NULL,
+    ALTER COLUMN projection_mode SET NOT NULL,
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN updated_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graphs'::regclass
+          AND conname = '_graphs_graph_kind_check'
+    ) THEN
+        ALTER TABLE graph._graphs
+            ADD CONSTRAINT _graphs_graph_kind_check
+            CHECK (graph_kind IN ('global', 'user', 'tenant', 'workspace', 'subgraph'));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graphs'::regclass
+          AND conname = '_graphs_residency_check'
+    ) THEN
+        ALTER TABLE graph._graphs
+            ADD CONSTRAINT _graphs_residency_check
+            CHECK (residency IN ('hot', 'warm', 'cold'));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graphs'::regclass
+          AND conname = '_graphs_materialization_check'
+    ) THEN
+        ALTER TABLE graph._graphs
+            ADD CONSTRAINT _graphs_materialization_check
+            CHECK (materialization IN ('shared', 'dedicated'));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graphs'::regclass
+          AND conname = '_graphs_projection_mode_check'
+    ) THEN
+        ALTER TABLE graph._graphs
+            ADD CONSTRAINT _graphs_projection_mode_check
+            CHECK (projection_mode IN ('csr_readonly', 'mutable_overlay'));
+    END IF;
+END $$;
+
+INSERT INTO graph._graphs (
+    graph_id,
+    graph_name,
+    owner_role,
+    created_by,
+    tenant,
+    namespace,
+    graph_kind,
+    residency,
+    materialization,
+    projection_mode
+)
+SELECT '00000000-0000-0000-0000-000000000001'::uuid,
+       'default',
+       current_user::regrole::oid,
+       current_user::regrole::oid,
+       NULL,
+       'public',
+       'global',
+       'hot',
+       'shared',
+       'csr_readonly'
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM graph._graphs
+    WHERE graph_id = '00000000-0000-0000-0000-000000000001'::uuid
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS _graphs_identity_idx
+    ON graph._graphs (
+        COALESCE(tenant, ''),
+        owner_role,
+        COALESCE(namespace, ''),
+        graph_name
+    );
+
 CREATE TABLE IF NOT EXISTS graph._build_jobs (
     build_id       TEXT PRIMARY KEY,
     status         TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
@@ -289,6 +413,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_buffer_created ON graph._sync_buffer (create
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_tables', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_edges', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_filter_columns', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._graphs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._build_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._maintenance_jobs', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log', '');
@@ -312,6 +437,7 @@ SELECT pg_catalog.pg_extension_config_dump('graph._sync_buffer_id_seq', '');
 REVOKE ALL ON TABLE graph._registered_tables       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._registered_edges        FROM PUBLIC;
 REVOKE ALL ON TABLE graph._registered_filter_columns FROM PUBLIC;
+REVOKE ALL ON TABLE graph._graphs                 FROM PUBLIC;
 REVOKE ALL ON TABLE graph._build_jobs             FROM PUBLIC;
 REVOKE ALL ON TABLE graph._maintenance_jobs       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
@@ -320,6 +446,7 @@ REVOKE ALL ON TABLE graph._sync_buffer            FROM PUBLIC;
 GRANT SELECT ON TABLE graph._registered_tables       TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_edges        TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_filter_columns TO PUBLIC;
+GRANT SELECT ON TABLE graph._graphs                 TO PUBLIC;
 GRANT SELECT ON TABLE graph._build_jobs             TO PUBLIC;
 GRANT SELECT ON TABLE graph._maintenance_jobs       TO PUBLIC;
 GRANT SELECT ON TABLE graph._sync_log               TO PUBLIC;

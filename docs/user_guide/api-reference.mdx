@@ -8,6 +8,7 @@ All functions live in the `graph` schema.
 | Category | Functions |
 |---|---|
 | Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
+| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph` |
 | Registration | `add_table`, `add_edge`, `add_filter_column`, `registered_tables`, `registered_edges`, `remove_table`, `remove_edge`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables` |
 | Build jobs | `build`, `build_status` |
@@ -208,6 +209,120 @@ Reports sizing estimates for the current backend's active engine. Shared mmap
 bytes are counted once; backend-private heap is multiplied by
 `concurrent_backends`, with a minimum of one. This is an operator sizing aid,
 not a live connection counter or cluster-wide hard cap.
+
+## Named Graph Metadata
+
+Named graph metadata is the identity and policy catalog for multi-graph
+support. The current release keeps existing build, registration, sync, and
+query functions on the compatibility default graph while this metadata surface
+is introduced. Later graph-scoped APIs use the same graph identity rows.
+
+Graph metadata rows include:
+
+| Column | Meaning |
+|---|---|
+| `graph_id` | Stable UUID for the graph metadata row |
+| `graph_name` | User-visible graph name |
+| `owner_role` | PostgreSQL role that owns this graph metadata |
+| `created_by` | PostgreSQL role that created this graph metadata |
+| `tenant` | Optional tenant discriminator |
+| `namespace` | Optional graph namespace; defaults to `public` |
+| `graph_kind` | `global`, `user`, `tenant`, `workspace`, or `subgraph` |
+| `residency` | `hot`, `warm`, or `cold` |
+| `materialization` | `shared` or `dedicated` |
+| `projection_mode` | `csr_readonly` or `mutable_overlay` |
+| `created_at`, `updated_at` | Catalog timestamps |
+
+### `graph.create_graph()`
+
+```sql
+graph.create_graph(
+  graph_name text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL,
+  graph_kind text DEFAULT 'user',
+  residency text DEFAULT 'hot',
+  materialization text DEFAULT 'shared',
+  projection_mode text DEFAULT 'csr_readonly'
+)
+RETURNS TABLE (...)
+```
+
+Admin-only. Creates a graph metadata row for the current role. The tuple
+`(tenant, owner_role, namespace, graph_name)` must be unique, treating a `NULL`
+tenant or namespace as an empty value for identity checks. Invalid policy
+values and duplicate identities return SQLSTATE `PG005`.
+
+### `graph.alter_graph()`
+
+```sql
+graph.alter_graph(
+  graph_name text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL,
+  graph_kind text DEFAULT NULL,
+  residency text DEFAULT NULL,
+  materialization text DEFAULT NULL,
+  projection_mode text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Admin-only. Updates mutable policy metadata for an existing graph owned by the
+current role. Omitted values keep the existing policy. Missing graphs and
+invalid policy values return SQLSTATE `PG005`.
+
+### `graph.drop_graph()`
+
+```sql
+graph.drop_graph(
+  graph_name text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Admin-only. Drops graph metadata for an existing non-default graph owned by the
+current role and returns the deleted row. The compatibility default graph cannot
+be dropped. Dropping graph-owned registrations, jobs, artifacts, and
+projections is introduced by later graph-scoped phases.
+
+### `graph.list_graphs()`
+
+```sql
+graph.list_graphs()
+RETURNS TABLE (...)
+```
+
+Lists graph metadata visible to the current role. The default global graph is
+visible to all roles with schema usage; role-owned graphs are visible to their
+owner.
+
+### `graph.current_graph()`
+
+```sql
+graph.current_graph()
+RETURNS TABLE (...)
+```
+
+Returns the session-selected graph metadata. If no graph has been selected,
+this returns the compatibility default graph.
+
+### `graph.set_current_graph()`
+
+```sql
+graph.set_current_graph(
+  graph_name text,
+  tenant text DEFAULT NULL,
+  namespace text DEFAULT NULL
+)
+RETURNS TABLE (...)
+```
+
+Selects graph metadata for the current session and returns the selected row.
+Selection is metadata only in this release: it does not load or switch the
+backend-local graph engine. Missing graphs return SQLSTATE `PG005`.
 
 ### `graph.sync_health()`
 

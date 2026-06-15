@@ -1,10 +1,15 @@
 //! SPI-backed graph catalog access, registration, and validation helpers.
 
+mod graphs;
 mod read;
 mod validate;
 mod write;
 
 pub(crate) use crate::builder::split_catalog_columns;
+pub(crate) use graphs::{
+    create_graph_metadata, default_graph_metadata, drop_graph_metadata, list_graph_metadata,
+    resolve_graph_by_id, resolve_visible_graph_metadata, update_graph_metadata, GraphMetadata,
+};
 pub(crate) use read::{catalog_fingerprint, current_catalog_state, read_catalog};
 #[cfg(feature = "pg_test")]
 pub(crate) use validate::validate_numeric_column;
