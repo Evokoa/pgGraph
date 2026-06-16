@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 15, SQL/PGQ and openCypher Compatibility Closure.
-- Status: Phase 14 is complete after PostgreSQL-first registered relationship `CREATE`, transaction-local graph indexes for created nodes, same-transaction traversal visibility, public docs, review, and phase checks.
+- Active phase: Phase 16, Documentation, Migration, Operational Tooling, and Release Gates.
+- Status: Phase 15 is complete after enforcing public PGQ boundaries and mapping/rejecting openCypher compatibility with tests and fuzz seeds.
 - Started: 2026-06-16.
 
 ## Phase Updates
@@ -25,6 +25,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 12: complete - added graph-scoped `get_node` and `get_neighbors` direct business-id lookup APIs, GQL `id(node)` and single-column primary-key property `NodeLookup` planning/execution, source-table ACL/RLS visibility checks, transaction-delta-aware GQL node lookup, regression coverage, and public docs.
 - Phase 13: complete - hydrated whole relationship variables from registered edge-row tables, preserved coordinate-only relationship values for `hydrate := false`, added node-only `OPTIONAL MATCH` null-extension, pinned planner-hostile wildcard forms to typed `PG014` rejections, updated explain output for edge-row hydration, and refreshed public GQL docs.
 - Phase 14: complete - added PostgreSQL-first GQL relationship `CREATE` for registered edge-row mappings, made transaction-created nodes traversable through backend-local temporary graph indexes, preserved bidirectional schema direction in overlays, and documented the supported write boundary.
+- Phase 15: complete - added explicit SQLSTATE rejections for public SQL/PGQ execution, enforced `COMPATIBILITY_MATRIX` rejections for unsupported openCypher features (DDL, UNWIND, CALL), added tests, and populated fuzz seeds for accepted/rejected cypher forms.
 
 ## Verification Log
 

@@ -175,7 +175,7 @@ fn direct_neighbor_lookup_expands_after_business_id_resolution() {
                     'default',
                     'graph_test_users_pgtest',
                     'u1',
-                    direction := 'outgoing',
+                    direction := 'out',
                     edge_types := ARRAY['friend'],
                     hydrate := false
                  )",

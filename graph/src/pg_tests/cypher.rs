@@ -143,13 +143,17 @@ fn cypher_write_uses_shared_mutable_overlay_execution() {
 }
 
 #[pg_test]
-fn cypher_rejects_unmappable_features_with_gql_sqlstate() {
+fn cypher_rejects_unsupported_cypher_only_syntax() {
     reset_and_create_fixtures();
-    build_friendship_fixture_graph();
 
-    let sqlstate = sqlstate_for_error("SELECT * FROM graph.cypher('UNWIND [1, 2] AS n RETURN n')");
+    let sqlstate_unwind = sqlstate_for_error("SELECT * FROM graph.cypher('UNWIND [1, 2] AS n RETURN n')");
+    assert_eq!(sqlstate_unwind.as_deref(), Some("PG014"));
 
-    assert_eq!(sqlstate.as_deref(), Some("PG014"));
+    let sqlstate_call = sqlstate_for_error("SELECT * FROM graph.cypher('CALL db.labels()')");
+    assert_eq!(sqlstate_call.as_deref(), Some("PG014"));
+
+    let sqlstate_ddl = sqlstate_for_error("SELECT * FROM graph.cypher('CREATE INDEX ON :Person(name)')");
+    assert_eq!(sqlstate_ddl.as_deref(), Some("PG014"));
 }
 
 #[pg_test]
@@ -189,4 +193,12 @@ fn cypher_compatibility_matrix_is_separate_and_honest() {
 
     assert!(supported_rows > 0);
     assert_eq!(full_opencypher_rows, 1);
+}
+
+#[pg_test]
+fn pgq_public_endpoint_is_permanently_rejected() {
+    reset_and_create_fixtures();
+    
+    let sqlstate = sqlstate_for_error("SELECT graph.pgq('MATCH (a)')");
+    assert_eq!(sqlstate.as_deref(), Some("PG018"));
 }

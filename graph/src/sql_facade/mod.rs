@@ -53,6 +53,7 @@ mod components;
 mod cypher;
 mod discovery;
 mod gql;
+mod pgq;
 mod runtime;
 mod search;
 mod traversal;
