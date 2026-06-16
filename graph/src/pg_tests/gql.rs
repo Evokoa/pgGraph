@@ -2155,7 +2155,429 @@ fn gql_create_node_inserts_mapped_row_and_records_delta() {
 }
 
 #[pg_test]
-fn gql_rejects_transaction_created_node_traversal_entry_points() {
+fn gql_create_relationship_inserts_edge_row_and_records_delta() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (
+        returned_id,
+        returned_type,
+        returned_start,
+        returned_end,
+        source_rows,
+        tx_added_edges,
+        same_tx_gql_count,
+    ) = Spi::connect(|client| {
+        let created = client
+            .select(
+                "SELECT
+                    row #>> '{r,id}',
+                    row #>> '{r,_type}',
+                    row #>> '{r,_start,id}',
+                    row #>> '{r,_end,id}'
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''}), (v:graph_test_users_pgtest {id: ''u1''})
+                     CREATE (u)-[r:friend {id: ''f2''}]->(v)
+                     RETURN r'
+                 )",
+                None,
+                &[],
+            )
+            .expect("gql relationship create failed")
+            .first();
+        let source_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM public.graph_test_friendships_pgtest
+                 WHERE id = 'f2' AND user_id = 'u2' AND friend_id = 'u1'",
+                None,
+                &[],
+            )
+            .expect("source edge row count failed")
+            .first()
+            .get::<i64>(1)
+            .expect("source edge row count read failed")
+            .unwrap_or_default();
+        let tx_added_edges = client
+            .select("SELECT tx_delta_added_edges FROM graph.status()", None, &[])
+            .expect("status query failed")
+            .first()
+            .get::<i32>(1)
+            .expect("tx added edge count read failed")
+            .unwrap_or_default();
+        let same_tx_gql_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN r',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("same transaction relationship read failed")
+            .first()
+            .get::<i64>(1)
+            .expect("same transaction relationship count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((
+            created
+                .get::<String>(1)
+                .expect("returned relationship id read failed")
+                .unwrap_or_default(),
+            created
+                .get::<String>(2)
+                .expect("returned relationship type read failed")
+                .unwrap_or_default(),
+            created
+                .get::<String>(3)
+                .expect("returned start id read failed")
+                .unwrap_or_default(),
+            created
+                .get::<String>(4)
+                .expect("returned end id read failed")
+                .unwrap_or_default(),
+            source_rows,
+            tx_added_edges,
+            same_tx_gql_count,
+        ))
+    })
+    .expect("relationship create verification failed");
+
+    assert_eq!(returned_id, "f2");
+    assert_eq!(returned_type, "friend");
+    assert_eq!(returned_start, "u2");
+    assert_eq!(returned_end, "u1");
+    assert_eq!(source_rows, 1);
+    assert_eq!(tx_added_edges, 1);
+    assert_eq!(same_tx_gql_count, 1);
+}
+
+#[pg_test]
+fn gql_create_relationship_can_use_transaction_created_nodes() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (created_edge_rows, path_rows, tx_added_nodes, tx_added_edges) = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT *
+                 FROM graph.gql(
+                    'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("gql node create failed");
+        client
+            .select(
+                "SELECT *
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u3''}), (v:graph_test_users_pgtest {id: ''u1''})
+                     CREATE (u)-[r:friend {id: ''f3''}]->(v)
+                     RETURN r',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("gql relationship create from tx node failed");
+        let created_edge_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM public.graph_test_friendships_pgtest
+                 WHERE id = 'f3' AND user_id = 'u3' AND friend_id = 'u1'",
+                None,
+                &[],
+            )
+            .expect("created edge source count failed")
+            .first()
+            .get::<i64>(1)
+            .expect("created edge source count read failed")
+            .unwrap_or_default();
+        let path_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u3''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN u, r, v',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("same transaction created path read failed")
+            .first()
+            .get::<i64>(1)
+            .expect("same transaction created path count read failed")
+            .unwrap_or_default();
+        let status = client
+            .select(
+                "SELECT tx_delta_added_nodes, tx_delta_added_edges FROM graph.status()",
+                None,
+                &[],
+            )
+            .expect("status query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            created_edge_rows,
+            path_rows,
+            status
+                .get::<i32>(1)
+                .expect("tx added nodes read failed")
+                .unwrap_or_default(),
+            status
+                .get::<i32>(2)
+                .expect("tx added edges read failed")
+                .unwrap_or_default(),
+        ))
+    })
+    .expect("transaction-created relationship verification failed");
+
+    assert_eq!(created_edge_rows, 1);
+    assert_eq!(path_rows, 1);
+    assert_eq!(tx_added_nodes, 1);
+    assert_eq!(tx_added_edges, 1);
+}
+
+#[pg_test]
+fn gql_create_relationship_fills_registered_dynamic_label_column() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest
+         ADD COLUMN rel_type text NOT NULL DEFAULT 'colleague'",
+    )
+    .expect("add dynamic relationship label column failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                from_table := 'graph_test_friendships_pgtest'::regclass,
+                from_column := 'user_id',
+                to_table := 'graph_test_users_pgtest'::regclass,
+                to_column := 'friend_id',
+                label := 'related_to',
+                bidirectional := false,
+                label_column := 'rel_type'
+            )",
+    )
+    .expect("add dynamic friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable dynamic relationship graph failed");
+
+    let (created_label, path_rows) = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT *
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''}), (v:graph_test_users_pgtest {id: ''u1''})
+                     CREATE (u)-[r:colleague {id: ''f2''}]->(v)
+                     RETURN r'
+                 )",
+                None,
+                &[],
+            )
+            .expect("dynamic relationship create failed");
+        let created_label = client
+            .select(
+                "SELECT rel_type
+                 FROM public.graph_test_friendships_pgtest
+                 WHERE id = 'f2' AND user_id = 'u2' AND friend_id = 'u1'",
+                None,
+                &[],
+            )
+            .expect("dynamic label source query failed")
+            .first()
+            .get::<String>(1)
+            .expect("dynamic label read failed")
+            .unwrap_or_default();
+        let path_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:colleague]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN r',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("dynamic label path read failed")
+            .first()
+            .get::<i64>(1)
+            .expect("dynamic label path count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((created_label, path_rows))
+    })
+    .expect("dynamic relationship create verification failed");
+
+    assert_eq!(created_label, "colleague");
+    assert_eq!(path_rows, 1);
+}
+
+#[pg_test]
+fn gql_create_relationship_preserves_bidirectional_registered_direction() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := true
+            )",
+    )
+    .expect("add bidirectional friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (forward_start, forward_end, reverse_start, reverse_end) = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT *
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''}), (v:graph_test_users_pgtest {id: ''u1''})
+                     CREATE (u)-[r:friend {id: ''f2''}]->(v)
+                     RETURN r',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("bidirectional relationship create failed");
+        let forward = client
+            .select(
+                "SELECT row #>> '{r,_start,id}', row #>> '{r,_end,id}'
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN r',
+                    hydrate := false
+                 )",
+                None,
+                &[],
+            )
+            .expect("forward created relationship read failed")
+            .first();
+        let reverse = client
+            .select(
+                "SELECT row #>> '{r,_start,id}', row #>> '{r,_end,id}'
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u2''}) RETURN r',
+                    hydrate := false
+                 )
+                 WHERE row #>> '{r,_start,id}' = 'u2'
+                   AND row #>> '{r,_end,id}' = 'u1'",
+                None,
+                &[],
+            )
+            .expect("reverse created relationship read failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            forward
+                .get::<String>(1)
+                .expect("forward start read failed")
+                .unwrap_or_default(),
+            forward
+                .get::<String>(2)
+                .expect("forward end read failed")
+                .unwrap_or_default(),
+            reverse
+                .get::<String>(1)
+                .expect("reverse start read failed")
+                .unwrap_or_default(),
+            reverse
+                .get::<String>(2)
+                .expect("reverse end read failed")
+                .unwrap_or_default(),
+        ))
+    })
+    .expect("bidirectional relationship create verification failed");
+
+    assert_eq!((forward_start.as_str(), forward_end.as_str()), ("u2", "u1"));
+    assert_eq!((reverse_start.as_str(), reverse_end.as_str()), ("u2", "u1"));
+}
+
+#[pg_test]
+fn gql_create_relationship_requires_mutable_overlay_projection() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let readonly_sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest {id: ''u2''}), (v:graph_test_users_pgtest {id: ''u1''})
+             CREATE (u)-[r:friend {id: ''f2''}]->(v)
+             RETURN r'
+         )",
+    );
+    let source_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_test_friendships_pgtest WHERE id = 'f2'",
+    )
+    .expect("source edge row count failed")
+    .unwrap_or_default();
+
+    assert_eq!(readonly_sqlstate.as_deref(), Some("PG018"));
+    assert_eq!(source_rows, 0);
+}
+
+#[pg_test]
+fn gql_traverses_transaction_created_node_entry_points() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
     Spi::run(
@@ -2180,78 +2602,106 @@ fn gql_rejects_transaction_created_node_traversal_entry_points() {
     Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
         .expect("build mutable graph failed");
 
-    let (node_match_count, materialized_match_count, relationship_error, wildcard_error) =
+    let (node_match_count, materialized_match_count, relationship_match_count, wildcard_path_count) =
         Spi::connect(|client| {
-        client
-            .select(
-                "SELECT *
-                 FROM graph.gql(
-                    'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u',
-                    hydrate := false
-                 )",
-                None,
-                &[],
-            )
-            .expect("gql create failed");
-        let node_match_count = client
-            .select(
-                "SELECT count(*)::bigint
-                 FROM graph.gql(
-                    'MATCH (u:graph_test_users_pgtest {id: ''u3''}) RETURN u',
-                    hydrate := false
-                 )",
-                None,
-                &[],
-            )
-            .expect("node scan query failed")
-            .first()
-            .get::<i64>(1)
-            .expect("node scan count read failed")
-            .unwrap_or_default();
-        let materialized_match_count = client
-            .select(
-                "SELECT count(*)::bigint
-                 FROM graph.gql(
-                    'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[:friend]->(v:graph_test_users_pgtest) RETURN u, v',
-                    hydrate := false
-                 )",
-                None,
-                &[],
-            )
-            .expect("materialized traversal query failed")
-            .first()
-            .get::<i64>(1)
-            .expect("materialized traversal count read failed")
-            .unwrap_or_default();
-        Ok::<_, pgrx::spi::Error>((
-            node_match_count,
-            materialized_match_count,
-            sql_error_message(
-                "SELECT *
-                 FROM graph.gql(
-                    'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest) RETURN u, v',
-                    hydrate := false
-                 )",
-            )
-            .unwrap_or_default(),
-            sql_error_message(
-                "SELECT *
-                 FROM graph.gql(
-                    'MATCH p=(u:graph_test_users_pgtest)-[]->() RETURN p, u',
-                    hydrate := false
-                 )",
-            )
-            .unwrap_or_default(),
-        ))
+            client
+                .select(
+                    "SELECT *
+                     FROM graph.gql(
+                        'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u',
+                        hydrate := false
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("gql create failed");
+            client
+                .select(
+                    "SELECT *
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u3''}), (v:graph_test_users_pgtest {id: ''u1''})
+                         CREATE (u)-[r:friend {id: ''f3''}]->(v)
+                         RETURN r',
+                        hydrate := false
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("gql relationship create failed");
+            let node_match_count = client
+                .select(
+                    "SELECT count(*)::bigint
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u3''}) RETURN u',
+                        hydrate := false
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("node scan query failed")
+                .first()
+                .get::<i64>(1)
+                .expect("node scan count read failed")
+                .unwrap_or_default();
+            let materialized_match_count = client
+                .select(
+                    "SELECT count(*)::bigint
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[:friend]->(v:graph_test_users_pgtest) RETURN u, v',
+                        hydrate := false
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("materialized traversal query failed")
+                .first()
+                .get::<i64>(1)
+                .expect("materialized traversal count read failed")
+                .unwrap_or_default();
+            let relationship_match_count = client
+                .select(
+                    "SELECT count(*)::bigint
+                     FROM graph.gql(
+                        'MATCH (u:graph_test_users_pgtest {id: ''u3''})-[:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN u, v',
+                        hydrate := false
+                     )",
+                    None,
+                    &[],
+                )
+                .expect("transaction-created traversal query failed")
+                .first()
+                .get::<i64>(1)
+                .expect("transaction-created traversal count read failed")
+                .unwrap_or_default();
+            let wildcard_path_count = client
+                .select(
+                    "SELECT count(*)::bigint
+                     FROM graph.gql(
+                        'MATCH p=(u:graph_test_users_pgtest)-[]->() RETURN p, u',
+                        hydrate := false
+                     )
+                     WHERE row #>> '{u,_id,id}' = 'u3'",
+                    None,
+                    &[],
+                )
+                .expect("transaction-created wildcard traversal query failed")
+                .first()
+                .get::<i64>(1)
+                .expect("transaction-created wildcard count read failed")
+                .unwrap_or_default();
+            Ok::<_, pgrx::spi::Error>((
+                node_match_count,
+                materialized_match_count,
+                relationship_match_count,
+                wildcard_path_count,
+            ))
         })
         .expect("transaction-created traversal verification failed");
 
     assert_eq!(node_match_count, 1);
     assert_eq!(materialized_match_count, 1);
-    assert!(relationship_error
-        .contains("transaction-created nodes cannot be used as traversal entry points"));
-    assert!(wildcard_error
-        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    assert_eq!(relationship_match_count, 1);
+    assert_eq!(wildcard_path_count, 1);
 }
 
 #[pg_test]

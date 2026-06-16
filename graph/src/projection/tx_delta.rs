@@ -148,6 +148,10 @@ impl TxGraphDelta {
 }
 
 /// Record a transaction-local node insertion.
+#[allow(
+    dead_code,
+    reason = "unit tests use the unindexed form to exercise node-only visibility without traversal"
+)]
 pub(crate) fn record_added_node(
     table_oid: u32,
     primary_key: &str,
@@ -165,6 +169,45 @@ pub(crate) fn record_added_node(
         });
     });
     Ok(())
+}
+
+/// Record a transaction-local node insertion and assign a temporary graph index.
+pub(crate) fn record_added_node_indexed(
+    table_oid: u32,
+    primary_key: &str,
+    tenant: Option<&str>,
+    base_node_count: u32,
+) -> GraphResult<u32> {
+    ensure_write_capacity(1, 0, estimated_added_node_bytes(primary_key, tenant))?;
+    TX_DELTA.with(|delta| {
+        let mut borrowed = delta.borrow_mut();
+        let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        let offset = delta
+            .added_nodes
+            .iter()
+            .filter(|node| node.node_idx.is_some())
+            .count();
+        let offset = u32::try_from(offset).map_err(|_| GraphError::OverlayLimit {
+            kind: "tx_delta_nodes".to_string(),
+            requested: usize::MAX,
+            limit: max_tx_delta_nodes(),
+        })?;
+        let node_idx =
+            base_node_count
+                .checked_add(offset)
+                .ok_or_else(|| GraphError::OverlayLimit {
+                    kind: "tx_delta_nodes".to_string(),
+                    requested: usize::MAX,
+                    limit: max_tx_delta_nodes(),
+                })?;
+        delta.added_nodes.push(AddedNode {
+            table_oid,
+            primary_key: primary_key.to_string(),
+            tenant: tenant.map(str::to_string),
+            node_idx: Some(node_idx),
+        });
+        Ok(node_idx)
+    })
 }
 
 /// Return transaction-local node primary keys for a table and tenant scope.
@@ -194,6 +237,76 @@ pub(crate) fn added_node_keys(
                     .collect()
             })
             .unwrap_or_default()
+    })
+}
+
+/// Return transaction-local node indexes for a table and tenant scope.
+pub(crate) fn added_node_indexes(
+    table_oid: u32,
+    tenant: Option<&str>,
+    table_is_tenanted: bool,
+) -> Vec<u32> {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .map(|delta| {
+                delta
+                    .added_nodes
+                    .iter()
+                    .filter(|node| node.table_oid == table_oid)
+                    .filter(
+                        |node| match (tenant, node.tenant.as_deref(), table_is_tenanted) {
+                            (Some(active), Some(created), true) => active == created,
+                            (Some(_), None, true) => false,
+                            (Some(_), _, false) => true,
+                            (None, _, _) => true,
+                        },
+                    )
+                    .filter_map(|node| node.node_idx)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Resolve a transaction-local node to its temporary graph index.
+pub(crate) fn resolve_added_node(
+    table_oid: u32,
+    primary_key: &str,
+    tenant: Option<&str>,
+    table_is_tenanted: bool,
+) -> Option<u32> {
+    TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().and_then(|delta| {
+            delta
+                .added_nodes
+                .iter()
+                .find(|node| {
+                    node.table_oid == table_oid
+                        && node.primary_key == primary_key
+                        && match (tenant, node.tenant.as_deref(), table_is_tenanted) {
+                            (Some(active), Some(created), true) => active == created,
+                            (Some(_), None, true) => false,
+                            (Some(_), _, false) => true,
+                            (None, _, _) => true,
+                        }
+                })
+                .and_then(|node| node.node_idx)
+        })
+    })
+}
+
+/// Return metadata for a transaction-local temporary graph index.
+pub(crate) fn added_node_by_index(node_idx: u32) -> Option<AddedNode> {
+    TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().and_then(|delta| {
+            delta
+                .added_nodes
+                .iter()
+                .find(|node| node.node_idx == Some(node_idx))
+                .cloned()
+        })
     })
 }
 

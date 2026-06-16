@@ -1,7 +1,9 @@
 use super::admin::{check_enabled_result, with_panic_boundary};
 use super::runtime::{current_query_freshness, ensure_current_graph_for_query};
 use super::*;
-use crate::catalog::{primary_key_expr, read_catalog, sql_table_name_from_catalog};
+use crate::catalog::{
+    primary_key_expr, read_catalog, sql_table_name_from_catalog, validate_column_exists,
+};
 use crate::quote::{quote_ident, quote_literal};
 
 /// Explain how the supported GQL subset binds and lowers.
@@ -51,6 +53,16 @@ pub(super) fn explain_statement(
                 "CreateNode(label={}, table_oid={}, returns={})",
                 plan.label,
                 plan.table_oid,
+                plan.returns.len()
+            )
+        }
+        crate::query::physical_plan::PhysicalStatement::CreateRelationship(plan) => {
+            check_create_relationship_acl(&plan);
+            format!(
+                "CreateRelationship(type={}, edge_table_oid={}, properties={}, returns={})",
+                plan.rel_type,
+                plan.edge_table_oid,
+                plan.properties.len(),
                 plan.returns.len()
             )
         }
@@ -143,6 +155,7 @@ fn build_statement(
     let span = match &ast {
         crate::gql::ast::Statement::Read(query) => query.span,
         crate::gql::ast::Statement::Create(query) => query.span,
+        crate::gql::ast::Statement::CreateRelationship(query) => query.span,
         crate::gql::ast::Statement::Merge(query) => query.span,
         crate::gql::ast::Statement::Set(query) => query.span,
         crate::gql::ast::Statement::Remove(query) => query.span,
@@ -166,6 +179,14 @@ fn check_plan_acl(plan: &crate::query::physical_plan::PhysicalPlan) {
 
 fn check_create_acl(plan: &crate::query::physical_plan::PhysicalCreateNode) {
     acl::check_table_insert_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+}
+
+fn check_create_relationship_acl(plan: &crate::query::physical_plan::PhysicalCreateRelationship) {
+    for table_oid in plan.required_node_table_oids() {
+        acl::check_table_acl(table_oid).unwrap_or_else(|err| err.report());
+    }
+    acl::check_table_acl(plan.required_edge_table_oid()).unwrap_or_else(|err| err.report());
+    acl::check_table_insert_acl(plan.required_edge_table_oid()).unwrap_or_else(|err| err.report());
 }
 
 fn check_merge_acl(plan: &crate::query::physical_plan::PhysicalMergeNode) {
@@ -289,6 +310,10 @@ pub(super) fn execute_statement(
             check_create_acl(&plan);
             execute_create_node(&plan, tenant_scope, params, hydrate)
         }
+        crate::query::physical_plan::PhysicalStatement::CreateRelationship(plan) => {
+            check_create_relationship_acl(&plan);
+            execute_create_relationship(&plan, tenant_scope, params, hydrate)
+        }
         crate::query::physical_plan::PhysicalStatement::MergeNode(plan) => {
             check_merge_acl(&plan);
             execute_merge_node(&plan, tenant_scope, params, hydrate)
@@ -321,12 +346,67 @@ fn execute_create_node(
     ensure_mutable_projection("GQL CREATE")?;
     crate::projection::tx_delta::ensure_write_capacity(1, 0, 0)?;
     let insert = insert_mapped_node(plan, tenant_scope, params)?;
-    crate::projection::tx_delta::record_added_node(
+    let base_node_count = ENGINE.with(|engine| engine.borrow().node_store.node_count());
+    crate::projection::tx_delta::record_added_node_indexed(
         plan.table_oid,
         &insert.node_id,
         insert.tenant.as_deref(),
+        base_node_count,
     )?;
     Ok(vec![project_created_node(plan, insert, hydrate)])
+}
+
+fn execute_create_relationship(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    ensure_mutable_projection("GQL relationship CREATE")?;
+    crate::projection::tx_delta::ensure_write_capacity(
+        0,
+        if plan.bidirectional { 2 } else { 1 },
+        0,
+    )?;
+    let source_scan = create_relationship_node_scan(plan, true);
+    let target_scan = create_relationship_node_scan(plan, false);
+    let source = matched_create_relationship_endpoint(&source_scan, tenant_scope, params)?;
+    let target = matched_create_relationship_endpoint(&target_scan, tenant_scope, params)?;
+    lock_and_recheck_node_write(
+        plan.source_table_oid,
+        &plan.source_label,
+        &plan.source_predicate,
+        &source.node.node_id,
+        params,
+        tenant_scope,
+        "GQL relationship CREATE",
+    )?;
+    if plan.source_var != plan.target_var || source.node.node_id != target.node.node_id {
+        lock_and_recheck_node_write(
+            plan.target_table_oid,
+            &plan.target_label,
+            &plan.target_predicate,
+            &target.node.node_id,
+            params,
+            tenant_scope,
+            "GQL relationship CREATE",
+        )?;
+    }
+    let created =
+        insert_mapped_relationship(plan, &source.node.node_id, &target.node.node_id, params)?;
+    record_added_relationship_delta(
+        plan,
+        &source.node.node_id,
+        &target.node.node_id,
+        tenant_scope,
+    )?;
+    project_created_relationship(
+        plan,
+        &source.node.node_id,
+        &target.node.node_id,
+        created,
+        hydrate,
+    )
 }
 
 fn execute_merge_node(
@@ -338,10 +418,12 @@ fn execute_merge_node(
     ensure_mutable_projection("GQL MERGE")?;
     let merged = merge_mapped_node(plan, tenant_scope, params)?;
     if merged.created {
-        crate::projection::tx_delta::record_added_node(
+        let base_node_count = ENGINE.with(|engine| engine.borrow().node_store.node_count());
+        crate::projection::tx_delta::record_added_node_indexed(
             plan.table_oid,
             &merged.node_id,
             merged.tenant.as_deref(),
+            base_node_count,
         )?;
     } else if let Some(on_match) = &plan.on_match {
         update_filter_index_for_property(
@@ -596,6 +678,65 @@ fn delete_edge_read_plan(
     }
 }
 
+fn create_relationship_node_scan(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    source: bool,
+) -> crate::query::physical_plan::PhysicalNodeScan {
+    if source {
+        crate::query::physical_plan::PhysicalNodeScan {
+            optional: false,
+            var: plan.source_var.clone(),
+            table_oid: plan.source_table_oid,
+            label: plan.source_label.clone(),
+            returns: Vec::new(),
+            distinct_stages: Vec::new(),
+            distinct: false,
+            predicate: plan.source_predicate.clone(),
+            identity_lookup: None,
+            order_by: Vec::new(),
+            skip: None,
+            limit: None,
+        }
+    } else {
+        crate::query::physical_plan::PhysicalNodeScan {
+            optional: false,
+            var: plan.target_var.clone(),
+            table_oid: plan.target_table_oid,
+            label: plan.target_label.clone(),
+            returns: Vec::new(),
+            distinct_stages: Vec::new(),
+            distinct: false,
+            predicate: plan.target_predicate.clone(),
+            identity_lookup: None,
+            order_by: Vec::new(),
+            skip: None,
+            limit: None,
+        }
+    }
+}
+
+fn matched_create_relationship_endpoint(
+    scan: &crate::query::physical_plan::PhysicalNodeScan,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<crate::query::execute::GqlNodeRow> {
+    let matches = ENGINE.with(|engine| {
+        crate::query::execute::execute_node_scan(&engine.borrow(), scan, tenant_scope, params)
+    })?;
+    let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
+    let matches = crate::query::value::filter_node_rows(matches, scan, &hydrated, params)?;
+    let [row] = matches.as_slice() else {
+        return Err(safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL relationship CREATE requires exactly one matched `{}` endpoint, found {}",
+                scan.label,
+                matches.len()
+            ),
+        });
+    };
+    Ok(row.clone())
+}
+
 struct MatchedEdgeIds {
     source_id: String,
     target_id: String,
@@ -623,6 +764,10 @@ fn matched_edge_ids(row: &crate::query::execute::GqlRow) -> safety::GraphResult<
 struct CreatedNode {
     node_id: String,
     tenant: Option<String>,
+    row: serde_json::Value,
+}
+
+struct CreatedRelationship {
     row: serde_json::Value,
 }
 
@@ -742,6 +887,53 @@ fn insert_mapped_node(
             tenant,
             row: row_json.0,
         })
+    })
+}
+
+fn insert_mapped_relationship(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    source_id: &str,
+    target_id: &str,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<CreatedRelationship> {
+    let table_name = regclass_text(plan.edge_table_oid)?;
+    let insert_shape = create_relationship_insert_shape(plan)?;
+    let values =
+        create_relationship_values_json(plan, &insert_shape, source_id, target_id, params)?;
+    let query = format!(
+        "WITH inserted AS (
+             INSERT INTO {table_name} ({})
+             SELECT {}
+             FROM jsonb_populate_record(NULL::{table_name}, $1::jsonb) AS rec
+             RETURNING *
+         )
+         SELECT to_jsonb(inserted.*)
+         FROM inserted",
+        insert_shape.columns.join(", "),
+        insert_shape.selectors.join(", "),
+    );
+    pgrx::Spi::connect_mut(|client| {
+        let rows = client
+            .update(&query, None, &[pgrx::JsonB(values).into()])
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL relationship CREATE insert failed for {table_name}: {err}"
+                ))
+            })?;
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL relationship CREATE row read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "GQL relationship CREATE returned no row JSON".to_string(),
+                )
+            })?;
+        Ok(CreatedRelationship { row: row_json.0 })
     })
 }
 
@@ -1965,6 +2157,14 @@ struct CreateInsertShape {
     tenant_column: Option<String>,
 }
 
+struct RelationshipInsertShape {
+    columns: Vec<String>,
+    selectors: Vec<String>,
+    source_column: String,
+    target_column: String,
+    label_column: Option<String>,
+}
+
 fn create_insert_shape(
     plan: &crate::query::physical_plan::PhysicalCreateNode,
     tenant_column: Option<&str>,
@@ -1998,6 +2198,33 @@ fn create_insert_shape(
         selectors,
         tenant_column,
     }
+}
+
+fn create_relationship_insert_shape(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+) -> safety::GraphResult<RelationshipInsertShape> {
+    let mut columns = Vec::with_capacity(plan.properties.len() + 3);
+    let mut selectors = Vec::with_capacity(columns.capacity());
+    columns.push(quote_ident(&plan.edge_source_column));
+    selectors.push(format!("rec.{}", quote_ident(&plan.edge_source_column)));
+    columns.push(quote_ident(&plan.edge_target_column));
+    selectors.push(format!("rec.{}", quote_ident(&plan.edge_target_column)));
+    if let Some(label_column) = &plan.label_column {
+        columns.push(quote_ident(label_column));
+        selectors.push(format!("rec.{}", quote_ident(label_column)));
+    }
+    for property in &plan.properties {
+        validate_column_exists(plan.edge_table_oid, &property.property)?;
+        columns.push(quote_ident(&property.property));
+        selectors.push(format!("rec.{}", quote_ident(&property.property)));
+    }
+    Ok(RelationshipInsertShape {
+        columns,
+        selectors,
+        source_column: plan.edge_source_column.clone(),
+        target_column: plan.edge_target_column.clone(),
+        label_column: plan.label_column.clone(),
+    })
 }
 
 fn merge_insert_shape(
@@ -2040,6 +2267,119 @@ fn merge_insert_shape(
         selectors,
         tenant_column,
     }
+}
+
+fn create_relationship_values_json(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    insert_shape: &RelationshipInsertShape,
+    source_id: &str,
+    target_id: &str,
+    params: &crate::query::value::QueryParams,
+) -> safety::GraphResult<serde_json::Value> {
+    let mut values = serde_json::Map::with_capacity(plan.properties.len() + 3);
+    values.insert(
+        insert_shape.source_column.clone(),
+        serde_json::Value::String(source_id.to_string()),
+    );
+    values.insert(
+        insert_shape.target_column.clone(),
+        serde_json::Value::String(target_id.to_string()),
+    );
+    if let Some(label_column) = &insert_shape.label_column {
+        values.insert(
+            label_column.clone(),
+            serde_json::Value::String(plan.rel_type.clone()),
+        );
+    }
+    for property in &plan.properties {
+        values.insert(
+            property.property.clone(),
+            write_value_json(&property.value, params)?,
+        );
+    }
+    Ok(serde_json::Value::Object(values))
+}
+
+fn record_added_relationship_delta(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    source_id: &str,
+    target_id: &str,
+    tenant_scope: Option<&str>,
+) -> safety::GraphResult<()> {
+    let (source, target, type_id) = ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        let source = resolve_built_or_added_node(
+            &engine,
+            plan.edge_source_table_oid,
+            source_id,
+            tenant_scope,
+            "source",
+        )?;
+        let target = resolve_built_or_added_node(
+            &engine,
+            plan.edge_target_table_oid,
+            target_id,
+            tenant_scope,
+            "target",
+        )?;
+        let type_id = engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == &plan.rel_type)
+            .map(|index| index as u8)
+            .ok_or_else(|| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "relationship type `{}` is not present in the built graph",
+                    plan.rel_type
+                ),
+            })?;
+        Ok::<_, safety::GraphError>((source, target, type_id))
+    })?;
+    crate::projection::tx_delta::record_added_edge(
+        source,
+        crate::projection::tx_delta::DeltaEdge {
+            target,
+            type_id,
+            schema_reversed: false,
+            weight: None,
+        },
+    )?;
+    if plan.bidirectional {
+        crate::projection::tx_delta::record_added_edge(
+            target,
+            crate::projection::tx_delta::DeltaEdge {
+                target: source,
+                type_id,
+                schema_reversed: true,
+                weight: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_built_or_added_node(
+    engine: &crate::engine::Engine,
+    table_oid: u32,
+    node_id: &str,
+    tenant_scope: Option<&str>,
+    role: &str,
+) -> safety::GraphResult<u32> {
+    if let Some(node_idx) = engine.resolve(table_oid, node_id) {
+        return Ok(node_idx);
+    }
+    let table_is_tenanted = engine.tenanted_table_oids.contains(&table_oid);
+    crate::projection::tx_delta::resolve_added_node(
+        table_oid,
+        node_id,
+        tenant_scope,
+        table_is_tenanted,
+    )
+    .ok_or_else(|| safety::GraphError::GqlExecution {
+        reason: format!(
+            "GQL relationship CREATE {role} node `{node_id}` is not in the built graph or transaction delta"
+        ),
+    })
 }
 
 fn ensure_mutable_projection(operation: &str) -> safety::GraphResult<()> {
@@ -2189,6 +2529,53 @@ fn project_created_node(
         }
     }
     serde_json::Value::Object(output)
+}
+
+fn project_created_relationship(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    source_id: &str,
+    target_id: &str,
+    created: CreatedRelationship,
+    hydrate: bool,
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    let mut output = serde_json::Map::new();
+    for slot in &plan.returns {
+        match slot {
+            crate::query::physical_plan::ReturnSlot::Node { side, name } => {
+                let value =
+                    created_relationship_node_value(plan, *side, source_id, target_id, hydrate)?;
+                output.insert(name.clone(), value);
+            }
+            crate::query::physical_plan::ReturnSlot::Relationship { name } => {
+                output.insert(
+                    name.clone(),
+                    created_relationship_value(plan, source_id, target_id, &created, hydrate),
+                );
+            }
+            crate::query::physical_plan::ReturnSlot::Property {
+                side,
+                property,
+                name,
+            } => {
+                let value = created_relationship_node_property(
+                    plan, *side, source_id, target_id, property,
+                )?;
+                output.insert(name.clone(), value);
+            }
+            crate::query::physical_plan::ReturnSlot::Path { .. }
+            | crate::query::physical_plan::ReturnSlot::PathFunction { .. }
+            | crate::query::physical_plan::ReturnSlot::Projected { .. }
+            | crate::query::physical_plan::ReturnSlot::Aggregate { .. } => {
+                return Err(safety::GraphError::GqlExecution {
+                    reason: format!(
+                        "relationship CREATE cannot project return slot `{}`",
+                        slot.name()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(vec![serde_json::Value::Object(output)])
 }
 
 fn project_merged_node(
@@ -2395,6 +2782,117 @@ fn detach_deleted_node_value(
         serde_json::Value::Array(vec![serde_json::Value::String(plan.label.clone())]),
     );
     serde_json::Value::Object(node)
+}
+
+fn created_relationship_node_value(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    side: crate::query::logical_plan::BindingSide,
+    source_id: &str,
+    target_id: &str,
+    hydrate: bool,
+) -> safety::GraphResult<serde_json::Value> {
+    let (table_oid, label, node_id) =
+        created_relationship_node_parts(plan, side, source_id, target_id)?;
+    let mut node = if hydrate {
+        hydrate_required_node(&crate::query::execute::GqlNodeCoordinate {
+            table_oid,
+            node_id: node_id.to_string(),
+        })?
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    node.insert(
+        "_id".to_string(),
+        serde_json::json!({
+            "table": label,
+            "id": node_id,
+        }),
+    );
+    node.insert(
+        "_labels".to_string(),
+        serde_json::Value::Array(vec![serde_json::Value::String(label.to_string())]),
+    );
+    Ok(serde_json::Value::Object(node))
+}
+
+fn created_relationship_node_property(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    side: crate::query::logical_plan::BindingSide,
+    source_id: &str,
+    target_id: &str,
+    property: &str,
+) -> safety::GraphResult<serde_json::Value> {
+    let (table_oid, _, node_id) =
+        created_relationship_node_parts(plan, side, source_id, target_id)?;
+    let row = hydrate_required_node(&crate::query::execute::GqlNodeCoordinate {
+        table_oid,
+        node_id: node_id.to_string(),
+    })?;
+    Ok(row_property_value(&row, property))
+}
+
+fn created_relationship_node_parts<'a>(
+    plan: &'a crate::query::physical_plan::PhysicalCreateRelationship,
+    side: crate::query::logical_plan::BindingSide,
+    source_id: &'a str,
+    target_id: &'a str,
+) -> safety::GraphResult<(u32, &'a str, &'a str)> {
+    match side {
+        crate::query::logical_plan::BindingSide::Source => {
+            Ok((plan.source_table_oid, &plan.source_label, source_id))
+        }
+        crate::query::logical_plan::BindingSide::Target => {
+            Ok((plan.target_table_oid, &plan.target_label, target_id))
+        }
+        crate::query::logical_plan::BindingSide::PathNode(_) => {
+            Err(safety::GraphError::GqlExecution {
+                reason: "relationship CREATE cannot project path-node return slots".to_string(),
+            })
+        }
+    }
+}
+
+fn created_relationship_value(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    source_id: &str,
+    target_id: &str,
+    created: &CreatedRelationship,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut relationship = serde_json::json!({
+        "_type": &plan.rel_type,
+        "_start": created_relationship_endpoint(&plan.source_label, source_id),
+        "_end": created_relationship_endpoint(&plan.target_label, target_id),
+    });
+    if hydrate {
+        merge_created_relationship_properties(&mut relationship, &created.row);
+    }
+    relationship
+}
+
+fn created_relationship_endpoint(label: &str, node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "table": label,
+        "id": node_id,
+    })
+}
+
+fn merge_created_relationship_properties(
+    relationship: &mut serde_json::Value,
+    row: &serde_json::Value,
+) {
+    let (Some(relationship), Some(row)) = (relationship.as_object_mut(), row.as_object()) else {
+        return;
+    };
+    for (key, value) in row {
+        if key.starts_with('_') {
+            continue;
+        }
+        relationship.insert(key.clone(), value.clone());
+    }
 }
 
 fn row_property_value(row: &serde_json::Value, property: &str) -> serde_json::Value {

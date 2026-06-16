@@ -511,6 +511,30 @@ fn binder_accepts_delete_for_mapped_edge_row() {
 }
 
 #[test]
+fn binder_accepts_create_for_mapped_edge_row() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users {id: 'u1'}), (v:users {id: 'u2'})
+         CREATE (u)-[r:friend {id: 'f2'}]->(v)
+         RETURN u, r, v",
+    )
+    .unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::CreateRelationship(create) = plan else {
+        panic!("expected create relationship plan");
+    };
+
+    assert_eq!(create.source.var, "u");
+    assert_eq!(create.target.var, "v");
+    assert_eq!(create.relationship.rel_type, "friend");
+    assert_eq!(create.rel_var, "r");
+    assert_eq!(create.edge.edge_table_oid, 30);
+    assert_eq!(create.edge.source_column, "user_id");
+    assert_eq!(create.edge.target_column, "friend_id");
+    assert_eq!(create.properties[0].property, "id");
+    assert_eq!(create.returns.len(), 3);
+}
+
+#[test]
 fn binder_accepts_wildcard_delete_for_unique_mapped_edge_row() {
     let ast = crate::gql::parse_statement("MATCH ()-[r]->() DELETE r RETURN r").unwrap();
     let plan = bind_statement(&ast, &fake_catalog()).unwrap();
@@ -4731,20 +4755,38 @@ fn executor_node_scan_keeps_unscoped_transaction_nodes_for_nontenanted_tables() 
 }
 
 #[test]
-fn executor_rejects_transaction_created_node_traversal_entry_points() {
+fn executor_traverses_transaction_created_node_entry_points() {
     crate::projection::tx_delta::clear_for_test();
     let physical = lower(bind_query(
         "MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c",
     ));
     let engine = engine_fixture();
-    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+    let node_idx = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        None,
+        engine.node_store.node_count(),
+    )
+    .expect("record tx node");
+    crate::projection::tx_delta::record_added_edge(
+        node_idx,
+        crate::projection::tx_delta::DeltaEdge {
+            target: 2,
+            type_id: 1,
+            schema_reversed: false,
+            weight: None,
+        },
+    )
+    .expect("record tx edge");
 
-    let err = execute(&engine, &physical, None).unwrap_err();
+    let rows = execute(&engine, &physical, None).unwrap();
 
-    assert!(matches!(err, GraphError::GqlExecution { .. }));
-    assert!(err
-        .to_string()
-        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().any(|row| row.source.node_id == "u3"
+        && row
+            .target
+            .as_ref()
+            .is_some_and(|target| target.node_id == "c1")));
     crate::projection::tx_delta::clear_for_test();
 }
 
@@ -4796,27 +4838,40 @@ fn executor_allows_tx_nodes_excluded_by_contradictory_source_ids() {
 }
 
 #[test]
-fn executor_rejects_tx_nodes_matching_source_id_disjunctions() {
+fn executor_traverses_tx_nodes_matching_source_id_disjunctions() {
     crate::projection::tx_delta::clear_for_test();
     let physical = lower(bind_query(
         "MATCH (u:users)-[:works_at]->(c:companies) \
-         WHERE u.id = 'u1' OR u.id = 'u2' \
+         WHERE u.id = 'u1' OR u.id = 'u3' \
          RETURN u, c",
     ));
     let engine = engine_fixture();
-    crate::projection::tx_delta::record_added_node(10, "u2", None).expect("record tx node");
+    let node_idx = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        None,
+        engine.node_store.node_count(),
+    )
+    .expect("record tx node");
+    crate::projection::tx_delta::record_added_edge(
+        node_idx,
+        crate::projection::tx_delta::DeltaEdge {
+            target: 2,
+            type_id: 1,
+            schema_reversed: false,
+            weight: None,
+        },
+    )
+    .expect("record tx edge");
 
-    let err = execute(&engine, &physical, None).unwrap_err();
+    let rows = execute(&engine, &physical, None).unwrap();
 
-    assert!(matches!(err, GraphError::GqlExecution { .. }));
-    assert!(err
-        .to_string()
-        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    assert!(rows.iter().any(|row| row.source.node_id == "u3"));
     crate::projection::tx_delta::clear_for_test();
 }
 
 #[test]
-fn multi_pattern_join_rejects_transaction_created_node_entry_points() {
+fn multi_pattern_join_traverses_transaction_created_node_entry_points() {
     crate::projection::tx_delta::clear_for_test();
     let statement = bind_statement_query(
         "MATCH (u:users)-[:works_at]->(c:companies), \
@@ -4832,14 +4887,32 @@ fn multi_pattern_join_rejects_transaction_created_node_entry_points() {
         panic!("expected physical join read plan");
     };
     let engine = engine_fixture();
-    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+    let node_idx = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        None,
+        engine.node_store.node_count(),
+    )
+    .expect("record tx node");
+    crate::projection::tx_delta::record_added_edge(
+        node_idx,
+        crate::projection::tx_delta::DeltaEdge {
+            target: 2,
+            type_id: 1,
+            schema_reversed: false,
+            weight: None,
+        },
+    )
+    .expect("record tx edge");
 
-    let err = execute_join(&engine, &physical, None).unwrap_err();
+    let rows = execute_join(&engine, &physical, None).unwrap();
 
-    assert!(matches!(err, GraphError::GqlExecution { .. }));
-    assert!(err
-        .to_string()
-        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    assert!(rows.iter().any(|row| row
+        .join_node_slots
+        .as_ref()
+        .and_then(|slots| slots.first())
+        .and_then(Option::as_ref)
+        .is_some_and(|node| node.node_id == "u3")));
     crate::projection::tx_delta::clear_for_test();
 }
 
@@ -4869,7 +4942,7 @@ fn multi_pattern_join_allows_tx_nodes_for_bound_later_source_slots() {
 }
 
 #[test]
-fn wildcard_path_rejects_transaction_created_node_entry_points() {
+fn wildcard_path_traverses_transaction_created_node_entry_points() {
     crate::projection::tx_delta::clear_for_test();
     let statement = bind_statement_query("MATCH p=(u:users)-[]->() RETURN p, u");
     let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
@@ -4881,14 +4954,29 @@ fn wildcard_path_rejects_transaction_created_node_entry_points() {
         panic!("expected physical wildcard path plan");
     };
     let engine = engine_fixture();
-    crate::projection::tx_delta::record_added_node(10, "u3", None).expect("record tx node");
+    let node_idx = crate::projection::tx_delta::record_added_node_indexed(
+        10,
+        "u3",
+        None,
+        engine.node_store.node_count(),
+    )
+    .expect("record tx node");
+    crate::projection::tx_delta::record_added_edge(
+        node_idx,
+        crate::projection::tx_delta::DeltaEdge {
+            target: 2,
+            type_id: 1,
+            schema_reversed: false,
+            weight: None,
+        },
+    )
+    .expect("record tx edge");
 
-    let err = execute_wildcard_path(&engine, &physical, None).unwrap_err();
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
 
-    assert!(matches!(err, GraphError::GqlExecution { .. }));
-    assert!(err
-        .to_string()
-        .contains("transaction-created nodes cannot be used as traversal entry points"));
+    assert!(rows.iter().any(|row| row.source.node_id == "u3"
+        && row.path_nodes.len() == 2
+        && row.path_nodes[1].node_id == "c1"));
     crate::projection::tx_delta::clear_for_test();
 }
 

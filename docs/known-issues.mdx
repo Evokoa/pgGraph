@@ -45,7 +45,7 @@ production use.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-002 | Transaction-created nodes are visible to node-only GQL reads, while traversal/path reads still require materialized graph node indexes. | Typed rejection | Concrete traversal, multi-pattern join, and wildcard path entry-point scans now reject matching transaction-created nodes with a typed GQL execution error until temporary-ID traversal support is implemented. |
+| KI-002 | Transaction-created nodes must participate in later reads without becoming durable graph-only state. | Hardened | GQL node `CREATE`/`MERGE` now assigns backend-local temporary graph node indexes. Node-only reads, concrete traversal, multi-pattern joins, wildcard paths, and relationship `CREATE` can use those nodes within the same top-level PostgreSQL transaction. |
 | KI-003 | The GQL and Cypher parser surfaces need dedicated fuzz targets beyond unit and pgrx coverage. | Coverage added | `gql_parser` and `cypher_parser` fuzz targets now exercise the pgrx-free parser frontends with seed corpora for path variables, wildcard deletes, compatible Cypher matches, and unsupported Cypher calls. Sustained fuzz execution remains a release-environment activity because it requires `cargo-fuzz` and the pgrx fuzz build path. |
 
 ### SQL Safety and Schema Plumbing

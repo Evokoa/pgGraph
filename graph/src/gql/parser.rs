@@ -1,11 +1,12 @@
 //! Recursive-descent parser for the supported GQL subset.
 
 use super::ast::{
-    AggregateArg, AggregateFunc, CmpOp, CreateClause, CreateQuery, DeleteClause, DeleteQuery,
-    DetachDeleteClause, DetachDeleteQuery, Direction, Expr, Ident, Literal, LiteralValue,
-    MatchClause, MergeClause, MergeQuery, NodePat, Operand, Pattern, PropertyRef, Query, RelPat,
-    RemoveClause, RemoveQuery, RemoveTarget, ReturnClause, ReturnExpr, ReturnItem, SetClause,
-    SetQuery, SortItem, SortKey, Statement, VarLen, WithClause,
+    AggregateArg, AggregateFunc, CmpOp, CreateClause, CreateQuery, CreateRelationshipClause,
+    CreateRelationshipQuery, DeleteClause, DeleteQuery, DetachDeleteClause, DetachDeleteQuery,
+    Direction, Expr, Ident, Literal, LiteralValue, MatchClause, MergeClause, MergeQuery, NodePat,
+    Operand, Pattern, PropertyRef, Query, RelPat, RemoveClause, RemoveQuery, RemoveTarget,
+    ReturnClause, ReturnExpr, ReturnItem, SetClause, SetQuery, SortItem, SortKey, Statement,
+    VarLen, WithClause,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
@@ -57,6 +58,12 @@ impl Parser {
         match self.peek() {
             TokKind::Create => self.parse_create_query().map(Statement::Create),
             TokKind::Merge => self.parse_merge_query().map(Statement::Merge),
+            TokKind::Match | TokKind::Optional
+                if self.statement_contains_create_before_return() =>
+            {
+                self.parse_create_relationship_query()
+                    .map(Statement::CreateRelationship)
+            }
             TokKind::Match | TokKind::Optional if self.statement_contains_set_before_return() => {
                 self.parse_set_query().map(Statement::Set)
             }
@@ -81,11 +88,11 @@ impl Parser {
     }
 
     fn statement_contains_set_before_return(&self) -> bool {
-        self.tokens
-            .iter()
-            .skip(self.pos)
-            .take_while(|token| token.kind != TokKind::Return && token.kind != TokKind::Eof)
-            .any(|token| token.kind == TokKind::Set)
+        self.statement_contains_before_return(TokKind::Set)
+    }
+
+    fn statement_contains_create_before_return(&self) -> bool {
+        self.statement_contains_before_return(TokKind::Create)
     }
 
     fn statement_contains_delete_before_return(&self) -> bool {
@@ -160,6 +167,22 @@ impl Parser {
         let end = self.expect(TokKind::Eof, "expected end of query")?.span.end as usize;
 
         Ok(CreateQuery {
+            create,
+            return_,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_create_relationship_query(&mut self) -> Result<CreateRelationshipQuery, GqlError> {
+        let start = self.current().span.start as usize;
+        let match_ = self.parse_match_clause()?;
+        let create = self.parse_create_relationship_clause()?;
+        let return_ = self.parse_return_clause()?;
+        self.reject_known_later_clauses()?;
+        let end = self.expect(TokKind::Eof, "expected end of query")?.span.end as usize;
+
+        Ok(CreateRelationshipQuery {
+            match_,
             create,
             return_,
             span: Span::new(start, end),
@@ -305,6 +328,18 @@ impl Parser {
         Ok(CreateClause {
             span: Span::new(start, node.span.end as usize),
             node,
+        })
+    }
+
+    fn parse_create_relationship_clause(&mut self) -> Result<CreateRelationshipClause, GqlError> {
+        let start = self
+            .expect(TokKind::Create, "expected CREATE clause")?
+            .span
+            .start as usize;
+        let pattern = self.parse_pattern()?;
+        Ok(CreateRelationshipClause {
+            span: Span::new(start, pattern.span.end as usize),
+            pattern,
         })
     }
 

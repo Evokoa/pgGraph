@@ -10,11 +10,12 @@ use super::catalog_snapshot::{CatalogSnapshot, EdgeMappingInfo, NodeLabelInfo, R
 use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundIncidentEdge,
     BoundMappedEdge, BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue,
-    HopBounds, LogicalCreateNode, LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalJoinNodeSlot,
-    LogicalJoinPathSlot, LogicalJoinPattern, LogicalJoinPlan, LogicalJoinRelSlot, LogicalMergeNode,
-    LogicalNodeScan, LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement,
-    LogicalWildcardPathPlan, LogicalWildcardPathSegment, PathFunc, Predicate, ReturnBinding,
-    SortBinding, SortBindingKey, ValueExpr,
+    HopBounds, LogicalCreateNode, LogicalCreateRelationship, LogicalDeleteEdge,
+    LogicalDetachDeleteNode, LogicalJoinNodeSlot, LogicalJoinPathSlot, LogicalJoinPattern,
+    LogicalJoinPlan, LogicalJoinRelSlot, LogicalMergeNode, LogicalNodeScan, LogicalPlan,
+    LogicalRemoveProperty, LogicalSetProperty, LogicalStatement, LogicalWildcardPathPlan,
+    LogicalWildcardPathSegment, PathFunc, Predicate, ReturnBinding, SortBinding, SortBindingKey,
+    ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -152,6 +153,9 @@ pub(crate) fn bind_statement(
         crate::gql::ast::Statement::Read(query) => bind(query, catalog).map(LogicalStatement::Read),
         crate::gql::ast::Statement::Create(query) => {
             bind_create_node(query, catalog).map(LogicalStatement::CreateNode)
+        }
+        crate::gql::ast::Statement::CreateRelationship(query) => {
+            bind_create_relationship(query, catalog).map(LogicalStatement::CreateRelationship)
         }
         crate::gql::ast::Statement::Set(query) => {
             bind_set_property(query, catalog).map(LogicalStatement::SetProperty)
@@ -2071,6 +2075,133 @@ fn bind_create_node(
     })
 }
 
+fn bind_create_relationship(
+    query: &crate::gql::ast::CreateRelationshipQuery,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalCreateRelationship, GqlError> {
+    if query.match_.optional {
+        return Err(GqlError::unsupported(
+            query.match_.span,
+            "OPTIONAL MATCH is only supported for read queries",
+        ));
+    }
+    if query.return_.distinct {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN DISTINCT over relationship CREATE is implemented in a later phase",
+        ));
+    }
+    let matched_nodes = bind_create_relationship_match_nodes(&query.match_, catalog)?;
+    let Pattern { start, tail, .. } = &query.create.pattern;
+    let [(rel_pat, target_pat)] = tail.as_slice() else {
+        return Err(GqlError::unsupported(
+            query.create.pattern.span,
+            "relationship CREATE requires exactly one relationship pattern",
+        ));
+    };
+    if query.create.pattern.path_var.is_some() {
+        return Err(GqlError::unsupported(
+            query.create.pattern.span,
+            "path variables in relationship CREATE are not supported",
+        ));
+    }
+    if rel_pat.direction != Direction::Out {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "relationship CREATE requires a directed outbound pattern",
+        ));
+    }
+    if rel_pat.var_len.is_some() {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "relationship CREATE supports only one edge row",
+        ));
+    }
+    let rel_var = rel_pat.var.as_ref().ok_or_else(|| {
+        GqlError::bind(
+            rel_pat.span,
+            "relationship CREATE requires a named relationship variable",
+        )
+    })?;
+    let source_var = required_node_var(start, "relationship CREATE source")?;
+    let target_var = required_node_var(target_pat, "relationship CREATE target")?;
+    let (source, source_predicate) =
+        matched_nodes
+            .get(&source_var.text)
+            .cloned()
+            .ok_or_else(|| {
+                GqlError::bind(
+                    source_var.span,
+                    format!(
+                        "relationship CREATE source variable `{}` must be bound by MATCH",
+                        source_var.text
+                    ),
+                )
+            })?;
+    let (target, target_predicate) =
+        matched_nodes
+            .get(&target_var.text)
+            .cloned()
+            .ok_or_else(|| {
+                GqlError::bind(
+                    target_var.span,
+                    format!(
+                        "relationship CREATE target variable `{}` must be bound by MATCH",
+                        target_var.text
+                    ),
+                )
+            })?;
+    let rel_type = require_single_relationship_type(
+        rel_pat,
+        "relationship CREATE requires a concrete relationship type",
+        "relationship type alternation in CREATE requires a later phase",
+    )?;
+    let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
+    let edge_mapping = rel_info.edge_mapping.clone().ok_or_else(|| {
+        GqlError::unsupported(
+            rel_pat.span,
+            "CREATE requires a relationship backed by a registered edge row table",
+        )
+    })?;
+    let properties = bind_create_relationship_properties(rel_pat, &edge_mapping)?;
+    let scope = initial_relationship_scope(rel_pat, target_pat, &source, &target)?;
+    let returns = bind_scoped_returns(&query.return_.items, &scope, &source, &target)?;
+    if returns.iter().any(ReturnBinding::is_aggregate) {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN aggregates over relationship CREATE are implemented in a later phase",
+        ));
+    }
+    Ok(LogicalCreateRelationship {
+        source,
+        source_predicate,
+        relationship: BoundRel {
+            var: Some(rel_var.text.clone()),
+            rel_type: rel_info.rel_type,
+            direction: BoundDirection::Out,
+            hops: HopBounds {
+                variable: false,
+                min: 1,
+                max: 1,
+            },
+            edge_mapping: Some(edge_mapping.clone()),
+        },
+        rel_var: rel_var.text.clone(),
+        target,
+        target_predicate,
+        edge: BoundMappedEdge {
+            edge_table_oid: edge_mapping.edge_table_oid,
+            source_table_oid: edge_mapping.source_table_oid,
+            target_table_oid: edge_mapping.target_table_oid,
+            source_column: edge_mapping.source_column,
+            target_column: edge_mapping.target_column,
+            bidirectional: edge_mapping.bidirectional,
+        },
+        properties,
+        returns,
+    })
+}
+
 fn bind_merge_node(
     query: &crate::gql::ast::MergeQuery,
     catalog: &impl CatalogSnapshot,
@@ -2162,6 +2293,44 @@ fn bind_merge_set_property(
     })
 }
 
+fn bind_create_relationship_match_nodes(
+    match_: &MatchClause,
+    catalog: &impl CatalogSnapshot,
+) -> Result<std::collections::BTreeMap<String, (BoundNode, Option<Predicate>)>, GqlError> {
+    let mut nodes = std::collections::BTreeMap::new();
+    for pattern in &match_.patterns {
+        if !pattern.tail.is_empty() || pattern.path_var.is_some() {
+            return Err(GqlError::unsupported(
+                pattern.span,
+                "relationship CREATE endpoint MATCH clauses must be node-only patterns",
+            ));
+        }
+        let var = required_node_var(&pattern.start, "relationship CREATE endpoint MATCH")?;
+        if nodes.contains_key(&var.text) {
+            return Err(GqlError::bind(
+                var.span,
+                format!(
+                    "duplicate relationship CREATE endpoint variable `{}`",
+                    var.text
+                ),
+            ));
+        }
+        let node = bind_node(&pattern.start, catalog)?;
+        let predicate = bind_node_predicates(None, &pattern.start, &node)?;
+        nodes.insert(var.text.clone(), (node, predicate));
+    }
+    Ok(nodes)
+}
+
+fn required_node_var<'a>(
+    node: &'a NodePat,
+    context: &'static str,
+) -> Result<&'a crate::gql::ast::Ident, GqlError> {
+    node.var
+        .as_ref()
+        .ok_or_else(|| GqlError::bind(node.span, format!("{context} requires a node variable")))
+}
+
 fn bind_create_properties(
     node_pat: &NodePat,
     node: &BoundNode,
@@ -2191,6 +2360,55 @@ fn bind_create_properties(
         properties.push(CreateProperty {
             property: key.text.clone(),
             value,
+        });
+    }
+    Ok(properties)
+}
+
+fn bind_create_relationship_properties(
+    rel_pat: &RelPat,
+    edge_mapping: &EdgeMappingInfo,
+) -> Result<Vec<CreateProperty>, GqlError> {
+    let mut reserved = std::collections::BTreeSet::from([
+        edge_mapping.source_column.as_str(),
+        edge_mapping.target_column.as_str(),
+    ]);
+    if let Some(label_column) = edge_mapping.label_column.as_deref() {
+        reserved.insert(label_column);
+    }
+    let mut seen = std::collections::HashSet::with_capacity(rel_pat.props.len());
+    let mut properties = Vec::with_capacity(rel_pat.props.len());
+    for (key, value) in &rel_pat.props {
+        if key.text.contains('.') {
+            return Err(GqlError::unsupported(
+                key.span,
+                "relationship CREATE writes to jsonb property paths require a later write phase",
+            ));
+        }
+        if key.text.starts_with('_') {
+            return Err(GqlError::bind(
+                key.span,
+                format!("reserved GQL relationship property key `{}`", key.text),
+            ));
+        }
+        if reserved.contains(key.text.as_str()) {
+            return Err(GqlError::bind(
+                key.span,
+                format!(
+                    "relationship CREATE fills mapped edge column `{}` from the graph pattern",
+                    key.text
+                ),
+            ));
+        }
+        if !seen.insert(key.text.as_str()) {
+            return Err(GqlError::bind(
+                key.span,
+                format!("duplicate relationship CREATE property `{}`", key.text),
+            ));
+        }
+        properties.push(CreateProperty {
+            property: key.text.clone(),
+            value: bind_create_value(value)?,
         });
     }
     Ok(properties)

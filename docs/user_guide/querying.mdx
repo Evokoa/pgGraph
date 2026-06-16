@@ -295,13 +295,14 @@ Planned outside this subset:
   inputs, and numeric aggregates over relationship/path values.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
-row into a registered source table, `SET` can update one mapped property on
-one matched node, `REMOVE` can clear one mapped property on one matched node,
-and directed `DELETE` can remove one matched relationship backed by a
-registered edge row table. `DETACH DELETE` can remove one matched node and its
-incident registered edge-row relationships. `MERGE` can insert one mapped node
-or match one mapped node by registered primary-key identity and run one branch update. These
-writes require that the active graph was built with
+row into a registered source table or one directed relationship row into a
+registered edge row table. `SET` can update one mapped property on one matched
+node, `REMOVE` can clear one mapped property on one matched node, and directed
+`DELETE` can remove one matched relationship backed by a registered edge row
+table. `DETACH DELETE` can remove one matched node and its incident registered
+edge-row relationships. `MERGE` can insert one mapped node or match one mapped
+node by registered primary-key identity and run one branch update. These writes
+require that the active graph was built with
 `mode := 'mutable_overlay'` and `graph.mutable_enabled = on`:
 
 ```sql
@@ -309,6 +310,16 @@ SELECT row
 FROM graph.gql(
   'CREATE (c:customers {id: $id, name: $name}) RETURN c',
   params := '{"id":"c-42","name":"Ada"}'::jsonb
+);
+```
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (a:customers {id: $from}), (b:products {id: $to})
+   CREATE (a)-[r:purchased {id: $purchase_id}]->(b)
+   RETURN r',
+  params := '{"from":"c-42","to":"p-9","purchase_id":"e-77"}'::jsonb
 );
 ```
 
@@ -353,8 +364,11 @@ FROM graph.gql(
 );
 ```
 
-Dynamic relationship label-column mappings still require the fully concrete
-`MATCH (a:label)-[r:type]->(b:label) DELETE r` form.
+Dynamic relationship label-column mappings require fully concrete relationship
+types. For `CREATE`, pgGraph fills the registered label column with the
+relationship type from the GQL pattern. The type must already be present in the
+built graph's dynamic label registry; pgGraph does not create graph-only
+relationship types.
 
 ```sql
 SELECT row
@@ -384,19 +398,21 @@ the matched PostgreSQL source row at the final write boundary and re-checks
 the matched GQL predicate before mutating. If another transaction changes the
 source row so the predicate no longer matches, the statement fails instead of
 overwriting the concurrent change.
-Within the same transaction, node-only `MATCH` queries can read newly created
-nodes through the backend-local transaction delta. Relationship traversal,
-multi-pattern joins, and wildcard path reads reject transaction-created nodes
-when they would be used as traversal entry points because those rows do not yet
-have temporary graph node indexes for path expansion. `SET` updates registered
-non-key, non-tenant property columns and refreshes any registered typed filter index value
-for that backend. `REMOVE` sets a mapped scalar column to SQL `NULL` or removes
-a registered dotted key from a JSONB property column; repeated `REMOVE` calls
-are idempotent. Labels map to registered source tables, so label removal is not
-part of the supported write model. `DELETE` tombstones the matching graph edge
-in the current backend after PostgreSQL deletes exactly one edge row; endpoint
-nodes are not deleted. `DETACH DELETE` enumerates registered incident edge-row
-tables, deletes matching forward and reverse edge rows first, then deletes the
+Within the same transaction, node-only `MATCH`, relationship traversal,
+multi-pattern joins, wildcard path reads, and later relationship `CREATE`
+statements can read newly created nodes through backend-local temporary graph
+node indexes. `SET` updates registered non-key, non-tenant property columns and
+refreshes any registered typed filter index value for that backend. `REMOVE`
+sets a mapped scalar column to SQL `NULL` or removes a registered dotted key
+from a JSONB property column; repeated `REMOVE` calls are idempotent. Labels map
+to registered source tables, so label removal is not part of the supported
+write model. `CREATE` for relationships inserts exactly one registered edge row
+after matching and locking one source endpoint and one target endpoint; the new
+edge is visible through the transaction-local overlay. `DELETE` tombstones the
+matching graph edge in the current backend after PostgreSQL deletes exactly one
+edge row; endpoint nodes are not deleted. `DETACH DELETE` enumerates registered
+incident edge-row tables, deletes matching forward and reverse edge rows first,
+then deletes the
 matched node row and tombstones the node and deleted graph edges in the current
 backend. If any step fails, PostgreSQL aborts the statement and the source rows
 remain authoritative. `DETACH DELETE` rejects incident relationships that are
@@ -412,8 +428,10 @@ racing the same key converge on one PostgreSQL source row. `MERGE` requires
 `SELECT` and `INSERT` on the mapped source table; `UPDATE` is required only when
 the statement includes `ON MATCH SET`. `CREATE`, `SET`, `REMOVE`, `DELETE`,
 `DETACH DELETE`, and `MERGE` are rejected on `csr_readonly`
-projections. Relationship creation, multi-row writes, dynamic labels, and
-creating new PostgreSQL schema objects from GQL are future work.
+projections. GQL writes are not accepted inside savepoints or PL
+subtransactions because the backend-local graph overlay is scoped to the
+top-level PostgreSQL transaction. Multi-row graph writes and creating new
+PostgreSQL schema objects from GQL are not part of this release's GQL subset.
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
 planning stages without executing the query. Node-only matches constrained by

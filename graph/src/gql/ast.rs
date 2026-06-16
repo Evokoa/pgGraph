@@ -9,6 +9,8 @@ pub(crate) enum Statement {
     Read(Query),
     /// `CREATE` node write query.
     Create(CreateQuery),
+    /// `MATCH ... CREATE` relationship write query.
+    CreateRelationship(CreateRelationshipQuery),
     /// `MATCH ... SET ... RETURN` property write query.
     Set(SetQuery),
     /// `MATCH ... REMOVE ... RETURN` property/label write query.
@@ -58,6 +60,19 @@ pub(crate) struct WithClause {
 pub(crate) struct CreateQuery {
     /// Created node clause.
     pub(crate) create: CreateClause,
+    /// Required `RETURN` clause.
+    pub(crate) return_: ReturnClause,
+    /// Full query span.
+    pub(crate) span: Span,
+}
+
+/// Parsed mapped relationship creation query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateRelationshipQuery {
+    /// Required `MATCH` clause selecting endpoint nodes.
+    pub(crate) match_: MatchClause,
+    /// Relationship pattern to create between matched endpoint variables.
+    pub(crate) create: CreateRelationshipClause,
     /// Required `RETURN` clause.
     pub(crate) return_: ReturnClause,
     /// Full query span.
@@ -144,6 +159,15 @@ pub(crate) struct MergeQuery {
 pub(crate) struct CreateClause {
     /// Node to create.
     pub(crate) node: NodePat,
+    /// Clause span.
+    pub(crate) span: Span,
+}
+
+/// `CREATE` clause for one relationship pattern.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateRelationshipClause {
+    /// Directed relationship pattern to create.
+    pub(crate) pattern: Pattern,
     /// Clause span.
     pub(crate) span: Span,
 }

@@ -1772,10 +1772,23 @@ label maps to a registered source table. It requires a `mutable_overlay`
 projection and inserts the PostgreSQL source row first, so table privileges,
 constraints, triggers, RLS, and MVCC remain authoritative. `CREATE` is rejected
 on `csr_readonly`. The same transaction can read created nodes through
-node-only `MATCH`. Relationship traversal, multi-pattern joins, and wildcard
-path reads reject transaction-created nodes when they would be used as
-traversal entry points until temporary graph node indexes are available for
-path expansion.
+node-only `MATCH`, relationship traversal, multi-pattern joins, wildcard path
+reads, and later relationship `CREATE` statements through backend-local
+temporary graph node indexes.
+
+`MATCH (a:label {...}), (b:label {...}) CREATE (a)-[r:type {properties}]->(b)
+RETURN ...` is supported for a single directed relationship backed by a
+registered edge row table. pgGraph matches exactly one source endpoint and one
+target endpoint, locks and re-checks both endpoint predicates, inserts the
+PostgreSQL edge row first, and records a transaction-local graph edge so later
+reads in the same transaction can see the relationship. Relationship `CREATE`
+requires concrete endpoint labels, a concrete relationship type, and a named
+relationship variable. Properties map to ordinary edge-row columns; endpoint
+columns and a registered dynamic label column are filled from the graph pattern
+and cannot be supplied as user properties. For dynamic relationship
+label-column mappings, the GQL relationship type is written into the registered
+label column and must already exist in the built graph's dynamic label
+registry.
 
 `MATCH (n:label {...}) SET n.property = value RETURN ...` is supported for a
 single matched node and one registered non-key, non-tenant property column. It requires a
@@ -1812,8 +1825,8 @@ matched node. It requires a `mutable_overlay` projection, deletes registered
 incident edge-row relationships first, then deletes the PostgreSQL node row.
 The current backend records transaction-local edge and node tombstones so later
 reads in the same transaction do not see the deleted topology. Incident
-relationships must be backed by registered edge row tables. Relationship
-creation and multi-row writes are not part of this release's GQL subset.
+relationships must be backed by registered edge row tables. Multi-row graph
+writes are not part of this release's GQL subset.
 Before deleting incident edge rows or the node row, pgGraph locks the matched
 node source row and re-checks the matched GQL predicate against the current
 PostgreSQL row.

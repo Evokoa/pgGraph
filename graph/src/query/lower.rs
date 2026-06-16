@@ -1,18 +1,19 @@
 //! Lowering from logical GQL plans to executable physical plans.
 
 use super::logical_plan::{
-    CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalDeleteEdge,
-    LogicalDetachDeleteNode, LogicalJoinNodeSlot, LogicalJoinPathSlot, LogicalJoinPattern,
-    LogicalJoinPlan, LogicalJoinRelSlot, LogicalMergeNode, LogicalNodeScan, LogicalPlan,
-    LogicalRemoveProperty, LogicalSetProperty, LogicalStatement, LogicalWildcardPathPlan,
-    LogicalWildcardPathSegment, ReturnBinding,
+    CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalCreateRelationship,
+    LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalJoinNodeSlot, LogicalJoinPathSlot,
+    LogicalJoinPattern, LogicalJoinPlan, LogicalJoinRelSlot, LogicalMergeNode, LogicalNodeScan,
+    LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement,
+    LogicalWildcardPathPlan, LogicalWildcardPathSegment, ReturnBinding,
 };
 use super::physical_plan::{
-    CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalDeleteEdge,
-    PhysicalDetachDeleteNode, PhysicalIncidentEdge, PhysicalJoinNodeSlot, PhysicalJoinPathSlot,
-    PhysicalJoinPattern, PhysicalJoinPlan, PhysicalJoinRelSlot, PhysicalMergeNode,
-    PhysicalNodeScan, PhysicalPlan, PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement,
-    PhysicalWildcardPathPlan, PhysicalWildcardPathSegment, ReturnSlot,
+    CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode,
+    PhysicalCreateRelationship, PhysicalDeleteEdge, PhysicalDetachDeleteNode, PhysicalIncidentEdge,
+    PhysicalJoinNodeSlot, PhysicalJoinPathSlot, PhysicalJoinPattern, PhysicalJoinPlan,
+    PhysicalJoinRelSlot, PhysicalMergeNode, PhysicalNodeScan, PhysicalPlan, PhysicalRemoveProperty,
+    PhysicalSetProperty, PhysicalStatement, PhysicalWildcardPathPlan, PhysicalWildcardPathSegment,
+    ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
@@ -26,6 +27,9 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
         }
         LogicalStatement::CreateNode(plan) => {
             PhysicalStatement::CreateNode(lower_create_node(plan))
+        }
+        LogicalStatement::CreateRelationship(plan) => {
+            PhysicalStatement::CreateRelationship(lower_create_relationship(plan))
         }
         LogicalStatement::SetProperty(plan) => {
             PhysicalStatement::SetProperty(lower_set_property(plan))
@@ -302,6 +306,37 @@ fn lower_delete_edge(plan: LogicalDeleteEdge) -> PhysicalDeleteEdge {
         target_column: plan.edge.target_column,
         bidirectional: plan.edge.bidirectional,
         predicate: plan.predicate,
+        returns: lower_returns(plan.returns),
+    }
+}
+
+fn lower_create_relationship(plan: LogicalCreateRelationship) -> PhysicalCreateRelationship {
+    PhysicalCreateRelationship {
+        source_var: plan.source.var,
+        source_table_oid: plan.source.table_oid,
+        source_label: plan.source.label,
+        source_predicate: plan.source_predicate,
+        rel_type: plan.relationship.rel_type,
+        rel_var: plan.rel_var,
+        target_var: plan.target.var,
+        target_table_oid: plan.target.table_oid,
+        target_label: plan.target.label,
+        target_predicate: plan.target_predicate,
+        edge_table_oid: plan.edge.edge_table_oid,
+        edge_source_table_oid: plan.edge.source_table_oid,
+        edge_target_table_oid: plan.edge.target_table_oid,
+        edge_source_column: plan.edge.source_column,
+        edge_target_column: plan.edge.target_column,
+        bidirectional: plan.edge.bidirectional,
+        label_column: plan
+            .relationship
+            .edge_mapping
+            .and_then(|mapping| mapping.label_column),
+        properties: plan
+            .properties
+            .into_iter()
+            .map(lower_create_property)
+            .collect(),
         returns: lower_returns(plan.returns),
     }
 }

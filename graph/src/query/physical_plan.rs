@@ -25,6 +25,8 @@ pub(crate) enum PhysicalStatement {
     WildcardPathRead(PhysicalWildcardPathPlan),
     /// PostgreSQL-backed node creation.
     CreateNode(PhysicalCreateNode),
+    /// PostgreSQL-backed edge row creation.
+    CreateRelationship(PhysicalCreateRelationship),
     /// PostgreSQL-backed node property update.
     SetProperty(PhysicalSetProperty),
     /// PostgreSQL-backed node property removal.
@@ -324,6 +326,49 @@ pub(crate) struct PhysicalDeleteEdge {
     pub(crate) returns: Vec<ReturnSlot>,
 }
 
+/// Physical mapped edge row creation plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalCreateRelationship {
+    /// Source node variable.
+    pub(crate) source_var: String,
+    /// Source table OID in the query pattern.
+    pub(crate) source_table_oid: u32,
+    /// Source label.
+    pub(crate) source_label: String,
+    /// Optional hydrated-row predicate selecting the source row.
+    pub(crate) source_predicate: Option<Predicate>,
+    /// Relationship type label.
+    pub(crate) rel_type: String,
+    /// Created relationship variable.
+    pub(crate) rel_var: String,
+    /// Target node variable.
+    pub(crate) target_var: String,
+    /// Target table OID in the query pattern.
+    pub(crate) target_table_oid: u32,
+    /// Target label.
+    pub(crate) target_label: String,
+    /// Optional hydrated-row predicate selecting the target row.
+    pub(crate) target_predicate: Option<Predicate>,
+    /// Registered edge row table OID.
+    pub(crate) edge_table_oid: u32,
+    /// Registered source node table OID.
+    pub(crate) edge_source_table_oid: u32,
+    /// Registered target node table OID.
+    pub(crate) edge_target_table_oid: u32,
+    /// Edge row source key column.
+    pub(crate) edge_source_column: String,
+    /// Edge row target key column.
+    pub(crate) edge_target_column: String,
+    /// Whether the edge row is registered bidirectionally.
+    pub(crate) bidirectional: bool,
+    /// Dynamic relationship label column, when registered.
+    pub(crate) label_column: Option<String>,
+    /// Relationship properties to insert into PostgreSQL.
+    pub(crate) properties: Vec<CreatePropertySlot>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnSlot>,
+}
+
 /// Physical mapped node detach-delete plan.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PhysicalDetachDeleteNode {
@@ -615,6 +660,18 @@ impl PhysicalDeleteEdge {
     }
 
     /// Edge row table OID whose row will be deleted.
+    pub(crate) fn required_edge_table_oid(&self) -> u32 {
+        self.edge_table_oid
+    }
+}
+
+impl PhysicalCreateRelationship {
+    /// Table OIDs whose endpoint rows must be visible to the current SQL role.
+    pub(crate) fn required_node_table_oids(&self) -> [u32; 2] {
+        [self.source_table_oid, self.target_table_oid]
+    }
+
+    /// Edge row table OID whose row will be inserted.
     pub(crate) fn required_edge_table_oid(&self) -> u32 {
         self.edge_table_oid
     }

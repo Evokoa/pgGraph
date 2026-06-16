@@ -288,20 +288,33 @@ impl<'a> OverlayNeighborIter<'a> {
         }
     }
 
-    fn base_contains(&self, target: u32, type_id: u8) -> bool {
+    fn base_contains(&self, target: u32, type_id: u8, schema_reversed: bool) -> bool {
         self.targets
             .iter()
             .zip(self.type_ids.iter())
-            .any(|(&base_target, &base_type)| base_target == target && base_type == type_id)
+            .zip(self.base.schema_reversed.iter())
+            .any(|((&base_target, &base_type), &base_schema_reversed)| {
+                base_target == target
+                    && base_type == type_id
+                    && (base_schema_reversed != 0) == schema_reversed
+            })
     }
 
-    fn inserted_duplicate(&self, pos: usize, target: u32, type_id: u8) -> bool {
+    fn inserted_duplicate(
+        &self,
+        pos: usize,
+        target: u32,
+        type_id: u8,
+        schema_reversed: bool,
+    ) -> bool {
         self.inserted.is_some_and(|inserted| {
-            inserted[..pos]
-                .iter()
-                .any(|&(inserted_target, inserted_type, _)| {
-                    inserted_target == target && inserted_type == type_id
-                })
+            inserted[..pos].iter().any(
+                |&(inserted_target, inserted_type, inserted_schema_reversed)| {
+                    inserted_target == target
+                        && inserted_type == type_id
+                        && inserted_schema_reversed == schema_reversed
+                },
+            )
         })
     }
 
@@ -333,7 +346,8 @@ impl<'a> OverlayNeighborIter<'a> {
                 pos
             };
             let (target, type_id, schema_reversed) = inserted[pos];
-            if self.base_contains(target, type_id) || self.inserted_duplicate(pos, target, type_id)
+            if self.base_contains(target, type_id, schema_reversed)
+                || self.inserted_duplicate(pos, target, type_id, schema_reversed)
             {
                 continue;
             }
@@ -452,6 +466,43 @@ mod tests {
                     type_id: 1,
                     schema_reversed: false,
                 }
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_neighbors_keep_schema_reversed_inserts_distinct_from_base() {
+        let store = EdgeStore::from_edges(
+            2,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+            }],
+            false,
+        );
+        let mut inserts = OverlayInserts::new();
+        inserts.insert(0, vec![(1, 1, true)]);
+        let deletes = OverlayDeletes::new();
+        let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
+
+        let actual = neighbors.neighbors(0).collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                Neighbor {
+                    target: 1,
+                    type_id: 1,
+                    schema_reversed: false,
+                },
+                Neighbor {
+                    target: 1,
+                    type_id: 1,
+                    schema_reversed: true,
+                },
             ]
         );
     }

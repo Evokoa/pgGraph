@@ -94,6 +94,7 @@ fn statement_span(statement: &crate::gql::ast::Statement) -> Span {
     match statement {
         crate::gql::ast::Statement::Read(query) => query.span,
         crate::gql::ast::Statement::Create(query) => query.span,
+        crate::gql::ast::Statement::CreateRelationship(query) => query.span,
         crate::gql::ast::Statement::Set(query) => query.span,
         crate::gql::ast::Statement::Remove(query) => query.span,
         crate::gql::ast::Statement::Delete(query) => query.span,

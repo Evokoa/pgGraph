@@ -238,6 +238,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_relationship_statement() {
+        let parsed = super::parse_statement(
+            "MATCH (u:users {id: 'u1'}), (v:users {id: 'u2'})
+             CREATE (u)-[r:friend {id: 'f2'}]->(v)
+             RETURN r",
+        )
+        .expect("statement should parse");
+        let Statement::CreateRelationship(create) = parsed else {
+            panic!("statement should be a create relationship query");
+        };
+
+        assert_eq!(create.match_.patterns.len(), 2);
+        assert_eq!(create.create.pattern.start.var_text(), Some("u"));
+        assert_eq!(create.create.pattern.tail[0].0.var_text(), Some("r"));
+        assert_eq!(
+            create.create.pattern.tail[0].0.rel_type_text(),
+            Some("friend")
+        );
+        assert_eq!(create.create.pattern.tail[0].1.var_text(), Some("v"));
+        assert_eq!(create.return_.items.len(), 1);
+    }
+
+    #[test]
     fn parses_set_property_statement() {
         let parsed = super::parse_statement(
             "MATCH (u:users {id: 'u1'}) SET u.name = $name RETURN u.name AS name",

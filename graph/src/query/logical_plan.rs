@@ -17,6 +17,8 @@ pub(crate) enum LogicalStatement {
     WildcardPathRead(LogicalWildcardPathPlan),
     /// Node creation write.
     CreateNode(LogicalCreateNode),
+    /// Mapped edge row creation.
+    CreateRelationship(LogicalCreateRelationship),
     /// Mapped node property update.
     SetProperty(LogicalSetProperty),
     /// Mapped node property removal.
@@ -285,6 +287,29 @@ pub(crate) struct LogicalDeleteEdge {
     pub(crate) edge: BoundMappedEdge,
     /// Optional hydrated-row predicate selecting the relationship match.
     pub(crate) predicate: Option<Predicate>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<ReturnBinding>,
+}
+
+/// Bound mapped edge row creation.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalCreateRelationship {
+    /// Source node binding selected by `MATCH`.
+    pub(crate) source: BoundNode,
+    /// Optional source-node predicate from the endpoint `MATCH`.
+    pub(crate) source_predicate: Option<Predicate>,
+    /// Relationship binding to create.
+    pub(crate) relationship: BoundRel,
+    /// Relationship variable targeted by `CREATE`.
+    pub(crate) rel_var: String,
+    /// Target node binding selected by `MATCH`.
+    pub(crate) target: BoundNode,
+    /// Optional target-node predicate from the endpoint `MATCH`.
+    pub(crate) target_predicate: Option<Predicate>,
+    /// Registered edge row mapping.
+    pub(crate) edge: BoundMappedEdge,
+    /// Relationship property values inserted into PostgreSQL.
+    pub(crate) properties: Vec<CreateProperty>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnBinding>,
 }

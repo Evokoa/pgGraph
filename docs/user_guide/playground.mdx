@@ -134,7 +134,8 @@ Supported GQL in the playground includes:
   registered edge-row mappings, plus named relationship path values and
   `nodes(path)`, `relationships(path)`, and `length(path)`;
 - mutable-overlay writes when the graph is built in mutable mode: single-node
-  `CREATE`, single-node `MERGE`, single-property `SET` and `REMOVE`, directed
+  `CREATE`, single-relationship `CREATE` backed by a registered edge row
+  table, single-node `MERGE`, single-property `SET` and `REMOVE`, directed
   relationship `DELETE` backed by a registered edge row table, and single-node
   `DETACH DELETE`.
 

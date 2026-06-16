@@ -4,8 +4,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Active phase: Phase 14, PostgreSQL-First GQL Writes Beyond Single-Row Node Mutation.
-- Status: Phase 13 is complete after relationship edge-row hydration, node-only optional matches, wildcard typed rejection coverage, explain updates, public docs, review, and phase checks.
+- Active phase: Phase 15, SQL/PGQ and openCypher Compatibility Closure.
+- Status: Phase 14 is complete after PostgreSQL-first registered relationship `CREATE`, transaction-local graph indexes for created nodes, same-transaction traversal visibility, public docs, review, and phase checks.
 - Started: 2026-06-16.
 
 ## Phase Updates
@@ -24,6 +24,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 11: complete - added graph-scoped `rename_edge`, `alter_edge`, `remove_edge`, and `list_edges` relationship management APIs, metadata-only `graph_map()` JSON export with deterministic registration/status/warning output, durable rebuild-required tracking for relationship edits on selected and non-selected graphs, ACL coverage, and public docs.
 - Phase 12: complete - added graph-scoped `get_node` and `get_neighbors` direct business-id lookup APIs, GQL `id(node)` and single-column primary-key property `NodeLookup` planning/execution, source-table ACL/RLS visibility checks, transaction-delta-aware GQL node lookup, regression coverage, and public docs.
 - Phase 13: complete - hydrated whole relationship variables from registered edge-row tables, preserved coordinate-only relationship values for `hydrate := false`, added node-only `OPTIONAL MATCH` null-extension, pinned planner-hostile wildcard forms to typed `PG014` rejections, updated explain output for edge-row hydration, and refreshed public GQL docs.
+- Phase 14: complete - added PostgreSQL-first GQL relationship `CREATE` for registered edge-row mappings, made transaction-created nodes traversable through backend-local temporary graph indexes, preserved bidirectional schema direction in overlays, and documented the supported write boundary.
 
 ## Verification Log
 
@@ -133,6 +134,16 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - 2026-06-16: `scripts/check_docs_drift.sh` passed after Phase 13 docs.
 - 2026-06-16: `git diff --check` passed after Phase 13.
 - 2026-06-16: `cargo doc --features pg17 --no-deps` passed from `graph/` after Phase 13.
+- 2026-06-16: `cargo test --features "pg17 development" overlay_neighbors_keep_schema_reversed_inserts_distinct_from_base` passed, 1 test.
+- 2026-06-16: `cargo pgrx test --features "pg17 development" gql_create_relationship` passed, 5 tests.
+- 2026-06-16: `cargo test --features "pg17 development" query::` passed after Phase 14, 166 tests.
+- 2026-06-16: `cargo test --features "pg17 development"` passed after Phase 14, 650 tests, 1 ignored.
+- 2026-06-16: `cargo doc --features pg17 --no-deps` passed from `graph/` after Phase 14.
+- 2026-06-16: `cargo pgrx test --features "pg17 development" gql_traverses_transaction_created_node_entry_points` passed, 1 test.
+- 2026-06-16: `cargo pgrx test --features "pg17 development" gql` passed after Phase 14, 97 tests.
+- 2026-06-16: `cargo fmt --check` passed from `graph/` after Phase 14.
+- 2026-06-16: `scripts/check_docs_drift.sh` passed after Phase 14 docs.
+- 2026-06-16: `git diff --check` passed after Phase 14.
 - 2026-06-15: `cargo fmt --check` passed from `graph/`.
 - 2026-06-15: `cargo test --features "pg17 development" graph_file_path` passed, 4 tests.
 - 2026-06-15: `git diff --check` passed.
@@ -263,4 +274,6 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 10 local review found no blocking issue in dirty-range segment metadata, manifest-level compaction publication, copy-on-write chunk routing, active artifact byte accounting, fanout/read-amplification metrics, artifact storage quota checks, or docs/API drift. The implementation continues to avoid in-place mutation of mmap'd CSR bytes.
 - Phase 11 local review found one API-shape gap: the requested named `graph.remove_edge(graph_name := ..., label := ...)` overload was missing. It was added and covered through the relationship-management pgrx test.
 - Independent review after Phases 9-11 ran in subagent `019ecc2e-095d-7a62-bb29-d7f4650f9d96` and found that non-selected named graphs did not report rebuild-required after relationship edits. The fix touches `graph._graphs.updated_at` on relationship catalog edits, compares that timestamp to the latest completed build in `graph_map()`, and adds non-selected named-graph regression coverage.
-- Next checkpoint: start Phase 14 PostgreSQL-first relationship creation and broader GQL write planning from `todo/named-graphs-complete-plan.md`.
+- Phase 14 local review found no blocking issue after adding relationship `CREATE`, relationship and temporary-node traversal tests, overlay schema-direction preservation, and public docs. One stale pgrx rejection test was converted to the new same-transaction traversal behavior.
+- Independent review after Phases 12-14 ran in subagent `019ecfc7-324f-7063-8e85-fa488b10176b` and found no blocking or request-change issues in the Phase 14 diff.
+- Next checkpoint: start Phase 15 SQL/PGQ and openCypher compatibility closure from `todo/named-graphs-complete-plan.md`.
