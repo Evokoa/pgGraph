@@ -549,9 +549,9 @@ pub(crate) fn set_graph_quota(
     }
     let scope_key = normalize_quota_scope_key(scope_type, scope_key)?;
 
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let rows = client
-            .select(
+            .update(
                 "INSERT INTO graph._graph_quotas (
                      scope_type,
                      scope_key,
@@ -585,7 +585,9 @@ pub(crate) fn set_graph_quota(
                 ],
             )
             .map_err(|err| graph_catalog_error("set graph quota", err))?;
-        quota_from_first_row(rows, "set graph quota row missing")
+        rows.first().map(quota_from_row).transpose()?.ok_or_else(|| {
+            safety::GraphError::Internal("set graph quota row missing".to_string())
+        })
     })
 }
 

@@ -26,6 +26,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 13: complete - hydrated whole relationship variables from registered edge-row tables, preserved coordinate-only relationship values for `hydrate := false`, added node-only `OPTIONAL MATCH` null-extension, pinned planner-hostile wildcard forms to typed `PG014` rejections, updated explain output for edge-row hydration, and refreshed public GQL docs.
 - Phase 14: complete - added PostgreSQL-first GQL relationship `CREATE` for registered edge-row mappings, made transaction-created nodes traversable through backend-local temporary graph indexes, preserved bidirectional schema direction in overlays, and documented the supported write boundary.
 - Phase 15: complete - added explicit SQLSTATE rejections for public SQL/PGQ execution, enforced `COMPATIBILITY_MATRIX` rejections for unsupported openCypher features (DDL, UNWIND, CALL), added tests, and populated fuzz seeds for accepted/rejected cypher forms.
+- 2026-06-18: set `graph::_graph_quotas` upsert path to use `Spi::connect_mut` + `client.update(...)` in `catalog::set_graph_quota`, avoiding `INSERT ...` execution through `client.select`.
 
 ## Verification Log
 
