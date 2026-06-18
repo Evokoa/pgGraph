@@ -1046,6 +1046,93 @@ Implementation tasks:
   - benchmark gates for single default graph no-regression and multi-graph
     overhead.
 
+Phase 16 repair plan for the current uncommitted bug set:
+
+- P16-R0: restore a compiling tree before widening the surface area.
+  - Fix `catalog::set_graph_quota` row extraction so it uses an API shape that
+    actually compiles with pgrx SPI rows. The current invalid
+    `rows.first().map(...).transpose()` pattern must be replaced with the
+    existing quota-row helper or an explicit first-row parse.
+  - Keep the `set_graph_quota` write path out of `client.select(...)` for the
+    mutating statement. The intended design is still a volatile SQL function
+    that performs the quota upsert as PostgreSQL DML, then separately reads the
+    row it returns.
+  - Treat any further `cargo check --features "pg17 development"` errors as
+    blockers before changing docs, gates, or benchmarks.
+- P16-R1: make release gates describe real supported SQL.
+  - Fix `graph/tests/heavy/named_graphs_heavy_gate.sh` so every call is backed
+    by an existing public function signature. In particular, selected-graph
+    sync should use the supported `select_graph(...)` plus no-arg
+    `enable_sync()` flow, job execution should use `run_due_jobs()` or an
+    explicit job id with `run_job(job_id text)`, and storage assertions should
+    use the existing projection/runtime/status surfaces rather than a
+    nonexistent `graph_storage_usage()` function.
+  - Keep `RUN_NAMED_GRAPHS_HEAVY` disabled by default until the named-graphs
+    heavy gate passes end to end, or make the gate pass before enabling it in
+    the default release script.
+  - Verify with shell syntax checks first, then the focused named-graphs heavy
+    gate, then the broader release gate path that includes it.
+- P16-R2: realign public documentation with the actual SQL API.
+  - Rewrite admin examples around the supported API shape:
+    `create_graph`, `add_table_to_graph` or selected-graph `add_table`,
+    `add_edge_to_graph` or selected-graph `add_edge`, `build_graph` or
+    selected-graph `build`, `add_sync_policy(schedule_interval_secs := ...)`,
+    `set_graph_quota(scope, quota_key, quota_value, scope_key, enforcement)`,
+    `memory_profile(concurrent_backends := ...)`, `search(property_key,
+    property_value, table_filter := ...)`, and `graph_map()`.
+  - Remove or replace examples for unsupported surfaces such as
+    `graph_storage_usage()`, `graph.reset('name')`, cron-string sync policy
+    schedules, and nonexistent `mode := 'delta'` sync policy fields.
+  - Document artifact paths as `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph`
+    and describe `graph_id` as the durable artifact directory key. Do not
+    document graph name or namespace as path components unless the runtime
+    implementation changes to match.
+  - Rework the troubleshooting failure matrix so every status, SQLSTATE, and
+    inspection query is produced by an existing stable surface.
+- P16-R3: harden operational tooling without adding a second source of truth.
+  - Update `scripts/inspect_pggraph_artifact.py` so it accepts the configured
+    graph data directory, validates `graph_id` as path-safe UUID input before
+    joining filesystem paths, and documents that graph names must first be
+    resolved through SQL unless the script explicitly grows a database lookup
+    mode.
+  - Keep filesystem inspection read-only. The script should inspect artifacts
+    under the configured directory and never infer catalog truth independently
+    from PostgreSQL.
+  - Verify with Python bytecode compilation and focused CLI error-case checks
+    against temporary directories.
+- P16-R4: remove lint and dependency churn that does not serve Phase 16.
+  - Revert unintended `Cargo.lock` dependency-version changes unless a matching
+    `Cargo.toml` change and release note explain why the dependency bump is
+    part of the phase.
+  - Remove broad `clippy::type_complexity` allowances from crate-wide or
+    module-wide scopes. If pgrx tuple signatures still need the allowance,
+    apply the narrowest local `#[allow(...)]` with a reason near the specific
+    SQL ABI boundary.
+  - Re-run format, compile, and clippy checks after the tree compiles again.
+- P16-R5: make benchmark and measurement changes meaningful.
+  - Review the new named-graph benchmark for whether it measures real
+    multi-graph overhead or only multiple standalone in-memory datasets. Rename
+    it as a synthetic dataset benchmark or replace it with a scenario that
+    exercises graph selection/loading overhead.
+  - Store any comparison output under `todo/` and use the existing regression
+    sample cadence rather than running heavyweight measurements after every
+    edit.
+- P16-R6: close Phase 16 only after review and release verification.
+  - Update `todo/progress.md` after each repair checkpoint with a one-line
+    result and the verification that ran.
+  - Run a local rust-reviewing pass after the repaired Phase 16 diff is
+    complete, then run the independent review cadence required by the overall
+    phase process if the completed-phase count reaches that boundary.
+  - Suggested repair verification sequence:
+    - `cargo check --features "pg17 development"`
+    - `cargo fmt --check`
+    - `cargo test --features "pg17 development" graph_policy`
+    - `cargo pgrx test --features "pg17 development" named_graphs`
+    - focused heavy gates for named graphs, jobs/sync, quotas, and install
+    - `scripts/check_docs_drift.sh`
+    - `cargo doc --features pg17 --no-deps`
+    - full release gate once focused gates are green
+
 Acceptance criteria:
 
 - A user can follow docs from `CREATE EXTENSION` to two named graphs with

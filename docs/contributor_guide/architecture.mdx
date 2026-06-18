@@ -132,10 +132,9 @@ from paths, backend globals, or session state.
 | `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local compatibility sync overlay state |
 | `TxGraphDelta` | Current backend transaction | Transaction-local read-your-own-writes state only |
 
-## Current Single-Graph Assumptions
+## Multi-Graph Architecture
 
-These assumptions are deliberate in the current implementation and define the
-places named-graph support must update:
+The system supports multiple isolated named graphs within the same database. This architecture is implemented across all layers:
 
 | Area | Current behavior |
 |---|---|
@@ -145,11 +144,10 @@ places named-graph support must update:
 | Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph`. |
 | Sync | `graph._sync_log` and `graph._sync_buffer` are global source-table streams; replay, status, and query freshness filter `_sync_log` through the selected graph's registered table OIDs. |
 | Projection generations | `graph._projection_generations` is keyed by `graph_id` so active-generation heartbeats and GC protection are graph-local. |
-| Discovery | `graph.auto_discover()` and `graph.auto_discover_tables()` can target a named graph or the selected/default graph. |
+| Discovery | `graph.auto_discover()` and `graph.auto_discover_tables()` target a named graph or the selected/default graph. |
 | Reset | `graph.reset()` clears the backend-local engine and removes files for the selected graph's artifact root. |
 
-Named-graph changes should move each row above from implicit global state to
-explicit graph-scoped inputs without breaking the default-graph SQL workflow.
+Named-graph changes moved each of these components from implicit global state to explicit graph-scoped inputs while preserving the default-graph SQL workflow for backward compatibility.
 
 ## Data Flow: Build
 

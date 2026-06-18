@@ -822,7 +822,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_buffer_created ON graph._sync_buffer (create
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_tables', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_edges', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._registered_filter_columns', '');
-SELECT pg_catalog.pg_extension_config_dump('graph._graphs', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._graphs', 'WHERE graph_id != ''00000000-0000-0000-0000-000000000001''');
 SELECT pg_catalog.pg_extension_config_dump('graph._graph_grants', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._graph_quotas', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._build_jobs', '');

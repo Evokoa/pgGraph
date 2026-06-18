@@ -140,9 +140,9 @@ pub(crate) fn create_graph_metadata(
     }
     enforce_named_graph_count_quota()?;
 
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let rows = client
-            .select(
+            .update(
                 "INSERT INTO graph._graphs (
                      graph_id,
                      graph_name,
@@ -227,9 +227,9 @@ pub(crate) fn update_graph_metadata(
         projection_mode,
     )?;
 
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let rows = client
-            .select(
+            .update(
                 "UPDATE graph._graphs
                     SET graph_kind = $2,
                         residency = $3,
@@ -294,9 +294,9 @@ pub(crate) fn drop_graph_metadata(
     }
     delete_graph_operational_state(&existing.graph_id)?;
 
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let rows = client
-            .select(
+            .update(
                 "DELETE FROM graph._graphs
                   WHERE graph_id = $1::uuid
                   RETURNING graph_id::text,
@@ -344,9 +344,9 @@ pub(crate) fn grant_graph_privilege(
     let privilege = GraphPrivilege::try_from(privilege)?.as_str();
     let grantee_oid = resolve_role_oid(grantee)?;
 
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let rows = client
-            .select(
+            .update(
                 "INSERT INTO graph._graph_grants (
                      graph_id, grantee, privilege, grantor
                  )
@@ -391,9 +391,9 @@ pub(crate) fn revoke_graph_privilege(
     let privilege = GraphPrivilege::try_from(privilege)?.as_str();
     let grantee_oid = resolve_role_oid(grantee)?;
 
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let rows = client
-            .select(
+            .update(
                 "DELETE FROM graph._graph_grants
                   WHERE graph_id = $1::uuid
                     AND grantee = $2::oid
@@ -504,9 +504,9 @@ pub(crate) fn transfer_graph_ownership(
     require_graph_privilege(&graph, GraphPrivilege::Admin)?;
     let new_owner_oid = resolve_role_oid(new_owner)?;
 
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         let rows = client
-            .select(
+            .update(
                 "UPDATE graph._graphs
                     SET owner_role = $2::oid,
                         updated_at = now()
@@ -550,7 +550,7 @@ pub(crate) fn set_graph_quota(
     let scope_key = normalize_quota_scope_key(scope_type, scope_key)?;
 
     Spi::connect_mut(|client| {
-        let rows = client
+        let mut rows = client
             .update(
                 "INSERT INTO graph._graph_quotas (
                      scope_type,
@@ -574,7 +574,7 @@ pub(crate) fn set_graph_quota(
                            enforcement,
                            updated_by,
                            created_at,
-                           updated_at",
+                 updated_at",
                 None,
                 &[
                     scope_type.into(),
@@ -585,9 +585,10 @@ pub(crate) fn set_graph_quota(
                 ],
             )
             .map_err(|err| graph_catalog_error("set graph quota", err))?;
-        rows.first().map(quota_from_row).transpose()?.ok_or_else(|| {
+        let row = rows.next().ok_or_else(|| {
             safety::GraphError::Internal("set graph quota row missing".to_string())
-        })
+        })?;
+        quota_from_row(row)
     })
 }
 
@@ -623,56 +624,41 @@ pub(crate) fn graph_quota_usage(
     let owner_oid = current_user_oid()?;
     let owner_key = owner_oid.to_string();
     let owner_graphs = graph_count(Some(owner_oid))?;
-    let mut rows = Vec::new();
-
-    rows.push(quota_usage_row(
-        "cluster",
-        "",
-        "max_named_graphs",
-        cluster_graphs,
-    )?);
-    rows.push(quota_usage_row(
-        "owner",
-        &owner_key,
-        "max_named_graphs",
-        owner_graphs,
-    )?);
-    rows.push(quota_usage_row(
-        "cluster",
-        "",
-        "max_loaded_graphs_per_backend",
-        loaded_graphs_per_backend,
-    )?);
-    rows.push(quota_usage_row(
-        "owner",
-        &owner_key,
-        "max_loaded_graphs_per_backend",
-        loaded_graphs_per_backend,
-    )?);
-    rows.push(quota_usage_row(
-        "cluster",
-        "",
-        "max_graph_jobs",
-        graph_job_count(None)?,
-    )?);
-    rows.push(quota_usage_row(
-        "owner",
-        &owner_key,
-        "max_graph_jobs",
-        graph_job_count(Some(owner_oid))?,
-    )?);
-    rows.push(quota_usage_row(
-        "cluster",
-        "",
-        "max_artifact_storage_bytes",
-        artifact_storage_bytes,
-    )?);
-    rows.push(quota_usage_row(
-        "owner",
-        &owner_key,
-        "max_artifact_storage_bytes",
-        artifact_storage_bytes,
-    )?);
+    let rows = vec![
+        quota_usage_row("cluster", "", "max_named_graphs", cluster_graphs)?,
+        quota_usage_row("owner", &owner_key, "max_named_graphs", owner_graphs)?,
+        quota_usage_row(
+            "cluster",
+            "",
+            "max_loaded_graphs_per_backend",
+            loaded_graphs_per_backend,
+        )?,
+        quota_usage_row(
+            "owner",
+            &owner_key,
+            "max_loaded_graphs_per_backend",
+            loaded_graphs_per_backend,
+        )?,
+        quota_usage_row("cluster", "", "max_graph_jobs", graph_job_count(None)?)?,
+        quota_usage_row(
+            "owner",
+            &owner_key,
+            "max_graph_jobs",
+            graph_job_count(Some(owner_oid))?,
+        )?,
+        quota_usage_row(
+            "cluster",
+            "",
+            "max_artifact_storage_bytes",
+            artifact_storage_bytes,
+        )?,
+        quota_usage_row(
+            "owner",
+            &owner_key,
+            "max_artifact_storage_bytes",
+            artifact_storage_bytes,
+        )?,
+    ];
 
     Ok(rows)
 }
@@ -1420,16 +1406,6 @@ fn validate_quota_enforcement(enforcement: &str) -> safety::GraphResult<()> {
             reason: format!("unsupported quota enforcement '{enforcement}'"),
         })
     }
-}
-
-fn quota_from_first_row(
-    mut rows: pgrx::spi::SpiTupleTable<'_>,
-    missing: &str,
-) -> safety::GraphResult<GraphQuota> {
-    rows.next()
-        .map(quota_from_row)
-        .transpose()?
-        .ok_or_else(|| safety::GraphError::Internal(missing.to_string()))
 }
 
 fn quota_from_row(row: pgrx::spi::SpiHeapTupleData<'_>) -> safety::GraphResult<GraphQuota> {

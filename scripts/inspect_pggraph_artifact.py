@@ -3,6 +3,8 @@
 
 Usage:
   python3 scripts/inspect_pggraph_artifact.py /path/to/main.pggraph
+  python3 scripts/inspect_pggraph_artifact.py -g 00000000-0000-0000-0000-000000000001
+  python3 scripts/inspect_pggraph_artifact.py -g <graph-id> --pgdata /var/lib/postgresql/data --graph-data-dir graph
 
 The checker validates the file header, format version, monotonic section
 offsets, section bounds, and CRC32. It does not require PostgreSQL, pgrx, git,
@@ -17,6 +19,7 @@ import pathlib
 import struct
 import sys
 import zlib
+import uuid
 
 MAGIC = b"PGGH"
 VERSION = 1
@@ -81,12 +84,41 @@ def inspect(path: pathlib.Path) -> dict[str, object]:
 
 
 def main() -> int:
+    import os
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("artifact", type=pathlib.Path)
+    parser.add_argument("artifact", type=pathlib.Path, nargs="?", help="Path to .pggraph file")
+    parser.add_argument("-g", "--graph-id", type=str, help="Graph ID to inspect (resolves to PGDATA/<graph-data-dir>/<id>/main.pggraph)")
+    parser.add_argument("--pgdata", type=pathlib.Path, help="PostgreSQL data directory (overrides PGDATA env var)")
+    parser.add_argument("--graph-data-dir", type=str, default=os.environ.get("GRAPH_DATA_DIR", "graph"), help="Graph data directory under PGDATA (defaults to graph)")
     args = parser.parse_args()
 
+    if args.artifact and args.graph_id:
+        print("error: provide either artifact path or --graph-id, not both", file=sys.stderr)
+        return 1
+
+    artifact_path = args.artifact
+    if artifact_path is None:
+        if not args.graph_id:
+            print("error: must provide either artifact path or --graph-id", file=sys.stderr)
+            return 1
+        try:
+            graph_id = str(uuid.UUID(args.graph_id))
+        except ValueError:
+            print(f"error: invalid graph id '{args.graph_id}'", file=sys.stderr)
+            return 1
+        graph_data_dir = pathlib.PurePosixPath(args.graph_data_dir)
+        if graph_data_dir.is_absolute() or any(part in {"..", "."} for part in graph_data_dir.parts):
+            print(f"error: invalid graph data dir '{args.graph_data_dir}'", file=sys.stderr)
+            return 1
+        pgdata = args.pgdata or pathlib.Path(os.environ.get("PGDATA", ""))
+        if str(pgdata) == "" or str(pgdata) == ".":
+            print("error: PGDATA environment variable not set. Use --pgdata or set PGDATA.", file=sys.stderr)
+            return 1
+        artifact_path = pgdata / pathlib.Path(graph_data_dir.as_posix()) / graph_id / "main.pggraph"
+
     try:
-        report = inspect(args.artifact)
+        report = inspect(artifact_path)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

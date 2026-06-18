@@ -12,7 +12,6 @@
     not(any(test, feature = "pg_test")),
     deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)
 )]
-
 use pgrx::prelude::*;
 use std::cell::RefCell;
 

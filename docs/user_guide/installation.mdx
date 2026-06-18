@@ -381,3 +381,29 @@ For the full release gate:
 cd graph
 PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
 ```
+
+## Upgrading and Migration
+
+If you are upgrading from a pre-named-graph version of pgGraph (Phase 3 or earlier), your installation will migrate automatically to the multi-graph architecture. This section explains how the migration handles existing data.
+
+### Global Catalog to Default Graph
+
+Earlier versions of pgGraph used a single, global catalog for registration (`graph._registered_tables`, etc.). During migration, the extension creates a default graph named `default` in the `public` namespace. All existing global catalog entries are automatically assigned to this `default` graph. Your existing queries continue to work because the legacy selected-graph workflow still targets the default graph when you do not opt into a named graph explicitly.
+
+### Artifact Path Migration
+
+The durable `.pggraph` artifact now lives under `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph` for each graph. The `graph_id` is the stable directory key; graph name and namespace stay in PostgreSQL catalogs rather than the filesystem path. If you inspect artifacts directly, point your tooling at the graph id and the configured `graph.data_dir` value.
+
+### Projection Generation Migration
+
+If your installation used pre-computed projections, the migration seeds a new generation sequence for the `default` graph and repoints durable metadata at the migrated catalog rows. Existing projections continue to serve until you rebuild or repair them against the new catalog state.
+
+### Rollback and Repair Guidance
+
+If the migration fails (e.g., due to insufficient disk space when moving artifacts), the extension may enter an inconsistent catalog state.
+
+**To recover:**
+1. **Restore from Backup**: If you dumped `pg_extension_config_dump` prior to upgrade, restore the catalog tables.
+2. **Manual Rebuild**: Run `SELECT * FROM graph.select_graph('default');` followed by `SELECT graph.reset();` and then `SELECT * FROM graph.build();` to recreate the selected graph from your authoritative PostgreSQL source tables.
+3. **Artifact Cleanup**: If old artifact files remain under the previous graph data directory, remove them only after the rebuilt default graph is healthy.
+4. **Log Inspection**: Check the PostgreSQL logs for `PG009` or `PG018` errors during extension update.

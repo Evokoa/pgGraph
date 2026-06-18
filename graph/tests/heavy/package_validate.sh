@@ -21,7 +21,7 @@ cargo pgrx package --pg-config "$PG_CONFIG"
 
 generated_sql="/tmp/graph-generated.sql"
 cargo pgrx schema --features "$PG_VERSION_FEATURE" --no-default-features > "$generated_sql"
-rg "CREATE TABLE IF NOT EXISTS graph\._registered_tables|CREATE TABLE IF NOT EXISTS graph\._sync_log|pg_extension_config_dump" "$generated_sql"
+grep -E "CREATE TABLE IF NOT EXISTS graph\._registered_tables|CREATE TABLE IF NOT EXISTS graph\._sync_log|pg_extension_config_dump" "$generated_sql"
 
 package_version="$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)"
 package_dir="target/release/graph-${PG_VERSION_FEATURE}"

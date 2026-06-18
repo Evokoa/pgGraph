@@ -346,6 +346,64 @@ fn bench_layered_projection_release_paths(c: &mut Criterion) {
     group.finish();
 }
 
+/// Synthetic benchmark that alternates multiple generated datasets.
+///
+/// This measures dataset generation and repeated traversal only. It does not
+/// model graph selection or persistence overhead; release gates cover that.
+fn bench_synthetic_dataset_alternation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("synthetic_dataset_alternation");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(30);
+
+    let graph1 = graph_gen::build_benchmark_graph(SMALL, AVG_DEGREE, SEED, 2);
+    let graph2 = graph_gen::build_benchmark_graph(SMALL, AVG_DEGREE, SEED + 1, 2);
+    let graph3 = graph_gen::build_benchmark_graph(SMALL, AVG_DEGREE, SEED + 2, 2);
+
+    let seed1 = graph_gen::find_supernode(&graph1);
+    let seed2 = graph_gen::find_supernode(&graph2);
+    let seed3 = graph_gen::find_supernode(&graph3);
+
+    let config1 = traversal_config(seed1, 3);
+    let config2 = traversal_config(seed2, 3);
+    let config3 = traversal_config(seed3, 3);
+
+    group.bench_function("single_dataset_baseline", |b| {
+        b.iter(|| {
+            black_box(bfs_execute(
+                black_box(&graph1.node_store),
+                black_box(&graph1.edge_store),
+                black_box(&graph1.filter_index),
+                black_box(&config1),
+            ))
+        })
+    });
+
+    group.bench_function("alternating_three_datasets", |b| {
+        b.iter(|| {
+            black_box(bfs_execute(
+                black_box(&graph1.node_store),
+                black_box(&graph1.edge_store),
+                black_box(&graph1.filter_index),
+                black_box(&config1),
+            ));
+            black_box(bfs_execute(
+                black_box(&graph2.node_store),
+                black_box(&graph2.edge_store),
+                black_box(&graph2.filter_index),
+                black_box(&config2),
+            ));
+            black_box(bfs_execute(
+                black_box(&graph3.node_store),
+                black_box(&graph3.edge_store),
+                black_box(&graph3.filter_index),
+                black_box(&config3),
+            ));
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_bfs_traverse,
@@ -353,5 +411,6 @@ criterion_group!(
     bench_bfs_overlay_paths,
     bench_bfs_filter_index_paths,
     bench_layered_projection_release_paths,
+    bench_synthetic_dataset_alternation,
 );
 criterion_main!(benches);

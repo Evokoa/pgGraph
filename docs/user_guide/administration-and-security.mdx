@@ -210,3 +210,66 @@ SELECT * FROM graph.build();
 
 If the persisted file was not restored with `$PGDATA`, rebuild from source
 tables.
+
+## Admin SQL Examples
+
+Use the named-graph APIs when you want to work on a graph without changing the session default.
+
+**Create, register, and build**
+```sql
+SELECT * FROM graph.create_graph('customer_360', namespace := 'analytics');
+SELECT * FROM graph.add_table_to_graph(
+  'customer_360',
+  'public.customers'::regclass,
+  'id',
+  ARRAY['name', 'email'],
+  graph_namespace := 'analytics'
+);
+SELECT * FROM graph.add_edge_to_graph(
+  'customer_360',
+  'public.orders'::regclass,
+  'customer_id',
+  'public.customers'::regclass,
+  'id',
+  'placed_order',
+  graph_namespace := 'analytics'
+);
+SELECT * FROM graph.build_graph('customer_360', force_persist := true, graph_namespace := 'analytics');
+```
+
+**Select, sync, and run jobs**
+```sql
+SELECT * FROM graph.select_graph('customer_360', namespace := 'analytics');
+SELECT graph.enable_sync();
+SELECT * FROM graph.add_sync_policy('customer_360', schedule_interval_secs := 300, graph_namespace := 'analytics');
+SELECT * FROM graph.jobs('customer_360', graph_namespace := 'analytics');
+SELECT * FROM graph.run_due_jobs();
+```
+
+**Set residency and quotas**
+```sql
+SELECT * FROM graph.set_graph_residency('customer_360', 'warm', namespace := 'analytics');
+SELECT * FROM graph.set_graph_quota('owner', 'max_named_graphs', 25, current_user::text, 'hard');
+SELECT * FROM graph.graph_quota_usage();
+```
+
+**Inspect storage, status, and memory**
+```sql
+SELECT artifact_bytes, segment_count, artifact_validation_state
+FROM graph.projection_status();
+SELECT node_count, edge_count, schema_status, sync_status, sync_lag
+FROM graph.status();
+SELECT * FROM graph.memory_profile(concurrent_backends := 4);
+```
+
+**Grant access and export the map**
+```sql
+SELECT * FROM graph.grant_graph('customer_360', 'app_reader', 'read', namespace := 'analytics');
+SELECT * FROM graph.graph_map('customer_360', graph_namespace := 'analytics');
+```
+
+**Direct node lookup and search**
+```sql
+SELECT * FROM graph.get_node('customer_360', 'customers', 'cust_123', graph_namespace := 'analytics');
+SELECT * FROM graph.search('name', 'Ada');
+```

@@ -24,7 +24,11 @@ RUN_GQL_SET_TX="${RUN_GQL_SET_TX:-1}"
 RUN_GQL_DELETE_TX="${RUN_GQL_DELETE_TX:-1}"
 RUN_GQL_MERGE_RACE="${RUN_GQL_MERGE_RACE:-1}"
 RUN_TX_DELTA_CRASH="${RUN_TX_DELTA_CRASH:-0}"
-
+RUN_NAMED_GRAPHS_HEAVY="${RUN_NAMED_GRAPHS_HEAVY:-1}"
+RUN_CROSS_BACKEND_DURABLE="${RUN_CROSS_BACKEND_DURABLE:-1}"
+RUN_PROJECTION_RECOVERY="${RUN_PROJECTION_RECOVERY:-1}"
+RUN_TX_DELTA_LIFECYCLE="${RUN_TX_DELTA_LIFECYCLE:-1}"
+RUN_GQL_WRITE_RECHECK="${RUN_GQL_WRITE_RECHECK:-1}"
 if [[ "$RUN_FULL_MATRIX" == "1" ]]; then
   ./tests/heavy/run_pg_matrix.sh
 fi
@@ -115,6 +119,26 @@ fi
 if [[ "$RUN_TX_DELTA_CRASH" == "1" ]]; then
   : "${PGDATA:?PGDATA must point at a disposable cluster when RUN_TX_DELTA_CRASH=1}"
   DBNAME="${DB_PREFIX}_tx_delta_crash" PGDATA="$PGDATA" ./tests/heavy/tx_delta_crash_recovery.sh
+fi
+
+if [[ "$RUN_NAMED_GRAPHS_HEAVY" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_named_graphs" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" bash ./tests/heavy/named_graphs_heavy_gate.sh
+fi
+
+if [[ "$RUN_CROSS_BACKEND_DURABLE" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_cross_backend" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" bash ./tests/heavy/cross_backend_durable_projection.sh
+fi
+
+if [[ "$RUN_PROJECTION_RECOVERY" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_projection_rec" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" bash ./tests/heavy/projection_recovery_gate.sh
+fi
+
+if [[ "$RUN_TX_DELTA_LIFECYCLE" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_tx_delta" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" bash ./tests/heavy/tx_delta_lifecycle.sh
+fi
+
+if [[ "$RUN_GQL_WRITE_RECHECK" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_gql_write_recheck" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" bash ./tests/heavy/gql_write_recheck_race.sh
 fi
 
 if [[ "$RUN_DOCKER" == "1" ]]; then

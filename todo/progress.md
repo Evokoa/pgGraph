@@ -4,8 +4,9 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
+- Current commit: `a6efee218d4e2d95bafe9ef4b677a9fc74389a32`
 - Active phase: Phase 16, Documentation, Migration, Operational Tooling, and Release Gates.
-- Status: Phase 15 is complete after enforcing public PGQ boundaries and mapping/rejecting openCypher compatibility with tests and fuzz seeds.
+- Status: Phase 16 repair implementation and verification are complete. The repaired tree now passes the focused named-graphs heavy gate, `cargo check`, `cargo clippy`, `cargo test --features "pg17 development"`, `cargo doc --features pg17 --no-deps`, and the docs drift check.
 - Started: 2026-06-16.
 
 ## Phase Updates
@@ -27,6 +28,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Phase 14: complete - added PostgreSQL-first GQL relationship `CREATE` for registered edge-row mappings, made transaction-created nodes traversable through backend-local temporary graph indexes, preserved bidirectional schema direction in overlays, and documented the supported write boundary.
 - Phase 15: complete - added explicit SQLSTATE rejections for public SQL/PGQ execution, enforced `COMPATIBILITY_MATRIX` rejections for unsupported openCypher features (DDL, UNWIND, CALL), added tests, and populated fuzz seeds for accepted/rejected cypher forms.
 - 2026-06-18: set `graph::_graph_quotas` upsert path to use `Spi::connect_mut` + `client.update(...)` in `catalog::set_graph_quota`, avoiding `INSERT ...` execution through `client.select`.
+- 2026-06-18: added the Phase 16 repair plan for the current uncommitted bug set, covering compile restoration, named-graphs heavy gate API fixes, docs/API alignment, artifact inspection hardening, lint/dependency cleanup, benchmark review, and final verification.
+- 2026-06-18: completed the Phase 16 repair pass with release-gate SQL fixes, public docs/API alignment, artifact inspection hardening, lint cleanup, benchmark renaming, and successful verification with `cargo check`, `cargo clippy`, `cargo test --features "pg17 development"`, `cargo doc --features pg17 --no-deps`, `scripts/check_docs_drift.sh`, and the named-graphs heavy gate.
 
 ## Verification Log
 

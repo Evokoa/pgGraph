@@ -17,7 +17,7 @@ SELECT pid
 FROM pg_locks
 WHERE locktype = 'advisory'
   AND classid = 1918928211
-  AND objid = 1735552871
+  AND objid = -272080206
   AND objsubid = 2
   AND pid <> pg_backend_pid();
 SQL
@@ -86,19 +86,19 @@ SELECT graph.add_edge(
 SQL
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" >"$WORKDIR/lock-holder.log" 2>&1 <<'SQL' &
-SELECT pg_advisory_lock(1918928211, 1735552871);
+SELECT pg_advisory_lock(1918928211, -272080206);
 SELECT pg_sleep(300);
-SELECT pg_advisory_unlock(1918928211, 1735552871);
+SELECT pg_advisory_unlock(1918928211, -272080206);
 SQL
 LOCK_PID=$!
 
 for _ in $(seq 1 100); do
   if psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL' | grep -qx "held"
 WITH attempted AS (
-    SELECT pg_try_advisory_lock(1918928211, 1735552871) AS acquired
+    SELECT pg_try_advisory_lock(1918928211, -272080206) AS acquired
 )
 SELECT CASE
-    WHEN acquired THEN pg_advisory_unlock(1918928211, 1735552871)::text
+    WHEN acquired THEN pg_advisory_unlock(1918928211, -272080206)::text
     ELSE 'held'
 END
 FROM attempted;
@@ -111,10 +111,10 @@ done
 
 lock_held="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
 WITH attempted AS (
-    SELECT pg_try_advisory_lock(1918928211, 1735552871) AS acquired
+    SELECT pg_try_advisory_lock(1918928211, -272080206) AS acquired
 )
 SELECT CASE
-    WHEN acquired THEN pg_advisory_unlock(1918928211, 1735552871)::text
+    WHEN acquired THEN pg_advisory_unlock(1918928211, -272080206)::text
     ELSE 'held'
 END
 FROM attempted;
@@ -155,10 +155,10 @@ terminate_lock_holder
 
 released="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
 WITH attempted AS (
-    SELECT pg_try_advisory_lock(1918928211, 1735552871) AS acquired
+    SELECT pg_try_advisory_lock(1918928211, -272080206) AS acquired
 )
 SELECT CASE
-    WHEN acquired THEN pg_advisory_unlock(1918928211, 1735552871)::text
+    WHEN acquired THEN pg_advisory_unlock(1918928211, -272080206)::text
     ELSE 'held'
 END
 FROM attempted;
@@ -186,19 +186,19 @@ traverse_before="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
   -c "SELECT count(*) FROM graph.traverse('public.graph_lock_nodes'::regclass, 'a', 1, edge_types := ARRAY['linked'], direction := 'out', hydrate := false)")"
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" >"$WORKDIR/artifact-lock-holder.log" 2>&1 <<'SQL' &
-SELECT pg_advisory_lock(1918928211, 1735552871);
+SELECT pg_advisory_lock(1918928211, -272080206);
 SELECT pg_sleep(300);
-SELECT pg_advisory_unlock(1918928211, 1735552871);
+SELECT pg_advisory_unlock(1918928211, -272080206);
 SQL
 LOCK_PID=$!
 
 for _ in $(seq 1 100); do
   if psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL' | grep -qx "held"
 WITH attempted AS (
-    SELECT pg_try_advisory_lock(1918928211, 1735552871) AS acquired
+    SELECT pg_try_advisory_lock(1918928211, -272080206) AS acquired
 )
 SELECT CASE
-    WHEN acquired THEN pg_advisory_unlock(1918928211, 1735552871)::text
+    WHEN acquired THEN pg_advisory_unlock(1918928211, -272080206)::text
     ELSE 'held'
 END
 FROM attempted;
@@ -284,10 +284,10 @@ OWNER_PID=$!
 for _ in $(seq 1 100); do
   if psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL' | grep -qx "held"
 WITH attempted AS (
-    SELECT pg_try_advisory_lock(1918928211, 1735552871) AS acquired
+    SELECT pg_try_advisory_lock(1918928211, -272080206) AS acquired
 )
 SELECT CASE
-    WHEN acquired THEN pg_advisory_unlock(1918928211, 1735552871)::text
+    WHEN acquired THEN pg_advisory_unlock(1918928211, -272080206)::text
     ELSE 'held'
 END
 FROM attempted;
@@ -300,10 +300,10 @@ done
 
 owner_holds_lock="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
 WITH attempted AS (
-    SELECT pg_try_advisory_lock(1918928211, 1735552871) AS acquired
+    SELECT pg_try_advisory_lock(1918928211, -272080206) AS acquired
 )
 SELECT CASE
-    WHEN acquired THEN pg_advisory_unlock(1918928211, 1735552871)::text
+    WHEN acquired THEN pg_advisory_unlock(1918928211, -272080206)::text
     ELSE 'held'
 END
 FROM attempted;

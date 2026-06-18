@@ -1,3 +1,8 @@
+#![allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shapes are intentionally explicit in this module"
+)]
+
 use super::*;
 
 pub(super) fn check_enabled() {
@@ -4010,7 +4015,7 @@ fn job_run_rows(
                 error: row.get::<String>(10)?,
                 started_at: row
                     .get::<TimestampWithTimeZone>(11)?
-                    .ok_or_else(|| pgrx::spi::SpiError::InvalidPosition)?,
+                    .ok_or(pgrx::spi::SpiError::InvalidPosition)?,
                 finished_at: row.get::<TimestampWithTimeZone>(12)?,
             });
         }

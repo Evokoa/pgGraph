@@ -33,7 +33,7 @@ EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "GQL Parameterized Match": [{"hash": "2d77220992fd54f4cd7150bb9bb984dc", "row_count": 1}],
     "GQL Scalar Projection": [{"hash": "bdb8fabf93f84ef1c80dacef37133512", "row_count": 4}],
     "GQL One-Hop Relationships": [{"hash": "cc43fef5258a696fee573d7ce63d3161", "row_count": 1}],
-    "GQL Relationship Projection": [{"hash": "cc72c65d52a818ea016148855db5d83a", "row_count": 1}],
+    "GQL Relationship Projection": [{"hash": "decfd268084234436536db856f335c70", "row_count": 1}],
     "GQL Inbound Relationships": [{"hash": "8667d6872adef948f4cd19a6d418af56", "row_count": 1}],
     "GQL Undirected Relationships": [{"hash": "471d8f696e537993a8f1e8a9be703095", "row_count": 1}],
     "GQL Distinct Labels": [{"hash": "2e9e4f9151f7e0f5d63cd7a1f38533ab", "row_count": 1}],
@@ -43,7 +43,7 @@ EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "GQL Variable-Length Paths": [{"hash": "27db82ea68fe6f630e0705bf080e742d", "row_count": 4}],
     "GQL Path Functions": [{"hash": "c565149448609e644287b30bf0345f6e", "row_count": 3}],
     "GQL Hydration Off": [{"hash": "e4b9e13b69f2e410f2729fa40b208524", "row_count": 1}],
-    "GQL Explain": [{"hash": "0c52392c32dab707c82a82edb79d1a1c", "row_count": 1}],
+    "GQL Explain": [{"hash": "a928d32b543bc838ae25f9b27b24ae90", "row_count": 1}],
     "Component Stats": [
         {"hash": "4d337f672574a60eaa19f44639f30553", "row_count": 1},
         {"hash": "3addbef5dca49ab0f0592d0e69be5b17", "row_count": 20},

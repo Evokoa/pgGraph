@@ -1,3 +1,8 @@
+#![allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shapes are intentionally explicit in this module"
+)]
+
 use super::admin::{check_enabled_result, require_graph_admin_result, with_panic_boundary};
 use super::*;
 
@@ -415,7 +420,7 @@ fn load_selected_graph_from_disk(
                 let nc = loaded_engine.node_store.node_count();
                 let ec = loaded_engine.edge_store.edge_count();
                 *e.borrow_mut() = loaded_engine;
-                crate::runtime_state::mark_loaded_graph(&graph);
+                crate::runtime_state::mark_loaded_graph(graph);
                 pgrx::log!(
                     "graph: loaded {} nodes, {} edges (resolution via mmap, zero-copy)",
                     nc,
