@@ -4,7 +4,7 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 
 ## Current Checkpoint
 
-- Current commit: `a6efee218d4e2d95bafe9ef4b677a9fc74389a32`
+- Current commit: `9f0399f8d1e08123d6a12a32cacf450c59ed1d50`
 - Active phase: Phase 16, Documentation, Migration, Operational Tooling, and Release Gates.
 - Status: Phase 16 repair implementation and verification are complete. The repaired tree now passes the focused named-graphs heavy gate, `cargo check`, `cargo clippy`, `cargo test --features "pg17 development"`, `cargo doc --features pg17 --no-deps`, and the docs drift check.
 - Started: 2026-06-16.
