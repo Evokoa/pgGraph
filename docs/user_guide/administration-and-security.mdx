@@ -136,27 +136,28 @@ table `SELECT` permissions.
 
 ## Internal Catalog Tables
 
-Bootstrap SQL revokes direct writes from `PUBLIC` and grants read access:
+Internal catalog tables are implementation details. Bootstrap SQL revokes
+direct `PUBLIC` read and write access to sensitive named-graph, grant, quota,
+job, sync, and projection metadata tables:
 
 ```text
-graph._registered_tables
-graph._registered_edges
-graph._registered_filter_columns
 graph._graphs
 graph._graph_grants
 graph._graph_quotas
-graph._build_jobs
-graph._maintenance_jobs
 graph._jobs
 graph._job_runs
 graph._sync_policies
 graph._sync_log
+graph._projection_generations
 graph._sync_buffer
 ```
 
-Do not mutate these tables directly in application code. Use `graph.*`
-functions so validation, catalog fingerprints, and schema drift handling remain
-consistent.
+Application code should not depend on raw internal reads. Use filtered public
+functions such as `graph.list_graphs()`, `graph.graph_privileges(...)`,
+`graph.graph_quotas()`, `graph.graph_quota_usage()`, `graph.jobs(...)`,
+`graph.job_runs(...)`, `graph.sync_health()`, and `graph.projection_status()`.
+Extension owners and superusers can still inspect internals for maintenance
+when needed.
 
 ## Error Codes
 

@@ -15,7 +15,7 @@ type DirectNodeRow = (
 /// BFS traversal from a seed node.
 ///
 /// See: `docs/user_guide/querying.mdx`
-#[pg_extern(schema = "graph", cost = 1000)]
+#[pg_extern(schema = "graph", cost = 1000, security_definer)]
 #[allow(
     clippy::too_many_arguments,
     clippy::type_complexity,

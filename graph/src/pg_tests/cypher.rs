@@ -198,7 +198,6 @@ fn cypher_compatibility_matrix_is_separate_and_honest() {
 #[pg_test]
 fn pgq_public_endpoint_is_permanently_rejected() {
     reset_and_create_fixtures();
-    
     let sqlstate = sqlstate_for_error("SELECT graph.pgq('MATCH (a)')");
     assert_eq!(sqlstate.as_deref(), Some("PG018"));
 }

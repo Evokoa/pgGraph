@@ -50,15 +50,13 @@ pub fn check_table_delete_acl(table_oid: u32) -> GraphResult<()> {
 }
 
 fn check_table_acl_mode(table_oid: u32, mode: pgrx::pg_sys::AclMode) -> GraphResult<()> {
+    let role_oid = current_acl_role_oid()?;
     let acl_result = unsafe {
         // SAFETY: This runs inside a PostgreSQL backend process. `table_oid` is
-        // an OID supplied by callers that already resolved catalog objects, and
-        // the ACL checker does not take ownership of Rust-managed memory.
-        pgrx::pg_sys::pg_class_aclcheck(
-            pgrx::pg_sys::Oid::from_u32(table_oid),
-            pgrx::pg_sys::GetUserId(),
-            mode,
-        )
+        // an OID supplied by callers that already resolved catalog objects.
+        // `role_oid` is resolved from PostgreSQL session state, and the ACL
+        // checker does not take ownership of Rust-managed memory.
+        pgrx::pg_sys::pg_class_aclcheck(pgrx::pg_sys::Oid::from_u32(table_oid), role_oid, mode)
     };
 
     if acl_result != pgrx::pg_sys::AclResult::ACLCHECK_OK {
@@ -67,4 +65,12 @@ fn check_table_acl_mode(table_oid: u32, mode: pgrx::pg_sys::AclMode) -> GraphRes
         });
     }
     Ok(())
+}
+
+fn current_acl_role_oid() -> GraphResult<pgrx::pg_sys::Oid> {
+    pgrx::Spi::get_one::<pgrx::pg_sys::Oid>(
+        "SELECT COALESCE(NULLIF(NULLIF(current_setting('role', true), ''), 'none'), current_user)::regrole::oid",
+    )
+    .map_err(|err| GraphError::Internal(format!("current ACL role read failed: {err}")))?
+    .ok_or_else(|| GraphError::Internal("current ACL role oid was null".to_string()))
 }

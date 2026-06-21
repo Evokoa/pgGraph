@@ -214,12 +214,34 @@ pub(crate) fn update_graph_metadata(
             reason: format!("graph '{}' does not exist", graph_name),
         }
     })?;
+    update_graph_metadata_by_id(
+        &existing,
+        graph_kind,
+        residency,
+        materialization,
+        projection_mode,
+    )
+}
+
+/// Updates mutable graph metadata by graph id.
+///
+/// # Errors
+///
+/// Returns [`safety::GraphError::InvalidFilter`] when a supplied policy value is
+/// invalid. Returns [`safety::GraphError::Internal`] for SPI failures.
+pub(crate) fn update_graph_metadata_by_id(
+    existing: &GraphMetadata,
+    graph_kind: Option<&str>,
+    residency: Option<&str>,
+    materialization: Option<&str>,
+    projection_mode: Option<&str>,
+) -> safety::GraphResult<GraphMetadata> {
     let graph_kind = graph_kind.unwrap_or(&existing.graph_kind);
     let residency = residency.unwrap_or(&existing.residency);
     let materialization = materialization.unwrap_or(&existing.materialization);
     let projection_mode = projection_mode.unwrap_or(&existing.projection_mode);
     validate_graph_metadata(
-        graph_name,
+        &existing.graph_name,
         existing.namespace.as_deref(),
         graph_kind,
         residency,
@@ -258,7 +280,7 @@ pub(crate) fn update_graph_metadata(
                     projection_mode.into(),
                 ],
             )
-            .map_err(|err| graph_catalog_error("alter graph", err))?;
+            .map_err(|err| graph_catalog_error("update graph", err))?;
         metadata_from_first_row(rows, "updated graph row missing")
     })
 }
@@ -416,24 +438,24 @@ pub(crate) fn revoke_graph_privilege(
     })
 }
 
-/// Lists graph privileges visible to the current role.
-pub(crate) fn graph_privileges(
+/// Lists graph privileges visible to an explicit role.
+pub(crate) fn graph_privileges_for_role(
     graph_name: Option<&str>,
     tenant: Option<&str>,
     namespace: Option<&str>,
+    role_oid: pgrx::pg_sys::Oid,
 ) -> safety::GraphResult<Vec<GraphGrant>> {
     let graph_filter = match graph_name {
         Some(graph_name) => Some(
-            resolve_visible_graph_metadata(graph_name, tenant, namespace)?.ok_or_else(|| {
-                safety::GraphError::InvalidFilter {
+            resolve_visible_graph_metadata_for_role(graph_name, tenant, namespace, role_oid)?
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
                     reason: format!("graph '{}' does not exist", graph_name),
-                }
-            })?,
+                })?,
         ),
         None => None,
     };
     if let Some(graph) = &graph_filter {
-        require_graph_privilege(graph, GraphPrivilege::Admin)?;
+        require_graph_privilege_for_role(graph, GraphPrivilege::Admin, role_oid)?;
     }
 
     Spi::connect(|client| {
@@ -464,18 +486,18 @@ pub(crate) fn graph_privileges(
                         g.updated_at
                    FROM graph._graph_grants g
                    JOIN graph._graphs gr ON gr.graph_id = g.graph_id
-                  WHERE gr.owner_role = current_user::regrole::oid
+                  WHERE gr.owner_role = $1::oid
                      OR gr.graph_kind = 'global'
                      OR EXISTS (
                          SELECT 1
                            FROM graph._graph_grants own
                           WHERE own.graph_id = gr.graph_id
-                            AND own.grantee = current_user::regrole::oid
+                            AND own.grantee = $1::oid
                             AND own.privilege = 'admin'
                      )
                   ORDER BY gr.graph_name, g.grantee, g.privilege",
                 None,
-                &[],
+                &[role_oid.into()],
             )
         }
         .map_err(|err| graph_catalog_error("list graph privileges", err))?;
@@ -759,6 +781,22 @@ pub(crate) fn selected_or_default_graph_metadata() -> safety::GraphResult<GraphM
     }
 }
 
+/// Returns the session-selected graph visible to an explicit role, or default.
+pub(crate) fn selected_or_default_graph_metadata_for_role(
+    role_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<GraphMetadata> {
+    match selected_graph_id()? {
+        Some(graph_id) => {
+            resolve_visible_graph_by_id_for_role(&graph_id, role_oid)?.ok_or_else(|| {
+                safety::GraphError::InvalidFilter {
+                    reason: "selected graph metadata is missing".to_string(),
+                }
+            })
+        }
+        None => default_graph_metadata(),
+    }
+}
+
 /// Stores a session-local graph selection by graph id.
 ///
 /// # Errors
@@ -842,6 +880,24 @@ pub(crate) fn resolve_visible_graph_metadata(
     tenant: Option<&str>,
     namespace: Option<&str>,
 ) -> safety::GraphResult<Option<GraphMetadata>> {
+    resolve_visible_graph_metadata_for_role(graph_name, tenant, namespace, current_user_oid()?)
+}
+
+/// Resolves graph metadata visible to an explicit role.
+///
+/// Role-owned graphs are visible to their owner. Global graphs are visible to
+/// every role with schema access, which keeps the compatibility default graph
+/// selectable without making direct catalog writes public.
+///
+/// # Errors
+///
+/// Returns [`safety::GraphError::Internal`] for SPI failures.
+pub(crate) fn resolve_visible_graph_metadata_for_role(
+    graph_name: &str,
+    tenant: Option<&str>,
+    namespace: Option<&str>,
+    role_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<Option<GraphMetadata>> {
     let namespace = namespace.unwrap_or(graph_policy::DEFAULT_GRAPH_NAMESPACE);
     Spi::connect(|client| {
         let mut rows = client
@@ -863,16 +919,16 @@ pub(crate) fn resolve_visible_graph_metadata(
                     AND COALESCE(tenant, '') = COALESCE($2, '')
                     AND COALESCE(namespace, '') = COALESCE($3, '')
                     AND (
-                        owner_role = current_user::regrole::oid
+                        owner_role = $4::oid
                         OR graph_kind = 'global'
                         OR EXISTS (
                             SELECT 1
                               FROM graph._graph_grants gg
                              WHERE gg.graph_id = graph._graphs.graph_id
-                               AND gg.grantee = current_user::regrole::oid
+                               AND gg.grantee = $4::oid
                         )
                     )
-                  ORDER BY CASE WHEN owner_role = current_user::regrole::oid THEN 0 ELSE 1 END,
+                  ORDER BY CASE WHEN owner_role = $4::oid THEN 0 ELSE 1 END,
                            created_at
                   LIMIT 1",
                 None,
@@ -880,6 +936,7 @@ pub(crate) fn resolve_visible_graph_metadata(
                     graph_name.into(),
                     tenant.map(str::to_string).into(),
                     namespace.into(),
+                    role_oid.into(),
                 ],
             )
             .map_err(|err| graph_catalog_error("resolve visible graph", err))?;
@@ -888,6 +945,13 @@ pub(crate) fn resolve_visible_graph_metadata(
 }
 
 fn resolve_visible_graph_by_id(graph_id: &str) -> safety::GraphResult<Option<GraphMetadata>> {
+    resolve_visible_graph_by_id_for_role(graph_id, current_user_oid()?)
+}
+
+fn resolve_visible_graph_by_id_for_role(
+    graph_id: &str,
+    role_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<Option<GraphMetadata>> {
     graph_policy::GraphId::parse(graph_id).map_err(|err| safety::GraphError::InvalidFilter {
         reason: err.to_string(),
     })?;
@@ -909,18 +973,18 @@ fn resolve_visible_graph_by_id(graph_id: &str) -> safety::GraphResult<Option<Gra
                    FROM graph._graphs
                   WHERE graph_id = $1::uuid
                     AND (
-                        owner_role = current_user::regrole::oid
+                        owner_role = $2::oid
                         OR graph_kind = 'global'
                         OR EXISTS (
                             SELECT 1
                               FROM graph._graph_grants gg
                              WHERE gg.graph_id = graph._graphs.graph_id
-                               AND gg.grantee = current_user::regrole::oid
+                               AND gg.grantee = $2::oid
                         )
                     )
                   LIMIT 1",
                 None,
-                &[graph_id.into()],
+                &[graph_id.into(), role_oid.into()],
             )
             .map_err(|err| graph_catalog_error("resolve visible graph by id", err))?;
         rows.next().map(metadata_from_row).transpose()
@@ -968,6 +1032,17 @@ pub(crate) fn resolve_graph_by_id(graph_id: &str) -> safety::GraphResult<Option<
 ///
 /// Returns [`safety::GraphError::Internal`] for SPI failures.
 pub(crate) fn list_graph_metadata() -> safety::GraphResult<Vec<GraphMetadata>> {
+    list_graph_metadata_for_role(current_user_oid()?)
+}
+
+/// Lists graph metadata rows visible to an explicit role.
+///
+/// # Errors
+///
+/// Returns [`safety::GraphError::Internal`] for SPI failures.
+pub(crate) fn list_graph_metadata_for_role(
+    role_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<Vec<GraphMetadata>> {
     Spi::connect(|client| {
         let rows = client
             .select(
@@ -984,17 +1059,17 @@ pub(crate) fn list_graph_metadata() -> safety::GraphResult<Vec<GraphMetadata>> {
                         created_at,
                         updated_at
                    FROM graph._graphs
-                  WHERE owner_role = current_user::regrole::oid
+                  WHERE owner_role = $1::oid
                      OR graph_kind = 'global'
                      OR EXISTS (
                          SELECT 1
                            FROM graph._graph_grants gg
                           WHERE gg.graph_id = graph._graphs.graph_id
-                            AND gg.grantee = current_user::regrole::oid
+                            AND gg.grantee = $1::oid
                      )
                   ORDER BY COALESCE(tenant, ''), COALESCE(namespace, ''), graph_name",
                 None,
-                &[],
+                &[role_oid.into()],
             )
             .map_err(|err| graph_catalog_error("list graphs", err))?;
         rows.map(metadata_from_row).collect()
@@ -1096,7 +1171,8 @@ pub(crate) fn require_graph_privilege(
     graph: &GraphMetadata,
     privilege: GraphPrivilege,
 ) -> safety::GraphResult<()> {
-    if has_graph_privilege(&graph.graph_id, privilege)? {
+    let role_oid = current_user_oid()?;
+    if has_graph_privilege_for_role(&graph.graph_id, privilege, role_oid)? {
         Ok(())
     } else {
         Err(safety::GraphError::AclDenied {
@@ -1105,7 +1181,26 @@ pub(crate) fn require_graph_privilege(
     }
 }
 
-fn has_graph_privilege(graph_id: &str, privilege: GraphPrivilege) -> safety::GraphResult<bool> {
+/// Ensures the explicit role has the requested graph-level privilege.
+pub(crate) fn require_graph_privilege_for_role(
+    graph: &GraphMetadata,
+    privilege: GraphPrivilege,
+    role_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<()> {
+    if has_graph_privilege_for_role(&graph.graph_id, privilege, role_oid)? {
+        Ok(())
+    } else {
+        Err(safety::GraphError::AclDenied {
+            table: format!("graph {}", graph.graph_name),
+        })
+    }
+}
+
+fn has_graph_privilege_for_role(
+    graph_id: &str,
+    privilege: GraphPrivilege,
+    role_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<bool> {
     let accepted = privilege
         .accepted_grants()
         .iter()
@@ -1114,14 +1209,14 @@ fn has_graph_privilege(graph_id: &str, privilege: GraphPrivilege) -> safety::Gra
     Spi::connect(|client| {
         let rows = client.select(
             "SELECT
-                COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)
-                OR has_schema_privilege(current_user, 'graph', 'CREATE')
+                COALESCE((SELECT rolsuper FROM pg_roles WHERE oid = $3::oid), false)
+                OR has_schema_privilege($3::oid, 'graph', 'CREATE')
                 OR EXISTS (
                     SELECT 1
                       FROM graph._graphs
                      WHERE graph_id = $1::uuid
                        AND (
-                           owner_role = current_user::regrole::oid
+                           owner_role = $3::oid
                            OR (graph_kind = 'global' AND 'read' = ANY($2::text[]))
                        )
                 )
@@ -1129,11 +1224,11 @@ fn has_graph_privilege(graph_id: &str, privilege: GraphPrivilege) -> safety::Gra
                     SELECT 1
                       FROM graph._graph_grants
                      WHERE graph_id = $1::uuid
-                       AND grantee = current_user::regrole::oid
+                       AND grantee = $3::oid
                        AND privilege = ANY($2::text[])
                 )",
             None,
-            &[graph_id.into(), accepted.into()],
+            &[graph_id.into(), accepted.into(), role_oid.into()],
         )?;
         Ok::<_, pgrx::spi::Error>(rows.first().get::<bool>(1).ok().flatten().unwrap_or(false))
     })
@@ -1337,6 +1432,14 @@ fn current_user_oid() -> safety::GraphResult<pgrx::pg_sys::Oid> {
     Spi::get_one::<pgrx::pg_sys::Oid>("SELECT current_user::regrole::oid")
         .map_err(|err| graph_catalog_error("read current user oid", err))?
         .ok_or_else(|| safety::GraphError::Internal("current user oid was null".to_string()))
+}
+
+pub(crate) fn current_role_oid() -> safety::GraphResult<pgrx::pg_sys::Oid> {
+    Spi::get_one::<pgrx::pg_sys::Oid>(
+        "SELECT COALESCE(NULLIF(NULLIF(current_setting('role', true), ''), 'none'), current_user)::regrole::oid",
+    )
+    .map_err(|err| graph_catalog_error("read current role oid", err))?
+    .ok_or_else(|| safety::GraphError::Internal("current role oid was null".to_string()))
 }
 
 fn normalize_quota_scope_key(

@@ -2535,7 +2535,23 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
              VALUES ('child', 'root', 99, 'tenant-a')",
     )
     .expect("insert projection ingest child failed");
+    Spi::run("SELECT graph.unload_graph('default')")
+        .expect("unload default graph before apply sync failed");
+    Spi::run("SELECT graph.select_graph('default')")
+        .expect("reselect default graph before apply sync failed");
+    let loaded_before_apply = Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+        .expect("loaded_graphs before projection apply failed")
+        .unwrap_or(-1);
     Spi::run("SELECT * FROM graph.apply_sync()").expect("apply projection ingest sync failed");
+    let loaded_after_apply = Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+        .expect("loaded_graphs after projection apply failed")
+        .unwrap_or(-1);
+    let loaded_after_apply_name = Spi::get_one::<String>(
+        "SELECT graph_name
+           FROM graph.loaded_graphs()",
+    )
+    .expect("loaded_graphs name after projection apply failed")
+    .unwrap_or_default();
 
     let (rows_ingested, segments_published, sync_watermark) = Spi::connect(|client| {
         let result = client
@@ -2557,10 +2573,24 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
     let max_sync_id = Spi::get_one::<i64>("SELECT max(id) FROM graph._sync_log")
         .expect("max sync id read failed")
         .unwrap_or(0);
+    let loaded_after_ingest = Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+        .expect("loaded_graphs after projection ingest failed")
+        .unwrap_or(-1);
+    let loaded_after_ingest_name = Spi::get_one::<String>(
+        "SELECT graph_name
+           FROM graph.loaded_graphs()",
+    )
+    .expect("loaded_graphs name after projection ingest failed")
+    .unwrap_or_default();
 
     assert!(rows_ingested >= 3);
     assert!(segments_published >= 2);
     assert_eq!(sync_watermark, max_sync_id);
+    assert_eq!(loaded_before_apply, 0);
+    assert_eq!(loaded_after_apply, 1);
+    assert_eq!(loaded_after_apply_name, "default");
+    assert_eq!(loaded_after_ingest, 1);
+    assert_eq!(loaded_after_ingest_name, "default");
     Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
     Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
 }

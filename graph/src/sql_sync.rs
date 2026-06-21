@@ -453,7 +453,11 @@ pub(crate) fn apply_sync_to_high_watermark(
 }
 
 fn ensure_engine_loaded_for_apply_sync() -> safety::GraphResult<()> {
-    if ENGINE.with(|e| e.borrow().built) {
+    let graph = selected_or_default_graph_metadata()?;
+    if ENGINE.with(|e| e.borrow().built)
+        && crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id)
+    {
+        crate::runtime_state::touch_loaded_graph(&graph.graph_id);
         return Ok(());
     }
 
@@ -462,14 +466,8 @@ fn ensure_engine_loaded_for_apply_sync() -> safety::GraphResult<()> {
         return Err(safety::GraphError::NotBuilt);
     }
 
-    let mut loaded = load_graph_file(&graph_path)?;
-    if let Ok((tables, edges, filters)) = read_catalog() {
-        loaded.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filters));
-    }
-    ENGINE.with(|engine| {
-        *engine.borrow_mut() = loaded;
-    });
-    Ok(())
+    let loaded = load_graph_file(&graph_path)?;
+    install_loaded_engine_for_selected_graph(&graph, loaded)
 }
 
 fn should_apply_sync_via_durable_projection() -> bool {
@@ -528,11 +526,23 @@ fn reload_engine_after_projection_ingest(
     graph_path: &std::path::Path,
     sync_watermark: i64,
 ) -> safety::GraphResult<()> {
+    let graph = selected_or_default_graph_metadata()?;
     let mut loaded = load_graph_file(graph_path)?;
     loaded.record_applied_sync_id(sync_watermark);
+    install_loaded_engine_for_selected_graph(&graph, loaded)
+}
+
+fn install_loaded_engine_for_selected_graph(
+    graph: &crate::catalog::GraphMetadata,
+    mut loaded: engine::Engine,
+) -> safety::GraphResult<()> {
+    if let Ok((tables, edges, filters)) = read_catalog() {
+        loaded.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filters));
+    }
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });
+    crate::runtime_state::mark_loaded_graph(graph);
     Ok(())
 }
 

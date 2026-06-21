@@ -1,8 +1,3 @@
-#![allow(
-    clippy::type_complexity,
-    reason = "pgrx SQL ABI row shapes are intentionally explicit in this module"
-)]
-
 use super::*;
 
 pub(super) fn check_enabled() {
@@ -18,6 +13,10 @@ fn test_enabled() -> bool {
 
 /// Create graph metadata for the current role.
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn create_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -61,6 +60,10 @@ fn create_graph(
 
 /// Alter graph metadata for the current role.
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn alter_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -104,6 +107,10 @@ fn alter_graph(
 
 /// Drop graph metadata for the current role.
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn drop_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -141,7 +148,11 @@ fn drop_graph(
 }
 
 /// List graph metadata visible to the current role.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn list_graphs() -> TableIterator<
     'static,
     (
@@ -160,13 +171,19 @@ fn list_graphs() -> TableIterator<
     ),
 > {
     with_panic_boundary("list_graphs()", || {
-        let rows = catalog::list_graph_metadata().unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let rows =
+            catalog::list_graph_metadata_for_role(caller_oid).unwrap_or_else(|err| err.report());
         graph_metadata_iterator(rows)
     })
 }
 
 /// Return the session-selected graph metadata.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn current_graph() -> TableIterator<
     'static,
     (
@@ -185,14 +202,19 @@ fn current_graph() -> TableIterator<
     ),
 > {
     with_panic_boundary("current_graph()", || {
-        let metadata =
-            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let metadata = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
         graph_metadata_iterator(vec![metadata])
     })
 }
 
 /// Select graph metadata for later graph-scoped calls.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn set_current_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -215,14 +237,17 @@ fn set_current_graph(
     ),
 > {
     with_panic_boundary("set_current_graph()", || {
-        let metadata = catalog::resolve_visible_graph_metadata(graph_name, tenant, namespace)
-            .unwrap_or_else(|err| err.report())
-            .unwrap_or_else(|| {
-                safety::GraphError::InvalidFilter {
-                    reason: format!("graph '{}' does not exist", graph_name),
-                }
-                .report()
-            });
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let metadata = catalog::resolve_visible_graph_metadata_for_role(
+            graph_name, tenant, namespace, caller_oid,
+        )
+        .unwrap_or_else(|err| err.report())
+        .unwrap_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!("graph '{}' does not exist", graph_name),
+            }
+            .report()
+        });
         catalog::set_selected_graph_id(&metadata.graph_id).unwrap_or_else(|err| err.report());
         graph_metadata_iterator(vec![metadata])
     })
@@ -282,7 +307,7 @@ fn revoke_graph(
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn graph_privileges(
     graph_name: default!(Option<&str>, "NULL"),
     tenant: default!(Option<&str>, "NULL"),
@@ -300,13 +325,18 @@ fn graph_privileges(
     ),
 > {
     with_panic_boundary("graph_privileges()", || {
-        let grants = catalog::graph_privileges(graph_name, tenant, namespace)
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let grants = catalog::graph_privileges_for_role(graph_name, tenant, namespace, caller_oid)
             .unwrap_or_else(|err| err.report());
         graph_grant_iterator(grants)
     })
 }
 
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn transfer_graph_ownership(
     graph_name: &str,
     new_owner: &str,
@@ -336,7 +366,11 @@ fn transfer_graph_ownership(
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn set_graph_residency(
     graph_name: &str,
     residency: &str,
@@ -360,24 +394,35 @@ fn set_graph_residency(
     ),
 > {
     with_panic_boundary("set_graph_residency()", || {
-        let graph = resolve_graph_for_registration(graph_name, tenant, namespace);
-        catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Admin)
-            .unwrap_or_else(|err| err.report());
-        let metadata = catalog::update_graph_metadata(
-            graph_name,
-            tenant,
-            namespace,
-            None,
-            Some(residency),
-            None,
-            None,
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::resolve_visible_graph_metadata_for_role(
+            graph_name, tenant, namespace, caller_oid,
+        )
+        .unwrap_or_else(|err| err.report())
+        .unwrap_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!("graph '{}' does not exist", graph_name),
+            }
+            .report()
+        });
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Admin,
+            caller_oid,
         )
         .unwrap_or_else(|err| err.report());
+        let metadata =
+            catalog::update_graph_metadata_by_id(&graph, None, Some(residency), None, None)
+                .unwrap_or_else(|err| err.report());
         graph_metadata_iterator(vec![metadata])
     })
 }
 
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn set_graph_quota(
     scope_type: &str,
     dimension: &str,
@@ -406,7 +451,11 @@ fn set_graph_quota(
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn graph_quotas() -> TableIterator<
     'static,
     (
@@ -426,7 +475,11 @@ fn graph_quotas() -> TableIterator<
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn graph_quota_usage() -> TableIterator<
     'static,
     (
@@ -459,6 +512,10 @@ pub(crate) fn check_enabled_result() -> safety::GraphResult<()> {
     }
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL row ABI"
+)]
 fn graph_metadata_iterator(
     rows: Vec<catalog::GraphMetadata>,
 ) -> TableIterator<
@@ -523,6 +580,10 @@ fn graph_grant_iterator(
     }))
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL row ABI"
+)]
 fn graph_quota_iterator(
     rows: Vec<catalog::GraphQuota>,
 ) -> TableIterator<
@@ -552,6 +613,10 @@ fn graph_quota_iterator(
     }))
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL row ABI"
+)]
 fn graph_quota_usage_iterator(
     rows: Vec<catalog::GraphQuotaUsage>,
 ) -> TableIterator<
@@ -594,6 +659,27 @@ fn resolve_graph_for_registration(
         })
 }
 
+fn resolve_graph_for_registration_for_role(
+    graph_name: &str,
+    graph_tenant: Option<&str>,
+    graph_namespace: Option<&str>,
+    role_oid: pgrx::pg_sys::Oid,
+) -> catalog::GraphMetadata {
+    catalog::resolve_visible_graph_metadata_for_role(
+        graph_name,
+        graph_tenant,
+        graph_namespace,
+        role_oid,
+    )
+    .unwrap_or_else(|err| err.report())
+    .unwrap_or_else(|| {
+        safety::GraphError::InvalidFilter {
+            reason: format!("graph '{}' does not exist", graph_name),
+        }
+        .report()
+    })
+}
+
 pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
     let allowed = Spi::connect(|client| {
         let result = client.select(
@@ -630,8 +716,22 @@ fn require_selected_graph_build_result() -> safety::GraphResult<()> {
     catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Build)
 }
 
+fn require_selected_graph_build_result_for_role(
+    role_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<()> {
+    let graph = catalog::selected_or_default_graph_metadata_for_role(role_oid)?;
+    catalog::require_graph_privilege_for_role(&graph, catalog::GraphPrivilege::Build, role_oid)
+}
+
 fn require_graph_build_result(graph: &catalog::GraphMetadata) -> safety::GraphResult<()> {
     catalog::require_graph_privilege(graph, catalog::GraphPrivilege::Build)
+}
+
+fn require_graph_build_result_for_role(
+    graph: &catalog::GraphMetadata,
+    role_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<()> {
+    catalog::require_graph_privilege_for_role(graph, catalog::GraphPrivilege::Build, role_oid)
 }
 
 fn registered_table_name(table_oid: u32) -> safety::GraphResult<Option<String>> {
@@ -1542,7 +1642,7 @@ fn projection_metadata_status_snapshot(
 /// Optionally persists the result to disk based on `graph.persist_on_build`.
 ///
 /// See: `docs/user_guide/build-and-persistence.mdx`
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 pub(super) fn build() -> TableIterator<
     'static,
     (
@@ -1555,7 +1655,8 @@ pub(super) fn build() -> TableIterator<
     ),
 > {
     with_panic_boundary("build()", || {
-        require_selected_graph_build_result().unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        require_selected_graph_build_result_for_role(caller_oid).unwrap_or_else(|err| err.report());
         let result = execute_build(false).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             result.nodes_loaded,
@@ -1569,7 +1670,7 @@ pub(super) fn build() -> TableIterator<
 }
 
 /// Build a named graph without requiring a separate `set_current_graph()` call.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -1591,8 +1692,14 @@ fn build_graph(
     ),
 > {
     with_panic_boundary("build_graph()", || {
-        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
-        require_graph_build_result(&graph).unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration_for_role(
+            graph_name,
+            graph_tenant,
+            graph_namespace,
+            caller_oid,
+        );
+        require_graph_build_result_for_role(&graph, caller_oid).unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         let result = execute_build(force_persist).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
@@ -2036,6 +2143,10 @@ fn build_status(
     })
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL row ABI"
+)]
 fn build_not_found_status(
     build_id: &str,
 ) -> TableIterator<
@@ -2431,6 +2542,10 @@ fn registered_tables_for_graph(
     })
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL row ABI"
+)]
 fn registered_tables_for_graph_id(
     graph_id: &str,
 ) -> safety::GraphResult<
@@ -2528,6 +2643,10 @@ fn registered_edges_for_graph(
     })
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL row ABI"
+)]
 fn registered_edges_for_graph_id(
     graph_id: &str,
 ) -> safety::GraphResult<
@@ -4918,6 +5037,10 @@ fn job_runs(
 
 /// Summarize durable job outcomes visible to the current role.
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn job_stats(
     graph_name: default!(Option<&str>, "NULL"),
     graph_tenant: default!(Option<&str>, "NULL"),
@@ -5573,6 +5696,10 @@ fn maintenance_status(
     })
 }
 
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL row ABI"
+)]
 fn maintenance_not_found_status(
     job_id: &str,
 ) -> TableIterator<

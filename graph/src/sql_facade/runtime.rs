@@ -1,8 +1,3 @@
-#![allow(
-    clippy::type_complexity,
-    reason = "pgrx SQL ABI row shapes are intentionally explicit in this module"
-)]
-
 use super::admin::{check_enabled_result, require_graph_admin_result, with_panic_boundary};
 use super::*;
 
@@ -27,7 +22,7 @@ fn reset() {
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn select_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -41,7 +36,9 @@ fn select_graph(
     ),
 > {
     with_panic_boundary("select_graph()", || {
-        let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph =
+            resolve_visible_runtime_graph_for_role(graph_name, tenant, namespace, caller_oid);
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         let mut loaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
         if !loaded && crate::runtime_state::loaded_graph_id().is_some() {
@@ -60,7 +57,11 @@ fn select_graph(
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn load_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -78,9 +79,15 @@ fn load_graph(
     ),
 > {
     with_panic_boundary("load_graph()", || {
-        let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
-        catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Admin)
-            .unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph =
+            resolve_visible_runtime_graph_for_role(graph_name, tenant, namespace, caller_oid);
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Admin,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         load_selected_graph_from_disk(&graph, false).unwrap_or_else(|err| err.report());
         let snapshot =
@@ -111,7 +118,7 @@ fn load_graph(
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn unload_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -125,9 +132,15 @@ fn unload_graph(
     ),
 > {
     with_panic_boundary("unload_graph()", || {
-        let graph = resolve_visible_runtime_graph(graph_name, tenant, namespace);
-        catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Admin)
-            .unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph =
+            resolve_visible_runtime_graph_for_role(graph_name, tenant, namespace, caller_oid);
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Admin,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
         let unloaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
         if unloaded {
             ENGINE.with(|engine| {
@@ -139,7 +152,11 @@ fn unload_graph(
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn loaded_graphs() -> TableIterator<
     'static,
     (
@@ -154,9 +171,10 @@ fn loaded_graphs() -> TableIterator<
     ),
 > {
     with_panic_boundary("loaded_graphs()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
         let row = ENGINE.with(|engine| {
             crate::runtime_state::loaded_graph_snapshot(&engine.borrow()).map(|mut snapshot| {
-                if let Ok(graphs) = catalog::list_graph_metadata() {
+                if let Ok(graphs) = catalog::list_graph_metadata_for_role(caller_oid) {
                     if let Some(graph) = graphs
                         .into_iter()
                         .find(|graph| graph.graph_id == snapshot.graph_id)
@@ -180,7 +198,11 @@ fn loaded_graphs() -> TableIterator<
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx TableIterator tuple defines this SQL function's ABI"
+)]
 fn graph_runtime_status() -> TableIterator<
     'static,
     (
@@ -198,9 +220,10 @@ fn graph_runtime_status() -> TableIterator<
     ),
 > {
     with_panic_boundary("graph_runtime_status()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
         let loaded =
             ENGINE.with(|engine| crate::runtime_state::loaded_graph_snapshot(&engine.borrow()));
-        let rows = catalog::list_graph_metadata()
+        let rows = catalog::list_graph_metadata_for_role(caller_oid)
             .unwrap_or_else(|err| err.report())
             .into_iter()
             .map(|graph| {
@@ -237,6 +260,22 @@ fn resolve_visible_runtime_graph(
     namespace: Option<&str>,
 ) -> catalog::GraphMetadata {
     catalog::resolve_visible_graph_metadata(graph_name, tenant, namespace)
+        .unwrap_or_else(|err| err.report())
+        .unwrap_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!("graph '{}' does not exist", graph_name),
+            }
+            .report()
+        })
+}
+
+fn resolve_visible_runtime_graph_for_role(
+    graph_name: &str,
+    tenant: Option<&str>,
+    namespace: Option<&str>,
+    role_oid: pgrx::pg_sys::Oid,
+) -> catalog::GraphMetadata {
+    catalog::resolve_visible_graph_metadata_for_role(graph_name, tenant, namespace, role_oid)
         .unwrap_or_else(|err| err.report())
         .unwrap_or_else(|| {
             safety::GraphError::InvalidFilter {
@@ -340,7 +379,14 @@ pub(super) fn hydrate_component_page(
 /// backend-local heap, and the reverse EdgeStore CSR is rebuilt into heap for
 /// inbound traversal.
 pub(super) fn maybe_auto_load() {
-    let graph = match catalog::selected_or_default_graph_metadata() {
+    let role_oid = match catalog::current_role_oid() {
+        Ok(role_oid) => role_oid,
+        Err(err) => {
+            pgrx::warning!("graph: auto-load skipped: {}", err);
+            return;
+        }
+    };
+    let graph = match catalog::selected_or_default_graph_metadata_for_role(role_oid) {
         Ok(graph) => graph,
         Err(err) => {
             pgrx::warning!("graph: auto-load skipped: {}", err);
@@ -441,9 +487,10 @@ fn load_selected_graph_from_disk(
 }
 
 pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
-    let graph = catalog::selected_or_default_graph_metadata()?;
+    let role_oid = catalog::current_role_oid()?;
+    let graph = catalog::selected_or_default_graph_metadata_for_role(role_oid)?;
     clear_loaded_graph_if_mismatched(&graph.graph_id);
-    catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Read)?;
+    catalog::require_graph_privilege_for_role(&graph, catalog::GraphPrivilege::Read, role_oid)?;
     maybe_auto_load();
 
     let sync_mode = current_sync_mode()?;

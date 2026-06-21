@@ -219,6 +219,74 @@ fn graph_catalog_mutation_requires_admin_privileges() {
 }
 
 #[pg_test]
+fn unprivileged_roles_cannot_read_named_graph_internal_catalogs() {
+    create_error_sqlstate_helper();
+    Spi::run("DROP ROLE IF EXISTS graph_acl_probe").expect("drop ACL probe role failed");
+    Spi::run("CREATE ROLE graph_acl_probe").expect("create ACL probe role failed");
+    Spi::run("GRANT USAGE ON SCHEMA graph TO graph_acl_probe")
+        .expect("grant graph schema usage failed");
+    Spi::run("SELECT graph.create_graph('acl_hidden_graph', namespace := 'app')")
+        .expect("create hidden ACL graph failed");
+
+    Spi::run("SET ROLE graph_acl_probe").expect("set ACL probe role failed");
+    let raw_table_sqlstates = [
+        "SELECT count(*) FROM graph._graphs",
+        "SELECT count(*) FROM graph._graph_grants",
+        "SELECT count(*) FROM graph._graph_quotas",
+        "SELECT count(*) FROM graph._jobs",
+        "SELECT count(*) FROM graph._job_runs",
+        "SELECT count(*) FROM graph._sync_policies",
+        "SELECT count(*) FROM graph._sync_log",
+        "SELECT count(*) FROM graph._projection_generations",
+        "SELECT count(*) FROM graph._sync_buffer",
+    ]
+    .into_iter()
+    .map(sqlstate_for_prepared_helper)
+    .collect::<Vec<_>>();
+    let visible_before_grant = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.list_graphs()
+          WHERE graph_name = 'acl_hidden_graph'
+            AND namespace = 'app'",
+    )
+    .expect("list_graphs before ACL grant failed")
+    .unwrap_or(-1);
+    Spi::run("RESET ROLE").expect("reset ACL probe role failed");
+
+    Spi::run(
+        "SELECT graph.grant_graph(
+             'acl_hidden_graph',
+             'graph_acl_probe',
+             'read',
+             namespace := 'app'
+         )",
+    )
+    .expect("grant ACL probe read failed");
+
+    Spi::run("SET ROLE graph_acl_probe").expect("set ACL probe role after grant failed");
+    let visible_after_grant = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.list_graphs()
+          WHERE graph_name = 'acl_hidden_graph'
+            AND namespace = 'app'",
+    )
+    .expect("list_graphs after ACL grant failed")
+    .unwrap_or(-1);
+    let raw_after_grant_sqlstate =
+        sqlstate_for_prepared_helper("SELECT count(*) FROM graph._graphs");
+    Spi::run("RESET ROLE").expect("reset ACL probe role after grant failed");
+
+    assert!(
+        raw_table_sqlstates
+            .iter()
+            .all(|sqlstate| sqlstate.as_deref() == Some("42501"))
+    );
+    assert_eq!(visible_before_grant, 0);
+    assert_eq!(visible_after_grant, 1);
+    assert_eq!(raw_after_grant_sqlstate, Some("42501".to_string()));
+}
+
+#[pg_test]
 fn graph_grants_gate_visibility_queries_and_builds() {
     reset_and_create_fixtures();
     create_error_sqlstate_helper();
@@ -296,6 +364,12 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     )
     .expect("graph admin load_graph failed")
     .unwrap_or(0);
+    let admin_residency = Spi::get_one::<String>(
+        "SELECT residency
+           FROM graph.set_graph_residency('secure_graph', 'warm', namespace := 'app')",
+    )
+    .expect("graph admin set_graph_residency failed")
+    .expect("graph admin residency row missing");
     Spi::run("RESET ROLE").expect("reset graph admin role failed");
 
     Spi::run("SET ROLE graph_phase7_reader").expect("set reader role failed");
@@ -316,6 +390,9 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     )
     .expect("reader traverse failed")
     .unwrap_or(0);
+    let reader_residency_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.set_graph_residency('secure_graph', 'cold', namespace := 'app')",
+    );
     Spi::run("RESET ROLE").expect("reset reader role failed");
 
     Spi::run("SET ROLE graph_phase7_no_graph").expect("set no_graph role failed");
@@ -343,9 +420,11 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     assert_eq!(owner_grant_rows, 4);
     assert_eq!(reader_current, "secure_graph");
     assert!(reader_nodes >= 1);
+    assert_eq!(admin_residency, "warm");
     assert_eq!(no_graph_sqlstate, Some("PG005".to_string()));
     assert_eq!(no_source_current, "secure_graph");
     assert_eq!(no_source_sqlstate, Some("PG002".to_string()));
+    assert_eq!(reader_residency_sqlstate, Some("PG002".to_string()));
     assert_eq!(builder_nodes, 2);
     assert!(admin_unloaded);
     assert_eq!(admin_loaded_nodes, 2);
@@ -733,8 +812,13 @@ fn graph_scoped_sync_replay_ignores_unrelated_source_table_changes() {
 
     Spi::run("UPDATE public.graph_test_bad_pgtest SET note = 'after' WHERE id = 's1'")
         .expect("update sync_b table failed");
+    Spi::run("SELECT graph.unload_graph('sync_b', namespace := 'app')")
+        .expect("unload sync_b before apply failed");
     Spi::run("SELECT graph.set_current_graph('sync_a', namespace := 'app')")
-        .expect("reselect sync_a failed");
+        .expect("reselect sync_a after unload failed");
+    let loaded_before_apply = Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+        .expect("loaded_graphs before sync_a apply failed")
+        .unwrap_or(-1);
     let pending_for_a = Spi::get_one::<i64>(
         "SELECT pending_sync_rows
            FROM graph.sync_health()",
@@ -747,6 +831,15 @@ fn graph_scoped_sync_replay_ignores_unrelated_source_table_changes() {
     )
     .expect("apply_sync sync_a failed")
     .unwrap_or(-1);
+    let loaded_after_apply = Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+        .expect("loaded_graphs after sync_a apply failed")
+        .unwrap_or(-1);
+    let loaded_graph_name = Spi::get_one::<String>(
+        "SELECT graph_name
+           FROM graph.loaded_graphs()",
+    )
+    .expect("loaded_graphs graph name after sync_a apply failed")
+    .unwrap_or_default();
 
     Spi::run("UPDATE public.graph_test_users_pgtest SET name = 'Alice synced' WHERE id = 'u1'")
         .expect("update sync_a table failed");
@@ -772,7 +865,10 @@ fn graph_scoped_sync_replay_ignores_unrelated_source_table_changes() {
     .unwrap_or(-1);
 
     assert_eq!(pending_for_a, 0);
+    assert_eq!(loaded_before_apply, 0);
     assert_eq!(applied_unrelated, 0);
+    assert_eq!(loaded_after_apply, 1);
+    assert_eq!(loaded_graph_name, "sync_a");
     assert_eq!(logged_user_updates, 1);
     assert_eq!(pending_after_a_change, 1);
     assert_eq!(applied_related, 1);

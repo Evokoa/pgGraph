@@ -846,8 +846,10 @@ SELECT pg_catalog.pg_extension_config_dump('graph._sync_buffer_id_seq', '');
 -- CREATE EXTENSION completes.
 
 -- ─── Privilege hardening ─────────────────────────────────────────────
--- Internal catalog tables should not be directly writable by non-admin
--- users. Access is mediated through the graph.* SQL API functions.
+-- Sensitive internal catalog tables should not be directly readable or
+-- writable by non-admin users. Read access is mediated through filtered
+-- graph.* SQL API functions; writes remain guarded by PostgreSQL ACLs and
+-- Rust graph-admin checks.
 REVOKE ALL ON TABLE graph._registered_tables       FROM PUBLIC;
 REVOKE ALL ON TABLE graph._registered_edges        FROM PUBLIC;
 REVOKE ALL ON TABLE graph._registered_filter_columns FROM PUBLIC;
@@ -862,22 +864,13 @@ REVOKE ALL ON TABLE graph._sync_policies          FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
 REVOKE ALL ON TABLE graph._projection_generations FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_buffer            FROM PUBLIC;
+REVOKE ALL ON SEQUENCE graph._sync_log_id_seq     FROM PUBLIC;
+REVOKE ALL ON SEQUENCE graph._sync_buffer_id_seq  FROM PUBLIC;
 GRANT SELECT ON TABLE graph._registered_tables       TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_edges        TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_filter_columns TO PUBLIC;
-GRANT SELECT ON TABLE graph._graphs                 TO PUBLIC;
-GRANT SELECT ON TABLE graph._graph_grants           TO PUBLIC;
-GRANT SELECT ON TABLE graph._graph_quotas           TO PUBLIC;
 GRANT SELECT ON TABLE graph._build_jobs             TO PUBLIC;
 GRANT SELECT ON TABLE graph._maintenance_jobs       TO PUBLIC;
-GRANT SELECT ON TABLE graph._jobs                   TO PUBLIC;
-GRANT SELECT ON TABLE graph._job_runs               TO PUBLIC;
-GRANT SELECT ON TABLE graph._sync_policies          TO PUBLIC;
-GRANT SELECT ON TABLE graph._sync_log               TO PUBLIC;
-GRANT SELECT ON TABLE graph._projection_generations TO PUBLIC;
-GRANT SELECT ON TABLE graph._sync_buffer            TO PUBLIC;
-GRANT SELECT ON SEQUENCE graph._sync_log_id_seq     TO PUBLIC;
-GRANT SELECT ON SEQUENCE graph._sync_buffer_id_seq  TO PUBLIC;
 
 -- Catalog mutation, build/vacuum, sync apply, reset, and global analytics are
 -- protected in Rust by graph-admin checks. Production deployments should still

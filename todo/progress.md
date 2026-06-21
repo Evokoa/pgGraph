@@ -281,4 +281,8 @@ This file is the cross-session handoff for completing `todo/` in phase order.
 - Independent review after Phases 9-11 ran in subagent `019ecc2e-095d-7a62-bb29-d7f4650f9d96` and found that non-selected named graphs did not report rebuild-required after relationship edits. The fix touches `graph._graphs.updated_at` on relationship catalog edits, compares that timestamp to the latest completed build in `graph_map()`, and adds non-selected named-graph regression coverage.
 - Phase 14 local review found no blocking issue after adding relationship `CREATE`, relationship and temporary-node traversal tests, overlay schema-direction preservation, and public docs. One stale pgrx rejection test was converted to the new same-transaction traversal behavior.
 - Independent review after Phases 12-14 ran in subagent `019ecfc7-324f-7063-8e85-fa488b10176b` and found no blocking or request-change issues in the Phase 14 diff.
-- Next checkpoint: start Phase 15 SQL/PGQ and openCypher compatibility closure from `todo/named-graphs-complete-plan.md`.
+- 2026-06-22 production-readiness cleanup is complete: sensitive named-graph
+  internals are no longer raw-readable by `PUBLIC`, mediated graph/runtime
+  APIs use caller-role filtering, sync/runtime load paths mark the loaded slot,
+  broad type-complexity suppressions were narrowed to local pgrx ABI
+  allowances, and completed follow-up todo files were removed.
