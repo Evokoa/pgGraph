@@ -2,6 +2,102 @@
 
 Release notes are ordered newest first.
 
+## v0.1.8: Named Graphs And Hosted Maintenance
+
+`v0.1.8` adds named graph administration, graph-scoped catalogs, hosted
+maintenance jobs, relationship creation, and stricter query-surface boundaries.
+pgGraph can now keep multiple registered graph definitions in the same
+extension schema, apply graph-specific grants and quotas, scope builds and sync
+replay to the selected graph, and expose enough runtime state for operators to
+load, unload, inspect, and maintain those graphs without falling back to raw
+catalog writes.
+
+This release also expands the mutable GQL write surface with registered
+relationship creation and row hydration, while keeping PostgreSQL source tables
+authoritative for graph mutations. Capability checks for openCypher and
+SQL/PGQ are now explicit, so unsupported syntax is rejected with clearer
+compatibility guidance instead of drifting into partial behavior.
+
+### Highlights
+
+- Added a durable named-graph catalog with graph creation, selection,
+  description, residency, grants, quotas, and metadata inspection APIs.
+- Scoped node registrations, relationship registrations, filter columns, build
+  jobs, maintenance jobs, sync policies, and sync replay by graph identity.
+- Added runtime graph loading and unloading controls so operators can manage
+  selected graphs and inspect active runtime state.
+- Added graph grants and quota policy enforcement for visibility, build,
+  sync, mutation, and administration paths.
+- Added hosted sync-policy jobs, hosted due-job runners, and an internal due
+  job worker so scheduled maintenance can run through graph-scoped job state.
+- Added graph-aware discovery and direct identity lookups for registered
+  labels and relationships.
+- Added GQL `CREATE` support for registered relationships, including source-row
+  inserts, transaction-local visibility, and hydrated relationship rows in
+  query results.
+- Added graph-scoped projection and sync behavior so replay, dirty-range
+  ingest, copy-on-write compaction, and runtime selection ignore unrelated
+  graph state.
+- Added explicit openCypher and SQL/PGQ capability boundaries with clearer
+  unsupported-feature reporting and compatibility corpus coverage.
+- Hardened named-graph catalog access so internal graph catalogs are mediated
+  through SQL APIs and caller-role visibility checks.
+
+### Named Graph Administration
+
+Named graphs move pgGraph beyond one implicit default graph. Operators can
+create graph definitions, select the active graph for a role, list graph
+metadata, configure residency, grant graph-level capabilities, and set build or
+storage quotas. Registration APIs now attach tables, relationships, filter
+columns, sync policies, and build state to a graph ID, while existing default
+graph behavior remains available for simple installs.
+
+The graph-scoped catalog layer also changes runtime behavior. Build operations,
+auto-discovery, traversal, GQL queries, sync replay, projection ingest, and
+maintenance jobs now resolve the caller's selected graph and reject access when
+the role lacks the required graph privilege. Runtime status APIs report graph
+identity and residency state so loaded graph engines are no longer treated as a
+single global slot.
+
+### Hosted Maintenance And Sync
+
+`v0.1.8` adds graph-scoped job tables and scheduler entry points for hosted
+maintenance. Sync policies can create due jobs, due-job runners can claim and
+execute graph work, and Docker installs continue to schedule
+`graph.run_scheduled_maintenance()` through `pg_cron`. The same job model can
+be used by external schedulers in non-Docker deployments.
+
+Build jobs and maintenance jobs now include graph identity, advisory-lock
+coverage was updated for graph-scoped work, and sync replay ignores source
+changes that belong to other registered graphs. Projection maintenance paths
+also preserve graph scope when ingesting dirty ranges or compacting
+copy-on-write state.
+
+### GQL And Compatibility
+
+The GQL mutable write path can now create registered relationships. Relationship
+creation resolves mapped endpoint rows, inserts through PostgreSQL DML, exposes
+transaction-local changes to subsequent graph reads, and returns hydrated
+relationship records. Direct identity lookups support the new row hydration
+paths without making graph artifacts a second source of truth.
+
+The release also makes compatibility boundaries more explicit. The openCypher
+preview accepts only the subset that maps cleanly to pgGraph's GQL IR, and the
+SQL/PGQ adapter documents supported typed-hook behavior separately from
+PostgreSQL's future SQL parser integration. Unsupported features now fail with
+clearer errors and capability metadata.
+
+### Compatibility
+
+The named-graph catalog adds new extension-owned tables and changes the shape
+of several internal administration paths. Existing single-graph installs should
+continue to use the default graph, but development databases created from older
+alpha catalog layouts should be recreated before testing this release.
+
+Source tables remain the source of truth. Graph artifacts, projection segments,
+sync state, and runtime engines are still derived from PostgreSQL tables and
+graph registration metadata.
+
 ## v0.1.7: Durable Projection Operations
 
 `v0.1.7` adds the durable projection operation layer for mutable graphs. pgGraph

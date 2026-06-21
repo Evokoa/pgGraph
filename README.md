@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-0.1.7-2ea44f?style=flat-square" alt="Version 0.1.7">
+    <img src="https://img.shields.io/badge/version-0.1.8-2ea44f?style=flat-square" alt="Version 0.1.8">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -100,12 +100,12 @@ The image is multi-arch (`linux/amd64` and `linux/arm64`) and works on macOS,
 Linux, and Windows via Docker Desktop.
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:0.1.7
+docker pull ghcr.io/evokoa/pggraph:0.1.8
 docker run -d --rm \
   --name pggraph \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:0.1.7
+  ghcr.io/evokoa/pggraph:0.1.8
 ```
 
 The default database is `graph` with `pg_cron` and a maintenance job
@@ -130,7 +130,7 @@ psql -h localhost -U postgres -d graph
 On macOS, pgGraph is available from the
 [Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) for local
 PostgreSQL extension installs. The current formula is `Evokoa/tap/pggraph`,
-installs pgGraph 0.1.6, and builds against Homebrew `postgresql@17`.
+installs pgGraph 0.1.8, and builds against Homebrew `postgresql@17`.
 
 ```bash
 brew tap Evokoa/tap
