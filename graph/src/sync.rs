@@ -321,7 +321,7 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 CREATE OR REPLACE FUNCTION graph.{trigger_fn_name}_truncate()
 RETURNS TRIGGER AS $$
@@ -332,7 +332,7 @@ BEGIN
         ('T', {table_oid}, {table_name_lit}, txid_current(), true);
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- Attach triggers
 DROP TRIGGER IF EXISTS graph_sync_insert ON {table_sql};

@@ -1,0 +1,628 @@
+# Release Gate Checklist
+
+Use this page as the pre-release validation runbook for contributors and
+agents. It is intentionally command-oriented: start with the local checks, run
+the aggregate release gate, then add the environment-specific gates that are
+disabled by default.
+
+Run commands from the repository root unless a block starts with `cd graph`.
+Use disposable databases for every heavy script. Use disposable PostgreSQL
+clusters for crash, upgrade, and memory-inspection scripts.
+
+## Low-Context Agent Rules
+
+Use these rules when an automated or low-context agent runs the checklist:
+
+- Treat any nonzero command exit as a failed gate unless the release owner
+  explicitly waives it.
+- Do not continue after a failed required gate. Capture the command, exit code,
+  and last useful log lines, then stop.
+- Do not retry a failed gate more than once unless the failure is clearly
+  environmental, such as a transient Docker pull, stale pgrx install, or
+  disposable database name collision.
+- Do not run `RUN_CRASH=1`, `RUN_TX_DELTA_CRASH=1`, `crash_recovery.sh`, or
+  `tx_delta_crash_recovery.sh` unless `PGDATA` points to a disposable
+  PostgreSQL cluster created for release testing.
+- Do not run `pg_upgrade_validate.sh` unless both old and new data directories
+  are throwaway directories.
+- Do not run package-manager `install` or `add` commands without the `sfw`
+  wrapper.
+- Do not mark skipped opt-in gates as passed. Record them as skipped with a
+  reason and owner.
+
+For every gate, record:
+
+```text
+command:
+working directory:
+start time:
+end time:
+exit code:
+result: pass | fail | skipped | waived
+log or artifact path:
+notes:
+```
+
+## Pre-Run Sanity Check
+
+Run this first and save the output with release evidence:
+
+```bash
+pwd
+git rev-parse --show-toplevel
+git rev-parse HEAD
+git status --short
+
+command -v cargo
+command -v cargo-pgrx
+command -v psql
+command -v createdb
+command -v dropdb
+command -v pg_config
+command -v pgbench
+command -v docker
+command -v cargo-deny
+
+pg_config --version
+psql --version
+docker --version
+cargo --version
+cargo pgrx --version
+cargo deny --version
+```
+
+If `PG_CONFIG` is set, also verify it points at the intended PostgreSQL major:
+
+```bash
+"$PG_CONFIG" --version
+```
+
+If the release uses a non-default PostgreSQL connection, record these
+environment variables before running heavy tests:
+
+```text
+PGHOST=
+PGPORT=
+PGUSER=
+PGDATABASE=
+PG_VERSION_FEATURE=
+PG_CONFIG=
+```
+
+The normal PostgreSQL 17 release path should use `PG_VERSION_FEATURE=pg17`.
+
+## Release Owner Summary
+
+Before tagging a release, collect successful output for:
+
+- docs drift, dependency freshness, formatting, clippy, docs, unit tests, pgrx
+  SQL tests, dependency audit, fuzz compile, and projection fuzz seed corpora;
+- package validation, fresh install smoke, SQL metadata audit, SQLSTATE/ACL
+  boundary, backup/restore, lock regressions, concurrency stress, synthetic
+  release fixture, playground query gate, GQL write lifecycle gates, named graph
+  gate, durable projection gates, tx-delta lifecycle, and pgbench sync stress;
+- explicit opt-in gates for Docker smoke, crash recovery, tx-delta crash
+  recovery, PostgreSQL-major matrix, peak RSS, mmap PSS, sanitizer runs, and
+  benchmarks when the release owner requires them.
+
+Do not mark release verification complete when a gate is skipped,
+interrupted, or run against the wrong PostgreSQL major. Rerun the gate or record
+an explicit release-owner waiver with the exact command, reason, and available
+evidence.
+
+## Environment Prerequisites
+
+Required for the normal PostgreSQL 17 release path:
+
+- Rust toolchain for the crate and `cargo-pgrx`.
+- PostgreSQL server, client tools, and headers for the target major.
+- `pg_config` for the target major on `PATH`, or set `PG_CONFIG`.
+- `psql`, `pg_dump`, `pg_restore`, `createdb`, `dropdb`, and related client
+  binaries on `PATH`.
+- `cargo-deny` for the dependency policy gate.
+- A pgrx test cluster initialized for the target major.
+- Docker for Docker, package, playground, or matrix gates.
+- `pgbench` for sync stress gates.
+- Nix for regenerating and validating `flake.lock` when the dependency
+  freshness gate reports `github:nixpkgs`, `github:rust-overlay`, or other
+  flake input updates. On macOS, current upstream Nix no longer supports
+  single-user installs; use the official daemon installer on a release machine
+  where system-level `/nix`, user, and launchd changes are acceptable.
+
+PostgreSQL 17 is the default release feature:
+
+```bash
+export PG_VERSION_FEATURE=pg17
+export PG_CONFIG=/path/to/postgresql-17/bin/pg_config
+```
+
+Initialize pgrx once per machine and PostgreSQL major:
+
+```bash
+cd graph
+cargo pgrx init --pg17 "$PG_CONFIG"
+```
+
+If pgrx reports SQL definition drift after code changes, reinstall against the
+same PostgreSQL version:
+
+```bash
+cd graph
+cargo pgrx install --pg-config "$PG_CONFIG" --features pg17 --no-default-features
+```
+
+## Fast Preflight
+
+Run this before long release gates so basic failures are found quickly:
+
+```bash
+./scripts/check_docs_drift.sh
+python3 scripts/check_dependency_updates.py
+
+cd graph
+cargo fmt --check
+cargo clippy --features "pg17 development" --all-targets -- -D warnings
+cargo doc --features pg17 --no-deps
+cargo test --features pg17
+cargo pgrx test --features "pg17 development" pg17
+cargo deny check advisories bans licenses sources
+```
+
+Documentation doctests are part of the public Rust API contract:
+
+```bash
+cd graph
+cargo test --doc --features pg17
+```
+
+## Documentation And Metadata Checks
+
+Run the aggregate docs drift gate from the repository root:
+
+```bash
+./scripts/check_docs_drift.sh
+```
+
+It runs:
+
+```bash
+./scripts/check_doc_references.py
+./scripts/check_sql_api_drift.py
+./scripts/check_rust_doc_map_drift.py
+```
+
+Use targeted inventories when a failure needs diagnosis:
+
+```bash
+python3 scripts/check_sql_api_drift.py --list-implemented
+python3 scripts/check_rust_doc_map_drift.py --list
+```
+
+Run dependency freshness before release metadata freezes:
+
+```bash
+python3 scripts/check_dependency_updates.py
+```
+
+The dependency checker reports update candidates without rewriting manifests
+unless an explicit `--update ... --yes` is passed. Any package-manager command
+that installs or adds a new dependency must use `sfw`.
+
+## Rust And SQL Test Layers
+
+Use the narrowest layer while iterating, then run the broader release layers.
+
+| Layer | Command | Required before release |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | Yes |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | Yes |
+| Rust unit tests | `cd graph && cargo test --features pg17` | Yes |
+| Rust docs | `cd graph && cargo doc --features pg17 --no-deps` | Yes |
+| Rust doctests | `cd graph && cargo test --doc --features pg17` | Yes |
+| pgrx SQL tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | Yes |
+| Dependency audit | `cd graph && cargo deny check advisories bans licenses sources` | Yes |
+| pgrx focused test | `cd graph && cargo pgrx test pg17 <test_name>` | Iteration only |
+| pg_regress setup smoke | `graph/tests/pg_regress/` | Packaging-style smoke only |
+
+The pgrx SQL test files live in `graph/src/pg_tests/` and cover discovery,
+GQL, Cypher compatibility, traversal, paths, filters, registration/search,
+sync/config/build behavior, maintenance/admin APIs, named graphs, workflow
+APIs, validation, and synthetic release SQL shape.
+
+## Fuzz Gates
+
+The release gate compiles fuzz binaries with `cargo check --bins` inside
+`graph/fuzz` and runs projection seed corpora:
+
+```bash
+cd graph
+(cd fuzz && cargo check --bins)
+./fuzz/run_projection_seed_corpora.sh
+```
+
+When a release includes parser, loader, filter, sync, traversal option, or
+projection format changes, also run the cargo-fuzz compile smoke:
+
+```bash
+cd graph/fuzz
+cargo fuzz build
+```
+
+Fuzz targets currently cover:
+
+| Target | Boundary |
+|---|---|
+| `load_graph_file` | Persisted graph artifact loader |
+| `node_ref_string` | Node reference parser |
+| `traverse_options` | Traversal option parser |
+| `sync_properties` | Sync JSON property parser |
+| `structured_filter` | Structured filter validation |
+| `gql_parser` | GQL parser frontend |
+| `cypher_parser` | openCypher compatibility parser frontend |
+| `load_projection_manifest` | Durable projection manifest loader |
+| `load_projection_segment` | Durable projection segment loader |
+
+## Aggregate Release Gate
+
+Run the main PostgreSQL 17 release gate from `graph/`:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
+```
+
+By default, this gate runs:
+
+- `cargo fmt --check`;
+- `cargo clippy --features "pg17 development" --all-targets -- -D warnings`;
+- `cargo doc --features pg17 --no-deps`;
+- `cargo test --features pg17`;
+- `cargo pgrx test --features "pg17 development" pg17`;
+- `cargo deny check advisories bans licenses sources`;
+- fuzz binary compile and projection fuzz seed corpora;
+- `package_validate.sh`;
+- `fresh_install_smoke.sh`;
+- `function_metadata_audit.sh`;
+- `run_sqlstate_acl_boundary.sh`;
+- `backup_restore_validate.sh`;
+- `background_job_lock_regression.sh`;
+- `build_lock_regression.sh`;
+- `concurrency_stress.sh`;
+- `synthetic_release_smoke.sh`;
+- `playground_release_gate.sh`;
+- `run_pgbench_sync.sh`;
+- `gql_create_tx_lifecycle.sh`;
+- `gql_set_tx_lifecycle.sh`;
+- `gql_delete_tx_lifecycle.sh`;
+- `gql_merge_race.sh`;
+- `named_graphs_heavy_gate.sh`;
+- `cross_backend_durable_projection.sh`;
+- `projection_recovery_gate.sh`;
+- `tx_delta_lifecycle.sh`;
+- `gql_write_recheck_race.sh`.
+
+The default gate does not run Docker smoke, crash recovery, tx-delta crash
+recovery, full PostgreSQL-major matrix, or peak RSS. Enable those explicitly.
+
+## Full Production Gate
+
+Use a disposable PostgreSQL cluster for crash gates. Do not point `PGDATA` at a
+development database you care about, and never at production.
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 \
+DB_PREFIX=pggraph_release \
+RUN_DOCKER=1 \
+RUN_CRASH=1 \
+RUN_TX_DELTA_CRASH=1 \
+RUN_FULL_MATRIX=1 \
+RUN_RSS=1 \
+PGDATA=/path/to/disposable/pgdata \
+./tests/heavy/run_release_gate.sh
+```
+
+For a staged environment that cannot run Docker, playground, pgbench, or crash
+checks, make skips explicit in the command and record why:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 \
+DB_PREFIX=pggraph_release_staged \
+RUN_PLAYGROUND=0 \
+RUN_PGBENCH=0 \
+RUN_DOCKER=0 \
+RUN_CRASH=0 \
+RUN_TX_DELTA_CRASH=0 \
+./tests/heavy/run_release_gate.sh
+```
+
+## Release Gate Toggles
+
+`run_release_gate.sh` accepts these environment variables:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `PG_VERSION_FEATURE` | `pg17` | Cargo/PostgreSQL feature to test |
+| `DB_PREFIX` | `pggraph_release` | Prefix for disposable database names |
+| `RUN_FULL_MATRIX` | `0` | Run local PostgreSQL-major matrix first |
+| `RUN_PACKAGE` | `1` | Run package validation |
+| `RUN_INSTALL` | `1` | Run fresh install smoke |
+| `RUN_METADATA` | `1` | Run SQL function metadata audit |
+| `RUN_BOUNDARY` | `1` | Run SQLSTATE/ACL boundary tests |
+| `RUN_BACKUP_RESTORE` | `1` | Run backup/restore validation |
+| `RUN_BACKGROUND_LOCK` | `1` | Run background-job lock regression |
+| `RUN_BUILD_LOCK` | `1` | Run build/vacuum lock regression |
+| `RUN_CONCURRENCY` | `1` | Run mixed concurrency stress |
+| `RUN_SYNTHETIC` | `1` | Run synthetic release fixture |
+| `RUN_PLAYGROUND` | `1` | Run playground query gate |
+| `RUN_PGBENCH` | `1` | Run pgbench sync stress |
+| `RUN_GQL_CREATE_TX` | `1` | Run GQL `CREATE` transaction lifecycle |
+| `RUN_GQL_SET_TX` | `1` | Run GQL `SET` transaction lifecycle |
+| `RUN_GQL_DELETE_TX` | `1` | Run GQL `DELETE` transaction lifecycle |
+| `RUN_GQL_MERGE_RACE` | `1` | Run GQL `MERGE` race proof |
+| `RUN_GQL_WRITE_RECHECK` | `1` | Run GQL stale-predicate recheck race proof |
+| `RUN_TX_DELTA_LIFECYCLE` | `1` | Run internal tx-delta lifecycle proof |
+| `RUN_NAMED_GRAPHS_HEAVY` | `1` | Run named graph heavy policy gate |
+| `RUN_CROSS_BACKEND_DURABLE` | `1` | Run cross-backend durable projection gate |
+| `RUN_PROJECTION_RECOVERY` | `1` | Run projection recovery gate |
+| `RUN_DOCKER` | `0` | Run Docker smoke |
+| `RUN_CRASH` | `0` | Run crash recovery, requires disposable `PGDATA` |
+| `RUN_TX_DELTA_CRASH` | `0` | Run tx-delta crash recovery, requires disposable `PGDATA` |
+| `RUN_RSS` | `0` | Run peak RSS measurement |
+
+Synthetic fixture tuning:
+
+| Variable | Default |
+|---|---:|
+| `SYNTHETIC_NODE_COUNT` | `50000` |
+| `SYNTHETIC_HUB_FANOUT` | `1000` |
+| `SYNTHETIC_MAX_BUILD_MS` | `60000` |
+| `SYNTHETIC_MAX_QUERY_MS` | `1000` |
+
+pgbench sync tuning:
+
+| Variable | Default |
+|---|---:|
+| `CLIENTS` | `4` |
+| `JOBS` | `2` |
+| `TIME` | `30` |
+
+## Heavy Script Inventory
+
+Run these from `graph/`. Most accept `PG_VERSION_FEATURE=pg17` and a disposable
+`DBNAME`. Scripts that kill, upgrade, or inspect PostgreSQL clusters require
+disposable cluster paths.
+
+| Script | Release purpose | Example |
+|---|---|---|
+| `run_release_gate.sh` | Aggregate release gate | `PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh` |
+| `run_pg_matrix.sh` | Local PostgreSQL 14 through 18 matrix | `./tests/heavy/run_pg_matrix.sh` |
+| `run_pg_matrix_docker.sh` | Docker PostgreSQL-major matrix | `./tests/heavy/run_pg_matrix_docker.sh` |
+| `package_validate.sh` | Validate pgrx package shape and companion files | `PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh` |
+| `fresh_install_smoke.sh` | Install extension and run quick workflow | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh` |
+| `function_metadata_audit.sh` | Audit SQL volatility, security, cost, rows, and parallel metadata | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata ./tests/heavy/function_metadata_audit.sh` |
+| `run_sqlstate_acl_boundary.sh` | Assert client-visible SQLSTATEs and restricted-role ACL behavior | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_boundary ./tests/heavy/run_sqlstate_acl_boundary.sh` |
+| `backup_restore_validate.sh` | Validate dump/restore of source tables, graph catalog, sync state, and persisted graph behavior | `PG_VERSION_FEATURE=pg17 SOURCE_DB=pggraph_backup_src RESTORE_DB=pggraph_backup_dst ./tests/heavy/backup_restore_validate.sh` |
+| `background_job_lock_regression.sh` | Check background job lock and failure-state behavior | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_background_lock ./tests/heavy/background_job_lock_regression.sh` |
+| `build_lock_regression.sh` | Check build/vacuum lock conflict behavior | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_build_lock ./tests/heavy/build_lock_regression.sh` |
+| `concurrency_stress.sh` | Exercise build, sync, vacuum, maintenance, and traversal concurrently | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_concurrency CLIENTS=3 ROUNDS=3 ./tests/heavy/concurrency_stress.sh` |
+| `synthetic_release_smoke.sh` | Deterministic release fixture for build, persistence, traversal, search, filters, paths, and components | `DBNAME=pggraph_synthetic NODE_COUNT=50000 HUB_FANOUT=1000 ./tests/heavy/synthetic_release_smoke.sh` |
+| `run_synthetic_release_evidence.sh` | Synthetic smoke plus metadata and persisted artifact inspection | `NODE_COUNT=50000 HUB_FANOUT=1000 ./tests/heavy/run_synthetic_release_evidence.sh` |
+| `playground_release_gate.sh` | Validate every playground sidebar query against stable summaries | `PGGRAPH_PLAYGROUND_YES=1 ./tests/heavy/playground_release_gate.sh` |
+| `run_pgbench_sync.sh` | Concurrent DML and trigger-sync stress | `DBNAME=pggraph_pgbench CLIENTS=4 JOBS=2 TIME=30 ./tests/heavy/run_pgbench_sync.sh` |
+| `read_latency_under_sync.sh` | Measure read p50/p95/p99 with no backlog, pending backlog, and concurrent writers | `DBNAME=pggraph_read_latency NODE_COUNT=10000 SAMPLES=25 ./tests/heavy/read_latency_under_sync.sh` |
+| `gql_create_tx_lifecycle.sh` | Public mapped GQL `CREATE` commit and rollback proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_create_tx ./tests/heavy/gql_create_tx_lifecycle.sh` |
+| `gql_set_tx_lifecycle.sh` | Public mapped GQL property `SET` rollback and filter-delta proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_set_tx ./tests/heavy/gql_set_tx_lifecycle.sh` |
+| `gql_delete_tx_lifecycle.sh` | Public mapped GQL edge-row `DELETE` rollback and tombstone proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_delete_tx ./tests/heavy/gql_delete_tx_lifecycle.sh` |
+| `gql_merge_race.sh` | Concurrent mapped `MERGE` same-key convergence proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_merge_race ./tests/heavy/gql_merge_race.sh` |
+| `gql_write_recheck_race.sh` | Two-session stale predicate recheck proof for mapped writes | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_write_recheck ./tests/heavy/gql_write_recheck_race.sh` |
+| `tx_delta_lifecycle.sh` | Internal mutable-overlay transaction lifecycle proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta ./tests/heavy/tx_delta_lifecycle.sh` |
+| `named_graphs_heavy_gate.sh` | Named-graph behavior and policy guardrails | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_named_graphs bash ./tests/heavy/named_graphs_heavy_gate.sh` |
+| `cross_backend_durable_projection.sh` | Cross-backend visibility for durable mutable projection state | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_cross_backend bash ./tests/heavy/cross_backend_durable_projection.sh` |
+| `projection_recovery_gate.sh` | Durable projection recovery behavior | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_projection_rec bash ./tests/heavy/projection_recovery_gate.sh` |
+| `docker_smoke.sh` | Build root Docker image and run extension workflow in container | `IMAGE=pggraph:smoke CONTAINER=pggraph-smoke PG_MAJOR=17 ./tests/heavy/docker_smoke.sh` |
+| `crash_recovery.sh` | Kill and restart disposable postmaster, then verify reload and corrupt artifact rejection | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_crash PGDATA=/path/to/disposable/pgdata ./tests/heavy/crash_recovery.sh` |
+| `tx_delta_crash_recovery.sh` | Kill disposable postmaster with uncommitted overlay and verify it does not persist | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta_crash PGDATA=/path/to/disposable/pgdata ./tests/heavy/tx_delta_crash_recovery.sh` |
+| `pg_upgrade_validate.sh` | Run `pg_upgrade --check` for a database containing pgGraph | `OLD_BINDIR=/path/to/old/bin NEW_BINDIR=/path/to/new/bin OLD_DATADIR=/tmp/pg-old NEW_DATADIR=/tmp/pg-new ./tests/heavy/pg_upgrade_validate.sh` |
+| `measure_build_rss.sh` | Capture peak backend RSS during graph build | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_rss NODE_COUNT=200000 MAX_RSS_MB=0 ./tests/heavy/measure_build_rss.sh` |
+| `measure_mmap_pss.sh` | Linux-only mmap sharing PSS measurement across backends | `DBNAME=graph_test BACKENDS=50 ./tests/heavy/measure_mmap_pss.sh` |
+| `run_memory_sanitizers.sh` | pgrx suite plus optional ASan or Valgrind checks | `DBNAME=pggraph_pgbench ./tests/heavy/run_memory_sanitizers.sh` |
+
+`pgbench_sync.sql`, `sqlstate_acl_boundary.sql`, and
+`playground_release_gate.py` are support files used by the shell gates.
+
+## Crash, Upgrade, And Cluster Safety
+
+Crash gates deliberately kill PostgreSQL. Run them only against a disposable
+cluster, and pass restart options when the instance uses custom socket or port
+settings:
+
+```bash
+cd graph
+PGHOST=/tmp/pggraph-crash \
+PGPORT=55437 \
+PGDATA=/tmp/pggraph-crash/data \
+POSTGRES_CTL=/path/to/pg_ctl \
+POSTGRES_OPTS="-p 55437 -k /tmp/pggraph-crash" \
+DBNAME=pggraph_release_crash \
+./tests/heavy/crash_recovery.sh
+```
+
+Run the tx-delta crash gate with the same disposable cluster pattern:
+
+```bash
+cd graph
+PGHOST=/tmp/pggraph-crash \
+PGPORT=55437 \
+PGDATA=/tmp/pggraph-crash/data \
+POSTGRES_CTL=/path/to/pg_ctl \
+POSTGRES_OPTS="-p 55437 -k /tmp/pggraph-crash" \
+PG_CONFIG=/path/to/pg_config \
+PG_VERSION_FEATURE=pg17 \
+DBNAME=pggraph_release_tx_delta_crash \
+./tests/heavy/tx_delta_crash_recovery.sh
+```
+
+Run upgrade validation only with throwaway old and new data directories:
+
+```bash
+cd graph
+OLD_BINDIR=/path/to/old/bin \
+NEW_BINDIR=/path/to/new/bin \
+OLD_DATADIR=/tmp/pggraph-old \
+NEW_DATADIR=/tmp/pggraph-new \
+./tests/heavy/pg_upgrade_validate.sh
+```
+
+## Matrix Gates
+
+Run the local PostgreSQL-major matrix when all supported `pg_config` binaries
+are available:
+
+```bash
+cd graph
+./tests/heavy/run_pg_matrix.sh
+```
+
+Use Docker when local headers are unavailable:
+
+```bash
+cd graph
+./tests/heavy/run_pg_matrix_docker.sh
+```
+
+The project supports PostgreSQL 14 through 18 in release automation. If a
+matrix leg is skipped locally, record which major was skipped and where it will
+be validated.
+
+## Performance And Benchmark Evidence
+
+Run Criterion when engine-level traversal, filter, storage, or overlay changes
+could affect hot paths:
+
+```bash
+cd graph
+cargo bench --bench bfs_bench
+```
+
+When comparing against a saved Criterion baseline:
+
+```bash
+cd graph
+cargo bench --features pg17 --bench bfs_bench -- --baseline pre_release
+```
+
+Run SQL-facing benchmark harnesses only when the release owner asks for
+performance evidence or the change affects SQL-facing query timing:
+
+```bash
+sandbox/run_benchmarks.sh panama
+sandbox/run_benchmarks.sh ldbc
+sandbox/run_benchmarks.sh all --yes
+```
+
+Keep generated `report.json` files with release evidence. Include the exact
+command, commit, dirty status, PostgreSQL version, Docker resource settings,
+machine details, and whether the host was otherwise idle.
+
+Run read-latency evidence when query-time sync semantics or topology-read
+freshness change:
+
+```bash
+cd graph
+DBNAME=pggraph_read_latency \
+NODE_COUNT=10000 \
+SAMPLES=25 \
+CONCURRENT_SAMPLES=25 \
+SMALL_BACKLOG=100 \
+LARGE_BACKLOG=5000 \
+CLIENTS=4 \
+JOBS=2 \
+TIME=30 \
+RATE=100 \
+./tests/heavy/read_latency_under_sync.sh
+```
+
+Keep `read-latency-samples.csv` and `read-latency-summary.csv` with milestone
+evidence.
+
+## Package And Publish Workflow Checks
+
+Before release automation:
+
+```bash
+./scripts/clean_generated_artifacts.sh --dry-run
+./scripts/check_docs_drift.sh
+python3 scripts/check_dependency_updates.py
+
+cd graph
+PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh
+```
+
+The GitHub Actions release workflow has two manual phases:
+
+| Phase | Required state |
+|---|---|
+| `prepare` | Tag exists, release metadata validates, prepared Docker images and PGXN archive build and verify |
+| `publish` | GitHub Release exists, prepared artifacts match the release tag, Docker manifests and PGXN archive publish without rebuild |
+
+Use this when validating release metadata locally:
+
+```bash
+scripts/validate_release.py --tag vX.Y.Z --check-main
+```
+
+## Evidence Template
+
+Record this for each release candidate:
+
+```text
+Release candidate:
+Commit:
+Dirty status:
+Date:
+Machine/OS:
+PostgreSQL major:
+PG_CONFIG:
+pgrx version:
+Docker version:
+
+Required gates:
+- docs drift:
+- dependency freshness:
+- fmt:
+- clippy:
+- cargo doc:
+- cargo test:
+- cargo test --doc:
+- cargo pgrx test:
+- cargo deny:
+- fuzz compile:
+- projection seed corpora:
+- aggregate release gate:
+
+Opt-in gates:
+- Docker smoke:
+- crash recovery:
+- tx-delta crash recovery:
+- PostgreSQL-major matrix:
+- RSS/PSS:
+- sanitizer:
+- Criterion:
+- sandbox benchmark:
+
+Skipped gates and waivers:
+- gate:
+  reason:
+  owner:
+  follow-up:
+```
+
+## Related References
+
+- [Testing And Release](./testing-release)
+- [SQL Tests](./sql-tests)
+- [Scripts](./scripts)
+- [Benchmarking](./benchmarking)

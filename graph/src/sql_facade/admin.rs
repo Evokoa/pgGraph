@@ -11,6 +11,43 @@ fn test_enabled() -> bool {
     config::ENABLED.get()
 }
 
+#[pg_extern(
+    schema = "graph",
+    name = "_selected_graph_id_for_current_role",
+    security_definer
+)]
+fn selected_graph_id_for_current_role() -> String {
+    with_panic_boundary("_selected_graph_id_for_current_role()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report())
+            .graph_id
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_pending_sync_rows_for_current_role",
+    security_definer
+)]
+fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
+    with_panic_boundary("_pending_sync_rows_for_current_role()", || {
+        crate::sql_sync::pending_sync_rows_direct(applied_sync_id)
+            .unwrap_or_else(|err| err.report())
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_max_sync_log_id_for_current_role",
+    security_definer
+)]
+fn max_sync_log_id_for_current_role() -> i64 {
+    with_panic_boundary("_max_sync_log_id_for_current_role()", || {
+        crate::sql_sync::max_sync_log_id_direct().unwrap_or_else(|err| err.report())
+    })
+}
+
 /// Create graph metadata for the current role.
 #[pg_extern(schema = "graph")]
 #[allow(
@@ -681,13 +718,14 @@ fn resolve_graph_for_registration_for_role(
 }
 
 pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
+    let role_oid = catalog::current_role_oid()?;
     let allowed = Spi::connect(|client| {
         let result = client.select(
             "SELECT
-                COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)
-                OR has_schema_privilege(current_user, 'graph', 'CREATE')",
+                COALESCE((SELECT rolsuper FROM pg_roles WHERE oid = $1), false)
+                OR has_schema_privilege($1, 'graph', 'CREATE')",
             None,
-            &[],
+            &[role_oid.into()],
         )?;
         Ok::<_, pgrx::spi::SpiError>(
             result
@@ -1613,7 +1651,7 @@ fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> 
 fn projection_status_snapshot() -> safety::GraphResult<crate::projection::status::ProjectionStatus>
 {
     crate::projection::manifest::expire_stale_generation_heartbeats()?;
-    let artifact = crate::persistence::graph_file_path()?;
+    let artifact = crate::persistence::graph_file_path_uncreated()?;
     let root = crate::persistence::projection_manifest_root(&artifact);
     crate::projection::status::collect_projection_status(
         &root,
@@ -1627,7 +1665,7 @@ fn projection_status_snapshot() -> safety::GraphResult<crate::projection::status
 fn projection_metadata_status_snapshot(
 ) -> safety::GraphResult<crate::projection::status::ProjectionStatus> {
     crate::projection::manifest::expire_stale_generation_heartbeats()?;
-    let artifact = crate::persistence::graph_file_path()?;
+    let artifact = crate::persistence::graph_file_path_uncreated()?;
     let root = crate::persistence::projection_manifest_root(&artifact);
     crate::projection::status::collect_projection_metadata_status(
         &root,
@@ -2264,7 +2302,7 @@ fn build_status_for_graph(
 }
 
 /// Register a table for graph indexing.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn add_table(
     table_name: pgrx::pg_sys::Oid,
     id_column: &str,
@@ -2296,7 +2334,7 @@ fn add_table(
 }
 
 /// Register a table for graph indexing using one or more primary-key columns.
-#[pg_extern(schema = "graph", name = "add_table")]
+#[pg_extern(schema = "graph", name = "add_table", security_definer)]
 fn add_table_with_id_columns(
     table_name: pgrx::pg_sys::Oid,
     id_columns: Vec<String>,
@@ -2308,7 +2346,7 @@ fn add_table_with_id_columns(
 }
 
 /// Register a table for a named graph without changing session selection.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn add_table_to_graph(
     graph_name: &str,
     table_name: pgrx::pg_sys::Oid,
@@ -2345,7 +2383,7 @@ fn add_table_to_graph(
 }
 
 /// Register a table for a named graph using one or more primary-key columns.
-#[pg_extern(schema = "graph", name = "add_table_to_graph")]
+#[pg_extern(schema = "graph", name = "add_table_to_graph", security_definer)]
 fn add_table_to_graph_with_id_columns(
     graph_name: &str,
     table_name: pgrx::pg_sys::Oid,
@@ -2368,7 +2406,7 @@ fn add_table_to_graph_with_id_columns(
 }
 
 /// Register an edge relationship.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::too_many_arguments,
     reason = "pgrx SQL ABI exposes each SQL argument"
@@ -2429,7 +2467,7 @@ fn add_edge(
 }
 
 /// Register an edge relationship for a named graph without changing session selection.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::too_many_arguments,
     reason = "pgrx SQL ABI exposes each SQL argument"
@@ -2496,7 +2534,7 @@ fn add_edge_to_graph(
 }
 
 /// List tables registered for graph indexing.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2511,14 +2549,15 @@ fn registered_tables() -> TableIterator<
     ),
 > {
     with_panic_boundary("registered_tables()", || {
-        let graph =
-            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
         registered_tables_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
     })
 }
 
 /// List tables registered for a named graph.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2537,7 +2576,13 @@ fn registered_tables_for_graph(
     ),
 > {
     with_panic_boundary("registered_tables_for_graph()", || {
-        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration_for_role(
+            graph_name,
+            graph_tenant,
+            graph_namespace,
+            caller_oid,
+        );
         registered_tables_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
     })
 }
@@ -2589,7 +2634,7 @@ fn registered_tables_for_graph_id(
 }
 
 /// List edge relationships registered for graph indexing.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2608,14 +2653,15 @@ fn registered_edges() -> TableIterator<
     ),
 > {
     with_panic_boundary("registered_edges()", || {
-        let graph =
-            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
         registered_edges_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
     })
 }
 
 /// List edge relationships registered for a named graph.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2638,7 +2684,13 @@ fn registered_edges_for_graph(
     ),
 > {
     with_panic_boundary("registered_edges_for_graph()", || {
-        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration_for_role(
+            graph_name,
+            graph_tenant,
+            graph_namespace,
+            caller_oid,
+        );
         registered_edges_for_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report())
     })
 }
@@ -3813,7 +3865,7 @@ fn estimate() -> TableIterator<
 /// the backend-local graph.
 ///
 /// See: `docs/user_guide/sync-and-maintenance.mdx`
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn apply_sync() -> TableIterator<
     'static,
     (
@@ -3935,10 +3987,23 @@ fn require_admin_for_graph_id(graph_id: &str) -> safety::GraphResult<catalog::Gr
 }
 
 fn visible_graph_ids() -> safety::GraphResult<Vec<String>> {
-    Ok(catalog::list_graph_metadata()?
+    let role_oid = catalog::current_role_oid()?;
+    Ok(catalog::list_graph_metadata_for_role(role_oid)?
         .into_iter()
         .map(|graph| graph.graph_id)
         .collect())
+}
+
+fn optional_graph_id_for_role(
+    graph_name: Option<&str>,
+    graph_tenant: Option<&str>,
+    graph_namespace: Option<&str>,
+) -> Option<String> {
+    graph_name.map(|name| {
+        let role_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        resolve_graph_for_registration_for_role(name, graph_tenant, graph_namespace, role_oid)
+            .graph_id
+    })
 }
 
 fn sync_policy_row(policy_id: &str) -> safety::GraphResult<Option<SyncPolicyRow>> {
@@ -4571,7 +4636,7 @@ fn run_due_jobs_result(
 ///
 /// Sync policies are durable records. They are executed by calling
 /// `graph.run_sync_policy()` or `graph.run_job()`.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -4828,7 +4893,7 @@ fn drop_sync_policy(
 }
 
 /// Run an explicit sync policy immediately.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -4876,7 +4941,7 @@ fn run_sync_policy(
 }
 
 /// List sync policies visible to the current role.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -4903,9 +4968,7 @@ fn sync_policy_status(
     ),
 > {
     with_panic_boundary("sync_policy_status()", || {
-        let graph_id = graph_name.map(|name| {
-            resolve_graph_for_registration(name, graph_tenant, graph_namespace).graph_id
-        });
+        let graph_id = optional_graph_id_for_role(graph_name, graph_tenant, graph_namespace);
         let rows = sync_policy_rows(None, graph_id.as_deref(), max_rows)
             .unwrap_or_else(|err| err.report());
         TableIterator::new(rows.into_iter().map(|row| {
@@ -4927,7 +4990,7 @@ fn sync_policy_status(
 }
 
 /// List durable jobs visible to the current role.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -4956,9 +5019,7 @@ fn jobs(
     ),
 > {
     with_panic_boundary("jobs()", || {
-        let graph_id = graph_name.map(|name| {
-            resolve_graph_for_registration(name, graph_tenant, graph_namespace).graph_id
-        });
+        let graph_id = optional_graph_id_for_role(graph_name, graph_tenant, graph_namespace);
         let rows = generic_job_rows(None, graph_id.as_deref(), max_rows)
             .unwrap_or_else(|err| err.report());
         TableIterator::new(rows.into_iter().map(|row| {
@@ -4982,7 +5043,7 @@ fn jobs(
 }
 
 /// List durable job run history visible to the current role.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5011,9 +5072,7 @@ fn job_runs(
     ),
 > {
     with_panic_boundary("job_runs()", || {
-        let graph_id = graph_name.map(|name| {
-            resolve_graph_for_registration(name, graph_tenant, graph_namespace).graph_id
-        });
+        let graph_id = optional_graph_id_for_role(graph_name, graph_tenant, graph_namespace);
         let rows =
             job_run_rows(job_id, graph_id.as_deref(), max_rows).unwrap_or_else(|err| err.report());
         TableIterator::new(rows.into_iter().map(|row| {
@@ -5036,7 +5095,7 @@ fn job_runs(
 }
 
 /// Summarize durable job outcomes visible to the current role.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -5059,9 +5118,7 @@ fn job_stats(
     ),
 > {
     with_panic_boundary("job_stats()", || {
-        let graph_id = graph_name.map(|name| {
-            resolve_graph_for_registration(name, graph_tenant, graph_namespace).graph_id
-        });
+        let graph_id = optional_graph_id_for_role(graph_name, graph_tenant, graph_namespace);
         let visible_graph_ids = visible_graph_ids().unwrap_or_else(|err| err.report());
         let rows = Spi::connect(|client| {
             let selected = client.select(
@@ -5109,7 +5166,7 @@ fn job_stats(
 }
 
 /// Run a durable job immediately.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5159,7 +5216,7 @@ fn run_job(
 }
 
 /// Run due durable jobs through the hosted scheduler path.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5405,7 +5462,7 @@ fn ingest_projection(
 /// `graph.memory_limit_mb` has ≥2× headroom.
 ///
 /// See: `docs/user_guide/sync-and-maintenance.mdx`
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn vacuum() -> TableIterator<
     'static,
     (
@@ -5417,7 +5474,8 @@ fn vacuum() -> TableIterator<
     ),
 > {
     with_panic_boundary("vacuum()", || {
-        require_selected_graph_build_result().unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        require_selected_graph_build_result_for_role(caller_oid).unwrap_or_else(|err| err.report());
         let result = execute_vacuum(false).unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             result.nodes_before,
@@ -5430,7 +5488,7 @@ fn vacuum() -> TableIterator<
 }
 
 /// Vacuum a named graph without requiring a separate `set_current_graph()`.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn vacuum_graph(
     graph_name: &str,
     graph_tenant: default!(Option<&str>, "NULL"),
@@ -5460,7 +5518,7 @@ fn vacuum_graph(
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5480,7 +5538,8 @@ fn maintenance(
     ),
 > {
     with_panic_boundary("maintenance()", || {
-        require_selected_graph_build_result().unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        require_selected_graph_build_result_for_role(caller_oid).unwrap_or_else(|err| err.report());
         if concurrently {
             let job_id = create_maintenance_job().unwrap_or_else(|err| err.report());
             if let Err(err) = launch_maintenance_worker(&job_id) {
@@ -5894,7 +5953,7 @@ fn cached_estimated_table_rows(
 ///
 /// Ensures sync catalog tables exist and attaches triggers that write to
 /// `graph._sync_log`.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn enable_sync() {
     with_panic_boundary("enable_sync()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());

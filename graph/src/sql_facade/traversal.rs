@@ -24,7 +24,10 @@ type DirectNodeRow = (
 pub(super) fn traverse(
     seed_table: pgrx::pg_sys::Oid,
     seed_id: &str,
-    max_depth: default!(i32, "current_setting('graph.default_max_depth')::int"),
+    max_depth: default!(
+        i32,
+        "COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5)"
+    ),
     edge_types: default!(Option<Vec<String>>, "NULL"),
     direction: default!(&str, "'any'"),
     node_tables: default!(Option<Vec<pgrx::pg_sys::Oid>>, "NULL"),
@@ -36,8 +39,14 @@ pub(super) fn traverse(
     hydrate: default!(bool, "true"),
     max_rows: default!(i32, 1000),
     row_offset: default!(i32, 0),
-    max_nodes: default!(i32, "current_setting('graph.max_nodes')::int"),
-    max_frontier: default!(i32, "current_setting('graph.max_frontier')::int"),
+    max_nodes: default!(
+        i32,
+        "COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000)"
+    ),
+    max_frontier: default!(
+        i32,
+        "COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000)"
+    ),
 ) -> TableIterator<
     'static,
     (
@@ -195,7 +204,10 @@ fn get_neighbors(
 fn traverse_many(
     start_tables: Vec<pgrx::pg_sys::Oid>,
     start_ids: Vec<String>,
-    max_depth: default!(i32, "current_setting('graph.default_max_depth')::int"),
+    max_depth: default!(
+        i32,
+        "COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5)"
+    ),
     edge_types: default!(Option<Vec<String>>, "NULL"),
     direction: default!(&str, "'any'"),
     node_tables: default!(Option<Vec<pgrx::pg_sys::Oid>>, "NULL"),
@@ -207,8 +219,14 @@ fn traverse_many(
     hydrate: default!(bool, "true"),
     max_rows: default!(i32, 1000),
     row_offset: default!(i32, 0),
-    max_nodes: default!(i32, "current_setting('graph.max_nodes')::int"),
-    max_frontier: default!(i32, "current_setting('graph.max_frontier')::int"),
+    max_nodes: default!(
+        i32,
+        "COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000)"
+    ),
+    max_frontier: default!(
+        i32,
+        "COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000)"
+    ),
 ) -> TableIterator<
     'static,
     (
@@ -619,7 +637,10 @@ fn aggregate(
     traversal: pgrx::JsonB,
     aggregations: pgrx::JsonB,
     scope: default!(&str, "'returned_nodes'"),
-    path_limit: default!(i32, "current_setting('graph.max_exact_path_count')::int"),
+    path_limit: default!(
+        i32,
+        "COALESCE(NULLIF(current_setting('graph.max_exact_path_count', true), '')::int, 100000)"
+    ),
 ) -> pgrx::JsonB {
     with_panic_boundary("aggregate()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());

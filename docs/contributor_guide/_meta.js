@@ -13,5 +13,6 @@ export default {
   'sql-tests': 'SQL Tests',
   scripts: 'Scripts',
   benchmarking: 'Benchmarking',
+  'release-gate-checklist': 'Release Gate Checklist',
   'testing-release': 'Testing And Release'
 }

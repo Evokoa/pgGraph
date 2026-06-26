@@ -570,8 +570,8 @@ FROM graph.traverse(
   hydrate := true,
   max_rows := 1000,
   row_offset := 0,
-  max_nodes := current_setting('graph.max_nodes')::int,
-  max_frontier := current_setting('graph.max_frontier')::int
+  max_nodes := COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000),
+  max_frontier := COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000)
 );
 ```
 

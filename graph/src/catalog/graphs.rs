@@ -821,6 +821,46 @@ pub(crate) fn selected_graph_id() -> safety::GraphResult<Option<String>> {
         .map(|value| value.filter(|value| !value.trim().is_empty()))
 }
 
+pub(crate) fn selected_or_default_graph_id_via_definer() -> safety::GraphResult<String> {
+    Spi::get_one::<String>("SELECT graph._selected_graph_id_for_current_role()")
+        .map_err(|err| safety::GraphError::InvalidFilter {
+            reason: format!("selected graph metadata is missing or not visible: {err}"),
+        })?
+        .ok_or_else(|| {
+            safety::GraphError::Internal(
+                "selected graph id definer helper returned null".to_string(),
+            )
+        })
+}
+
+pub(crate) fn selected_or_default_graph_metadata_via_definer() -> safety::GraphResult<GraphMetadata>
+{
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT graph_id,
+                        graph_name,
+                        owner_role,
+                        created_by,
+                        tenant,
+                        namespace,
+                        graph_kind,
+                        residency,
+                        materialization,
+                        projection_mode,
+                        created_at,
+                        updated_at
+                   FROM graph.current_graph()",
+                None,
+                &[],
+            )
+            .map_err(|err| safety::GraphError::InvalidFilter {
+                reason: format!("selected graph metadata is missing or not visible: {err}"),
+            })?;
+        metadata_from_first_row(rows, "selected graph definer helper returned no rows")
+    })
+}
+
 /// Resolves graph metadata by graph name, tenant, namespace, and current role.
 ///
 /// # Errors
@@ -1172,7 +1212,7 @@ pub(crate) fn require_graph_privilege(
     privilege: GraphPrivilege,
 ) -> safety::GraphResult<()> {
     let role_oid = current_user_oid()?;
-    if has_graph_privilege_for_role(&graph.graph_id, privilege, role_oid)? {
+    if has_graph_privilege_for_role(graph, privilege, role_oid)? {
         Ok(())
     } else {
         Err(safety::GraphError::AclDenied {
@@ -1187,7 +1227,7 @@ pub(crate) fn require_graph_privilege_for_role(
     privilege: GraphPrivilege,
     role_oid: pgrx::pg_sys::Oid,
 ) -> safety::GraphResult<()> {
-    if has_graph_privilege_for_role(&graph.graph_id, privilege, role_oid)? {
+    if has_graph_privilege_for_role(graph, privilege, role_oid)? {
         Ok(())
     } else {
         Err(safety::GraphError::AclDenied {
@@ -1197,10 +1237,16 @@ pub(crate) fn require_graph_privilege_for_role(
 }
 
 fn has_graph_privilege_for_role(
-    graph_id: &str,
+    graph: &GraphMetadata,
     privilege: GraphPrivilege,
     role_oid: pgrx::pg_sys::Oid,
 ) -> safety::GraphResult<bool> {
+    if graph.owner_role == role_oid {
+        return Ok(true);
+    }
+    if graph.graph_kind == "global" && privilege.accepted_grants().contains(&"read") {
+        return Ok(true);
+    }
     let accepted = privilege
         .accepted_grants()
         .iter()
@@ -1213,22 +1259,17 @@ fn has_graph_privilege_for_role(
                 OR has_schema_privilege($3::oid, 'graph', 'CREATE')
                 OR EXISTS (
                     SELECT 1
-                      FROM graph._graphs
-                     WHERE graph_id = $1::uuid
-                       AND (
-                           owner_role = $3::oid
-                           OR (graph_kind = 'global' AND 'read' = ANY($2::text[]))
-                       )
-                )
-                OR EXISTS (
-                    SELECT 1
                       FROM graph._graph_grants
                      WHERE graph_id = $1::uuid
                        AND grantee = $3::oid
                        AND privilege = ANY($2::text[])
                 )",
             None,
-            &[graph_id.into(), accepted.into(), role_oid.into()],
+            &[
+                graph.graph_id.clone().into(),
+                accepted.into(),
+                role_oid.into(),
+            ],
         )?;
         Ok::<_, pgrx::spi::Error>(rows.first().get::<bool>(1).ok().flatten().unwrap_or(false))
     })

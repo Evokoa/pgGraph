@@ -1,10 +1,10 @@
-ARG RUST_IMAGE=rust:1.95.0-bookworm@sha256:503651ea31e66ecb74623beabde781059a5978df1595a9e8ed03974d5fec1bf0
+ARG RUST_IMAGE=rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc
 ARG POSTGRES_IMAGE=postgres:17-bookworm
 
 FROM ${RUST_IMAGE} AS builder
 
 ARG PG_MAJOR=17
-ARG PGRX_VERSION=0.18.1
+ARG PGRX_VERSION=0.19.1
 
 RUN apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \

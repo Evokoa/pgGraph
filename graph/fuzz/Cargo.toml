@@ -2,7 +2,7 @@
 name = "graph-fuzz"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.95"
+rust-version = "1.96"
 publish = false
 
 [package.metadata]

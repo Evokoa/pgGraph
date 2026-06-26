@@ -1,7 +1,8 @@
 //! SQL sync-log replay, trigger management, and tenant-scope helpers.
 
 use crate::catalog::{
-    catalog_fingerprint, read_catalog, selected_or_default_graph_metadata, table_oid_from_name,
+    catalog_fingerprint, read_catalog, selected_or_default_graph_metadata,
+    selected_or_default_graph_metadata_via_definer, table_oid_from_name,
 };
 use crate::filter_index::{EncodedFilterValue, FilterColumnType};
 use crate::persistence::{
@@ -115,6 +116,15 @@ pub(crate) fn disabled_graph_trigger_count() -> safety::GraphResult<i32> {
 }
 
 pub(crate) fn pending_sync_rows(applied_sync_id: i64) -> safety::GraphResult<i64> {
+    Spi::get_one_with_args::<i64>(
+        "SELECT graph._pending_sync_rows_for_current_role($1)",
+        &[applied_sync_id.into()],
+    )
+    .map_err(|e| safety::GraphError::Internal(format!("sync status check failed: {}", e)))?
+    .ok_or_else(|| safety::GraphError::Internal("pending sync row count was null".to_string()))
+}
+
+pub(crate) fn pending_sync_rows_direct(applied_sync_id: i64) -> safety::GraphResult<i64> {
     let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
     if applicable_table_oids.is_empty() {
         return Ok(0);
@@ -139,6 +149,12 @@ pub(crate) fn pending_sync_rows(applied_sync_id: i64) -> safety::GraphResult<i64
 }
 
 pub(crate) fn max_sync_log_id() -> safety::GraphResult<i64> {
+    Spi::get_one::<i64>("SELECT graph._max_sync_log_id_for_current_role()")
+        .map_err(|e| safety::GraphError::Internal(format!("sync checkpoint read failed: {}", e)))?
+        .ok_or_else(|| safety::GraphError::Internal("max sync log id was null".to_string()))
+}
+
+pub(crate) fn max_sync_log_id_direct() -> safety::GraphResult<i64> {
     let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
     if applicable_table_oids.is_empty() {
         return Ok(0);
@@ -1867,7 +1883,7 @@ fn tenant_from_row(row: &serde_json::Value, tenant_column: &str) -> Option<Strin
 pub(crate) fn resolve_tenant_scope(
     explicit_tenant: Option<&str>,
 ) -> safety::GraphResult<Option<String>> {
-    let graph_tenant = selected_or_default_graph_metadata()
+    let graph_tenant = selected_or_default_graph_metadata_via_definer()
         .ok()
         .and_then(|graph| graph.tenant)
         .map(|tenant| tenant.trim().to_string())

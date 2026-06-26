@@ -1,8 +1,8 @@
 # Installation
 
-This extension is built from the `graph/` crate with `pgrx` 0.18.1. The crate
+This extension is built from the `graph/` crate with `pgrx` 0.19.1. The crate
 officially supports PostgreSQL 14 through 18 and defaults to `pg17`. A legacy
-`pg13` pgrx feature remains available on a best-effort basis because pgrx 0.18
+`pg13` pgrx feature remains available on a best-effort basis because pgrx
 still exposes it, but PostgreSQL 13 has reached upstream EOL and is not part of
 the release support matrix.
 
@@ -14,9 +14,9 @@ separately.
 
 | Requirement | Version or note |
 |---|---|
-| Rust | `1.95`, pinned by `graph/rust-toolchain.toml` |
+| Rust | `1.96`, pinned by `graph/rust-toolchain.toml` |
 | PostgreSQL | 14, 15, 16, 17, or 18, with server development headers and `pg_config` |
-| pgrx | `0.18.1` |
+| pgrx | `0.19.1` |
 | Crate feature | One of `pg14`, `pg15`, `pg16`, `pg17`, `pg18` |
 | Extension control | `graph/graph.control` |
 
@@ -55,7 +55,7 @@ Install cargo-pgrx and register the PostgreSQL on your `PATH` with pgrx. The
 major is detected from `pg_config`:
 
 ```bash
-cargo install cargo-pgrx --version 0.18.1 --locked
+cargo install cargo-pgrx --version 0.19.1 --locked
 PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
 cargo pgrx init --pg${PG_MAJOR}="$(which pg_config)"
 ```
@@ -78,7 +78,7 @@ Rust/pgrx extension, source installation requires Rust and `cargo-pgrx` before
 running `pgxn install`.
 
 ```bash
-cargo install cargo-pgrx --version 0.18.1 --locked
+cargo install cargo-pgrx --version 0.19.1 --locked
 # Register the installed PostgreSQL with pgrx (auto-detects the major):
 PG_MAJOR=$(pg_config --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
 cargo pgrx init --pg${PG_MAJOR}="$(which pg_config)"

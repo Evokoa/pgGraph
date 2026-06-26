@@ -2,7 +2,7 @@ use super::admin::{check_enabled_result, require_graph_admin_result, with_panic_
 use super::*;
 
 /// Reset the engine — clear graph and remove persisted files.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
 fn reset() {
     with_panic_boundary("reset()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
@@ -11,8 +11,9 @@ fn reset() {
         });
         crate::runtime_state::clear_loaded_graph();
 
-        let graph =
-            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
         persistence::remove_graph_artifacts_for(&graph.graph_id).unwrap_or_else(|err| err.report());
         pgrx::notice!(
             "graph: removed persisted files for graph {} ({})",
@@ -379,14 +380,7 @@ pub(super) fn hydrate_component_page(
 /// backend-local heap, and the reverse EdgeStore CSR is rebuilt into heap for
 /// inbound traversal.
 pub(super) fn maybe_auto_load() {
-    let role_oid = match catalog::current_role_oid() {
-        Ok(role_oid) => role_oid,
-        Err(err) => {
-            pgrx::warning!("graph: auto-load skipped: {}", err);
-            return;
-        }
-    };
-    let graph = match catalog::selected_or_default_graph_metadata_for_role(role_oid) {
+    let graph = match catalog::selected_or_default_graph_metadata_via_definer() {
         Ok(graph) => graph,
         Err(err) => {
             pgrx::warning!("graph: auto-load skipped: {}", err);
@@ -488,7 +482,7 @@ fn load_selected_graph_from_disk(
 
 pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
     let role_oid = catalog::current_role_oid()?;
-    let graph = catalog::selected_or_default_graph_metadata_for_role(role_oid)?;
+    let graph = catalog::selected_or_default_graph_metadata_via_definer()?;
     clear_loaded_graph_if_mismatched(&graph.graph_id);
     catalog::require_graph_privilege_for_role(&graph, catalog::GraphPrivilege::Read, role_oid)?;
     maybe_auto_load();

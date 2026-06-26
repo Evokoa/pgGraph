@@ -1046,6 +1046,11 @@ pub fn graph_file_path() -> GraphResult<PathBuf> {
     graph_file_path_for(&selected_graph_id_for_paths()?)
 }
 
+/// Resolve the selected graph's `.pggraph` artifact path without creating dirs.
+pub(crate) fn graph_file_path_uncreated() -> GraphResult<PathBuf> {
+    graph_file_path_for_uncreated(&selected_graph_id_for_paths()?)
+}
+
 /// Get the sync checkpoint sidecar path for a graph id.
 #[allow(
     dead_code,
@@ -1097,7 +1102,7 @@ pub fn projection_manifest_root(path: &Path) -> PathBuf {
 
 #[cfg(any(not(test), feature = "pg_test"))]
 fn selected_graph_id_for_paths() -> GraphResult<String> {
-    crate::catalog::selected_or_default_graph_metadata().map(|graph| graph.graph_id)
+    crate::catalog::selected_or_default_graph_id_via_definer()
 }
 
 #[cfg(all(test, not(feature = "pg_test")))]

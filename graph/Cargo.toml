@@ -2,7 +2,7 @@
 name = "graph"
 version = "0.1.8"
 edition = "2021"
-rust-version = "1.95"
+rust-version = "1.96"
 description = "Sub-millisecond graph traversal for PostgreSQL"
 license = "Apache-2.0"
 
@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # Official support follows PostgreSQL majors that still receive upstream fixes:
 # pg14 through pg18. The pg13 feature remains available as legacy best-effort
-# because pgrx 0.18 still exposes it, but release gates do not cover PG13.
+# because pgrx still exposes it, but release gates do not cover PG13.
 # Keep the supported matrix aligned with docs/user_guide/installation.mdx and
 # graph/tests/heavy/run_pg_matrix.sh.
 default = ["pg17"]
@@ -27,14 +27,14 @@ fuzzing = []
 development = []
 
 [dependencies]
-pgrx = "=0.18.1"
+pgrx = "=0.19.1"
 roaring = { version = "=0.11.4", features = ["serde"] }
 xxhash-rust = { version = "=0.8.15", features = ["xxh3"] }
-bitvec = "=1.0.1"
+bitvec = "=1.1.1"
 bincode = { version = "=2.0.1", features = ["serde"] }
 crc32fast = "=1.5.0"
 thiserror = "=2.0.18"
-memmap2 = "=0.9.10"
+memmap2 = "=0.9.11"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 
@@ -64,7 +64,7 @@ panic = "allow"
 unwrap_used = "allow"
 
 [dev-dependencies]
-pgrx-tests = "=0.18.1"
+pgrx-tests = "=0.19.1"
 criterion = { version = "=0.8.2", features = ["html_reports"] }
 proptest = "=1.11.0"
 

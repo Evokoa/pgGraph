@@ -1,7 +1,7 @@
 use crate::{builder, safety};
 use pgrx::prelude::*;
 
-use super::selected_or_default_graph_metadata;
+use super::selected_or_default_graph_id_via_definer;
 use super::validate::registered_schema_drift_reason;
 
 /// Read registered tables and edges for the selected or default graph.
@@ -10,8 +10,8 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
     Vec<builder::RegisteredEdge>,
     Vec<builder::RegisteredFilterColumn>,
 )> {
-    let graph = selected_or_default_graph_metadata()?;
-    read_catalog_for_graph(&graph.graph_id)
+    let graph_id = selected_or_default_graph_id_via_definer()?;
+    read_catalog_for_graph(&graph_id)
 }
 
 /// Read registered tables and edges from one graph catalog via SPI.

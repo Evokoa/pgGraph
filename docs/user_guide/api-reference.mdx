@@ -8,12 +8,12 @@ All functions live in the `graph` schema.
 | Category | Functions |
 |---|---|
 | Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
-| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph`, `set_graph_residency`, `grant_graph`, `revoke_graph`, `graph_privileges`, `transfer_graph_ownership`, `set_graph_quota`, `graph_quotas`, `graph_quota_usage` |
+| Named graph metadata | `create_graph`, `alter_graph`, `drop_graph`, `list_graphs`, `current_graph`, `set_current_graph`, `_selected_graph_id_for_current_role`, `set_graph_residency`, `grant_graph`, `revoke_graph`, `graph_privileges`, `transfer_graph_ownership`, `set_graph_quota`, `graph_quotas`, `graph_quota_usage` |
 | Runtime graph loading | `select_graph`, `load_graph`, `unload_graph`, `loaded_graphs`, `graph_runtime_status` |
 | Registration | `add_table`, `add_table_to_graph`, `add_edge`, `add_edge_to_graph`, `add_filter_column`, `add_filter_column_to_graph`, `registered_tables`, `registered_tables_for_graph`, `registered_edges`, `registered_edges_for_graph`, `list_edges`, `rename_edge`, `alter_edge`, `graph_map`, `remove_table`, `remove_table_from_graph`, `remove_edge`, `remove_edge_from_graph`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables`, `preview_discover`, `preview_discover_tables`, `create_row_predicate_subgraph` |
 | Build jobs | `build`, `build_graph`, `build_async_graph`, `build_status`, `build_status_for_graph` |
-| Sync and maintenance | `enable_sync`, `apply_sync`, `add_sync_policy`, `alter_sync_policy`, `drop_sync_policy`, `run_sync_policy`, `sync_policy_status`, `jobs`, `job_runs`, `job_stats`, `run_job`, `run_due_jobs`, `run_due_jobs_async`, `alter_job`, `remove_job`, `run_scheduled_maintenance`, `projection_compact`, `projection_gc`, `projection_repair`, `vacuum`, `vacuum_graph`, `maintenance`, `maintenance_graph`, `maintenance_status`, `maintenance_status_for_graph` |
+| Sync and maintenance | `enable_sync`, `apply_sync`, `_pending_sync_rows_for_current_role`, `_max_sync_log_id_for_current_role`, `add_sync_policy`, `alter_sync_policy`, `drop_sync_policy`, `run_sync_policy`, `sync_policy_status`, `jobs`, `job_runs`, `job_stats`, `run_job`, `run_due_jobs`, `run_due_jobs_async`, `alter_job`, `remove_job`, `run_scheduled_maintenance`, `projection_compact`, `projection_gc`, `projection_repair`, `vacuum`, `vacuum_graph`, `maintenance`, `maintenance_graph`, `maintenance_status`, `maintenance_status_for_graph` |
 | GQL | `gql`, `gql_explain` |
 | Search | `search`, `search_nodes` |
 | Traversal | `traverse`, `traverse_search`, `node_ref`, `node_ref_string`, `format_path` |
@@ -375,6 +375,17 @@ SQL surface resolve the selected graph, or the default graph when no graph is
 selected. Selecting a graph does not load a persisted artifact by itself; the
 backend-local engine changes when you build or load graph state. Missing or
 unauthorized graphs return SQLSTATE `PG005`.
+
+### `graph._selected_graph_id_for_current_role()`
+
+```sql
+graph._selected_graph_id_for_current_role()
+RETURNS text
+```
+
+Security-definer helper used by sync triggers and internal SQL paths. Returns
+the current role's selected graph id, falling back to the compatibility default
+graph when the role has not selected one explicitly.
 
 ### `graph.grant_graph()`
 
@@ -1295,6 +1306,28 @@ segments carry source-node range metadata when sync replay can determine the
 affected range. Backend-local node/filter/tenant replay and legacy overlay paths
 remain for sync surfaces that are not yet represented by durable segments.
 
+### `graph._pending_sync_rows_for_current_role()`
+
+```sql
+graph._pending_sync_rows_for_current_role(applied_sync_id bigint)
+RETURNS bigint
+```
+
+Security-definer helper used by internal sync status paths. Counts committed
+sync-log rows above `applied_sync_id` for source tables registered to the
+current role's selected graph.
+
+### `graph._max_sync_log_id_for_current_role()`
+
+```sql
+graph._max_sync_log_id_for_current_role()
+RETURNS bigint
+```
+
+Security-definer helper used by internal sync status paths. Returns the maximum
+committed sync-log id visible for source tables registered to the current
+role's selected graph, or zero when no matching sync rows exist.
+
 ### `graph.add_sync_policy()`
 
 ```sql
@@ -2060,8 +2093,8 @@ graph.traverse(
   hydrate boolean DEFAULT true,
   max_rows int DEFAULT 1000,
   row_offset int DEFAULT 0,
-  max_nodes int DEFAULT current_setting('graph.max_nodes')::int,
-  max_frontier int DEFAULT current_setting('graph.max_frontier')::int
+  max_nodes int DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000),
+  max_frontier int DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000)
 )
 RETURNS TABLE (
   root_table oid,
@@ -2459,7 +2492,7 @@ graph.aggregate(
   traversal jsonb,
   aggregations jsonb,
   scope text DEFAULT 'returned_nodes',
-  path_limit int DEFAULT current_setting('graph.max_exact_path_count')::int
+  path_limit int DEFAULT COALESCE(NULLIF(current_setting('graph.max_exact_path_count', true), '')::int, 100000)
 ) RETURNS jsonb
 ```
 

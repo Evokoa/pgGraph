@@ -12,8 +12,9 @@ pub(crate) use graphs::{
     graph_privileges_for_role, graph_quota_usage, graph_quotas, list_graph_metadata,
     list_graph_metadata_for_role, require_graph_privilege, require_graph_privilege_for_role,
     resolve_visible_graph_metadata, resolve_visible_graph_metadata_for_role,
-    revoke_graph_privilege, selected_graph_id, selected_or_default_graph_metadata,
-    selected_or_default_graph_metadata_for_role, set_graph_quota, set_selected_graph_id,
+    revoke_graph_privilege, selected_graph_id, selected_or_default_graph_id_via_definer,
+    selected_or_default_graph_metadata, selected_or_default_graph_metadata_for_role,
+    selected_or_default_graph_metadata_via_definer, set_graph_quota, set_selected_graph_id,
     transfer_graph_ownership, update_graph_metadata, update_graph_metadata_by_id, GraphGrant,
     GraphMetadata, GraphPrivilege, GraphQuota, GraphQuotaUsage,
 };

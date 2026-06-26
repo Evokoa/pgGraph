@@ -19,15 +19,15 @@
         };
 
         # Toolchain pinned to the rust-version in graph/Cargo.toml.
-        rust = pkgs.rust-bin.stable."1.95.0".default.override {
+        rust = pkgs.rust-bin.stable."1.96.0".default.override {
           extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
         };
 
-        # cargo-pgrx version is pinned in graph/Cargo.toml as `pgrx = "=0.18.0"`.
+        # cargo-pgrx version is pinned in graph/Cargo.toml as `pgrx = "=0.19.1"`.
         # nixpkgs' cargo-pgrx may drift from that, so we install the exact
         # version into a project-local CARGO_INSTALL_ROOT on first shell entry.
         # This keeps the host's global ~/.cargo/bin untouched.
-        pgrxVersion = "0.18.0";
+        pgrxVersion = "0.19.1";
 
         commonBuildInputs = with pkgs; [
           icu

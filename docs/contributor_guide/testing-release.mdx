@@ -109,10 +109,16 @@ export PG_CONFIG=/opt/homebrew/opt/postgresql@17/bin/pg_config
 export PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 ```
 
+Install Nix on machines that own release dependency freshness remediation. The
+dependency checker can report flake input updates, but `flake.lock` should be
+regenerated and validated with `nix flake lock` rather than edited by hand. On
+macOS, upstream Nix requires the daemon installer because single-user installs
+are no longer supported.
+
 Install and initialize pgrx once for that PostgreSQL version:
 
 ```bash
-cargo install cargo-pgrx --version 0.18.1 --locked
+cargo install cargo-pgrx --version 0.19.1 --locked
 cargo pgrx init --pg17 "$PG_CONFIG"
 ```
 

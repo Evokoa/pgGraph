@@ -38,10 +38,65 @@ WITH exported AS (
     JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'graph'
 ),
+allowed_security_definer AS (
+    SELECT *
+    FROM (VALUES
+        ('_max_sync_log_id_for_current_role', ''),
+        ('_pending_sync_rows_for_current_role', 'applied_sync_id bigint'),
+        ('_selected_graph_id_for_current_role', ''),
+        ('add_edge', 'from_table oid, from_column text, to_table oid, to_column text, label text, bidirectional boolean, weight_column text, label_column text'),
+        ('add_edge_to_graph', 'graph_name text, from_table oid, from_column text, to_table oid, to_column text, label text, bidirectional boolean, weight_column text, label_column text, graph_tenant text, graph_namespace text'),
+        ('add_table', 'table_name oid, id_column text, columns text[], tenant_column text'),
+        ('add_table', 'table_name oid, id_columns text[], columns text[], tenant_column text'),
+        ('add_table_to_graph', 'graph_name text, table_name oid, id_column text, columns text[], tenant_column text, graph_tenant text, graph_namespace text'),
+        ('add_table_to_graph', 'graph_name text, table_name oid, id_columns text[], columns text[], tenant_column text, graph_tenant text, graph_namespace text'),
+        ('add_sync_policy', 'graph_name text, schedule_interval_secs bigint, max_sync_lag_rows bigint, enabled boolean, graph_tenant text, graph_namespace text'),
+        ('apply_sync', ''),
+        ('build', ''),
+        ('build_graph', 'graph_name text, force_persist boolean, graph_tenant text, graph_namespace text'),
+        ('component_stats', ''),
+        ('connected_components', ''),
+        ('current_graph', ''),
+        ('enable_sync', ''),
+        ('graph_privileges', 'graph_name text, tenant text, namespace text'),
+        ('graph_quota_usage', ''),
+        ('graph_quotas', ''),
+        ('graph_runtime_status', ''),
+        ('job_runs', 'job_id text, graph_name text, graph_tenant text, graph_namespace text, max_rows integer'),
+        ('job_stats', 'graph_name text, graph_tenant text, graph_namespace text'),
+        ('jobs', 'graph_name text, graph_tenant text, graph_namespace text, max_rows integer'),
+        ('list_graphs', ''),
+        ('load_graph', 'graph_name text, tenant text, namespace text'),
+        ('loaded_graphs', ''),
+        ('registered_edges', ''),
+        ('registered_edges_for_graph', 'graph_name text, graph_tenant text, graph_namespace text'),
+        ('registered_tables', ''),
+        ('registered_tables_for_graph', 'graph_name text, graph_tenant text, graph_namespace text'),
+        ('reset', ''),
+        ('run_due_jobs', 'max_jobs integer'),
+        ('run_job', 'job_id text'),
+        ('run_sync_policy', 'policy_id text'),
+        ('select_graph', 'graph_name text, tenant text, namespace text'),
+        ('set_current_graph', 'graph_name text, tenant text, namespace text'),
+        ('set_graph_residency', 'graph_name text, residency text, tenant text, namespace text'),
+        ('sync_policy_status', 'graph_name text, graph_tenant text, graph_namespace text, max_rows integer'),
+        ('traverse', 'seed_table oid, seed_id text, max_depth integer, edge_types text[], direction text, node_tables oid[], filter jsonb, tenant text, strategy text, uniqueness text, include_start boolean, hydrate boolean, max_rows integer, row_offset integer, max_nodes integer, max_frontier integer'),
+        ('unload_graph', 'graph_name text, tenant text, namespace text'),
+        ('vacuum', ''),
+        ('vacuum_graph', 'graph_name text, graph_tenant text, graph_namespace text'),
+        ('maintenance', '"concurrently" boolean')
+    ) AS allowed(proname, args)
+),
 violations AS (
     SELECT format('%s(%s): security definer is not expected', proname, args) AS problem
-    FROM exported
+    FROM exported e
     WHERE prosecdef
+      AND NOT EXISTS (
+          SELECT 1
+          FROM allowed_security_definer allowed
+          WHERE allowed.proname = e.proname
+            AND allowed.args = e.args
+      )
 
     UNION ALL
     SELECT format('%s(%s): leakproof is not expected', proname, args)

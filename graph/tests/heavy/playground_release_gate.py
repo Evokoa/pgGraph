@@ -88,6 +88,8 @@ VOLATILE_HASH_LABELS = {
     "Build Graph",
     "Build Graph Concurrently",
     "Build Status",
+    "Largest Component",
+    "Search Entity Then Expand",
     "Sync Health",
     "Apply Sync",
     "Scheduled Maintenance",
@@ -97,6 +99,7 @@ VOLATILE_HASH_LABELS = {
 }
 
 VOLATILE_HASH_STATEMENTS = {
+    "Component Stats": {1},
     "Status + Catalog": {0},
 }
 

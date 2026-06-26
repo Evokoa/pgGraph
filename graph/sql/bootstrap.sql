@@ -35,8 +35,8 @@ CREATE OR REPLACE FUNCTION graph.traverse(
     hydrate       BOOLEAN DEFAULT true,
     max_rows      INTEGER DEFAULT 1000,
     row_offset    INTEGER DEFAULT 0,
-    max_nodes     INTEGER DEFAULT (current_setting('graph.max_nodes'))::INTEGER,
-    max_frontier  INTEGER DEFAULT (current_setting('graph.max_frontier'))::INTEGER
+    max_nodes     INTEGER DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::INTEGER, 100000),
+    max_frontier  INTEGER DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::INTEGER, 100000)
 )
 RETURNS TABLE (
     root_table OID,
