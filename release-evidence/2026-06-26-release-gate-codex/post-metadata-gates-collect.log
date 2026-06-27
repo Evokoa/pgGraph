@@ -1,7 +1,0 @@
-===== boundary START 2026-06-26T17:05:42Z =====
-NOTICE:  graph: removed persisted files for graph default (00000000-0000-0000-0000-000000000001)
-NOTICE:  table "graph_boundary_edges" does not exist, skipping
-NOTICE:  table "graph_boundary_nodes" does not exist, skipping
-Expected SQLSTATE PG003 but got different error output:
-ERROR:  42704: unrecognized configuration parameter "graph.max_nodes"
-LOCATION:  find_option, guc.c:1281

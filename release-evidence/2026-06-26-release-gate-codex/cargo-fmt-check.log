@@ -1,9 +1,0 @@
-command: cargo fmt --check
-working directory:
-/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph
-start time:
-2026-06-26T16:25:35Z
---- outputs ---
-end time:
-2026-06-26T16:25:36Z
-exit code: 0
