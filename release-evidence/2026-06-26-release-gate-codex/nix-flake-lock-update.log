@@ -1,0 +1,21 @@
+command: /nix/var/nix/profiles/default/bin/nix --extra-experimental-features nix-command flakes flake lock --update-input nixpkgs --update-input rust-overlay
+working directory:
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph
+start time:
+2026-06-26T16:24:48Z
+--- outputs ---
+warning: '--update-input' is a deprecated alias for 'flake update' and will be removed in a future version.
+warning: '--update-input' is a deprecated alias for 'flake update' and will be removed in a future version.
+warning: Git tree '/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph' is dirty
+unpacking 'github:NixOS/nixpkgs/e73de5be04e0eff4190a1432b946d469c794e7b4' into the Git cache...
+unpacking 'github:oxalica/rust-overlay/4b06ff4acf3491ff69721df852507fcc51d0a13d' into the Git cache...
+warning: updating lock file "/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/flake.lock":
+• Updated input 'nixpkgs':
+    'github:NixOS/nixpkgs/f83fc3c307e74bc5fd5adb7eb6b8b13ffd2a36e1?narHash=sha256-cCO8aTqss5x9Ky8GWkpY0Hy5fyTZEbtifSUV8QjSzic%3D' (2026-05-21)
+  → 'github:NixOS/nixpkgs/e73de5be04e0eff4190a1432b946d469c794e7b4?narHash=sha256-pGvFkM8N0xEkIIXDe5YYfbEAvHrk4IxBrjB/x8OomhE%3D' (2026-06-26)
+• Updated input 'rust-overlay':
+    'github:oxalica/rust-overlay/d9973e2ab49747fada06ebbe26cda27eb0220cf1?narHash=sha256-OffE5yuMrSW71zIJNLvtl9MCO6WTAHEjlFPUCvkd/QM%3D' (2026-05-23)
+  → 'github:oxalica/rust-overlay/4b06ff4acf3491ff69721df852507fcc51d0a13d?narHash=sha256-P%2BpADLtK7qC1mz0/5Xq9uF77oahUR4zYLTaitiHsUHg%3D' (2026-06-26)
+end time:
+2026-06-26T16:25:07Z
+exit code: 0

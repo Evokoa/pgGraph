@@ -1,0 +1,16 @@
+command: rustup toolchain install 1.96.0
+working directory:
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph
+start time:
+2026-06-26T16:14:07Z
+--- outputs ---
+info: syncing channel updates for 1.96.0-aarch64-apple-darwin
+info: latest update on 2026-05-28 for version 1.96.0 (ac68faa20 2026-05-25)
+info: downloading 6 components
+
+  1.96.0-aarch64-apple-darwin installed - rustc 1.96.0 (ac68faa20 2026-05-25)
+
+info: checking for self-update (current version: 1.29.0)
+end time:
+2026-06-26T16:14:20Z
+exit code: 0

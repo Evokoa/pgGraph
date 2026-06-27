@@ -1,0 +1,33 @@
+command: python3 scripts/check_dependency_updates.py
+working directory:
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph
+start time:
+2026-06-26T16:11:25Z
+--- outputs ---
+UPDATE cargo:pgrx: 0.18.1 -> 0.19.1 (released 2026-06-23)
+OK cargo:roaring: pinned 0.11.4; recommended 0.11.4
+OK cargo:xxhash-rust: pinned 0.8.15; recommended 0.8.15
+UPDATE cargo:bitvec: 1.0.1 -> 1.1.1 (released 2026-06-18)
+OK cargo:bincode: pinned 2.0.1; recommended 2.0.1
+OK cargo:crc32fast: pinned 1.5.0; recommended 1.5.0
+OK cargo:thiserror: pinned 2.0.18; recommended 2.0.18
+UPDATE cargo:memmap2: 0.9.10 -> 0.9.11 (released 2026-06-22)
+OK cargo:serde: pinned 1.0.228; recommended 1.0.228
+OK cargo:serde_json: pinned 1.0.150; recommended 1.0.150
+UPDATE cargo:pgrx-tests: 0.18.1 -> 0.19.1 (released 2026-06-23)
+OK cargo:criterion: pinned 0.8.2; recommended 0.8.2
+OK cargo:proptest: pinned 1.11.0; recommended 1.11.0
+OK cargo:libfuzzer-sys: pinned 0.4.13; recommended 0.4.13
+OK cargo:serde_json: pinned 1.0.150; recommended 1.0.150
+OK pypi:streamlit: pinned 1.58.0; recommended 1.58.0
+OK pypi:psycopg: pinned 3.3.4; recommended 3.3.4
+OK pypi:psycopg: pinned 3.3.4; recommended 3.3.4
+OK docker:rust: pinned 1.95.0-bookworm; recommended 1.95.0-bookworm
+OK docker:postgres: pinned 17-bookworm; recommended 17-bookworm
+OK github:flake-utils: pinned 11707dc2f618dd54ca8739b309ec4fc024de578b; recommended 11707dc2f618dd54ca8739b309ec4fc024de578b
+UPDATE github:nixpkgs: f83fc3c307e74bc5fd5adb7eb6b8b13ffd2a36e1 -> e73de5be04e0eff4190a1432b946d469c794e7b4 (released 2026-06-26)
+UPDATE github:rust-overlay: d9973e2ab49747fada06ebbe26cda27eb0220cf1 -> 4b06ff4acf3491ff69721df852507fcc51d0a13d (released 2026-06-26)
+OK github:systems: pinned da67096a3b9bf56a91d16901293e51ba5b49a27e; recommended da67096a3b9bf56a91d16901293e51ba5b49a27e
+end time:
+2026-06-26T16:11:34Z
+exit code: 1

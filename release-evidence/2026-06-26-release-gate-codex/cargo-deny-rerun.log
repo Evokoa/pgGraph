@@ -1,0 +1,335 @@
+command: cargo deny check advisories bans licenses sources
+working directory:
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph
+start time:
+2026-06-26T16:31:14Z
+--- outputs ---
+warning[license-not-encountered]: license was not encountered
+   ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/deny.toml:14:4
+   │
+14 │   "BSD-2-Clause",
+   │    ━━━━━━━━━━━━ unmatched license allowance
+
+warning[duplicate]: found 2 duplicate entries for crate 'getrandom'
+   ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:76:1
+   │  
+76 │ ╭ getrandom 0.3.4 registry+https://github.com/rust-lang/crates.io-index
+77 │ │ getrandom 0.4.2 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰─────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ getrandom v0.3.4
+     ├── rand_core v0.9.5
+     │   ├── rand v0.9.4
+     │   │   └── proptest v1.11.0
+     │   │       └── (dev) graph v0.1.8
+     │   ├── rand_chacha v0.9.0
+     │   │   └── proptest v1.11.0 (*)
+     │   └── rand_xorshift v0.4.0
+     │       └── proptest v1.11.0 (*)
+     └── tempfile v3.27.0
+         ├── pgrx-tests v0.19.1
+         │   └── graph v0.1.8 (*)
+         ├── proptest v1.11.0 (*)
+         └── rusty-fork v0.3.1
+             └── proptest v1.11.0 (*)
+   ├ getrandom v0.4.2
+     ├── rand v0.10.1
+     │   ├── pgrx-tests v0.19.1
+     │   │   └── graph v0.1.8
+     │   ├── postgres-protocol v0.6.12
+     │   │   ├── postgres-types v0.2.14
+     │   │   │   └── tokio-postgres v0.7.18
+     │   │   │       └── postgres v0.19.13
+     │   │   │           └── pgrx-tests v0.19.1 (*)
+     │   │   └── tokio-postgres v0.7.18 (*)
+     │   └── tokio-postgres v0.7.18 (*)
+     └── uuid v1.23.2
+         └── pgrx v0.19.1
+             ├── graph v0.1.8 (*)
+             └── pgrx-tests v0.19.1 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'hashbrown'
+   ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:82:1
+   │  
+82 │ ╭ hashbrown 0.15.5 registry+https://github.com/rust-lang/crates.io-index
+83 │ │ hashbrown 0.17.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ hashbrown v0.15.5
+     └── petgraph v0.8.3
+         └── pgrx-sql-entity-graph v0.19.1
+             ├── pgrx v0.19.1
+             │   ├── graph v0.1.8
+             │   └── pgrx-tests v0.19.1
+             │       └── graph v0.1.8 (*)
+             ├── pgrx-macros v0.19.1
+             │   ├── pgrx v0.19.1 (*)
+             │   ├── pgrx-pg-sys v0.19.1
+             │   │   └── pgrx v0.19.1 (*)
+             │   └── pgrx-tests v0.19.1 (*)
+             └── pgrx-pg-sys v0.19.1 (*)
+   ├ hashbrown v0.17.1
+     └── indexmap v2.14.0
+         └── petgraph v0.8.3
+             └── pgrx-sql-entity-graph v0.19.1
+                 ├── pgrx v0.19.1
+                 │   ├── graph v0.1.8
+                 │   └── pgrx-tests v0.19.1
+                 │       └── graph v0.1.8 (*)
+                 ├── pgrx-macros v0.19.1
+                 │   ├── pgrx v0.19.1 (*)
+                 │   ├── pgrx-pg-sys v0.19.1
+                 │   │   └── pgrx v0.19.1 (*)
+                 │   └── pgrx-tests v0.19.1 (*)
+                 └── pgrx-pg-sys v0.19.1 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'r-efi'
+    ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:155:1
+    │  
+155 │ ╭ r-efi 5.3.0 registry+https://github.com/rust-lang/crates.io-index
+156 │ │ r-efi 6.0.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ r-efi v5.3.0
+      └── getrandom v0.3.4
+          ├── rand_core v0.9.5
+          │   ├── rand v0.9.4
+          │   │   └── proptest v1.11.0
+          │   │       └── (dev) graph v0.1.8
+          │   ├── rand_chacha v0.9.0
+          │   │   └── proptest v1.11.0 (*)
+          │   └── rand_xorshift v0.4.0
+          │       └── proptest v1.11.0 (*)
+          └── tempfile v3.27.0
+              ├── pgrx-tests v0.19.1
+              │   └── graph v0.1.8 (*)
+              ├── proptest v1.11.0 (*)
+              └── rusty-fork v0.3.1
+                  └── proptest v1.11.0 (*)
+    ├ r-efi v6.0.0
+      └── getrandom v0.4.2
+          ├── rand v0.10.1
+          │   ├── pgrx-tests v0.19.1
+          │   │   └── graph v0.1.8
+          │   ├── postgres-protocol v0.6.12
+          │   │   ├── postgres-types v0.2.14
+          │   │   │   └── tokio-postgres v0.7.18
+          │   │   │       └── postgres v0.19.13
+          │   │   │           └── pgrx-tests v0.19.1 (*)
+          │   │   └── tokio-postgres v0.7.18 (*)
+          │   └── tokio-postgres v0.7.18 (*)
+          └── uuid v1.23.2
+              └── pgrx v0.19.1
+                  ├── graph v0.1.8 (*)
+                  └── pgrx-tests v0.19.1 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'shlex'
+    ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:186:1
+    │  
+186 │ ╭ shlex 1.3.0 registry+https://github.com/rust-lang/crates.io-index
+187 │ │ shlex 2.0.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ shlex v1.3.0
+      └── bindgen v0.72.1
+          └── pgrx-bindgen v0.19.1
+              └── (build) pgrx-pg-sys v0.19.1
+                  └── pgrx v0.19.1
+                      ├── graph v0.1.8
+                      └── pgrx-tests v0.19.1
+                          └── graph v0.1.8 (*)
+    ├ shlex v2.0.1
+      ├── cc v1.2.63
+      │   ├── (build) alloca v0.4.0
+      │   │   └── criterion v0.8.2
+      │   │       └── (dev) graph v0.1.8
+      │   ├── (build) cee-scape v0.2.0
+      │   │   └── pgrx-pg-sys v0.19.1
+      │   │       └── pgrx v0.19.1
+      │   │           ├── graph v0.1.8 (*)
+      │   │           └── pgrx-tests v0.19.1
+      │   │               └── graph v0.1.8 (*)
+      │   └── pgrx-bindgen v0.19.1
+      │       └── (build) pgrx-pg-sys v0.19.1 (*)
+      ├── pgrx-bindgen v0.19.1 (*)
+      └── pgrx-tests v0.19.1 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'toml'
+    ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:209:1
+    │  
+209 │ ╭ toml 0.9.12+spec-1.1.0 registry+https://github.com/rust-lang/crates.io-index
+210 │ │ toml 1.1.2+spec-1.1.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ toml v0.9.12+spec-1.1.0
+      └── cargo_toml v0.22.3
+          └── pgrx-pg-config v0.19.1
+              ├── pgrx-bindgen v0.19.1
+              │   └── (build) pgrx-pg-sys v0.19.1
+              │       └── pgrx v0.19.1
+              │           ├── graph v0.1.8
+              │           └── pgrx-tests v0.19.1
+              │               └── graph v0.1.8 (*)
+              └── pgrx-tests v0.19.1 (*)
+    ├ toml v1.1.2+spec-1.1.0
+      └── pgrx-pg-config v0.19.1
+          ├── pgrx-bindgen v0.19.1
+          │   └── (build) pgrx-pg-sys v0.19.1
+          │       └── pgrx v0.19.1
+          │           ├── graph v0.1.8
+          │           └── pgrx-tests v0.19.1
+          │               └── graph v0.1.8 (*)
+          └── pgrx-tests v0.19.1 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'toml_datetime'
+    ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:211:1
+    │  
+211 │ ╭ toml_datetime 0.7.5+spec-1.1.0 registry+https://github.com/rust-lang/crates.io-index
+212 │ │ toml_datetime 1.1.1+spec-1.1.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ toml_datetime v0.7.5+spec-1.1.0
+      └── toml v0.9.12+spec-1.1.0
+          └── cargo_toml v0.22.3
+              └── pgrx-pg-config v0.19.1
+                  ├── pgrx-bindgen v0.19.1
+                  │   └── (build) pgrx-pg-sys v0.19.1
+                  │       └── pgrx v0.19.1
+                  │           ├── graph v0.1.8
+                  │           └── pgrx-tests v0.19.1
+                  │               └── graph v0.1.8 (*)
+                  └── pgrx-tests v0.19.1 (*)
+    ├ toml_datetime v1.1.1+spec-1.1.0
+      └── toml v1.1.2+spec-1.1.0
+          └── pgrx-pg-config v0.19.1
+              ├── pgrx-bindgen v0.19.1
+              │   └── (build) pgrx-pg-sys v0.19.1
+              │       └── pgrx v0.19.1
+              │           ├── graph v0.1.8
+              │           └── pgrx-tests v0.19.1
+              │               └── graph v0.1.8 (*)
+              └── pgrx-tests v0.19.1 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'wasi'
+    ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:230:1
+    │  
+230 │ ╭ wasi 0.11.1+wasi-snapshot-preview1 registry+https://github.com/rust-lang/crates.io-index
+231 │ │ wasi 0.14.7+wasi-0.2.4 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ wasi v0.11.1+wasi-snapshot-preview1
+      └── mio v1.2.1
+          └── tokio v1.52.3
+              ├── postgres v0.19.13
+              │   └── pgrx-tests v0.19.1
+              │       └── graph v0.1.8
+              ├── tokio-postgres v0.7.18
+              │   └── postgres v0.19.13 (*)
+              └── tokio-util v0.7.18
+                  └── tokio-postgres v0.7.18 (*)
+    ├ wasi v0.14.7+wasi-0.2.4
+      └── wasite v1.0.2
+          └── whoami v2.1.2
+              └── tokio-postgres v0.7.18
+                  └── postgres v0.19.13
+                      └── pgrx-tests v0.19.1
+                          └── graph v0.1.8
+
+warning[duplicate]: found 2 duplicate entries for crate 'winnow'
+    ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:257:1
+    │  
+257 │ ╭ winnow 0.7.15 registry+https://github.com/rust-lang/crates.io-index
+258 │ │ winnow 1.0.3 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ winnow v0.7.15
+      └── toml v0.9.12+spec-1.1.0
+          └── cargo_toml v0.22.3
+              └── pgrx-pg-config v0.19.1
+                  ├── pgrx-bindgen v0.19.1
+                  │   └── (build) pgrx-pg-sys v0.19.1
+                  │       └── pgrx v0.19.1
+                  │           ├── graph v0.1.8
+                  │           └── pgrx-tests v0.19.1
+                  │               └── graph v0.1.8 (*)
+                  └── pgrx-tests v0.19.1 (*)
+    ├ winnow v1.0.3
+      ├── toml v1.1.2+spec-1.1.0
+      │   └── pgrx-pg-config v0.19.1
+      │       ├── pgrx-bindgen v0.19.1
+      │       │   └── (build) pgrx-pg-sys v0.19.1
+      │       │       └── pgrx v0.19.1
+      │       │           ├── graph v0.1.8
+      │       │           └── pgrx-tests v0.19.1
+      │       │               └── graph v0.1.8 (*)
+      │       └── pgrx-tests v0.19.1 (*)
+      └── toml_parser v1.1.2+spec-1.1.0
+          ├── toml v0.9.12+spec-1.1.0
+          │   └── cargo_toml v0.22.3
+          │       └── pgrx-pg-config v0.19.1 (*)
+          └── toml v1.1.2+spec-1.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'wit-bindgen'
+    ┌─ /Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/Cargo.lock:259:1
+    │  
+259 │ ╭ wit-bindgen 0.51.0 registry+https://github.com/rust-lang/crates.io-index
+260 │ │ wit-bindgen 0.57.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ wit-bindgen v0.51.0
+      └── wasip3 v0.4.0+wasi-0.3.0-rc-2026-01-06
+          └── getrandom v0.4.2
+              ├── rand v0.10.1
+              │   ├── pgrx-tests v0.19.1
+              │   │   └── graph v0.1.8
+              │   ├── postgres-protocol v0.6.12
+              │   │   ├── postgres-types v0.2.14
+              │   │   │   └── tokio-postgres v0.7.18
+              │   │   │       └── postgres v0.19.13
+              │   │   │           └── pgrx-tests v0.19.1 (*)
+              │   │   └── tokio-postgres v0.7.18 (*)
+              │   └── tokio-postgres v0.7.18 (*)
+              └── uuid v1.23.2
+                  └── pgrx v0.19.1
+                      ├── graph v0.1.8 (*)
+                      └── pgrx-tests v0.19.1 (*)
+    ├ wit-bindgen v0.57.1
+      └── wasip2 v1.0.3+wasi-0.2.9
+          ├── getrandom v0.3.4
+          │   ├── rand_core v0.9.5
+          │   │   ├── rand v0.9.4
+          │   │   │   └── proptest v1.11.0
+          │   │   │       └── (dev) graph v0.1.8
+          │   │   ├── rand_chacha v0.9.0
+          │   │   │   └── proptest v1.11.0 (*)
+          │   │   └── rand_xorshift v0.4.0
+          │   │       └── proptest v1.11.0 (*)
+          │   └── tempfile v3.27.0
+          │       ├── pgrx-tests v0.19.1
+          │       │   └── graph v0.1.8 (*)
+          │       ├── proptest v1.11.0 (*)
+          │       └── rusty-fork v0.3.1
+          │           └── proptest v1.11.0 (*)
+          ├── getrandom v0.4.2
+          │   ├── rand v0.10.1
+          │   │   ├── pgrx-tests v0.19.1 (*)
+          │   │   ├── postgres-protocol v0.6.12
+          │   │   │   ├── postgres-types v0.2.14
+          │   │   │   │   └── tokio-postgres v0.7.18
+          │   │   │   │       └── postgres v0.19.13
+          │   │   │   │           └── pgrx-tests v0.19.1 (*)
+          │   │   │   └── tokio-postgres v0.7.18 (*)
+          │   │   └── tokio-postgres v0.7.18 (*)
+          │   └── uuid v1.23.2
+          │       └── pgrx v0.19.1
+          │           ├── graph v0.1.8 (*)
+          │           └── pgrx-tests v0.19.1 (*)
+          └── wasi v0.14.7+wasi-0.2.4
+              └── wasite v1.0.2
+                  └── whoami v2.1.2
+                      └── tokio-postgres v0.7.18 (*)
+
+advisories ok, bans ok, licenses ok, sources ok
+end time:
+2026-06-26T16:31:15Z
+exit code: 0

@@ -1,0 +1,17 @@
+command: ./fuzz/run_projection_seed_corpora.sh
+working directory:
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph
+start time:
+2026-06-26T16:35:03Z
+--- outputs ---
+   Compiling graph-fuzz v0.0.0 (/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/fuzz)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.06s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.06s
+     Running `fuzz/target/aarch64-apple-darwin/release/load_projection_manifest '-artifact_prefix=/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph/graph/fuzz/artifacts/load_projection_manifest/' -runs=0 fuzz/corpus/load_projection_manifest`
+dyld[21014]: symbol not found in flat namespace '_GUC_check_errhint_string'
+────────────────────────────────────────────────────────────────────────────────
+
+Error: Fuzz target exited with signal: 6 (SIGABRT)
+end time:
+2026-06-26T16:35:05Z
+exit code: 1

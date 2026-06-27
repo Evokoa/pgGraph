@@ -1,0 +1,45 @@
+command: pre-run sanity block
+working directory:
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph
+start time:
+2026-06-26T16:09:19Z
+--- outputs ---
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph
+cb2ddaf23cc1bd26595329be92fb58b75be1cb3c
+ M docs/contributor_guide/_meta.js
+ M graph/src/catalog.rs
+ M graph/src/catalog/graphs.rs
+ M graph/src/catalog/read.rs
+ M graph/src/persistence.rs
+ M graph/src/pg_tests/named_graphs.rs
+ M graph/src/sql_facade/admin.rs
+ M graph/src/sql_facade/runtime.rs
+ M graph/src/sql_sync.rs
+ M graph/src/sync.rs
+?? docs/contributor_guide/release-gate-checklist.mdx
+?? release-evidence/
+?? todo/
+/Users/daltonprescott/.cargo/bin/cargo
+/Users/daltonprescott/.cargo/bin/cargo-pgrx
+/opt/homebrew/opt/libpq/bin/psql
+/opt/homebrew/opt/libpq/bin/createdb
+/opt/homebrew/opt/libpq/bin/dropdb
+/opt/homebrew/opt/libpq/bin/pg_config
+/opt/homebrew/opt/libpq/bin/pgbench
+/usr/local/bin/docker
+/Users/daltonprescott/.cargo/bin/cargo-deny
+PostgreSQL 18.3
+psql (PostgreSQL) 18.3
+Docker version 28.3.3, build 980b856
+cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+cargo-pgrx 0.18.0
+cargo-deny 0.19.4
+env PGHOST=
+env PGPORT=
+env PGUSER=
+env PGDATABASE=
+env PG_VERSION_FEATURE=
+env PG_CONFIG=
+end time:
+2026-06-26T16:09:20Z

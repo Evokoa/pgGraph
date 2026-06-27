@@ -1,0 +1,12 @@
+command: ./scripts/check_docs_drift.sh
+working directory:
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph
+start time:
+2026-06-26T16:11:01Z
+--- outputs ---
+Documentation local references are valid.
+SQL API and GUC documentation are in sync.
+Rust source map documentation is in sync.
+end time:
+2026-06-26T16:11:01Z
+exit code: 0

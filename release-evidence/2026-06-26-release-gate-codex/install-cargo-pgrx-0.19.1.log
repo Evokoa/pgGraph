@@ -1,0 +1,18 @@
+command: sfw cargo install cargo-pgrx --version 0.19.1 --locked
+working directory:
+/Users/daltonprescott/Desktop/Evokoa V2/public_pgGraph
+start time:
+2026-06-26T16:16:05Z
+--- outputs ---
+Protected by Socket Firewall
+    Updating crates.io index
+error: cannot install package `cargo-pgrx 0.19.1`, it requires rustc 1.96 or newer, while the currently active rustc version is 1.95.0
+`cargo-pgrx 0.18.1` has an unspecified minimum rustc version
+
+=== Socket Firewall ===
+
+Warning: Socket Firewall did not detect any package fetch attempts
+
+end time:
+2026-06-26T16:16:05Z
+exit code: 101
