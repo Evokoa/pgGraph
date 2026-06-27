@@ -2,7 +2,7 @@
 
 Release notes are ordered newest first.
 
-## v0.1.8: Named Graphs And Hosted Maintenance
+## v0.1.8: Named Graphs And Production Release Hardening
 
 `v0.1.8` adds named graph administration, graph-scoped catalogs, hosted
 maintenance jobs, relationship creation, and stricter query-surface boundaries.
@@ -17,6 +17,10 @@ relationship creation and row hydration, while keeping PostgreSQL source tables
 authoritative for graph mutations. Capability checks for openCypher and
 SQL/PGQ are now explicit, so unsupported syntax is rejected with clearer
 compatibility guidance instead of drifting into partial behavior.
+
+The final release candidate hardens restricted-role SQL behavior, refreshes the
+Rust and pgrx release toolchain, and documents the full release handoff from
+gate evidence through signed tags and package publishing.
 
 ### Highlights
 
@@ -42,6 +46,15 @@ compatibility guidance instead of drifting into partial behavior.
   unsupported-feature reporting and compatibility corpus coverage.
 - Hardened named-graph catalog access so internal graph catalogs are mediated
   through SQL APIs and caller-role visibility checks.
+- Hardened restricted-role graph access so selected-graph metadata, sync status,
+  and runtime state can be resolved through controlled definer boundaries while
+  preserving caller-role graph grants and PostgreSQL source-table ACL/RLS
+  checks.
+- Refreshed the release toolchain to Rust 1.96 and pgrx 0.19.1, with matching
+  Docker, Nix, Cargo, installation, and PGXN source-build documentation.
+- Added a contributor release-gate checklist that records required gates,
+  environment prerequisites, opt-in gates, evidence capture, signed tagging,
+  package validation, and prepare/publish ordering.
 
 ### Named Graph Administration
 
@@ -97,6 +110,27 @@ alpha catalog layouts should be recreated before testing this release.
 Source tables remain the source of truth. Graph artifacts, projection segments,
 sync state, and runtime engines are still derived from PostgreSQL tables and
 graph registration metadata.
+
+`v0.1.8` raises the source-build baseline to Rust 1.96 and pgrx 0.19.1.
+PostgreSQL 14 through 18 remain the supported PostgreSQL majors, with
+PostgreSQL 17 as the default release-gate target.
+
+### Release Validation
+
+The production release candidate completed the full PostgreSQL 17 release gate,
+including docs drift, dependency freshness remediation, formatting, clippy,
+Rust docs and doctests, unit tests, pgrx SQL tests, cargo-deny, fuzz compile,
+projection seed corpora, package validation, fresh install smoke,
+SQL metadata audit, SQLSTATE/ACL boundary tests, backup/restore,
+lock-regression gates, concurrency stress, synthetic release fixture,
+Docker/playground validation, pgbench sync stress, GQL write lifecycle gates,
+named-graph heavy gates, cross-backend durable projection checks, projection
+recovery, transaction-delta lifecycle, and write predicate re-check races.
+
+The playground release gate now treats nondeterministic demo sample hashes as
+row-count assertions while retaining stable checksums for deterministic results.
+This keeps the gate focused on product regressions instead of component-id or
+sample-order drift across fresh builds.
 
 ## v0.1.7: Durable Projection Operations
 
