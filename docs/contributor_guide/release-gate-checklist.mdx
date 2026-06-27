@@ -549,6 +549,24 @@ evidence.
 
 ## Package And Publish Workflow Checks
 
+Publishing requires four explicit release-owner steps after all required gates
+pass: tag, sign, package, and push. Do not start these steps from a dirty
+worktree or from a commit that has not completed the required release gate.
+
+Required local state:
+
+- The release commit is checked out and `git status --short` is empty.
+- `graph/Cargo.toml`, package metadata, docs, Docker defaults, and release notes
+  identify the intended version.
+- `scripts/validate_release.py --tag vX.Y.Z --check-main` passes.
+- A signing key is configured for Git tags. Use the repository's required
+  signing backend, such as GPG, SSH signing, or the platform-managed signing
+  flow.
+- Docker is available if preparing Docker images or validating playground
+  packaging.
+- PGXN credentials, GitHub credentials, Docker registry credentials, and any
+  required 2FA/session state are available to the release owner.
+
 Before release automation:
 
 ```bash
@@ -561,12 +579,52 @@ PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh
 PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh
 ```
 
+Create the signed release tag only after the release commit and evidence are
+final:
+
+```bash
+git status --short
+git log -1 --oneline
+git tag -s vX.Y.Z -m "vX.Y.Z"
+git tag -v vX.Y.Z
+```
+
+If the project uses SSH tag signing instead of GPG, configure Git before
+creating the tag:
+
+```bash
+git config gpg.format ssh
+git config user.signingkey /path/to/release-signing-key.pub
+git tag -s vX.Y.Z -m "vX.Y.Z"
+git tag -v vX.Y.Z
+```
+
+Build and validate release packages before pushing the tag:
+
+```bash
+scripts/validate_release.py --tag vX.Y.Z --check-main
+
+cd graph
+PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh
+```
+
+Push only after package validation and tag verification pass:
+
+```bash
+git push origin HEAD
+git push origin vX.Y.Z
+```
+
 The GitHub Actions release workflow has two manual phases:
 
 | Phase | Required state |
 |---|---|
 | `prepare` | Tag exists, release metadata validates, prepared Docker images and PGXN archive build and verify |
 | `publish` | GitHub Release exists, prepared artifacts match the release tag, Docker manifests and PGXN archive publish without rebuild |
+
+Run the `prepare` phase first and inspect its generated artifacts before
+publishing. The `publish` phase must consume prepared artifacts for the exact
+tag; it must not rebuild from a moving branch or untagged commit.
 
 Use this when validating release metadata locally:
 
