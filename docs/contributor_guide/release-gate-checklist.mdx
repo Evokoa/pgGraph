@@ -370,6 +370,7 @@ RUN_TX_DELTA_CRASH=0 \
 | `RUN_CRASH` | `0` | Run crash recovery, requires disposable `PGDATA` |
 | `RUN_TX_DELTA_CRASH` | `0` | Run tx-delta crash recovery, requires disposable `PGDATA` |
 | `RUN_RSS` | `0` | Run peak RSS measurement |
+| `RUN_BUILD_MEMORY_STRESS` | `0` | Run baseline, small-batch, rebuild, and low-memory rebuild RSS profiles |
 
 Synthetic fixture tuning:
 
@@ -426,6 +427,7 @@ disposable cluster paths.
 | `tx_delta_crash_recovery.sh` | Kill disposable postmaster with uncommitted overlay and verify it does not persist | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta_crash PGDATA=/path/to/disposable/pgdata ./tests/heavy/tx_delta_crash_recovery.sh` |
 | `pg_upgrade_validate.sh` | Run `pg_upgrade --check` for a database containing pgGraph | `OLD_BINDIR=/path/to/old/bin NEW_BINDIR=/path/to/new/bin OLD_DATADIR=/tmp/pg-old NEW_DATADIR=/tmp/pg-new ./tests/heavy/pg_upgrade_validate.sh` |
 | `measure_build_rss.sh` | Capture peak backend RSS during graph build | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_rss NODE_COUNT=200000 MAX_RSS_MB=0 ./tests/heavy/measure_build_rss.sh` |
+| `build_memory_stress.sh` | Run baseline, small-batch, repeated-rebuild, and low-memory rebuild profiles | `PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_memstress ./tests/heavy/build_memory_stress.sh` |
 | `measure_mmap_pss.sh` | Linux-only mmap sharing PSS measurement across backends | `DBNAME=graph_test BACKENDS=50 ./tests/heavy/measure_mmap_pss.sh` |
 | `run_memory_sanitizers.sh` | pgrx suite plus optional ASan or Valgrind checks | `DBNAME=pggraph_pgbench ./tests/heavy/run_memory_sanitizers.sh` |
 

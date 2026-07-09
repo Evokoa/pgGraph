@@ -71,6 +71,7 @@ requires `graph.mutable_enabled = on`.
 |---|---:|---:|---|---|---|
 | `graph.memory_limit_mb` | int | `2048` | `SUSET` | `64` to `32768` | Pre-build OOM guard and status limit |
 | `graph.build_batch_size` | int | `10000` | `SUSET` | `1` to `1000000` | SPI cursor fetch size and spool batch size |
+| `graph.low_memory_build` | bool | `false` | `SUSET` | `on`, `off` | Allow rebuilds to unload the current backend-local graph before constructing the replacement |
 | `graph.oom_action` | string | `error` | `SUSET` | `error`, `readonly`, `read_only`, `read-only` | Behavior when estimated build memory exceeds the limit |
 | `graph.max_loaded_graphs_per_backend` | int | `1` | `SUSET` | `0` to `1` | Runtime loaded-graph slot cap for each PostgreSQL backend |
 | `graph.max_tx_delta_nodes` | int | `100000` | `USERSET` | `0` to `10000000` | Maximum transaction-local node deltas before a mapped GQL write aborts |
@@ -83,6 +84,14 @@ requires `graph.mutable_enabled = on`.
 constructing the active engine. With `graph.oom_action = 'error'`, it raises `PG001`.
 With `graph.oom_action = 'readonly'`, it logs a warning and marks the built
 engine read-only.
+
+Set `graph.low_memory_build = on` when rebuilds fail only because the current
+backend already has a graph loaded. In that mode, `graph.build()` may unload the
+current backend-local graph before constructing the replacement. This lowers
+peak memory for rebuilds at the cost of losing the old loaded graph in the
+building backend if the build fails. Other PostgreSQL backends are unaffected.
+It does not make a final graph that exceeds `graph.memory_limit_mb` fit; reduce
+the graph size or raise the limit for that case.
 
 `graph.memory_limit_mb` is enforced per PostgreSQL backend. To size a database
 where multiple sessions may load or build the graph, build or load the graph in

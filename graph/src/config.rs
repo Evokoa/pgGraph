@@ -64,6 +64,11 @@ pub static MAX_EXACT_PATH_COUNT: GucSetting<i32> = GucSetting::<i32>::new(100_00
 /// Default: 10000. Range: 1–1000000.
 pub static BUILD_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 
+/// Whether graph.build() may unload the current backend-local graph before
+/// constructing a replacement to reduce rebuild peak memory.
+/// Default: false.
+pub static LOW_MEMORY_BUILD: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 // ─── Persistence ───
 
 /// Whether to persist the graph to disk after build().
@@ -600,6 +605,15 @@ pub fn register_gucs() {
         &BUILD_BATCH_SIZE,
         1,
         1_000_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"graph.low_memory_build",
+        c"Allow graph.build() to unload the current backend graph before rebuilding.",
+        c"When enabled, rebuilds can use less peak memory at the cost of losing the old loaded graph in the building backend if the build fails.",
+        &LOW_MEMORY_BUILD,
         GucContext::Suset,
         GucFlags::default(),
     );

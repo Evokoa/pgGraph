@@ -46,9 +46,49 @@ fn report_progress(
     progress(phase, message)
 }
 
+struct EngineRuntimeMetadata {
+    catalog_fingerprint: Option<u64>,
+    is_read_only: bool,
+    read_only_reason: Option<engine::ReadOnlyReason>,
+    sync_status: engine::SyncStatus,
+    last_build: Option<pgrx::prelude::TimestampWithTimeZone>,
+    last_vacuum: Option<pgrx::prelude::TimestampWithTimeZone>,
+    applied_sync_id: i64,
+    needs_vacuum: bool,
+    projection_mode: config::ProjectionMode,
+}
+
+impl EngineRuntimeMetadata {
+    fn capture(source: &engine::Engine) -> Self {
+        Self {
+            catalog_fingerprint: source.catalog_fingerprint,
+            is_read_only: source.is_read_only,
+            read_only_reason: source.read_only_reason,
+            sync_status: source.sync_status,
+            last_build: source.last_build,
+            last_vacuum: source.last_vacuum,
+            applied_sync_id: source.applied_sync_id,
+            needs_vacuum: source.needs_vacuum,
+            projection_mode: source.projection_mode,
+        }
+    }
+
+    fn apply_to(self, target: &mut engine::Engine) {
+        target.catalog_fingerprint = self.catalog_fingerprint;
+        target.is_read_only = self.is_read_only;
+        target.read_only_reason = self.read_only_reason;
+        target.sync_status = self.sync_status;
+        target.last_build = self.last_build;
+        target.last_vacuum = self.last_vacuum;
+        target.applied_sync_id = self.applied_sync_id;
+        target.needs_vacuum = self.needs_vacuum;
+        target.projection_mode = self.projection_mode;
+    }
+}
+
 fn persist_and_reload_engine(
     operation: &str,
-    source: &engine::Engine,
+    source: engine::Engine,
     progress: &mut ProgressCallback<'_>,
 ) -> safety::GraphResult<engine::Engine> {
     let path = persistence::graph_file_path()?;
@@ -57,7 +97,7 @@ fn persist_and_reload_engine(
         "persisting",
         "writing and fsyncing graph artifact",
     )?;
-    persistence::write_graph_file_with_interrupt_checks(source, &path).map_err(|err| {
+    persistence::write_graph_file_with_interrupt_checks(&source, &path).map_err(|err| {
         safety::GraphError::Internal(format!("graph.{operation}(): persistence failed: {err}"))
     })?;
 
@@ -70,6 +110,9 @@ fn persist_and_reload_engine(
         file_size
     );
 
+    let metadata = EngineRuntimeMetadata::capture(&source);
+    drop(source);
+
     report_progress(
         progress,
         "validating_persistence",
@@ -80,7 +123,7 @@ fn persist_and_reload_engine(
             "graph.{operation}(): persisted mmap reload failed: {err}"
         ))
     })?;
-    loaded.inherit_runtime_metadata_from(source);
+    metadata.apply_to(&mut loaded);
 
     Ok(loaded)
 }
@@ -167,11 +210,16 @@ fn execute_build_inner(
     }
 
     check_build_acls_result(&tables, &edges)?;
-    let force_read_only = guard_build_memory_headroom(&tables, &edges)?;
+    let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
 
     report_progress(progress, build_phase, build_message)?;
-    let mut new_engine =
-        build_replacement_engine(&tables, &edges, &filter_columns, force_read_only)?;
+    apply_build_memory_plan(memory_plan)?;
+    let mut new_engine = build_replacement_engine(
+        &tables,
+        &edges,
+        &filter_columns,
+        memory_plan.force_read_only,
+    )?;
     new_engine.set_projection_mode(projection_mode);
 
     let nodes_loaded = new_engine.node_store.node_count() as i64;
@@ -179,16 +227,15 @@ fn execute_build_inner(
     let build_time_ms = start.elapsed().as_secs_f64() * 1000.0;
     let memory_used_mb = new_engine.estimated_memory_used_mb();
 
-    let persisted_engine = if force_persist || config::PERSIST_ON_BUILD.get() {
-        Some(persist_and_reload_engine("build", &new_engine, progress)?)
+    let new_engine = if force_persist || config::PERSIST_ON_BUILD.get() {
+        persist_and_reload_engine("build", new_engine, progress)?
     } else {
-        None
+        new_engine.finalize_resolution();
+        new_engine
     };
 
-    new_engine.finalize_resolution();
-
     ENGINE.with(|e| {
-        *e.borrow_mut() = persisted_engine.unwrap_or(new_engine);
+        *e.borrow_mut() = new_engine;
     });
     crate::runtime_state::mark_loaded_graph(&graph);
 
@@ -276,31 +323,31 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
 
     let (tables, edges, filter_columns) = read_catalog()?;
     check_build_acls_result(&tables, &edges)?;
-    let force_read_only = guard_build_memory_headroom(&tables, &edges)?;
+    let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
+    apply_build_memory_plan(memory_plan)?;
 
-    let mut new_engine =
-        build_replacement_engine(&tables, &edges, &filter_columns, force_read_only)?;
+    let mut new_engine = build_replacement_engine(
+        &tables,
+        &edges,
+        &filter_columns,
+        memory_plan.force_read_only,
+    )?;
 
     let nodes_after = new_engine.node_store.node_count() as i64;
     let edges_rebuilt = new_engine.edge_store.edge_count() as i64;
     let tombstones_removed = nodes_before - active_before;
     new_engine.mark_vacuum_complete(Some(pgrx::datetime::transaction_timestamp()));
 
-    let persisted_engine = if force_persist || config::PERSIST_ON_BUILD.get() {
+    let new_engine = if force_persist || config::PERSIST_ON_BUILD.get() {
         let mut progress = |_, _| Ok(());
-        Some(persist_and_reload_engine(
-            "vacuum",
-            &new_engine,
-            &mut progress,
-        )?)
+        persist_and_reload_engine("vacuum", new_engine, &mut progress)?
     } else {
-        None
+        new_engine.finalize_resolution();
+        new_engine
     };
 
-    new_engine.finalize_resolution();
-
     ENGINE.with(|e| {
-        *e.borrow_mut() = persisted_engine.unwrap_or(new_engine);
+        *e.borrow_mut() = new_engine;
     });
 
     Ok(VacuumExecutionResult {
@@ -371,10 +418,16 @@ pub(crate) fn validate_projection_mode_enabled(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BuildMemoryPlan {
+    pub(crate) force_read_only: bool,
+    pub(crate) unload_existing: bool,
+}
+
 pub(crate) fn guard_build_memory_headroom(
     tables: &[builder::RegisteredTable],
     edges: &[builder::RegisteredEdge],
-) -> safety::GraphResult<bool> {
+) -> safety::GraphResult<BuildMemoryPlan> {
     let estimate = builder::estimate_graph_memory(tables, edges)?;
     let existing_mb = ENGINE.with(|e| {
         let eng = e.borrow();
@@ -384,29 +437,67 @@ pub(crate) fn guard_build_memory_headroom(
             0.0
         }
     });
-    let total_mb = estimate.memory_mb + existing_mb;
+    let build_peak_mb = conservative_build_peak_mb(estimate.memory_mb);
+    let total_mb = build_peak_mb + existing_mb;
     let limit_mb = config::MEMORY_LIMIT_MB.get() as f64;
+    let low_memory_build = config::LOW_MEMORY_BUILD.get();
+    if low_memory_build && existing_mb > 0.0 && build_peak_mb <= limit_mb {
+        pgrx::warning!(
+            "graph: low-memory build unloading current backend graph before rebuild ({:.0} MB existing, {:.0} MB peak replacement, limit {:.0} MB).",
+            existing_mb,
+            build_peak_mb,
+            limit_mb
+        );
+        return Ok(BuildMemoryPlan {
+            force_read_only: false,
+            unload_existing: true,
+        });
+    }
     if total_mb <= limit_mb {
-        return Ok(false);
+        return Ok(BuildMemoryPlan {
+            force_read_only: false,
+            unload_existing: false,
+        });
     }
 
     match config::oom_action() {
         config::OomAction::ReadOnly => {
+            let unload_existing = low_memory_build && existing_mb > 0.0;
             pgrx::warning!(
-                "graph: build headroom estimate ({:.0} MB new + {:.0} MB existing = {:.0} MB) exceeds limit ({:.0} MB). Building in read-only mode.",
-                estimate.memory_mb,
+                "graph: build headroom estimate ({:.0} MB peak new + {:.0} MB existing = {:.0} MB) exceeds limit ({:.0} MB). Building in read-only mode.",
+                build_peak_mb,
                 existing_mb,
                 total_mb,
                 limit_mb
             );
-            Ok(true)
+            Ok(BuildMemoryPlan {
+                force_read_only: true,
+                unload_existing,
+            })
         }
         config::OomAction::Error => Err(safety::GraphError::Oom {
             used_mb: existing_mb.ceil() as u64,
-            need_mb: estimate.memory_mb.ceil() as u64,
+            need_mb: build_peak_mb.ceil() as u64,
             limit_mb: config::MEMORY_LIMIT_MB.get() as u64,
         }),
     }
+}
+
+fn apply_build_memory_plan(plan: BuildMemoryPlan) -> safety::GraphResult<()> {
+    if plan.unload_existing {
+        ENGINE.with(|e| {
+            *e.borrow_mut() = engine::Engine::new();
+        });
+        crate::runtime_state::clear_loaded_graph();
+    }
+    Ok(())
+}
+
+fn conservative_build_peak_mb(final_graph_mb: f64) -> f64 {
+    const BUILD_OVERHEAD_MULTIPLIER: f64 = 1.25;
+    const MIN_BUILD_OVERHEAD_MB: f64 = 64.0;
+
+    (final_graph_mb * BUILD_OVERHEAD_MULTIPLIER).max(final_graph_mb + MIN_BUILD_OVERHEAD_MB)
 }
 
 pub(crate) fn check_build_acls_result(
@@ -429,7 +520,8 @@ pub(crate) fn check_build_acls_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_lock_query_for_graph, validate_projection_mode_enabled, BUILD_LOCK_CLASS_ID,
+        build_lock_query_for_graph, conservative_build_peak_mb, validate_projection_mode_enabled,
+        BUILD_LOCK_CLASS_ID,
     };
     use crate::config::ProjectionMode;
 
@@ -461,5 +553,15 @@ mod tests {
     fn csr_readonly_projection_mode_is_always_allowed() {
         validate_projection_mode_enabled(ProjectionMode::CsrReadonly)
             .expect("csr_readonly should be allowed");
+    }
+
+    #[test]
+    fn build_peak_estimate_keeps_minimum_rebuild_overhead() {
+        assert_eq!(conservative_build_peak_mb(100.0), 164.0);
+    }
+
+    #[test]
+    fn build_peak_estimate_scales_large_graphs() {
+        assert_eq!(conservative_build_peak_mb(1024.0), 1280.0);
     }
 }

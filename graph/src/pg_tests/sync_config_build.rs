@@ -182,6 +182,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert_eq!(crate::config::MAX_LOADED_GRAPHS_PER_BACKEND.get(), 1);
     assert!(!crate::config::HOT_EAGER_LOAD.get());
     assert_eq!(crate::config::IDLE_UNLOAD_SECS.get(), 0);
+    assert!(!crate::config::LOW_MEMORY_BUILD.get());
 
     let registered = Spi::get_one::<bool>(
         "WITH expected(name, context, min_val, max_val) AS (
@@ -200,17 +201,18 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                     ('graph.compaction_threshold', 'user', '1', '10000000'),
                     ('graph.projection_retention_generations', 'user', '1', '1000'),
                     ('graph.max_loaded_graphs_per_backend', 'superuser', '0', '1'),
-                    ('graph.idle_unload_secs', 'superuser', '0', '86400')
+                    ('graph.idle_unload_secs', 'superuser', '0', '86400'),
+                    ('graph.low_memory_build', 'superuser', NULL, NULL)
              ),
              matched AS (
                 SELECT e.name,
                        s.context = e.context
-                       AND s.min_val = e.min_val
-                       AND s.max_val = e.max_val AS ok
+                       AND (e.min_val IS NULL OR s.min_val = e.min_val)
+                       AND (e.max_val IS NULL OR s.max_val = e.max_val) AS ok
                 FROM expected e
                 JOIN pg_settings s ON s.name = e.name
              )
-             SELECT count(*) = 15 AND bool_and(ok)
+             SELECT count(*) = 16 AND bool_and(ok)
              FROM matched",
     )
     .expect("pg_settings inspection failed")
@@ -403,6 +405,61 @@ fn build_memory_headroom_accounts_for_existing_serving_graph() {
 
     Spi::run("SET graph.oom_action = 'error'").expect("restore oom action failed");
     Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
+}
+
+#[pg_test]
+fn low_memory_build_unloads_existing_backend_graph_before_rebuild() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
+    Spi::run("SET graph.memory_limit_mb = 65").expect("set memory limit failed");
+    Spi::run("SET graph.oom_action = 'error'").expect("set oom error failed");
+    Spi::run("SET graph.low_memory_build = on").expect("enable low memory build failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_low_memory_pgtest CASCADE")
+        .expect("drop low memory table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_low_memory_pgtest (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create low memory table failed");
+    Spi::run("INSERT INTO public.graph_test_low_memory_pgtest VALUES ('one', 'One')")
+        .expect("insert low memory row failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_low_memory_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add low memory table failed");
+
+    crate::ENGINE.with(|e| {
+        let mut eng = crate::engine::Engine::new();
+        for idx in 0..1_200_000u32 {
+            eng.node_store.add_node(1, idx.to_string());
+        }
+        eng.built = true;
+        *e.borrow_mut() = eng;
+    });
+
+    let nodes = Spi::get_one::<i64>("SELECT nodes_loaded FROM graph.build()")
+        .expect("low memory build failed")
+        .unwrap_or(0);
+    let read_only = Spi::get_one::<bool>("SELECT read_only FROM graph.status()")
+        .expect("status read failed")
+        .unwrap_or(true);
+
+    Spi::run("SET graph.low_memory_build = off").expect("restore low memory build failed");
+    Spi::run("SET graph.oom_action = 'error'").expect("restore oom action failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
+
+    assert_eq!(nodes, 1);
+    assert!(!read_only);
 }
 
 #[pg_test]

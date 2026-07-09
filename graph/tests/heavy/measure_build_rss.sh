@@ -8,6 +8,8 @@ PG_CONFIG="${PG_CONFIG:-}"
 NODE_COUNT="${NODE_COUNT:-200000}"
 EDGE_COUNT="${EDGE_COUNT:-199999}"
 BUILD_BATCH_SIZE="${BUILD_BATCH_SIZE:-10000}"
+REBUILD_ROUNDS="${REBUILD_ROUNDS:-0}"
+LOW_MEMORY_BUILD="${LOW_MEMORY_BUILD:-off}"
 MAX_RSS_MB="${MAX_RSS_MB:-0}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
 WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-rss.XXXXXX")"
@@ -53,16 +55,24 @@ SELECT graph.add_edge('public.graph_rss_edges'::regclass, 'from_id', 'public.gra
 SQL
 
 (
-  psql "$DBNAME" <<SQL
+  {
+    cat <<SQL
 \t on
-\a on
+\a
 \o $PID_FILE
 SELECT pg_backend_pid();
 \o
 SET graph.build_batch_size = $BUILD_BATCH_SIZE;
+SET graph.low_memory_build = $LOW_MEMORY_BUILD;
 SET graph.persist_on_build = on;
 SELECT * FROM graph.build();
 SQL
+    if (( REBUILD_ROUNDS > 0 )); then
+      for _ in $(seq 1 "$REBUILD_ROUNDS"); do
+        echo "SELECT * FROM graph.build();"
+      done
+    fi
+  } | psql "$DBNAME"
 ) >"$OUT_FILE" 2>&1 &
 psql_pid=$!
 
@@ -98,6 +108,7 @@ if (( MAX_RSS_MB > 0 && peak_mb > MAX_RSS_MB )); then
 fi
 
 cat "$OUT_FILE"
+echo "Build executions: $((REBUILD_ROUNDS + 1))"
 echo "Peak backend RSS: ${peak_mb}MB"
 echo "Database size: ${graph_file_mb}MB"
 echo "Temp bytes recorded: ${temp_bytes}"

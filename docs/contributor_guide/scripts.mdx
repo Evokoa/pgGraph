@@ -206,7 +206,7 @@ playground query stability.
 
 | Script | Use when | What it does |
 |---|---|---|
-| `run_release_gate.sh` | Final pre-release validation | Aggregates static checks, docs, Rust tests, pgrx tests, cargo-deny, fuzz compile, package validation, install smoke, metadata audit, boundary tests, backup/restore, lock tests, concurrency, synthetic smoke, playground query validation, public GQL write transaction checks, and pgbench. Set `RUN_TX_DELTA_CRASH=1` with disposable `PGDATA` to include the internal mutable-overlay crash proof. |
+| `run_release_gate.sh` | Final pre-release validation | Aggregates static checks, docs, Rust tests, pgrx tests, cargo-deny, fuzz compile, package validation, install smoke, metadata audit, boundary tests, backup/restore, lock tests, concurrency, synthetic smoke, playground query validation, public GQL write transaction checks, and pgbench. Set `RUN_TX_DELTA_CRASH=1` with disposable `PGDATA` to include the internal mutable-overlay crash proof; set `RUN_BUILD_MEMORY_STRESS=1` to include opt-in build-memory stress profiles. |
 | `run_pg_matrix.sh` | Local PostgreSQL-major compatibility | Runs Rust and optionally pgrx SQL tests for officially supported PostgreSQL 14 through 18 using local `pg_config` binaries. |
 | `run_pg_matrix_docker.sh` | Matrix validation without local headers | Builds the Docker matrix image and runs supported PostgreSQL-major checks in Docker. |
 | `docker_smoke.sh` | Top-level Dockerfile check | Builds the root Docker image, starts Postgres, creates the extension, and runs a small graph workflow. |
@@ -233,6 +233,7 @@ playground query stability.
 | `run_synthetic_release_evidence.sh` | Synthetic evidence capture | Runs synthetic release smoke, captures metadata, and inspects `.pggraph` artifacts when available. |
 | `playground_release_gate.sh` | Playground query stability | Prepares the Docker-backed Panama playground dataset, validates every sidebar SQL example from the shared playground catalog, and fails if expected row counts or stable result hashes change. |
 | `measure_build_rss.sh` | Build memory evidence | Measures peak backend RSS during graph build. |
+| `build_memory_stress.sh` | Build memory stress | Runs baseline, small-batch, repeated-rebuild, and low-memory rebuild RSS profiles through `measure_build_rss.sh`. |
 | `measure_mmap_pss.sh` | mmap sharing evidence | Linux-only proportional set size check for mmap sharing across backends. |
 | `run_memory_sanitizers.sh` | Memory/FFI boundary checks | Runs pgrx tests and optional ASan/Valgrind checks where toolchains support them. |
 

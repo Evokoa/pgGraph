@@ -312,7 +312,11 @@ correct for immutable CSR and reclaims tombstones and overlay state.
 
 <Callout type="warning">
 Vacuum has a double-memory period because the old and new engines coexist until
-the swap completes. Keep `graph.memory_limit_mb` high enough for both engines.
+the replacement build completes. Persisted rebuilds release the owned
+replacement before mmap validation/reload, but `graph.memory_limit_mb` still
+needs enough headroom for the old engine plus the peak replacement build.
+Set `graph.low_memory_build = on` for maintenance windows where the building
+backend may unload its current graph before constructing the replacement.
 </Callout>
 
 ## Maintenance

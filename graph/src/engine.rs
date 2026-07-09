@@ -330,18 +330,6 @@ impl Engine {
         self.catalog_fingerprint = Some(catalog_fingerprint);
     }
 
-    pub fn inherit_runtime_metadata_from(&mut self, source: &Self) {
-        self.catalog_fingerprint = source.catalog_fingerprint;
-        self.is_read_only = source.is_read_only;
-        self.read_only_reason = source.read_only_reason;
-        self.sync_status = source.sync_status;
-        self.last_build = source.last_build;
-        self.last_vacuum = source.last_vacuum;
-        self.applied_sync_id = source.applied_sync_id;
-        self.needs_vacuum = source.needs_vacuum;
-        self.projection_mode = source.projection_mode;
-    }
-
     pub fn set_projection_mode(&mut self, projection_mode: crate::config::ProjectionMode) {
         self.projection_mode = projection_mode;
     }
