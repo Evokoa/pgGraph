@@ -269,17 +269,20 @@ arrows from `relationships(path)` may observe changed output for reverse
 matches on bidirectional relationships. The new output is the registered schema
 direction, not the reverse path-pattern direction.
 
-The persisted artifact formats changed for this release. Graph artifacts now
-use graph format v3, and projection segments now use segment format v2, so the
-schema-direction metadata can be loaded safely. Existing source tables and graph
-registrations do not need to be rewritten.
+The persisted artifact formats changed for this release. Graph artifacts use
+graph format v3, and projection segments now use segment format v3. The segment
+format preserves schema direction and exact registered filter values, including
+signed numeric, boolean, text, date, timestamp-with-time-zone, UUID, SQL `NULL`,
+and tombstones. Existing source tables and graph registrations do not need to be
+rewritten.
 
 ### Upgrade Note
 
 <Callout type="warning">
-`.pggraph` artifacts written before `v0.1.7` must be regenerated with
-`SELECT graph.build();` after upgrading. These files are derived artifacts, not
-the source of truth; PostgreSQL source tables remain authoritative.
+`.pggraph` artifacts written before `v0.1.7`, and mutable projection segments
+written with segment format v2, must be regenerated with `SELECT graph.build();`
+after upgrading. These files are derived artifacts, not the source of truth;
+PostgreSQL source tables remain authoritative.
 </Callout>
 
 Regenerating the derived artifact is the intended upgrade path:

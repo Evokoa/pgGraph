@@ -870,6 +870,7 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
         "filter index",
         "FilterIndex deserialization failed",
     )?;
+    filter_index.validate_persisted_layout(node_count)?;
 
     let registry_data = length_prefixed_payload(&mmap, &section_ranges, 11, "edge type registry")?;
     let edge_type_registry: Vec<String> = decode_bincode_section(
@@ -1166,9 +1167,11 @@ mod tests {
 
     use super::*;
     use crate::edge_store::RawEdge;
+    use crate::filter_index::{FilterColumnType, PersistedFilterValue};
     use crate::projection::manifest::{
         ManifestSegmentRef, ProjectionManifest, ProjectionManifestStore,
     };
+    use crate::projection::segment::{DeltaSegment, SegmentFilterValue, SegmentKind};
     use crate::types::{FilterCondition, FilterOp, TraversalDirection, TraversalStrategy};
 
     #[cfg(not(feature = "pg_test"))]
@@ -1505,6 +1508,138 @@ mod tests {
     }
 
     #[test]
+    fn persisted_load_rejects_malformed_filter_dictionary_layout() {
+        let mut engine = graph_with_relationship();
+        let column = engine.filter_index.register_typed_column(
+            10,
+            "status".to_string(),
+            FilterColumnType::Text,
+            engine.node_store.node_count() as usize,
+        );
+        engine.filter_index.intern_text_value(column, "open");
+        engine
+            .filter_index
+            .corrupt_reverse_text_dictionary_for_test();
+
+        let path = temp_graph_path("malformed-filter-dictionary");
+        write_graph_file(&engine, &path).expect("malformed fixture writes with a valid checksum");
+        let err = match load_graph_file(&path) {
+            Ok(_) => panic!("malformed filter dictionary must fail closed"),
+            Err(err) => err,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().expect("artifact parent"));
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
+    fn persisted_load_applies_exact_typed_filter_segment_values() {
+        let mut engine = Engine::new();
+        let node = engine.node_store.add_node(10, "A-1".to_string());
+        engine.resolution_insert(10, "A-1", node);
+        engine.edge_store = EdgeStore::from_edges(1, vec![], false);
+        let columns = [
+            ("numeric", FilterColumnType::Numeric),
+            ("boolean", FilterColumnType::Boolean),
+            ("text", FilterColumnType::Text),
+            ("date", FilterColumnType::Date),
+            ("timestamptz", FilterColumnType::Timestamptz),
+            ("uuid", FilterColumnType::Uuid),
+            ("nullable", FilterColumnType::Numeric),
+            ("deleted", FilterColumnType::Numeric),
+        ];
+        for (name, column_type) in columns {
+            engine
+                .filter_index
+                .register_typed_column(10, name.to_string(), column_type, 1);
+        }
+        engine.filter_index.set_encoded_value(
+            7,
+            node,
+            Some(crate::filter_index::EncodedFilterValue::Numeric(99)),
+        );
+        engine.built = true;
+
+        let path = temp_graph_path("typed-filter-segment-reload");
+        write_graph_file(&engine, &path).expect("base graph writes");
+        let root = projection_manifest_root(&path);
+        let segment_path = root.join("typed-filter.pggraph-delta");
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 1, 1)
+            .expect("node segment constructs");
+        let values = [
+            PersistedFilterValue::Numeric(i64::MIN + 1),
+            PersistedFilterValue::Boolean(true),
+            PersistedFilterValue::Text("durable 🧪 filter".to_string()),
+            PersistedFilterValue::Date(-20_000),
+            PersistedFilterValue::Timestamptz(4_102_444_800_123_456),
+            PersistedFilterValue::Uuid(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef),
+            PersistedFilterValue::Null,
+            PersistedFilterValue::Numeric(99),
+        ];
+        for (column_id, value) in values.into_iter().enumerate() {
+            segment.filters.push(SegmentFilterValue {
+                node_idx: node,
+                column_id: column_id as u32,
+                value,
+                tombstone: column_id == 7,
+            });
+        }
+        let segment_bytes = segment.to_bytes().expect("typed filter segment encodes");
+        std::fs::write(&segment_path, &segment_bytes).expect("typed filter segment writes");
+
+        let mut manifest = ProjectionManifest::base_only(
+            2,
+            path.file_name().expect("base name").to_string_lossy(),
+            checksum_graph_artifact(&path),
+            VERSION,
+            1,
+            1,
+        );
+        manifest.segments.push(ManifestSegmentRef {
+            path: "typed-filter.pggraph-delta".to_string(),
+            checksum: format!("crc32:{:08x}", crc32fast::hash(&segment_bytes)),
+            level: 0,
+            source_start: 0,
+            source_end: 1,
+            sync_watermark: 1,
+        });
+        publish_manifest(root, manifest);
+
+        let loaded = load_graph_file(&path).expect("typed filter projection reloads");
+        let text_column = loaded
+            .filter_index
+            .find_column("text")
+            .expect("text column");
+        let text_token = loaded
+            .filter_index
+            .lookup_text_value(text_column, "durable 🧪 filter")
+            .expect("restored text is interned");
+        let checks = [
+            ("numeric", FilterCondition::EqI64(i64::MIN + 1)),
+            ("boolean", FilterCondition::EqBool(true)),
+            ("text", FilterCondition::EqToken(text_token)),
+            ("date", FilterCondition::EqI64(-20_000)),
+            ("timestamptz", FilterCondition::EqI64(4_102_444_800_123_456)),
+            (
+                "uuid",
+                FilterCondition::EqUuid(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef),
+            ),
+            ("nullable", FilterCondition::IsNull),
+            ("deleted", FilterCondition::IsNull),
+        ];
+        for (name, condition) in checks {
+            let column = loaded
+                .filter_index
+                .find_column(name)
+                .expect("restored column exists");
+            assert!(loaded
+                .filter_index
+                .check_filter(node, &FilterOp::new(column, condition)));
+        }
+        let _ = std::fs::remove_dir_all(path.parent().expect("artifact parent"));
+    }
+
+    #[test]
     fn engine_loads_base_only_projection_manifest() {
         let mut engine = graph_with_relationship();
         engine.record_applied_sync_id(41);
@@ -1635,7 +1770,10 @@ mod tests {
         write_graph_file(&engine, &path).unwrap();
         let root = projection_manifest_root(&path);
         let segment_path = root.join("segment.pggraph-delta");
-        std::fs::write(&segment_path, b"segment").unwrap();
+        let segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 2, 0)
+            .expect("segment constructs");
+        let segment_bytes = segment.to_bytes().expect("segment encodes");
+        std::fs::write(&segment_path, &segment_bytes).unwrap();
         let checksum = checksum_graph_artifact(&path);
         let mut manifest = ProjectionManifest::base_only(
             12,
@@ -1647,7 +1785,7 @@ mod tests {
         );
         manifest.segments.push(ManifestSegmentRef {
             path: "segment.pggraph-delta".to_string(),
-            checksum: "crc32:00000000".to_string(),
+            checksum: format!("crc32:{:08x}", crc32fast::hash(&segment_bytes)),
             level: 0,
             source_start: 0,
             source_end: 2,

@@ -4,7 +4,7 @@ use crate::catalog::{
     catalog_fingerprint, read_catalog, selected_or_default_graph_metadata,
     selected_or_default_graph_metadata_via_definer, table_oid_from_name,
 };
-use crate::filter_index::{EncodedFilterValue, FilterColumnType};
+use crate::filter_index::{EncodedFilterValue, FilterColumnType, PersistedFilterValue};
 use crate::persistence::{
     graph_artifact_checksum_for_path, graph_artifact_version, graph_file_path, load_graph_file,
     projection_manifest_root, read_sync_checkpoint,
@@ -1347,17 +1347,12 @@ fn append_projection_filter_rows_for_pk(
         let Some(column_idx) = eng.filter_index.find_column(&filter.column_name) else {
             continue;
         };
-        let encoded = filter_value_from_row_or_properties(
+        let value = persisted_filter_value_from_row_or_properties(
             &filter.column_name,
             eng.filter_index.column_type(column_idx),
             row,
             properties,
-            &mut eng.filter_index,
-            column_idx,
         )?;
-        let Some(value) = encoded.and_then(segment_filter_value) else {
-            continue;
-        };
         out.push(ProjectionSyncRow {
             sync_id: entry.id as u64,
             generation_id: entry.id as u64,
@@ -1380,14 +1375,34 @@ fn append_projection_filter_rows_for_pk(
     Ok(())
 }
 
-fn segment_filter_value(value: EncodedFilterValue) -> Option<u32> {
-    match value {
-        EncodedFilterValue::Numeric(value)
-        | EncodedFilterValue::Date(value)
-        | EncodedFilterValue::Timestamptz(value) => Some(value.clamp(0, u32::MAX as i64) as u32),
-        EncodedFilterValue::Boolean(value) => Some(u32::from(value)),
-        EncodedFilterValue::Text(value) => Some(value),
-        EncodedFilterValue::Uuid(_) => None,
+fn persisted_filter_value_from_row_or_properties(
+    column_name: &str,
+    column_type: Option<FilterColumnType>,
+    row: Option<&serde_json::Value>,
+    properties: &HashMap<String, String>,
+) -> safety::GraphResult<PersistedFilterValue> {
+    let raw = raw_filter_value(column_name, row, properties);
+    let Some(raw) = raw.filter(|value| !value.is_null()) else {
+        return Ok(PersistedFilterValue::Null);
+    };
+    let column_type = column_type.ok_or_else(|| {
+        safety::GraphError::Internal(format!(
+            "registered projection filter column '{column_name}' has no encoded domain"
+        ))
+    })?;
+    match column_type {
+        FilterColumnType::Numeric => Ok(PersistedFilterValue::Numeric(json_value_i64(&raw)?)),
+        FilterColumnType::Boolean => Ok(PersistedFilterValue::Boolean(json_value_bool(&raw)?)),
+        FilterColumnType::Text => Ok(PersistedFilterValue::Text(json_value_text(&raw)?)),
+        FilterColumnType::Date => Ok(PersistedFilterValue::Date(encode_date_filter_value(
+            &string_filter_value(&raw)?,
+        )?)),
+        FilterColumnType::Timestamptz => Ok(PersistedFilterValue::Timestamptz(
+            encode_timestamptz_filter_value(&string_filter_value(&raw)?)?,
+        )),
+        FilterColumnType::Uuid => Ok(PersistedFilterValue::Uuid(parse_uuid_u128(
+            &json_value_text(&raw)?,
+        )?)),
     }
 }
 
@@ -1503,14 +1518,7 @@ fn filter_value_from_row_or_properties(
     filter_index: &mut crate::filter_index::FilterIndex,
     column_idx: usize,
 ) -> safety::GraphResult<Option<EncodedFilterValue>> {
-    let raw = row
-        .and_then(|row| row.get(column_name))
-        .cloned()
-        .or_else(|| {
-            properties
-                .get(column_name)
-                .map(|value| serde_json::Value::String(value.clone()))
-        });
+    let raw = raw_filter_value(column_name, row, properties);
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -1539,6 +1547,20 @@ fn filter_value_from_row_or_properties(
             Ok(Some(EncodedFilterValue::Uuid(parse_uuid_u128(&value)?)))
         }
     }
+}
+
+fn raw_filter_value(
+    column_name: &str,
+    row: Option<&serde_json::Value>,
+    properties: &HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    row.and_then(|row| row.get(column_name))
+        .cloned()
+        .or_else(|| {
+            properties
+                .get(column_name)
+                .map(|value| serde_json::Value::String(value.clone()))
+        })
 }
 
 fn string_filter_value(raw: &serde_json::Value) -> safety::GraphResult<serde_json::Value> {

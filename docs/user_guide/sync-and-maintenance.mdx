@@ -76,6 +76,7 @@ Current apply behavior includes:
 | Updated node row | Handles primary-key changes, property/filter refresh, tenant refresh, and edge mutations where possible |
 | Deleted node row | Tombstones node in owned store |
 | Edge mutations in `mutable_overlay` | Published into durable projection segments and loaded through the layered read path |
+| Registered filter changes in persisted `mutable_overlay` graphs | Published with their exact signed numeric, boolean, text, date, timestamp-with-time-zone, UUID, or SQL `NULL` value and restored on reload |
 | Edge mutations outside durable projection coverage | Stored in the legacy edge overlay buffer until rebuild/vacuum |
 | Truncate | Marks rebuild/vacuum need |
 
@@ -92,6 +93,12 @@ accumulated projection state into a clean base graph. Dirty-range segment
 metadata lets compaction and diagnostics reason about the affected source-node
 span without rewriting existing mmap'd CSR bytes.
 </Callout>
+
+Durable filter values use projection segment format v3. Upgrading from a
+release that wrote segment format v2 requires a fresh `graph.build()` before
+the persisted mutable graph is served. The rebuild reads PostgreSQL source
+tables, which remain authoritative; it does not require rewriting application
+rows or graph registrations.
 
 ## Query Freshness
 

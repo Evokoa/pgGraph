@@ -4,6 +4,7 @@
 //! evaluate traversal predicates without routing each neighbor back through SQL.
 
 use crate::types::{FilterCondition, FilterOp};
+use crate::{safety::GraphError, safety::GraphResult};
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -54,6 +55,44 @@ pub enum EncodedFilterValue {
     Timestamptz(i64),
     /// UUID value encoded in canonical byte order.
     Uuid(u128),
+}
+
+/// Self-contained filter value stored in durable projection segments.
+///
+/// Unlike [`EncodedFilterValue::Text`], text values are stored directly rather
+/// than as backend-local dictionary identifiers. `Null` is distinct from a
+/// segment-row tombstone so an update to SQL `NULL` survives restart.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum PersistedFilterValue {
+    /// SQL `NULL` for a present source row.
+    Null,
+    /// Signed integral numeric value.
+    Numeric(i64),
+    /// Boolean value.
+    Boolean(bool),
+    /// Source text value, before backend-local dictionary interning.
+    Text(String),
+    /// Date encoded as days from the Unix epoch.
+    Date(i64),
+    /// Timestamp with time zone encoded as microseconds from the Unix epoch.
+    Timestamptz(i64),
+    /// UUID encoded in canonical byte order.
+    Uuid(u128),
+}
+
+impl PersistedFilterValue {
+    /// Return heap bytes owned by this value for ingest-budget accounting.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Text(value) => value.len(),
+            Self::Null
+            | Self::Numeric(_)
+            | Self::Boolean(_)
+            | Self::Date(_)
+            | Self::Timestamptz(_)
+            | Self::Uuid(_) => 0,
+        }
+    }
 }
 
 impl FilterColumnType {
@@ -209,6 +248,163 @@ impl FilterIndex {
             return;
         };
         storage.set(node_idx, value);
+    }
+
+    /// Apply a self-contained value decoded from a durable projection segment.
+    ///
+    /// Text values are interned into this backend's dictionary. SQL `NULL` and
+    /// tombstones clear the indexed value. A persisted type that does not match
+    /// the registered column is treated as artifact corruption.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::CorruptFile`] for an unknown column identifier or
+    /// a value whose tag does not match the registered filter column domain.
+    pub(crate) fn apply_persisted_value(
+        &mut self,
+        column_idx: usize,
+        node_idx: u32,
+        node_count: u32,
+        value: &PersistedFilterValue,
+        tombstone: bool,
+    ) -> GraphResult<()> {
+        if node_idx >= node_count {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "projection filter node id {node_idx} is outside projected node range 0..{node_count}"
+                ),
+            });
+        }
+        let column_type = self.column_type(column_idx).ok_or_else(|| {
+            GraphError::CorruptFile {
+                reason: format!(
+                    "projection filter column id {column_idx} is not registered in the base artifact"
+                ),
+            }
+        })?;
+        let encoded = match (column_type, value) {
+            (_, PersistedFilterValue::Null) => None,
+            (FilterColumnType::Numeric, PersistedFilterValue::Numeric(value)) => {
+                Some(EncodedFilterValue::Numeric(*value))
+            }
+            (FilterColumnType::Boolean, PersistedFilterValue::Boolean(value)) => {
+                Some(EncodedFilterValue::Boolean(*value))
+            }
+            (FilterColumnType::Text, PersistedFilterValue::Text(value)) => {
+                let token = self.intern_persisted_text_value(column_idx, value)?;
+                Some(EncodedFilterValue::Text(token))
+            }
+            (FilterColumnType::Date, PersistedFilterValue::Date(value)) => {
+                Some(EncodedFilterValue::Date(*value))
+            }
+            (FilterColumnType::Timestamptz, PersistedFilterValue::Timestamptz(value)) => {
+                Some(EncodedFilterValue::Timestamptz(*value))
+            }
+            (FilterColumnType::Uuid, PersistedFilterValue::Uuid(value)) => {
+                Some(EncodedFilterValue::Uuid(*value))
+            }
+            (expected, actual) => {
+                return Err(GraphError::CorruptFile {
+                    reason: format!(
+                        "projection filter value {actual:?} does not match registered column {column_idx} type {expected:?}"
+                    ),
+                });
+            }
+        };
+        self.set_encoded_value(column_idx, node_idx, if tombstone { None } else { encoded });
+        Ok(())
+    }
+
+    /// Validate the parallel arrays and text dictionaries decoded from a base
+    /// graph artifact before the index can be installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::CorruptFile`] when column metadata, storage, or
+    /// text dictionaries are structurally inconsistent with `node_count`.
+    pub(crate) fn validate_persisted_layout(&self, node_count: u32) -> GraphResult<()> {
+        let column_count = self.columns.len();
+        if self.storage.len() != column_count
+            || self.text_dictionaries.len() != column_count
+            || self.reverse_text_dictionaries.len() != column_count
+        {
+            return Err(filter_index_corrupt(
+                "filter index parallel column arrays have different lengths",
+            ));
+        }
+        let node_count = usize::try_from(node_count)
+            .map_err(|_| filter_index_corrupt("filter index node count exceeds usize"))?;
+        for column_idx in 0..column_count {
+            self.storage[column_idx]
+                .validate_persisted_layout(self.columns[column_idx].column_type, node_count)?;
+            self.validate_text_dictionary(column_idx)?;
+        }
+        Ok(())
+    }
+
+    fn validate_text_dictionary(&self, column_idx: usize) -> GraphResult<()> {
+        let forward = &self.text_dictionaries[column_idx];
+        let reverse = &self.reverse_text_dictionaries[column_idx];
+        if self.columns[column_idx].column_type != FilterColumnType::Text {
+            if !forward.is_empty() || !reverse.is_empty() {
+                return Err(filter_index_corrupt(format!(
+                    "non-text filter column {column_idx} has a text dictionary"
+                )));
+            }
+            return Ok(());
+        }
+        if forward.len() != reverse.len() {
+            return Err(filter_index_corrupt(format!(
+                "text filter column {column_idx} dictionary directions differ in length"
+            )));
+        }
+        for (token, value) in reverse.iter().enumerate() {
+            let token = u32::try_from(token).map_err(|_| {
+                filter_index_corrupt(format!(
+                    "text filter column {column_idx} dictionary exceeds u32 tokens"
+                ))
+            })?;
+            if forward.get(value) != Some(&token) {
+                return Err(filter_index_corrupt(format!(
+                    "text filter column {column_idx} dictionary token {token} is inconsistent"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn intern_persisted_text_value(&mut self, column_idx: usize, value: &str) -> GraphResult<u32> {
+        let forward = self.text_dictionaries.get_mut(column_idx).ok_or_else(|| {
+            filter_index_corrupt(format!(
+                "text filter column {column_idx} has no forward dictionary"
+            ))
+        })?;
+        let reverse = self
+            .reverse_text_dictionaries
+            .get_mut(column_idx)
+            .ok_or_else(|| {
+                filter_index_corrupt(format!(
+                    "text filter column {column_idx} has no reverse dictionary"
+                ))
+            })?;
+        if forward.len() != reverse.len() {
+            return Err(filter_index_corrupt(format!(
+                "text filter column {column_idx} dictionary directions differ in length"
+            )));
+        }
+        if let Some(existing) = forward.get(value) {
+            if reverse.get(*existing as usize).map(String::as_str) != Some(value) {
+                return Err(filter_index_corrupt(format!(
+                    "text filter column {column_idx} dictionary token {existing} is inconsistent"
+                )));
+            }
+            return Ok(*existing);
+        }
+        let token = u32::try_from(reverse.len())
+            .map_err(|_| filter_index_corrupt("text filter dictionary exceeds u32 tokens"))?;
+        forward.insert(value.to_string(), token);
+        reverse.push(value.to_string());
+        Ok(token)
     }
 
     /// Get the value for a specific node in a specific column.
@@ -391,6 +587,11 @@ impl FilterIndex {
     }
 
     #[cfg(test)]
+    pub(crate) fn corrupt_reverse_text_dictionary_for_test(&mut self) {
+        self.reverse_text_dictionaries.pop();
+    }
+
+    #[cfg(test)]
     pub(crate) fn storage_kind(&self, column_idx: usize) -> Option<FilterStorageKind> {
         self.storage.get(column_idx).map(FilterColumnStorage::kind)
     }
@@ -461,6 +662,27 @@ fn default_encoded_value(column_type: FilterColumnType) -> EncodedFilterValue {
     }
 }
 
+fn filter_index_corrupt(reason: impl Into<String>) -> GraphError {
+    GraphError::CorruptFile {
+        reason: reason.into(),
+    }
+}
+
+fn encoded_value_matches(column_type: FilterColumnType, value: EncodedFilterValue) -> bool {
+    matches!(
+        (column_type, value),
+        (FilterColumnType::Numeric, EncodedFilterValue::Numeric(_))
+            | (FilterColumnType::Boolean, EncodedFilterValue::Boolean(_))
+            | (FilterColumnType::Text, EncodedFilterValue::Text(_))
+            | (FilterColumnType::Date, EncodedFilterValue::Date(_))
+            | (
+                FilterColumnType::Timestamptz,
+                EncodedFilterValue::Timestamptz(_)
+            )
+            | (FilterColumnType::Uuid, EncodedFilterValue::Uuid(_))
+    )
+}
+
 fn encoded_u32(value: EncodedFilterValue) -> u32 {
     encoded_i64(value)
         .map(|value| value.clamp(0, u32::MAX as i64) as u32)
@@ -477,6 +699,115 @@ fn encoded_i64(value: EncodedFilterValue) -> Option<i64> {
 }
 
 impl FilterColumnStorage {
+    fn validate_persisted_layout(
+        &self,
+        column_type: FilterColumnType,
+        node_count: usize,
+    ) -> GraphResult<()> {
+        let node_in_range = |node_idx: u32| (node_idx as usize) < node_count;
+        match self {
+            Self::Dense {
+                values,
+                present_bitmap,
+            } => {
+                if values.len() != node_count
+                    || present_bitmap
+                        .iter()
+                        .any(|node_idx| !node_in_range(node_idx))
+                    || values
+                        .iter()
+                        .any(|value| !encoded_value_matches(column_type, *value))
+                {
+                    return Err(filter_index_corrupt(
+                        "dense filter storage does not match its column domain or node count",
+                    ));
+                }
+            }
+            Self::SparseBool {
+                true_bitmap,
+                false_bitmap,
+                present_bitmap,
+            } => {
+                if column_type != FilterColumnType::Boolean
+                    || present_bitmap
+                        .iter()
+                        .any(|node_idx| !node_in_range(node_idx))
+                    || true_bitmap.iter().any(|node_idx| {
+                        !node_in_range(node_idx) || !present_bitmap.contains(node_idx)
+                    })
+                    || false_bitmap.iter().any(|node_idx| {
+                        !node_in_range(node_idx) || !present_bitmap.contains(node_idx)
+                    })
+                    || !true_bitmap.is_disjoint(false_bitmap)
+                    || present_bitmap.len() != true_bitmap.len() + false_bitmap.len()
+                {
+                    return Err(filter_index_corrupt(
+                        "sparse boolean storage is inconsistent with its column domain",
+                    ));
+                }
+            }
+            Self::SparseLookup {
+                value_bitmaps,
+                present_bitmap,
+            } => {
+                if !matches!(column_type, FilterColumnType::Text | FilterColumnType::Uuid)
+                    || present_bitmap
+                        .iter()
+                        .any(|node_idx| !node_in_range(node_idx))
+                {
+                    return Err(filter_index_corrupt(
+                        "sparse lookup storage is inconsistent with its column domain",
+                    ));
+                }
+                let mut seen = RoaringBitmap::new();
+                for (value, bitmap) in value_bitmaps {
+                    if !encoded_value_matches(column_type, *value)
+                        || !seen.is_disjoint(bitmap)
+                        || bitmap.iter().any(|node_idx| {
+                            !node_in_range(node_idx) || !present_bitmap.contains(node_idx)
+                        })
+                    {
+                        return Err(filter_index_corrupt(
+                            "sparse lookup storage is inconsistent with its column domain",
+                        ));
+                    }
+                    seen |= bitmap;
+                }
+                if &seen != present_bitmap {
+                    return Err(filter_index_corrupt(
+                        "sparse lookup storage does not cover its present nodes exactly",
+                    ));
+                }
+            }
+            Self::SparseOrdered {
+                entries,
+                present_bitmap,
+            } => {
+                if !matches!(
+                    column_type,
+                    FilterColumnType::Numeric
+                        | FilterColumnType::Date
+                        | FilterColumnType::Timestamptz
+                ) || present_bitmap
+                    .iter()
+                    .any(|node_idx| !node_in_range(node_idx))
+                    || entries.iter().any(|(node_idx, value)| {
+                        !node_in_range(*node_idx)
+                            || !present_bitmap.contains(*node_idx)
+                            || !encoded_value_matches(column_type, *value)
+                    })
+                    || entries.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+                    || entries.len() as u64 != present_bitmap.len()
+                {
+                    return Err(filter_index_corrupt(
+                        "sparse ordered storage is inconsistent with its column domain",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn kind(&self) -> FilterStorageKind {
         match self {
@@ -857,5 +1188,128 @@ mod tests {
         assert!(!fi.check_filter(4, &FilterOp::new(col, FilterCondition::EqI64(42))));
 
         crate::projection::tx_delta::clear_for_test();
+    }
+
+    #[test]
+    fn persisted_filter_values_restore_exact_backend_local_encodings() {
+        let mut index = FilterIndex::new();
+        let cases = [
+            (
+                FilterColumnType::Numeric,
+                PersistedFilterValue::Numeric(i64::MIN + 1),
+                EncodedFilterValue::Numeric(i64::MIN + 1),
+            ),
+            (
+                FilterColumnType::Boolean,
+                PersistedFilterValue::Boolean(true),
+                EncodedFilterValue::Boolean(true),
+            ),
+            (
+                FilterColumnType::Date,
+                PersistedFilterValue::Date(-20_000),
+                EncodedFilterValue::Date(-20_000),
+            ),
+            (
+                FilterColumnType::Timestamptz,
+                PersistedFilterValue::Timestamptz(4_102_444_800_123_456),
+                EncodedFilterValue::Timestamptz(4_102_444_800_123_456),
+            ),
+            (
+                FilterColumnType::Uuid,
+                PersistedFilterValue::Uuid(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef),
+                EncodedFilterValue::Uuid(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef),
+            ),
+        ];
+        for (idx, (column_type, persisted, expected)) in cases.into_iter().enumerate() {
+            let column = index.register_typed_column(100, format!("column_{idx}"), column_type, 1);
+            index
+                .apply_persisted_value(column, 0, 1, &persisted, false)
+                .expect("persisted value applies");
+            assert_eq!(index.storage[column].value(0), Some(expected));
+        }
+
+        let text_column =
+            index.register_typed_column(100, "text".into(), FilterColumnType::Text, 1);
+        index
+            .apply_persisted_value(
+                text_column,
+                0,
+                1,
+                &PersistedFilterValue::Text("durable 🧪 filter".into()),
+                false,
+            )
+            .expect("persisted text applies");
+        let token = index
+            .lookup_text_value(text_column, "durable 🧪 filter")
+            .expect("text is interned in the restored backend");
+        assert_eq!(
+            index.storage[text_column].value(0),
+            Some(EncodedFilterValue::Text(token))
+        );
+
+        index
+            .apply_persisted_value(text_column, 0, 1, &PersistedFilterValue::Null, false)
+            .expect("persisted null applies");
+        assert_eq!(index.storage[text_column].value(0), None);
+    }
+
+    #[test]
+    fn persisted_filter_value_rejects_registered_type_mismatch() {
+        let mut index = FilterIndex::new();
+        let column = index.register_typed_column(100, "score".into(), FilterColumnType::Numeric, 1);
+
+        let err = index
+            .apply_persisted_value(column, 0, 1, &PersistedFilterValue::Uuid(1), false)
+            .expect_err("mismatched durable type must be rejected");
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
+    fn persisted_filter_value_rejects_out_of_range_dense_and_sparse_nodes() {
+        let mut index = FilterIndex::new();
+        let dense = index.register_typed_column_with_populated_count(
+            100,
+            "dense".into(),
+            FilterColumnType::Numeric,
+            1,
+            1,
+        );
+        let sparse = index.register_typed_column_with_populated_count(
+            100,
+            "sparse".into(),
+            FilterColumnType::Numeric,
+            1,
+            0,
+        );
+
+        for column in [dense, sparse] {
+            let err = index
+                .apply_persisted_value(column, 1, 1, &PersistedFilterValue::Numeric(42), false)
+                .expect_err("out-of-range persisted node must be rejected");
+            assert!(matches!(err, GraphError::CorruptFile { .. }));
+        }
+    }
+
+    #[test]
+    fn malformed_persisted_text_dictionary_fails_closed() {
+        let mut index = FilterIndex::new();
+        let column = index.register_typed_column(100, "text".into(), FilterColumnType::Text, 1);
+        index.reverse_text_dictionaries.pop();
+
+        assert!(matches!(
+            index.validate_persisted_layout(1),
+            Err(GraphError::CorruptFile { .. })
+        ));
+        assert!(matches!(
+            index.apply_persisted_value(
+                column,
+                0,
+                1,
+                &PersistedFilterValue::Text("value".into()),
+                false,
+            ),
+            Err(GraphError::CorruptFile { .. })
+        ));
     }
 }

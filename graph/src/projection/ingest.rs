@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::filter_index::PersistedFilterValue;
 use crate::projection::manifest::{
     ManifestSegmentRef, ProjectionManifest, ProjectionManifestStore,
 };
@@ -24,7 +25,7 @@ use crate::projection::segment::{
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
-const INGEST_ROW_BYTES: usize = 41;
+const INGEST_ROW_BYTES: usize = std::mem::size_of::<ProjectionSyncRow>();
 static ACTIVE_INGEST_ROOTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// One committed row ready to publish into durable projection segments.
@@ -44,7 +45,7 @@ pub(crate) struct ProjectionSyncRow {
     pub(crate) pk_hash: Option<u64>,
     pub(crate) node_idx: Option<u32>,
     pub(crate) filter_column_id: Option<u32>,
-    pub(crate) filter_value: Option<u32>,
+    pub(crate) filter_value: Option<PersistedFilterValue>,
     pub(crate) tenant_hash: Option<u64>,
 }
 
@@ -194,6 +195,9 @@ impl ProjectionIngester {
         );
         if let Some(previous) = previous.as_ref() {
             manifest.inherit_operation_timestamps(previous);
+            manifest.segments = previous.segments.clone();
+            manifest.base_chunks = previous.base_chunks.clone();
+            manifest.obsolete_files = previous.obsolete_files.clone();
         }
         manifest.previous_generation_id = previous.map(|manifest| manifest.generation_id);
         manifest.mark_ingestion();
@@ -218,7 +222,6 @@ impl ProjectionIngester {
             .iter()
             .filter(|row| row.committed)
             .filter(|row| i64::try_from(row.sync_id).is_ok_and(|id| id > previous_watermark))
-            .cloned()
             .collect::<Vec<_>>();
         if committed_rows.is_empty() {
             return Ok(ProjectionIngestResult {
@@ -227,7 +230,7 @@ impl ProjectionIngester {
                 segments_published: 0,
             });
         }
-        validate_ingestion_limits(committed_rows.len(), limits)?;
+        validate_ingestion_limits(committed_rows.iter().copied(), limits)?;
 
         let generation_id = next_generation_id(previous.as_ref(), &committed_rows)?;
         let sync_watermark = committed_rows
@@ -239,16 +242,16 @@ impl ProjectionIngester {
             .max()
             .unwrap_or(previous_watermark);
 
-        let mut segment_refs = Vec::new();
+        let mut new_segment_refs = Vec::new();
         for edge_segment in self.edge_segments(&committed_rows, limits)? {
             let path =
-                self.write_segment(generation_id, segment_refs.len() as u32, &edge_segment)?;
-            segment_refs.push(segment_ref(&self.root, &path, &edge_segment)?);
+                self.write_segment(generation_id, new_segment_refs.len() as u32, &edge_segment)?;
+            new_segment_refs.push(segment_ref(&self.root, &path, &edge_segment)?);
         }
         if let Some(node_segment) = node_segment(&committed_rows, limits, sync_watermark)? {
             let path =
-                self.write_segment(generation_id, segment_refs.len() as u32, &node_segment)?;
-            segment_refs.push(segment_ref(&self.root, &path, &node_segment)?);
+                self.write_segment(generation_id, new_segment_refs.len() as u32, &node_segment)?;
+            new_segment_refs.push(segment_ref(&self.root, &path, &node_segment)?);
         }
 
         let mut manifest = ProjectionManifest::base_only(
@@ -261,20 +264,23 @@ impl ProjectionIngester {
         );
         if let Some(previous) = previous.as_ref() {
             manifest.inherit_operation_timestamps(previous);
+            manifest.segments = previous.segments.clone();
+            manifest.base_chunks = previous.base_chunks.clone();
+            manifest.obsolete_files = previous.obsolete_files.clone();
         }
         manifest.previous_generation_id = previous.map(|manifest| manifest.generation_id);
         manifest.mark_ingestion();
-        manifest.segments = segment_refs;
+        manifest.segments.extend(new_segment_refs.iter().cloned());
         if let Err(err) = self.store.publish(&manifest) {
             if !self.store.manifest_path(generation_id).exists() {
-                cleanup_segment_refs(&self.root, &manifest.segments)?;
+                cleanup_segment_refs(&self.root, &new_segment_refs)?;
             }
             return Err(err);
         }
 
         Ok(ProjectionIngestResult {
             rows_ingested: committed_rows.len(),
-            segments_published: manifest.segments.len(),
+            segments_published: new_segment_refs.len(),
             manifest: Some(manifest),
         })
     }
@@ -286,7 +292,7 @@ impl ProjectionIngester {
 
     fn edge_segments(
         &self,
-        rows: &[ProjectionSyncRow],
+        rows: &[&ProjectionSyncRow],
         limits: MutationBufferLimits,
     ) -> GraphResult<Vec<DeltaSegment>> {
         let mut segments = Vec::new();
@@ -297,6 +303,7 @@ impl ProjectionIngester {
         ] {
             let edge_rows = rows
                 .iter()
+                .copied()
                 .filter(|row| row.operation.is_edge())
                 .filter(|row| row.direction == direction)
                 .map(ProjectionSyncRow::to_committed_mutation)
@@ -340,12 +347,12 @@ impl ProjectionIngester {
 }
 
 fn node_segment(
-    rows: &[ProjectionSyncRow],
+    rows: &[&ProjectionSyncRow],
     limits: MutationBufferLimits,
     sync_watermark: i64,
 ) -> GraphResult<Option<DeltaSegment>> {
     validate_ingestion_limits(
-        rows.iter().filter(|row| !row.operation.is_edge()).count(),
+        rows.iter().copied().filter(|row| !row.operation.is_edge()),
         limits,
     )?;
     let mut segment = DeltaSegment::new(
@@ -358,18 +365,22 @@ fn node_segment(
     )?;
     let mut node_states = BTreeMap::<u32, Vec<NodeStateDelta>>::new();
     let mut resolutions = BTreeMap::<(u32, u64), Vec<ResolutionDelta>>::new();
-    let mut filters = BTreeMap::<(u32, u32, u32), Vec<FilterDelta>>::new();
+    let mut filters = BTreeMap::<(u32, u32), Vec<FilterDelta<'_>>>::new();
     let mut tenants = BTreeMap::<(u32, u64), Vec<TenantDelta>>::new();
-    for row in rows.iter().filter(|row| !row.operation.is_edge()) {
+    for (sequence, row) in rows
+        .iter()
+        .filter(|row| !row.operation.is_edge())
+        .enumerate()
+    {
         let node_idx = row.node_idx.unwrap_or(row.source);
-        node_states
-            .entry(node_idx)
-            .or_default()
-            .push(NodeStateDelta {
-                sync_id: row.sync_id,
-                active: row.operation.is_insert(),
-            });
         if let (Some(table_oid), Some(pk_hash)) = (row.table_oid, row.pk_hash) {
+            node_states
+                .entry(node_idx)
+                .or_default()
+                .push(NodeStateDelta {
+                    sync_id: row.sync_id,
+                    active: row.operation.is_insert(),
+                });
             resolutions
                 .entry((table_oid, pk_hash))
                 .or_default()
@@ -379,12 +390,14 @@ fn node_segment(
                     tombstone: row.operation.is_delete(),
                 });
         }
-        if let (Some(column_id), Some(value)) = (row.filter_column_id, row.filter_value) {
+        if let (Some(column_id), Some(value)) = (row.filter_column_id, row.filter_value.as_ref()) {
             filters
-                .entry((node_idx, column_id, value))
+                .entry((node_idx, column_id))
                 .or_default()
                 .push(FilterDelta {
                     sync_id: row.sync_id,
+                    sequence,
+                    value,
                     tombstone: row.operation.is_delete(),
                 });
         }
@@ -416,12 +429,12 @@ fn node_segment(
             });
         }
     }
-    for ((node_idx, column_id, value), group) in filters {
+    for ((node_idx, column_id), group) in filters {
         if let Some(delta) = select_filter(&group) {
             segment.filters.push(SegmentFilterValue {
                 node_idx,
                 column_id,
-                value,
+                value: delta.value.clone(),
                 tombstone: delta.tombstone,
             });
         }
@@ -513,8 +526,10 @@ struct ResolutionDelta {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FilterDelta {
+struct FilterDelta<'a> {
     sync_id: u64,
+    sequence: usize,
+    value: &'a PersistedFilterValue,
     tombstone: bool,
 }
 
@@ -547,13 +562,10 @@ fn select_resolution(group: &[ResolutionDelta]) -> Option<ResolutionDelta> {
         .copied()
 }
 
-fn select_filter(group: &[FilterDelta]) -> Option<FilterDelta> {
-    if cancels_tombstone_pair(group.iter().map(|delta| delta.tombstone)) {
-        return None;
-    }
+fn select_filter<'a>(group: &[FilterDelta<'a>]) -> Option<FilterDelta<'a>> {
     group
         .iter()
-        .max_by_key(|delta| (delta.tombstone, delta.sync_id))
+        .max_by_key(|delta| (delta.sync_id, delta.sequence))
         .copied()
 }
 
@@ -574,7 +586,7 @@ fn cancels_tombstone_pair(tombstones: impl Iterator<Item = bool>) -> bool {
 
 fn next_generation_id(
     previous: Option<&ProjectionManifest>,
-    rows: &[ProjectionSyncRow],
+    rows: &[&ProjectionSyncRow],
 ) -> GraphResult<u64> {
     let row_generation = rows.iter().map(|row| row.generation_id).max().unwrap_or(1);
     previous.map_or_else(
@@ -588,23 +600,42 @@ fn next_generation_id(
     )
 }
 
-fn validate_ingestion_limits(row_count: usize, limits: MutationBufferLimits) -> GraphResult<()> {
-    if row_count > limits.max_rows {
-        return Err(GraphError::OverlayLimit {
-            kind: "projection_ingest_rows".to_string(),
-            requested: row_count,
-            limit: limits.max_rows,
-        });
-    }
-    let requested_bytes = row_count
-        .checked_mul(INGEST_ROW_BYTES)
-        .ok_or_else(|| GraphError::Internal("projection ingest byte estimate overflowed".into()))?;
-    if requested_bytes > limits.max_bytes {
-        return Err(GraphError::OverlayLimit {
-            kind: "projection_ingest_bytes".to_string(),
-            requested: requested_bytes,
-            limit: limits.max_bytes,
-        });
+fn validate_ingestion_limits<'a>(
+    rows: impl IntoIterator<Item = &'a ProjectionSyncRow>,
+    limits: MutationBufferLimits,
+) -> GraphResult<()> {
+    let mut row_count = 0_usize;
+    let mut requested_bytes = 0_usize;
+    for row in rows {
+        row_count = row_count
+            .checked_add(1)
+            .ok_or_else(|| GraphError::Internal("projection ingest row count overflowed".into()))?;
+        if row_count > limits.max_rows {
+            return Err(GraphError::OverlayLimit {
+                kind: "projection_ingest_rows".to_string(),
+                requested: row_count,
+                limit: limits.max_rows,
+            });
+        }
+        requested_bytes = requested_bytes
+            .checked_add(INGEST_ROW_BYTES)
+            .and_then(|total| {
+                total.checked_add(
+                    row.filter_value
+                        .as_ref()
+                        .map_or(0, PersistedFilterValue::heap_bytes),
+                )
+            })
+            .ok_or_else(|| {
+                GraphError::Internal("projection ingest byte estimate overflowed".into())
+            })?;
+        if requested_bytes > limits.max_bytes {
+            return Err(GraphError::OverlayLimit {
+                kind: "projection_ingest_bytes".to_string(),
+                requested: requested_bytes,
+                limit: limits.max_bytes,
+            });
+        }
     }
     Ok(())
 }
@@ -808,7 +839,7 @@ mod tests {
                 pk_hash: Some(7000),
                 node_idx: Some(2),
                 filter_column_id: Some(3),
-                filter_value: Some(88),
+                filter_value: Some(PersistedFilterValue::Numeric(88)),
                 tenant_hash: Some(8001),
                 schema_reversed: false,
             },
@@ -826,7 +857,7 @@ mod tests {
                 pk_hash: Some(7000),
                 node_idx: Some(2),
                 filter_column_id: Some(3),
-                filter_value: Some(88),
+                filter_value: Some(PersistedFilterValue::Numeric(88)),
                 tenant_hash: Some(8001),
                 schema_reversed: false,
             },
@@ -844,7 +875,7 @@ mod tests {
                 pk_hash: Some(7001),
                 node_idx: Some(4),
                 filter_column_id: Some(3),
-                filter_value: Some(99),
+                filter_value: Some(PersistedFilterValue::Numeric(99)),
                 tenant_hash: Some(8002),
                 schema_reversed: false,
             },
@@ -862,7 +893,7 @@ mod tests {
                 pk_hash: Some(7002),
                 node_idx: Some(4),
                 filter_column_id: Some(4),
-                filter_value: Some(100),
+                filter_value: Some(PersistedFilterValue::Numeric(100)),
                 tenant_hash: Some(8003),
                 schema_reversed: false,
             },
@@ -878,18 +909,133 @@ mod tests {
         let node = load_segment(&dir, &manifest.segments[1].path);
         assert_eq!(edge.header.source_start, 0);
         assert_eq!(edge.header.source_end, 1);
-        assert_eq!(node.header.source_start, 4);
+        assert_eq!(node.header.source_start, 2);
         assert_eq!(node.header.source_end, 5);
         assert_eq!(edge.edge_weights[0].weight, 7);
         assert_eq!(edge.header.direction, TraversalDirection::Out);
         assert_eq!(node.node_states[0].node_idx, 4);
         assert_eq!(node.resolutions[0].pk_hash, 7001);
-        assert_eq!(node.filters[0].value, 99);
+        assert_eq!(
+            node.filters
+                .iter()
+                .find(|row| row.node_idx == 4 && row.column_id == 3)
+                .map(|row| &row.value),
+            Some(&PersistedFilterValue::Numeric(99))
+        );
+        assert!(node
+            .filters
+            .iter()
+            .any(|row| row.node_idx == 2 && row.tombstone));
         assert_eq!(node.tenants[0].tenant_hash, 8002);
         assert_eq!(node.node_states.len(), 1);
         assert_eq!(node.resolutions.len(), 2);
-        assert_eq!(node.filters.len(), 2);
+        assert_eq!(node.filters.len(), 3);
         assert_eq!(node.tenants.len(), 2);
+    }
+
+    #[test]
+    fn node_segment_keeps_latest_typed_filter_value_and_null() {
+        let mut old = edge_row(7, 3, 3, None, MutationOperation::DeleteNode);
+        old.direction = TraversalDirection::Any;
+        old.node_idx = Some(3);
+        old.filter_column_id = Some(4);
+        old.filter_value = Some(PersistedFilterValue::Numeric(i64::MIN + 1));
+
+        let mut updated = old.clone();
+        updated.operation = MutationOperation::UpsertNode;
+        updated.filter_value = Some(PersistedFilterValue::Numeric(i64::MAX));
+
+        let mut cleared = updated.clone();
+        cleared.filter_column_id = Some(5);
+        cleared.filter_value = Some(PersistedFilterValue::Null);
+
+        let rows = [old, updated, cleared];
+        let rows = rows.iter().collect::<Vec<_>>();
+        let segment = node_segment(&rows, MutationBufferLimits::new(10, 10_000), 7)
+            .expect("node segment builds")
+            .expect("node segment is present");
+
+        assert_eq!(segment.filters.len(), 2);
+        assert_eq!(
+            segment
+                .filters
+                .iter()
+                .find(|row| row.column_id == 4)
+                .map(|row| (&row.value, row.tombstone)),
+            Some((&PersistedFilterValue::Numeric(i64::MAX), false))
+        );
+        assert_eq!(
+            segment
+                .filters
+                .iter()
+                .find(|row| row.column_id == 5)
+                .map(|row| (&row.value, row.tombstone)),
+            Some((&PersistedFilterValue::Null, false))
+        );
+        assert!(
+            segment.node_states.is_empty(),
+            "filter-only rows must not be interpreted as node lifecycle deltas"
+        );
+    }
+
+    #[test]
+    fn filter_rows_do_not_tombstone_an_updated_node() {
+        let mut deleted_node = edge_row(7, 3, 3, None, MutationOperation::DeleteNode);
+        deleted_node.direction = TraversalDirection::Any;
+        deleted_node.node_idx = Some(3);
+        deleted_node.table_oid = Some(100);
+        deleted_node.pk_hash = Some(7003);
+
+        let mut upserted_node = deleted_node.clone();
+        upserted_node.operation = MutationOperation::UpsertNode;
+
+        let mut old_filter = deleted_node.clone();
+        old_filter.table_oid = None;
+        old_filter.pk_hash = None;
+        old_filter.filter_column_id = Some(4);
+        old_filter.filter_value = Some(PersistedFilterValue::Text("old".into()));
+
+        let mut new_filter = old_filter.clone();
+        new_filter.operation = MutationOperation::UpsertNode;
+        new_filter.filter_value = Some(PersistedFilterValue::Text("new".into()));
+
+        let rows = [deleted_node, upserted_node, old_filter, new_filter];
+        let rows = rows.iter().collect::<Vec<_>>();
+        let segment = node_segment(&rows, MutationBufferLimits::new(10, 10_000), 7)
+            .expect("node segment builds")
+            .expect("node segment is present");
+
+        assert!(
+            segment.node_states.is_empty(),
+            "an UPDATE preserves node state"
+        );
+        assert_eq!(
+            segment.filters,
+            vec![SegmentFilterValue {
+                node_idx: 3,
+                column_id: 4,
+                value: PersistedFilterValue::Text("new".into()),
+                tombstone: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn projection_ingest_budget_counts_persisted_text_bytes() {
+        let mut row = edge_row(1, 0, 0, None, MutationOperation::UpsertNode);
+        row.direction = TraversalDirection::Any;
+        row.node_idx = Some(0);
+        row.filter_column_id = Some(0);
+        row.filter_value = Some(PersistedFilterValue::Text("x".repeat(128)));
+        let base_bytes = std::mem::size_of::<ProjectionSyncRow>();
+
+        let err = validate_ingestion_limits(
+            std::iter::once(&row),
+            MutationBufferLimits::new(1, base_bytes + 127),
+        )
+        .expect_err("text heap bytes must count against ingest budget");
+
+        assert!(matches!(err, GraphError::OverlayLimit { .. }));
     }
 
     #[test]
@@ -991,12 +1137,26 @@ mod tests {
             .expect("second publish")
             .manifest
             .expect("second manifest");
-        let second_segment = load_segment(&dir, &second.segments[0].path);
+        let first_segment = load_segment(&dir, &second.segments[0].path);
+        let second_segment = load_segment(&dir, &second.segments[1].path);
 
         assert_eq!(second.previous_generation_id, Some(first.generation_id));
         assert!(second.generation_id > first.generation_id);
         assert_eq!(second.sync_watermark, 2);
+        assert_eq!(second.segments.len(), 2);
+        assert_eq!(second.segments[0], first.segments[0]);
+        assert_eq!(first_segment.header.direction, TraversalDirection::Out);
         assert_eq!(second_segment.header.direction, TraversalDirection::In);
+
+        let watermark_only = publisher
+            .publish_empty_watermark(3)
+            .expect("watermark-only generation publishes")
+            .manifest
+            .expect("watermark-only manifest");
+        assert_eq!(watermark_only.sync_watermark, 3);
+        assert_eq!(watermark_only.segments, second.segments);
+        assert_eq!(watermark_only.base_chunks, second.base_chunks);
+        assert_eq!(watermark_only.obsolete_files, second.obsolete_files);
 
         let overflow_dir = seeded_artifacts("projection_ingest_generation_overflow");
         ProjectionManifestStore::new(overflow_dir.path())

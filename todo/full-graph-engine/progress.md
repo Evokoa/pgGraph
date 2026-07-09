@@ -7,7 +7,7 @@ Last updated: 2026-07-09
 | Checkpoint | Status | Evidence / next action |
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
-| Rust type/unsafe/pgrx boundary | RUST-00A/00B/00C implemented on PG17; matrix pending | Safe mapped access is validated, and graph errors now unwind through pgrx with standard SQLSTATEs plus stable diagnostics. Execute RUST-00D through RUST-00F next; run Miri/sanitizer and supported-major evidence before checkpoint exit. |
+| Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00D implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, and projection segment v3 preserves exact typed filter deltas. Execute RUST-00E and RUST-00F next; run Miri/sanitizer and supported-major evidence before checkpoint exit. |
 | 1A. Security and identity | Not started | RLS topology, relationship identity, filter identity, savepoints. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
@@ -48,9 +48,11 @@ Checkpoint 0 regression pack, in this order:
 2. **Complete on PG17; supported-major matrix pending:** error-boundary test
    proves Rust destructors unwind before PostgreSQL ERROR; standard SQLSTATEs
    carry stable pgGraph diagnostics in `DETAIL`.
-3. **Next:** durable filter differential for signed, large, temporal, boolean, text,
-   UUID, NULL, and tombstone values across sync, segment, and reload.
-4. Security-definer shadow-schema/catalog path assertion and stable-relation-
+3. **Complete on PG17; supported-major matrix pending:** durable filter
+   differential preserves signed, large, temporal, boolean, Unicode text,
+   UUID, SQL NULL, and tombstone values across sync, segment v3, consecutive
+   manifest generations, and fresh-backend reload.
+4. **Next:** security-definer shadow-schema/catalog path assertion and stable-relation-
    identity rename/search-path/drop-recreate tests.
 5. Two-role GQL RLS test with `hydrate := false` for node, relationship, path,
    scalar identity, aggregate count, and existence.
@@ -68,6 +70,8 @@ correctness and safety boundary.
 
 - 2026-07-09 — Checkpoint 0 mapped-layout phase: made node metadata lookups fallible, validated mapped PK/CSR contents at crate-private constructors, and kept traversal/component corruption failures typed.
 - 2026-07-09 — Checkpoint 0 error-boundary phase: replaced direct `errfinish()` FFI with pgrx stack unwinding, standard SQLSTATEs, stable `PGxxx` diagnostics, and a destructor regression.
+- 2026-07-09 — Checkpoint 0 durable-filter phase: added projection segment v3 tagged values, staged exact filter reload, consecutive-generation retention, and signed/temporal/text/UUID/NULL/tombstone regressions.
+- 2026-07-09 — Independent three-phase review: fixed watermark-only artifact retention, pre-copy ingest budgeting, filter node-range validation, and malformed base dictionary fail-closed handling; the follow-up review and final gates were green.
 
 ## Decisions
 
@@ -136,4 +140,20 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 655 passed, 1 ignored; doctests 0 |
 | PostgreSQL-backed tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 892 passed, 1 ignored; doctests 0 |
 | SQLSTATE/ACL boundary | `graph/tests/heavy/run_sqlstate_acl_boundary.sh` | PASS on PG17 |
+| Documentation drift | `scripts/check_docs_drift.sh` | PASS |
+
+### 2026-07-09 Durable Typed-Filter Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Red PostgreSQL regression | `cd graph && cargo pgrx test --features "pg17 development" pg17 sparse_typed_filters_survive_persisted_load_traverse_search_and_sync` before the lifecycle fix | EXPECTED FAIL: the exact text token reloaded but filter-only rows incorrectly tombstoned the updated node |
+| Targeted ingest regressions | `cd graph && cargo test --features pg17 projection::ingest::tests` | PASS: 10 passed |
+| Targeted PostgreSQL differential | `cd graph && cargo pgrx test --features "pg17 development" pg17 sparse_typed_filters_survive_persisted_load_traverse_search_and_sync` | PASS: exact values and prior-generation SQL NULL survive consecutive sync generations and fresh-backend reload |
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Independent Rust review | Separate `rust-reviewing` subagent over `8271565`, `63d8f4a`, and the RUST-00D worktree | Four RUST-00D findings fixed: watermark reference retention, borrowed pre-copy budget validation, dense/sparse node-range rejection, and malformed dictionary validation |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 667 passed, 1 ignored; doctests 0 |
+| Rust docs | `cd graph && cargo doc --features pg17 --no-deps` | PASS |
+| Rust doctests | `cd graph && cargo test --doc --features pg17` | PASS: 0 doctests |
+| PostgreSQL-backed tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 904 passed, 1 ignored; doctests 0 |
 | Documentation drift | `scripts/check_docs_drift.sh` | PASS |

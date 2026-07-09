@@ -10,7 +10,7 @@ use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
-use crate::projection::layered::{LayeredNeighbors, ManifestSegmentProvider};
+use crate::projection::layered::{LayeredNeighbors, ManifestSegmentProvider, SegmentProvider};
 use crate::projection::manifest::ProjectionManifest;
 use crate::projection::neighbors::{
     CsrNeighbors, EdgeOverlay, OverlayDeletes, OverlayInserts, OverlayNeighbors,
@@ -339,10 +339,30 @@ impl Engine {
         manifest: &ProjectionManifest,
         root: impl Into<PathBuf>,
     ) -> crate::safety::GraphResult<()> {
+        let root = root.into();
+        let segments = ManifestSegmentProvider::new(&root, manifest).load_segments()?;
+        let mut filter_index = self.filter_index.clone();
+        for segment in segments {
+            for filter in segment.filters {
+                let column_idx =
+                    usize::try_from(filter.column_id).map_err(|_| GraphError::CorruptFile {
+                        reason: "projection filter column id exceeds usize".to_string(),
+                    })?;
+                filter_index.apply_persisted_value(
+                    column_idx,
+                    filter.node_idx,
+                    self.node_store.node_count(),
+                    &filter.value,
+                    filter.tombstone,
+                )?;
+            }
+        }
+        crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;
+        self.filter_index = filter_index;
         self.projection_manifest = Some(ProjectionManifestSnapshot::from(manifest));
         self.projection_manifest_full = Some(manifest.clone());
-        self.projection_manifest_root = Some(root.into());
-        crate::projection::manifest::record_loaded_generation_heartbeat(manifest)
+        self.projection_manifest_root = Some(root);
+        Ok(())
     }
 
     pub(crate) fn base_projection_manifest_status(&self) -> (Option<i64>, Option<i64>) {

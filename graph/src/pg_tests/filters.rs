@@ -328,6 +328,7 @@ fn sparse_typed_filters_survive_persisted_load_traverse_search_and_sync() {
     Spi::run("SELECT graph.reset()").expect("reset failed");
     Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
     Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
     Spi::run("SET graph.enabled = on").expect("enable graph failed");
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
     clear_graph_catalog_for_test();
@@ -390,6 +391,7 @@ fn sparse_typed_filters_survive_persisted_load_traverse_search_and_sync() {
     )
     .expect("add sparse filter edge failed");
     for (column, column_type) in [
+        ("name", "text"),
         ("active", "boolean"),
         ("joined_on", "date"),
         ("seen_at", "timestamptz"),
@@ -407,14 +409,15 @@ fn sparse_typed_filters_survive_persisted_load_traverse_search_and_sync() {
         ))
         .expect("add sparse typed filter column failed");
     }
-    Spi::run("SELECT * FROM graph.build()").expect("build sparse filter graph failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build sparse filter graph failed");
 
     crate::ENGINE.with(|e| {
         *e.borrow_mut() = crate::engine::Engine::new();
     });
     Spi::run("SET graph.auto_load = on").expect("enable auto_load failed");
 
-    let old_filter = "{\"node\":{\"where\":{\"active\":{\"eq\":true},\"joined_on\":{\"eq\":\"2024-01-01\"},\"seen_at\":{\"eq\":\"2024-01-01T00:00:00Z\"},\"owner_uuid\":{\"eq\":\"00000000-0000-0000-0000-000000000002\"},\"risk_score\":{\"eq\":10}}}}";
+    let old_filter = "{\"node\":{\"where\":{\"name\":{\"eq\":\"Child\"},\"active\":{\"eq\":true},\"joined_on\":{\"eq\":\"2024-01-01\"},\"seen_at\":{\"eq\":\"2024-01-01T00:00:00Z\"},\"owner_uuid\":{\"eq\":\"00000000-0000-0000-0000-000000000002\"},\"risk_score\":{\"eq\":10}}}}";
     let loaded_match = Spi::get_one::<i64>(&format!(
         "SELECT count(*)
              FROM graph.traverse_search(
@@ -436,20 +439,102 @@ fn sparse_typed_filters_survive_persisted_load_traverse_search_and_sync() {
 
     Spi::run(
         "UPDATE public.graph_test_sparse_filters_pgtest
-             SET joined_on = DATE '2025-01-01',
-                 seen_at = TIMESTAMPTZ '2025-01-01 00:00:00+00',
+             SET name = 'Child Updated 🧪',
+                 joined_on = DATE '1900-01-01',
+                 seen_at = TIMESTAMPTZ '2100-01-01 00:00:00.123456+00',
                  owner_uuid = '00000000-0000-0000-0000-000000000003'::uuid,
-                 risk_score = 11
+                 risk_score = -9223372036854775807
              WHERE id = 'child'",
     )
     .expect("update sparse filter child failed");
+    Spi::run(
+        "UPDATE public.graph_test_sparse_filters_pgtest
+             SET active = NULL,
+                 joined_on = NULL,
+                 seen_at = NULL,
+                 owner_uuid = NULL,
+                 risk_score = NULL
+             WHERE id = 'filler-1'",
+    )
+    .expect("record sparse NULL filter update failed");
     let updates = Spi::get_one::<i64>("SELECT updates_applied FROM graph.apply_sync()")
         .expect("apply sparse filter sync failed")
         .unwrap_or(0);
-    assert_eq!(updates, 1);
+    assert_eq!(updates, 2);
 
-    let new_filter = "{\"node\":{\"where\":{\"active\":{\"eq\":true},\"joined_on\":{\"eq\":\"2025-01-01\"},\"seen_at\":{\"eq\":\"2025-01-01T00:00:00Z\"},\"owner_uuid\":{\"eq\":\"00000000-0000-0000-0000-000000000003\"},\"risk_score\":{\"eq\":11}}}}";
-    let (old_after_sync, new_after_sync) = Spi::connect(|client| {
+    crate::ENGINE.with(|e| {
+        *e.borrow_mut() = crate::engine::Engine::new();
+    });
+
+    let new_filter = "{\"node\":{\"where\":{\"name\":{\"eq\":\"Child Updated 🧪\"},\"active\":{\"eq\":true},\"joined_on\":{\"eq\":\"1900-01-01\"},\"seen_at\":{\"eq\":\"2100-01-01T00:00:00.123456Z\"},\"owner_uuid\":{\"eq\":\"00000000-0000-0000-0000-000000000003\"},\"risk_score\":{\"eq\":-9223372036854775807}}}}";
+    let null_filter = "{\"node\":{\"where\":{\"active\":{\"is_null\":true},\"joined_on\":{\"is_null\":true},\"seen_at\":{\"is_null\":true},\"owner_uuid\":{\"is_null\":true},\"risk_score\":{\"is_null\":true}}}}";
+    let reloaded_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+         FROM graph.traverse(
+            'graph_test_sparse_filters_pgtest'::regclass,
+            'root',
+            1,
+            direction := 'in',
+            hydrate := false
+         )",
+    )
+    .expect("reload traversal failed")
+    .unwrap_or(0);
+    assert!(reloaded_rows > 0);
+    crate::ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        let name_column = engine
+            .filter_index
+            .find_column("name")
+            .expect("name filter remains registered");
+        let token = engine
+            .filter_index
+            .lookup_text_value(name_column, "Child Updated 🧪")
+            .expect("durable text must be interned while the projection manifest loads");
+        let matching_primary_keys = (0..engine.node_store.node_count())
+            .filter(|&node_idx| {
+                engine.filter_index.check_filter(
+                    node_idx,
+                    &crate::types::FilterOp::new(
+                        name_column,
+                        crate::types::FilterCondition::EqToken(token),
+                    ),
+                )
+            })
+            .filter_map(|node_idx| engine.node_store.primary_key(node_idx))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching_primary_keys,
+            vec!["child"],
+            "durable text token must remain assigned to the updated node"
+        );
+    });
+    for (domain, filter) in [
+        ("text", "{\"node\":{\"where\":{\"name\":{\"eq\":\"Child Updated 🧪\"}}}}"),
+        ("boolean", "{\"node\":{\"where\":{\"active\":{\"eq\":true}}}}"),
+        ("date", "{\"node\":{\"where\":{\"joined_on\":{\"eq\":\"1900-01-01\"}}}}"),
+        ("timestamptz", "{\"node\":{\"where\":{\"seen_at\":{\"eq\":\"2100-01-01T00:00:00.123456Z\"}}}}"),
+        ("uuid", "{\"node\":{\"where\":{\"owner_uuid\":{\"eq\":\"00000000-0000-0000-0000-000000000003\"}}}}"),
+        ("numeric", "{\"node\":{\"where\":{\"risk_score\":{\"eq\":-9223372036854775807}}}}"),
+    ] {
+        let matches = Spi::get_one::<i64>(&format!(
+            "SELECT count(*)
+                 FROM graph.traverse(
+                    'graph_test_sparse_filters_pgtest'::regclass,
+                    'root',
+                    1,
+                    direction := 'in',
+                    filter := {}::jsonb,
+                    hydrate := false
+                 )
+                 WHERE node_id = 'child'",
+            super::sql_literal(filter)
+        ))
+        .expect("typed durable filter query failed")
+        .unwrap_or(0);
+        assert_eq!(matches, 1, "durable {domain} filter did not survive reload");
+    }
+    let (old_after_sync, new_after_sync, null_after_sync) = Spi::connect(|client| {
         let old_query = format!(
             "SELECT count(*)
                  FROM graph.traverse(
@@ -476,19 +561,85 @@ fn sparse_typed_filters_survive_persisted_load_traverse_search_and_sync() {
                  WHERE node_id = 'child'",
             super::sql_literal(new_filter)
         );
+        let null_query = format!(
+            "SELECT count(*)
+                 FROM graph.traverse(
+                    'graph_test_sparse_filters_pgtest'::regclass,
+                    'root',
+                    1,
+                    direction := 'in',
+                    filter := {}::jsonb,
+                    hydrate := false
+                 )
+                 WHERE node_id = 'filler-1'",
+            super::sql_literal(null_filter)
+        );
         let old_rows = client.select(&old_query, None, &[])?;
         let new_rows = client.select(&new_query, None, &[])?;
+        let null_rows = client.select(&null_query, None, &[])?;
         Ok::<_, pgrx::spi::Error>((
             old_rows.first().get::<i64>(1)?.unwrap_or(0),
             new_rows.first().get::<i64>(1)?.unwrap_or(0),
+            null_rows.first().get::<i64>(1)?.unwrap_or(0),
         ))
     })
     .expect("read sparse filter sync results failed");
 
     assert_eq!(old_after_sync, 0);
     assert_eq!(new_after_sync, 1);
+    assert_eq!(null_after_sync, 1);
+
+    Spi::run(
+        "UPDATE public.graph_test_sparse_filters_pgtest
+             SET name = 'Child Updated Twice'
+             WHERE id = 'child'",
+    )
+    .expect("record second durable filter generation failed");
+    let second_updates = Spi::get_one::<i64>("SELECT updates_applied FROM graph.apply_sync()")
+        .expect("apply second sparse filter sync failed")
+        .unwrap_or(0);
+    assert_eq!(second_updates, 1);
+    crate::ENGINE.with(|e| {
+        *e.borrow_mut() = crate::engine::Engine::new();
+    });
+    let second_generation_matches = Spi::get_one::<i64>(&format!(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_sparse_filters_pgtest'::regclass,
+                'root',
+                1,
+                direction := 'in',
+                filter := {}::jsonb,
+                hydrate := false
+             )
+             WHERE node_id = 'child'",
+        super::sql_literal("{\"node\":{\"where\":{\"name\":{\"eq\":\"Child Updated Twice\"}}}}")
+    ))
+    .expect("second durable filter generation query failed")
+    .unwrap_or(0);
+    let retained_null_matches = Spi::get_one::<i64>(&format!(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_sparse_filters_pgtest'::regclass,
+                'root',
+                1,
+                direction := 'in',
+                filter := {}::jsonb,
+                hydrate := false
+             )
+             WHERE node_id = 'filler-1'",
+        super::sql_literal(null_filter)
+    ))
+    .expect("prior durable filter generation query failed")
+    .unwrap_or(0);
+    assert_eq!(second_generation_matches, 1);
+    assert_eq!(
+        retained_null_matches, 1,
+        "a later manifest must retain filter deltas from earlier generations"
+    );
     Spi::run("SET graph.auto_load = off").expect("restore auto_load failed");
     Spi::run("SET graph.persist_on_build = off").expect("restore persist_on_build failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
     Spi::run("SET graph.sync_mode = 'manual'").expect("restore sync mode failed");
 }
 

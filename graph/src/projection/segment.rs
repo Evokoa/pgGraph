@@ -10,12 +10,13 @@ use std::path::Path;
 
 use crc32fast::Hasher;
 
+use crate::filter_index::PersistedFilterValue;
 use crate::projection::normalize::NormalizedMutationBatch;
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 const MAGIC: &[u8; 8] = b"PGGSEG01";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const HEADER_SIZE: usize = 160;
 const CHECKSUM_OFFSET: usize = 124;
 const RESERVED_OFFSET: usize = 128;
@@ -120,8 +121,8 @@ pub(crate) struct SegmentFilterValue {
     pub(crate) node_idx: u32,
     /// Registered filter column identifier.
     pub(crate) column_id: u32,
-    /// Encoded filter value.
-    pub(crate) value: u32,
+    /// Self-contained typed filter value.
+    pub(crate) value: PersistedFilterValue,
     /// Whether the filter value is removed.
     pub(crate) tombstone: bool,
 }
@@ -267,7 +268,7 @@ impl DeltaSegment {
         encode_edge_weights(&mut sections.edge_weights, &self.edge_weights);
         encode_node_states(&mut sections.node_states, &self.node_states);
         encode_resolutions(&mut sections.resolutions, &self.resolutions);
-        encode_filters(&mut sections.filters, &self.filters);
+        encode_filters(&mut sections.filters, &self.filters)?;
         encode_tenants(&mut sections.tenants, &self.tenants);
 
         let section_bytes = sections.as_slices();
@@ -420,7 +421,7 @@ pub(crate) fn fuzz_seed_bytes(name: &str) -> Option<Vec<u8>> {
             segment.filters.push(SegmentFilterValue {
                 node_idx: 0,
                 column_id: 7,
-                value: 9,
+                value: PersistedFilterValue::Numeric(9),
                 tombstone: false,
             });
             segment.tenants.push(SegmentTenant {
@@ -606,25 +607,43 @@ fn validate_section_ranges(
     counts: &[u32; SECTION_COUNT],
     offsets: &[u64; SECTION_COUNT],
 ) -> GraphResult<[std::ops::Range<usize>; SECTION_COUNT]> {
-    let widths = [10_usize, 10, 14, 5, 17, 13, 13];
+    let widths = [
+        Some(10_usize),
+        Some(10),
+        Some(14),
+        Some(5),
+        Some(17),
+        None,
+        Some(13),
+    ];
     let mut ranges: [std::ops::Range<usize>; SECTION_COUNT] =
         std::array::from_fn(|_| 0_usize..0_usize);
     let mut previous_end = HEADER_SIZE;
     for idx in 0..SECTION_COUNT {
         let start = usize::try_from(offsets[idx])
             .map_err(|_| segment_corrupt("section offset exceeds usize"))?;
-        let byte_len = usize::try_from(counts[idx])
-            .ok()
-            .and_then(|count| count.checked_mul(widths[idx]))
-            .ok_or_else(|| segment_corrupt("section byte length overflowed"))?;
-        let end = start
-            .checked_add(byte_len)
-            .ok_or_else(|| segment_corrupt("section end overflowed"))?;
+        let end = if idx + 1 < SECTION_COUNT {
+            usize::try_from(offsets[idx + 1])
+                .map_err(|_| segment_corrupt("section offset exceeds usize"))?
+        } else {
+            len
+        };
         if start != previous_end {
             return Err(segment_corrupt("section offsets are not contiguous"));
         }
-        if end > len {
+        if end < start || end > len {
             return Err(segment_corrupt("section extends past file end"));
+        }
+        if let Some(width) = widths[idx] {
+            let expected_len = usize::try_from(counts[idx])
+                .ok()
+                .and_then(|count| count.checked_mul(width))
+                .ok_or_else(|| segment_corrupt("section byte length overflowed"))?;
+            if end - start != expected_len {
+                return Err(segment_corrupt(
+                    "section byte length does not match row count",
+                ));
+            }
         }
         ranges[idx] = start..end;
         previous_end = end;
@@ -676,13 +695,37 @@ fn encode_resolutions(out: &mut Vec<u8>, rows: &[SegmentResolution]) {
     }
 }
 
-fn encode_filters(out: &mut Vec<u8>, rows: &[SegmentFilterValue]) {
+fn encode_filters(out: &mut Vec<u8>, rows: &[SegmentFilterValue]) -> GraphResult<()> {
     for row in rows {
         push_u32(out, row.node_idx);
         push_u32(out, row.column_id);
-        push_u32(out, row.value);
         out.push(u8::from(row.tombstone));
+        let (tag, payload_len) = match &row.value {
+            PersistedFilterValue::Null => (0, 0),
+            PersistedFilterValue::Numeric(_) => (1, 8),
+            PersistedFilterValue::Boolean(_) => (2, 1),
+            PersistedFilterValue::Text(value) => (
+                3,
+                u32::try_from(value.len())
+                    .map_err(|_| segment_corrupt("filter text payload exceeds u32"))?,
+            ),
+            PersistedFilterValue::Date(_) => (4, 8),
+            PersistedFilterValue::Timestamptz(_) => (5, 8),
+            PersistedFilterValue::Uuid(_) => (6, 16),
+        };
+        out.push(tag);
+        push_u32(out, payload_len);
+        match &row.value {
+            PersistedFilterValue::Null => {}
+            PersistedFilterValue::Numeric(value)
+            | PersistedFilterValue::Date(value)
+            | PersistedFilterValue::Timestamptz(value) => push_i64(out, *value),
+            PersistedFilterValue::Boolean(value) => out.push(u8::from(*value)),
+            PersistedFilterValue::Text(value) => out.extend_from_slice(value.as_bytes()),
+            PersistedFilterValue::Uuid(value) => out.extend_from_slice(&value.to_le_bytes()),
+        }
     }
+    Ok(())
 }
 
 fn encode_tenants(out: &mut Vec<u8>, rows: &[SegmentTenant]) {
@@ -761,17 +804,65 @@ fn decode_resolutions(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentResolu
 }
 
 fn decode_filters(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentFilterValue>> {
-    let mut rows = Vec::with_capacity(count as usize);
-    for idx in 0..count as usize {
-        let offset = idx * 13;
+    const FILTER_ROW_HEADER_SIZE: usize = 14;
+    let count =
+        usize::try_from(count).map_err(|_| segment_corrupt("filter row count exceeds usize"))?;
+    if count
+        .checked_mul(FILTER_ROW_HEADER_SIZE)
+        .is_none_or(|minimum| minimum > bytes.len())
+    {
+        return Err(segment_corrupt(
+            "filter section is too short for its row count",
+        ));
+    }
+    let mut rows = Vec::with_capacity(count);
+    let mut offset = 0_usize;
+    for _ in 0..count {
+        let payload_len = usize::try_from(read_u32(bytes, offset + 10)?)
+            .map_err(|_| segment_corrupt("filter payload length exceeds usize"))?;
+        let payload_start = offset
+            .checked_add(FILTER_ROW_HEADER_SIZE)
+            .ok_or_else(|| segment_corrupt("filter payload offset overflowed"))?;
+        let payload_end = payload_start
+            .checked_add(payload_len)
+            .ok_or_else(|| segment_corrupt("filter payload end overflowed"))?;
+        let payload = bytes
+            .get(payload_start..payload_end)
+            .ok_or_else(|| segment_corrupt("filter payload extends past section"))?;
         rows.push(SegmentFilterValue {
             node_idx: read_u32(bytes, offset)?,
             column_id: read_u32(bytes, offset + 4)?,
-            value: read_u32(bytes, offset + 8)?,
-            tombstone: decode_bool(read_u8(bytes, offset + 12)?)?,
+            tombstone: decode_bool(read_u8(bytes, offset + 8)?)?,
+            value: decode_filter_value(read_u8(bytes, offset + 9)?, payload)?,
         });
+        offset = payload_end;
+    }
+    if offset != bytes.len() {
+        return Err(segment_corrupt("trailing bytes in filter section"));
     }
     Ok(rows)
+}
+
+fn decode_filter_value(tag: u8, payload: &[u8]) -> GraphResult<PersistedFilterValue> {
+    match tag {
+        0 if payload.is_empty() => Ok(PersistedFilterValue::Null),
+        1 if payload.len() == 8 => Ok(PersistedFilterValue::Numeric(read_i64(payload, 0)?)),
+        2 if payload.len() == 1 => Ok(PersistedFilterValue::Boolean(decode_bool(payload[0])?)),
+        3 => std::str::from_utf8(payload)
+            .map(|value| PersistedFilterValue::Text(value.to_string()))
+            .map_err(|_| segment_corrupt("filter text payload is not valid UTF-8")),
+        4 if payload.len() == 8 => Ok(PersistedFilterValue::Date(read_i64(payload, 0)?)),
+        5 if payload.len() == 8 => Ok(PersistedFilterValue::Timestamptz(read_i64(payload, 0)?)),
+        6 if payload.len() == 16 => {
+            let mut value = [0_u8; 16];
+            value.copy_from_slice(payload);
+            Ok(PersistedFilterValue::Uuid(u128::from_le_bytes(value)))
+        }
+        0..=6 => Err(segment_corrupt(
+            "filter payload length does not match its value tag",
+        )),
+        other => Err(segment_corrupt(format!("unknown filter value tag {other}"))),
+    }
 }
 
 fn decode_tenants(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentTenant>> {
@@ -871,6 +962,10 @@ fn push_u32(bytes: &mut Vec<u8>, value: u32) {
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i64(bytes: &mut Vec<u8>, value: i64) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -976,7 +1071,7 @@ mod tests {
         segment.filters.push(SegmentFilterValue {
             node_idx: 1,
             column_id: 7,
-            value: 99,
+            value: PersistedFilterValue::Numeric(-9_223_372_036_854_775_000),
             tombstone: true,
         });
         segment.tenants.push(SegmentTenant {
@@ -994,6 +1089,85 @@ mod tests {
         assert_eq!(decoded.resolutions, segment.resolutions);
         assert_eq!(decoded.filters, segment.filters);
         assert_eq!(decoded.tenants, segment.tenants);
+    }
+
+    #[test]
+    fn delta_segment_roundtrips_every_persisted_filter_value_domain() {
+        let mut segment =
+            DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 16, 44)
+                .expect("segment constructs");
+        let values = [
+            PersistedFilterValue::Null,
+            PersistedFilterValue::Numeric(i64::MIN + 1),
+            PersistedFilterValue::Numeric(i64::MAX),
+            PersistedFilterValue::Boolean(false),
+            PersistedFilterValue::Boolean(true),
+            PersistedFilterValue::Text(String::new()),
+            PersistedFilterValue::Text("durable 🧪 filter".to_string()),
+            PersistedFilterValue::Date(-20_000),
+            PersistedFilterValue::Timestamptz(4_102_444_800_123_456),
+            PersistedFilterValue::Uuid(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef),
+        ];
+        for (idx, value) in values.into_iter().enumerate() {
+            segment.filters.push(SegmentFilterValue {
+                node_idx: idx as u32,
+                column_id: idx as u32,
+                value,
+                tombstone: idx == 9,
+            });
+        }
+
+        let bytes = segment.to_bytes().expect("typed filter segment encodes");
+        let decoded = DeltaSegment::from_bytes(&bytes).expect("typed filter segment decodes");
+
+        assert_eq!(decoded.header.version, VERSION);
+        assert_eq!(decoded.filters, segment.filters);
+    }
+
+    #[test]
+    fn delta_segment_rejects_invalid_filter_value_tags_and_lengths() {
+        let mut segment =
+            DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 1, 45)
+                .expect("segment constructs");
+        segment.filters.push(SegmentFilterValue {
+            node_idx: 0,
+            column_id: 0,
+            value: PersistedFilterValue::Numeric(-1),
+            tombstone: false,
+        });
+        let bytes = segment.to_bytes().expect("filter segment encodes");
+        let filter_offset = usize::try_from(read_u64(&bytes, 104).expect("filter offset reads"))
+            .expect("filter offset fits usize");
+
+        let mut bad_tag = bytes.clone();
+        bad_tag[filter_offset + 9] = 255;
+        rewrite_checksum(&mut bad_tag);
+        assert!(matches!(
+            DeltaSegment::from_bytes(&bad_tag),
+            Err(GraphError::CorruptFile { reason }) if reason.contains("unknown filter value tag")
+        ));
+
+        let mut bad_length = bytes;
+        write_u32_at(&mut bad_length, filter_offset + 10, 7);
+        rewrite_checksum(&mut bad_length);
+        assert!(matches!(
+            DeltaSegment::from_bytes(&bad_length),
+            Err(GraphError::CorruptFile { reason }) if reason.contains("payload length") || reason.contains("trailing bytes")
+        ));
+    }
+
+    #[test]
+    fn delta_segment_rejects_pre_typed_filter_format_version() {
+        let segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 0, 0)
+            .expect("segment constructs");
+        let mut bytes = segment.to_bytes().expect("segment encodes");
+        write_u32_at(&mut bytes, 8, VERSION - 1);
+        rewrite_checksum(&mut bytes);
+
+        assert!(matches!(
+            DeltaSegment::from_bytes(&bytes),
+            Err(GraphError::IncompatibleVersion(message)) if message.contains("rebuild") || message.contains("unsupported")
+        ));
     }
 
     #[test]

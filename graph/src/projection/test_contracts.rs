@@ -114,7 +114,9 @@ fn delta_segment_roundtrips_node_resolution_filter_tenant_sections() {
     segment.filters.push(SegmentFilterValue {
         node_idx: 1,
         column_id: 2,
-        value: 99,
+        value: crate::filter_index::PersistedFilterValue::Uuid(
+            0x1234_5678_90ab_cdef_1234_5678_90ab_cdef,
+        ),
         tombstone: false,
     });
     segment.tenants.push(SegmentTenant {

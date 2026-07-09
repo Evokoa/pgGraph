@@ -266,7 +266,30 @@ segment or chunk references. The active read path remains CSR for those
 manifests unless the persisted build-mode sidecar says the graph was built as
 `mutable_overlay`. Segment-backed manifests are installed with mutable-overlay
 read mode so public read APIs consume durable L0/L1/L2 segment deltas after
-reload. The engine keeps base manifest generation and sync watermark metadata
+reload. Segment format v3 stores registered filter deltas as tagged,
+self-contained values: signed numeric, boolean, UTF-8 text, date,
+timestamp-with-time-zone, UUID, and SQL `NULL`. Text is stored as text rather
+than as a backend-local dictionary token, then interned when the manifest is
+installed. A filter tombstone remains distinct from SQL `NULL`. The loader
+validates each tag, payload length, UTF-8 string, registered column, and column
+domain before switching the engine to the new manifest. Filter node identifiers
+must be within the loaded projection's supported node range, and the base filter
+index's storage and text-dictionary arrays must agree before any segment value
+is applied. An invalid value or malformed index leaves the prior engine state
+unchanged.
+
+Projection segment versions are not read across this format boundary. After an
+upgrade from a release that wrote segment format v2, rebuild the graph from its
+authoritative PostgreSQL tables before serving the mutable projection. A clean
+`graph.build()` publishes a compatible base and manifest; old derived segment
+files can then be removed by the normal generation cleanup path.
+
+Ingestion generations retain all segment, base-chunk, and obsolete-file
+references from the preceding manifest before appending new segments. A sync
+batch that advances only the watermark retains the same artifact references, so
+later generations cannot make earlier committed deltas disappear.
+
+The engine keeps base manifest generation and sync watermark metadata
 backend-locally, and `graph.active_generation_count()` exposes the selected
 graph's active heartbeat count so operators can see whether concurrent backends
 are retaining projection generations for that graph.
@@ -316,9 +339,12 @@ return `ReadOnly` with the stored reason.
 
 ## Filter And Tenant Refresh
 
-`sql_sync.rs` can refresh registered filter values from new row properties and
-update tenant membership. Tenant membership is a `HashMap<String,
-RoaringBitmap>` from tenant value to node indices.
+`sql_sync.rs` refreshes registered filter values from authoritative new row
+images and publishes exact typed values into durable projection segments for
+persisted `mutable_overlay` graphs. Reload applies those values to a staged
+filter index before the manifest becomes active. Filter-only rows do not change
+node lifecycle state. Tenant membership is a `HashMap<String, RoaringBitmap>`
+from tenant value to node indices.
 
 ## Maintenance Rebuild
 
