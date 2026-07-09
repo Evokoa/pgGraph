@@ -70,8 +70,8 @@ flowchart LR
 | GQL conformance | Track ISO/IEC 39075:2024 and applicable corrections in one machine-readable parser-to-docs ledger, then implement vertical feature slices until every applicable requirement is complete. |
 | Planner/runtime | Replace source-order materialization with typed binding-table IR, graph/PostgreSQL statistics, cost/resource planning, streaming operators, and spillable blocking work. |
 | Storage and sync | Persist both CSR directions and stable relationship/filter identities; publish snapshots with cross-backend generation compare-and-swap and source watermarks. |
-| PostgreSQL 19 | Investigate native property-graph catalog and `GRAPH_TABLE` interoperation behind a versioned SQL/PGQ adapter while retaining PostgreSQL 14-18 frontends. |
-| Refactoring | Decompose build, projection, binder, executor, evaluator, engine, SQL facade, sync, and test mega-modules without changing behavior during mechanical splits. |
+| PostgreSQL 19 | Support native `CREATE PROPERTY GRAPH` definitions as an authoritative mapping source without duplicate pgGraph registration; add version-gated catalog, DDL invalidation, security, SQL/PGQ differential, packaging, and CI support while retaining PostgreSQL 14-18 frontends. |
+| Refactoring | Decompose build, projection, binder, executor, evaluator, engine, persistence, SQL facade, sync, and test mega-modules without changing behavior during mechanical splits. |
 | CI/CD rollout | First gate `cargo fmt --check`, `cargo clippy`, `cargo test`, `cargo doc`, and docs drift checks; next gate `cargo pgrx test`; final gate synthetic/heavy release scripts. |
 | Competitive evidence | Publish checked workload results with latency percentiles, throughput, RSS/PSS, spill, build/load time, sync lag, storage amplification, and equivalent semantics. |
 
@@ -137,9 +137,11 @@ PostgreSQL 19 documentation now includes
 [property graph definitions](https://www.postgresql.org/docs/19/ddl-property-graphs.html),
 [CREATE PROPERTY GRAPH](https://www.postgresql.org/docs/19/sql-create-property-graph.html),
 and [GRAPH_TABLE](https://www.postgresql.org/docs/19/queries-graph.html).
-pgGraph will investigate version-gated native catalog and SQL/PGQ interoperation
-now, while keeping SQL/PGQ conformance separate from GQL and preserving the
-PostgreSQL 14-18 SQL/GQL frontends.
+pgGraph will support native PostgreSQL 19 property graph definitions as an
+authoritative registration source, while keeping SQL/PGQ conformance separate
+from GQL and preserving PostgreSQL 14-18 SQL/GQL frontends. Native
+`GRAPH_TABLE` execution remains delegated to PostgreSQL unless a stable,
+supported integration hook can safely select pgGraph acceleration.
 
 Full GQL is a completion criterion, not an umbrella label for the current
 subset. Until the conformance ledger is green, docs and releases will identify
@@ -186,7 +188,7 @@ work, but are not current behavior.
 | Out-of-core build and maintenance | Low-memory rebuild mode reduces old/new overlap in the building backend, but construction, mmap load, queries, and compaction are not universally byte-bounded. | Add remaining-memory detection, adaptive byte batches, external runs/merge, streaming artifacts, mmap inbound/filter sections, bounded range compaction, and deterministic resource SQLSTATEs. |
 | Relationship registration helper | `graph.add_edge()` remains the public API for FK-style and edge-table relationship registration. | Consider a dedicated many-to-many helper only if repeated post-fix user reports show the documented edge-table registration shape is still too easy to misuse. |
 | Full ISO GQL | `graph.gql()` currently exposes a substantial but incomplete profile through a JSONB SQL facade. Current coverage and rejections remain documented in the query guide. | Implement every applicable ISO/IEC 39075:2024 requirement through a generated conformance ledger, correct graph identities and visibility, typed binding-table IR, cost/resource planning, streaming execution, PostgreSQL-first set-based writes, and full transaction/security gates. |
-| PostgreSQL SQL/PGQ | An internal typed adapter seam exists but is not a public API. PostgreSQL 19 has native property graph and `GRAPH_TABLE` documentation. | Rebase the adapter on the canonical IR, investigate native PostgreSQL 19 property-graph catalog/interoperation behind version gates, and maintain a separate SQL/PGQ conformance matrix. |
+| PostgreSQL SQL/PGQ | An internal typed adapter seam exists but is not a public API. PostgreSQL 19 has native property graph and `GRAPH_TABLE` documentation. | Add version-gated PG19 support that consumes native definitions without duplicate registration, rebases the adapter on canonical IR, handles DDL/security semantics, differential-tests `GRAPH_TABLE`, and maintains a separate SQL/PGQ conformance matrix. |
 | openCypher compatibility | `graph.cypher()` exposes only the overlapping documented subset. | Keep this as an explicitly narrow compatibility layer until full GQL foundations and evidence are complete. |
 | Online mutable graph overlays | The `mutable_overlay` build mode, transaction-delta lifecycle, overlay-aware read paths, durable committed edge projection segments, PostgreSQL-first GQL node `CREATE`, PostgreSQL-first GQL relationship `CREATE` for registered edge-row mappings, PostgreSQL-first GQL property `SET`, PostgreSQL-first GQL property `REMOVE`, PostgreSQL-first GQL edge-row `DELETE`, PostgreSQL-first GQL node `DETACH DELETE`, and PostgreSQL-first GQL node `MERGE` are present. | Continue routing narrow GQL writes through PostgreSQL-first DML and transaction-local deltas while keeping `csr_readonly` as the fast read-mostly mode. |
 | Full GQL writes | Current writes are intentionally narrow and PostgreSQL-first: mapped single-node/relationship `CREATE`, property `SET`/`REMOVE`, edge `DELETE`, node `DETACH DELETE`, and node `MERGE`. Writes are rejected on `csr_readonly` projections. | Implement the selected ISO data-modification features, including set-based/multi-row semantics and savepoints, through authoritative PostgreSQL DML, row locks/rechecks, `RETURNING`, transaction deltas, concurrency tests, and explicit mapping errors. Treat Cypher-shaped aliases separately in the conformance registry. |
@@ -207,6 +209,15 @@ pgGraph is not trying to become:
 | Broad Cypher, Gremlin, or SPARQL compatibility | The standards direction is GQL and SQL/PGQ first. Other graph-language compatibility should be considered only as a later compatibility layer. |
 | A distributed graph database | The current architecture is local to one PostgreSQL database. |
 | A global analytics engine in the OLTP query path | Expensive whole-graph algorithms need different scheduling and resource controls than bounded traversal. |
+
+## Roadmap Completion Policy
+
+Roadmap rows are active commitments or explicit decision gates, not permanent
+idea storage. When evidence is green, delivered work moves into Current
+Baseline and release notes and its planned/reserved row is removed. Conditional
+items are implemented, rejected, or moved to a deferred non-goal with a concrete
+revisit trigger. Resolved limitations leave active Known Issues after their
+regressions and release history are durable.
 
 ## Documentation Policy
 

@@ -15,8 +15,10 @@ Last updated: 2026-07-09
 | 4. Refactor foundations | Not started | Begin after P0 tests/owners are fixed. |
 | 5. Streaming costed runtime | Not started | Canonical IR and resource governor are prerequisites. |
 | 6. Full GQL slices | Not started | Conformance registry is prerequisite. |
-| 7. PostgreSQL 19 SQL/PGQ | Planned | Research current native catalog/planner boundary. |
+| 7. PostgreSQL 19 SQL/PGQ | Planned | Execute PG19-0 through PG19-5 in `08-postgresql-19-property-graphs.md`; native definitions become authoritative mappings without duplicate registration. |
 | 8. Competitive program | Planned | Requires correctness and reproducible baseline. |
+| 9. Clear current public backlog | Planned | Close every ledger row and remove delivered/resolved work from active Roadmap/Known Issues. |
+| Public backlog closure | In progress | `09-public-backlog-closure.md` maps every current Roadmap/KI row to evidence or an explicit decision. |
 
 ## Completed This Review
 
@@ -27,6 +29,8 @@ Last updated: 2026-07-09
   targeted build tests, and targeted PostgreSQL-backed low-memory/GUC tests.
 - Created the full-engine program plans in this folder.
 - Updated public Roadmap and Known Issues to reflect P0 reality and full GQL.
+- Added explicit PostgreSQL 19 native property-graph work packages and a public
+  backlog closure ledger.
 
 ## Next Executable Checkpoint
 
@@ -53,6 +57,7 @@ correctness and safety boundary.
 | 2026-07-09 | Module split before workspace split. | Remove coupling before choosing crate boundaries. |
 | 2026-07-09 | Artifact publication is generation-based and validation-first. | Preserve the last good serving graph on every failure. |
 | 2026-07-09 | RLS applies to topology as well as hydrated properties. | PostgreSQL remains authoritative even for coordinate-only graph results. |
+| 2026-07-09 | PostgreSQL 19 native property graph definitions are authoritative mappings. | Avoid duplicate `add_table`/`add_edge` registration and share one PostgreSQL-owned graph definition across GQL and SQL/PGQ. |
 
 ## Measurement Log
 

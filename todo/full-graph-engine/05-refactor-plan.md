@@ -197,6 +197,27 @@ Split `engine.rs` around:
 Algorithms remain in focused modules and accept neighbor/source traits rather
 than reaching into all engine state.
 
+### 9. Persistence
+
+Split `persistence.rs` without changing the artifact contract:
+
+```text
+persistence/
+  format.rs
+  writer.rs
+  reader.rs
+  validate.rs
+  mmap.rs
+  compatibility.rs
+  sidecar.rs
+```
+
+`format` owns versioned constants and checked section descriptors; writer and
+reader share those types but not control flow. `validate` is pure where
+possible and runs before mapped stores are installed. `mmap` contains the
+minimal documented unsafe pointer boundary. Compatibility/rebuild policy lives
+in one module rather than branching throughout load/write code.
+
 ## Test Decomposition
 
 Mirror production boundaries:

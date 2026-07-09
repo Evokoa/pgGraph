@@ -29,49 +29,16 @@ pressure by doing more work per request. pgGraph has to weigh those choices
 carefully because it runs inside PostgreSQL backend processes rather than a
 separate service with its own resource envelope.
 
-## Next Update Scope
+## Active Next Update Scope
 
-The next update is focused on issues that are either hard to change after users
-depend on SQL behavior, or important enough to fix before recommending
-production use.
-
-### Data Correctness and Corruption
-
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-001 | GQL mutable writes should re-check matched predicates at the final PostgreSQL write boundary under concurrent source-row changes. | Hardened | `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lock the PostgreSQL source row at the write boundary and re-evaluate the matched GQL predicate before mutating. Heavy two-session race gates cover stale `SET`, `REMOVE`, tenant-scope drift, and stale delete predicate paths. |
-
-### SQL Contract and Query Semantics
-
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-002 | Transaction-created nodes must participate in later reads without becoming durable graph-only state. | Hardened | GQL node `CREATE`/`MERGE` now assigns backend-local temporary graph node indexes. Node-only reads, concrete traversal, multi-pattern joins, wildcard paths, and relationship `CREATE` can use those nodes within the same top-level PostgreSQL transaction. |
-| KI-003 | The GQL and Cypher parser surfaces need dedicated fuzz targets beyond unit and pgrx coverage. | Coverage added | `gql_parser` and `cypher_parser` fuzz targets now exercise the pgrx-free parser frontends with seed corpora for path variables, wildcard deletes, compatible Cypher matches, and unsupported Cypher calls. Sustained fuzz execution remains a release-environment activity because it requires `cargo-fuzz` and the pgrx fuzz build path. |
-
-### SQL Safety and Schema Plumbing
-
-<Callout type="info">
-Dynamic table SQL and discovery SQL parameterization are hardened. The P0
-section below tracks the coordinate-only GQL RLS visibility investigation.
-</Callout>
-
-### Persistence and File Format
-
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-011 | `.pggraph` variable metadata sections previously depended on bincode 1 payload behavior. | Hardened with rebuild requirement | `v0.1.6` moved metadata sections to bincode 2 serde encoding and rejects trailing bytes on decode. Existing derived `.pggraph` artifacts must be regenerated with `SELECT graph.build();` after upgrading. Future serializer-independent metadata encoding is tracked in [Roadmap](./roadmap). |
+Only unresolved or deliberately pending rows appear in the active sections.
+Resolved work is preserved near the end of this page and in release notes.
 
 ### Sync, Jobs, and Operator Semantics
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-004 | pgGraph has a scheduler-safe `graph.run_scheduled_maintenance()` entry point, but no always-on internal scheduler for trigger-sync apply and overlay compaction in non-Docker installs. | Planned operational hardening | Docker installs can use the bundled `pg_cron` schedule, and other deployments can call `graph.run_scheduled_maintenance()` from `pg_cron`, cron, or an application scheduler. A future built-in scheduler should make the default trigger-sync experience require less external orchestration while preserving operator control over rebuild cost. |
-
-### Internal Construction and Performance
-
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-005 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Current behavior is correctness-gated. Future work should use benchmarks before changing duplicate suppression, overlay indexing, or transaction delta snapshotting. |
+| KI-004 | pgGraph has a scheduler-safe `graph.run_scheduled_maintenance()` entry point, but no always-on internal scheduler for trigger-sync apply and overlay compaction in non-Docker installs. | Explicit implementation/policy decision required | Either ship a supervised bounded per-database scheduler with cross-backend/crash tests, or declare `pg_cron`/external scheduling the final supported contract and close the issue with complete setup, health, and failure guidance. |
 
 ## P0: Correctness, Security, Durability, and Resource Bounds
 
@@ -93,6 +60,7 @@ by one byte budget.
 | KI-016 | Filter indexes resolve by column name even though registered metadata carries table identity. | P0 correctness fix | Same-named filter columns on different tables can collide or skip registration. Use stable graph/table/attribute identity throughout build, pushdown, persistence, and deltas. |
 | KI-017 | Projection publication is protected by a process-local Rust mutex rather than a cross-PostgreSQL-backend lock. | P0 concurrency fix | Serialize by graph, reload current state inside the lock, compare-and-swap generation/watermark, and add two-backend races. |
 | KI-018 | Persisted replacement is renamed over the serving path before mmap reload validation. | P0 durability fix | Write and validate a generation-specific artifact, catch it up, then atomically switch a small manifest while retaining the previous generation. |
+| KI-019 | Mutable GQL writes reject PostgreSQL savepoints/subtransactions and do not yet have a complete isolation-level contract. | P0 transaction fix | Add per-subtransaction delta frames with rollback/release, then gate READ COMMITTED, REPEATABLE READ, and SERIALIZABLE behavior with source-row/projection consistency tests. |
 
 ## P1: Query Performance Follow-Ups
 
@@ -101,7 +69,7 @@ not changes to the public SQL contract.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-005 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Duplicated here because it is an internal construction item with user-visible latency implications on dirty mutable projections. |
+| KI-005 | Overlay neighbor merging and transaction-delta lookups may be material traversal hot paths on dirty mutable projections. | Measure and close | Benchmark degree, segment depth, transaction inserts/deletes/tombstones, direction, weights, allocations, and p95/p99 with correctness checks. Optimize material regressions or close with an approved regression threshold and retained gate. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 
@@ -111,15 +79,28 @@ not block use of the current documented SQL surface.
 | ID | Issue | Status | Notes |
 |---|---|---|---|
 | KI-006 | `graph.cypher()` is a narrow openCypher compatibility preview over pgGraph's supported GQL subset, not full openCypher compatibility. | Documented limitation | Keep compatibility rows honest and route broader openCypher expansion through [Roadmap](./roadmap), not this register. |
-| KI-007 | SQL/PGQ remains an internal adapter seam, not a public SQL API. | PostgreSQL 19 integration planning | PostgreSQL 19 documents native property graphs and `GRAPH_TABLE`. Rebase the stale dead-code adapter on the canonical IR, investigate version-gated catalog/interoperation now, and keep its conformance matrix separate from GQL. |
+| KI-007 | SQL/PGQ remains an internal adapter seam, and pgGraph cannot yet consume PostgreSQL 19 native property graph definitions. | PostgreSQL 19 implementation planned | Add PG19 toolchain support, consume native graph mappings without duplicate registration, handle DDL invalidation and PostgreSQL security semantics, rebase SQL/PGQ on canonical IR, and differential-test supported results against `GRAPH_TABLE` while keeping PG14-18 green. |
 
 ## P3: Internals and Maintainability
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-008 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | Planned refactor | Start with `sql_facade/admin.rs` (about 5,963 lines), `query/tests.rs`, `pg_tests/gql.rs`, `query/semantics.rs`, `pg_tests/maintenance_admin.rs`, `sql_facade/gql.rs`, `engine.rs`, `query/value.rs`, `persistence.rs`, and `sql_sync.rs`. Split by responsibility inside the pgrx crate first; evaluate a pure core crate only after dependencies are clean. |
-| KI-009 | GQL write weak-path tests can be expanded for more SQLSTATE and rollback scenarios. | Partially hardened | Pgrx coverage now asserts readonly mapped `SET` reports `PG018` and keeps a mapped `SET` type-mismatch source-row preservation guard. Transaction lifecycle scripts still cover mapped `CREATE`, `SET`, and `DELETE` rollback. Additional weak paths should be added close to the code they constrain. |
+| KI-008 | Several implementation and test modules mix unrelated responsibilities, making review and focused weak-path testing harder. | Planned refactor | Split the named admin, query, GQL, engine, persistence, sync, and test hotspots by cohesive ownership inside the pgrx crate first. File size is a signal, not the closing criterion; stable dependency direction and focused testability are. |
+| KI-009 | The supported GQL write surface lacks a finite failure/SQLSTATE and rollback matrix. | Partially hardened | Cover readonly, unmapped/type, constraint, trigger, ACL/RLS, stale/disappeared match, cancellation, rollback, and savepoint failures for every write, and assert both source rows and projection/transaction deltas remain correct. |
 | KI-010 | `nixpkgs` and `rust-overlay` lock inputs are stale in environments where `nix` is unavailable. | Deferred tooling refresh | The dependency checker reports these lock inputs, but refreshing them requires a Nix-capable environment to run `nix flake lock --update-input nixpkgs` and `nix flake lock --update-input rust-overlay`, then verify the development shell still exposes the expected Rust, PostgreSQL, and pgrx tooling. |
+
+## Resolved Items Awaiting Retirement
+
+These items are no longer active work. After their release-matrix regressions
+are confirmed and release notes remain the durable history, remove them from
+this page rather than carrying resolved rows indefinitely.
+
+| ID | Resolution | Retirement evidence |
+|---|---|---|
+| KI-001 | PostgreSQL row locks and final predicate rechecks harden `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` against stale concurrent matches. | Two-session stale-write/tenant/delete gates green on the release matrix. |
+| KI-002 | Transaction-created nodes receive backend-local temporary indexes and participate in later same-transaction reads without durable graph-only state. | Read-your-writes and rollback gates green on the release matrix. |
+| KI-003 | Dedicated GQL and Cypher parser fuzz targets and seed corpora exist. | Targets build and scheduled/release fuzz policy owns continuing campaigns. |
+| KI-011 | Metadata encoding moved to bincode 2 serde with strict trailing-byte rejection and a documented artifact rebuild requirement. | Upgrade/rebuild/corruption regressions green; migration remains in release notes. |
 
 ## Roadmap-Owned Future Work
 

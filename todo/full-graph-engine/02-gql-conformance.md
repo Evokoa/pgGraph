@@ -141,12 +141,15 @@ Plan a PostgreSQL-version adapter:
 
 - PostgreSQL 14-18: `graph.gql()` and existing SQL functions remain the public
   frontends.
-- PostgreSQL 19: investigate importing/validating native property-graph catalog
-  definitions, interoperation with `GRAPH_TABLE`, and common statistics.
+- PostgreSQL 19: consume native property-graph definitions as authoritative
+  mappings without duplicate registration, with DDL invalidation, security,
+  `GRAPH_TABLE` differential tests, and common statistics.
 - Keep GQL and SQL/PGQ conformance ledgers separate. They are related standards
   and may share IR, but one frontend does not imply conformance to the other.
 - Do not depend on unstable internal parser/planner APIs without a versioned
   adapter and CI coverage.
+- Delegate native `GRAPH_TABLE` execution to PostgreSQL unless a stable,
+  supported hook can safely select pgGraph acceleration.
 - Benchmark native SQL/PGQ and pgGraph execution on identical PostgreSQL source
   tables rather than using synthetic marketing comparisons.
 
@@ -172,8 +175,9 @@ IR instead of translating into the subset AST.
    row locks/rechecks, deltas, savepoints, and concurrency gates.
 8. **Catalog/session/delegation:** implement or explicitly delegate graph
    catalog, session, transaction, and privilege features.
-9. **PostgreSQL 19 adapter:** native property-graph interop and separate SQL/PGQ
-   matrix.
+9. **PostgreSQL 19 adapter:** complete the explicit work packages in
+   [the native property-graph plan](./08-postgresql-19-property-graphs.md), with
+   native mapping authority and a separate SQL/PGQ matrix.
 10. **Conformance closeout:** every applicable normative row is green; rows
     delegated to PostgreSQL have proof at the adapter boundary; no full GQL
     claim before this gate.

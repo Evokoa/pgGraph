@@ -72,8 +72,8 @@ the base, and repeated cycles have stable memory/files.
 
 ## Checkpoint 4: Refactor Foundations
 
-- Split memory, build, projection, binder, evaluator, SQL facade, engine, and
-  test modules in the order in the refactor plan.
+- Split memory, build, projection, binder, evaluator, SQL facade, engine,
+  persistence, sync, and test modules in the order in the refactor plan.
 - Establish typed values, graph identities, adapter traits, and canonical
   binding-table logical IR.
 - Keep old execution behind equivalence tests while migrating.
@@ -111,13 +111,20 @@ support.
 
 ## Checkpoint 7: PostgreSQL 19 SQL/PGQ
 
-- Rebase the typed adapter on canonical IR.
-- Investigate native property-graph catalog import/interoperation.
-- Add version-gated planner/catalog adapters and a separate conformance matrix.
-- Compare native `GRAPH_TABLE` and pgGraph on identical source tables.
+- Complete [PG19-0 through PG19-5](./08-postgresql-19-property-graphs.md):
+  toolchain, native catalog adapter, attach/build/invalidation, query
+  interoperation, security semantics, and release support.
+- Consume native `CREATE PROPERTY GRAPH` mappings without duplicate manual
+  table/edge registration.
+- Rebase the typed SQL/PGQ adapter on canonical IR and maintain a separate
+  conformance registry.
+- Differential-test native `GRAPH_TABLE` and pgGraph on identical source data.
+- Claim transparent `GRAPH_TABLE` acceleration only if PostgreSQL exposes a
+  stable supported integration hook.
 
-**Exit:** supported PG19 behavior is explicit, tested, and does not destabilize
-PG14-18 frontends.
+**Exit:** the PG19 plan's overall definition of done is green, the two public
+PG19/SQL-PGQ rows graduate to Current Baseline, KI-007 retires with release
+evidence, and PG14-18 remain green.
 
 ## Checkpoint 8: Competitive Engine Program
 
@@ -131,11 +138,29 @@ PG14-18 frontends.
 **Exit:** competitive claims are scoped to measured workloads and include
 correctness, tails, memory, build/load, update lag, and operational cost.
 
+## Checkpoint 9: Clear The Current Public Backlog
+
+- Complete every `OPEN` row in
+  [the closure ledger](./09-public-backlog-closure.md).
+- Resolve each `CONDITIONAL` item through its stated evidence gate: implement
+  it or remove it with a durable rejection/non-goal rationale.
+- Move `RESOLVED-RETIRE` items out of active Known Issues after release
+  regressions and release-note evidence are confirmed.
+- Graduate delivered roadmap work into Current Baseline, then remove its
+  planned/reserved row.
+- Run the Roadmap/KI drift inventory and archive exact evidence.
+
+**Exit:** the ledger's “Public Backlog Clear” gate is green. Every existing
+Roadmap item is delivered, rejected, or trigger-deferred outside active work;
+Known Issues contains only newly discovered unresolved defects, if any.
+
 ## Checkpoint Discipline
 
 At every checkpoint:
 
 - update `progress.md`, conformance metadata, Roadmap, and Known Issues;
+- update [the public backlog closure ledger](./09-public-backlog-closure.md) and
+  graduate, retire, reject, or trigger-defer the completed public row;
 - run formatting, clippy, unit, affected pgrx, docs, and relevant heavy gates;
 - record exact test and benchmark commands/results;
 - make format/SQL compatibility and rollback impact explicit;

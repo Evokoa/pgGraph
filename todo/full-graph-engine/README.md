@@ -52,6 +52,8 @@ reproducible correctness, latency, throughput, build, sync, and memory results.
 | [Refactor plan](./05-refactor-plan.md) | Ordered module decomposition. |
 | [Quality and performance](./06-quality-performance-operations.md) | Security, fuzz, fault, benchmarks, operations. |
 | [Build order](./07-build-order.md) | Checkpoints and completion criteria. |
+| [PostgreSQL 19 property graphs](./08-postgresql-19-property-graphs.md) | Native catalog, build, query, security, and release support. |
+| [Public backlog closure](./09-public-backlog-closure.md) | One disposition and closure gate for every Roadmap and Known Issues item. |
 | [Progress](./progress.md) | Living status and next checkpoint. |
 
 The earlier [out-of-core build plan](../out-of-core-build-plan.md) is a useful
@@ -74,6 +76,8 @@ and expands the scope to load, query, sync, and compaction.
 7. Public benchmarks report correctness, latency percentiles, throughput,
    RSS/PSS, spill, build/load time, and sync lag.
 8. PostgreSQL adapters and the planning/runtime core have an acyclic boundary.
+9. Every current Roadmap and Known Issues row has passed the public backlog
+   closure gate and has been graduated, retired, rejected, or trigger-deferred.
 
 ## Working Rules
 
@@ -82,4 +86,6 @@ and expands the scope to load, query, sync, and compaction.
 - Do not add graph-sized allocation without a budget owner and fallback.
 - Treat artifact changes as migrations with rebuild and rollback plans.
 - Update progress, conformance, Known Issues, and Roadmap at checkpoints.
+- Close public rows through the backlog ledger; do not leave conditional or
+  “future” items open indefinitely.
 - Preserve the slower, safer spill path when optimizing the fast path.
