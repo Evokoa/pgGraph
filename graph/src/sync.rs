@@ -427,8 +427,8 @@ mod tests {
         // Node exists in NodeStore
         assert_eq!(eng.node_store.node_count(), 1);
         assert!(eng.node_store.is_active(0));
-        assert_eq!(eng.node_store.primary_key(0), "U-1");
-        assert_eq!(eng.node_store.table_oid(0), 42);
+        assert_eq!(eng.node_store.primary_key(0), Some("U-1"));
+        assert_eq!(eng.node_store.table_oid(0), Some(42));
 
         // Node is resolvable
         assert_eq!(eng.resolve(42, "U-1"), Some(0));
@@ -566,7 +566,7 @@ mod tests {
     fn insert_empty_pk_is_valid() {
         let mut eng = test_engine();
         sync_insert(&mut eng, 42, "", None).unwrap();
-        assert_eq!(eng.node_store.primary_key(0), "");
+        assert_eq!(eng.node_store.primary_key(0), Some(""));
         assert_eq!(eng.resolve(42, ""), Some(0));
     }
 

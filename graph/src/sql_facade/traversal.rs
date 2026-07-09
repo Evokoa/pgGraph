@@ -605,8 +605,9 @@ fn tenant_allows_direct_node(engine: &Engine, node_idx: u32, tenant: Option<&str
     match tenant {
         Some(tenant)
             if engine
-                .tenanted_table_oids
-                .contains(&engine.node_store.table_oid(node_idx)) =>
+                .node_store
+                .table_oid(node_idx)
+                .is_some_and(|table_oid| engine.tenanted_table_oids.contains(&table_oid)) =>
         {
             engine
                 .tenant_membership

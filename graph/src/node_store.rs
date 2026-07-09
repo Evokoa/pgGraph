@@ -28,7 +28,7 @@ use bitvec::prelude::*;
 
 /// Validated pointer metadata for mmap-backed node arrays.
 #[derive(Clone, Copy, Debug)]
-pub struct MmapNodeArrays {
+pub(crate) struct MmapNodeArrays {
     active_ptr: *const u8,
     oid_ptr: *const u32,
     pk_offsets_ptr: *const u64,
@@ -44,29 +44,32 @@ pub struct MmapNodeArrays {
 /// [`NodeStore`]. The struct groups the raw pointer contract so call sites do
 /// not pass several same-typed pointer and length arguments positionally.
 #[derive(Clone, Copy, Debug)]
-pub struct MmapNodeArrayParts {
+pub(crate) struct MmapNodeArrayParts {
     /// Pointer to the start of the mmap region that owns every array section.
-    pub region_ptr: *const u8,
+    pub(crate) region_ptr: *const u8,
     /// Length in bytes of the mmap region.
-    pub region_len: usize,
+    pub(crate) region_len: usize,
     /// Pointer to `active_byte_count` initialized packed active-bit bytes.
-    pub active_ptr: *const u8,
+    pub(crate) active_ptr: *const u8,
     /// Pointer to `node_count` initialized source table OIDs.
-    pub oid_ptr: *const u32,
+    pub(crate) oid_ptr: *const u32,
     /// Pointer to `node_count + 1` initialized primary-key byte offsets.
-    pub pk_offsets_ptr: *const u64,
+    pub(crate) pk_offsets_ptr: *const u64,
     /// Pointer to `pk_bytes_len` initialized UTF-8 primary-key bytes.
-    pub pk_bytes_ptr: *const u8,
+    pub(crate) pk_bytes_ptr: *const u8,
     /// Number of nodes represented by every per-node array.
-    pub node_count: u32,
+    pub(crate) node_count: u32,
     /// Number of bytes in the packed active-bit array.
-    pub active_byte_count: usize,
+    pub(crate) active_byte_count: usize,
     /// Number of bytes in the primary-key byte section.
-    pub pk_bytes_len: usize,
+    pub(crate) pk_bytes_len: usize,
 }
 
 impl MmapNodeArrays {
     /// Create validated mmap pointer metadata.
+    ///
+    /// Validation covers pointer ranges, typed alignment, the complete
+    /// primary-key offset table, terminal offsets, and UTF-8 boundaries.
     ///
     /// # Safety
     ///
@@ -74,7 +77,7 @@ impl MmapNodeArrays {
     /// that the mmap outlives every [`NodeStore`] created from this metadata.
     /// Typed pointers must be aligned and initialized for the documented
     /// element counts.
-    pub unsafe fn new(parts: MmapNodeArrayParts) -> Option<Self> {
+    pub(crate) unsafe fn new(parts: MmapNodeArrayParts) -> Option<Self> {
         let required_ptrs_present = !parts.active_ptr.is_null()
             && !parts.oid_ptr.is_null()
             && !parts.pk_offsets_ptr.is_null()
@@ -118,6 +121,35 @@ impl MmapNodeArrays {
             return None;
         }
 
+        // SAFETY: The pointer range, alignment, and initialized-element
+        // obligations are established above and required from the caller.
+        let pk_offsets = unsafe {
+            std::slice::from_raw_parts(parts.pk_offsets_ptr, parts.node_count as usize + 1)
+        };
+        // SAFETY: The byte range and initialization obligations are established
+        // above and required from the caller.
+        let pk_bytes =
+            unsafe { std::slice::from_raw_parts(parts.pk_bytes_ptr, parts.pk_bytes_len) };
+        if pk_offsets.first().copied() != Some(0)
+            || pk_offsets.last().copied() != Some(parts.pk_bytes_len as u64)
+        {
+            return None;
+        }
+        for offsets in pk_offsets.windows(2) {
+            let Ok(start) = usize::try_from(offsets[0]) else {
+                return None;
+            };
+            let Ok(end) = usize::try_from(offsets[1]) else {
+                return None;
+            };
+            if start > end
+                || end > pk_bytes.len()
+                || std::str::from_utf8(&pk_bytes[start..end]).is_err()
+            {
+                return None;
+            }
+        }
+
         Some(Self {
             active_ptr: parts.active_ptr,
             oid_ptr: parts.oid_ptr,
@@ -151,7 +183,7 @@ fn ptr_range_in_region(
 }
 
 /// Backing store for array data: either owned Vecs or mmap-backed sections.
-pub enum ArrayBacking {
+enum ArrayBacking {
     /// Build-time: owned Vecs, mutable.
     Owned {
         is_active: BitVec,
@@ -204,7 +236,7 @@ impl NodeStore {
     /// initialized values, `active_ptr` must contain `active_byte_count` initialized bytes,
     /// `pk_offsets_ptr` must contain `node_count + 1` initialized offsets, and
     /// `pk_bytes_ptr` must contain `pk_bytes_len` initialized bytes.
-    pub unsafe fn from_mmap(arrays: MmapNodeArrays) -> Self {
+    pub(crate) unsafe fn from_mmap(arrays: MmapNodeArrays) -> Self {
         Self {
             backing: ArrayBacking::Mmap { arrays },
         }
@@ -311,14 +343,20 @@ impl NodeStore {
         }
     }
 
-    /// Get the source table OID for a node.
-    pub fn table_oid(&self, node_idx: u32) -> u32 {
+    /// Return the source table OID for a node.
+    ///
+    /// Returns `None` when `node_idx` is outside this store.
+    pub fn table_oid(&self, node_idx: u32) -> Option<u32> {
         match &self.backing {
-            ArrayBacking::Owned { table_oids, .. } => table_oids[node_idx as usize],
+            ArrayBacking::Owned { table_oids, .. } => table_oids.get(node_idx as usize).copied(),
             ArrayBacking::Mmap { arrays } => {
+                if node_idx >= arrays.node_count {
+                    return None;
+                }
                 // SAFETY: MmapNodeArrays::new validates oid_ptr points to
-                // node_count initialized u32 values.
-                unsafe { *arrays.oid_ptr.add(node_idx as usize) }
+                // node_count initialized u32 values, and the guard above keeps
+                // this index within that range.
+                Some(unsafe { *arrays.oid_ptr.add(node_idx as usize) })
             }
         }
     }
@@ -326,15 +364,16 @@ impl NodeStore {
     /// Get the primary key for a node. Cold path.
     ///
     /// In mmap-backed mode this reads UTF-8 bytes through the persisted
-    /// primary-key offset and byte sections. Returns an empty string if the
-    /// node index is out of range, offsets are invalid, or bytes are not valid
-    /// UTF-8.
-    pub fn primary_key(&self, node_idx: u32) -> &str {
+    /// primary-key offset and byte sections. Returns `None` when `node_idx` is
+    /// outside this store.
+    pub fn primary_key(&self, node_idx: u32) -> Option<&str> {
         match &self.backing {
-            ArrayBacking::Owned { primary_keys, .. } => &primary_keys[node_idx as usize],
+            ArrayBacking::Owned { primary_keys, .. } => {
+                primary_keys.get(node_idx as usize).map(String::as_str)
+            }
             ArrayBacking::Mmap { arrays } => {
                 if node_idx >= arrays.node_count {
-                    return "";
+                    return None;
                 }
 
                 // SAFETY: MmapNodeArrays::new validates pk_offsets_ptr points
@@ -344,14 +383,14 @@ impl NodeStore {
                 // validated offset table.
                 let end = unsafe { *arrays.pk_offsets_ptr.add(node_idx as usize + 1) as usize };
                 if start > end || end > arrays.pk_bytes_len {
-                    return "";
+                    return None;
                 }
 
                 // SAFETY: start/end are validated against pk_bytes_len above.
                 let bytes = unsafe {
                     std::slice::from_raw_parts(arrays.pk_bytes_ptr.add(start), end - start)
                 };
-                std::str::from_utf8(bytes).unwrap_or("")
+                std::str::from_utf8(bytes).ok()
             }
         }
     }
@@ -399,18 +438,58 @@ impl NodeStore {
     /// Sync overlays use this to accept node tombstones and inserts after a
     /// persisted graph has been auto-loaded from mmap.
     pub fn to_owned_store(&self) -> Self {
-        let node_count = self.node_count();
-        let mut owned = Self::with_capacity(node_count as usize);
-        for node_idx in 0..node_count {
-            let idx = owned.add_node(
-                self.table_oid(node_idx),
-                self.primary_key(node_idx).to_string(),
-            );
-            if !self.is_active(node_idx) {
-                owned.deactivate(idx);
+        match &self.backing {
+            ArrayBacking::Owned {
+                is_active,
+                table_oids,
+                primary_keys,
+            } => Self {
+                backing: ArrayBacking::Owned {
+                    is_active: is_active.clone(),
+                    table_oids: table_oids.clone(),
+                    primary_keys: primary_keys.clone(),
+                },
+            },
+            ArrayBacking::Mmap { arrays } => {
+                let mut is_active = BitVec::with_capacity(arrays.node_count as usize);
+                for node_idx in 0..arrays.node_count {
+                    is_active.push(self.is_active(node_idx));
+                }
+                // SAFETY: MmapNodeArrays::new validates this complete OID range,
+                // and its lifetime contract keeps the mapping alive here.
+                let table_oids = unsafe {
+                    std::slice::from_raw_parts(arrays.oid_ptr, arrays.node_count as usize).to_vec()
+                };
+                // SAFETY: MmapNodeArrays::new validates the complete offset and
+                // byte ranges, terminal offset, and every UTF-8 boundary.
+                let offsets = unsafe {
+                    std::slice::from_raw_parts(
+                        arrays.pk_offsets_ptr,
+                        arrays.node_count as usize + 1,
+                    )
+                };
+                // SAFETY: The byte range is validated by MmapNodeArrays::new.
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(arrays.pk_bytes_ptr, arrays.pk_bytes_len) };
+                let primary_keys = offsets
+                    .windows(2)
+                    .map(|window| {
+                        let start = window[0] as usize;
+                        let end = window[1] as usize;
+                        // SAFETY: Constructor validation proved each offset pair
+                        // selects a valid UTF-8 substring within `bytes`.
+                        unsafe { std::str::from_utf8_unchecked(&bytes[start..end]) }.to_string()
+                    })
+                    .collect();
+                Self {
+                    backing: ArrayBacking::Owned {
+                        is_active,
+                        table_oids,
+                        primary_keys,
+                    },
+                }
             }
         }
-        owned
     }
 
     // ── Persistence helpers (for write_graph_file) ──
@@ -482,8 +561,8 @@ mod tests {
         assert_eq!(idx, 0);
         assert_eq!(store.node_count(), 1);
         assert!(store.is_active(0));
-        assert_eq!(store.table_oid(0), 12345);
-        assert_eq!(store.primary_key(0), "PK-001");
+        assert_eq!(store.table_oid(0), Some(12345));
+        assert_eq!(store.primary_key(0), Some("PK-001"));
     }
 
     #[test]
@@ -534,9 +613,9 @@ mod tests {
         store.add_node(200, "order-1".to_string());
         store.add_node(300, "product-1".to_string());
 
-        assert_eq!(store.table_oid(0), 100);
-        assert_eq!(store.table_oid(1), 200);
-        assert_eq!(store.table_oid(2), 300);
+        assert_eq!(store.table_oid(0), Some(100));
+        assert_eq!(store.table_oid(1), Some(200));
+        assert_eq!(store.table_oid(2), Some(300));
     }
 
     #[test]
@@ -547,10 +626,10 @@ mod tests {
         store.add_node(1, "pk_with_🦀_emoji".to_string());
         store.add_node(1, "".to_string()); // Empty PK
 
-        assert_eq!(store.primary_key(0), "pk with spaces");
-        assert_eq!(store.primary_key(1), "pk-with-dashes");
-        assert_eq!(store.primary_key(2), "pk_with_🦀_emoji");
-        assert_eq!(store.primary_key(3), "");
+        assert_eq!(store.primary_key(0), Some("pk with spaces"));
+        assert_eq!(store.primary_key(1), Some("pk-with-dashes"));
+        assert_eq!(store.primary_key(2), Some("pk_with_🦀_emoji"));
+        assert_eq!(store.primary_key(3), Some(""));
     }
 
     #[test]
@@ -572,6 +651,63 @@ mod tests {
 
         assert!(!store.is_active(1));
         assert!(!store.is_active(u32::MAX));
+    }
+
+    #[test]
+    fn mmap_metadata_lookups_reject_out_of_range_nodes() {
+        let active = [1u8];
+        let oids = [42u32];
+        let pk_offsets = [0u64, 1u64];
+        let pk_bytes = *b"X";
+        let (region_ptr, region_len) = test_region_for_slices(&[
+            (active.as_ptr(), active.len()),
+            (
+                oids.as_ptr().cast::<u8>(),
+                oids.len() * std::mem::size_of::<u32>(),
+            ),
+            (
+                pk_offsets.as_ptr().cast::<u8>(),
+                pk_offsets.len() * std::mem::size_of::<u64>(),
+            ),
+            (pk_bytes.as_ptr(), pk_bytes.len()),
+        ]);
+        // SAFETY: Every pointer references an initialized local array, the
+        // computed region contains all arrays, and the arrays outlive `store`.
+        let arrays = unsafe {
+            MmapNodeArrays::new(MmapNodeArrayParts {
+                region_ptr,
+                region_len,
+                active_ptr: active.as_ptr(),
+                oid_ptr: oids.as_ptr(),
+                pk_offsets_ptr: pk_offsets.as_ptr(),
+                pk_bytes_ptr: pk_bytes.as_ptr(),
+                node_count: 1,
+                active_byte_count: 1,
+                pk_bytes_len: 1,
+            })
+            .expect("valid mapped node fixture")
+        };
+        // SAFETY: `arrays` borrows the local fixture for the duration of this
+        // test, so its pointers remain valid while the store is used.
+        let store = unsafe { NodeStore::from_mmap(arrays) };
+
+        assert_eq!(store.table_oid(0), Some(42));
+        assert_eq!(store.primary_key(0), Some("X"));
+        assert_eq!(store.table_oid(1), None);
+        assert_eq!(store.primary_key(1), None);
+        assert_eq!(store.table_oid(u32::MAX), None);
+        assert_eq!(store.primary_key(u32::MAX), None);
+        assert!(store.is_active(0));
+        assert!(!store.is_active(1));
+        assert_eq!(store.active_count(), 1);
+        assert_eq!(store.is_active_bytes(), vec![1]);
+        assert_eq!(store.table_oids_slice(), &[42]);
+
+        let owned = store.to_owned_store();
+        assert!(!owned.is_mmap_backed());
+        assert_eq!(owned.table_oid(0), Some(42));
+        assert_eq!(owned.primary_key(0), Some("X"));
+        assert!(owned.is_active(0));
     }
 
     #[test]
@@ -675,7 +811,7 @@ mod tests {
             pk_bytes_ptr: unsafe { base.add(32) },
             node_count: 1,
             active_byte_count: 1,
-            pk_bytes_len: 4,
+            pk_bytes_len: 0,
         };
 
         // SAFETY: Pointers are into the local region and are not dereferenced.
@@ -731,6 +867,70 @@ mod tests {
     }
 
     #[test]
+    fn mmap_node_arrays_reject_invalid_primary_key_layout() {
+        fn parts<'a>(
+            active: &'a [u8; 1],
+            oids: &'a [u32; 1],
+            offsets: &'a [u64; 2],
+            bytes: &'a [u8],
+        ) -> MmapNodeArrayParts {
+            let (region_ptr, region_len) = test_region_for_slices(&[
+                (active.as_ptr(), active.len()),
+                (oids.as_ptr().cast::<u8>(), std::mem::size_of_val(oids)),
+                (
+                    offsets.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(offsets),
+                ),
+                (bytes.as_ptr(), bytes.len()),
+            ]);
+            MmapNodeArrayParts {
+                region_ptr,
+                region_len,
+                active_ptr: active.as_ptr(),
+                oid_ptr: oids.as_ptr(),
+                pk_offsets_ptr: offsets.as_ptr(),
+                pk_bytes_ptr: bytes.as_ptr(),
+                node_count: 1,
+                active_byte_count: 1,
+                pk_bytes_len: bytes.len(),
+            }
+        }
+
+        let active = [1u8];
+        let oids = [42u32];
+        let valid_offsets = [0u64, 1];
+        let valid_bytes = *b"X";
+        // SAFETY: All parts describe initialized, aligned local arrays that
+        // outlive the returned validation result within this test.
+        assert!(unsafe {
+            MmapNodeArrays::new(parts(&active, &oids, &valid_offsets, &valid_bytes))
+        }
+        .is_some());
+
+        let nonzero_start = [1u64, 1];
+        // SAFETY: The memory is valid to inspect; only the persisted values are
+        // deliberately malformed.
+        assert!(unsafe {
+            MmapNodeArrays::new(parts(&active, &oids, &nonzero_start, &valid_bytes))
+        }
+        .is_none());
+
+        let bad_terminal = [0u64, 0];
+        assert!(
+            // SAFETY: See the preceding malformed-value safety rationale.
+            unsafe { MmapNodeArrays::new(parts(&active, &oids, &bad_terminal, &valid_bytes)) }
+                .is_none()
+        );
+
+        let invalid_utf8 = [0xffu8];
+        // SAFETY: See the preceding malformed-value safety rationale.
+        assert!(unsafe {
+            MmapNodeArrays::new(parts(&active, &oids, &valid_offsets, &invalid_utf8))
+        }
+        .is_none());
+    }
+
+    #[test]
     fn bulk_add_1000_nodes() {
         let mut store = NodeStore::with_capacity(1000);
         for i in 0..1000u32 {
@@ -739,6 +939,6 @@ mod tests {
         }
         assert_eq!(store.node_count(), 1000);
         assert_eq!(store.active_count(), 1000);
-        assert_eq!(store.primary_key(999), "pk-999");
+        assert_eq!(store.primary_key(999), Some("pk-999"));
     }
 }

@@ -178,9 +178,11 @@ Raw mmap pointer metadata is only constructed by validated constructors:
 
 | Type | Validation |
 |---|---|
-| `MmapNodeArrays::new` | pointer presence, active byte count, `u32`/`u64` alignment |
-| `MmapEdgeArrays::new` | pointer presence, optional weights pointer, `u32` alignment |
+| `MmapNodeArrays::new` | pointer ranges, active byte count, `u32`/`u64` alignment, complete primary-key offsets, terminal byte count, and UTF-8 boundaries |
+| `MmapEdgeArrays::new` | pointer ranges, optional weights, `u32` alignment, monotonic CSR offsets, terminal edge count, target bounds, and schema-direction flags |
 | `validate_section_layout` | section ordering, bounds, sizes, alignment, CRC, CSR content, PK offsets |
 
 Every unsafe raw slice or pointer dereference has a local `// SAFETY:` comment
-explaining the proof at the call site.
+explaining the proof at the call site. Node metadata lookups also check the
+requested node index locally and return no value when it is outside the store;
+they do not rely on traversal callers to supply a valid index.

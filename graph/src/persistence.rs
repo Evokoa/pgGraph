@@ -576,7 +576,11 @@ fn write_graph_file_internal(
         if check_interrupts && node_idx.is_multiple_of(INTERRUPT_CHECK_INTERVAL) {
             check_for_interrupts();
         }
-        let pk = engine.node_store.primary_key(node_idx);
+        let pk = engine.node_store.primary_key(node_idx).ok_or_else(|| {
+            GraphError::Internal(format!(
+                "node store is missing primary key metadata for index {node_idx}"
+            ))
+        })?;
         pk_offset =
             pk_offset
                 .checked_add(u64::try_from(pk.len()).map_err(|_| {
@@ -591,7 +595,11 @@ fn write_graph_file_internal(
         if check_interrupts && node_idx.is_multiple_of(INTERRUPT_CHECK_INTERVAL) {
             check_for_interrupts();
         }
-        let pk = engine.node_store.primary_key(node_idx);
+        let pk = engine.node_store.primary_key(node_idx).ok_or_else(|| {
+            GraphError::Internal(format!(
+                "node store is missing primary key metadata for index {node_idx}"
+            ))
+        })?;
         writer.write_body(pk.as_bytes())?;
     }
 
@@ -1358,15 +1366,15 @@ mod tests {
         let reloaded = load_graph_file(&path).unwrap();
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(loaded.node_store.primary_key(a), "A-1");
-        assert_eq!(loaded.node_store.primary_key(b), "B-2");
+        assert_eq!(loaded.node_store.primary_key(a), Some("A-1"));
+        assert_eq!(loaded.node_store.primary_key(b), Some("B-2"));
         assert_eq!(loaded.resolve(10, "A-1"), Some(a));
         assert_eq!(loaded.resolve(10, "B-2"), Some(b));
         assert_eq!(loaded.edge_type_registry, vec!["", "officer_of"]);
         assert!(loaded.edge_store.has_weights());
         assert_eq!(loaded.edge_store.neighbors_weighted(a).2, &[7]);
-        assert_eq!(reloaded.node_store.primary_key(a), "A-1");
-        assert_eq!(reloaded.node_store.primary_key(b), "B-2");
+        assert_eq!(reloaded.node_store.primary_key(a), Some("A-1"));
+        assert_eq!(reloaded.node_store.primary_key(b), Some("B-2"));
         assert_eq!(reloaded.edge_type_registry, vec!["", "officer_of"]);
         assert_eq!(reloaded.edge_store.neighbors_weighted(a).2, &[7]);
     }
@@ -1840,8 +1848,8 @@ mod tests {
         assert_eq!(loaded.node_store.node_count(), 2);
         assert_eq!(loaded.edge_store.edge_count(), 1);
         assert!(!loaded.edge_store.has_weights());
-        assert_eq!(loaded.node_store.primary_key(0), "X");
-        assert_eq!(loaded.node_store.primary_key(1), "Y");
+        assert_eq!(loaded.node_store.primary_key(0), Some("X"));
+        assert_eq!(loaded.node_store.primary_key(1), Some("Y"));
     }
 
     #[test]
@@ -1863,8 +1871,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(loaded.node_store.node_count(), n);
-        assert_eq!(loaded.node_store.primary_key(0), "node-0");
-        assert_eq!(loaded.node_store.primary_key(999), "node-999");
+        assert_eq!(loaded.node_store.primary_key(0), Some("node-0"));
+        assert_eq!(loaded.node_store.primary_key(999), Some("node-999"));
         assert_eq!(loaded.resolve(1, "node-500"), Some(500));
     }
 

@@ -29,7 +29,7 @@ const EMPTY_U8_SLICE: [u8; 0] = [];
 
 /// Validated pointer metadata for mmap-backed CSR edge arrays.
 #[derive(Clone, Copy)]
-pub struct MmapEdgeArrays {
+pub(crate) struct MmapEdgeArrays {
     offsets_ptr: *const u32,
     targets_ptr: *const u32,
     type_ids_ptr: *const u8,
@@ -42,37 +42,40 @@ pub struct MmapEdgeArrays {
 
 /// Raw mmap-backed edge array pointers and lengths.
 #[derive(Clone, Copy, Debug)]
-pub struct MmapEdgeArrayParts {
+pub(crate) struct MmapEdgeArrayParts {
     /// Pointer to the start of the mmap region that owns every array section.
-    pub region_ptr: *const u8,
+    pub(crate) region_ptr: *const u8,
     /// Length in bytes of the mmap region.
-    pub region_len: usize,
+    pub(crate) region_len: usize,
     /// Pointer to `node_count + 1` initialized CSR offsets.
-    pub offsets_ptr: *const u32,
+    pub(crate) offsets_ptr: *const u32,
     /// Pointer to `edge_count` initialized target node indexes.
-    pub targets_ptr: *const u32,
+    pub(crate) targets_ptr: *const u32,
     /// Pointer to `edge_count` initialized edge type identifiers.
-    pub type_ids_ptr: *const u8,
+    pub(crate) type_ids_ptr: *const u8,
     /// Pointer to `edge_count` initialized schema-reversed flags.
-    pub schema_reversed_ptr: *const u8,
+    pub(crate) schema_reversed_ptr: *const u8,
     /// Pointer to `edge_count` initialized weights when `has_weights` is true.
-    pub weights_ptr: *const u32,
+    pub(crate) weights_ptr: *const u32,
     /// Number of nodes represented by the CSR offset table.
-    pub node_count: u32,
+    pub(crate) node_count: u32,
     /// Number of edges represented by the parallel edge arrays.
-    pub edge_count: u32,
+    pub(crate) edge_count: u32,
     /// Whether the weights section is present.
-    pub has_weights: bool,
+    pub(crate) has_weights: bool,
 }
 
 impl MmapEdgeArrays {
     /// Create validated mmap pointer metadata.
     ///
+    /// Validation covers pointer ranges, typed alignment, monotonic CSR
+    /// offsets, the terminal edge count, target bounds, and direction flags.
+    ///
     /// # Safety
     ///
     /// The caller must ensure all pointers reference initialized sections in a
     /// mmap region that outlives every [`EdgeStore`] created from this metadata.
-    pub unsafe fn new(parts: MmapEdgeArrayParts) -> Option<Self> {
+    pub(crate) unsafe fn new(parts: MmapEdgeArrayParts) -> Option<Self> {
         if parts.offsets_ptr.is_null()
             || parts.targets_ptr.is_null()
             || parts.type_ids_ptr.is_null()
@@ -128,6 +131,31 @@ impl MmapEdgeArrays {
             return None;
         }
 
+        // SAFETY: The pointer range, alignment, and initialized-element
+        // obligations are established above and required from the caller.
+        let offsets =
+            unsafe { std::slice::from_raw_parts(parts.offsets_ptr, parts.node_count as usize + 1) };
+        // SAFETY: The pointer range, alignment, and initialized-element
+        // obligations are established above and required from the caller.
+        let targets =
+            unsafe { std::slice::from_raw_parts(parts.targets_ptr, parts.edge_count as usize) };
+        // SAFETY: The byte range and initialized-element obligations are
+        // established above and required from the caller.
+        let schema_reversed = unsafe {
+            std::slice::from_raw_parts(parts.schema_reversed_ptr, parts.edge_count as usize)
+        };
+
+        if offsets.first().copied() != Some(0)
+            || offsets.last().copied() != Some(parts.edge_count)
+            || offsets
+                .windows(2)
+                .any(|window| window[0] > window[1] || window[1] > parts.edge_count)
+            || targets.iter().any(|&target| target >= parts.node_count)
+            || schema_reversed.iter().any(|&flag| flag > 1)
+        {
+            return None;
+        }
+
         Some(Self {
             offsets_ptr: parts.offsets_ptr,
             targets_ptr: parts.targets_ptr,
@@ -162,7 +190,7 @@ fn ptr_range_in_region(
 }
 
 /// Backing store for edge data.
-pub enum EdgeBacking {
+enum EdgeBacking {
     /// Build-time: owned Vecs.
     Owned {
         edge_offsets: Vec<u32>,
@@ -300,7 +328,7 @@ impl EdgeStore {
     /// `edge_count` initialized `u32` values, `type_ids_ptr` must contain
     /// `edge_count` initialized bytes, and `weights_ptr` must contain
     /// `edge_count` initialized `u32` values when `has_weights` is true.
-    pub unsafe fn from_mmap(arrays: MmapEdgeArrays) -> Self {
+    pub(crate) unsafe fn from_mmap(arrays: MmapEdgeArrays) -> Self {
         Self {
             backing: EdgeBacking::Mmap { arrays },
         }
@@ -812,6 +840,44 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[repr(C)]
+    struct MappedEdgeFixture {
+        offsets: [u32; 3],
+        targets: [u32; 1],
+        type_ids: [u8; 1],
+        schema_reversed: [u8; 1],
+        padding: [u8; 2],
+        weights: [u32; 1],
+    }
+
+    impl MappedEdgeFixture {
+        fn valid() -> Self {
+            Self {
+                offsets: [0, 1, 1],
+                targets: [1],
+                type_ids: [7],
+                schema_reversed: [0],
+                padding: [0; 2],
+                weights: [9],
+            }
+        }
+
+        fn parts(&self) -> MmapEdgeArrayParts {
+            MmapEdgeArrayParts {
+                region_ptr: std::ptr::from_ref(self).cast::<u8>(),
+                region_len: std::mem::size_of::<Self>(),
+                offsets_ptr: self.offsets.as_ptr(),
+                targets_ptr: self.targets.as_ptr(),
+                type_ids_ptr: self.type_ids.as_ptr(),
+                schema_reversed_ptr: self.schema_reversed.as_ptr(),
+                weights_ptr: self.weights.as_ptr(),
+                node_count: 2,
+                edge_count: 1,
+                has_weights: true,
+            }
+        }
+    }
+
     #[test]
     fn empty_graph() {
         let store = EdgeStore::from_edges(3, vec![], false);
@@ -1018,8 +1084,8 @@ mod tests {
             // SAFETY: See above.
             weights_ptr: unsafe { base.add(32).cast::<u32>() },
             node_count: 1,
-            edge_count: 1,
-            has_weights: true,
+            edge_count: 0,
+            has_weights: false,
         };
 
         // SAFETY: Pointers are into the local region and are not dereferenced.
@@ -1073,6 +1139,78 @@ mod tests {
             })
         }
         .is_none());
+    }
+
+    #[test]
+    fn mmap_edge_arrays_reject_malformed_csr_values() {
+        let valid = MappedEdgeFixture::valid();
+        // SAFETY: `parts` describes initialized, aligned fields within `valid`.
+        assert!(unsafe { MmapEdgeArrays::new(valid.parts()) }.is_some());
+
+        let bad_first = MappedEdgeFixture {
+            offsets: [1, 1, 1],
+            ..valid
+        };
+        // SAFETY: The fixture is memory-safe to inspect; its CSR values are
+        // deliberately invalid and must be rejected by the validator.
+        assert!(unsafe { MmapEdgeArrays::new(bad_first.parts()) }.is_none());
+
+        let nonmonotonic = MappedEdgeFixture {
+            offsets: [0, 1, 0],
+            ..valid
+        };
+        // SAFETY: See the preceding malformed-fixture safety rationale.
+        assert!(unsafe { MmapEdgeArrays::new(nonmonotonic.parts()) }.is_none());
+
+        let bad_final = MappedEdgeFixture {
+            offsets: [0, 0, 0],
+            ..valid
+        };
+        // SAFETY: See the preceding malformed-fixture safety rationale.
+        assert!(unsafe { MmapEdgeArrays::new(bad_final.parts()) }.is_none());
+
+        let bad_target = MappedEdgeFixture {
+            targets: [2],
+            ..valid
+        };
+        // SAFETY: See the preceding malformed-fixture safety rationale.
+        assert!(unsafe { MmapEdgeArrays::new(bad_target.parts()) }.is_none());
+
+        let bad_direction = MappedEdgeFixture {
+            schema_reversed: [2],
+            ..valid
+        };
+        // SAFETY: See the preceding malformed-fixture safety rationale.
+        assert!(unsafe { MmapEdgeArrays::new(bad_direction.parts()) }.is_none());
+    }
+
+    #[test]
+    fn mmap_edge_accessors_use_validated_in_memory_layout() {
+        let fixture = MappedEdgeFixture::valid();
+        // SAFETY: The fixture fields are initialized, aligned, contained in the
+        // declared region, and outlive the mapped store used in this test.
+        let arrays =
+            unsafe { MmapEdgeArrays::new(fixture.parts()).expect("valid mapped edge fixture") };
+        // SAFETY: `fixture` remains alive until after `store` is last used.
+        let store = unsafe { EdgeStore::from_mmap(arrays) };
+
+        assert_eq!(store.node_count(), 2);
+        assert_eq!(store.edge_count(), 1);
+        assert!(store.has_weights());
+        assert_eq!(store.degree(0), 1);
+        assert_eq!(store.degree(2), 0);
+        assert_eq!(store.neighbors(0), (&[1][..], &[7][..]));
+        assert_eq!(store.neighbors(2), (&[][..], &[][..]));
+        assert_eq!(
+            store.neighbors_with_schema(0),
+            (&[1][..], &[7][..], &[0][..])
+        );
+        assert_eq!(store.neighbors_weighted(0), (&[1][..], &[7][..], &[9][..]));
+        assert_eq!(store.offsets_slice(), &[0, 1, 1]);
+        assert_eq!(store.targets_slice(), &[1]);
+        assert_eq!(store.type_ids_slice(), &[7]);
+        assert_eq!(store.schema_reversed_slice(), &[0]);
+        assert_eq!(store.weights_slice(), &[9]);
     }
 
     #[test]

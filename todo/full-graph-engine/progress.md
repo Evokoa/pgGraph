@@ -7,7 +7,7 @@ Last updated: 2026-07-09
 | Checkpoint | Status | Evidence / next action |
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
-| Rust type/unsafe/pgrx boundary | Review complete; blockers open | Execute RUST-00A through RUST-00F before expanding unsafe or claiming production readiness, then complete RUST-1 through RUST-8 by their owning checkpoints. |
+| Rust type/unsafe/pgrx boundary | RUST-00A/00B implemented on PG17; matrix pending | Safe node metadata access is bounds-checked, mapped constructors are crate-private and validate PK/CSR values, and in-memory mapped-accessor regressions pass. Execute RUST-00C through RUST-00F next; run Miri/sanitizer and supported-major evidence before checkpoint exit. |
 | 1A. Security and identity | Not started | RLS topology, relationship identity, filter identity, savepoints. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
@@ -42,8 +42,9 @@ Last updated: 2026-07-09
 
 Checkpoint 0 regression pack, in this order:
 
-1. Out-of-range mapped node lookup and malformed CSR offset tests that exercise
-   every safe accessor without OS mmap.
+1. **Complete:** out-of-range mapped node lookup and malformed CSR offset tests
+   exercise mapped accessors with aligned in-memory backing; mapped constructors
+   reject invalid PK/CSR contents before a store exists.
 2. Custom SQLSTATE/error-boundary test proving Rust destructors unwind before
    PostgreSQL ERROR on every supported major.
 3. Durable filter differential for signed, large, temporal, boolean, text,
@@ -61,6 +62,10 @@ Checkpoint 0 regression pack, in this order:
 
 Do not implement broad syntax until these tests establish the current
 correctness and safety boundary.
+
+## Phase Updates
+
+- 2026-07-09 — Checkpoint 0 mapped-layout phase: made node metadata lookups fallible, validated mapped PK/CSR contents at crate-private constructors, and kept traversal/component corruption failures typed.
 
 ## Decisions
 
@@ -81,3 +86,39 @@ Add dated entries with dataset shape, PostgreSQL/pgGraph settings, exact command
 peak RSS/PSS, spill, elapsed time, result checksum, and pass/fail threshold.
 No benchmark result should be recorded without its correctness checksum and
 environment.
+
+### 2026-07-09 Checkpoint 0 Baseline
+
+Environment: macOS arm64, Rust 1.96.0, pgrx 0.19.1, PostgreSQL 17 from
+Homebrew. This establishes the correctness baseline before the mapped-layout
+safety regression pack; workload RSS and Criterion measurements remain pending
+until the corresponding deterministic checksum fixtures are selected.
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 652 passed, 1 ignored; doctests 0 |
+| Rust docs | `cd graph && cargo doc --features pg17 --no-deps` | PASS |
+| PostgreSQL-backed tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 888 passed, 1 ignored; doctests 0 |
+
+### 2026-07-09 Mapped-Layout Safety Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Targeted mapped regressions | `cd graph && cargo test --features pg17 mmap_` | PASS: 13 passed |
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 656 passed, 1 ignored; doctests 0 |
+| Rust docs | `cd graph && cargo doc --features pg17 --no-deps` | PASS |
+| Rust doctests | `cd graph && cargo test --doc --features pg17` | PASS: 0 doctests |
+| PostgreSQL-backed tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 892 passed, 1 ignored; doctests 0 |
+| Miri mapped-edge checks | `cd graph && env MIRIFLAGS='-Zmiri-tree-borrows -Zmiri-permissive-provenance' cargo +nightly miri test --features pg17 mmap_edge` | PASS: 4 passed |
+| Miri mapped-node layout checks | `cd graph && env MIRIFLAGS='-Zmiri-tree-borrows -Zmiri-permissive-provenance' cargo +nightly miri test --features pg17 mmap_node` | PASS: 3 passed |
+| Miri mapped-node accessor check | `cd graph && env MIRIFLAGS='-Zmiri-tree-borrows -Zmiri-permissive-provenance' cargo +nightly miri test --features pg17 mmap_metadata_lookups_reject_out_of_range_nodes` | PASS: 1 passed |
+
+The default Stacked Borrows model reports inside `bitvec` pointer tagging during
+mapped-to-owned materialization, and the broad `mmap_` filter also selects
+OS-file tests that Miri isolation cannot unlink. The focused in-memory gates use
+Tree Borrows and permissive provenance for the deliberate overflow-pointer
+fixtures; they do not disable isolation or undefined-behavior checking.

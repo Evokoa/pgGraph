@@ -326,13 +326,13 @@ pub(super) fn component_rows(
     let page = ENGINE.with(|e| {
         let eng = e.borrow();
         let cc_result = eng.connected_components()?;
-        Ok::<_, safety::GraphError>(connected_components::component_rows_page(
+        connected_components::component_rows_page(
             &cc_result,
             &eng.node_store,
             component_id as u32,
             offset,
             limit,
-        ))
+        )
     })?;
 
     hydrate_component_page(page, hydrate)

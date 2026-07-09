@@ -239,8 +239,11 @@ pub(crate) fn enumerate_all_paths_dfs(
     overlay_deletes: &OverlayDeletes,
 ) {
     if depth >= request.min_depth
-        && node_table_filter
-            .is_none_or(|tables| tables.contains(&eng.node_store.table_oid(current)))
+        && node_table_filter.is_none_or(|tables| {
+            eng.node_store
+                .table_oid(current)
+                .is_some_and(|table_oid| tables.contains(&table_oid))
+        })
     {
         record_indexed_path(path, paths, seen_paths);
         if paths.len() >= edge_limit {
@@ -523,11 +526,23 @@ pub(crate) fn indexed_path_coordinates(
         }
         let mut coordinates = HashMap::new();
         for idx in paths.iter().flat_map(|path| path.iter().copied()) {
+            let table_oid =
+                eng.node_store
+                    .table_oid(idx)
+                    .ok_or_else(|| safety::GraphError::CorruptFile {
+                        reason: format!("node index {idx} has no table OID metadata"),
+                    })?;
+            let node_id =
+                eng.node_store
+                    .primary_key(idx)
+                    .ok_or_else(|| safety::GraphError::CorruptFile {
+                        reason: format!("node index {idx} has no primary-key metadata"),
+                    })?;
             coordinates
                 .entry(idx)
                 .or_insert_with(|| types::PathCoordinate {
-                    table_oid: types::TableOid(eng.node_store.table_oid(idx)),
-                    node_id: eng.node_store.primary_key(idx).to_string(),
+                    table_oid: types::TableOid(table_oid),
+                    node_id: node_id.to_string(),
                 });
         }
         Ok(coordinates)

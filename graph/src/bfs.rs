@@ -23,6 +23,7 @@ use crate::node_store::NodeStore;
 use crate::projection::neighbors::{
     NeighborSource, OverlayDeletes, OverlayInserts, OverlayNeighbors,
 };
+use crate::safety::{GraphError, GraphResult};
 use crate::types::{FilterOp, PathCoordinate, TableOid, TraversalResult};
 
 const SPARSE_METADATA_MIN_NODES: usize = 4_096;
@@ -570,13 +571,13 @@ fn candidate_allowed(
         return false;
     }
     if let Some(tenant) = config.tenant.as_deref() {
-        let table_oid = node_store.table_oid(neighbor);
-        if config.tenanted_table_oids.contains(&table_oid)
-            && !config
-                .tenant_membership
-                .get(tenant)
-                .is_some_and(|bitmap| bitmap.contains(neighbor))
-        {
+        if node_store.table_oid(neighbor).is_some_and(|table_oid| {
+            config.tenanted_table_oids.contains(&table_oid)
+                && !config
+                    .tenant_membership
+                    .get(tenant)
+                    .is_some_and(|bitmap| bitmap.contains(neighbor))
+        }) {
             return false;
         }
     }
@@ -704,12 +705,17 @@ pub fn reconstruct_edge_path(
     edge_path
 }
 
-/// Convert BFS results into TraversalResult structs for SQL output.
+/// Convert BFS results into [`TraversalResult`] values for SQL output.
+///
+/// # Errors
+///
+/// Returns [`GraphError::CorruptFile`] when a visited node or reconstructed
+/// path index has no corresponding node metadata.
 pub fn to_traversal_results(
     bfs_result: &BfsResult,
     node_store: &NodeStore,
     edge_type_registry: &[String],
-) -> Vec<TraversalResult> {
+) -> GraphResult<Vec<TraversalResult>> {
     let mut results = Vec::with_capacity(bfs_result.visited.len() as usize);
 
     // Find the seed (depth 0)
@@ -724,11 +730,14 @@ pub fn to_traversal_results(
         let path_indices = reconstruct_path(&bfs_result.parent, seed, node_idx);
         let path: Vec<PathCoordinate> = path_indices
             .iter()
-            .map(|&idx| PathCoordinate {
-                table_oid: TableOid(node_store.table_oid(idx)),
-                node_id: node_store.primary_key(idx).to_string(),
+            .map(|&idx| {
+                let (table_oid, node_id) = node_coordinate(node_store, idx)?;
+                Ok(PathCoordinate {
+                    table_oid,
+                    node_id: node_id.to_string(),
+                })
             })
-            .collect();
+            .collect::<GraphResult<Vec<_>>>()?;
         let edge_path = reconstruct_edge_path(
             &bfs_result.parent,
             &bfs_result.parent_edge_type,
@@ -744,9 +753,10 @@ pub fn to_traversal_results(
         })
         .collect();
 
+        let (node_table, node_id) = node_coordinate(node_store, node_idx)?;
         results.push(TraversalResult {
-            node_table: TableOid(node_store.table_oid(node_idx)),
-            node_id: node_store.primary_key(node_idx).to_string(),
+            node_table,
+            node_id: node_id.to_string(),
             depth,
             path,
             edge_path,
@@ -755,7 +765,21 @@ pub fn to_traversal_results(
 
     // Sort by depth for consistent output
     results.sort_by_key(|r| r.depth);
-    results
+    Ok(results)
+}
+
+fn node_coordinate(node_store: &NodeStore, node_idx: u32) -> GraphResult<(TableOid, &str)> {
+    let table_oid = node_store
+        .table_oid(node_idx)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: format!("node index {node_idx} has no table OID metadata"),
+        })?;
+    let node_id = node_store
+        .primary_key(node_idx)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: format!("node index {node_idx} has no primary-key metadata"),
+        })?;
+    Ok((TableOid(table_oid), node_id))
 }
 
 #[cfg(test)]
@@ -1333,7 +1357,7 @@ mod tests {
 
         let bfs_result = execute(&ns, &es, &fi, &config);
         let edge_type_registry = vec!["".to_string(), "test".to_string()];
-        let results = to_traversal_results(&bfs_result, &ns, &edge_type_registry);
+        let results = to_traversal_results(&bfs_result, &ns, &edge_type_registry).unwrap();
 
         // Verify all columns are populated
         for r in &results {

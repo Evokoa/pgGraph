@@ -73,8 +73,8 @@ pub(crate) fn shortest_path_with_neighbors(
     if source == target {
         return Some(vec![PathStep {
             step: 0,
-            node_table: TableOid(node_store.table_oid(source)),
-            node_id: node_store.primary_key(source).to_string(),
+            node_table: TableOid(node_store.table_oid(source)?),
+            node_id: node_store.primary_key(source)?.to_string(),
             edge_label: None,
         }]);
     }
@@ -252,8 +252,8 @@ fn bidirectional_bfs(
     for (i, &(node, edge_type)) in fwd_path.iter().enumerate() {
         steps.push(PathStep {
             step: i as i32,
-            node_table: TableOid(node_store.table_oid(node)),
-            node_id: node_store.primary_key(node).to_string(),
+            node_table: TableOid(node_store.table_oid(node)?),
+            node_id: node_store.primary_key(node)?.to_string(),
             edge_label: if i == 0 {
                 None
             } else {
@@ -270,8 +270,8 @@ fn bidirectional_bfs(
     for (i, &(node, edge_type)) in bwd_path.iter().enumerate() {
         steps.push(PathStep {
             step: (offset + i) as i32,
-            node_table: TableOid(node_store.table_oid(node)),
-            node_id: node_store.primary_key(node).to_string(),
+            node_table: TableOid(node_store.table_oid(node)?),
+            node_id: node_store.primary_key(node)?.to_string(),
             edge_label: Some(
                 edge_type_registry
                     .get(edge_type as usize)
@@ -343,13 +343,14 @@ fn single_direction_bfs(
                 }
                 path.reverse();
 
-                return Some(
-                    path.iter()
-                        .enumerate()
-                        .map(|(i, &(node, et))| PathStep {
+                return path
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(node, et))| {
+                        Some(PathStep {
                             step: i as i32,
-                            node_table: TableOid(node_store.table_oid(node)),
-                            node_id: node_store.primary_key(node).to_string(),
+                            node_table: TableOid(node_store.table_oid(node)?),
+                            node_id: node_store.primary_key(node)?.to_string(),
                             edge_label: if i == 0 {
                                 None
                             } else {
@@ -361,8 +362,8 @@ fn single_direction_bfs(
                                 )
                             },
                         })
-                        .collect(),
-                );
+                    })
+                    .collect();
             }
         }
     }
@@ -471,37 +472,35 @@ pub(crate) fn weighted_shortest_path_with_neighbors(
     }
     nodes.reverse();
 
-    Some(
-        nodes
-            .into_iter()
-            .enumerate()
-            .map(|(step, node)| {
-                let parent_step = parent.get(&node).copied().unwrap_or(WeightedParentStep {
-                    parent: node,
-                    edge_type: 0,
-                    edge_weight: 0,
-                });
-                WeightedPathStep {
-                    step: step as i32,
-                    node_table: TableOid(node_store.table_oid(node)),
-                    node_id: node_store.primary_key(node).to_string(),
-                    edge_label: if step == 0 {
-                        None
-                    } else {
-                        Some(
-                            edge_type_registry
-                                .get(parent_step.edge_type as usize)
-                                .cloned()
-                                .unwrap_or_else(|| format!("type_{}", parent_step.edge_type)),
-                        )
-                    },
-                    edge_weight: (step != 0).then_some(parent_step.edge_weight),
-                    step_cost: dist[node as usize],
-                    total_cost,
-                }
+    nodes
+        .into_iter()
+        .enumerate()
+        .map(|(step, node)| {
+            let parent_step = parent.get(&node).copied().unwrap_or(WeightedParentStep {
+                parent: node,
+                edge_type: 0,
+                edge_weight: 0,
+            });
+            Some(WeightedPathStep {
+                step: step as i32,
+                node_table: TableOid(node_store.table_oid(node)?),
+                node_id: node_store.primary_key(node)?.to_string(),
+                edge_label: if step == 0 {
+                    None
+                } else {
+                    Some(
+                        edge_type_registry
+                            .get(parent_step.edge_type as usize)
+                            .cloned()
+                            .unwrap_or_else(|| format!("type_{}", parent_step.edge_type)),
+                    )
+                },
+                edge_weight: (step != 0).then_some(parent_step.edge_weight),
+                step_cost: dist[node as usize],
+                total_cost,
             })
-            .collect(),
-    )
+        })
+        .collect()
 }
 
 #[cfg(test)]

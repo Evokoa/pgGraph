@@ -102,7 +102,7 @@ pub(crate) fn execute(
                 }
                 return Ok(rows);
             }
-            rows.push(project_optional_row(engine, source_idx));
+            rows.push(project_optional_row(engine, source_idx)?);
             continue;
         }
         for target in targets {
@@ -174,7 +174,7 @@ pub(crate) fn execute_node_scan(
         if !node_active(engine, node_idx) || crate::projection::tx_delta::node_deleted(node_idx) {
             continue;
         }
-        let coordinate = coordinate(engine, node_idx);
+        let coordinate = coordinate(engine, node_idx)?;
         if seen.insert(coordinate.node_id.clone()) {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
@@ -710,7 +710,7 @@ fn source_nodes(engine: &Engine, table_oid: u32, tenant: Option<&str>) -> Vec<u3
         nodes.iter().collect()
     } else {
         (0..engine.node_store.node_count())
-            .filter(|&idx| engine.node_store.table_oid(idx) == table_oid)
+            .filter(|&idx| engine.node_store.table_oid(idx) == Some(table_oid))
             .collect()
     };
     let table_is_tenanted = engine.tenanted_table_oids.contains(&table_oid);
@@ -1128,7 +1128,7 @@ fn node_active(engine: &Engine, node_idx: u32) -> bool {
 
 fn node_table_oid(engine: &Engine, node_idx: u32) -> Option<u32> {
     if node_idx < engine.node_store.node_count() {
-        Some(engine.node_store.table_oid(node_idx))
+        engine.node_store.table_oid(node_idx)
     } else {
         crate::projection::tx_delta::added_node_by_index(node_idx).map(|node| node.table_oid)
     }
@@ -1143,15 +1143,15 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
         target.schema_reversed,
     );
     Ok(GqlRow {
-        source: coordinate(engine, source_idx),
-        target: Some(coordinate(engine, target_idx)),
-        rel_start: Some(coordinate(engine, rel_start_idx)),
-        rel_end: Some(coordinate(engine, rel_end_idx)),
+        source: coordinate(engine, source_idx)?,
+        target: Some(coordinate(engine, target_idx)?),
+        rel_start: Some(coordinate(engine, rel_start_idx)?),
+        rel_end: Some(coordinate(engine, rel_end_idx)?),
         path_nodes: target
             .path_nodes
             .into_iter()
             .map(|node_idx| coordinate(engine, node_idx))
-            .collect(),
+            .collect::<GraphResult<Vec<_>>>()?,
         path_relationships: target
             .path_relationships
             .into_iter()
@@ -1159,8 +1159,8 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
                 let (start_idx, end_idx) = canonical_step_endpoints(&relationship);
                 Ok(GqlPathRelationship {
                     rel_type: edge_type_label(engine, relationship.type_id)?,
-                    start: coordinate(engine, start_idx),
-                    end: coordinate(engine, end_idx),
+                    start: coordinate(engine, start_idx)?,
+                    end: coordinate(engine, end_idx)?,
                 })
             })
             .collect::<GraphResult<Vec<_>>>()?,
@@ -1175,8 +1175,11 @@ fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> 
     let join_node_slots = state
         .node_slots
         .iter()
-        .map(|node| node.map(|node_idx| coordinate(engine, node_idx)))
-        .collect::<Vec<_>>();
+        .map(|node| {
+            node.map(|node_idx| coordinate(engine, node_idx))
+                .transpose()
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
     let path_nodes = join_node_slots
         .iter()
         .filter_map(Clone::clone)
@@ -1191,20 +1194,24 @@ fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> 
         .relationships
         .iter()
         .map(|relationships| {
-            relationships.as_ref().map(|relationships| {
-                let mut nodes = Vec::with_capacity(relationships.len() + 1);
-                if let Some(first) = relationships.first() {
-                    nodes.push(coordinate(engine, first.from_idx));
-                }
-                nodes.extend(
-                    relationships
-                        .iter()
-                        .map(|relationship| coordinate(engine, relationship.to_idx)),
-                );
-                nodes
-            })
+            relationships
+                .as_ref()
+                .map(|relationships| {
+                    let mut nodes = Vec::with_capacity(relationships.len() + 1);
+                    if let Some(first) = relationships.first() {
+                        nodes.push(coordinate(engine, first.from_idx)?);
+                    }
+                    nodes.extend(
+                        relationships
+                            .iter()
+                            .map(|relationship| coordinate(engine, relationship.to_idx))
+                            .collect::<GraphResult<Vec<_>>>()?,
+                    );
+                    Ok(nodes)
+                })
+                .transpose()
         })
-        .collect::<Vec<_>>();
+        .collect::<GraphResult<Vec<_>>>()?;
     let join_path_relationships = state
         .relationships
         .iter()
@@ -1254,8 +1261,8 @@ fn gql_path_relationship(
     let (start_idx, end_idx) = canonical_step_endpoints(relationship);
     Ok(GqlPathRelationship {
         rel_type: edge_type_label(engine, relationship.type_id)?,
-        start: coordinate(engine, start_idx),
-        end: coordinate(engine, end_idx),
+        start: coordinate(engine, start_idx)?,
+        end: coordinate(engine, end_idx)?,
     })
 }
 
@@ -1264,7 +1271,7 @@ fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult
         .path_nodes
         .iter()
         .map(|node_idx| coordinate(engine, *node_idx))
-        .collect::<Vec<_>>();
+        .collect::<GraphResult<Vec<_>>>()?;
     let Some(source) = path_nodes.first().cloned() else {
         return Err(GraphError::GqlExecution {
             reason: "wildcard path state has no source node".to_string(),
@@ -1278,8 +1285,8 @@ fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult
             let (start_idx, end_idx) = canonical_step_endpoints(relationship);
             Ok(GqlPathRelationship {
                 rel_type: edge_type_label(engine, relationship.type_id)?,
-                start: coordinate(engine, start_idx),
-                end: coordinate(engine, end_idx),
+                start: coordinate(engine, start_idx)?,
+                end: coordinate(engine, end_idx)?,
             })
         })
         .collect::<GraphResult<Vec<_>>>()?;
@@ -1301,9 +1308,9 @@ fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult
     })
 }
 
-fn project_optional_row(engine: &Engine, source_idx: u32) -> GqlRow {
-    GqlRow {
-        source: coordinate(engine, source_idx),
+fn project_optional_row(engine: &Engine, source_idx: u32) -> GraphResult<GqlRow> {
+    Ok(GqlRow {
+        source: coordinate(engine, source_idx)?,
         target: None,
         rel_start: None,
         rel_end: None,
@@ -1313,7 +1320,7 @@ fn project_optional_row(engine: &Engine, source_idx: u32) -> GqlRow {
         join_path_nodes: None,
         join_relationships: None,
         join_path_relationships: None,
-    }
+    })
 }
 
 fn canonical_step_endpoints(relationship: &GqlRelationshipStep) -> (u32, u32) {
@@ -1342,17 +1349,31 @@ fn canonical_relationship_endpoints(
     }
 }
 
-fn coordinate(engine: &Engine, node_idx: u32) -> GqlNodeCoordinate {
+fn coordinate(engine: &Engine, node_idx: u32) -> GraphResult<GqlNodeCoordinate> {
     if let Some(node) = crate::projection::tx_delta::added_node_by_index(node_idx) {
-        return GqlNodeCoordinate {
+        return Ok(GqlNodeCoordinate {
             table_oid: node.table_oid,
             node_id: node.primary_key,
-        };
+        });
     }
-    GqlNodeCoordinate {
-        table_oid: engine.node_store.table_oid(node_idx),
-        node_id: engine.node_store.primary_key(node_idx).to_string(),
-    }
+    let table_oid =
+        engine
+            .node_store
+            .table_oid(node_idx)
+            .ok_or_else(|| GraphError::CorruptFile {
+                reason: format!("node index {node_idx} has no table OID metadata"),
+            })?;
+    let node_id =
+        engine
+            .node_store
+            .primary_key(node_idx)
+            .ok_or_else(|| GraphError::CorruptFile {
+                reason: format!("node index {node_idx} has no primary-key metadata"),
+            })?;
+    Ok(GqlNodeCoordinate {
+        table_oid,
+        node_id: node_id.to_string(),
+    })
 }
 
 fn edge_type_label(engine: &Engine, type_id: u8) -> GraphResult<String> {

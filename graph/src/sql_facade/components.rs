@@ -38,7 +38,8 @@ fn connected_components() -> Result<
                 .connected_components()
                 .unwrap_or_else(|err| err.report());
 
-            let rows = connected_components::to_component_rows(&cc_result, &eng.node_store);
+            let rows = connected_components::to_component_rows(&cc_result, &eng.node_store)
+                .unwrap_or_else(|err| err.report());
             rows.into_iter()
                 .map(|r| {
                     (
@@ -260,6 +261,7 @@ fn isolated_nodes(
                 row_offset,
                 max_rows,
             )
+            .unwrap_or_else(|err| err.report())
         });
         let rows = hydrate_component_page(page, hydrate).unwrap_or_else(|err| err.report());
 

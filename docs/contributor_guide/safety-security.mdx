@@ -102,13 +102,13 @@ from `load_graph_file()`.
 | Node active bytes cover `ceil(node_count / 8)` bytes | `validate_section_layout()` and `MmapNodeArrays::new()` |
 | Node table OIDs contain `node_count` aligned `u32` values | Section size/alignment validation |
 | Primary-key offsets contain `node_count + 1` aligned `u64` values | Section size/alignment validation |
-| Primary-key offsets are monotonic and bounded by the PK byte section | `validate_persisted_contents()` |
+| Primary-key offsets start at zero, are monotonic, end at the PK byte length, and select valid UTF-8 | `validate_persisted_contents()` and `MmapNodeArrays::new()` |
 | Forward CSR offsets contain `node_count + 1` aligned `u32` values | Section size/alignment validation |
-| CSR offsets are monotonic and end at `edge_count` | `validate_persisted_contents()` |
-| Every target node index is less than `node_count` | `validate_persisted_contents()` |
+| CSR offsets start at zero, are monotonic, and end at `edge_count` | `validate_persisted_contents()` and `MmapEdgeArrays::new()` |
+| Every target node index is less than `node_count` | `validate_persisted_contents()` and `MmapEdgeArrays::new()` |
 | `type_ids` length equals `edge_count` | Section size validation |
 | `weights` is empty or exactly `edge_count * 4` bytes | Section size validation |
-| `schema_reversed` is exactly `edge_count` bytes of `0` or `1` values | Section size and content validation |
+| `schema_reversed` is exactly `edge_count` bytes of `0` or `1` values | Section validation and `MmapEdgeArrays::new()` |
 | Bincode payload length prefixes stay inside their sections | `validate_length_prefixed_section()` |
 | Edge registry index 0 is the reserved empty label | Loader registry validation |
 | Background worker notify PID is read only while a backend is registering a worker | `launch_build_worker()` and `launch_maintenance_worker()` call PostgreSQL's `MyProcPid` inside an active backend |
@@ -123,6 +123,12 @@ Never construct mmap-backed stores from unvalidated section metadata. The loader
 must validate file size, magic, version, CRC, offsets, section sizes,
 alignment, CSR content, primary-key offsets, and length-prefixed payload bounds
 before constructing pointer metadata.
+
+Mapped-array constructors and their raw parts are crate-private. Safe node
+metadata lookups check the requested index at the dereference site and return
+`None` for out-of-range indexes. Tests exercise these accessors with aligned
+in-memory backing, so the soundness checks do not depend on operating-system
+file mappings.
 
 ## SQL Injection Boundaries
 

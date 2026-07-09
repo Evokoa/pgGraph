@@ -465,8 +465,8 @@ impl Engine {
             idx < self.node_store.node_count()
                 && self.node_store.is_active(idx)
                 && !tx_delta::node_deleted(idx)
-                && self.node_store.table_oid(idx) == table_oid
-                && self.node_store.primary_key(idx) == pk
+                && self.node_store.table_oid(idx) == Some(table_oid)
+                && self.node_store.primary_key(idx) == Some(pk)
         };
         if let Some(idx) = self
             .resolution_delta
@@ -490,8 +490,8 @@ impl Engine {
     pub(crate) fn resolve_existing_node(&self, table_oid: u32, pk: &str) -> Option<u32> {
         let verify = |idx: u32| {
             idx < self.node_store.node_count()
-                && self.node_store.table_oid(idx) == table_oid
-                && self.node_store.primary_key(idx) == pk
+                && self.node_store.table_oid(idx) == Some(table_oid)
+                && self.node_store.primary_key(idx) == Some(pk)
         };
         if let Some(idx) = self
             .resolution_delta
@@ -548,7 +548,9 @@ impl Engine {
         self.table_membership.clear();
         for node_idx in 0..self.node_store.node_count() {
             if self.node_store.is_active(node_idx) {
-                self.insert_table_membership(self.node_store.table_oid(node_idx), node_idx);
+                if let Some(table_oid) = self.node_store.table_oid(node_idx) {
+                    self.insert_table_membership(table_oid, node_idx);
+                }
             }
         }
     }
@@ -584,7 +586,9 @@ impl Engine {
     /// Tombstone an active sync node, materializing mmap-backed arrays first.
     pub fn tombstone_sync_node(&mut self, table_oid: u32, node_idx: u32) -> bool {
         self.materialize_mmap_node_store_for_sync();
-        if self.node_store.is_active(node_idx) && self.node_store.table_oid(node_idx) == table_oid {
+        if self.node_store.is_active(node_idx)
+            && self.node_store.table_oid(node_idx) == Some(table_oid)
+        {
             self.node_store.deactivate(node_idx);
             return true;
         }
@@ -757,11 +761,7 @@ impl Engine {
                 bfs::execute_dfs(&self.node_store, edge_store, &self.filter_index, &config)
             }
         };
-        Ok(bfs::to_traversal_results(
-            &bfs_result,
-            &self.node_store,
-            &self.edge_type_registry,
-        ))
+        bfs::to_traversal_results(&bfs_result, &self.node_store, &self.edge_type_registry)
     }
 
     pub fn push_edge_mutation(&mut self, mutation: EdgeMutation) -> GraphResult<()> {

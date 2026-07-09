@@ -18,6 +18,7 @@
 use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
 use crate::projection::neighbors::{CsrNeighbors, NeighborSource};
+use crate::safety::{GraphError, GraphResult};
 use crate::types::TableOid;
 use std::collections::HashMap;
 
@@ -168,8 +169,16 @@ pub struct ComponentRow {
     pub component_size: u32,
 }
 
-/// Convert ComponentResult into SQL output rows.
-pub fn to_component_rows(result: &ComponentResult, node_store: &NodeStore) -> Vec<ComponentRow> {
+/// Convert [`ComponentResult`] into SQL output rows.
+///
+/// # Errors
+///
+/// Returns [`GraphError::CorruptFile`] when an active component node has no
+/// corresponding node metadata.
+pub fn to_component_rows(
+    result: &ComponentResult,
+    node_store: &NodeStore,
+) -> GraphResult<Vec<ComponentRow>> {
     let node_count = node_store.node_count() as usize;
 
     let mut rows = Vec::with_capacity(node_count);
@@ -178,15 +187,16 @@ pub fn to_component_rows(result: &ComponentResult, node_store: &NodeStore) -> Ve
             continue; // inactive
         }
         let comp_id = result.component[node_idx as usize];
+        let (node_table, node_id) = node_coordinate(node_store, node_idx)?;
         rows.push(ComponentRow {
-            node_table: TableOid(node_store.table_oid(node_idx)),
-            node_id: node_store.primary_key(node_idx).to_string(),
+            node_table,
+            node_id: node_id.to_string(),
             component_id: comp_id,
             component_size: result.component_size(comp_id),
         });
     }
 
-    rows
+    Ok(rows)
 }
 
 pub fn component_size_rows(result: &ComponentResult) -> Vec<(u32, u32)> {
@@ -199,13 +209,19 @@ pub fn component_size_rows(result: &ComponentResult) -> Vec<(u32, u32)> {
     rows
 }
 
+/// Return one page of nodes belonging to `component_id`.
+///
+/// # Errors
+///
+/// Returns [`GraphError::CorruptFile`] when a selected component node has no
+/// corresponding node metadata.
 pub fn component_rows_page(
     result: &ComponentResult,
     node_store: &NodeStore,
     component_id: u32,
     offset: usize,
     limit: usize,
-) -> Vec<ComponentRow> {
+) -> GraphResult<Vec<ComponentRow>> {
     let mut matching_nodes = result
         .component
         .iter()
@@ -221,7 +237,7 @@ pub fn component_rows_page(
             .then_with(|| {
                 node_store
                     .primary_key(left)
-                    .cmp(node_store.primary_key(right))
+                    .cmp(&node_store.primary_key(right))
             })
     });
 
@@ -230,21 +246,30 @@ pub fn component_rows_page(
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|node_idx| ComponentRow {
-            node_table: TableOid(node_store.table_oid(node_idx)),
-            node_id: node_store.primary_key(node_idx).to_string(),
-            component_id,
-            component_size,
+        .map(|node_idx| {
+            let (node_table, node_id) = node_coordinate(node_store, node_idx)?;
+            Ok(ComponentRow {
+                node_table,
+                node_id: node_id.to_string(),
+                component_id,
+                component_size,
+            })
         })
         .collect()
 }
 
+/// Return one page of single-node components.
+///
+/// # Errors
+///
+/// Returns [`GraphError::CorruptFile`] when a selected isolated node has no
+/// corresponding node metadata.
 pub fn isolated_rows_page(
     result: &ComponentResult,
     node_store: &NodeStore,
     offset: usize,
     limit: usize,
-) -> Vec<ComponentRow> {
+) -> GraphResult<Vec<ComponentRow>> {
     let mut isolated_nodes = result
         .component
         .iter()
@@ -265,7 +290,7 @@ pub fn isolated_rows_page(
             .then_with(|| {
                 node_store
                     .primary_key(*left)
-                    .cmp(node_store.primary_key(*right))
+                    .cmp(&node_store.primary_key(*right))
             })
     });
 
@@ -273,13 +298,30 @@ pub fn isolated_rows_page(
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|(component_id, node_idx)| ComponentRow {
-            node_table: TableOid(node_store.table_oid(node_idx)),
-            node_id: node_store.primary_key(node_idx).to_string(),
-            component_id,
-            component_size: 1,
+        .map(|(component_id, node_idx)| {
+            let (node_table, node_id) = node_coordinate(node_store, node_idx)?;
+            Ok(ComponentRow {
+                node_table,
+                node_id: node_id.to_string(),
+                component_id,
+                component_size: 1,
+            })
         })
         .collect()
+}
+
+fn node_coordinate(node_store: &NodeStore, node_idx: u32) -> GraphResult<(TableOid, &str)> {
+    let table_oid = node_store
+        .table_oid(node_idx)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: format!("node index {node_idx} has no table OID metadata"),
+        })?;
+    let node_id = node_store
+        .primary_key(node_idx)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: format!("node index {node_idx} has no primary-key metadata"),
+        })?;
+    Ok((TableOid(table_oid), node_id))
 }
 
 #[cfg(test)]
@@ -525,7 +567,7 @@ mod tests {
         ];
         let es = EdgeStore::from_edges(3, edges, false);
         let result = compute_components(&ns, &es);
-        let rows = to_component_rows(&result, &ns);
+        let rows = to_component_rows(&result, &ns).unwrap();
 
         assert_eq!(rows.len(), 3);
         // A and B share a component
@@ -606,7 +648,7 @@ mod tests {
         let es = EdgeStore::from_edges(3, edges, false);
         let result = compute_components(&ns, &es);
         let component_id = result.component[0];
-        let rows = component_rows_page(&result, &ns, component_id, 0, 1);
+        let rows = component_rows_page(&result, &ns, component_id, 0, 1).unwrap();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].node_id, "A");
@@ -621,7 +663,7 @@ mod tests {
         ns.add_node(200, "B".to_string());
         let es = EdgeStore::from_edges(3, vec![], false);
         let result = compute_components(&ns, &es);
-        let rows = isolated_rows_page(&result, &ns, 1, 1);
+        let rows = isolated_rows_page(&result, &ns, 1, 1).unwrap();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].node_table.0, 100);

@@ -110,7 +110,14 @@ Loader validation rejects:
 | Final CSR offset not equal to edge count | Missing or extra edges |
 | Target node index out of range | Traversal could index invalid node |
 | Primary-key offsets not monotonic or out of bytes | Invalid UTF-8 slice bounds |
+| First/final primary-key offsets do not span the byte section | Missing or unaddressable key bytes |
+| A primary-key offset pair does not select valid UTF-8 | Invalid persisted node identity |
 | Edge registry index 0 not empty | Root edge type invariant broken |
+
+The section-layout validator and the crate-private mapped-array constructors
+both enforce the value invariants used by raw pointer access. This deliberate
+second check keeps malformed in-memory fixtures and future loader call sites
+from constructing a mapped store even if they bypass file parsing.
 
 ## Mmap Lifetime
 
