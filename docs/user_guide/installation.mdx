@@ -406,4 +406,5 @@ If the migration fails (e.g., due to insufficient disk space when moving artifac
 1. **Restore from Backup**: If you dumped `pg_extension_config_dump` prior to upgrade, restore the catalog tables.
 2. **Manual Rebuild**: Run `SELECT * FROM graph.select_graph('default');` followed by `SELECT graph.reset();` and then `SELECT * FROM graph.build();` to recreate the selected graph from your authoritative PostgreSQL source tables.
 3. **Artifact Cleanup**: If old artifact files remain under the previous graph data directory, remove them only after the rebuilt default graph is healthy.
-4. **Log Inspection**: Check the PostgreSQL logs for `PG009` or `PG018` errors during extension update.
+4. **Log Inspection**: Check the PostgreSQL error detail for diagnostics `PG009`
+   or `PG018` during extension update.

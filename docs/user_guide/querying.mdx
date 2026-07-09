@@ -260,7 +260,8 @@ property directly, for example `RETURN o.id AS order_id`, instead of returning
 the whole node. The optional `hydrate := false` SQL argument is a pgGraph
 escape hatch for coordinate-only node objects when callers intentionally want
 the compact `{table, id}` shape. Required hydration is fail-closed: a stale
-graph coordinate whose source row cannot be hydrated raises `PG017`.
+graph coordinate whose source row cannot be hydrated raises SQLSTATE `22000`
+with diagnostic `PG017`.
 
 Other read semantics:
 
@@ -805,7 +806,8 @@ FROM graph.weighted_shortest_path(
 
 Unweighted shortest path includes pending trigger-sync edge overlays after
 `graph.apply_sync()`. Weighted shortest path requires merged weighted CSR data;
-when edge overlays are pending, it fails with `PG018` until `graph.vacuum()` or
+when edge overlays are pending, it fails with SQLSTATE `0A000` and diagnostic
+`PG018` until `graph.vacuum()` or
 `graph.maintenance()` rebuilds the weighted graph.
 
 Weighted path return columns:

@@ -362,7 +362,7 @@ fn gql_wildcard_planner_hostile_forms_have_stable_sqlstate() {
     ] {
         assert_eq!(
             sqlstate_for_error(statement).as_deref(),
-            Some("PG014"),
+            Some("0A000"),
             "unexpected SQLSTATE for {statement}"
         );
     }
@@ -518,7 +518,7 @@ fn gql_hydration_fails_closed_when_source_row_is_not_visible() {
     .expect("hydration SQLSTATE capture failed");
     Spi::run("RESET ROLE").expect("reset hydration rls role failed");
 
-    assert_eq!(sqlstate.as_deref(), Some("PG017"));
+    assert_eq!(sqlstate.as_deref(), Some("22000"));
 }
 
 #[pg_test]
@@ -2572,7 +2572,7 @@ fn gql_create_relationship_requires_mutable_overlay_projection() {
     .expect("source edge row count failed")
     .unwrap_or_default();
 
-    assert_eq!(readonly_sqlstate.as_deref(), Some("PG018"));
+    assert_eq!(readonly_sqlstate.as_deref(), Some("0A000"));
     assert_eq!(source_rows, 0);
 }
 
@@ -2861,7 +2861,7 @@ fn gql_merge_node_without_on_match_does_not_require_update_acl() {
 
     assert_eq!(inserted_id, "u3");
     assert_eq!(matched_id, "u3");
-    assert_eq!(denied_sqlstate.as_deref(), Some("PG002"));
+    assert_eq!(denied_sqlstate.as_deref(), Some("42501"));
 }
 
 #[pg_test]
@@ -2884,8 +2884,8 @@ fn gql_merge_node_requires_identity_and_mutable_overlay() {
          )",
     );
 
-    assert_eq!(readonly_sqlstate.as_deref(), Some("PG018"));
-    assert_eq!(missing_identity_sqlstate.as_deref(), Some("PG017"));
+    assert_eq!(readonly_sqlstate.as_deref(), Some("0A000"));
+    assert_eq!(missing_identity_sqlstate.as_deref(), Some("22000"));
 }
 
 #[pg_test]
@@ -2983,7 +2983,7 @@ fn gql_merge_node_delta_limit_aborts_statement_before_source_insert() {
 
     Spi::run("RESET graph.max_tx_delta_nodes").expect("reset node delta limit failed");
 
-    assert_eq!(sqlstate.as_deref(), Some("PG019"));
+    assert_eq!(sqlstate.as_deref(), Some("54000"));
     assert_eq!(source_count, 0);
     assert_eq!(tx_added_nodes, 0);
 }
@@ -3020,7 +3020,7 @@ fn gql_create_node_delta_limit_aborts_statement_before_source_insert() {
 
     Spi::run("RESET graph.max_tx_delta_nodes").expect("reset node delta limit failed");
 
-    assert_eq!(sqlstate.as_deref(), Some("PG019"));
+    assert_eq!(sqlstate.as_deref(), Some("54000"));
     assert_eq!(source_count, 0);
     assert_eq!(tx_added_nodes, 0);
 }
@@ -3593,7 +3593,7 @@ fn gql_set_property_readonly_projection_reports_sqlstate() {
              )",
     );
 
-    assert_eq!(readonly_sqlstate.as_deref(), Some("PG018"));
+    assert_eq!(readonly_sqlstate.as_deref(), Some("0A000"));
 }
 
 #[pg_test]
@@ -3857,7 +3857,7 @@ fn gql_delete_edge_write_recheck_rejects_stale_endpoint_predicate() {
     .expect("edge row count failed")
     .unwrap_or_default();
 
-    assert_eq!(sqlstate.as_deref(), Some("PG017"));
+    assert_eq!(sqlstate.as_deref(), Some("22000"));
     assert_eq!(edge_rows, 1);
 }
 
@@ -4148,7 +4148,7 @@ fn gql_delete_edge_delta_limit_aborts_before_source_delete() {
 
     Spi::run("RESET graph.max_tx_delta_edges").expect("reset edge delta limit failed");
 
-    assert_eq!(sqlstate.as_deref(), Some("PG019"));
+    assert_eq!(sqlstate.as_deref(), Some("54000"));
     assert_eq!(edge_rows, 1);
     assert_eq!(tx_deleted_edges, 0);
 }
@@ -4273,7 +4273,7 @@ fn gql_detach_delete_removes_incident_edges_before_node() {
     assert_eq!(deleted_user_rows, 0);
     assert_eq!(remaining_user_rows, 1);
     assert_eq!(gql_deleted_visible, 0);
-    assert_eq!(traverse_deleted_sqlstate, "PG010");
+    assert_eq!(traverse_deleted_sqlstate, "P0002");
 }
 
 #[pg_test]
@@ -4320,7 +4320,7 @@ fn gql_detach_delete_delta_limit_rolls_back_source_rows() {
 
     Spi::run("RESET graph.max_tx_delta_nodes").expect("reset node delta limit failed");
 
-    assert_eq!(sqlstate.as_deref(), Some("PG019"));
+    assert_eq!(sqlstate.as_deref(), Some("54000"));
     assert_eq!(user_rows, 1);
     assert_eq!(edge_rows, 1);
 }

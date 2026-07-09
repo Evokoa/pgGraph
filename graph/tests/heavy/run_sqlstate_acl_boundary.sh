@@ -101,22 +101,22 @@ run_sql "CREATE TABLE public.graph_boundary_edges (id BIGSERIAL PRIMARY KEY, fro
 run_sql "INSERT INTO public.graph_boundary_nodes VALUES ('b', 't2', 'Bob', 20, NULL), ('a', 't1', 'Alice', 10, 'b');"
 run_sql "INSERT INTO public.graph_boundary_edges (from_id, to_id) VALUES ('a', 'b');"
 
-expect_sqlstate "PG003" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1);"
+expect_sqlstate "55000" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1);"
 
 run_sql "SELECT graph.add_table('public.graph_boundary_nodes'::regclass, 'id', ARRAY['tenant_id', 'name', 'age']);"
 run_sql "SELECT graph.add_edge('public.graph_boundary_nodes'::regclass, 'friend_id', 'public.graph_boundary_nodes'::regclass, 'id', 'boundary', bidirectional := false);"
 run_sql "SELECT graph.add_filter_column('public.graph_boundary_nodes'::regclass, 'age');"
 run_sql "SELECT * FROM graph.build();"
 
-expect_sqlstate "PG010" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'missing', 1);"
-expect_sqlstate "PG005" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, NULL, '🔥 > 1');"
+expect_sqlstate "P0002" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'missing', 1);"
+expect_sqlstate "22023" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, NULL, '🔥 > 1');"
 
 if has_gql_facade; then
-  expect_sqlstate "PG013" "SELECT * FROM graph.gql('MATCH (');"
-  expect_sqlstate "PG014" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes)-[:boundary*]->(v:graph_boundary_nodes) RETURN u');"
-  expect_sqlstate "PG015" "SELECT * FROM graph.gql('MATCH (u:no_such_label)-[:boundary]->(v:graph_boundary_nodes) RETURN u');"
-  expect_sqlstate "PG016" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes {name: \$name})-[:boundary]->(v:graph_boundary_nodes) RETURN u', '[\"Alice\"]'::jsonb);"
-  expect_sqlstate "PG017" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes)-[:boundary]->(v:graph_boundary_nodes) WHERE u.age > ''old'' RETURN u');"
+  expect_sqlstate "42601" "SELECT * FROM graph.gql('MATCH (');"
+  expect_sqlstate "0A000" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes)-[:boundary*]->(v:graph_boundary_nodes) RETURN u');"
+  expect_sqlstate "22023" "SELECT * FROM graph.gql('MATCH (u:no_such_label)-[:boundary]->(v:graph_boundary_nodes) RETURN u');"
+  expect_sqlstate "22023" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes {name: \$name})-[:boundary]->(v:graph_boundary_nodes) RETURN u', '[\"Alice\"]'::jsonb);"
+  expect_sqlstate "22000" "SELECT * FROM graph.gql('MATCH (u:graph_boundary_nodes)-[:boundary]->(v:graph_boundary_nodes) WHERE u.age > ''old'' RETURN u');"
 elif [[ "$GQL_SQLSTATE_REQUIRED" == "1" ]]; then
   echo "GQL_SQLSTATE_REQUIRED=1 but graph.gql(text,jsonb,boolean) is not installed"
   exit 1
@@ -139,14 +139,14 @@ expect_value_as_role "$ROLE_NAME" "2" "SET graph.boundary_tenant = 't1'; SELECT 
 expect_value_as_role "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM public.graph_boundary_traversal_coords g JOIN public.graph_boundary_nodes n ON n.id = g.node_id;"
 
 expect_sqlstate_as_role "$ROLE_NAME" "42501" "INSERT INTO graph._registered_tables (table_name, id_column) VALUES ('public.nope', 'id');"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT graph.add_table('public.graph_boundary_nodes'::regclass, 'id');"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT * FROM graph.build();"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT * FROM graph.vacuum();"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT * FROM graph.maintenance();"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT graph.reset();"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT graph.enable_sync();"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT * FROM graph.apply_sync();"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT * FROM graph.connected_components();"
-expect_sqlstate_as_role "$ROLE_NAME" "PG002" "SELECT * FROM graph.component_stats();"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT graph.add_table('public.graph_boundary_nodes'::regclass, 'id');"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT * FROM graph.build();"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT * FROM graph.vacuum();"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT * FROM graph.maintenance();"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT graph.reset();"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT graph.enable_sync();"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT * FROM graph.apply_sync();"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT * FROM graph.connected_components();"
+expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT * FROM graph.component_stats();"
 
 echo "SQLSTATE/ACL boundary checks passed on database: $DBNAME"

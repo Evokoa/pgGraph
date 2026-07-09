@@ -1302,7 +1302,7 @@ fn weighted_shortest_path_rejects_pending_edge_overlay_with_pg018() {
          )",
     );
 
-    assert_eq!(sqlstate.as_deref(), Some("PG018"));
+    assert_eq!(sqlstate.as_deref(), Some("0A000"));
     Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
 }
 

@@ -58,7 +58,7 @@ fn default_graph_compatibility_workflow_still_uses_legacy_sql_surface() {
                 hydrate := false
             )"
         ),
-        Some("PG003".to_string())
+        Some("55000".to_string())
     );
 }
 
@@ -121,23 +121,23 @@ fn create_graph_enforces_identity_and_policy_values() {
 
     assert_eq!(
         sqlstate_for_error("SELECT * FROM graph.create_graph('customer_360', namespace := 'analytics')"),
-        Some("PG005".to_string())
+        Some("22023".to_string())
     );
     assert_eq!(
         sqlstate_for_error("SELECT * FROM graph.create_graph('bad_kind', graph_kind := 'team')"),
-        Some("PG005".to_string())
+        Some("22023".to_string())
     );
     assert_eq!(
         sqlstate_for_error("SELECT * FROM graph.create_graph('bad_residency', residency := 'always_loaded')"),
-        Some("PG005".to_string())
+        Some("22023".to_string())
     );
     assert_eq!(
         sqlstate_for_error("SELECT * FROM graph.create_graph('bad_materialization', materialization := 'physical')"),
-        Some("PG005".to_string())
+        Some("22023".to_string())
     );
     assert_eq!(
         sqlstate_for_error("SELECT * FROM graph.create_graph('bad_projection', projection_mode := 'mutable')"),
-        Some("PG005".to_string())
+        Some("22023".to_string())
     );
 }
 
@@ -166,7 +166,7 @@ fn current_graph_selection_is_separate_from_engine_load_state() {
 
     assert_eq!(
         sqlstate_for_error("SELECT * FROM graph.set_current_graph('missing_graph')"),
-        Some("PG005".to_string())
+        Some("22023".to_string())
     );
 }
 
@@ -213,7 +213,7 @@ fn graph_catalog_mutation_requires_admin_privileges() {
     );
     Spi::run("RESET ROLE").expect("reset restricted role failed");
 
-    assert_eq!(create_sqlstate, Some("PG002".to_string()));
+    assert_eq!(create_sqlstate, Some("42501".to_string()));
     assert_eq!(selected_default, "default");
     assert_eq!(direct_write_sqlstate, Some("42501".to_string()));
 }
@@ -421,10 +421,10 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     assert_eq!(reader_current, "secure_graph");
     assert!(reader_nodes >= 1);
     assert_eq!(admin_residency, "warm");
-    assert_eq!(no_graph_sqlstate, Some("PG005".to_string()));
+    assert_eq!(no_graph_sqlstate, Some("22023".to_string()));
     assert_eq!(no_source_current, "secure_graph");
-    assert_eq!(no_source_sqlstate, Some("PG002".to_string()));
-    assert_eq!(reader_residency_sqlstate, Some("PG002".to_string()));
+    assert_eq!(no_source_sqlstate, Some("42501".to_string()));
+    assert_eq!(reader_residency_sqlstate, Some("42501".to_string()));
     assert_eq!(builder_nodes, 2);
     assert!(admin_unloaded);
     assert_eq!(admin_loaded_nodes, 2);
@@ -499,11 +499,11 @@ fn graph_quotas_block_named_graph_creation_before_catalog_state() {
     .expect("quota_cluster_blocked count failed")
     .unwrap_or(-1);
 
-    assert_eq!(hard_sqlstate, Some("PG005".to_string()));
+    assert_eq!(hard_sqlstate, Some("22023".to_string()));
     assert_eq!(blocked_rows, 0);
     assert_eq!(created_under_warning, "quota_warned");
     assert!(warning_usage);
-    assert_eq!(cluster_sqlstate, Some("PG005".to_string()));
+    assert_eq!(cluster_sqlstate, Some("22023".to_string()));
     assert_eq!(cluster_blocked_rows, 0);
 }
 
@@ -605,8 +605,8 @@ fn graph_tenant_defaults_and_conflicts_are_enforced() {
     Spi::run("SET graph.enforce_tenant_scope = off").expect("disable tenant enforcement failed");
 
     assert_eq!(defaulted_rows, 1);
-    assert_eq!(explicit_conflict, Some("PG005".to_string()));
-    assert_eq!(session_conflict, Some("PG005".to_string()));
+    assert_eq!(explicit_conflict, Some("22023".to_string()));
+    assert_eq!(session_conflict, Some("22023".to_string()));
 }
 
 #[pg_test]
@@ -752,7 +752,7 @@ fn graph_residency_controls_auto_load_and_runtime_status() {
         "SELECT * FROM graph.load_graph('resident_graph', namespace := 'app')",
     );
 
-    assert_eq!(cold_auto_load_sqlstate, Some("PG003".to_string()));
+    assert_eq!(cold_auto_load_sqlstate, Some("55000".to_string()));
     assert_eq!(explicit_load_nodes, 2);
     assert_eq!(cold_status, "cold:true:true");
     assert!(unloaded);
@@ -762,7 +762,7 @@ fn graph_residency_controls_auto_load_and_runtime_status() {
     assert_eq!(hot_status, "hot:true");
     assert!(loaded_quota_exceeded);
     assert_eq!(refreshed_loaded_residency, "warm");
-    assert_eq!(quota_sqlstate, Some("PG005".to_string()));
+    assert_eq!(quota_sqlstate, Some("22023".to_string()));
 }
 
 #[pg_test]
@@ -1084,7 +1084,7 @@ fn sync_policies_run_through_visible_durable_jobs() {
     assert_eq!(due_rows, Some(1));
     assert_eq!(due_mode, "hosted");
     let invalid_due_limit = sqlstate_for_prepared_helper("SELECT * FROM graph.run_due_jobs(0)");
-    assert_eq!(invalid_due_limit, Some("PG005".to_string()));
+    assert_eq!(invalid_due_limit, Some("22023".to_string()));
 
     #[cfg(feature = "development")]
     {
@@ -1159,7 +1159,7 @@ fn sync_policies_run_through_visible_durable_jobs() {
     );
     Spi::run("RESET ROLE").expect("reset no-policy role failed");
     assert_eq!(visible_policy_jobs, 0);
-    assert_eq!(named_policy_sqlstate, Some("PG005".to_string()));
+    assert_eq!(named_policy_sqlstate, Some("22023".to_string()));
 
     Spi::run(
         "SELECT graph.set_graph_quota(
@@ -1184,7 +1184,7 @@ fn sync_policies_run_through_visible_durable_jobs() {
     )
     .expect("graph job quota usage query failed")
     .unwrap_or_default();
-    assert_eq!(quota_sqlstate, Some("PG005".to_string()));
+    assert_eq!(quota_sqlstate, Some("22023".to_string()));
     assert_eq!(quota_graph_jobs, 1);
 
     let removed = Spi::get_one::<bool>(&format!(
@@ -1433,8 +1433,8 @@ fn selected_graph_guc_cannot_expose_another_roles_graph() {
         sqlstate_for_prepared_helper("SELECT * FROM graph.registered_tables()");
     Spi::run("RESET ROLE").expect("reset spoof role failed");
 
-    assert_eq!(current_graph_sqlstate, Some("PG005".to_string()));
-    assert_eq!(registered_tables_sqlstate, Some("PG005".to_string()));
+    assert_eq!(current_graph_sqlstate, Some("22023".to_string()));
+    assert_eq!(registered_tables_sqlstate, Some("22023".to_string()));
 }
 
 #[pg_test]
@@ -1455,7 +1455,7 @@ fn drop_graph_rejects_non_empty_graph_with_pggraph_sqlstate() {
 
     assert_eq!(
         sqlstate_for_error("SELECT * FROM graph.drop_graph('non_empty_graph', namespace := 'app')"),
-        Some("PG005".to_string())
+        Some("22023".to_string())
     );
 }
 
@@ -1866,7 +1866,7 @@ fn runtime_selection_does_not_reuse_previous_graph_engine() {
 
     assert_eq!(
         sqlstate_for_error("SELECT * FROM graph.load_graph('runtime_a', namespace := 'app')"),
-        Some("PG003".to_string())
+        Some("55000".to_string())
     );
 
     Spi::run("SELECT graph.build_graph('runtime_a', force_persist := true, graph_namespace := 'app')")
@@ -1947,7 +1947,7 @@ fn runtime_selection_does_not_reuse_previous_graph_engine() {
     assert_eq!(load_a_nodes, 2);
     assert!(!select_b_loaded);
     assert_eq!(load_b_nodes, 1);
-    assert_eq!(stale_engine_sqlstate, Some("PG003".to_string()));
+    assert_eq!(stale_engine_sqlstate, Some("55000".to_string()));
     assert_eq!(loaded_after_set_current, 0);
     assert_eq!(reload_b_nodes, 1);
     assert!(unloaded_b);

@@ -283,7 +283,7 @@ escape hatch. The core unsafe boundary is mmap-backed store construction:
 | `MmapNodeArrays` | Active bytes, OID array, PK offsets, and PK byte ranges are present, aligned, and bounded by the mmap. |
 | `MmapEdgeArrays` | CSR offsets, targets, type IDs, and optional weights are present, aligned, and bounded by the mmap. |
 | `Engine._mmap` | The mmap outlives every NodeStore, forward EdgeStore, and ResolutionIndex lookup that borrows from it. |
-| `raise_graph_error()` | PostgreSQL error FFI is called with stable strings and is treated as non-returning at the SQL boundary. |
+| `GraphError::report()` | A pgrx `ErrorReport` unwinds Rust frames before PostgreSQL emits the standard SQLSTATE and pgGraph diagnostic. |
 
 Detailed rules live in [Safety And Security](./safety-security). Keep rustdoc
 `# Safety` sections and local `// SAFETY:` comments current when touching any

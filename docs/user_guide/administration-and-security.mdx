@@ -103,13 +103,15 @@ ORDER BY p.proname, p.oid::regprocedure::text;
 ## Source Table ACL Checks
 
 Query functions check source-table `SELECT` privileges before accessing graph
-data for the relevant table coordinates. Missing privilege raises `PG002`.
+data for the relevant table coordinates. Missing privilege raises SQLSTATE
+`42501` with diagnostic `PG002`.
 Mapped GQL writes also preflight the privileges they need on source tables:
 `MERGE` requires `SELECT` and `INSERT`, and it requires `UPDATE` only when the
 query includes `ON MATCH SET`.
 
 Graph `read` is necessary but not sufficient for reading source data. A role
-with graph `read` but no source-table `SELECT` still receives `PG002` when a
+with graph `read` but no source-table `SELECT` still receives SQLSTATE `42501`
+with diagnostic `PG002` when a
 query hydrates or otherwise reads source rows. A role with source-table
 `SELECT` but no graph `read` cannot select or query that graph.
 
@@ -118,7 +120,8 @@ query hydrates or otherwise reads source rows. A role with source-table
 When a selected graph has a `tenant` value, pgGraph uses it as the default
 tenant scope for traversal, search, GQL, and Cypher calls. An explicit tenant
 argument or a session tenant from `graph.tenant_setting` must match the
-selected graph tenant; mismatches return `PG005`.
+selected graph tenant; mismatches return SQLSTATE `22023` with diagnostic
+`PG005`.
 
 Resolution order is:
 
@@ -161,30 +164,32 @@ when needed.
 
 ## Error Codes
 
-The extension emits custom SQLSTATEs through PostgreSQL's error reporting API.
+The extension emits standard PostgreSQL SQLSTATEs. Its stable diagnostic code
+appears in `DETAIL` as `pgGraph diagnostic: PGxxx`, allowing applications and
+operators to distinguish pgGraph conditions that share a standard SQLSTATE.
 
-| SQLSTATE | Error | Common fix |
-|---|---|---|
-| `PG001` | Memory limit exceeded | Raise `graph.memory_limit_mb`, reduce registered graph size, or change OOM policy |
-| `PG002` | ACL denied | Grant `SELECT` on the relevant source table or graph admin privilege for admin functions |
-| `PG003` | Graph not built | Run `SELECT * FROM graph.build();` |
-| `PG004` | Edge type limit exceeded | Reduce distinct edge labels; max user labels are 254 |
-| `PG005` | Invalid filter | Register the filter column and use supported operators/types |
-| `PG006` | Build locked | Wait for current build/vacuum/maintenance |
-| `PG008` | Edge buffer full | Run `graph.vacuum()`/`graph.maintenance()` or increase `graph.edge_buffer_size` |
-| `PG009` | Corrupt graph file | Rebuild persisted artifact |
-| `PG010` | Node not found | Check table/primary key and rebuild/apply sync if data changed |
-| `PG011` | Incompatible graph file version | Rebuild artifact with current extension version |
-| `PG012` | Read-only graph state | Inspect `graph.status().read_only_reason`, then rebuild, vacuum, or adjust memory policy |
-| `PG013` | GQL syntax error | Check the query text against the documented GQL subset |
-| `PG014` | Unsupported GQL feature | Rewrite the query using supported GQL compatibility-matrix features |
-| `PG015` | GQL semantic error | Verify labels, relationship types, aliases, and return bindings |
-| `PG016` | GQL parameter error | Pass a JSON object containing every `$parameter` referenced by the query |
-| `PG017` | GQL execution error | Reduce result cardinality, fix invalid runtime values, or rebuild/apply sync if a graph coordinate can no longer hydrate its source row |
-| `PG018` | Unsupported graph operation | Use a supported query shape or merge pending overlays before retrying |
-| `PG019` | Overlay limit exceeded | Commit or roll back the transaction, or raise the relevant overlay GUC |
-| `55000` | Extension disabled | `SET graph.enabled = on` |
-| `XX000` | Internal error | Report with full message and reproduction |
+| SQLSTATE | Diagnostic | Error | Common fix |
+|---|---|---|---|
+| `53200` | `PG001` | Memory limit exceeded | Raise `graph.memory_limit_mb`, reduce registered graph size, or change OOM policy |
+| `42501` | `PG002` | ACL denied | Grant `SELECT` on the relevant source table or graph admin privilege for admin functions |
+| `55000` | `PG003` | Graph not built | Run `SELECT * FROM graph.build();` |
+| `54000` | `PG004` | Edge type limit exceeded | Reduce distinct edge labels; max user labels are 254 |
+| `22023` | `PG005` | Invalid filter | Register the filter column and use supported operators/types |
+| `55P03` | `PG006` | Build locked | Wait for current build/vacuum/maintenance |
+| `54000` | `PG008` | Edge buffer full | Run `graph.vacuum()`/`graph.maintenance()` or increase `graph.edge_buffer_size` |
+| `XX001` | `PG009` | Corrupt graph file | Rebuild persisted artifact |
+| `P0002` | `PG010` | Node not found | Check table/primary key and rebuild/apply sync if data changed |
+| `0A000` | `PG011` | Incompatible graph file version | Rebuild artifact with current extension version |
+| `55000` | `PG012` | Read-only graph state | Inspect `graph.status().read_only_reason`, then rebuild, vacuum, or adjust memory policy |
+| `42601` | `PG013` | GQL syntax error | Check the query text against the documented GQL subset |
+| `0A000` | `PG014` | Unsupported GQL feature | Rewrite the query using supported GQL compatibility-matrix features |
+| `22023` | `PG015` | GQL semantic error | Verify labels, relationship types, aliases, and return bindings |
+| `22023` | `PG016` | GQL parameter error | Pass a JSON object containing every `$parameter` referenced by the query |
+| `22000` | `PG017` | GQL execution error | Fix invalid runtime values, reduce result cardinality, or rebuild/apply sync if a graph coordinate can no longer hydrate its source row |
+| `0A000` | `PG018` | Unsupported graph operation | Use a supported query shape or merge pending overlays before retrying |
+| `54000` | `PG019` | Overlay limit exceeded | Commit or roll back the transaction, or raise the relevant overlay GUC |
+| `55000` | `PG020` | Extension disabled | `SET graph.enabled = on` |
+| `XX000` | `PG000` | Internal error | Report with full message and reproduction |
 
 ## Disable Query Functions
 

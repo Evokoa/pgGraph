@@ -512,6 +512,6 @@ fn row_predicate_subgraphs_are_explicitly_rejected() {
                 '{\"where\":{\"status\":\"active\"}}'::jsonb
             )"
         ),
-        Some("PG018".to_string())
+        Some("0A000".to_string())
     );
 }

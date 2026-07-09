@@ -5887,6 +5887,24 @@ fn test_run_build_job(build_id: &str) -> Option<String> {
 }
 
 #[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_error_unwind")]
+fn test_error_unwind() -> bool {
+    with_panic_boundary("_test_error_unwind()", || {
+        let _probe = safety::TestErrorUnwindProbe::arm();
+        safety::GraphError::InvalidFilter {
+            reason: "error boundary unwind probe".to_string(),
+        }
+        .report()
+    })
+}
+
+#[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_error_unwind_observed")]
+fn test_error_unwind_observed() -> bool {
+    safety::test_error_unwind_observed()
+}
+
+#[cfg(feature = "development")]
 #[pg_extern(schema = "graph", name = "_test_run_maintenance_job")]
 fn test_run_maintenance_job(job_id: &str) -> Option<String> {
     with_panic_boundary("_test_run_maintenance_job()", || {

@@ -24,6 +24,9 @@ gate evidence through signed tags and package publishing.
 
 ### Highlights
 
+- Switched pgGraph errors to standard PostgreSQL SQLSTATEs while retaining the
+  stable `PGxxx` diagnostic in `DETAIL`; the pgrx error boundary now unwinds
+  live Rust frames before PostgreSQL handles the error.
 - Added a durable named-graph catalog with graph creation, selection,
   description, residency, grants, quotas, and metadata inspection APIs.
 - Scoped node registrations, relationship registrations, filter columns, build
@@ -686,8 +689,8 @@ supply-chain policy.
   including `read_only_reason`.
 - `graph.build_status()` and `graph.maintenance_status()` now include
   `progress_phase` and `progress_message`.
-- Sync mutations against an already read-only engine now report `PG012` instead
-  of reusing `PG008`.
+- Sync mutations against an already read-only engine now use diagnostic `PG012`
+  instead of reusing `PG008`.
 
 <Callout type="info">
   Docker users should recreate existing pgGraph Docker volumes to pick up the
@@ -753,8 +756,8 @@ supply-chain policy.
   semantics.
 - Improved memory/status accounting with store-specific heap estimates and a
   conservative logical floor.
-- Preserved `PG008` for edge-buffer capacity breaches and uses `PG012` for later
-  read-only sync mutations.
+- Preserved diagnostic `PG008` for edge-buffer capacity breaches and uses
+  diagnostic `PG012` for later read-only sync mutations.
 - Added missing `SAFETY:` comments on test-only mmap unsafe blocks so clippy
   release gates pass.
 

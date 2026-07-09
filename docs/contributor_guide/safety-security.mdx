@@ -1,39 +1,43 @@
 # Safety And Security
 
 This extension runs inside PostgreSQL backend processes, so safety and security
-bugs can affect database stability. The codebase uses typed errors, explicit
-SQLSTATE emission, ACL checks, schema validation, and narrow unsafe boundaries.
+bugs can affect database stability. The codebase uses typed errors, standard
+PostgreSQL SQLSTATEs, stable pgGraph diagnostics, ACL checks, schema validation,
+and narrow unsafe boundaries.
 
 ## Error Model
 
-`GraphError` maps internal errors to SQLSTATEs:
+`GraphError` maps internal errors to a standard PostgreSQL SQLSTATE and a stable
+pgGraph diagnostic identifier. Clients should branch on the SQLSTATE class and
+use the diagnostic in `DETAIL` when they need pgGraph-specific classification.
 
-| Variant | SQLSTATE |
-|---|---|
-| `Oom` | `PG001` |
-| `AclDenied` | `PG002` |
-| `NotBuilt` | `PG003` |
-| `EdgeTypeLimit` | `PG004` |
-| `InvalidFilter` | `PG005` |
-| `BuildLocked` | `PG006` |
-| `EdgeBufferFull` | `PG008` |
-| `CorruptFile` | `PG009` |
-| `NodeNotFound` | `PG010` |
-| `IncompatibleVersion` | `PG011` |
-| `ReadOnly` | `PG012` |
-| `GqlSyntax` | `PG013` |
-| `GqlUnsupported` | `PG014` |
-| `GqlSemantic` | `PG015` |
-| `GqlParameter` | `PG016` |
-| `GqlExecution` | `PG017` |
-| `UnsupportedOperation` | `PG018` |
-| `Disabled` | `55000` |
-| `Internal` | `XX000` |
+| Variant | SQLSTATE | Diagnostic |
+|---|---|---|
+| `Oom` | `53200` | `PG001` |
+| `AclDenied` | `42501` | `PG002` |
+| `NotBuilt` | `55000` | `PG003` |
+| `EdgeTypeLimit` | `54000` | `PG004` |
+| `InvalidFilter` | `22023` | `PG005` |
+| `BuildLocked` | `55P03` | `PG006` |
+| `EdgeBufferFull` | `54000` | `PG008` |
+| `CorruptFile` | `XX001` | `PG009` |
+| `NodeNotFound` | `P0002` | `PG010` |
+| `IncompatibleVersion` | `0A000` | `PG011` |
+| `ReadOnly` | `55000` | `PG012` |
+| `GqlSyntax` | `42601` | `PG013` |
+| `GqlUnsupported` | `0A000` | `PG014` |
+| `GqlSemantic` | `22023` | `PG015` |
+| `GqlParameter` | `22023` | `PG016` |
+| `GqlExecution` | `22000` | `PG017` |
+| `UnsupportedOperation` | `0A000` | `PG018` |
+| `OverlayLimit` | `54000` | `PG019` |
+| `Disabled` | `55000` | `PG020` |
+| `Internal` | `XX000` | `PG000` |
 
-`GraphError::report()` calls PostgreSQL's error reporting API directly so custom
-SQLSTATEs are visible at the client boundary. The report path tracks the Rust
-caller so PostgreSQL locations point at the SQL facade boundary that emitted the
-error instead of the shared reporting helper.
+`GraphError::report()` constructs a pgrx `ErrorReport` and raises it at
+`ERROR`. pgrx first unwinds the Rust stack, including live destructors, then
+emits the PostgreSQL error above its guard boundary. Do not add direct
+`errfinish()` calls below that boundary.
 
 ## Panic Boundary
 
@@ -89,7 +93,6 @@ Current unsafe areas:
 | `EdgeStore` mmap reads | Raw pointer CSR access |
 | `persistence::load_graph_file()` | Construct mmap and typed pointer metadata |
 | `sql_jobs.rs` background worker launch | Read PostgreSQL backend global `MyProcPid` for worker notification |
-| `safety::raise_graph_error()` | Direct PostgreSQL error API FFI |
 
 ## Unsafe Invariants
 

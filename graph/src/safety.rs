@@ -1,17 +1,113 @@
 //! # Safety — Error handling and crash prevention
 //!
 //! SQL-facing functions use a uniform boundary that maps [`GraphError`] values
-//! to PostgreSQL errors with stable SQLSTATEs. pgrx and PostgreSQL provide the
-//! panic/error boundary; this module owns graph-specific error codes, hints,
-//! and the direct PostgreSQL error-reporting FFI call.
+//! to PostgreSQL errors with standard SQLSTATEs and stable pgGraph diagnostic
+//! codes. pgrx and PostgreSQL provide the panic/error boundary; this module
+//! owns graph-specific diagnostics and actionable hints.
 //!
 //! See: `docs/contributor_guide/safety-security.mdx`
 //! See: `docs/user_guide/troubleshooting.mdx`
 
-use pgrx::pg_sys::AsPgCStr;
-use std::os::raw::{c_char, c_int};
+use pgrx::pg_sys::panic::ErrorReport;
+use pgrx::{PgLogLevel, PgSqlErrorCode};
 
-/// All graph engine errors. Each variant maps to a SQLSTATE error code.
+#[cfg(feature = "development")]
+std::thread_local! {
+    static TEST_ERROR_UNWIND_OBSERVED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only stack guard used to prove that SQL error reporting unwinds Rust
+/// frames before PostgreSQL transfers control to an exception handler.
+#[cfg(feature = "development")]
+pub(crate) struct TestErrorUnwindProbe;
+
+#[cfg(feature = "development")]
+impl TestErrorUnwindProbe {
+    pub(crate) fn arm() -> Self {
+        TEST_ERROR_UNWIND_OBSERVED.set(false);
+        Self
+    }
+}
+
+#[cfg(feature = "development")]
+impl Drop for TestErrorUnwindProbe {
+    fn drop(&mut self) {
+        TEST_ERROR_UNWIND_OBSERVED.set(true);
+    }
+}
+
+#[cfg(feature = "development")]
+pub(crate) fn test_error_unwind_observed() -> bool {
+    TEST_ERROR_UNWIND_OBSERVED.get()
+}
+
+/// Stable pgGraph error identifier included in PostgreSQL error detail.
+///
+/// These identifiers preserve pgGraph-specific classification while the wire
+/// protocol uses standard PostgreSQL SQLSTATE values supported by pgrx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraphDiagnosticCode {
+    Internal,
+    Oom,
+    AclDenied,
+    NotBuilt,
+    EdgeTypeLimit,
+    InvalidFilter,
+    BuildLocked,
+    EdgeBufferFull,
+    CorruptFile,
+    NodeNotFound,
+    IncompatibleVersion,
+    ReadOnly,
+    GqlSyntax,
+    GqlUnsupported,
+    GqlSemantic,
+    GqlParameter,
+    GqlExecution,
+    UnsupportedOperation,
+    OverlayLimit,
+    Disabled,
+}
+
+impl GraphDiagnosticCode {
+    /// Return the stable identifier rendered in PostgreSQL error detail.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Internal => "PG000",
+            Self::Oom => "PG001",
+            Self::AclDenied => "PG002",
+            Self::NotBuilt => "PG003",
+            Self::EdgeTypeLimit => "PG004",
+            Self::InvalidFilter => "PG005",
+            Self::BuildLocked => "PG006",
+            Self::EdgeBufferFull => "PG008",
+            Self::CorruptFile => "PG009",
+            Self::NodeNotFound => "PG010",
+            Self::IncompatibleVersion => "PG011",
+            Self::ReadOnly => "PG012",
+            Self::GqlSyntax => "PG013",
+            Self::GqlUnsupported => "PG014",
+            Self::GqlSemantic => "PG015",
+            Self::GqlParameter => "PG016",
+            Self::GqlExecution => "PG017",
+            Self::UnsupportedOperation => "PG018",
+            Self::OverlayLimit => "PG019",
+            Self::Disabled => "PG020",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GraphErrorClassification {
+    diagnostic: GraphDiagnosticCode,
+    sqlstate: &'static str,
+    postgres_code: PgSqlErrorCode,
+}
+
+/// All graph engine errors.
+///
+/// Each variant maps to a standard PostgreSQL SQLSTATE and a stable
+/// [`GraphDiagnosticCode`].
 ///
 /// See: `docs/user_guide/troubleshooting.mdx`
 #[derive(Debug, thiserror::Error)]
@@ -86,32 +182,130 @@ pub enum GraphError {
 }
 
 impl GraphError {
-    /// Return the SQLSTATE error code string for this error.
+    fn classification(&self) -> GraphErrorClassification {
+        let (diagnostic, sqlstate, postgres_code) = match self {
+            GraphError::Oom { .. } => (
+                GraphDiagnosticCode::Oom,
+                "53200",
+                PgSqlErrorCode::ERRCODE_OUT_OF_MEMORY,
+            ),
+            GraphError::AclDenied { .. } => (
+                GraphDiagnosticCode::AclDenied,
+                "42501",
+                PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+            ),
+            GraphError::NotBuilt => (
+                GraphDiagnosticCode::NotBuilt,
+                "55000",
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ),
+            GraphError::EdgeTypeLimit => (
+                GraphDiagnosticCode::EdgeTypeLimit,
+                "54000",
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            ),
+            GraphError::InvalidFilter { .. } => (
+                GraphDiagnosticCode::InvalidFilter,
+                "22023",
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            ),
+            GraphError::GqlSyntax { .. } => (
+                GraphDiagnosticCode::GqlSyntax,
+                "42601",
+                PgSqlErrorCode::ERRCODE_SYNTAX_ERROR,
+            ),
+            GraphError::GqlUnsupported { .. } => (
+                GraphDiagnosticCode::GqlUnsupported,
+                "0A000",
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ),
+            GraphError::GqlSemantic { .. } => (
+                GraphDiagnosticCode::GqlSemantic,
+                "22023",
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            ),
+            GraphError::GqlParameter { .. } => (
+                GraphDiagnosticCode::GqlParameter,
+                "22023",
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            ),
+            GraphError::GqlExecution { .. } => (
+                GraphDiagnosticCode::GqlExecution,
+                "22000",
+                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
+            ),
+            GraphError::UnsupportedOperation { .. } => (
+                GraphDiagnosticCode::UnsupportedOperation,
+                "0A000",
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ),
+            GraphError::BuildLocked => (
+                GraphDiagnosticCode::BuildLocked,
+                "55P03",
+                PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+            ),
+            GraphError::EdgeBufferFull { .. } => (
+                GraphDiagnosticCode::EdgeBufferFull,
+                "54000",
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            ),
+            GraphError::ReadOnly { .. } => (
+                GraphDiagnosticCode::ReadOnly,
+                "55000",
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ),
+            GraphError::OverlayLimit { .. } => (
+                GraphDiagnosticCode::OverlayLimit,
+                "54000",
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            ),
+            GraphError::CorruptFile { .. } => (
+                GraphDiagnosticCode::CorruptFile,
+                "XX001",
+                PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            ),
+            GraphError::IncompatibleVersion(_) => (
+                GraphDiagnosticCode::IncompatibleVersion,
+                "0A000",
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ),
+            GraphError::NodeNotFound { .. } => (
+                GraphDiagnosticCode::NodeNotFound,
+                "P0002",
+                PgSqlErrorCode::ERRCODE_NO_DATA_FOUND,
+            ),
+            GraphError::Disabled => (
+                GraphDiagnosticCode::Disabled,
+                "55000",
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ),
+            GraphError::Internal(_) => (
+                GraphDiagnosticCode::Internal,
+                "XX000",
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            ),
+        };
+        GraphErrorClassification {
+            diagnostic,
+            sqlstate,
+            postgres_code,
+        }
+    }
+
+    /// Return the stable pgGraph diagnostic code for this error.
     ///
     /// See: `docs/user_guide/troubleshooting.mdx`
+    pub(crate) fn diagnostic_code(&self) -> GraphDiagnosticCode {
+        self.classification().diagnostic
+    }
+
+    /// Return the standard PostgreSQL SQLSTATE string emitted on the wire.
     pub fn sqlstate(&self) -> &'static str {
-        match self {
-            GraphError::Oom { .. } => "PG001",
-            GraphError::AclDenied { .. } => "PG002",
-            GraphError::NotBuilt => "PG003",
-            GraphError::EdgeTypeLimit => "PG004",
-            GraphError::InvalidFilter { .. } => "PG005",
-            GraphError::GqlSyntax { .. } => "PG013",
-            GraphError::GqlUnsupported { .. } => "PG014",
-            GraphError::GqlSemantic { .. } => "PG015",
-            GraphError::GqlParameter { .. } => "PG016",
-            GraphError::GqlExecution { .. } => "PG017",
-            GraphError::UnsupportedOperation { .. } => "PG018",
-            GraphError::BuildLocked => "PG006",
-            GraphError::EdgeBufferFull { .. } => "PG008",
-            GraphError::ReadOnly { .. } => "PG012",
-            GraphError::OverlayLimit { .. } => "PG019",
-            GraphError::CorruptFile { .. } => "PG009",
-            GraphError::IncompatibleVersion(_) => "PG011",
-            GraphError::NodeNotFound { .. } => "PG010",
-            GraphError::Disabled => "55000",
-            GraphError::Internal(_) => "XX000",
-        }
+        self.classification().sqlstate
+    }
+
+    fn postgres_error_code(&self) -> PgSqlErrorCode {
+        self.classification().postgres_code
     }
 
     /// Return the HINT string for this error.
@@ -194,90 +388,25 @@ impl GraphError {
 
     /// Convert this error into a Postgres ERROR via pgrx.
     ///
-    /// Uses Postgres' error reporting API directly:
-    /// - Actual SQLSTATE code on the wire (not generic `P0001`)
-    /// - DETAIL field with human-readable code reference
+    /// Uses pgrx's supported error-reporting boundary:
+    /// - standard PostgreSQL SQLSTATE on the wire;
+    /// - stable pgGraph diagnostic code in `DETAIL`;
     /// - HINT with actionable fix guidance
     ///
     /// SQL facade functions call this at the PostgreSQL error boundary.
     #[track_caller]
     pub fn report(self) -> ! {
-        let sqlstate = self.sqlstate();
+        let sqlstate = self.postgres_error_code();
+        let diagnostic = self.diagnostic_code();
         let hint = self.hint();
-        let detail = format!("SQLSTATE: {}", sqlstate);
+        let detail = format!("pgGraph diagnostic: {}", diagnostic.as_str());
         let msg = self.to_string();
-        let location = std::panic::Location::caller();
-
-        raise_graph_error(
-            make_sqlstate(sqlstate),
-            msg,
-            detail,
-            hint,
-            location.file().to_string(),
-            location.line() as c_int,
-        );
+        ErrorReport::new(sqlstate, msg, "GraphError::report")
+            .set_detail(detail)
+            .set_hint(hint)
+            .report(PgLogLevel::ERROR);
+        unreachable!("pgrx ERROR reporting returned unexpectedly");
     }
-}
-
-/// Encode a 5-character SQLSTATE the same way Postgres' `MAKE_SQLSTATE` does.
-///
-/// `pgrx::PgSqlErrorCode` is an enum containing only Postgres' built-in codes,
-/// so constructing custom `PG00x` values as that enum would be undefined
-/// behavior. Keep this as a raw `c_int` and pass it directly to `errcode()`.
-fn make_sqlstate(code: &str) -> c_int {
-    let b = code.as_bytes();
-    debug_assert_eq!(b.len(), 5, "SQLSTATE must be exactly 5 characters");
-    let encode = |c: u8| -> c_int { (c.wrapping_sub(b'0') as c_int) & 0x3F };
-    encode(b[0])
-        | (encode(b[1]) << 6)
-        | (encode(b[2]) << 12)
-        | (encode(b[3]) << 18)
-        | (encode(b[4]) << 24)
-}
-
-fn raise_graph_error(
-    sqlerrcode: c_int,
-    message: String,
-    detail: String,
-    hint: String,
-    file: String,
-    line: c_int,
-) -> ! {
-    const PERCENT_S: *const c_char = c"%s".as_ptr();
-    const FUNCTION: *const c_char = c"GraphError::report caller".as_ptr();
-    const DEFAULT_DOMAIN: *const c_char = std::ptr::null();
-
-    #[cfg_attr(target_os = "windows", link(name = "postgres"))]
-    unsafe extern "C-unwind" {
-        fn errstart(elevel: c_int, domain: *const c_char) -> bool;
-        fn errcode(sqlerrcode: c_int) -> c_int;
-        fn errmsg(fmt: *const c_char, ...) -> c_int;
-        fn errdetail(fmt: *const c_char, ...) -> c_int;
-        fn errhint(fmt: *const c_char, ...) -> c_int;
-        fn errfinish(filename: *const c_char, lineno: c_int, funcname: *const c_char);
-    }
-
-    let message = message.as_pg_cstr();
-    let detail = detail.as_pg_cstr();
-    let hint = hint.as_pg_cstr();
-    let file = file.as_pg_cstr();
-
-    // SAFETY: These calls mirror pgrx's internal ErrorReport emission path, but
-    // keep the SQLSTATE as a raw Postgres `MAKE_SQLSTATE` integer instead of
-    // forcing it through pgrx's built-in-code enum. The message/detail/hint
-    // pointers are allocated with Postgres `palloc`, so they remain valid until
-    // `errfinish()` transfers control back to Postgres.
-    unsafe {
-        if errstart(pgrx::PgLogLevel::ERROR as c_int, DEFAULT_DOMAIN) {
-            errcode(sqlerrcode);
-            errmsg(PERCENT_S, message);
-            errdetail(PERCENT_S, detail);
-            errhint(PERCENT_S, hint);
-            errfinish(file, line, FUNCTION);
-        }
-    }
-
-    unreachable!("Postgres ERROR reporting returned unexpectedly");
 }
 
 /// Result type alias for graph operations.
@@ -290,7 +419,7 @@ mod tests {
 
     use super::*;
 
-    // ─── SQLSTATE mapping ───
+    // ─── Error classification ───
 
     #[test]
     fn oom_maps_to_pg001() {
@@ -299,7 +428,8 @@ mod tests {
             need_mb: 200,
             limit_mb: 150,
         };
-        assert_eq!(err.sqlstate(), "PG001");
+        assert_eq!(err.diagnostic_code().as_str(), "PG001");
+        assert_eq!(err.sqlstate(), "53200");
     }
 
     #[test]
@@ -307,17 +437,23 @@ mod tests {
         let err = GraphError::AclDenied {
             table: "users".to_string(),
         };
-        assert_eq!(err.sqlstate(), "PG002");
+        assert_eq!(err.diagnostic_code().as_str(), "PG002");
+        assert_eq!(err.sqlstate(), "42501");
     }
 
     #[test]
     fn not_built_maps_to_pg003() {
-        assert_eq!(GraphError::NotBuilt.sqlstate(), "PG003");
+        assert_eq!(GraphError::NotBuilt.diagnostic_code().as_str(), "PG003");
+        assert_eq!(GraphError::NotBuilt.sqlstate(), "55000");
     }
 
     #[test]
     fn edge_type_limit_maps_to_pg004() {
-        assert_eq!(GraphError::EdgeTypeLimit.sqlstate(), "PG004");
+        assert_eq!(
+            GraphError::EdgeTypeLimit.diagnostic_code().as_str(),
+            "PG004"
+        );
+        assert_eq!(GraphError::EdgeTypeLimit.sqlstate(), "54000");
     }
 
     #[test]
@@ -325,42 +461,55 @@ mod tests {
         let err = GraphError::InvalidFilter {
             reason: "bad syntax".to_string(),
         };
-        assert_eq!(err.sqlstate(), "PG005");
+        assert_eq!(err.diagnostic_code().as_str(), "PG005");
+        assert_eq!(err.sqlstate(), "22023");
     }
 
     #[test]
     fn gql_errors_map_to_stable_sqlstates() {
         assert_eq!(
-            GraphError::GqlSyntax { reason: "r".into() }.sqlstate(),
+            GraphError::GqlSyntax { reason: "r".into() }
+                .diagnostic_code()
+                .as_str(),
             "PG013"
         );
         assert_eq!(
-            GraphError::GqlUnsupported { reason: "r".into() }.sqlstate(),
+            GraphError::GqlUnsupported { reason: "r".into() }
+                .diagnostic_code()
+                .as_str(),
             "PG014"
         );
         assert_eq!(
-            GraphError::GqlSemantic { reason: "r".into() }.sqlstate(),
+            GraphError::GqlSemantic { reason: "r".into() }
+                .diagnostic_code()
+                .as_str(),
             "PG015"
         );
         assert_eq!(
-            GraphError::GqlParameter { reason: "r".into() }.sqlstate(),
+            GraphError::GqlParameter { reason: "r".into() }
+                .diagnostic_code()
+                .as_str(),
             "PG016"
         );
         assert_eq!(
-            GraphError::GqlExecution { reason: "r".into() }.sqlstate(),
+            GraphError::GqlExecution { reason: "r".into() }
+                .diagnostic_code()
+                .as_str(),
             "PG017"
         );
     }
 
     #[test]
     fn build_locked_maps_to_pg006() {
-        assert_eq!(GraphError::BuildLocked.sqlstate(), "PG006");
+        assert_eq!(GraphError::BuildLocked.diagnostic_code().as_str(), "PG006");
+        assert_eq!(GraphError::BuildLocked.sqlstate(), "55P03");
     }
 
     #[test]
     fn edge_buffer_full_maps_to_pg008() {
         let err = GraphError::EdgeBufferFull { size: 100000 };
-        assert_eq!(err.sqlstate(), "PG008");
+        assert_eq!(err.diagnostic_code().as_str(), "PG008");
+        assert_eq!(err.sqlstate(), "54000");
     }
 
     #[test]
@@ -369,7 +518,8 @@ mod tests {
             operation: "op".to_string(),
             reason: "reason".to_string(),
         };
-        assert_eq!(err.sqlstate(), "PG018");
+        assert_eq!(err.diagnostic_code().as_str(), "PG018");
+        assert_eq!(err.sqlstate(), "0A000");
     }
 
     #[test]
@@ -379,7 +529,8 @@ mod tests {
             requested: 2,
             limit: 1,
         };
-        assert_eq!(err.sqlstate(), "PG019");
+        assert_eq!(err.diagnostic_code().as_str(), "PG019");
+        assert_eq!(err.sqlstate(), "54000");
         assert!(err.hint().contains("graph.max_tx_delta_nodes"));
     }
 
@@ -388,7 +539,8 @@ mod tests {
         let err = GraphError::ReadOnly {
             reason: "memory_limit".to_string(),
         };
-        assert_eq!(err.sqlstate(), "PG012");
+        assert_eq!(err.diagnostic_code().as_str(), "PG012");
+        assert_eq!(err.sqlstate(), "55000");
     }
 
     #[test]
@@ -396,13 +548,15 @@ mod tests {
         let err = GraphError::CorruptFile {
             reason: "bad magic".to_string(),
         };
-        assert_eq!(err.sqlstate(), "PG009");
+        assert_eq!(err.diagnostic_code().as_str(), "PG009");
+        assert_eq!(err.sqlstate(), "XX001");
     }
 
     #[test]
     fn incompatible_version_maps_to_pg011() {
         let err = GraphError::IncompatibleVersion("outdated".to_string());
-        assert_eq!(err.sqlstate(), "PG011");
+        assert_eq!(err.diagnostic_code().as_str(), "PG011");
+        assert_eq!(err.sqlstate(), "0A000");
     }
 
     #[test]
@@ -411,40 +565,44 @@ mod tests {
             table: "t".to_string(),
             pk: "1".to_string(),
         };
-        assert_eq!(err.sqlstate(), "PG010");
+        assert_eq!(err.diagnostic_code().as_str(), "PG010");
+        assert_eq!(err.sqlstate(), "P0002");
     }
 
     #[test]
     fn disabled_maps_to_55000() {
         assert_eq!(GraphError::Disabled.sqlstate(), "55000");
+        assert_eq!(GraphError::Disabled.diagnostic_code().as_str(), "PG020");
     }
 
     #[test]
     fn internal_maps_to_xx000() {
         let err = GraphError::Internal("boom".to_string());
         assert_eq!(err.sqlstate(), "XX000");
+        assert_eq!(err.diagnostic_code().as_str(), "PG000");
     }
 
     #[test]
-    fn custom_sqlstate_is_encoded_for_wire_protocol() {
-        assert_eq!(make_sqlstate("PG001"), make_sqlstate_for_test(b"PG001"));
-        assert_eq!(make_sqlstate("PG010"), make_sqlstate_for_test(b"PG010"));
-        assert_ne!(
-            make_sqlstate("PG001"),
-            pgrx::PgSqlErrorCode::ERRCODE_RAISE_EXCEPTION as std::os::raw::c_int,
-            "custom SQLSTATEs must not collapse to P0001"
-        );
-    }
-
-    #[test]
-    fn standard_sqlstate_encoding_matches_pgrx_builtin_codes() {
+    fn gql_error_sqlstates_use_standard_postgres_classes() {
         assert_eq!(
-            make_sqlstate("55000"),
-            pgrx::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE as std::os::raw::c_int
+            GraphError::GqlSyntax { reason: "r".into() }.sqlstate(),
+            "42601"
         );
         assert_eq!(
-            make_sqlstate("XX000"),
-            pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR as std::os::raw::c_int
+            GraphError::GqlUnsupported { reason: "r".into() }.sqlstate(),
+            "0A000"
+        );
+        assert_eq!(
+            GraphError::GqlSemantic { reason: "r".into() }.sqlstate(),
+            "22023"
+        );
+        assert_eq!(
+            GraphError::GqlParameter { reason: "r".into() }.sqlstate(),
+            "22023"
+        );
+        assert_eq!(
+            GraphError::GqlExecution { reason: "r".into() }.sqlstate(),
+            "22000"
         );
     }
 
@@ -641,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlstate_codes_are_unique_per_variant() {
+    fn diagnostic_codes_are_unique_per_variant() {
         use std::collections::HashMap;
         let variants: Vec<GraphError> = vec![
             GraphError::Oom {
@@ -680,14 +838,13 @@ mod tests {
         ];
         let mut seen: HashMap<&str, String> = HashMap::new();
         for v in &variants {
-            let code = v.sqlstate();
+            let code = v.diagnostic_code().as_str();
             let name = format!("{:?}", v);
             if let Some(existing) = seen.get(code) {
-                // XX000 (Internal) is the standard Postgres "internal error" code.
-                // It's allowed to be shared because it's the catch-all.
-                if code != "XX000" {
-                    panic!("SQLSTATE {} is used by both {:?} and {}", code, v, existing);
-                }
+                panic!(
+                    "diagnostic code {} is used by both {:?} and {}",
+                    code, v, existing
+                );
             }
             seen.insert(code, name);
         }
@@ -723,16 +880,5 @@ mod tests {
             msg.contains("secret"),
             "AclDenied display should include table"
         );
-    }
-
-    fn make_sqlstate_for_test(code: &[u8; 5]) -> std::os::raw::c_int {
-        let encode = |c: u8| -> std::os::raw::c_int {
-            (std::os::raw::c_int::from(c.wrapping_sub(b'0'))) & 0x3F
-        };
-        encode(code[0])
-            | (encode(code[1]) << 6)
-            | (encode(code[2]) << 12)
-            | (encode(code[3]) << 18)
-            | (encode(code[4]) << 24)
     }
 }

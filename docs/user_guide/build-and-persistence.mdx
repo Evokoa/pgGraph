@@ -144,7 +144,7 @@ allocates the replacement graph. If the estimate exceeds
 
 | `graph.oom_action` | Behavior |
 |---|---|
-| `error` | Raise `PG001` and stop before allocating the engine |
+| `error` | Raise SQLSTATE `53200` with diagnostic `PG001` and stop before allocating the engine |
 | `readonly` | Log a warning, build anyway, and mark the engine read-only |
 
 If the replacement graph fits by itself but the current backend cannot hold old
@@ -171,12 +171,12 @@ at the same time.
 ## Build Locking
 
 Build and vacuum/maintenance rebuild paths coordinate through a build lock. A
-concurrent build or vacuum reports `PG006`.
+concurrent build or vacuum reports SQLSTATE `55P03` with diagnostic `PG006`.
 
 ```text
 session A: graph.build() holds build/vacuum lock
-session B: graph.build() -> PG006
-session C: graph.vacuum() -> PG006
+session B: graph.build() -> 55P03 / PG006
+session C: graph.vacuum() -> 55P03 / PG006
 ```
 
 ## Persistence Files
@@ -253,8 +253,9 @@ rebuilt from the PostgreSQL source tables or handled by an operator.
 
 <Callout type="warning">
 Corrupt or incompatible artifacts are rejected. A corrupt file raises or logs a
-`PG009`-class loader failure depending on the call site; an incompatible file
-uses `PG011`. Rebuild from source tables with `SELECT * FROM graph.build();`.
+SQLSTATE `XX001`/diagnostic `PG009` loader failure depending on the call site;
+an incompatible file uses SQLSTATE `0A000`/diagnostic `PG011`. Rebuild from
+source tables with `SELECT * FROM graph.build();`.
 </Callout>
 
 ## Status Checks

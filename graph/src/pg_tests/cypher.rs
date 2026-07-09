@@ -147,13 +147,13 @@ fn cypher_rejects_unsupported_cypher_only_syntax() {
     reset_and_create_fixtures();
 
     let sqlstate_unwind = sqlstate_for_error("SELECT * FROM graph.cypher('UNWIND [1, 2] AS n RETURN n')");
-    assert_eq!(sqlstate_unwind.as_deref(), Some("PG014"));
+    assert_eq!(sqlstate_unwind.as_deref(), Some("0A000"));
 
     let sqlstate_call = sqlstate_for_error("SELECT * FROM graph.cypher('CALL db.labels()')");
-    assert_eq!(sqlstate_call.as_deref(), Some("PG014"));
+    assert_eq!(sqlstate_call.as_deref(), Some("0A000"));
 
     let sqlstate_ddl = sqlstate_for_error("SELECT * FROM graph.cypher('CREATE INDEX ON :Person(name)')");
-    assert_eq!(sqlstate_ddl.as_deref(), Some("PG014"));
+    assert_eq!(sqlstate_ddl.as_deref(), Some("0A000"));
 }
 
 #[pg_test]
@@ -199,5 +199,5 @@ fn cypher_compatibility_matrix_is_separate_and_honest() {
 fn pgq_public_endpoint_is_permanently_rejected() {
     reset_and_create_fixtures();
     let sqlstate = sqlstate_for_error("SELECT graph.pgq('MATCH (a)')");
-    assert_eq!(sqlstate.as_deref(), Some("PG018"));
+    assert_eq!(sqlstate.as_deref(), Some("0A000"));
 }

@@ -197,13 +197,13 @@ with PL/pgSQL's nested exception machinery.
 
 It covers representative public errors:
 
-| SQLSTATE | Boundary |
-|---|---|
-| `PG003` | Traversal before the graph has been built. |
-| `PG010` | Missing seed node. |
-| `PG005` | Invalid Unicode-heavy filter input. |
-| `55000` | Graph queries disabled by configuration. |
-| `PG002` | Restricted-role access to global analytics. |
+| SQLSTATE | Diagnostic | Boundary |
+|---|---|---|
+| `55000` | `PG003` | Traversal before the graph has been built. |
+| `P0002` | `PG010` | Missing seed node. |
+| `22023` | `PG005` | Invalid Unicode-heavy filter input. |
+| `55000` | `PG020` | Graph queries disabled by configuration. |
+| `42501` | `PG002` | Restricted-role access to global analytics. |
 
 ### Concurrent Sync Stress
 

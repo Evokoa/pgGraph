@@ -139,8 +139,8 @@ if [[ "$build_status" -eq 0 ]]; then
   exit 1
 fi
 
-if ! grep -q "SQLSTATE: PG006" "$WORKDIR/build-while-locked.log"; then
-  echo "graph.build() did not report PG006 while the advisory lock was held"
+if ! grep -q "SQLSTATE: 55P03" "$WORKDIR/build-while-locked.log"; then
+  echo "graph.build() did not report 55P03 while the advisory lock was held"
   cat "$WORKDIR/build-while-locked.log"
   exit 1
 fi
@@ -220,8 +220,8 @@ if [[ "$artifact_build_status" -eq 0 ]]; then
   cat "$WORKDIR/artifact-build-while-locked.log"
   exit 1
 fi
-if ! grep -q "SQLSTATE: PG006" "$WORKDIR/artifact-build-while-locked.log"; then
-  echo "artifact preservation lock test did not report PG006"
+if ! grep -q "SQLSTATE: 55P03" "$WORKDIR/artifact-build-while-locked.log"; then
+  echo "artifact preservation lock test did not report 55P03"
   cat "$WORKDIR/artifact-build-while-locked.log"
   exit 1
 fi
@@ -329,8 +329,8 @@ for idx in 1 2 3; do
     cat "$WORKDIR/concurrent-contender-$idx.log"
     exit 1
   fi
-  if ! grep -q "SQLSTATE: PG006" "$WORKDIR/concurrent-contender-$idx.log"; then
-    echo "concurrent graph.build() contender $idx did not report PG006"
+  if ! grep -q "SQLSTATE: 55P03" "$WORKDIR/concurrent-contender-$idx.log"; then
+    echo "concurrent graph.build() contender $idx did not report 55P03"
     cat "$WORKDIR/concurrent-contender-$idx.log"
     exit 1
   fi
@@ -353,8 +353,8 @@ if [[ "$vacuum_status" -eq 0 ]]; then
   cat "$WORKDIR/concurrent-vacuum.log"
   exit 1
 fi
-if ! grep -q "SQLSTATE: PG006" "$WORKDIR/concurrent-vacuum.log"; then
-  echo "concurrent graph.vacuum() did not report PG006"
+if ! grep -q "SQLSTATE: 55P03" "$WORKDIR/concurrent-vacuum.log"; then
+  echo "concurrent graph.vacuum() did not report 55P03"
   cat "$WORKDIR/concurrent-vacuum.log"
   exit 1
 fi
@@ -374,7 +374,7 @@ if [[ "$owner_status" -ne 0 ]]; then
   exit 1
 fi
 if [[ "$failure_count" -ne 3 ]]; then
-  echo "expected 3 concurrent graph.build() PG006 failures, saw $failure_count"
+  echo "expected 3 concurrent graph.build() 55P03 failures, saw $failure_count"
   exit 1
 fi
 if [[ -e "$graph_tmp_path" ]]; then

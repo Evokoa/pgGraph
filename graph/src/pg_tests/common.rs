@@ -51,6 +51,26 @@ fn create_error_message_helper() {
     .expect("create SQL error message capture helper failed");
 }
 
+fn create_error_detail_helper() {
+    Spi::run(
+        "CREATE OR REPLACE FUNCTION public.graph_test_sql_error_detail(statement text)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $$
+             DECLARE
+                 detail text;
+             BEGIN
+                 EXECUTE statement;
+                 RETURN NULL;
+             EXCEPTION WHEN others THEN
+                 GET STACKED DIAGNOSTICS detail = PG_EXCEPTION_DETAIL;
+                 RETURN detail;
+             END
+             $$",
+    )
+    .expect("create SQL error detail capture helper failed");
+}
+
 fn sql_raises(statement: &str) -> bool {
     create_error_capture_helper();
     Spi::get_one::<bool>(&format!(
@@ -77,6 +97,33 @@ fn sql_error_message(statement: &str) -> Option<String> {
         super::sql_literal(statement)
     ))
     .expect("SQL error message capture query failed")
+}
+
+fn sql_error_detail(statement: &str) -> Option<String> {
+    create_error_detail_helper();
+    Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sql_error_detail({})",
+        super::sql_literal(statement)
+    ))
+    .expect("SQL error detail capture query failed")
+}
+
+#[pg_test]
+fn graph_error_reporting_unwinds_before_postgres_error() {
+    assert_eq!(
+        sqlstate_for_error("SELECT graph._test_error_unwind()"),
+        Some("22023".to_string())
+    );
+    assert_eq!(
+        sql_error_detail("SELECT graph._test_error_unwind()").as_deref(),
+        Some("pgGraph diagnostic: PG005")
+    );
+    assert_eq!(
+        Spi::get_one::<bool>("SELECT graph._test_error_unwind_observed()")
+            .expect("read error unwind probe failed"),
+        Some(true),
+        "GraphError::report must unwind and drop live Rust frames before PostgreSQL ERROR"
+    );
 }
 
 fn explain_source_search_query(property_value: &str, mode: &str, table_oid: u32) -> String {

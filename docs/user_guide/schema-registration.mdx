@@ -173,7 +173,7 @@ SELECT graph.add_edge(
 Edge labels are assigned compact IDs. A graph can use up to 254 distinct
 user-facing labels. The untyped slot and internal sentinel reserve the remaining
 `u8` values, so registering or building a graph that would require another label
-fails cleanly with `PG004`.
+fails cleanly with SQLSTATE `54000` and diagnostic `PG004`.
 
 ## Weighted Edges
 
@@ -414,7 +414,8 @@ SELECT graph.add_table(
 
 Subgraph support is catalog-subset based: create a named graph and register the
 selected tables and relationships into that graph. Arbitrary row-predicate
-subgraphs are rejected with SQLSTATE `PG018`; use PostgreSQL views or source
+subgraphs are rejected with SQLSTATE `0A000` and diagnostic `PG018`; use
+PostgreSQL views or source
 tables when row filtering needs to be part of the source-of-truth model.
 
 Traversal filters are registered separately from searchable properties:

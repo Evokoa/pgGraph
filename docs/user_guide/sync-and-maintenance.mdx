@@ -275,7 +275,8 @@ legacy queued/running/completed/failed subset.
 `graph.edge_buffer_size` limits legacy/backend-local pending edge mutations.
 For persisted `mutable_overlay` graphs, committed edge changes normally use
 durable projection segments instead of this buffer. When the legacy buffer is
-full, the engine enters read-only mode, reports `PG008` at the capacity breach,
+full, the engine enters read-only mode, reports SQLSTATE `54000` with diagnostic
+`PG008` at the capacity breach,
 and exposes `read_only_reason = 'edge_buffer_full'`.
 
 ```sql

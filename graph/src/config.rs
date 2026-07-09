@@ -94,7 +94,7 @@ pub static IDLE_UNLOAD_SECS: GucSetting<i32> = GucSetting::<i32>::new(0);
 // ─── Sync ───
 
 /// Maximum pending edge mutations in the backend-local sync overlay.
-/// When exceeded, graph enters read-only mode (PG008).
+/// When exceeded, graph enters read-only mode (SQLSTATE 54000, diagnostic PG008).
 /// Default: 100000. Range: 1000–10000000.
 pub static EDGE_BUFFER_SIZE: GucSetting<i32> = GucSetting::<i32>::new(100_000);
 

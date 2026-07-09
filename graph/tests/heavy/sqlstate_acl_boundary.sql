@@ -33,8 +33,8 @@ INSERT INTO public.graph_boundary_edges (from_id, to_id) VALUES ('a', 'b');
 DO $$
 BEGIN
     PERFORM * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1);
-    RAISE EXCEPTION 'expected PG003';
-EXCEPTION WHEN SQLSTATE 'PG003' THEN
+    RAISE EXCEPTION 'expected 55000';
+EXCEPTION WHEN SQLSTATE '55000' THEN
     NULL;
 END $$;
 
@@ -46,16 +46,16 @@ SELECT * FROM graph.build();
 DO $$
 BEGIN
     PERFORM * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'missing', 1);
-    RAISE EXCEPTION 'expected PG010';
-EXCEPTION WHEN SQLSTATE 'PG010' THEN
+    RAISE EXCEPTION 'expected P0002';
+EXCEPTION WHEN SQLSTATE 'P0002' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, NULL, '🔥 > 1');
-    RAISE EXCEPTION 'expected PG005';
-EXCEPTION WHEN SQLSTATE 'PG005' THEN
+    RAISE EXCEPTION 'expected 22023';
+EXCEPTION WHEN SQLSTATE '22023' THEN
     NULL;
 END $$;
 
@@ -115,72 +115,72 @@ END $$;
 DO $$
 BEGIN
     PERFORM graph.add_table('public.graph_boundary_nodes'::regclass, 'id');
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM * FROM graph.build();
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM * FROM graph.vacuum();
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM * FROM graph.maintenance();
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM graph.reset();
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM graph.enable_sync();
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM * FROM graph.apply_sync();
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM * FROM graph.connected_components();
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 
 DO $$
 BEGIN
     PERFORM * FROM graph.component_stats();
-    RAISE EXCEPTION 'expected PG002';
-EXCEPTION WHEN SQLSTATE 'PG002' THEN
+    RAISE EXCEPTION 'expected 42501';
+EXCEPTION WHEN SQLSTATE '42501' THEN
     NULL;
 END $$;
 RESET ROLE;

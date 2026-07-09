@@ -81,7 +81,8 @@ requires `graph.mutable_enabled = on`.
 | `graph.projection_retention_generations` | int | `2` | `USERSET` | `1` to `1000` | Minimum valid projection manifest generations retained by GC |
 
 `graph.build()` estimates memory from registered tables and edges before
-constructing the active engine. With `graph.oom_action = 'error'`, it raises `PG001`.
+constructing the active engine. With `graph.oom_action = 'error'`, it raises
+SQLSTATE `53200` with diagnostic `PG001`.
 With `graph.oom_action = 'readonly'`, it logs a warning and marks the built
 engine read-only.
 
@@ -112,7 +113,8 @@ runtime has one backend-local graph engine slot, so the supported range is
 server while still allowing metadata and build operations.
 
 Mapped GQL writes use transaction-local overlays. If a node, edge, or overlay
-memory limit would be exceeded, the current SQL statement aborts with `PG019`
+memory limit would be exceeded, the current SQL statement aborts with SQLSTATE
+`54000` and diagnostic `PG019`
 and PostgreSQL rolls back the source-table DML for that statement.
 
 ```sql

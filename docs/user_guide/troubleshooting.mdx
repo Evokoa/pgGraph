@@ -7,7 +7,8 @@ Use this page to map symptoms to status checks and recovery actions.
 Symptom:
 
 ```text
-SQLSTATE PG003
+SQLSTATE 55000
+DETAIL: pgGraph diagnostic: PG003
 Graph not built. Call graph.build() first.
 ```
 
@@ -29,7 +30,8 @@ SELECT * FROM graph.build();
 Symptom:
 
 ```text
-SQLSTATE PG010
+SQLSTATE P0002
+DETAIL: pgGraph diagnostic: PG010
 Node not found
 ```
 
@@ -114,7 +116,8 @@ Likely causes:
 Symptom:
 
 ```text
-SQLSTATE PG018
+SQLSTATE 0A000
+DETAIL: pgGraph diagnostic: PG018
 Unsupported graph operation
 ```
 
@@ -150,7 +153,7 @@ If a registered column no longer exists, remove or update the registration.
 
 ## Build Fails With Memory Error
 
-Symptom: `PG001`.
+Symptom: SQLSTATE `53200`, diagnostic `PG001`.
 
 Check:
 
@@ -171,7 +174,7 @@ Or reduce registered graph scope.
 
 ## Build Or Vacuum Locked
 
-Symptom: `PG006`.
+Symptom: SQLSTATE `55P03`, diagnostic `PG006`.
 
 Check:
 
@@ -185,7 +188,8 @@ Wait for the current operation or investigate the owning session.
 
 ## Corrupt Or Incompatible Artifact
 
-Symptoms: `PG009` or `PG011`.
+Symptoms: SQLSTATE `XX001`/diagnostic `PG009`, or SQLSTATE
+`0A000`/diagnostic `PG011`.
 
 Fix:
 
@@ -202,7 +206,8 @@ SELECT * FROM graph.build();
 
 ## Edge Buffer Full
 
-Symptom: `PG008`, `PG012`, `read_only = true`, or high `edge_buffer_used`.
+Symptom: diagnostic `PG008` or `PG012`, `read_only = true`, or high
+`edge_buffer_used`. The corresponding SQLSTATE is `54000` or `55000`.
 
 Check:
 
@@ -225,7 +230,7 @@ SELECT * FROM graph.vacuum();
 
 ## ACL Denied
 
-Symptom: `PG002`.
+Symptom: SQLSTATE `42501`, diagnostic `PG002`.
 
 Fix for read queries:
 
@@ -243,18 +248,18 @@ GRANT USAGE, CREATE ON SCHEMA graph TO graph_admin;
 
 Use this matrix when diagnosing complex production failures relating to jobs, quotas, sync, or storage.
 
-| Failure | Stable state | SQLSTATE | Visible location | Recovery action | Read impact |
+| Failure | Stable state | SQLSTATE / diagnostic | Visible location | Recovery action | Read impact |
 |---|---|---|---|---|---|
-| **Sync falls behind** | `sync_status = 'syncing'`, `sync_lag > 0` | `PG018` if the lag surfaces as a read-only guard | `graph.status().sync_lag`, `graph.status().pending_sync_rows`, `graph.jobs()` | Run `graph.run_due_jobs()` or `graph.run_job(job_id)` after confirming the source tables are healthy. | Serves the last valid generation. |
-| **Artifacts are missing** | `graph.projection_status().artifact_validation_state = 'full_rebuild'` | `PG009` | `graph.status().schema_status`, `graph.projection_status().artifact_validation_state` | Run `graph.projection_repair()` or `graph.build()` to publish a fresh artifact. | Reads fail on affected paths until rebuilt. |
-| **Artifact validation fails** | `graph.projection_status().artifact_validation_state = 'targeted_chunk_repair'` | `PG009` | `graph.projection_status().artifact_validation_state` | Run `graph.projection_repair()`; if repair cannot salvage the files, rebuild. | Reads fail on affected paths until repaired. |
+| **Sync falls behind** | `sync_status = 'syncing'`, `sync_lag > 0` | `0A000` / `PG018` if the lag surfaces as an unsupported-operation guard | `graph.status().sync_lag`, `graph.status().pending_sync_rows`, `graph.jobs()` | Run `graph.run_due_jobs()` or `graph.run_job(job_id)` after confirming the source tables are healthy. | Serves the last valid generation. |
+| **Artifacts are missing** | `graph.projection_status().artifact_validation_state = 'full_rebuild'` | `XX001` / `PG009` | `graph.status().schema_status`, `graph.projection_status().artifact_validation_state` | Run `graph.projection_repair()` or `graph.build()` to publish a fresh artifact. | Reads fail on affected paths until rebuilt. |
+| **Artifact validation fails** | `graph.projection_status().artifact_validation_state = 'targeted_chunk_repair'` | `XX001` / `PG009` | `graph.projection_status().artifact_validation_state` | Run `graph.projection_repair()`; if repair cannot salvage the files, rebuild. | Reads fail on affected paths until repaired. |
 | **Disk is full** | `read_only_reason` indicates storage pressure | `53100` | `graph.status().read_only_reason`, `graph.job_runs()` | Free space, then rerun `graph.run_due_jobs()` or `graph.projection_repair()`. | Serves the last valid generation. |
-| **Compaction fails** | `graph.projection_status().artifact_validation_state = 'targeted_chunk_repair'` after a failed compaction run | `PG018` | `graph.projection_status().last_compaction_unix_micros`, `graph.job_runs()` | Fix the underlying artifact problem and rerun `graph.projection_repair()` or `graph.maintenance()`. | Serves the last valid generation. |
-| **Projection ingest fails** | `pending_durable_rows > 0` and `repair_recommended = true` | `PG018` | `graph.projection_status().pending_durable_rows`, `graph.projection_status().repair_recommended` | Repair the projection artifact, then rerun the ingest path. | Serves the last valid generation. |
+| **Compaction fails** | `graph.projection_status().artifact_validation_state = 'targeted_chunk_repair'` after a failed compaction run | `0A000` / `PG018` | `graph.projection_status().last_compaction_unix_micros`, `graph.job_runs()` | Fix the underlying artifact problem and rerun `graph.projection_repair()` or `graph.maintenance()`. | Serves the last valid generation. |
+| **Projection ingest fails** | `pending_durable_rows > 0` and `repair_recommended = true` | `0A000` / `PG018` | `graph.projection_status().pending_durable_rows`, `graph.projection_status().repair_recommended` | Repair the projection artifact, then rerun the ingest path. | Serves the last valid generation. |
 | **A job repeatedly errors** | `graph.jobs().last_status = 'retryable_failed'` or `graph.jobs().last_status = 'permanent_failed'` | `XX000` or a more specific job SQLSTATE | `graph.jobs()`, `graph.job_runs()` | Inspect the most recent run error, correct the source issue, and rerun the job. | Depends on job type. |
-| **A graph exceeds quota** | `graph.graph_quota_usage().exceeded = true` | `PG019` | `graph.graph_quota_usage()` | Raise the quota or shrink graph scope/storage. | New writes, builds, or loads can be blocked. |
+| **A graph exceeds quota** | `graph.graph_quota_usage().exceeded = true` | `54000` / `PG019` | `graph.graph_quota_usage()` | Raise the quota or shrink graph scope/storage. | New writes, builds, or loads can be blocked. |
 | **Background workers unavailable** | `graph.jobs().last_status = 'queued'` | N/A | `graph.jobs()`, `graph.job_runs()` | Restore worker capacity, then run `graph.run_due_jobs()` manually. | Serves the last valid generation. |
-| **Schema/catalog drift** | `schema_status = 'invalid'` and `needs_rebuild = true` | `PG018` | `graph.status().schema_status`, `graph.status().needs_rebuild` | Run `graph.build()` for the selected graph. | Reads fail on affected paths until rebuilt. |
+| **Schema/catalog drift** | `schema_status = 'invalid'` and `needs_rebuild = true` | `0A000` / `PG018` | `graph.status().schema_status`, `graph.status().needs_rebuild` | Run `graph.build()` for the selected graph. | Reads fail on affected paths until rebuilt. |
 
 ## Heavy Validation Commands
 

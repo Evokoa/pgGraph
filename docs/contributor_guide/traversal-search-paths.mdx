@@ -125,7 +125,8 @@ The SQL wrapper returns no rows when:
 | No weight data exists | Weighted path cannot be evaluated |
 
 Missing per-edge weights in a weighted store default to cost `1`.
-When pending edge overlays exist, weighted path search is rejected with `PG018`
+When pending edge overlays exist, weighted path search is rejected with
+SQLSTATE `0A000` and diagnostic `PG018`
 because overlay mutations do not carry edge weights until maintenance merges
 them into the CSR weight store.
 
