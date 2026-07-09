@@ -9,8 +9,8 @@ without your own validation, backup, rollback, and load-testing plan.
 pgGraph is built around a simple launch standard: the most critical correctness,
 durability, safety, and operational paths should be solid first. There is always
 another way to optimize a graph engine, especially inside PostgreSQL, so we are
-launching with the critical paths working and then continuously improving in
-the open.
+tracking gaps in those paths explicitly and continuously hardening them in the
+open before recommending production use.
 </Callout>
 
 This page documents known alpha limitations, next-update hardening work, and
@@ -51,8 +51,8 @@ production use.
 ### SQL Safety and Schema Plumbing
 
 <Callout type="info">
-No currently tracked next-update items remain in this category after dynamic
-table SQL and discovery SQL parameterization work.
+Dynamic table SQL and discovery SQL parameterization are hardened. The P0
+section below tracks the coordinate-only GQL RLS visibility investigation.
 </Callout>
 
 ### Persistence and File Format
@@ -73,18 +73,26 @@ table SQL and discovery SQL parameterization work.
 |---|---|---|---|
 | KI-005 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Current behavior is correctness-gated. Future work should use benchmarks before changing duplicate suppression, overlay indexing, or transaction delta snapshotting. |
 
-## P0: Operational Visibility and Resource Predictability
+## P0: Correctness, Security, Durability, and Resource Bounds
 
 These are the highest-priority public follow-ups because they affect operators
-running larger graphs or higher sync volume.
+running larger graphs or higher sync volume, and because some findings can
+change observable graph correctness or PostgreSQL security boundaries.
 
-<Callout type="info">
-No currently tracked P0 rows remain after `graph.memory_profile()` added
-instance-level sizing visibility for concurrent graph-using backends. Memory
-limits remain per backend; use `graph.memory_profile(concurrent_backends)` for
-capacity planning rather than treating `graph.memory_limit_mb` as a
-cluster-wide hard cap.
-</Callout>
+`graph.memory_profile()` remains useful for capacity planning, but visibility is
+not enforcement. `graph.memory_limit_mb` is not a cluster-wide hard cap, and
+important build, load, query, and maintenance allocations are not yet governed
+by one byte budget.
+
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-012 | Build preflight is not a hard memory bound; `oom_action = 'readonly'` still performs the over-budget construction. | P0 architecture fix | Low-memory rebuild reduces old/new overlap, but filters, resolution, both CSR directions, persistence buffers, stale row estimates, and PostgreSQL temp memory can exceed the estimate. Add a single remaining-memory governor, adaptive byte batches, and out-of-core spill. |
+| KI-013 | mmap load, GQL/path execution, sync, projection reads, compaction, and analytics can allocate outside the build guard. | P0 architecture fix | Persist/mmap inbound CSR and large filter metadata; add query work/byte breakers, lazy scans/neighbor merges, bounded hydration and blocking operators, pinned projection snapshots, and range compaction. |
+| KI-014 | Static review indicates coordinate-only GQL reads can expose topology or identities for source rows hidden by RLS. | P0 reproduce and fix | Table ACL preflight does not filter projected candidates, and `hydrate := false` can skip source-row visibility. Add two-role tests for nodes, relationships, paths, aggregates, and existence, then enforce visibility before topology is observable. |
+| KI-015 | Relationship identity is currently endpoints plus type, so parallel edge rows can collapse or hydrate an arbitrary row. | P0 correctness fix | Persist authoritative source relationship keys through CSR, overlays, paths, writes, sync, compaction, and hydration; remove endpoint/type-only deduplication and `LIMIT 1` ambiguity. |
+| KI-016 | Filter indexes resolve by column name even though registered metadata carries table identity. | P0 correctness fix | Same-named filter columns on different tables can collide or skip registration. Use stable graph/table/attribute identity throughout build, pushdown, persistence, and deltas. |
+| KI-017 | Projection publication is protected by a process-local Rust mutex rather than a cross-PostgreSQL-backend lock. | P0 concurrency fix | Serialize by graph, reload current state inside the lock, compare-and-swap generation/watermark, and add two-backend races. |
+| KI-018 | Persisted replacement is renamed over the serving path before mmap reload validation. | P0 durability fix | Write and validate a generation-specific artifact, catch it up, then atomically switch a small manifest while retaining the previous generation. |
 
 ## P1: Query Performance Follow-Ups
 
@@ -103,13 +111,13 @@ not block use of the current documented SQL surface.
 | ID | Issue | Status | Notes |
 |---|---|---|---|
 | KI-006 | `graph.cypher()` is a narrow openCypher compatibility preview over pgGraph's supported GQL subset, not full openCypher compatibility. | Documented limitation | Keep compatibility rows honest and route broader openCypher expansion through [Roadmap](./roadmap), not this register. |
-| KI-007 | SQL/PGQ remains an internal adapter seam, not a public SQL API. | Deferred public surface | Track public SQL/PGQ exposure in [Roadmap](./roadmap) after PostgreSQL graph-pattern hooks stabilize. |
+| KI-007 | SQL/PGQ remains an internal adapter seam, not a public SQL API. | PostgreSQL 19 integration planning | PostgreSQL 19 documents native property graphs and `GRAPH_TABLE`. Rebase the stale dead-code adapter on the canonical IR, investigate version-gated catalog/interoperation now, and keep its conformance matrix separate from GQL. |
 
 ## P3: Internals and Maintainability
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-008 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | Planned refactor | Highest-priority split candidates are `graph/src/pg_tests/gql.rs`, `graph/src/sql_facade/gql.rs`, `graph/src/query/tests.rs`, `graph/src/engine.rs`, `graph/src/query/semantics.rs`, `graph/src/query/value.rs`, `graph/src/bfs.rs`, and `graph/src/gql/parser.rs`. |
+| KI-008 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | Planned refactor | Start with `sql_facade/admin.rs` (about 5,963 lines), `query/tests.rs`, `pg_tests/gql.rs`, `query/semantics.rs`, `pg_tests/maintenance_admin.rs`, `sql_facade/gql.rs`, `engine.rs`, `query/value.rs`, `persistence.rs`, and `sql_sync.rs`. Split by responsibility inside the pgrx crate first; evaluate a pure core crate only after dependencies are clean. |
 | KI-009 | GQL write weak-path tests can be expanded for more SQLSTATE and rollback scenarios. | Partially hardened | Pgrx coverage now asserts readonly mapped `SET` reports `PG018` and keeps a mapped `SET` type-mismatch source-row preservation guard. Transaction lifecycle scripts still cover mapped `CREATE`, `SET`, and `DELETE` rollback. Additional weak paths should be added close to the code they constrain. |
 | KI-010 | `nixpkgs` and `rust-overlay` lock inputs are stale in environments where `nix` is unavailable. | Deferred tooling refresh | The dependency checker reports these lock inputs, but refreshing them requires a Nix-capable environment to run `nix flake lock --update-input nixpkgs` and `nix flake lock --update-input rust-overlay`, then verify the development shell still exposes the expected Rust, PostgreSQL, and pgrx tooling. |
 
@@ -118,12 +126,12 @@ not block use of the current documented SQL surface.
 Do not use this known-issues register for broad feature wishes that are not
 current limitations. Track these in [Roadmap](./roadmap) instead:
 
-- broader GQL syntax and multi-pattern planning;
-- relationship source-row hydration, relationship property projection, and
-  optional path-variable projection semantics;
+- complete ISO GQL syntax and semantics beyond the current subset;
+- costed multi-pattern planning, streaming execution, relationship property
+  expressions, and optional path-variable projection semantics;
 - a dedicated many-to-many relationship registration helper if post-fix user
   reports show `graph.add_edge()` remains too easy to misuse;
-- public SQL/PGQ exposure;
+- PostgreSQL 19 SQL/PGQ catalog and `GRAPH_TABLE` interoperation;
 - broader openCypher compatibility;
 - semantic-guided search and pgVector ranking;
 - WAL-driven sync;

@@ -1,5 +1,11 @@
 # Out-Of-Core Graph Build Plan
 
+> **Program note:** This focused sketch predates the full codebase review.
+> [Memory Governance And Out-Of-Core Execution](./full-graph-engine/01-memory-governance.md)
+> is now authoritative where the plans differ. It also covers mmap load, query
+> execution, sync, projection compaction, cross-backend publication, source
+> snapshot/watermark correctness, and relationship identity.
+
 ## Goal
 
 Allow `graph.build()` and rebuild workflows to complete under bounded memory by
@@ -55,28 +61,35 @@ Effective memory budget should be:
 
 ```text
 min(
-  graph.memory_limit_mb when set,
-  detected cgroup/container limit * build_memory_target,
-  host memory * build_memory_target
+  configured build cap,
+  graph.memory_limit_mb minus current pgGraph private residency,
+  detected cgroup limit minus current cgroup usage minus safety reserve,
+  host available memory minus safety reserve
 )
 ```
 
-Container/cgroup memory should win over host memory whenever present.
+Container/cgroup remaining memory should win over host memory whenever present.
+Using a percentage of the total cgroup limit is unsafe when PostgreSQL or other
+backends already consume most of that limit.
 
 ## Implementation Phases
 
 ### Phase 1: Budget Detection And Planning
 
 - Add cgroup-aware memory limit detection for Linux containers.
+- Subtract current cgroup/backend residency and a safety reserve.
 - Keep platform fallbacks conservative for macOS and non-cgroup systems.
 - Convert `graph.build_memory_target` into a concrete per-build budget.
+- Capture a coherent PostgreSQL snapshot/catalog fingerprint and source-change
+  watermark before chunk scanning.
 - Expose the resolved build budget in build progress/status output.
 - Add unit tests for cgroup parsing, percentage parsing, and fallback behavior.
 
 ### Phase 2: Disk-Backed Edge Runs
 
 - Scan PostgreSQL source tables in bounded batches.
-- Write edge run files containing compact typed records.
+- Write node, relationship-identity, filter, resolution, outbound-edge, and
+  inbound-edge run files containing compact typed records.
 - Include checksums, schema version, graph id, and build id in run metadata.
 - Bound per-run buffers by the resolved build budget.
 - Add cleanup for abandoned temp runs.
@@ -92,10 +105,13 @@ Container/cgroup memory should win over host memory whenever present.
 
 ### Phase 4: Streaming Artifact Writer
 
-- Write node arrays, edge offsets, targets, weights, filter sections, and
-  resolution index sections directly to the artifact file.
+- Write node arrays, both CSR directions, relationship identities, weights,
+  mmap-friendly filter sections, and resolution sections directly to the
+  artifact file.
 - Avoid constructing a complete owned `Engine` for persisted builds.
-- Publish artifacts atomically only after all sections validate.
+- Write a generation-specific artifact, mmap-validate it, replay captured
+  source changes to a final watermark, then atomically switch the generation
+  manifest under cross-backend serialization.
 - Ensure failed builds leave the previous artifact intact.
 
 ### Phase 5: mmap Load And Rebuild Semantics
