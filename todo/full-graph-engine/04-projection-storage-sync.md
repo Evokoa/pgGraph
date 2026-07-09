@@ -35,12 +35,19 @@ section directory + checksums
 - Relationship records carry stable source mapping and row identity.
 - Parallel edges are preserved; any duplicate suppression uses full identity.
 - Filter descriptors use stable graph/table/attribute identity.
+- Filter base and delta values use one versioned tagged representation that
+  preserves signed integers, booleans, text tokens, dates, timestamps, UUIDs,
+  NULL, and tombstones without narrowing or clamping.
 - Inbound CSR is persisted rather than rebuilt per backend.
 - Large immutable filter/dictionary sections are directly mapped.
 - Node and relationship count/index width is explicit. Decide whether vNext
   widens current `u32` ceilings or documents a hard maximum with early errors.
 - Registry/type limits are explicit and no longer accidental `u8` behavior.
 - All sizes and offsets use checked arithmetic and validate before pointer use.
+- A private parser produces `ValidatedGraphLayout`; only an owning
+  `MappedGraphArtifact` can create safe node/edge stores. Pointer ranges,
+  alignment, CSR value invariants, target bounds, UTF-8, immutability, lifetime,
+  overflow, and endian policy are part of that proof.
 
 Variable metadata should use a pgGraph-owned encoding with explicit evolution,
 not serializer-crate behavior as a durable contract.
@@ -176,6 +183,9 @@ backend-private heap.
 - Parallel relationships remain distinct across every lifecycle path.
 - Same-named filter columns on different tables return correct results before
   and after mmap load, sync, and compaction.
+- Every supported filter value roundtrips equivalently through clean build and
+  sync/segment/restart/reload, including negative, wide, temporal, and UUID
+  boundary values.
 - Concurrent two-backend ingestion cannot overwrite or fork a generation.
 - Failed staged load leaves the last known-good generation byte-for-byte
   current and queryable.
@@ -188,3 +198,6 @@ backend-private heap.
   rebuild.
 - Crash, restart, rollback, reader pin, and GC tests run across supported
   PostgreSQL versions.
+- Out-of-range indexes and malformed mapped layouts return typed errors without
+  panic or undefined behavior under the in-memory Miri backing and PostgreSQL
+  process sanitizer gates.

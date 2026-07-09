@@ -560,7 +560,7 @@ Required local state:
 - The release commit is checked out and `git status --short` is empty.
 - `graph/Cargo.toml`, package metadata, docs, Docker defaults, and release notes
   identify the intended version.
-- `scripts/validate_release.py --tag vX.Y.Z --check-main` passes.
+- `scripts/validate_release.py` passes with `--tag vX.Y.Z --check-main`.
 - A signing key is configured for Git tags. Use the repository's required
   signing backend, such as GPG, SSH signing, or the platform-managed signing
   flow.

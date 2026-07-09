@@ -124,6 +124,11 @@ matches, filters, projections, grouping, ordering, subqueries, and writes.
 Keep a typed internal value model. JSONB is an external SQL encoding, not the
 engine's only data type. Implement GQL null/missing and three-valued logic
 explicitly rather than inheriting accidental serde/JSON behavior.
+RUST-4 in the
+[Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md) defines the
+required `GraphValue` algebra and PostgreSQL differential gates. Decimal/
+numeric and temporal semantics must not pass through `f64` or JSON, and no
+unrepresentable value may silently become JSON null.
 
 Compile path patterns into a reusable automaton/state machine with explicit
 search mode, uniqueness, direction, label/type predicates, capture slots, and

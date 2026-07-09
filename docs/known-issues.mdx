@@ -61,15 +61,21 @@ by one byte budget.
 | KI-017 | Projection publication is protected by a process-local Rust mutex rather than a cross-PostgreSQL-backend lock. | P0 concurrency fix | Serialize by graph, reload current state inside the lock, compare-and-swap generation/watermark, and add two-backend races. |
 | KI-018 | Persisted replacement is renamed over the serving path before mmap reload validation. | P0 durability fix | Write and validate a generation-specific artifact, catch it up, then atomically switch a small manifest while retaining the previous generation. |
 | KI-019 | Mutable GQL writes reject PostgreSQL savepoints/subtransactions and do not yet have a complete isolation-level contract. | P0 transaction fix | Add per-subtransaction delta frames with rollback/release, then gate READ COMMITTED, REPEATABLE READ, and SERIALIZABLE behavior with source-row/projection consistency tests. |
+| KI-020 | Safe mapped-store methods can reach unchecked pointer arithmetic for an invalid node index or persisted CSR offset. | P0 Rust soundness fix | Make access checked/typed and construct owning mapped stores only from a fully validated layout covering ranges, alignment, CSR values, target bounds, UTF-8, overflow, lifetime, immutability, and endian policy. |
+| KI-021 | Custom SQLSTATE reporting calls PostgreSQL `errfinish()` directly below pgrx's guarded error boundary. | P0 Rust/PostgreSQL boundary fix | Unwind live Rust frames through pgrx before PostgreSQL ERROR. Use supported SQLSTATE handling plus typed graph diagnostics, or obtain a sound pgrx arbitrary-SQLSTATE API; never transmute custom values into `PgSqlErrorCode`. |
+| KI-022 | Durable filter projection deltas narrow signed, temporal, large, and UUID values to `Option<u32>`. | P0 correctness fix | Persist a versioned tagged filter value that preserves every registered type, then prove clean-build and sync/segment/reload equivalence at domain boundaries. |
+| KI-023 | Security-definer entrypoints do not declare a minimal explicit search path. | P0 security fix | Add vetted pgrx `#[search_path(...)]` attributes and catalog plus shadow-schema attack tests for every definer function. |
+| KI-024 | Registered source relations are stored and later resolved through names/search path instead of stable OID/regclass identity. | P0 identity/security fix | Resolve and store stable relation identity once, derive names only for display/quoted SQL, and test rename, path changes, drop/recreate, concurrent DDL, and stale OIDs. |
 
-## P1: Query Performance Follow-Ups
+## P1: Transaction And Performance Follow-Ups
 
-These items are expected to improve latency or memory pressure, but they are
-not changes to the public SQL contract.
+These items can affect transaction behavior, latency, or memory pressure, but
+do not change the intended public SQL contract.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
 | KI-005 | Overlay neighbor merging and transaction-delta lookups may be material traversal hot paths on dirty mutable projections. | Measure and close | Benchmark degree, segment depth, transaction inserts/deletes/tombstones, direction, weights, allocations, and p95/p99 with correctness checks. Optimize material regressions or close with an approved regression threshold and retained gate. |
+| KI-025 | Background-worker jobs can return a Rust `GraphResult::Err` normally from a pgrx transaction closure after mutating job state, making partial commit behavior accidental. | P1 transaction fix | Centralize worker transaction policy, distinguish atomic work from intentional progress checkpoints, inject failures in every phase, and prove no unintended commit or stuck `running` job. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 
@@ -85,7 +91,7 @@ not block use of the current documented SQL surface.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-008 | Several implementation and test modules mix unrelated responsibilities, making review and focused weak-path testing harder. | Planned refactor | Split the named admin, query, GQL, engine, persistence, sync, and test hotspots by cohesive ownership inside the pgrx crate first. File size is a signal, not the closing criterion; stable dependency direction and focused testability are. |
+| KI-008 | Several implementation and test modules mix unrelated responsibilities, stringly closed state, raw cross-domain integers, and PostgreSQL/unsafe boundary concerns. | Planned refactor | Split cohesive modules inside the pgrx crate first while introducing canonical enums/newtypes, exact graph values, a pgrx-first PostgreSQL adapter, and an unsafe allowlist. File size is a signal, not the closing criterion. |
 | KI-009 | The supported GQL write surface lacks a finite failure/SQLSTATE and rollback matrix. | Partially hardened | Cover readonly, unmapped/type, constraint, trigger, ACL/RLS, stale/disappeared match, cancellation, rollback, and savepoint failures for every write, and assert both source rows and projection/transaction deltas remain correct. |
 | KI-010 | `nixpkgs` and `rust-overlay` lock inputs are stale in environments where `nix` is unavailable. | Deferred tooling refresh | The dependency checker reports these lock inputs, but refreshing them requires a Nix-capable environment to run `nix flake lock --update-input nixpkgs` and `nix flake lock --update-input rust-overlay`, then verify the development shell still exposes the expected Rust, PostgreSQL, and pgrx tooling. |
 
@@ -124,7 +130,6 @@ current limitations. Track these in [Roadmap](./roadmap) instead:
 
 These are intentionally deferred until measurement shows they matter:
 
-- Avoiding small string allocations in config parsing and UUID parsing.
 - Replacing bitmap serialized-size estimates with native roaring helpers if the
   pinned crate exposes them.
 - Reducing low-level clone counts in builder, traversal, weighted path, and
@@ -133,9 +138,8 @@ These are intentionally deferred until measurement shows they matter:
   allocation work is complete.
 - Cleaning up long internal function signatures when the surrounding traversal
   parameters stabilize.
-- Replacing manual pointer alignment checks with newer standard-library helpers
-  once the supported Rust version makes that clean.
 - Cleaning up padding-bit handling in `active_count()`.
-- Moving from custom parse helpers to `FromStr` for SQL-facing enums.
-- Introducing production newtypes for node indices and edge type IDs after
-  benchmarking the hot paths.
+
+Canonical enums/newtypes, native UUID/OID boundaries, checked conversions, and
+unsafe proof are active correctness work, not benchmark-dependent
+micro-optimizations.

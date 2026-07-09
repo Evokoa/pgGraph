@@ -23,7 +23,7 @@ The current engine already supports the core SQL workflow:
 | Maintenance | Explicit build, persist, load, sync apply, vacuum, stats, and background job entry points. |
 | Sync | Trigger-buffered change capture with explicit foreground or background apply. |
 | Persistence | Atomic `.pggraph` artifacts under PostgreSQL data storage. Immutable forward graph arrays, schema-direction flags, and resolution are read-only mmap-backed on load; reverse CSR and bincode metadata are backend-local heap structures. |
-| Safety | ACL preflight, SQLSTATE mapping, selected traversal circuit breakers, build-memory preflight, and panic-to-PostgreSQL-error boundaries. Hard byte budgets are not yet universal across build, load, query, sync, and compaction. |
+| Safety | ACL preflight, typed error mapping, selected traversal circuit breakers, and build-memory preflight exist. Hard byte budgets are not universal, mapped safe APIs need stronger validated-layout types, and custom SQLSTATE emission must move back behind pgrx's guarded PostgreSQL error boundary. |
 
 ```text
 current stable core
@@ -71,7 +71,7 @@ flowchart LR
 | Planner/runtime | Replace source-order materialization with typed binding-table IR, graph/PostgreSQL statistics, cost/resource planning, streaming operators, and spillable blocking work. |
 | Storage and sync | Persist both CSR directions and stable relationship/filter identities; publish snapshots with cross-backend generation compare-and-swap and source watermarks. |
 | PostgreSQL 19 | Support native `CREATE PROPERTY GRAPH` definitions as an authoritative mapping source without duplicate pgGraph registration; add version-gated catalog, DDL invalidation, security, SQL/PGQ differential, packaging, and CI support while retaining PostgreSQL 14-18 frontends. |
-| Refactoring | Decompose build, projection, binder, executor, evaluator, engine, persistence, SQL facade, sync, and test mega-modules without changing behavior during mechanical splits. |
+| Refactoring and Rust boundaries | Decompose build, projection, binder, executor, evaluator, engine, persistence, SQL facade, sync, and tests while replacing stringly closed state with canonical enums, raw cross-domain integers with production newtypes, JSON/`f64` semantic values with exact graph values, and scattered unsafe/PostgreSQL calls with pgrx-first reviewed adapters. |
 | CI/CD rollout | First gate `cargo fmt --check`, `cargo clippy`, `cargo test`, `cargo doc`, and docs drift checks; next gate `cargo pgrx test`; final gate synthetic/heavy release scripts. |
 | Competitive evidence | Publish checked workload results with latency percentiles, throughput, RSS/PSS, spill, build/load time, sync lag, storage amplification, and equivalent semantics. |
 
@@ -86,7 +86,7 @@ clearer public baseline.
 | Data correctness | Critical baseline landed; P0 follow-ups open | Edge endpoint and exact numeric hydration fixes landed. Parallel relationship identity and same-named filter identity are now tracked as P0 before a full property-multigraph claim. |
 | SQL contract | Complete for the critical path | Weighted shortest paths return stable step rows; search and traversal pagination contracts are documented and tested. |
 | Persistence safety | Critical validation landed; publication follow-up open | PK UTF-8, resolution collisions, mmap bounds, and missing `PGDATA` are validated. Replacement validation-before-switch and cross-backend generation serialization remain P0. |
-| SQL boundary safety | Search hardened; GQL RLS follow-up open | Source search binds user values through SPI parameters. Coordinate-only GQL topology needs a dedicated RLS reproduction and fail-closed visibility gate. |
+| SQL boundary safety | Search hardened; P0 boundary follow-ups open | Source search binds user values through SPI parameters. Coordinate-only GQL topology needs a fail-closed visibility gate; security-definer search paths, OID-stable relation identity, and custom SQLSTATE guard behavior also require explicit fixes. |
 | Sync freshness | Complete for topology reads | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; `graph.query_freshness = 'off'` preserves manual mode. |
 | Scheduler integration | Available | `graph.run_scheduled_maintenance()` is scheduler-safe and documented for `pg_cron` or external schedulers. The Docker image enables `pg_cron` and installs a five-minute maintenance schedule. |
 | Operator diagnostics | Complete for the critical path | `graph.status()`, `graph.sync_health()`, build jobs, and maintenance jobs expose read-only reasons and progress diagnostics. |
@@ -105,8 +105,8 @@ Work is ranked by user impact:
 
 | Priority | Focus | Examples |
 |---|---|---|
-| P0 | Correctness, security, and hard resource bounds | RLS-safe topology, relationship/filter identity, cross-backend publication, validation-first artifacts, and bounded build/load/query/compaction. |
-| P1 | Full engine foundations | Canonical IR, streaming operators, cost/resource planning, mmap-friendly artifact vNext, coherent sync watermarks, and PostgreSQL transaction completeness. |
+| P0 | Correctness, security, soundness, and hard resource bounds | RLS-safe topology, relationship/filter identity, safe validated mmap access, guarded PostgreSQL errors, hardened definer paths, stable relation identity, validation-first artifacts, and bounded build/load/query/compaction. |
+| P1 | Full engine foundations | Canonical enums/newtypes and exact graph values, pgrx-first adapters, canonical IR, streaming operators, cost/resource planning, mmap-friendly artifact vNext, coherent sync watermarks, and PostgreSQL transaction completeness. |
 | P2 | Standards coverage and interoperability | Full ISO GQL slices and a separate PostgreSQL 19 SQL/PGQ adapter/conformance matrix. |
 | P3 | Competitive breadth and maintainability | Analytics workers, WAL sync, semantic guidance, module/core extraction decisions, and measured hot-path optimization. |
 
@@ -114,6 +114,15 @@ The bias is to optimize with evidence, but correctness, security, and hard
 resource boundaries do not wait for a favorable benchmark. Hot-path changes
 need checked workloads showing whether allocations, SPI calls, sorts, clones,
 or lookups are material, plus proof that the bounded fallback remains intact.
+
+Rust type safety and PostgreSQL integration are an explicit engine track. Every
+closed lifecycle/policy/config value becomes a canonical enum after one
+boundary parse; graph identities, planner slots, counts, offsets, generations,
+and memory/work units become production newtypes with checked conversions.
+pgrx-native enum GUCs, UUID/OID datums, search paths, SPI, guards, and worker
+facilities are preferred. Raw PostgreSQL/mmap code is denied by default and
+confined to an allowlist with local proofs, Miri-compatible mapped-layout
+tests, PostgreSQL-process sanitizers, fuzzing, and supported-major gates.
 
 Arena-style allocation is a possible future optimization for bounded query
 scratch space, parser/binder working sets, or traversal/path reconstruction
@@ -142,6 +151,10 @@ authoritative registration source, while keeping SQL/PGQ conformance separate
 from GQL and preserving PostgreSQL 14-18 SQL/GQL frontends. Native
 `GRAPH_TABLE` execution remains delegated to PostgreSQL unless a stable,
 supported integration hook can safely select pgGraph acceleration.
+The pinned pgrx 0.19.1 crates already expose a `pg19` feature, so the immediate
+toolchain task is to add an experimental pgGraph feature/build lane and verify
+the exact PostgreSQL prerelease/GA version before promoting PG19 to the
+supported release matrix.
 
 Full GQL is a completion criterion, not an umbrella label for the current
 subset. Until the conformance ledger is green, docs and releases will identify

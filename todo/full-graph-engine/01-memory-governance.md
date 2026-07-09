@@ -15,6 +15,11 @@ phases. Leases are RAII values; growing Rust collections use `try_reserve` only
 after acquiring a lease. PostgreSQL temporary work and spill bytes are tracked
 separately.
 
+All accounting uses checked integer domain types from the
+[Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md): `ByteCount`,
+`MemoryBudget`, `DiskBudget`, and `WorkUnits`. Allocation decisions never use
+rounded `f64` MiB values; unit conversion is display/config boundary work.
+
 ```text
 ResourceGovernor
   effective private-memory bytes

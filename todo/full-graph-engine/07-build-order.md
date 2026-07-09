@@ -13,9 +13,16 @@ ships before their convergence gates.
 - Add phase-level memory telemetry and production-shaped RSS profiles.
 - Add exact reproductions for coordinate-only RLS, duplicate filter names,
   parallel relationships, concurrent publication, and failed replacement load.
+- Add exact reproductions for out-of-range mapped access, malformed CSR
+  offsets, error-boundary unwinding, durable filter-value type loss,
+  security-definer search-path shadowing, and relation rename/search-path
+  identity.
+- Freeze new unsafe/raw-FFI locations until RUST-00A through RUST-00F in the
+  [Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md) close.
 
 **Exit:** each static P0 finding is reproduced or disproved by a permanent test;
-baseline commands/results are archived.
+baseline commands/results are archived; safe mapped APIs cannot reach UB and
+PostgreSQL errors unwind through the supported pgrx guard.
 
 ## Checkpoint 1A: Security And Identity
 
@@ -74,12 +81,16 @@ the base, and repeated cycles have stable memory/files.
 
 - Split memory, build, projection, binder, evaluator, SQL facade, engine,
   persistence, sync, and test modules in the order in the refactor plan.
+- Complete RUST-2, RUST-3, and RUST-6 from the
+  [Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md): canonical
+  enums, production identity/unit types, pgrx adapters, and unsafe isolation.
 - Establish typed values, graph identities, adapter traits, and canonical
-  binding-table logical IR.
+  binding-table logical IR; raw strings/integers convert once at boundaries.
 - Keep old execution behind equivalence tests while migrating.
 
 **Exit:** dependency direction is acyclic, mega-facades are thin, and core
-planning tests do not need SPI.
+planning tests do not need SPI. Closed state is not stringly, unsafe is
+allowlisted, and compile-fail tests prevent cross-domain ID/slot mixups.
 
 ## Checkpoint 5: Streaming Costed Runtime
 
@@ -104,6 +115,8 @@ Implement conformance-registry slices in dependency order:
 
 Each slice includes parser, binder, optimizer, executor, resource behavior,
 security, transactions, tests, explain, and docs before the next slice.
+The first slice implements RUST-4's exact `GraphValue`; JSON/`f64` is not the
+semantic value layer.
 
 **Exit:** every applicable requirement in the selected ISO GQL edition is green,
 with no hand-maintained matrix drift or compatibility wording that overstates
@@ -111,6 +124,9 @@ support.
 
 ## Checkpoint 7: PostgreSQL 19 SQL/PGQ
 
+- Add the `pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]` crate feature and
+  experimental build/install/test lane available in pinned pgrx 0.19.1;
+  promote it to supported only after the PG19 release/package matrix is green.
 - Complete [PG19-0 through PG19-5](./08-postgresql-19-property-graphs.md):
   toolchain, native catalog adapter, attach/build/invalidation, query
   interoperation, security semantics, and release support.
@@ -162,6 +178,8 @@ At every checkpoint:
 - update [the public backlog closure ledger](./09-public-backlog-closure.md) and
   graduate, retire, reject, or trigger-defer the completed public row;
 - run formatting, clippy, unit, affected pgrx, docs, and relevant heavy gates;
+- run the enum/type drift checks, unsafe/raw-FFI allowlist, checked-cast audit,
+  and affected Miri/sanitizer/fuzz gates from the Rust boundary plan;
 - record exact test and benchmark commands/results;
 - make format/SQL compatibility and rollback impact explicit;
 - commit coherent reviewable units using repository commit conventions;

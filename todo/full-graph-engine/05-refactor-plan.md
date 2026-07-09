@@ -10,6 +10,11 @@ Do not combine broad file moves with semantic feature work. Each split should
 have a mechanical commit, unchanged tests, and a small follow-up commit for
 new behavior.
 
+The [Rust type-safety and pgrx boundary plan](./10-rust-type-safety-pgrx-boundaries.md)
+owns enum/newtype migration, exact values, unsafe isolation, and pgrx-first
+integration. Its release blockers run before this mechanical decomposition;
+checkpoint 4 completes the structural work they require.
+
 ## Dependency Direction
 
 ```text
@@ -31,7 +36,37 @@ narrow traits and own snapshots, roles, RLS checks, DML, catalog invalidation,
 and SQLSTATE translation. Persistence and projection code depend on typed
 storage identities, not the SQL facade.
 
+Closed values are converted into canonical enums once. OIDs, UUIDs, graph and
+planner identities, counts, offsets, generations, and byte/work quantities use
+domain newtypes. Raw PostgreSQL ABI types and serialized primitives do not
+cross adapter boundaries.
+
 ## Ordered Module Splits
+
+### 0. Domain types and PostgreSQL adapters
+
+```text
+domain/
+  identity.rs
+  state.rs
+  value.rs
+  units.rs
+  error.rs
+postgres/
+  relation.rs
+  guc.rs
+  datum.rs
+  error.rs
+  acl.rs
+  callbacks.rs
+  bgworker_tx.rs
+  ffi.rs
+```
+
+Start with the soundness/security blockers in the Rust boundary plan. Define
+the adapter dependency rule and raw-FFI allowlist before moving modules so the
+refactor cannot spread `pg_sys`, enum-like strings, raw IDs, or unsafe pointer
+contracts into new locations.
 
 ### 1. Memory
 
@@ -215,8 +250,10 @@ persistence/
 `format` owns versioned constants and checked section descriptors; writer and
 reader share those types but not control flow. `validate` is pure where
 possible and runs before mapped stores are installed. `mmap` contains the
-minimal documented unsafe pointer boundary. Compatibility/rebuild policy lives
-in one module rather than branching throughout load/write code.
+minimal documented unsafe pointer boundary and returns an owning
+`MappedGraphArtifact` built only from `ValidatedGraphLayout`. Compatibility/
+rebuild policy lives in one module rather than branching throughout load/write
+code.
 
 ## Test Decomposition
 
@@ -247,15 +284,17 @@ Until then, one crate with enforced module boundaries is lower risk.
 ## Refactor Checkpoints
 
 1. Add dependency/lint rules and a module ownership map.
-2. Centralize memory accounting and policy.
-3. Split publication/generation code and add two-backend tests.
-4. Split build coordinator and strategies.
-5. Split GQL binder and test modules without semantic change.
-6. Introduce canonical typed IR and adapter traits.
-7. Migrate read operators one vertical slice at a time.
-8. Migrate hydration/visibility and then write operators.
-9. Thin admin/GQL/sync SQL facades.
-10. Re-evaluate crate extraction with compile-time evidence.
+2. Close RUST-00A through RUST-00F and establish typed PostgreSQL adapters.
+3. Centralize memory accounting and policy with `ByteCount`/budget types.
+4. Replace closed string state and raw cross-domain IDs with canonical types.
+5. Split publication/generation code and add two-backend tests.
+6. Split build coordinator and strategies.
+7. Split GQL binder and test modules without semantic change.
+8. Introduce canonical typed IR and `GraphValue` adapter traits.
+9. Migrate read operators one vertical slice at a time.
+10. Migrate hydration/visibility and then write operators.
+11. Thin admin/GQL/sync SQL facades.
+12. Re-evaluate crate extraction with compile-time evidence.
 
 ## Acceptance Gates
 
@@ -267,6 +306,12 @@ Until then, one crate with enforced module boundaries is lower risk.
   narrow unit without the mega-module.
 - No core planner/executor/storage module depends on `sql_facade`.
 - No circular module ownership is hidden behind broad `use super::*` imports.
+- Core/runtime/storage modules contain no enum-like string state, raw
+  PostgreSQL ABI type, or interchangeable graph/planner/unit primitive.
+- Unsafe code and raw PostgreSQL calls appear only in the reviewed allowlist;
+  safe mapped stores can be constructed only from validated owning layouts.
+- pgrx enum GUC, UUID/OID, search-path, SPI, datum, guard, and background-worker
+  facilities are used at the PostgreSQL boundary where they fit.
 - Historical phase names are removed from durable errors/docs.
 - Public compatibility tables are generated from conformance metadata.
 - File size is a signal, not a target; do not split cohesive code merely to

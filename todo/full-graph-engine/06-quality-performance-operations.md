@@ -26,6 +26,10 @@ fuzz, fault, and stress suites.
 - CSR and relationship identity invariants, including parallel edges;
 - filter identity across same-named columns and tables;
 - artifact layout, checked arithmetic, checksums, corrupt/truncated inputs;
+- enum/newtype roundtrips, compile-fail cross-domain ID/slot checks, exact
+  `GraphValue` coercion, and checked capacity/unit boundaries;
+- validated mapped-layout access through one aligned in-memory backing, with
+  out-of-range indexes and malformed CSR offsets;
 - budget lease conservation, pressure transitions, and adaptive batches;
 - delta normalization, subtransaction frames, generation CAS, and idempotency.
 
@@ -34,6 +38,8 @@ fuzz, fault, and stress suites.
 - GQL and compatibility parser token/AST fuzzing;
 - semantic/binder fuzzing with valid and invalid generated catalogs;
 - artifact, segment, manifest, and spill decoder fuzzing;
+- validated mapped ranges/offsets, tagged filter values, and endian-policy
+  fuzzing without ABI-incompatible PostgreSQL stubs;
 - path automaton and expression evaluator differential fuzzing;
 - state-machine fuzzing for sync, publish, crash, retry, and GC.
 
@@ -44,11 +50,16 @@ Fuzz targets for pure logic should not need a live PostgreSQL process.
 - every supported PostgreSQL major version;
 - ACL/RLS matrix across owner, granted, restricted, SECURITY DEFINER/INVOKER
   boundaries, hydration modes, nodes, edges, paths, counts, and errors;
+- explicit security-definer search paths, shadow-schema attacks, native OID/
+  UUID/enum-GUC roundtrips, relation rename/drop/recreate, and exact
+  SQLSTATE/error-guard behavior;
 - READ COMMITTED, REPEATABLE READ, SERIALIZABLE, savepoint rollback/release;
 - triggers, constraints, generated columns, partitions, composite keys, JSONB,
   temporal/numeric values, and catalog drift;
 - two-backend build, ingest, publication, reader pin, and DDL/DML races;
 - crash/restart and artifact rollback.
+- background-worker failure injection proving explicit atomic/checkpoint commit
+  semantics and no stuck job state.
 
 ## Memory And Fault Gates
 
@@ -66,6 +77,12 @@ Run in cgroup-limited containers with nonzero enforcement thresholds:
 Inject ENOSPC, quota exhaustion, partial write, fsync/rename failure, checksum
 corruption, interrupt, backend termination, stale generation, and catalog
 change. The previous serving generation must remain valid.
+
+Run targeted Miri over pure validation/access using the aligned in-memory
+mapped backing. Run ASan/LSan or Valgrind against an actual PostgreSQL process
+for mmap load/traversal/reload, error guards, transaction callbacks, and
+background workers. CI also enforces the unsafe/raw-FFI allowlist and denies
+new enum-like string GUCs, signed OID paths, or unchecked narrowing casts.
 
 ## Correctness And Conformance Gates
 

@@ -4,7 +4,9 @@
 
 This static Rust review covered build/load, GQL parse-to-execute, hydration,
 relationship representation, filter indexes, projection publication and
-compaction, public planning docs, and the largest implementation/test modules.
+compaction, Rust domain types, GQL values, unsafe/mmap and PostgreSQL FFI
+boundaries, pgrx usage, public planning docs, and the largest
+implementation/test modules.
 
 The pre-existing low-memory patch was validated before commit with:
 
@@ -190,6 +192,55 @@ last good path.
 Evidence: `graph/src/persistence.rs:611-624` and
 `graph/src/sql_build.rs:89-128`.
 
+### Rust soundness and PostgreSQL boundary blockers
+
+Three safe/unsafe boundaries do not currently meet Rust's safety contract:
+
+- `NodeStore::table_oid()` is safe but its mmap branch dereferences
+  `oid_ptr.add(node_idx)` without checking `node_idx < node_count`.
+- mapped edge constructors require valid pointer ranges but do not encode
+  validated CSR offset values; safe weighted/schema neighbor access can reuse
+  an invalid offset for pointer arithmetic;
+- custom SQLSTATE emission calls PostgreSQL `errfinish()` directly below
+  pgrx's top-level guard, allowing PostgreSQL longjmp semantics to cross live
+  Rust frames.
+
+Evidence:
+
+- `graph/src/node_store.rs:315-322`
+- `graph/src/edge_store.rs:68-141`
+- `graph/src/edge_store.rs:522-597`
+- `graph/src/safety.rs:238-280`
+
+Two PostgreSQL boundary findings are also P0:
+
+- security-definer entrypoints do not declare an explicit hardened pgrx search
+  path;
+- registered relations are persisted/re-resolved through names and search
+  path rather than stable OID/regclass identity.
+
+Evidence:
+
+- `graph/src/sql_facade/`
+- `graph/sql/bootstrap.sql:75-91`
+- `graph/src/catalog/validate.rs:132-190`
+- `graph/src/builder.rs:341`
+
+### Durable filter values lose their type
+
+The in-memory filter model supports signed integers, booleans, text tokens,
+dates, timestamps, and UUIDs. Durable projection ingestion reduces updates to
+`Option<u32>`: negative values are clamped, large values narrow, and UUID
+updates are dropped. Segment replay therefore cannot be equivalent to a clean
+build for the supported value domain.
+
+Evidence:
+
+- `graph/src/filter_index.rs:42-57`
+- `graph/src/projection/ingest.rs:32-48`
+- `graph/src/sql_sync.rs:1383-1391`
+- `graph/src/projection/segment.rs:116-126`
+
 ## P1 Architecture Findings
 
 - **Source-order planning:** multi-pattern plans execute recursively from
@@ -200,6 +251,18 @@ Evidence: `graph/src/persistence.rs:611-624` and
 - **Representation ceilings:** node/edge indexes use `u32`; relationship types
   use `u8` and reject more than 255 entries. Keep these explicit or widen them
   in an artifact migration.
+- **Disabled production type safety:** `NodeIdx` and `EdgeTypeId` exist only in
+  test/development builds, while production passes interchangeable `u32`/`u8`
+  values and performs unchecked narrowing casts.
+- **Stringly PostgreSQL boundaries:** closed GUCs, graph/job/policy/catalog
+  states, UUID identities, error reasons, and engine status are parsed or
+  stored as strings despite pgrx enum, UUID, and OID support.
+- **Incomplete GQL value model:** decimal literals, parameters, hydration, and
+  aggregation use `f64`/JSON as semantic storage, which cannot preserve exact
+  PostgreSQL numeric and temporal behavior.
+- **Background-worker transaction ambiguity:** a plain Rust `Result::Err`
+  returned from a pgrx transaction closure can allow the closure to return
+  normally and commit earlier job mutations.
 - **Transaction completeness:** mutable graph writes reject savepoints instead
   of maintaining per-subtransaction delta frames; isolation-level behavior
   needs two-session gates.
@@ -213,6 +276,11 @@ Primary evidence:
 - `graph/src/query/lower.rs:50-80`
 - `graph/src/query/execute.rs:240-270`
 - `graph/src/sql_facade/gql.rs:3015-3122`
+- `graph/src/types.rs:20-64`
+- `graph/src/config.rs:110-147`
+- `graph/src/gql/ast.rs:488-500`
+- `graph/src/query/lower.rs:434-443`
+- `graph/src/sql_facade/admin.rs:1858-1866`
 - `graph/src/engine.rs:436-444`
 - `graph/src/projection/tx_delta.rs:650-699`
 - `graph/src/node_store.rs:397-413`
@@ -249,7 +317,9 @@ one conformance registry.
 - Edge endpoint resolution already uses bounded PostgreSQL spool batches.
 - Forward CSR, node arrays, PK bytes, and resolution can be mmap-backed.
 - Traversal APIs already have useful node/frontier breakers.
-- Panic boundaries, SQLSTATE mapping, and artifact validation are solid bases.
+- pgrx guards, typed `GraphError`, and artifact validation are useful bases;
+  custom SQLSTATE emission and mapped-store construction must be repaired
+  before they can be treated as safe boundaries.
 - Transaction deltas and projection generations support richer freshness.
 
 ## Measurements Still Required

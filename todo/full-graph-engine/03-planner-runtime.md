@@ -30,6 +30,13 @@ records. Relationship slots always carry `RelationshipId`; node slots carry
 source table and stable PK identity. JSON serialization happens at the outer
 SQL boundary only.
 
+Slot indexes are distinct `NodeSlotId`, `RelationshipSlotId`, `PathSlotId`,
+`PatternId`, and `ColumnIndex` types backed by typed arenas/indexed vectors.
+The compiler must reject using one slot family to index another. Scalar slots
+carry the exact `GraphValue` model from the
+[Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md), never an
+internal JSON/`f64` surrogate.
+
 ## Statistics And Costing
 
 Maintain versioned statistics per graph generation:

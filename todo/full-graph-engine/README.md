@@ -22,6 +22,10 @@ reproducible correctness, latency, throughput, build, sync, and memory results.
   validated, synchronized, and atomically published.
 - GQL, SQL/PGQ, SQL functions, and compatibility frontends lower into one
   typed logical and physical runtime.
+- Closed vocabularies, identities, planner slots, counts, offsets, and resource
+  units use canonical enums/newtypes after one checked PostgreSQL boundary.
+- Safe Rust APIs cannot reach undefined behavior; raw PostgreSQL and mmap
+  operations live only in reviewed adapters when pgrx has no suitable safe API.
 - Parallel relationships retain source-row identity.
 - Long-running loops are interruptible and resource failures are typed.
 
@@ -39,6 +43,10 @@ reproducible correctness, latency, throughput, build, sync, and memory results.
 | Artifact replacement precedes mmap validation. | `graph/src/persistence.rs:618-622`, `graph/src/sql_build.rs:112-124` | Validate a staged generation before manifest switch. |
 | GQL caps rows, not source scans, supernodes, paths, hydration, sort, or grouping bytes. | `graph/src/query/execute.rs:708-725`, `graph/src/query/execute.rs:893-952`, `graph/src/query/value.rs:108-249` | Streaming operators with byte/work budgets. |
 | The roadmap targets a compatible GQL subset, not full conformance. | `graph/src/gql/ast.rs:5-24`, `graph/src/sql_facade/gql.rs:123-148` | Normative machine-readable conformance ledger. |
+| Safe mmap accessors can use an unchecked node index or persisted CSR offset. | `graph/src/node_store.rs:315-322`, `graph/src/edge_store.rs:522-597` | Validated layouts and locally checked access only. |
+| Custom SQLSTATE reporting calls `errfinish()` below the pgrx guard. | `graph/src/safety.rs:238-280` | Unwind through the supported pgrx error boundary. |
+| Durable filter deltas narrow signed, temporal, large, and UUID values to `Option<u32>`. | `graph/src/projection/ingest.rs:32-48`, `graph/src/sql_sync.rs:1383-1391` | Versioned tagged filter values across sync and reload. |
+| Security-definer functions lack explicit search paths and registered relation identity is name-based. | `graph/src/sql_facade/`, `graph/src/catalog/validate.rs:132-190` | Hardened pgrx search paths and OID-stable registration. |
 
 ## Program Documents
 
@@ -54,6 +62,7 @@ reproducible correctness, latency, throughput, build, sync, and memory results.
 | [Build order](./07-build-order.md) | Checkpoints and completion criteria. |
 | [PostgreSQL 19 property graphs](./08-postgresql-19-property-graphs.md) | Native catalog, build, query, security, and release support. |
 | [Public backlog closure](./09-public-backlog-closure.md) | One disposition and closure gate for every Roadmap and Known Issues item. |
+| [Rust type safety and pgrx boundaries](./10-rust-type-safety-pgrx-boundaries.md) | Enums, newtypes, exact values, safe mmap/FFI, and pgrx-first integration. |
 | [Progress](./progress.md) | Living status and next checkpoint. |
 
 The earlier [out-of-core build plan](../out-of-core-build-plan.md) is a useful
@@ -76,7 +85,9 @@ and expands the scope to load, query, sync, and compaction.
 7. Public benchmarks report correctness, latency percentiles, throughput,
    RSS/PSS, spill, build/load time, and sync lag.
 8. PostgreSQL adapters and the planning/runtime core have an acyclic boundary.
-9. Every current Roadmap and Known Issues row has passed the public backlog
+9. Canonical enums/newtypes and exact graph values cross one checked adapter;
+   unsafe code is allowlisted, locally proven, and sanitizer/fuzz/matrix gated.
+10. Every current Roadmap and Known Issues row has passed the public backlog
    closure gate and has been graduated, retired, rejected, or trigger-deferred.
 
 ## Working Rules
@@ -84,6 +95,8 @@ and expands the scope to load, query, sync, and compaction.
 - Fix reproduced correctness and security bugs before adjacent syntax.
 - Add a failing regression test before or with every bug fix.
 - Do not add graph-sized allocation without a budget owner and fallback.
+- Do not add an enum-like string, raw cross-domain integer, unchecked narrowing
+  cast, raw `pg_sys` call, or safe wrapper over unproven unsafe invariants.
 - Treat artifact changes as migrations with rebuild and rollback plans.
 - Update progress, conformance, Known Issues, and Roadmap at checkpoints.
 - Close public rows through the backlog ledger; do not leave conditional or

@@ -4,9 +4,8 @@
 
 At completion, pgGraph supports PostgreSQL 19 native property graph definitions
 as a first-class catalog frontend. A user can define vertices, relationships,
-keys,
-labels, and properties with `CREATE PROPERTY GRAPH`, then build and query a
-pgGraph projection without recreating the same mapping through
+keys, labels, and properties with `CREATE PROPERTY GRAPH`, then build and query
+a pgGraph projection without recreating the same mapping through
 `graph.add_table()` and `graph.add_edge()`.
 
 PostgreSQL remains authoritative:
@@ -27,8 +26,12 @@ Official PostgreSQL 19 references:
 
 ## PG19-0: Toolchain And Contract Baseline
 
-- Track the pgrx release that supports PostgreSQL 19; add `pg19` only when the
-  extension builds and tests against the supported pgrx API.
+- The pinned pgrx, pgrx-tests, and pgrx-pg-sys 0.19.1 crates already expose a
+  `pg19` feature. Add `pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]` to the graph
+  crate now and establish an experimental build/install/test lane.
+- Record the exact PostgreSQL 19 prerelease/GA version supported by each pgrx
+  patch. Do not call PG19 a supported release target until install, upgrade,
+  package, and regression gates pass against the claimed server version.
 - Add PostgreSQL 19 to the supported-version policy, CI matrix, install docs,
   packaging, fresh-install smoke test, and upgrade test.
 - Inventory stable PostgreSQL catalog and extension APIs for property graphs,
@@ -39,7 +42,8 @@ Official PostgreSQL 19 references:
 
 **Exit:** a minimal extension builds, installs, and runs pgrx tests on PG19; the
 catalog and planner contract is documented with no dependency on guessed or
-unstable APIs.
+unstable APIs. The project no longer waits for a pgrx feature that is already
+present.
 
 ## PG19-1: Native Catalog Adapter
 
@@ -53,6 +57,12 @@ Define a narrow core-owned catalog port representing:
 - property names, types, column/expression mappings, and visibility;
 - temporary versus persistent graph lifetime;
 - catalog fingerprint and dependency OIDs.
+
+Use the canonical enums, UUID/OID identity wrappers, exact `GraphValue` types,
+and PostgreSQL adapter from the
+[Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md). The PG19 adapter
+must not create a second stringly model or resolve catalog identity through
+names/search path.
 
 Implement a version-gated PostgreSQL 19 adapter that reads native definitions
 into that model. PostgreSQL 14-18 continue using the existing registered graph
@@ -110,6 +120,9 @@ the execution/acceleration boundary is documented without overclaiming.
 
 - Check privileges on the native property graph and every underlying relation
   as the executing role, matching PostgreSQL semantics.
+- Give every security-definer entrypoint a minimal explicit pgrx search path
+  and prove shadow schemas cannot change catalog, operator, or function
+  resolution.
 - Apply RLS before coordinates, topology, counts, paths, or hydrated values are
   observable, including coordinate-only pgGraph output.
 - Use one documented MVCC snapshot/freshness contract for topology and source

@@ -13,7 +13,7 @@ Inventory snapshot for 2026-07-09:
 - 10 Near-Term Roadmap rows;
 - 14 Reserved/Future rows;
 - 2 substantive future-work sections outside the tables;
-- 15 active Known Issues;
+- 21 active Known Issues;
 - 4 resolved Known Issues awaiting retirement.
 
 ## Status And Disposition
@@ -69,14 +69,14 @@ reused.
 
 | ID | Public item | Owner | Closure evidence | Status |
 |---|---|---|---|---|
-| RM-01 | Correctness and security | Checkpoints 0, 1A, 1C | KI-014 through KI-019 closed; two-role, multigraph, filter, transaction, publication, and failure tests green. | OPEN |
+| RM-01 | Correctness and security | Checkpoints 0, 1A, 1C and [Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md) | KI-014 through KI-025 closed; two-role, multigraph, filter/value, mapped-soundness, error-guard, definer-path, relation-identity, transaction, publication, and failure tests green. | OPEN |
 | RM-02 | Resource governance | [Memory governance](./01-memory-governance.md), checkpoints 1B, 3, 5 | Build/load/query/sync/compaction/analytics stay within hard envelopes or return typed resource errors. | OPEN |
 | RM-03 | Out-of-core build | Memory/storage plans, checkpoint 2 | Forced-spill build completes below heap requirement and is equivalent at a declared source watermark. | OPEN |
 | RM-04 | Full GQL conformance | [GQL plan](./02-gql-conformance.md), checkpoint 6 | Every applicable ISO GQL row is green and generated public docs do not overclaim. | OPEN |
 | RM-05 | Planner/runtime | [Planner plan](./03-planner-runtime.md), checkpoint 5 | Costed streaming IR, spill, explain estimates/actuals, bounded pathological queries, and differential plan equivalence are green. | OPEN |
 | RM-06 | Storage and sync | [Storage plan](./04-projection-storage-sync.md), checkpoints 1C-3 | Identity-preserving vNext generations, watermark catch-up, mmap residency, bounded compaction, crash/CAS tests green. | OPEN |
 | RM-07 | PostgreSQL 19 | [PG19 native property graphs](./08-postgresql-19-property-graphs.md), checkpoint 7 | PG19-0 through PG19-5 complete; native mapping needs no duplicate registration; PG14-18 remain green. | OPEN |
-| RM-08 | Refactoring | [Refactor plan](./05-refactor-plan.md), checkpoint 4 | Planned mega-modules split with acyclic dependencies, stable SQL contracts, and green tests/benchmarks. | OPEN |
+| RM-08 | Refactoring | [Refactor plan](./05-refactor-plan.md), [Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md), checkpoint 4 | Planned mega-modules split with acyclic dependencies; canonical enums/newtypes and pgrx adapters replace stringly/raw boundaries; unsafe is allowlisted; SQL contracts and tests/benchmarks remain green. | OPEN |
 | RM-09 | CI/CD rollout | V1-CI and [quality plan](./06-quality-performance-operations.md) | Each documented tier runs automatically at its stated cadence; a release candidate has archived evidence. | OPEN |
 | RM-10 | Competitive evidence | Planner/quality plans, checkpoint 8 | Reproducible checked scorecards publish p50/p95/p99, throughput, RSS/PSS, spill, build/load, sync lag, and semantics. | OPEN |
 
@@ -120,7 +120,7 @@ should not stay indefinitely on the active Known Issues page.
 | KI-005 | Checkpoints 3, 5, 8 | Representative dirty-overlay benchmarks identify and fix material regressions, or demonstrate current performance within an approved threshold; retain regression gate. | OPEN |
 | KI-006 | RF-07 openCypher bounded-surface decision | Generated compatibility matrix, deterministic rejection tests, and explicit non-conformance docs make the limitation a product boundary rather than an issue. | CONDITIONAL |
 | KI-007 | RM-07/RF-06 and [PG19 plan](./08-postgresql-19-property-graphs.md) | PG19-0 through PG19-5 and SQL/PGQ registry/differential gates green; release notes preserve the change. | OPEN |
-| KI-008 | RM-08 and [refactor plan](./05-refactor-plan.md) | Named mega-modules are split at cohesive boundaries, SQL behavior remains stable, and size/coupling checks no longer identify the listed hotspots. | OPEN |
+| KI-008 | RM-08, [refactor plan](./05-refactor-plan.md), and [Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md) | Named mega-modules are split at cohesive boundaries; RUST-2, RUST-3, and RUST-6 close stringly state, raw-ID, pgrx-adapter, and unsafe-allowlist gaps; SQL behavior remains stable. | OPEN |
 | KI-009 | Checkpoints 0/6 and [quality plan](./06-quality-performance-operations.md) | Enumerated write SQLSTATE, constraint, RLS, savepoint, concurrency, and rollback weak paths have permanent unit/pgrx/heavy tests. | OPEN |
 | KI-010 | Tooling maintenance task | In a Nix-capable environment update both lock inputs, build the dev shell, run documented Rust/PostgreSQL/pgrx checks, and record versions; then retire. | OPEN |
 | KI-011 | Retire serializer migration item | Upgrade/rebuild documentation and corrupt/trailing-byte regression remain green; historical migration stays in release notes. | RESOLVED-RETIRE |
@@ -132,6 +132,12 @@ should not stay indefinitely on the active Known Issues page.
 | KI-017 | RM-01/RM-06 checkpoint 1C | Two PostgreSQL backends cannot fork/overwrite a generation; lock/reload/CAS/crash tests preserve one current manifest. | OPEN |
 | KI-018 | RM-01/RM-06 checkpoints 1C/2 | Injected write/checksum/mmap validation/catch-up failure leaves the old generation current and queryable. | OPEN |
 | KI-019 | RM-01/RF-09 checkpoints 1A/6 and QA-01 | Mutable GQL writes support PostgreSQL savepoint rollback/release through per-subtransaction delta frames, with READ COMMITTED, REPEATABLE READ, and SERIALIZABLE two-session gates. | OPEN |
+| KI-020 | RM-01 and RUST-00A through RUST-00B | Out-of-range/corrupt mapped-layout tests cannot reach unchecked pointer arithmetic; only an owning validated layout constructs stores; Miri/in-memory backing plus PostgreSQL sanitizer matrix is green. | OPEN |
+| KI-021 | RM-01 and RUST-00C | Rust destructors unwind through the supported pgrx guard before PostgreSQL ERROR; SQLSTATE/diagnostic behavior is versioned and exact on PG14-PG19; no deep raw `errfinish()` remains. | OPEN |
+| KI-022 | RM-01/RM-06 and RUST-00D/RUST-5 | Every filter value domain roundtrips through build, sync, persisted segment, restart, and reload; old/new format behavior is documented and differential results match. | OPEN |
+| KI-023 | RM-01 and RUST-00E | Every security-definer function has the vetted `proconfig` search path and shadow-schema attack tests prove catalog/function/operator resolution cannot be redirected. | OPEN |
+| KI-024 | RM-01/RM-06 and RUST-00F | OID-stable relation identity survives rename/search-path change, fails closed on drop/recreate/stale identity, and has concurrent-DDL tests; name re-resolution is absent. | OPEN |
+| KI-025 | RM-01/RM-08 and RUST-1 | Failure injection proves background-worker transactions do not commit unintended partial state or leave stuck jobs; intentional progress checkpoints are documented and tested. | OPEN |
 
 ### KI-013 Subsystem Gates
 
