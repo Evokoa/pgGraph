@@ -25,6 +25,7 @@ pub(crate) struct ParsedStructuredFilter {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PushdownFilter {
+    pub(crate) table_oid: u32,
     pub(crate) column: String,
     pub(crate) operator: String,
     pub(crate) value: serde_json::Value,
@@ -145,6 +146,7 @@ pub(crate) fn parse_structured_filter(
         validate_structured_operator_shape(column, operator, value)?;
         if resolved.column_type.is_some() {
             pushdown_filters.push(PushdownFilter {
+                table_oid: resolved.table_oid,
                 column: column.clone(),
                 operator: operator.clone(),
                 value: value.clone(),
@@ -343,11 +345,14 @@ pub(crate) fn typed_pushdown_filter_op(
     filter_index: &filter_index::FilterIndex,
     filter: &PushdownFilter,
 ) -> safety::GraphResult<types::FilterOp> {
-    let column_idx = filter_index.find_column(&filter.column).ok_or_else(|| {
-        safety::GraphError::InvalidFilter {
-            reason: format!("filter column '{}' is not indexed", filter.column),
-        }
-    })?;
+    let column_idx = filter_index
+        .find_column_for_table(filter.table_oid, &filter.column)
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: format!(
+                "filter column '{}' is not indexed for table OID {}",
+                filter.column, filter.table_oid
+            ),
+        })?;
     if filter.value.is_null() {
         return match filter.operator.as_str() {
             "eq" => Ok(pushdown_op(column_idx, types::FilterCondition::IsNull)),

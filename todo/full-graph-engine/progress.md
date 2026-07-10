@@ -36,6 +36,10 @@ Last updated: 2026-07-09
   and value assignment by PostgreSQL table OID plus attribute name, so
   same-named registered columns no longer overwrite one another during build.
 
+- Carried table-qualified filter identity through structured pushdown and both
+  sync replay paths; ambiguous user-facing names remain rejected until every
+  legacy name-only helper is retired.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.

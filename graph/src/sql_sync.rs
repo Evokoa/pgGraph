@@ -1318,7 +1318,10 @@ fn append_projection_filter_rows_for_pk(
         if filter.table_oid != table_oid {
             continue;
         }
-        let Some(column_idx) = eng.filter_index.find_column(&filter.column_name) else {
+        let Some(column_idx) = eng
+            .filter_index
+            .find_column_for_table(table_oid, &filter.column_name)
+        else {
             continue;
         };
         let value = persisted_filter_value_from_row_or_properties(
@@ -1465,7 +1468,10 @@ fn refresh_filter_index_from_sync(
         if filter.table_oid != table_oid {
             continue;
         }
-        let Some(column_idx) = eng.filter_index.find_column(&filter.column_name) else {
+        let Some(column_idx) = eng
+            .filter_index
+            .find_column_for_table(table_oid, &filter.column_name)
+        else {
             continue;
         };
         let value = filter_value_from_row_or_properties(
