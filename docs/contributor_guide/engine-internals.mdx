@@ -108,6 +108,12 @@ their own pending graph deltas without changing the immutable CSR stores.
 Read-only GQL pattern expansion uses the same neighbor-source abstraction as
 traversal and unweighted graph algorithms, so one-hop and bounded variable-length
 relationship reads share overlay semantics with the SQL traversal APIs.
+Clean CSR neighbors also expose the persisted relationship identity sidecar to
+the GQL executor. This lets fixed and wildcard path expansion preserve parallel
+same-type/same-endpoint source rows as distinct matches. Pending overlay and
+layered segment neighbors currently report no stable relationship ID; code that
+requires an authoritative source relationship row must treat that as
+unavailable rather than guessing from endpoints.
 Mutable write operators must reject execution while a PostgreSQL subtransaction
 is active; the current delta model does not attempt per-savepoint overlay
 rollback.

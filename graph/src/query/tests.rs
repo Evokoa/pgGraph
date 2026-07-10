@@ -16,7 +16,7 @@ use super::value::{
     project_join_rows, project_node_rows, project_rows, project_wildcard_path_rows, HydratedRows,
     QueryParams,
 };
-use crate::edge_store::{EdgeStore, RawEdge};
+use crate::edge_store::{EdgeStore, IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder};
 use crate::engine::{EdgeMutation, Engine, MutationKind};
 use crate::gql::errors::GqlErrorKind;
 use crate::gql::parse;
@@ -3615,6 +3615,107 @@ fn wildcard_path_executor_deduplicates_undirected_relationships() {
 }
 
 #[test]
+fn executor_propagates_relationship_ids_into_rows_and_paths() {
+    let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = identified_edge_store(
+        engine.node_store.node_count(),
+        [
+            (
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: works_at,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                41,
+            ),
+            (
+                RawEdge {
+                    source: 1,
+                    target: 3,
+                    type_id: works_at,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                42,
+            ),
+        ],
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    let row = rows
+        .iter()
+        .find(|row| row.source.node_id == "u1" && row.target.as_ref().unwrap().node_id == "c1")
+        .expect("u1 -> c1 row should exist");
+    assert_eq!(row.relationship_id, Some(41));
+    assert_eq!(row.path_relationships[0].relationship_id, Some(41));
+}
+
+#[test]
+fn wildcard_path_executor_preserves_parallel_relationship_ids() {
+    let statement = bind_statement_query("MATCH p=()-[:works_at]->() RETURN length(p) AS len");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = identified_edge_store(
+        engine.node_store.node_count(),
+        [
+            (
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: works_at,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                41,
+            ),
+            (
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: works_at,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                42,
+            ),
+        ],
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let mut relationship_ids = rows
+        .iter()
+        .map(|row| row.path_relationships[0].relationship_id)
+        .collect::<Vec<_>>();
+    relationship_ids.sort_unstable();
+
+    assert_eq!(relationship_ids, vec![Some(41), Some(42)]);
+}
+
+#[test]
 fn binder_allows_with_aliases_downstream() {
     let logical = bind_query(
         "MATCH (u:users)-[:works_at]->(c:companies) \
@@ -5531,6 +5632,22 @@ fn engine_fixture() -> Engine {
     engine.reverse_edge_store = engine.edge_store.reversed();
     engine.built = true;
     engine
+}
+
+fn identified_edge_store(
+    node_count: u32,
+    edges: impl IntoIterator<Item = (RawEdge, crate::edge_store::RelationshipId)>,
+) -> EdgeStore {
+    let mut builder = SortedEdgeStoreBuilder::new(node_count, false);
+    for (edge, relationship_id) in edges {
+        builder
+            .try_push_identified(IdentifiedRawEdge {
+                edge,
+                relationship_id,
+            })
+            .expect("identified test edge should be valid");
+    }
+    builder.finish()
 }
 
 fn install_query_edge_segment_manifest(

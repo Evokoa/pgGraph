@@ -90,6 +90,14 @@ After traversal, `to_traversal_results()` reconstructs each path by walking
 parent links backward to the seed, reversing them, and converting node indices
 to `(table_oid, primary_key)` coordinates.
 
+GQL path execution carries relationship identity separately from the public
+relationship JSON. Base CSR path steps retain the per-adjacency relationship ID
+when present, and wildcard path deduplication includes that ID so parallel
+source rows with equal endpoints remain distinct. Overlay and layered path
+steps do not yet have durable relationship IDs; later hydration and
+relationship-row visibility checks must fail closed or use a migrated sidecar
+format before relying on those paths.
+
 ## Shortest Path
 
 `Engine::shortest_path()`:

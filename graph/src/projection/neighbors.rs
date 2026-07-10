@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::edge_store::EdgeStore;
+use crate::edge_store::{EdgeStore, RelationshipId, NO_RELATIONSHIP_ID};
 
 /// Pending edge inserts keyed by source node.
 pub(crate) type OverlayInserts = HashMap<u32, Vec<(u32, u8, bool)>>;
@@ -39,16 +39,26 @@ impl<'a> CsrNeighbors<'a> {
 
 impl NeighborSource for CsrNeighbors<'_> {
     fn neighbors(&self, node_idx: u32) -> NeighborIter<'_> {
-        let (targets, type_ids, schema_reversed) = self.edge_store.neighbors_with_schema(node_idx);
-        NeighborIter::Csr(CsrNeighborIter::forward(targets, type_ids, schema_reversed))
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .edge_store
+            .neighbors_with_schema_and_relationship_ids(node_idx);
+        NeighborIter::Csr(CsrNeighborIter::forward(
+            targets,
+            type_ids,
+            schema_reversed,
+            relationship_ids,
+        ))
     }
 
     fn neighbors_reversed(&self, node_idx: u32) -> NeighborIter<'_> {
-        let (targets, type_ids, schema_reversed) = self.edge_store.neighbors_with_schema(node_idx);
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .edge_store
+            .neighbors_with_schema_and_relationship_ids(node_idx);
         NeighborIter::Csr(CsrNeighborIter::reversed(
             targets,
             type_ids,
             schema_reversed,
+            relationship_ids,
         ))
     }
 }
@@ -77,22 +87,28 @@ impl<'a> OverlayNeighbors<'a> {
 
 impl NeighborSource for OverlayNeighbors<'_> {
     fn neighbors(&self, node_idx: u32) -> NeighborIter<'_> {
-        let (targets, type_ids, schema_reversed) = self.edge_store.neighbors_with_schema(node_idx);
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .edge_store
+            .neighbors_with_schema_and_relationship_ids(node_idx);
         NeighborIter::Overlay(OverlayNeighborIter::forward(
             targets,
             type_ids,
             schema_reversed,
+            relationship_ids,
             self.inserts.get(&node_idx).map(Vec::as_slice),
             self.deletes.get(&node_idx),
         ))
     }
 
     fn neighbors_reversed(&self, node_idx: u32) -> NeighborIter<'_> {
-        let (targets, type_ids, schema_reversed) = self.edge_store.neighbors_with_schema(node_idx);
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .edge_store
+            .neighbors_with_schema_and_relationship_ids(node_idx);
         NeighborIter::Overlay(OverlayNeighborIter::reversed(
             targets,
             type_ids,
             schema_reversed,
+            relationship_ids,
             self.inserts.get(&node_idx).map(Vec::as_slice),
             self.deletes.get(&node_idx),
         ))
@@ -108,6 +124,8 @@ pub(crate) struct Neighbor {
     pub(crate) type_id: u8,
     /// Whether this edge row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
+    /// Durable relationship identity for the source row when available.
+    pub(crate) relationship_id: Option<RelationshipId>,
 }
 
 /// Weighted neighbor stream item.
@@ -184,26 +202,39 @@ pub(crate) struct CsrNeighborIter<'a> {
     targets: &'a [u32],
     type_ids: &'a [u8],
     schema_reversed: &'a [u8],
+    relationship_ids: &'a [RelationshipId],
     pos: usize,
     reversed: bool,
 }
 
 impl<'a> CsrNeighborIter<'a> {
-    fn forward(targets: &'a [u32], type_ids: &'a [u8], schema_reversed: &'a [u8]) -> Self {
+    fn forward(
+        targets: &'a [u32],
+        type_ids: &'a [u8],
+        schema_reversed: &'a [u8],
+        relationship_ids: &'a [RelationshipId],
+    ) -> Self {
         Self {
             targets,
             type_ids,
             schema_reversed,
+            relationship_ids,
             pos: 0,
             reversed: false,
         }
     }
 
-    fn reversed(targets: &'a [u32], type_ids: &'a [u8], schema_reversed: &'a [u8]) -> Self {
+    fn reversed(
+        targets: &'a [u32],
+        type_ids: &'a [u8],
+        schema_reversed: &'a [u8],
+        relationship_ids: &'a [RelationshipId],
+    ) -> Self {
         Self {
             targets,
             type_ids,
             schema_reversed,
+            relationship_ids,
             pos: targets.len(),
             reversed: true,
         }
@@ -229,6 +260,11 @@ impl Iterator for CsrNeighborIter<'_> {
             target: self.targets[pos],
             type_id: self.type_ids[pos],
             schema_reversed: self.schema_reversed[pos] != 0,
+            relationship_id: self
+                .relationship_ids
+                .get(pos)
+                .copied()
+                .filter(|id| *id != NO_RELATIONSHIP_ID),
         })
     }
 }
@@ -254,6 +290,7 @@ impl<'a> OverlayNeighborIter<'a> {
         targets: &'a [u32],
         type_ids: &'a [u8],
         schema_reversed: &'a [u8],
+        relationship_ids: &'a [RelationshipId],
         inserted: Option<&'a [(u32, u8, bool)]>,
         deleted: Option<&'a HashSet<(u32, u8)>>,
     ) -> Self {
@@ -262,7 +299,7 @@ impl<'a> OverlayNeighborIter<'a> {
             type_ids,
             deleted,
             inserted,
-            base: CsrNeighborIter::forward(targets, type_ids, schema_reversed),
+            base: CsrNeighborIter::forward(targets, type_ids, schema_reversed, relationship_ids),
             insert_pos: 0,
             phase: OverlayPhase::Base,
             reversed: false,
@@ -273,6 +310,7 @@ impl<'a> OverlayNeighborIter<'a> {
         targets: &'a [u32],
         type_ids: &'a [u8],
         schema_reversed: &'a [u8],
+        relationship_ids: &'a [RelationshipId],
         inserted: Option<&'a [(u32, u8, bool)]>,
         deleted: Option<&'a HashSet<(u32, u8)>>,
     ) -> Self {
@@ -281,7 +319,7 @@ impl<'a> OverlayNeighborIter<'a> {
             type_ids,
             deleted,
             inserted,
-            base: CsrNeighborIter::reversed(targets, type_ids, schema_reversed),
+            base: CsrNeighborIter::reversed(targets, type_ids, schema_reversed, relationship_ids),
             insert_pos: inserted.map_or(0, <[_]>::len),
             phase: OverlayPhase::Inserts,
             reversed: true,
@@ -355,6 +393,7 @@ impl<'a> OverlayNeighborIter<'a> {
                 target,
                 type_id,
                 schema_reversed,
+                relationship_id: None,
             });
         }
     }
@@ -413,11 +452,13 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
                 Neighbor {
                     target: 2,
                     type_id: 2,
                     schema_reversed: false,
+                    relationship_id: None,
                 }
             ]
         );
@@ -460,11 +501,13 @@ mod tests {
                     target: 2,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
                 Neighbor {
                     target: 3,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 }
             ]
         );
@@ -497,11 +540,13 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
                 Neighbor {
                     target: 1,
                     type_id: 1,
                     schema_reversed: true,
+                    relationship_id: None,
                 },
             ]
         );

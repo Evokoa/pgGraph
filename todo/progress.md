@@ -6,6 +6,7 @@ the authoritative checkpoint handoff, measurement log, and next-action record.
 
 Last synchronized: 2026-07-10
 
-Current phase: Checkpoint 1A relationship identity persistence is implemented
-and targeted on PostgreSQL 17 Rust tests; continue with query, hydration, RLS,
-overlay, compaction, and savepoint use of persisted relationship IDs.
+Current phase: Checkpoint 1A relationship identity persistence and base-CSR GQL
+query/path propagation are implemented and targeted on PostgreSQL 17 Rust tests;
+continue with hydration, relationship-row RLS, overlay, compaction, and
+savepoint use of persisted relationship IDs.

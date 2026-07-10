@@ -1,6 +1,6 @@
 //! Physical GQL plan execution against engine stores and edge overlays.
 
-use crate::edge_store::EdgeStore;
+use crate::edge_store::{EdgeStore, RelationshipId};
 use crate::engine::Engine;
 use crate::projection::layered::LayeredNeighbors;
 use crate::projection::neighbors::EdgeOverlay;
@@ -34,6 +34,8 @@ pub(crate) struct GqlRow {
     pub(crate) rel_start: Option<GqlNodeCoordinate>,
     /// Relationship end coordinate in the registered edge direction.
     pub(crate) rel_end: Option<GqlNodeCoordinate>,
+    /// Durable relationship identity for the primary one-hop relationship.
+    pub(crate) relationship_id: Option<RelationshipId>,
     /// Path nodes in query traversal order.
     pub(crate) path_nodes: Vec<GqlNodeCoordinate>,
     /// Path relationships in query traversal order.
@@ -57,6 +59,8 @@ pub(crate) struct GqlPathRelationship {
     pub(crate) start: GqlNodeCoordinate,
     /// Relationship end coordinate in the registered edge direction.
     pub(crate) end: GqlNodeCoordinate,
+    /// Durable relationship identity when the matched edge has one.
+    pub(crate) relationship_id: Option<RelationshipId>,
 }
 
 /// One GQL node-only result row.
@@ -441,6 +445,7 @@ fn expand_join_pattern_hops(
             orientation: target.orientation,
             type_id: target.type_id,
             schema_reversed: target.schema_reversed,
+            relationship_id: target.relationship_id,
         });
         expand_join_pattern_hops(
             engine,
@@ -531,11 +536,14 @@ struct WildcardExpansion<'a> {
     row_cap: usize,
 }
 
+type WildcardPathStepKey = (u32, u32, u8, Option<RelationshipId>);
+type SeenWildcardPaths = std::collections::HashSet<Vec<WildcardPathStepKey>>;
+
 fn expand_wildcard_segments(
     expansion: &WildcardExpansion<'_>,
     source_idx: u32,
     rows: &mut Vec<GqlRow>,
-    seen_paths: &mut std::collections::HashSet<Vec<(u32, u32, u8)>>,
+    seen_paths: &mut SeenWildcardPaths,
 ) -> GraphResult<()> {
     let state = PathState {
         node_idx: source_idx,
@@ -566,7 +574,7 @@ fn expand_wildcard_segment(
     state: PathState,
     segment_idx: usize,
     rows: &mut Vec<GqlRow>,
-    seen_paths: &mut std::collections::HashSet<Vec<(u32, u32, u8)>>,
+    seen_paths: &mut SeenWildcardPaths,
     row_cap: usize,
 ) -> GraphResult<()> {
     let Some(segment) = plan.segments.get(segment_idx) else {
@@ -575,7 +583,12 @@ fn expand_wildcard_segment(
             .iter()
             .map(|relationship| {
                 let (rel_start_idx, rel_end_idx) = canonical_step_endpoints(relationship);
-                (rel_start_idx, rel_end_idx, relationship.type_id)
+                (
+                    rel_start_idx,
+                    rel_end_idx,
+                    relationship.type_id,
+                    relationship.relationship_id,
+                )
             })
             .collect::<Vec<_>>();
         if !seen_paths.insert(path_key) {
@@ -620,7 +633,7 @@ fn expand_wildcard_segment_hops(
     segment_idx: usize,
     hop_count: u32,
     rows: &mut Vec<GqlRow>,
-    seen_paths: &mut std::collections::HashSet<Vec<(u32, u32, u8)>>,
+    seen_paths: &mut SeenWildcardPaths,
     row_cap: usize,
 ) -> GraphResult<()> {
     if hop_count >= segment.hops.min
@@ -764,6 +777,7 @@ fn expand_targets(
                         orientation: target.orientation,
                         type_id: target.type_id,
                         schema_reversed: target.schema_reversed,
+                        relationship_id: target.relationship_id,
                         path_nodes: next_state.path_nodes.clone(),
                         path_relationships: next_state.path_relationships.clone(),
                     });
@@ -803,6 +817,7 @@ impl PathState {
             orientation: target.orientation,
             type_id: target.type_id,
             schema_reversed: target.schema_reversed,
+            relationship_id: target.relationship_id,
         });
         Self {
             node_idx: target.node_idx,
@@ -898,8 +913,14 @@ impl<'a> GqlNeighbors<'a> {
                 &mut neighbors,
             );
         }
-        neighbors
-            .sort_by_key(|target| (target.node_idx, target.orientation, target.schema_reversed));
+        neighbors.sort_by_key(|target| {
+            (
+                target.node_idx,
+                target.orientation,
+                target.schema_reversed,
+                target.relationship_id,
+            )
+        });
         neighbors
     }
 
@@ -927,6 +948,7 @@ impl<'a> GqlNeighbors<'a> {
                 target.orientation,
                 target.type_id,
                 target.schema_reversed,
+                target.relationship_id,
             )
         });
         neighbors
@@ -994,6 +1016,7 @@ struct GqlTarget {
     orientation: EdgeOrientation,
     type_id: u8,
     schema_reversed: bool,
+    relationship_id: Option<RelationshipId>,
     path_nodes: Vec<u32>,
     path_relationships: Vec<GqlRelationshipStep>,
 }
@@ -1004,6 +1027,7 @@ struct GqlStepTarget {
     orientation: EdgeOrientation,
     type_id: u8,
     schema_reversed: bool,
+    relationship_id: Option<RelationshipId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1013,6 +1037,7 @@ struct GqlRelationshipStep {
     orientation: EdgeOrientation,
     type_id: u8,
     schema_reversed: bool,
+    relationship_id: Option<RelationshipId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1034,6 +1059,7 @@ fn append_matching_neighbors(
             orientation,
             type_id: neighbor.type_id,
             schema_reversed: neighbor.schema_reversed,
+            relationship_id: neighbor.relationship_id,
         })
     }));
 }
@@ -1049,6 +1075,7 @@ fn append_all_neighbors(
         orientation,
         type_id: neighbor.type_id,
         schema_reversed: neighbor.schema_reversed,
+        relationship_id: neighbor.relationship_id,
     }));
 }
 
@@ -1128,6 +1155,7 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
         target: Some(coordinate(engine, target_idx)?),
         rel_start: Some(coordinate(engine, rel_start_idx)?),
         rel_end: Some(coordinate(engine, rel_end_idx)?),
+        relationship_id: target.relationship_id,
         path_nodes: target
             .path_nodes
             .into_iter()
@@ -1142,6 +1170,7 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
                     rel_type: edge_type_label(engine, relationship.type_id)?,
                     start: coordinate(engine, start_idx)?,
                     end: coordinate(engine, end_idx)?,
+                    relationship_id: relationship.relationship_id,
                 })
             })
             .collect::<GraphResult<Vec<_>>>()?,
@@ -1226,6 +1255,7 @@ fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> 
         target,
         rel_start: None,
         rel_end: None,
+        relationship_id: None,
         path_nodes,
         path_relationships,
         join_node_slots: Some(join_node_slots),
@@ -1244,6 +1274,7 @@ fn gql_path_relationship(
         rel_type: edge_type_label(engine, relationship.type_id)?,
         start: coordinate(engine, start_idx)?,
         end: coordinate(engine, end_idx)?,
+        relationship_id: relationship.relationship_id,
     })
 }
 
@@ -1268,6 +1299,7 @@ fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult
                 rel_type: edge_type_label(engine, relationship.type_id)?,
                 start: coordinate(engine, start_idx)?,
                 end: coordinate(engine, end_idx)?,
+                relationship_id: relationship.relationship_id,
             })
         })
         .collect::<GraphResult<Vec<_>>>()?;
@@ -1275,11 +1307,15 @@ fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult
         .first()
         .map(|relationship| (relationship.start.clone(), relationship.end.clone()))
         .unzip();
+    let relationship_id = path_relationships
+        .first()
+        .and_then(|relationship| relationship.relationship_id);
     Ok(GqlRow {
         source,
         target,
         rel_start,
         rel_end,
+        relationship_id,
         path_nodes,
         path_relationships,
         join_node_slots: None,
@@ -1295,6 +1331,7 @@ fn project_optional_row(engine: &Engine, source_idx: u32) -> GraphResult<GqlRow>
         target: None,
         rel_start: None,
         rel_end: None,
+        relationship_id: None,
         path_nodes: Vec::new(),
         path_relationships: Vec::new(),
         join_node_slots: None,

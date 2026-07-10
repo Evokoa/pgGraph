@@ -8,7 +8,7 @@ Last updated: 2026-07-10
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
-| 1A. Security and identity | In progress | Coordinate-only node visibility, base-CSR relationship multiplicity, table-qualified filter identity, and persisted relationship identity sidecars are enforced on PostgreSQL 17; relationship-row RLS, hydration, overlays, compaction, and savepoints remain. |
+| 1A. Security and identity | In progress | Coordinate-only node visibility, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, and base-CSR query/path ID propagation are enforced on PostgreSQL 17; relationship-row RLS, hydration, overlays, compaction, and savepoints remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
@@ -72,6 +72,11 @@ Last updated: 2026-07-10
   nonzero dictionary entries, mapping IDs, and dictionary references before
   installing the graph. Query, hydration, RLS, overlays, and compaction still
   need to use these IDs before KI-015 can close.
+
+- Carried base-CSR relationship IDs through GQL one-hop rows, path
+  relationships, multi-pattern joins, and wildcard path deduplication.
+  Overlay and layered neighbors intentionally expose no ID until their segment
+  formats migrate or relationship hydration/RLS can fail closed.
 
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
@@ -249,4 +254,16 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Malformed relationship dictionary | `cd graph && cargo test --features pg17 load_graph_file_rejects_empty_relationship_identity_slot` | PASS: 1 passed |
 | Mmap persistence subset | `cd graph && cargo test --features pg17 persistence::tests::persisted_mmap_load` | PASS: 3 passed |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 671 passed, 1 ignored; doctests 0 |
+| Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |
+
+### 2026-07-10 Relationship ID Query Propagation Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Compile | `cd graph && cargo check --features "pg17 development"` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| One-hop relationship ID propagation | `cd graph && cargo test --features pg17 executor_propagates_relationship_ids_into_rows_and_paths` | PASS: 1 passed |
+| Wildcard parallel relationship identity | `cd graph && cargo test --features pg17 wildcard_path_executor_preserves_parallel_relationship_ids` | PASS after red regression confirmed endpoint-only dedup collapsed `[Some(41), Some(42)]` to `[Some(41)]` |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 673 passed, 1 ignored, doctests 0 |
 | Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |

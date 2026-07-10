@@ -3294,6 +3294,7 @@ fn test_recheck_delete_edge_predicate(
             target: Some(target.clone()),
             rel_start: Some(source.clone()),
             rel_end: Some(target.clone()),
+            relationship_id: None,
             path_nodes: vec![source, target],
             path_relationships: Vec::new(),
             join_node_slots: None,

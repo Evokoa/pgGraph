@@ -202,11 +202,13 @@ mod tests {
                     target: 1,
                     type_id: 2,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
                 Neighbor {
                     target: 2,
                     type_id: 3,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
             ]
         );

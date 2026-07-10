@@ -143,6 +143,12 @@ values stay coordinate-only. Relationship property expressions such as
 `r.weight` remain outside the current subset; return the whole relationship
 value to receive hydrated edge-row properties.
 
+Parallel relationship rows with the same type and endpoints remain separate
+matches when the graph artifact has source-row relationship identity metadata.
+The JSON shape above is intentionally stable and does not expose pgGraph's
+internal relationship ID; applications should continue to use the returned
+type, endpoints, and hydrated source-row properties as the public value.
+
 Path values are JSON objects with a `_path` member:
 
 ```json

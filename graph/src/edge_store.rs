@@ -620,6 +620,29 @@ impl EdgeStore {
         }
     }
 
+    /// Get the neighbor slice with registered-direction metadata and
+    /// relationship identity sidecars.
+    ///
+    /// The relationship ID slice is in the same adjacency order as the target,
+    /// type, and registered-direction slices. A value of
+    /// [`NO_RELATIONSHIP_ID`] means this adjacency does not have a durable
+    /// source-row relationship identity.
+    #[inline(always)]
+    pub(crate) fn neighbors_with_schema_and_relationship_ids(
+        &self,
+        node_idx: u32,
+    ) -> (&[u32], &[u8], &[u8], &[RelationshipId]) {
+        let (targets, type_ids, schema_reversed) = self.neighbors_with_schema(node_idx);
+        let start = self
+            .offsets_slice()
+            .get(node_idx as usize)
+            .copied()
+            .unwrap_or(0) as usize;
+        let end = start.saturating_add(targets.len());
+        let relationship_ids = self.relationship_ids.get(start..end).unwrap_or(&[]);
+        (targets, type_ids, schema_reversed, relationship_ids)
+    }
+
     /// Get the neighbor slice with weights for Dijkstra.
     #[inline]
     pub fn neighbors_weighted(&self, node_idx: u32) -> (&[u32], &[u8], &[u32]) {

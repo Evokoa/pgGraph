@@ -604,6 +604,7 @@ impl NeighborSource for LayeredNeighbors<'_> {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
+                    relationship_id: None,
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -618,6 +619,7 @@ impl NeighborSource for LayeredNeighbors<'_> {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
+                    relationship_id: None,
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -641,6 +643,7 @@ impl NeighborSource for DirectionalLayeredNeighbors<'_, '_> {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
+                    relationship_id: None,
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -656,6 +659,7 @@ impl NeighborSource for DirectionalLayeredNeighbors<'_, '_> {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
+                    relationship_id: None,
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -1123,11 +1127,13 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
                 Neighbor {
                     target: 3,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
             ]
         );
@@ -1155,6 +1161,7 @@ mod tests {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
+                    relationship_id: None,
                 })
                 .collect::<Vec<_>>(),
             vec![
@@ -1162,11 +1169,13 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
                 Neighbor {
                     target: 2,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
             ]
         );
@@ -1204,11 +1213,13 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
                 Neighbor {
                     target: 2,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
             ]
         );
@@ -1272,6 +1283,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             }]
         );
         tx_delta::clear_for_test();
@@ -1346,6 +1358,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             }]
         );
     }
@@ -1377,6 +1390,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             }]
         );
     }
@@ -1436,6 +1450,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             }]
         );
     }
