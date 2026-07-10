@@ -24,6 +24,18 @@
 
 use crate::safety::{GraphError, GraphResult};
 
+/// Dense identifier for one relationship source row in a graph projection.
+pub(crate) type RelationshipId = u32;
+/// Reserved identity for internal/test edges with no PostgreSQL source row.
+pub(crate) const NO_RELATIONSHIP_ID: RelationshipId = 0;
+
+/// Durable source identity for one relationship row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RelationshipIdentity {
+    pub(crate) mapping_id: u64,
+    pub(crate) source_key: String,
+}
+
 const EMPTY_U32_SLICE: [u32; 0] = [];
 const EMPTY_U8_SLICE: [u8; 0] = [];
 
@@ -219,6 +231,13 @@ pub struct RawEdge {
     pub schema_reversed: bool,
 }
 
+/// A raw adjacency paired with its durable relationship dictionary entry.
+#[derive(Debug, Clone)]
+pub(crate) struct IdentifiedRawEdge {
+    pub(crate) edge: RawEdge,
+    pub(crate) relationship_id: RelationshipId,
+}
+
 /// Incremental CSR builder for raw edges already sorted by
 /// `(source, target, type_id, schema_reversed)`.
 ///
@@ -232,6 +251,7 @@ pub struct SortedEdgeStoreBuilder {
     type_ids: Vec<u8>,
     schema_reversed: Vec<u8>,
     weights: Vec<u32>,
+    relationship_ids: Vec<RelationshipId>,
     current_node: u32,
 }
 
@@ -246,6 +266,7 @@ impl SortedEdgeStoreBuilder {
             type_ids: Vec::new(),
             schema_reversed: Vec::new(),
             weights: Vec::new(),
+            relationship_ids: Vec::new(),
             current_node: 0,
         }
     }
@@ -261,6 +282,15 @@ impl SortedEdgeStoreBuilder {
     /// Returns [`GraphError::Internal`] when `edge.source` or `edge.target`
     /// is greater than or equal to the builder's node count.
     pub fn try_push(&mut self, edge: RawEdge) -> GraphResult<()> {
+        self.try_push_identified(IdentifiedRawEdge {
+            edge,
+            relationship_id: NO_RELATIONSHIP_ID,
+        })
+    }
+
+    /// Add one sorted edge with its source-row relationship identity.
+    pub(crate) fn try_push_identified(&mut self, identified: IdentifiedRawEdge) -> GraphResult<()> {
+        let edge = identified.edge;
         validate_raw_edge(self.node_count, &edge)?;
         while self.current_node < edge.source {
             self.current_node += 1;
@@ -269,6 +299,7 @@ impl SortedEdgeStoreBuilder {
         self.targets.push(edge.target);
         self.type_ids.push(edge.type_id);
         self.schema_reversed.push(u8::from(edge.schema_reversed));
+        self.relationship_ids.push(identified.relationship_id);
         if self.has_weights {
             self.weights.push(edge.weight.unwrap_or(1));
         }
@@ -289,6 +320,7 @@ impl SortedEdgeStoreBuilder {
                 schema_reversed: self.schema_reversed,
                 weights: self.weights,
             },
+            relationship_ids: self.relationship_ids,
         }
     }
 }
@@ -296,6 +328,7 @@ impl SortedEdgeStoreBuilder {
 /// Compressed Sparse Row (CSR) edge storage.
 pub struct EdgeStore {
     backing: EdgeBacking,
+    relationship_ids: Vec<RelationshipId>,
 }
 
 impl EdgeStore {
@@ -309,6 +342,7 @@ impl EdgeStore {
                 schema_reversed: Vec::new(),
                 weights: Vec::new(),
             },
+            relationship_ids: Vec::new(),
         }
     }
 
@@ -325,6 +359,7 @@ impl EdgeStore {
     pub(crate) unsafe fn from_mmap(arrays: MmapEdgeArrays) -> Self {
         Self {
             backing: EdgeBacking::Mmap { arrays },
+            relationship_ids: vec![NO_RELATIONSHIP_ID; arrays.edge_count as usize],
         }
     }
 
@@ -395,6 +430,7 @@ impl EdgeStore {
                 schema_reversed,
                 weights,
             },
+            relationship_ids: vec![NO_RELATIONSHIP_ID; edge_count],
         }
     }
 
@@ -455,6 +491,7 @@ impl EdgeStore {
         } else {
             Vec::new()
         };
+        let mut reversed_relationship_ids = vec![NO_RELATIONSHIP_ID; edge_count];
         let mut write_offsets = edge_offsets.clone();
 
         for source in 0..self.node_count() {
@@ -466,6 +503,11 @@ impl EdgeStore {
                 reversed_targets[write_idx] = source;
                 reversed_type_ids[write_idx] = type_id;
                 reversed_schema_reversed[write_idx] = schema_reversed[idx];
+                reversed_relationship_ids[write_idx] = self
+                    .relationship_ids
+                    .get(self.offsets_slice()[source as usize] as usize + idx)
+                    .copied()
+                    .unwrap_or(NO_RELATIONSHIP_ID);
                 if has_weights {
                     reversed_weights[write_idx] = weights.get(idx).copied().unwrap_or(1);
                 }
@@ -480,6 +522,7 @@ impl EdgeStore {
                 schema_reversed: reversed_schema_reversed,
                 weights: reversed_weights,
             },
+            relationship_ids: reversed_relationship_ids,
         }
     }
 
@@ -793,6 +836,11 @@ impl EdgeStore {
                 }
             }
         }
+    }
+
+    /// Relationship IDs in CSR adjacency order.
+    pub(crate) fn relationship_ids_slice(&self) -> &[RelationshipId] {
+        &self.relationship_ids
     }
 }
 

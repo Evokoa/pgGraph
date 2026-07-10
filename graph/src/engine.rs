@@ -6,7 +6,7 @@
 //! See: `docs/contributor_guide/engine-internals.mdx`
 
 use crate::bfs;
-use crate::edge_store::EdgeStore;
+use crate::edge_store::{EdgeStore, RelationshipIdentity};
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
@@ -72,6 +72,8 @@ pub struct Engine {
     /// Edge label registry. After `.pggraph` load, this is deserialized from a
     /// bincode section into backend-local heap.
     pub(crate) edge_type_registry: Vec<String>,
+    /// Source-row identities indexed by nonzero CSR relationship IDs.
+    pub(crate) relationship_identities: Vec<Option<RelationshipIdentity>>,
     pub(crate) has_unidirectional_edges: bool,
     pub(crate) built: bool,
     pub(crate) sync_status: SyncStatus,
@@ -228,6 +230,7 @@ impl Engine {
             reverse_edge_store: EdgeStore::new(),
             filter_index: FilterIndex::new(),
             edge_type_registry,
+            relationship_identities: vec![None],
             has_unidirectional_edges: false,
             built: false,
             sync_status: SyncStatus::Idle,

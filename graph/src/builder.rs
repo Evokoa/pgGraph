@@ -22,7 +22,9 @@ use pgrx::prelude::*;
 
 use crate::catalog::{estimated_table_rows, sql_table_name_from_oid};
 use crate::config::BuildScanMode;
-use crate::edge_store::{RawEdge, SortedEdgeStoreBuilder};
+use crate::edge_store::{
+    IdentifiedRawEdge, RawEdge, RelationshipId, RelationshipIdentity, SortedEdgeStoreBuilder,
+};
 use crate::engine::Engine;
 use crate::filter_index::{EncodedFilterValue, FilterColumnType};
 use crate::quote::quote_ident;
@@ -585,8 +587,15 @@ pub fn build_graph(
 
     // Phase 3: Build CSR by streaming sorted temp-spooled edges.
     let node_count = engine.node_store.node_count();
-    let edge_store = load_edge_store_from_spool(node_count, has_weights)?;
+    let (edge_store, relationship_identities) =
+        load_edge_store_from_spool(node_count, has_weights)?;
+    if edge_store.relationship_ids_slice().len() != edge_store.edge_count() as usize {
+        return Err(GraphError::Internal(
+            "relationship identity sidecar does not match CSR edge count".to_string(),
+        ));
+    }
     engine.replace_edge_stores(edge_store);
+    engine.relationship_identities = relationship_identities;
 
     // Mark as built
     engine.finish_build(Some(pgrx::datetime::transaction_timestamp()));
@@ -924,7 +933,10 @@ fn create_edge_spool() -> GraphResult<()> {
 fn load_edge_store_from_spool(
     node_count: u32,
     has_weights: bool,
-) -> GraphResult<crate::edge_store::EdgeStore> {
+) -> GraphResult<(
+    crate::edge_store::EdgeStore,
+    Vec<Option<RelationshipIdentity>>,
+)> {
     Spi::connect(|client| {
         let mut cursor = client.open_cursor(
             "SELECT source, target, type_id, weight, schema_reversed, mapping_id, source_key
@@ -934,6 +946,9 @@ fn load_edge_store_from_spool(
         );
         let batch_size = crate::config::BUILD_BATCH_SIZE.get().max(1) as i64;
         let mut builder = SortedEdgeStoreBuilder::new(node_count, has_weights);
+        let mut relationship_ids =
+            std::collections::HashMap::<RelationshipIdentity, RelationshipId>::new();
+        let mut relationship_identities = vec![None];
 
         loop {
             let rows = cursor
@@ -972,29 +987,66 @@ fn load_edge_store_from_spool(
                         GraphError::Internal("edge schema direction was NULL".to_string())
                     })?;
 
-                builder.try_push(RawEdge {
-                    source: u32::try_from(source).map_err(|_| {
-                        GraphError::Internal(format!("edge source out of range: {}", source))
-                    })?,
-                    target: u32::try_from(target).map_err(|_| {
-                        GraphError::Internal(format!("edge target out of range: {}", target))
-                    })?,
-                    type_id: u8::try_from(type_id).map_err(|_| {
-                        GraphError::Internal(format!("edge type out of range: {}", type_id))
-                    })?,
-                    weight: weight
-                        .map(|value| {
-                            u32::try_from(value).map_err(|_| {
-                                GraphError::Internal(format!("edge weight out of range: {}", value))
+                let mapping_id = row
+                    .get::<i64>(6)
+                    .map_err(|err| {
+                        GraphError::Internal(format!("edge mapping ID read failed: {err}"))
+                    })?
+                    .ok_or_else(|| GraphError::Internal("edge mapping ID was NULL".to_string()))?;
+                let mapping_id = u64::try_from(mapping_id).map_err(|_| {
+                    GraphError::Internal("edge mapping ID was negative".to_string())
+                })?;
+                let source_key = row
+                    .get::<String>(7)
+                    .map_err(|err| {
+                        GraphError::Internal(format!("edge source key read failed: {err}"))
+                    })?
+                    .ok_or_else(|| GraphError::Internal("edge source key was NULL".to_string()))?;
+                let identity = RelationshipIdentity {
+                    mapping_id,
+                    source_key,
+                };
+                let relationship_id = if let Some(&id) = relationship_ids.get(&identity) {
+                    id
+                } else {
+                    let id =
+                        RelationshipId::try_from(relationship_identities.len()).map_err(|_| {
+                            GraphError::Internal("too many relationship identities".to_string())
+                        })?;
+                    relationship_ids.insert(identity.clone(), id);
+                    relationship_identities.push(Some(identity));
+                    id
+                };
+
+                builder.try_push_identified(IdentifiedRawEdge {
+                    edge: RawEdge {
+                        source: u32::try_from(source).map_err(|_| {
+                            GraphError::Internal(format!("edge source out of range: {}", source))
+                        })?,
+                        target: u32::try_from(target).map_err(|_| {
+                            GraphError::Internal(format!("edge target out of range: {}", target))
+                        })?,
+                        type_id: u8::try_from(type_id).map_err(|_| {
+                            GraphError::Internal(format!("edge type out of range: {}", type_id))
+                        })?,
+                        weight: weight
+                            .map(|value| {
+                                u32::try_from(value).map_err(|_| {
+                                    GraphError::Internal(format!(
+                                        "edge weight out of range: {}",
+                                        value
+                                    ))
+                                })
                             })
-                        })
-                        .transpose()?,
-                    schema_reversed,
+                            .transpose()?,
+                        schema_reversed,
+                    },
+                    relationship_id,
                 })?;
             }
         }
 
-        Ok(builder.finish())
+        Ok((builder.finish(), relationship_identities))
     })
 }
 

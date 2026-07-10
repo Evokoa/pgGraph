@@ -62,6 +62,11 @@ Last updated: 2026-07-09
   bounded build spool in deterministic order. The next step is to intern these
   rows into per-adjacency CSR IDs and persist the dictionary.
 
+- Interned build-spool identity pairs into per-adjacency in-memory CSR IDs,
+  including generated reverse adjacencies. Artifact persistence and query use
+  remain intentionally pending; no relationship behavior relies on the
+  sidecar before reload support exists.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.
