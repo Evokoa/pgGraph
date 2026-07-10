@@ -48,6 +48,12 @@ Last updated: 2026-07-09
   and target relation OIDs, catalog fingerprints include all registered OIDs,
   and source-key metadata is checked against the live primary key before use.
 
+- Relationship identity remains open: source keys are durable catalog metadata,
+  but no `RelationshipId` yet travels with a CSR adjacency, persisted artifact,
+  overlay, path, hydration request, or relationship-row visibility check.
+  Do not claim relationship-row RLS or property hydration correctness until the
+  identity dictionary and per-adjacency references are versioned together.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.
