@@ -776,6 +776,9 @@ fn registered_edge(
     label_source_column: &str,
 ) -> RegisteredEdge {
     RegisteredEdge {
+        // Discovery output is registered before it is built; catalog insertion
+        // assigns the durable mapping identity.
+        mapping_id: 0,
         from_table_oid,
         from_table,
         from_column: from_column.to_string(),

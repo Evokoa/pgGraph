@@ -179,6 +179,8 @@ pub struct RegisteredTable {
 /// Registered edge in the graph catalog.
 #[derive(Debug, Clone)]
 pub struct RegisteredEdge {
+    /// Durable catalog identity for this relationship mapping.
+    pub mapping_id: u64,
     /// PostgreSQL OID of the source edge relation.
     pub from_table_oid: u32,
     pub from_table: String,
@@ -1094,6 +1096,7 @@ mod tests {
         }];
         let edges = vec![
             RegisteredEdge {
+                mapping_id: 1,
                 from_table_oid: 42,
                 from_table: "public.accounts".to_string(),
                 from_column: "parent_id".to_string(),
@@ -1107,6 +1110,7 @@ mod tests {
                 label_column: None,
             },
             RegisteredEdge {
+                mapping_id: 2,
                 from_table_oid: 42,
                 from_table: "public.accounts".to_string(),
                 from_column: "owner_id".to_string(),

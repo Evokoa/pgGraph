@@ -54,6 +54,10 @@ Last updated: 2026-07-09
   Do not claim relationship-row RLS or property hydration correctness until the
   identity dictionary and per-adjacency references are versioned together.
 
+- Added durable relationship mapping IDs to the catalog. OID-first
+  re-registration preserves the mapping surrogate, which will combine with the
+  canonical source primary-key tuple when the CSR identity dictionary lands.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.

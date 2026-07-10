@@ -427,6 +427,22 @@ ALTER TABLE graph._registered_tables
 ALTER TABLE graph._registered_edges
     ALTER COLUMN graph_id SET NOT NULL;
 
+CREATE SEQUENCE IF NOT EXISTS graph._registered_edges_mapping_id_seq;
+
+ALTER TABLE graph._registered_edges
+    ADD COLUMN IF NOT EXISTS mapping_id BIGINT;
+
+UPDATE graph._registered_edges
+SET mapping_id = nextval('graph._registered_edges_mapping_id_seq')
+WHERE mapping_id IS NULL;
+
+ALTER TABLE graph._registered_edges
+    ALTER COLUMN mapping_id SET DEFAULT nextval('graph._registered_edges_mapping_id_seq'),
+    ALTER COLUMN mapping_id SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS _registered_edges_graph_mapping_id_idx
+    ON graph._registered_edges (graph_id, mapping_id);
+
 ALTER TABLE graph._registered_filter_columns
     ALTER COLUMN graph_id SET NOT NULL;
 

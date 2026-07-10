@@ -116,7 +116,8 @@ pub(crate) fn read_catalog_for_graph(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT registered.from_table_oid::integer,
+                "SELECT registered.mapping_id,
+                        registered.from_table_oid::integer,
                         pg_catalog.quote_ident(source_namespace.nspname) || '.' || pg_catalog.quote_ident(source_relation.relname),
                         registered.from_column,
                         registered.source_key_columns,
@@ -148,8 +149,20 @@ pub(crate) fn read_catalog_for_graph(
                 ))
             })?;
         for row in result {
+            let mapping_id = row
+                .get::<i64>(1)
+                .map_err(|e| {
+                    safety::GraphError::Internal(format!("catalog read error (mapping_id): {e}"))
+                })?
+                .and_then(|id| u64::try_from(id).ok())
+                .filter(|&id| id != 0)
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered edge has no valid mapping identity; re-register it".to_string(),
+                    )
+                })?;
             let from_table_oid = row
-                .get::<i32>(1)
+                .get::<i32>(2)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (from_table_oid): {e}"
@@ -168,7 +181,7 @@ pub(crate) fn read_catalog_for_graph(
                     })
                 })?;
             let from_table = row
-                .get::<String>(2)
+                .get::<String>(3)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (from_table): {e}"))
                 })?
@@ -179,13 +192,13 @@ pub(crate) fn read_catalog_for_graph(
                     )
                 })?;
             let from_column = row
-                .get::<String>(3)
+                .get::<String>(4)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (from_column): {}", e))
                 })?
                 .unwrap_or_default();
             let source_key_columns = row
-                .get::<String>(4)
+                .get::<String>(5)
                 .map_err(|e| safety::GraphError::Internal(format!("catalog read error (source_key_columns): {e}")))?
                 .filter(|columns| !columns.trim().is_empty())
                 .map(|columns| builder::PrimaryKeySpec::from_catalog_text(&columns))
@@ -193,7 +206,7 @@ pub(crate) fn read_catalog_for_graph(
                     reason: format!("registered edge source relation OID {from_table_oid} has no stable primary-key mapping; re-register it"),
                 })?;
             let to_table_oid = row
-                .get::<i32>(5)
+                .get::<i32>(6)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (to_table_oid): {e}"))
                 })?
@@ -210,7 +223,7 @@ pub(crate) fn read_catalog_for_graph(
                     })
                 })?;
             let to_table = row
-                .get::<String>(6)
+                .get::<String>(7)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (to_table): {}", e))
                 })?
@@ -221,19 +234,19 @@ pub(crate) fn read_catalog_for_graph(
                     )
                 })?;
             let to_column = row
-                .get::<String>(7)
+                .get::<String>(8)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (to_column): {}", e))
                 })?
                 .unwrap_or_default();
             let label = row
-                .get::<String>(8)
+                .get::<String>(9)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (label): {}", e))
                 })?
                 .unwrap_or_default();
             let bidirectional = row
-                .get::<bool>(9)
+                .get::<bool>(10)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (bidirectional): {}",
@@ -242,7 +255,7 @@ pub(crate) fn read_catalog_for_graph(
                 })?
                 .unwrap_or(true);
             let weight_column = row
-                .get::<String>(10)
+                .get::<String>(11)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (weight_column): {}",
@@ -251,7 +264,7 @@ pub(crate) fn read_catalog_for_graph(
                 })?
                 .filter(|s| !s.is_empty());
             let label_column = row
-                .get::<String>(11)
+                .get::<String>(12)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (label_column): {}",
@@ -261,6 +274,7 @@ pub(crate) fn read_catalog_for_graph(
                 .filter(|s| !s.is_empty());
 
             edges.push(builder::RegisteredEdge {
+                mapping_id,
                 from_table_oid,
                 from_table,
                 from_column,
@@ -382,6 +396,7 @@ pub(crate) fn catalog_fingerprint(
             .then(a.label.cmp(&b.label))
     });
     for edge in edge_rows {
+        edge.mapping_id.hash(&mut hasher);
         edge.from_table_oid.hash(&mut hasher);
         edge.from_table.hash(&mut hasher);
         edge.from_column.hash(&mut hasher);
