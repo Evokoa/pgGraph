@@ -17,6 +17,20 @@ fn registered_relation_oid_survives_rename_and_rejects_recreation() {
     .expect("registered OID should survive a table rename and caller search-path change");
 
     Spi::run(
+        "SELECT graph.add_table('graph_identity_pgtest.renamed_nodes'::regclass, 'id', ARRAY['name'])",
+    )
+    .expect("re-registering a renamed relation failed");
+    let registration_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph._registered_tables
+          WHERE graph_id = '00000000-0000-0000-0000-000000000001'::uuid
+            AND table_oid = 'graph_identity_pgtest.renamed_nodes'::regclass",
+    )
+    .expect("renamed registration count failed")
+    .unwrap_or_default();
+    assert_eq!(registration_count, 1, "rename must not duplicate registration");
+
+    Spi::run(
         "DROP TABLE graph_identity_pgtest.renamed_nodes;
          CREATE TABLE graph_identity_pgtest.renamed_nodes (id text PRIMARY KEY, name text NOT NULL);",
     )

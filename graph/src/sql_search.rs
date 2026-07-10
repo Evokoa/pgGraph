@@ -2,8 +2,7 @@
 
 use crate::api_types::SearchOutputRow;
 use crate::catalog::{
-    primary_key_expr, read_catalog, relation_name, sql_table_name_from_catalog,
-    validate_column_exists,
+    primary_key_expr, read_catalog, relation_name, sql_table_name_from_oid, validate_column_exists,
 };
 use crate::quote::quote_ident;
 use crate::{acl, safety, types};
@@ -132,8 +131,8 @@ fn source_table_search_statements(
             continue;
         }
 
-        let table_name = sql_table_name_from_catalog(&table.table_name)?;
-        let table_oid = table_name.oid();
+        let table_name = sql_table_name_from_oid(table.table_oid)?;
+        let table_oid = table.table_oid;
         if table_filter.is_some_and(|filter| filter != table_oid) {
             continue;
         }

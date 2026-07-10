@@ -31,9 +31,26 @@ pub(crate) fn insert_registered_table_for_graph(
     let id_column = id_columns.as_catalog_text();
     let columns = columns.as_catalog_text();
     Spi::run_with_args(
-        "INSERT INTO graph._registered_tables (graph_id, table_name, table_oid, id_column, columns, tenant_column)
-         VALUES ($1::uuid, $2, pg_catalog.to_regclass($2)::oid, $3, $4, $5)
+        "WITH relation AS (
+             SELECT pg_catalog.to_regclass($2)::oid AS oid
+         ), updated AS (
+             UPDATE graph._registered_tables AS registered
+                SET table_name = $2,
+                    id_column = $3,
+                    columns = $4,
+                    tenant_column = $5
+               FROM relation
+              WHERE registered.graph_id = $1::uuid
+                AND registered.table_oid = relation.oid
+          RETURNING 1
+         )
+         INSERT INTO graph._registered_tables (graph_id, table_name, table_oid, id_column, columns, tenant_column)
+         SELECT $1::uuid, $2, relation.oid, $3, $4, $5
+           FROM relation
+          WHERE relation.oid IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM updated)
          ON CONFLICT (graph_id, table_name) DO UPDATE SET
+           table_oid = EXCLUDED.table_oid,
            id_column = EXCLUDED.id_column,
            columns = EXCLUDED.columns,
            tenant_column = EXCLUDED.tenant_column",

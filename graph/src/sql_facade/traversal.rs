@@ -620,7 +620,7 @@ fn tenant_allows_direct_node(engine: &Engine, node_idx: u32, tenant: Option<&str
 }
 
 fn source_row_visible(table: &builder::RegisteredTable, id: &str) -> safety::GraphResult<bool> {
-    let table_name = catalog::sql_table_name_from_catalog(&table.table_name)?;
+    let table_name = catalog::sql_table_name_from_oid(table.table_oid)?;
     let pk_expr = catalog::primary_key_expr("src", &table.id_columns);
     let sql = format!(
         "SELECT EXISTS (SELECT 1 FROM {} src WHERE {pk_expr} = $1)",

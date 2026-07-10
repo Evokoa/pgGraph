@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builder::{RegisteredEdge, RegisteredTable};
-use crate::catalog::{read_catalog, sql_table_name_from_catalog};
+use crate::catalog::{read_catalog, sql_table_name_from_oid};
 use crate::gql::errors::{GqlError, Span};
 use crate::quote::quote_ident;
 use crate::safety::GraphError;
@@ -299,7 +299,7 @@ fn relationship_type_names(edge: &RegisteredEdge) -> GraphResult<Vec<String>> {
     let Some(label_column) = edge.label_column.as_deref() else {
         return Ok(vec![edge.label.clone()]);
     };
-    let edge_table = sql_table_name_from_catalog(&edge.from_table)?;
+    let edge_table = sql_table_name_from_oid(edge.from_table_oid)?;
     let label_expr = quote_ident(label_column);
     let query = format!(
         "SELECT DISTINCT COALESCE(NULLIF(BTRIM({label_expr}::text), ''), $1)

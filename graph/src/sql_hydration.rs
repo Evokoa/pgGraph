@@ -1,6 +1,6 @@
 //! SQL hydration helpers for source rows returned by graph operations.
 
-use crate::catalog::{primary_key_expr, read_catalog, sql_table_name_from_catalog};
+use crate::catalog::{primary_key_expr, read_catalog, sql_table_name_from_oid};
 use crate::{acl, safety, types};
 use pgrx::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -26,7 +26,7 @@ pub(crate) fn hydrate_node(
         })?;
 
     acl::check_table_acl(table_oid)?;
-    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let table_name = sql_table_name_from_oid(table.table_oid)?;
     let pk_expr = primary_key_expr("src", &table.id_columns);
     Spi::connect(|client| {
         let query = format!(
@@ -90,7 +90,7 @@ pub(crate) fn hydrate_nodes(
             ))
         })?;
         acl::check_table_acl(table_oid)?;
-        let table_name = sql_table_name_from_catalog(&table.table_name)?;
+        let table_name = sql_table_name_from_oid(table.table_oid)?;
         let pk_expr = primary_key_expr("src", &table.id_columns);
         let query = format!(
             "SELECT {} AS graph_node_id, to_jsonb(src.*) FROM {} src WHERE {} = ANY($1::text[])",
@@ -153,7 +153,7 @@ pub(crate) fn visible_node_keys(
             ))
         })?;
         acl::check_table_acl(*table_oid)?;
-        let table_name = sql_table_name_from_catalog(&table.table_name)?;
+        let table_name = sql_table_name_from_oid(table.table_oid)?;
         let pk_expr = primary_key_expr("src", &table.id_columns);
         let query = format!(
             "SELECT {pk_expr} AS graph_node_id FROM {} src WHERE {pk_expr} = ANY($1::text[])",

@@ -142,24 +142,22 @@ pub(crate) fn relation_name(table_oid: u32) -> safety::GraphResult<String> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SqlTableName {
-    oid: u32,
     sql: String,
 }
 
 impl SqlTableName {
-    pub(crate) fn oid(&self) -> u32 {
-        self.oid
-    }
-
     pub(crate) fn as_sql(&self) -> &str {
         &self.sql
     }
 }
 
-pub(crate) fn sql_table_name_from_catalog(table_name: &str) -> safety::GraphResult<SqlTableName> {
-    let oid = table_oid_from_name(table_name)?;
-    let sql = regclass_text(oid)?;
-    Ok(SqlTableName { oid, sql })
+/// Render a registered relation directly from its stable PostgreSQL OID.
+///
+/// This avoids resolving a previously-read display name after a concurrent DDL
+/// change has renamed, dropped, or recreated the relation.
+pub(crate) fn sql_table_name_from_oid(table_oid: u32) -> safety::GraphResult<SqlTableName> {
+    let sql = regclass_text(table_oid)?;
+    Ok(SqlTableName { sql })
 }
 
 pub(crate) fn table_oid_from_name(table_name: &str) -> safety::GraphResult<u32> {

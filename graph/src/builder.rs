@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use pgrx::prelude::*;
 
-use crate::catalog::estimated_table_rows;
+use crate::catalog::{estimated_table_rows, sql_table_name_from_oid};
 use crate::config::BuildScanMode;
 use crate::edge_store::{RawEdge, SortedEdgeStoreBuilder};
 use crate::engine::Engine;
@@ -346,7 +346,8 @@ pub fn build_graph(
             cols.join(", ")
         };
 
-        let query = format!("SELECT {} FROM {}", column_list, table.table_name);
+        let table_name = sql_table_name_from_oid(oid)?;
+        let query = format!("SELECT {} FROM {}", column_list, table_name.as_sql());
         let filter_start_column = 2;
         let tenant_column_idx = filter_start_column + table_filter_columns.len();
         if table.tenant_column.is_some() {

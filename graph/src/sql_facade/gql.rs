@@ -2,7 +2,7 @@ use super::admin::{check_enabled_result, with_panic_boundary};
 use super::runtime::{current_query_freshness, ensure_current_graph_for_query};
 use super::*;
 use crate::catalog::{
-    primary_key_expr, read_catalog, sql_table_name_from_catalog, validate_column_exists,
+    primary_key_expr, read_catalog, sql_table_name_from_oid, validate_column_exists,
 };
 use crate::quote::{quote_ident, quote_literal};
 
@@ -829,7 +829,7 @@ fn insert_mapped_node(
                 plan.table_oid
             ))
         })?;
-    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let table_name = sql_table_name_from_oid(table.table_oid)?;
     let insert_shape = create_insert_shape(plan, table.tenant_column.as_deref(), tenant_scope);
     let values = create_values_json(plan, &insert_shape, tenant_scope, params)?;
     let pk_expr = primary_key_expr("inserted", &table.id_columns);
@@ -952,7 +952,7 @@ fn merge_mapped_node(
                 plan.table_oid
             ))
         })?;
-    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let table_name = sql_table_name_from_oid(table.table_oid)?;
     let identity_values =
         merge_identity_values_json(plan, table.tenant_column.as_deref(), tenant_scope, params)?;
     validate_merge_identity(&identity_values, &table.id_columns)?;
@@ -1298,7 +1298,7 @@ fn lock_node_coordinate(
                 "{operation} cannot lock unregistered table OID {table_oid}"
             ))
         })?;
-    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let table_name = sql_table_name_from_oid(table.table_oid)?;
     let pk_expr = primary_key_expr("src", &table.id_columns);
     let query = format!(
         "SELECT to_jsonb(src.*), {}
@@ -1396,7 +1396,7 @@ fn update_mapped_property(
                 plan.table_oid
             ))
         })?;
-    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let table_name = sql_table_name_from_oid(table.table_oid)?;
     lock_and_recheck_node_write(
         plan.table_oid,
         &plan.label,
@@ -1480,7 +1480,7 @@ fn remove_mapped_property(
                 plan.table_oid
             ))
         })?;
-    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let table_name = sql_table_name_from_oid(table.table_oid)?;
     lock_and_recheck_node_write(
         plan.table_oid,
         &plan.label,
@@ -1562,7 +1562,7 @@ fn delete_mapped_node_row(
                 plan.table_oid
             ))
         })?;
-    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let table_name = sql_table_name_from_oid(table.table_oid)?;
     let pk_expr = primary_key_expr("src", &table.id_columns);
     let query = format!(
         "WITH deleted AS (
@@ -1641,7 +1641,7 @@ fn delete_incident_edge_rows(
                     incident.edge_table_oid
                 ))
             })?;
-        let table_name = sql_table_name_from_catalog(&edge.from_table)?;
+        let table_name = sql_table_name_from_oid(edge.from_table_oid)?;
         deleted.extend(delete_incident_edge_rows_for_mapping(
             plan,
             incident,
@@ -1777,7 +1777,7 @@ fn delete_mapped_edge_row(
                 .to_string(),
         });
     }
-    let table_name = sql_table_name_from_catalog(&edge.from_table)?;
+    let table_name = sql_table_name_from_oid(edge.from_table_oid)?;
     if plan.bidirectional
         && plan.edge_source_table_oid == plan.edge_target_table_oid
         && source_id != target_id
