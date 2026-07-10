@@ -269,10 +269,10 @@ the source row can be read. To return only identifiers, project the identifier
 property directly, for example `RETURN o.id AS order_id`, instead of returning
 the whole node. The optional `hydrate := false` SQL argument returns compact
 coordinate-only node objects, but it does not bypass PostgreSQL visibility:
-pgGraph batch-checks the backing source rows under the caller's ACL and RLS
-policies before exposing coordinates or topology. A stale or hidden source row
-raises SQLSTATE `22000` with diagnostic `PG017` rather than returning a partial
-result.
+pgGraph batch-checks the backing node rows and mapped single-pattern
+relationship rows under the caller's ACL and RLS policies before exposing
+coordinates or topology. A stale or hidden source row raises SQLSTATE `22000`
+with diagnostic `PG017` rather than returning a partial result.
 
 Other read semantics:
 

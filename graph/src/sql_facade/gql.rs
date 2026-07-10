@@ -253,6 +253,7 @@ pub(super) fn execute_statement(
                 crate::query::execute::execute(&engine.borrow(), &plan, tenant_scope)
             })?;
             ensure_gql_rows_visible(&matches)?;
+            ensure_gql_relationship_rows_visible(&matches, &plan)?;
             let hydrated = hydrate_gql_rows(
                 &matches,
                 crate::query::value::requires_hydration(&plan, hydrate),
@@ -3065,6 +3066,78 @@ fn ensure_gql_node_rows_visible(
     {
         return Err(safety::GraphError::GqlExecution {
             reason: "GQL source row is not visible to the current role".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Check mapped relationship source-row visibility before exposing graph
+/// topology.
+fn ensure_gql_relationship_rows_visible(
+    rows: &[crate::query::execute::GqlRow],
+    plan: &crate::query::physical_plan::PhysicalPlan,
+) -> safety::GraphResult<()> {
+    let Some(edge_mapping) = &plan.edge_mapping else {
+        return Ok(());
+    };
+    let relationship_identities =
+        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    let mut source_keys = Vec::new();
+    for row in rows {
+        if row.rel_start.is_none() || row.rel_end.is_none() {
+            continue;
+        }
+        let identity = relationship_source_identity(
+            edge_mapping,
+            &relationship_identities,
+            row.relationship_id,
+        )?;
+        source_keys.push(identity.source_key.clone());
+    }
+    if source_keys.is_empty() {
+        return Ok(());
+    }
+    source_keys.sort();
+    source_keys.dedup();
+
+    acl::check_table_acl(edge_mapping.edge_table_oid)?;
+    let table_name = regclass_text(edge_mapping.edge_table_oid)?;
+    let source_key_predicate = relationship_source_key_predicate(edge_mapping);
+    let query = format!(
+        "SELECT {source_key_predicate} AS graph_relationship_id
+           FROM {table_name} edge_row
+          WHERE {source_key_predicate} = ANY($1::text[])"
+    );
+    let mut visible = std::collections::HashSet::new();
+    Spi::connect(|client| {
+        let result = client
+            .select(&query, None, &[source_keys.clone().into()])
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("relationship visibility check failed: {err}"))
+            })?;
+        for row in result {
+            let source_key = row
+                .get::<String>(1)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "relationship visibility key read failed: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "relationship visibility returned NULL key".to_string(),
+                    )
+                })?;
+            visible.insert(source_key);
+        }
+        Ok::<(), safety::GraphError>(())
+    })?;
+    if source_keys
+        .into_iter()
+        .any(|source_key| !visible.contains(&source_key))
+    {
+        return Err(safety::GraphError::GqlExecution {
+            reason: "GQL relationship source row is not visible to the current role".to_string(),
         });
     }
     Ok(())

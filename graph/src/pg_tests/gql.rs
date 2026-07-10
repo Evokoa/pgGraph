@@ -564,6 +564,50 @@ fn gql_coordinate_only_rows_fail_closed_when_source_row_is_not_visible() {
 }
 
 #[pg_test]
+fn gql_coordinate_only_relationships_fail_closed_when_edge_row_is_not_visible() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run("DROP ROLE IF EXISTS graph_gql_relationship_rls").expect("drop role failed");
+    Spi::run("CREATE ROLE graph_gql_relationship_rls").expect("create role failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_relationship_rls;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_gql_relationship_rls;
+         GRANT SELECT ON public.graph_test_friendships_pgtest TO graph_gql_relationship_rls;",
+    )
+    .expect("create relationship rls fixture failed");
+    create_error_sqlstate_helper();
+
+    Spi::run("SET ROLE graph_gql_relationship_rls").expect("set relationship rls role failed");
+    let coordinate_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                 RETURN u, r, v',
+                hydrate := false
+             )"
+        )
+    ))
+    .expect("relationship coordinate SQLSTATE capture failed");
+    let hydrated_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                 RETURN u, r, v',
+                hydrate := true
+             )"
+        )
+    ))
+    .expect("relationship hydrated SQLSTATE capture failed");
+    Spi::run("RESET ROLE").expect("reset relationship rls role failed");
+
+    assert_eq!(coordinate_sqlstate.as_deref(), Some("22000"));
+    assert_eq!(hydrated_sqlstate.as_deref(), Some("22000"));
+}
+
+#[pg_test]
 fn gql_with_projection_scope_aliases_and_shadows() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();
