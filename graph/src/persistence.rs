@@ -1493,7 +1493,10 @@ mod tests {
         let loaded = load_graph_file(&path).unwrap();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
-        let loaded_status = loaded.filter_index.find_column("status").unwrap();
+        let loaded_status = loaded
+            .filter_index
+            .find_first_column_by_name("status")
+            .unwrap();
         assert!(loaded.filter_index.check_filter(
             a,
             &FilterOp::new(loaded_status, FilterCondition::EqToken(open))
@@ -1608,7 +1611,7 @@ mod tests {
         let loaded = load_graph_file(&path).expect("typed filter projection reloads");
         let text_column = loaded
             .filter_index
-            .find_column("text")
+            .find_first_column_by_name("text")
             .expect("text column");
         let text_token = loaded
             .filter_index
@@ -1630,7 +1633,7 @@ mod tests {
         for (name, condition) in checks {
             let column = loaded
                 .filter_index
-                .find_column(name)
+                .find_first_column_by_name(name)
                 .expect("restored column exists");
             assert!(loaded
                 .filter_index

@@ -485,7 +485,7 @@ fn sparse_typed_filters_survive_persisted_load_traverse_search_and_sync() {
         let engine = engine.borrow();
         let name_column = engine
             .filter_index
-            .find_column("name")
+            .find_first_column_by_name("name")
             .expect("name filter remains registered");
         let token = engine
             .filter_index

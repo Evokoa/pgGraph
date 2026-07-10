@@ -536,8 +536,13 @@ impl FilterIndex {
         ops.iter().all(|op| self.check_filter(node_idx, op))
     }
 
-    /// Find the column index for a given column name.
-    pub fn find_column(&self, column_name: &str) -> Option<usize> {
+    /// Return the first column with this display name.
+    ///
+    /// This compatibility helper is intentionally unsuitable for graph query
+    /// and synchronization paths because a display name can occur on more
+    /// than one relation. Use [`Self::find_column_for_table`] whenever source
+    /// relation identity is available.
+    pub fn find_first_column_by_name(&self, column_name: &str) -> Option<usize> {
         self.columns
             .iter()
             .position(|c| c.column_name == column_name)
@@ -1056,7 +1061,7 @@ mod tests {
     #[test]
     fn find_column_returns_none_for_unregistered() {
         let fi = FilterIndex::new();
-        assert!(fi.find_column("nonexistent").is_none());
+        assert!(fi.find_first_column_by_name("nonexistent").is_none());
     }
 
     #[test]
