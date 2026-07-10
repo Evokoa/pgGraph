@@ -237,6 +237,37 @@ fn binder_accepts_phase2_named_path_elements_and_filters() {
 }
 
 #[test]
+fn wildcard_path_carries_edge_mapping_metadata() {
+    let statement = bind_statement_query("MATCH p=(u:users)-[r:friend]->(v:users) RETURN p, r");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    assert_eq!(
+        logical
+            .edge_mappings_by_id
+            .values()
+            .map(|mapping| mapping.edge_table_oid)
+            .collect::<Vec<_>>(),
+        vec![30]
+    );
+
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+
+    assert_eq!(
+        physical
+            .edge_mappings_by_id
+            .values()
+            .map(|mapping| mapping.edge_table_oid)
+            .collect::<Vec<_>>(),
+        vec![30]
+    );
+}
+
+#[test]
 fn binder_accepts_variable_length_wildcard_path_without_element_variables() {
     let plan = bind_statement_query("MATCH p=()-[*1..3]->() RETURN p, length(p) AS len");
     let super::logical_plan::LogicalStatement::WildcardPathRead(plan) = plan else {

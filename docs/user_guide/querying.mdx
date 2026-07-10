@@ -270,10 +270,11 @@ property directly, for example `RETURN o.id AS order_id`, instead of returning
 the whole node. The optional `hydrate := false` SQL argument returns compact
 coordinate-only node objects, but it does not bypass PostgreSQL visibility:
 pgGraph batch-checks the backing node rows and mapped relationship rows for
-single-pattern reads and supported multi-pattern joins under the caller's ACL
-and RLS policies before exposing coordinates or topology. A stale or hidden
-source row raises SQLSTATE `22000` with diagnostic `PG017` rather than
-returning a partial result.
+single-pattern reads, supported multi-pattern joins, and base wildcard path
+outputs with persisted relationship identities under the caller's ACL and RLS
+policies before exposing coordinates or topology. A stale or hidden source row
+raises SQLSTATE `22000` with diagnostic `PG017` rather than returning a partial
+result.
 
 Other read semantics:
 

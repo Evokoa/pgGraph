@@ -68,6 +68,8 @@ pub(crate) struct PhysicalWildcardPathPlan {
     pub(crate) table_labels: BTreeMap<u32, String>,
     /// Relationship type labels that may appear in wildcard output.
     pub(crate) rel_type_labels: BTreeSet<String>,
+    /// Registered edge-row mappings keyed by durable mapping ID.
+    pub(crate) edge_mappings_by_id: BTreeMap<u64, EdgeMappingInfo>,
     /// Optional hydrated-row predicate over named path-node variables.
     pub(crate) predicate: Option<Predicate>,
     /// Number of rows to skip after projection.

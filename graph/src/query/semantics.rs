@@ -1541,6 +1541,7 @@ fn bind_wildcard_path_read(
         .into_iter()
         .map(|rel| rel.rel_type)
         .collect::<std::collections::BTreeSet<_>>();
+    let edge_mappings_by_id = wildcard_edge_mappings_by_id(catalog, &segments);
     Ok(LogicalWildcardPathPlan {
         path_var,
         source_var,
@@ -1555,10 +1556,36 @@ fn bind_wildcard_path_read(
         required_node_table_oids,
         table_labels,
         rel_type_labels,
+        edge_mappings_by_id,
         predicate,
         skip: query.skip,
         limit: query.limit,
     })
+}
+
+fn wildcard_edge_mappings_by_id(
+    catalog: &impl CatalogSnapshot,
+    segments: &[LogicalWildcardPathSegment],
+) -> std::collections::BTreeMap<u64, EdgeMappingInfo> {
+    let mut rel_type_filters = std::collections::BTreeSet::new();
+    let mut has_unfiltered_segment = false;
+    for segment in segments {
+        if segment.rel_type_filters.is_empty() {
+            has_unfiltered_segment = true;
+            break;
+        }
+        rel_type_filters.extend(segment.rel_type_filters.iter().cloned());
+    }
+
+    catalog
+        .rel_types()
+        .into_iter()
+        .filter(|rel| has_unfiltered_segment || rel_type_filters.contains(&rel.rel_type))
+        .filter_map(|rel| {
+            rel.edge_mapping
+                .map(|mapping| (mapping.mapping_id, mapping))
+        })
+        .collect()
 }
 
 fn bind_wildcard_path_predicate(

@@ -304,6 +304,7 @@ pub(super) fn execute_statement(
                 crate::query::execute::execute_wildcard_path(&engine.borrow(), &plan, tenant_scope)
             })?;
             ensure_gql_rows_visible(&matches)?;
+            ensure_gql_wildcard_relationship_rows_visible(&matches, &plan)?;
             let hydrated = hydrate_gql_rows(
                 &matches,
                 crate::query::value::wildcard_path_requires_hydration(&plan, hydrate),
@@ -3134,6 +3135,58 @@ fn ensure_gql_join_relationship_rows_visible(
                     .map(|relationship| relationship.relationship_id),
             );
         }
+        ensure_relationship_source_keys_visible(
+            edge_mapping,
+            &relationship_identities,
+            relationship_ids,
+        )?;
+    }
+    Ok(())
+}
+
+/// Check mapped relationship source-row visibility for wildcard path outputs.
+fn ensure_gql_wildcard_relationship_rows_visible(
+    rows: &[crate::query::execute::GqlRow],
+    plan: &crate::query::physical_plan::PhysicalWildcardPathPlan,
+) -> safety::GraphResult<()> {
+    if plan.edge_mappings_by_id.is_empty() {
+        return Ok(());
+    }
+    let relationship_identities =
+        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    let mut ids_by_mapping =
+        std::collections::BTreeMap::<u64, Vec<Option<crate::edge_store::RelationshipId>>>::new();
+
+    for row in rows {
+        for relationship in &row.path_relationships {
+            let Some(relationship_id) = relationship.relationship_id else {
+                continue;
+            };
+            let Some(identity) = relationship_identities
+                .get(relationship_id as usize)
+                .and_then(Option::as_ref)
+            else {
+                return Err(safety::GraphError::GqlExecution {
+                    reason: format!(
+                        "GQL relationship identity `{relationship_id}` is not available"
+                    ),
+                });
+            };
+            if plan.edge_mappings_by_id.contains_key(&identity.mapping_id) {
+                ids_by_mapping
+                    .entry(identity.mapping_id)
+                    .or_default()
+                    .push(Some(relationship_id));
+            }
+        }
+    }
+
+    for (mapping_id, relationship_ids) in ids_by_mapping {
+        let Some(edge_mapping) = plan.edge_mappings_by_id.get(&mapping_id) else {
+            return Err(safety::GraphError::Internal(format!(
+                "wildcard path relationship mapping {mapping_id} is missing from the physical plan"
+            )));
+        };
         ensure_relationship_source_keys_visible(
             edge_mapping,
             &relationship_identities,
