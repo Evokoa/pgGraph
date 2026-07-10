@@ -795,8 +795,12 @@ fn registered_table_name_for_graph(
         let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
         let mut result = client
             .select(
-                "SELECT table_name
+                "SELECT pg_catalog.quote_ident(namespace.nspname) || '.' || pg_catalog.quote_ident(relation.relname)
                     FROM graph._registered_tables
+                    JOIN pg_catalog.pg_class AS relation
+                      ON relation.oid = graph._registered_tables.table_oid
+                    JOIN pg_catalog.pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
                     WHERE graph_id = $1::uuid
                       AND table_oid = $2::oid
                     ORDER BY table_name
