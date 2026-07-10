@@ -233,7 +233,6 @@ pub struct SortedEdgeStoreBuilder {
     schema_reversed: Vec<u8>,
     weights: Vec<u32>,
     current_node: u32,
-    previous: Option<(u32, u32, u8, bool)>,
 }
 
 impl SortedEdgeStoreBuilder {
@@ -248,14 +247,14 @@ impl SortedEdgeStoreBuilder {
             schema_reversed: Vec::new(),
             weights: Vec::new(),
             current_node: 0,
-            previous: None,
         }
     }
 
     /// Add one sorted edge, rejecting endpoints outside the node range.
     ///
-    /// Consecutive duplicate `(source, target, type_id)` rows are ignored so
-    /// SQL build spools can deduplicate without retaining all edges in memory.
+    /// Every source relationship row is retained, including rows with equal
+    /// endpoints and type. PostgreSQL relationship tables have bag semantics;
+    /// topology alone is not a relationship identity.
     ///
     /// # Errors
     ///
@@ -263,10 +262,6 @@ impl SortedEdgeStoreBuilder {
     /// is greater than or equal to the builder's node count.
     pub fn try_push(&mut self, edge: RawEdge) -> GraphResult<()> {
         validate_raw_edge(self.node_count, &edge)?;
-        let key = (edge.source, edge.target, edge.type_id, edge.schema_reversed);
-        if self.previous == Some(key) {
-            return Ok(());
-        }
         while self.current_node < edge.source {
             self.current_node += 1;
             self.edge_offsets.push(self.targets.len() as u32);
@@ -277,7 +272,6 @@ impl SortedEdgeStoreBuilder {
         if self.has_weights {
             self.weights.push(edge.weight.unwrap_or(1));
         }
-        self.previous = Some(key);
         Ok(())
     }
 
@@ -363,14 +357,6 @@ impl EdgeStore {
                 .then(a.target.cmp(&b.target))
                 .then(a.type_id.cmp(&b.type_id))
                 .then(a.schema_reversed.cmp(&b.schema_reversed))
-        });
-
-        // Deduplicate
-        edges.dedup_by(|a, b| {
-            a.source == b.source
-                && a.target == b.target
-                && a.type_id == b.type_id
-                && a.schema_reversed == b.schema_reversed
         });
 
         let edge_count = edges.len();
@@ -944,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn deduplicates_edges() {
+    fn preserves_parallel_edges() {
         let edges = vec![
             RawEdge {
                 source: 0,
@@ -969,8 +955,8 @@ mod tests {
             },
         ];
         let store = EdgeStore::from_edges(3, edges, false);
-        assert_eq!(store.edge_count(), 2); // deduped
-        assert_eq!(store.neighbors(0).0, &[1, 2]);
+        assert_eq!(store.edge_count(), 3);
+        assert_eq!(store.neighbors(0).0, &[1, 1, 2]);
     }
 
     #[test]
@@ -1372,7 +1358,7 @@ mod tests {
     proptest! {
         /// Verifies the sorted temp-table CSR pipeline is behaviorally
         /// equivalent to the in-memory unsorted builder after invalid edges are
-        /// rejected and duplicate `(source, target, type_id)` entries collapse.
+        /// rejected, while preserving relationship-row multiplicity.
         #[test]
         fn sorted_edge_pipeline_matches_unsorted_builder(
             node_count in 0u32..32,

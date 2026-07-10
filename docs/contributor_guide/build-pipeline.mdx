@@ -148,11 +148,13 @@ ORDER BY source, target, type_id
 
 into `SortedEdgeStoreBuilder`.
 
-## Deduplication
+## Relationship multiplicity
 
-Both `EdgeStore::from_edges()` and sorted builders deduplicate duplicate
-`(source, target, type_id)` edges. This keeps CSR slices canonical even when
-source tables contain repeated relationship rows.
+CSR construction retains every registered source relationship row. Two rows
+with the same endpoints and label remain separate relationships; applications
+that want a set of projected results can request `DISTINCT` in their query.
+The projection does not use endpoint/type topology as a substitute for a
+source-row identity.
 
 ## Build Completion
 

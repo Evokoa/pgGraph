@@ -331,6 +331,44 @@ impl<'a> LayeredNeighbors<'a> {
             return Vec::new();
         }
 
+        // Do not route an untouched base projection through the topology-keyed
+        // merge map. A base CSR may contain parallel source relationship rows,
+        // and the map is reserved for the legacy delta representation until
+        // durable relationship keys reach segments and overlays.
+        if direction == TraversalDirection::Out
+            && self.base_chunk_out.is_empty()
+            && self.durable_out.is_empty()
+            && self.committed_out_inserts.is_empty()
+            && self.committed_out_deletes.is_empty()
+            && self.active_nodes.is_empty()
+            && self.tenant_memberships.is_empty()
+            && !tx_delta::edge_delta_dirty()
+        {
+            let (targets, type_ids, schema_reversed) = self.base.neighbors_with_schema(node_idx);
+            let weights = base_weight_slice(self.base, node_idx);
+            let mut neighbors = targets
+                .iter()
+                .zip(type_ids.iter())
+                .zip(schema_reversed.iter())
+                .enumerate()
+                .filter_map(|(idx, ((&target, &type_id), &schema_reversed))| {
+                    self.node_visible(target).then_some((
+                        target,
+                        LayeredEdge {
+                            target,
+                            type_id,
+                            schema_reversed: schema_reversed != 0,
+                            weight: weights.and_then(|values| values.get(idx)).copied(),
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if reversed {
+                neighbors.reverse();
+            }
+            return neighbors;
+        }
+
         let mut merged = BTreeMap::<(u32, u8, bool), LayeredEdge>::new();
         self.merge_base(direction, node_idx, &mut merged);
         self.merge_durable(direction, node_idx, &mut merged);

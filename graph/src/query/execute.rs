@@ -11,7 +11,7 @@ use crate::types::TraversalDirection;
 use super::logical_plan::BoundDirection;
 use super::physical_plan::{
     PhysicalJoinPlan, PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan,
-    PhysicalWildcardPathSegment, ReturnSlot,
+    PhysicalWildcardPathSegment,
 };
 
 /// Coordinate-only node value returned by Phase 1B.
@@ -734,13 +734,7 @@ fn expand_targets(
     tenant: Option<&str>,
 ) -> Vec<GqlTarget> {
     let mut results = Vec::new();
-    let returns_relationship = plan
-        .returns
-        .iter()
-        .any(|slot| matches!(slot, ReturnSlot::Relationship { .. }));
     let preserve_path_matches = plan.hops.variable;
-    let mut seen_result_nodes = std::collections::HashSet::new();
-    let mut seen_result_relationships = std::collections::HashSet::new();
     let mut seen_frontier = std::collections::HashSet::from([source_idx]);
     let mut current = vec![PathState {
         node_idx: source_idx,
@@ -764,17 +758,6 @@ fn expand_targets(
                 let next_state = state.push(target);
                 if depth >= plan.hops.min
                     && target_matches(engine, target.node_idx, plan.target_table_oid, tenant)
-                    && (preserve_path_matches
-                        || if returns_relationship {
-                            seen_result_relationships.insert((
-                                target.node_idx,
-                                target.orientation,
-                                target.type_id,
-                                target.schema_reversed,
-                            ))
-                        } else {
-                            seen_result_nodes.insert(target.node_idx)
-                        })
                 {
                     results.push(GqlTarget {
                         node_idx: target.node_idx,
@@ -917,7 +900,6 @@ impl<'a> GqlNeighbors<'a> {
         }
         neighbors
             .sort_by_key(|target| (target.node_idx, target.orientation, target.schema_reversed));
-        neighbors.dedup();
         neighbors
     }
 
@@ -947,7 +929,6 @@ impl<'a> GqlNeighbors<'a> {
                 target.schema_reversed,
             )
         });
-        neighbors.dedup();
         neighbors
     }
 

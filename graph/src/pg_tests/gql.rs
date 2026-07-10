@@ -808,6 +808,31 @@ fn gql_optional_match_hydrates_source_with_null_target_and_relationship() {
 }
 
 #[pg_test]
+fn gql_preserves_parallel_source_relationship_rows() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f_parallel', 'u1', 'u2')",
+    )
+    .expect("insert parallel relationship failed");
+    build_friendship_fixture_graph();
+
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph.gql(
+               'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                RETURN u, v',
+               hydrate := false
+           )
+          WHERE row #>> '{u,_id,id}' = 'u1'
+            AND row #>> '{v,_id,id}' = 'u2'",
+    )
+    .expect("parallel relationship query failed")
+    .unwrap_or_default();
+    assert_eq!(count, 2, "parallel source rows must remain distinct");
+}
+
+#[pg_test]
 fn gql_aggregates_match_sql_grouping_and_numeric_results() {
     reset_and_create_fixtures();
     Spi::run(
