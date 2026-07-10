@@ -58,6 +58,10 @@ Last updated: 2026-07-09
   re-registration preserves the mapping surrogate, which will combine with the
   canonical source primary-key tuple when the CSR identity dictionary lands.
 
+- Carried relationship mapping IDs and canonical source-key tuples through the
+  bounded build spool in deterministic order. The next step is to intern these
+  rows into per-adjacency CSR IDs and persist the dictionary.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.

@@ -156,6 +156,8 @@ enum PendingFilterValue {
 struct UnresolvedEdge {
     from_pk: String,
     to_pk: String,
+    mapping_id: u64,
+    source_key: String,
     type_id: u8,
     weight: Option<u32>,
     bidirectional: bool,
@@ -486,12 +488,13 @@ pub fn build_graph(
             .as_ref()
             .map(|label| format!(", {}::text", quote_ident(label)))
             .unwrap_or_default();
-        let label_column_index = 3 + usize::from(edge.weight_column.is_some());
+        let source_key_expr = primary_key_expr(&edge.source_key_columns);
+        let label_column_index = 4 + usize::from(edge.weight_column.is_some());
 
         let query = format!(
-            "SELECT ({})::text, ({})::text{}{}
+            "SELECT ({})::text, ({})::text, ({})::text{}{}
              FROM {}",
-            from_expr, to_expr, weight_select, label_select, edge.from_table
+            from_expr, to_expr, source_key_expr, weight_select, label_select, edge.from_table
         );
 
         Spi::connect(|client| {
@@ -522,8 +525,17 @@ pub fn build_graph(
                     else {
                         continue;
                     };
+                    let Some(source_key) =
+                        structural_text_value(row.get::<String>(3).map_err(|e| {
+                            GraphError::Internal(format!(
+                                "Cannot read relationship source key: {e}"
+                            ))
+                        })?)
+                    else {
+                        continue;
+                    };
                     let weight = if edge.weight_column.is_some() {
-                        row.get::<i64>(3)
+                        row.get::<i64>(4)
                             .ok()
                             .flatten()
                             .map(|value| value.clamp(1, u32::MAX as i64) as u32)
@@ -552,6 +564,8 @@ pub fn build_graph(
                     unresolved_edges.push(UnresolvedEdge {
                         from_pk,
                         to_pk,
+                        mapping_id: edge.mapping_id,
+                        source_key,
                         type_id: edge_type_id,
                         weight,
                         bidirectional: edge.bidirectional,
@@ -770,23 +784,31 @@ fn resolve_edge_batch(
 
     for (edge, (source, target)) in inputs.iter().zip(resolved) {
         if let (Some(source), Some(target)) = (source, target) {
-            edge_batch.push(RawEdge {
-                source,
-                target,
-                type_id: edge.type_id,
-                weight: edge.weight,
-                schema_reversed: false,
-            });
+            edge_batch.push(
+                RawEdge {
+                    source,
+                    target,
+                    type_id: edge.type_id,
+                    weight: edge.weight,
+                    schema_reversed: false,
+                },
+                edge.mapping_id,
+                &edge.source_key,
+            )?;
             edge_batch.flush_if_full()?;
 
             if edge.bidirectional {
-                edge_batch.push(RawEdge {
-                    source: target,
-                    target: source,
-                    type_id: edge.type_id,
-                    weight: edge.weight,
-                    schema_reversed: true,
-                });
+                edge_batch.push(
+                    RawEdge {
+                        source: target,
+                        target: source,
+                        type_id: edge.type_id,
+                        weight: edge.weight,
+                        schema_reversed: true,
+                    },
+                    edge.mapping_id,
+                    &edge.source_key,
+                )?;
                 edge_batch.flush_if_full()?;
             }
         }
@@ -801,6 +823,8 @@ struct EdgeSpoolBatch {
     type_ids: Vec<i64>,
     weights: Vec<i64>,
     schema_reversed: Vec<bool>,
+    mapping_ids: Vec<i64>,
+    source_keys: Vec<String>,
     capacity: usize,
 }
 
@@ -813,16 +837,26 @@ impl EdgeSpoolBatch {
             type_ids: Vec::with_capacity(capacity),
             weights: Vec::with_capacity(capacity),
             schema_reversed: Vec::with_capacity(capacity),
+            mapping_ids: Vec::with_capacity(capacity),
+            source_keys: Vec::with_capacity(capacity),
             capacity,
         }
     }
 
-    fn push(&mut self, edge: RawEdge) {
+    fn push(&mut self, edge: RawEdge, mapping_id: u64, source_key: &str) -> GraphResult<()> {
         self.sources.push(i64::from(edge.source));
         self.targets.push(i64::from(edge.target));
         self.type_ids.push(i64::from(edge.type_id));
         self.weights.push(i64::from(edge.weight.unwrap_or(0)));
         self.schema_reversed.push(edge.schema_reversed);
+        self.mapping_ids
+            .push(i64::try_from(mapping_id).map_err(|_| {
+                GraphError::Internal(format!(
+                    "relationship mapping ID {mapping_id} is out of range"
+                ))
+            })?);
+        self.source_keys.push(source_key.to_string());
+        Ok(())
     }
 
     fn flush_if_full(&mut self) -> GraphResult<()> {
@@ -842,23 +876,29 @@ impl EdgeSpoolBatch {
         let type_ids = std::mem::take(&mut self.type_ids);
         let weights = std::mem::take(&mut self.weights);
         let schema_reversed = std::mem::take(&mut self.schema_reversed);
+        let mapping_ids = std::mem::take(&mut self.mapping_ids);
+        let source_keys = std::mem::take(&mut self.source_keys);
         self.sources = Vec::with_capacity(self.capacity);
         self.targets = Vec::with_capacity(self.capacity);
         self.type_ids = Vec::with_capacity(self.capacity);
         self.weights = Vec::with_capacity(self.capacity);
         self.schema_reversed = Vec::with_capacity(self.capacity);
+        self.mapping_ids = Vec::with_capacity(self.capacity);
+        self.source_keys = Vec::with_capacity(self.capacity);
 
         Spi::run_with_args(
-            "INSERT INTO pg_temp.graph_build_edges (source, target, type_id, weight, schema_reversed)
-             SELECT source, target, type_id, NULLIF(weight, 0), schema_reversed
-             FROM unnest($1::int8[], $2::int8[], $3::int8[], $4::int8[], $5::bool[])
-               AS edge(source, target, type_id, weight, schema_reversed)",
+            "INSERT INTO pg_temp.graph_build_edges (source, target, type_id, weight, schema_reversed, mapping_id, source_key)
+             SELECT source, target, type_id, NULLIF(weight, 0), schema_reversed, mapping_id, source_key
+             FROM unnest($1::int8[], $2::int8[], $3::int8[], $4::int8[], $5::bool[], $6::int8[], $7::text[])
+               AS edge(source, target, type_id, weight, schema_reversed, mapping_id, source_key)",
             &[
                 sources.into(),
                 targets.into(),
                 type_ids.into(),
                 weights.into(),
                 schema_reversed.into(),
+                mapping_ids.into(),
+                source_keys.into(),
             ],
         )
         .map_err(|err| GraphError::Internal(format!("edge spool batch insert failed: {}", err)))
@@ -873,7 +913,9 @@ fn create_edge_spool() -> GraphResult<()> {
             target bigint NOT NULL,
             type_id bigint NOT NULL,
             weight bigint,
-            schema_reversed boolean NOT NULL
+            schema_reversed boolean NOT NULL,
+            mapping_id bigint NOT NULL,
+            source_key text NOT NULL
          ) ON COMMIT DROP",
     )
     .map_err(|err| GraphError::Internal(format!("edge spool setup failed: {}", err)))
@@ -885,9 +927,9 @@ fn load_edge_store_from_spool(
 ) -> GraphResult<crate::edge_store::EdgeStore> {
     Spi::connect(|client| {
         let mut cursor = client.open_cursor(
-            "SELECT source, target, type_id, weight, schema_reversed
+            "SELECT source, target, type_id, weight, schema_reversed, mapping_id, source_key
              FROM pg_temp.graph_build_edges
-             ORDER BY source, target, type_id, schema_reversed",
+             ORDER BY source, target, type_id, schema_reversed, mapping_id, source_key",
             &[],
         );
         let batch_size = crate::config::BUILD_BATCH_SIZE.get().max(1) as i64;
