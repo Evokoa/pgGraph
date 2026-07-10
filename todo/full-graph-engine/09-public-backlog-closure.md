@@ -135,7 +135,7 @@ should not stay indefinitely on the active Known Issues page.
 | KI-020 | RM-01 and RUST-00A through RUST-00B | Out-of-range/corrupt mapped-layout tests cannot reach unchecked pointer arithmetic; only an owning validated layout constructs stores; Miri/in-memory backing plus PostgreSQL sanitizer matrix is green. | OPEN |
 | KI-021 | RM-01 and RUST-00C | Rust destructors unwind through the supported pgrx guard before PostgreSQL ERROR; SQLSTATE/diagnostic behavior is versioned and exact on PG14-PG19; no deep raw `errfinish()` remains. | IMPLEMENTED ON PG17; MATRIX OPEN |
 | KI-022 | RM-01/RM-06 and RUST-00D/RUST-5 | Every filter value domain roundtrips through build, sync, persisted segment, restart, and reload; old/new format behavior is documented and differential results match. | IMPLEMENTED ON PG17; MATRIX PENDING |
-| KI-023 | RM-01 and RUST-00E | Every security-definer function has the vetted `proconfig` search path and shadow-schema attack tests prove catalog/function/operator resolution cannot be redirected. | OPEN |
+| KI-023 | RM-01 and RUST-00E | Every security-definer function has the vetted `proconfig` search path and shadow-schema attack tests prove catalog/function/operator resolution cannot be redirected. | IMPLEMENTED ON PG17; MATRIX PENDING |
 | KI-024 | RM-01/RM-06 and RUST-00F | OID-stable relation identity survives rename/search-path change, fails closed on drop/recreate/stale identity, and has concurrent-DDL tests; name re-resolution is absent. | OPEN |
 | KI-025 | RM-01/RM-08 and RUST-1 | Failure injection proves background-worker transactions do not commit unintended partial state or leave stuck jobs; intentional progress checkpoints are documented and tested. | OPEN |
 

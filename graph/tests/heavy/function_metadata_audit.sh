@@ -31,6 +31,7 @@ WITH exported AS (
            p.provolatile,
            p.proparallel,
            p.prosecdef,
+           p.proconfig,
            p.proleakproof,
            p.procost,
            p.prorows
@@ -97,6 +98,12 @@ violations AS (
           WHERE allowed.proname = e.proname
             AND allowed.args = e.args
       )
+
+    UNION ALL
+    SELECT format('%s(%s): security definer must pin search_path to pg_catalog, public', proname, args)
+    FROM exported
+    WHERE prosecdef
+      AND NOT (COALESCE(proconfig, ARRAY[]::text[]) @> ARRAY['search_path=pg_catalog, public'])
 
     UNION ALL
     SELECT format('%s(%s): leakproof is not expected', proname, args)

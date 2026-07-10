@@ -7,7 +7,7 @@ Last updated: 2026-07-09
 | Checkpoint | Status | Evidence / next action |
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
-| Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00D implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, and projection segment v3 preserves exact typed filter deltas. Execute RUST-00E and RUST-00F next; run Miri/sanitizer and supported-major evidence before checkpoint exit. |
+| Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00E implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, and definer functions pin a vetted search path. Execute RUST-00F next; run Miri/sanitizer and supported-major evidence before checkpoint exit. |
 | 1A. Security and identity | Not started | RLS topology, relationship identity, filter identity, savepoints. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
@@ -52,15 +52,18 @@ Checkpoint 0 regression pack, in this order:
    differential preserves signed, large, temporal, boolean, Unicode text,
    UUID, SQL NULL, and tombstone values across sync, segment v3, consecutive
    manifest generations, and fresh-backend reload.
-4. **Next:** security-definer shadow-schema/catalog path assertion and stable-relation-
-   identity rename/search-path/drop-recreate tests.
-5. Two-role GQL RLS test with `hydrate := false` for node, relationship, path,
+4. **Complete on PG17; supported-major matrix pending:** security-definer catalog
+   metadata asserts a pinned `pg_catalog, public` path for every approved
+   definer function. The explicit `public` compatibility entry remains until
+   RUST-00F replaces name-based registered-relation resolution with OID identity.
+5. **Next:** stable-relation-identity rename/search-path/drop-recreate tests.
+6. Two-role GQL RLS test with `hydrate := false` for node, relationship, path,
    scalar identity, aggregate count, and existence.
-6. Same-name filter columns on two registered tables.
-7. Parallel same-type/same-endpoint edge rows with distinct PK/properties.
-8. Two-backend concurrent projection publication.
-9. Invalid staged persisted replacement preserving the previous generation.
-10. Memory profiles for stale/no statistics, many filters, supernode LIMIT 1,
+7. Same-name filter columns on two registered tables.
+8. Parallel same-type/same-endpoint edge rows with distinct PK/properties.
+9. Two-backend concurrent projection publication.
+10. Invalid staged persisted replacement preserving the previous generation.
+11. Memory profiles for stale/no statistics, many filters, supernode LIMIT 1,
    auto-load, and compaction.
 
 Do not implement broad syntax until these tests establish the current
@@ -71,6 +74,7 @@ correctness and safety boundary.
 - 2026-07-09 — Checkpoint 0 mapped-layout phase: made node metadata lookups fallible, validated mapped PK/CSR contents at crate-private constructors, and kept traversal/component corruption failures typed.
 - 2026-07-09 — Checkpoint 0 error-boundary phase: replaced direct `errfinish()` FFI with pgrx stack unwinding, standard SQLSTATEs, stable `PGxxx` diagnostics, and a destructor regression.
 - 2026-07-09 — Checkpoint 0 durable-filter phase: added projection segment v3 tagged values, staged exact filter reload, consecutive-generation retention, and signed/temporal/text/UUID/NULL/tombstone regressions.
+- 2026-07-09 — Checkpoint 0 RUST-00E security-definer phase: every approved definer function now has pgrx-generated `pg_catalog, public` `search_path` metadata, with a catalog audit regression and public security guidance; RUST-00F will remove the temporary public compatibility entry by storing relation identity as OIDs.
 - 2026-07-09 — Independent three-phase review: fixed watermark-only artifact retention, pre-copy ingest budgeting, filter node-range validation, and malformed base dictionary fail-closed handling; the follow-up review and final gates were green.
 
 ## Decisions
@@ -157,3 +161,16 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Rust doctests | `cd graph && cargo test --doc --features pg17` | PASS: 0 doctests |
 | PostgreSQL-backed tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 904 passed, 1 ignored; doctests 0 |
 | Documentation drift | `scripts/check_docs_drift.sh` | PASS |
+
+### 2026-07-09 Security-Definer Search-Path Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Red metadata regression | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata_rust_00e ./tests/heavy/function_metadata_audit.sh` before the attribute change | EXPECTED FAIL: all approved security-definer functions lacked `pg_proc.proconfig` search-path settings |
+| Metadata regression | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata_rust_00e ./tests/heavy/function_metadata_audit.sh` | PASS: every approved definer function has `search_path=pg_catalog, public` |
+| Targeted compatibility | `cd graph && cargo pgrx test --features "pg17 development" pg17 pg_traverse_accepts_structured_jsonb_numeric_filters` | PASS |
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust docs | `cd graph && cargo doc --features pg17 --no-deps` | PASS |
+| Rust doctests | `cd graph && cargo test --doc --features pg17` | PASS: 0 doctests |
+| PostgreSQL-backed tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 904 passed, 1 ignored; doctests 0 |

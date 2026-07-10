@@ -19,6 +19,16 @@ Grant a non-superuser admin role:
 GRANT USAGE, CREATE ON SCHEMA graph TO graph_admin;
 ```
 
+## Security-Definer Execution
+
+pgGraph functions that run with definer privileges pin their PostgreSQL
+`search_path` to `pg_catalog, public`. This prevents objects in a
+caller-controlled schema from changing how those privileged functions resolve
+built-in names while retaining compatibility with legacy registrations that
+refer to tables in `public` without a schema qualification. Applications should
+still schema-qualify their own database objects and grant only the graph
+functions each role requires.
+
 ## Admin-Protected Functions
 
 Admin protection applies to catalog mutation, build/vacuum/maintenance, sync

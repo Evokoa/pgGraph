@@ -6,5 +6,5 @@ the authoritative checkpoint handoff, measurement log, and next-action record.
 
 Last synchronized: 2026-07-09
 
-Current phase: Checkpoint 0 RUST-00D is implemented and verified on PostgreSQL
-17; hardened security-definer search paths (RUST-00E) are next.
+Current phase: Checkpoint 0 RUST-00E is implemented and verified on PostgreSQL
+17; stable relation identity (RUST-00F) is next.

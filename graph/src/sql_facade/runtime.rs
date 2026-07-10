@@ -3,6 +3,7 @@ use super::*;
 
 /// Reset the engine — clear graph and remove persisted files.
 #[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, public)]
 fn reset() {
     with_panic_boundary("reset()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
@@ -24,6 +25,7 @@ fn reset() {
 }
 
 #[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, public)]
 fn select_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -59,6 +61,7 @@ fn select_graph(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, public)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -120,6 +123,7 @@ fn load_graph(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, public)]
 fn unload_graph(
     graph_name: &str,
     tenant: default!(Option<&str>, "NULL"),
@@ -154,6 +158,7 @@ fn unload_graph(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, public)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -200,6 +205,7 @@ fn loaded_graphs() -> TableIterator<
 }
 
 #[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, public)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
