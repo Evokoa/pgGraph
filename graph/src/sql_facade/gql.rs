@@ -252,6 +252,7 @@ pub(super) fn execute_statement(
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute(&engine.borrow(), &plan, tenant_scope)
             })?;
+            ensure_gql_rows_visible(&matches)?;
             let hydrated = hydrate_gql_rows(
                 &matches,
                 crate::query::value::requires_hydration(&plan, hydrate),
@@ -276,6 +277,7 @@ pub(super) fn execute_statement(
                     params,
                 )
             })?;
+            ensure_gql_node_rows_visible(&matches)?;
             let hydrated = hydrate_gql_node_rows(
                 &matches,
                 crate::query::value::node_scan_requires_hydration(&plan, hydrate),
@@ -287,6 +289,7 @@ pub(super) fn execute_statement(
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_join(&engine.borrow(), &plan, tenant_scope)
             })?;
+            ensure_gql_rows_visible(&matches)?;
             let hydrated = hydrate_gql_rows(
                 &matches,
                 crate::query::value::join_requires_hydration(&plan, hydrate),
@@ -298,6 +301,7 @@ pub(super) fn execute_statement(
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_wildcard_path(&engine.borrow(), &plan, tenant_scope)
             })?;
+            ensure_gql_rows_visible(&matches)?;
             let hydrated = hydrate_gql_rows(
                 &matches,
                 crate::query::value::wildcard_path_requires_hydration(&plan, hydrate),
@@ -3007,6 +3011,63 @@ fn hydrate_gql_rows(
         }
     }
     Ok(hydrated)
+}
+
+/// Check source-row visibility before exposing graph coordinates or topology.
+///
+/// GQL's projection may be served from the in-memory graph even when callers
+/// request `hydrate := false`. Reusing the PostgreSQL hydration boundary here
+/// makes RLS authoritative for every coordinate-bearing result shape.
+fn ensure_gql_rows_visible(rows: &[crate::query::execute::GqlRow]) -> safety::GraphResult<()> {
+    let mut ids_by_table = std::collections::HashMap::<u32, Vec<String>>::new();
+    for row in rows {
+        for coordinate in std::iter::once(&row.source)
+            .chain(row.target.iter())
+            .chain(row.path_nodes.iter())
+            .chain(row.join_node_slots.iter().flatten().flatten())
+            .chain(row.join_path_nodes.iter().flatten().flatten().flatten())
+        {
+            ids_by_table
+                .entry(coordinate.table_oid)
+                .or_default()
+                .push(coordinate.node_id.clone());
+        }
+    }
+    let visible = crate::sql_hydration::visible_node_keys(&ids_by_table)?;
+    let hidden = ids_by_table
+        .into_iter()
+        .flat_map(|(table_oid, ids)| ids.into_iter().map(move |node_id| (table_oid, node_id)))
+        .any(|key| !visible.contains(&key));
+    if hidden {
+        return Err(safety::GraphError::GqlExecution {
+            reason: "GQL source row is not visible to the current role".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Check source-row visibility for node-only GQL scans.
+fn ensure_gql_node_rows_visible(
+    rows: &[crate::query::execute::GqlNodeRow],
+) -> safety::GraphResult<()> {
+    let mut ids_by_table = std::collections::HashMap::<u32, Vec<String>>::new();
+    for row in rows.iter().filter(|row| !row.optional_null) {
+        ids_by_table
+            .entry(row.node.table_oid)
+            .or_default()
+            .push(row.node.node_id.clone());
+    }
+    let visible = crate::sql_hydration::visible_node_keys(&ids_by_table)?;
+    if ids_by_table
+        .into_iter()
+        .flat_map(|(table_oid, ids)| ids.into_iter().map(move |node_id| (table_oid, node_id)))
+        .any(|key| !visible.contains(&key))
+    {
+        return Err(safety::GraphError::GqlExecution {
+            reason: "GQL source row is not visible to the current role".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn hydrate_gql_node_rows(

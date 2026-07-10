@@ -129,3 +129,59 @@ pub(crate) fn hydrate_nodes(
 
     Ok(hydrated)
 }
+
+/// Return the source coordinates visible to the current PostgreSQL role.
+///
+/// This is the batch visibility primitive for graph result paths that expose
+/// coordinates without returning hydrated JSON. PostgreSQL row security remains
+/// authoritative because every key is selected from its mapped source table.
+pub(crate) fn visible_node_keys(
+    ids_by_table: &HashMap<u32, Vec<String>>,
+) -> safety::GraphResult<HashSet<(u32, String)>> {
+    let needed_table_oids = ids_by_table.keys().copied().collect::<HashSet<_>>();
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let tables_by_oid = tables
+        .iter()
+        .filter(|table| needed_table_oids.contains(&table.table_oid))
+        .map(|table| (table.table_oid, table))
+        .collect::<HashMap<_, _>>();
+    let mut visible = HashSet::new();
+    for (table_oid, node_ids) in ids_by_table {
+        let table = tables_by_oid.get(table_oid).ok_or_else(|| {
+            safety::GraphError::Internal(format!(
+                "cannot check source visibility for unregistered table OID {table_oid}"
+            ))
+        })?;
+        acl::check_table_acl(*table_oid)?;
+        let table_name = sql_table_name_from_catalog(&table.table_name)?;
+        let pk_expr = primary_key_expr("src", &table.id_columns);
+        let query = format!(
+            "SELECT {pk_expr} AS graph_node_id FROM {} src WHERE {pk_expr} = ANY($1::text[])",
+            table_name.as_sql()
+        );
+        Spi::connect(|client| {
+            let result = client
+                .select(&query, None, &[node_ids.clone().into()])
+                .map_err(|e| {
+                    safety::GraphError::Internal(format!("source visibility check failed: {e}"))
+                })?;
+            for row in result {
+                let node_id = row
+                    .get::<String>(1)
+                    .map_err(|e| {
+                        safety::GraphError::Internal(format!(
+                            "source visibility key read failed: {e}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal(
+                            "source visibility returned NULL key".to_string(),
+                        )
+                    })?;
+                visible.insert((*table_oid, node_id));
+            }
+            Ok::<(), safety::GraphError>(())
+        })?;
+    }
+    Ok(visible)
+}

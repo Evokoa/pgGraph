@@ -522,6 +522,48 @@ fn gql_hydration_fails_closed_when_source_row_is_not_visible() {
 }
 
 #[pg_test]
+fn gql_coordinate_only_rows_fail_closed_when_source_row_is_not_visible() {
+    reset_and_create_fixtures();
+    Spi::run("DROP ROLE IF EXISTS graph_gql_coordinate_rls").expect("drop role failed");
+    Spi::run("CREATE ROLE graph_gql_coordinate_rls").expect("create role failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_gql_coordinate_rls_pgtest CASCADE")
+        .expect("drop coordinate rls table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_coordinate_rls_pgtest (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+         INSERT INTO public.graph_gql_coordinate_rls_pgtest VALUES ('u1', 'Hidden');
+         SELECT graph.add_table(
+             'graph_gql_coordinate_rls_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['name']
+         );
+         SELECT * FROM graph.build();
+         ALTER TABLE public.graph_gql_coordinate_rls_pgtest ENABLE ROW LEVEL SECURITY;
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_coordinate_rls;
+         GRANT SELECT ON public.graph_gql_coordinate_rls_pgtest TO graph_gql_coordinate_rls;",
+    )
+    .expect("create coordinate rls fixture failed");
+    create_error_sqlstate_helper();
+
+    Spi::run("SET ROLE graph_gql_coordinate_rls").expect("set coordinate rls role failed");
+    let sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_gql_coordinate_rls_pgtest) RETURN u',
+                hydrate := false
+             )"
+        )
+    ))
+    .expect("coordinate SQLSTATE capture failed");
+    Spi::run("RESET ROLE").expect("reset coordinate rls role failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("22000"));
+}
+
+#[pg_test]
 fn gql_with_projection_scope_aliases_and_shadows() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();
