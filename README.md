@@ -72,6 +72,9 @@ path, and relationship queries directly against ordinary PostgreSQL tables.
 Your tables stay the source of truth. pgGraph builds a derived graph index and
 lets you query it from SQL using functions in the `graph` schema.
 
+> [!TIP]
+> **Looking for a managed version?** We have launched a managed version of pgGraph on [polygres.com](https://polygres.com) for full high performance GraphRAG on Postgres.
+
 > [!IMPORTANT]
 > pgGraph is in early alpha. Even though we have tested it to be stable,
 > please avoid production use for now; try it in
