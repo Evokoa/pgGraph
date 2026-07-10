@@ -500,12 +500,14 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         edge_segment.edge_deletes.push(SegmentEdge {
             source: 1,
             target: 0,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         edge_segment
             .write_to_path(&edge_path)

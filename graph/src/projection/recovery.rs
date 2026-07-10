@@ -562,6 +562,7 @@ mod tests {
                 target,
                 type_id,
                 schema_reversed: false,
+                relationship_id: None,
             });
         }
         segment

@@ -299,6 +299,7 @@ fn build_compacted_segment(
                     target,
                     type_id,
                     schema_reversed,
+                    relationship_id: None,
                 });
             }
             for (&(target, type_id, schema_reversed), &weight) in final_edges.iter() {
@@ -310,6 +311,7 @@ fn build_compacted_segment(
                     target,
                     type_id,
                     schema_reversed,
+                    relationship_id: None,
                 });
                 if let Some(weight) = weight {
                     compacted.edge_weights.push(SegmentEdgeWeight {
@@ -696,12 +698,14 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         weighted.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
             type_id: 1,
             schema_reversed: true,
+            relationship_id: None,
         });
         weighted.edge_weights.push(SegmentEdgeWeight {
             source: 0,
@@ -883,12 +887,14 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         edge_segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
             type_id: 1,
             schema_reversed: true,
+            relationship_id: None,
         });
         edge_segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
@@ -1016,6 +1022,7 @@ mod tests {
                     target,
                     type_id,
                     schema_reversed: false,
+                    relationship_id: None,
                 }),
         );
         segment.edge_deletes.extend(
@@ -1026,6 +1033,7 @@ mod tests {
                     target,
                     type_id,
                     schema_reversed: false,
+                    relationship_id: None,
                 }),
         );
         segment

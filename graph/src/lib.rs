@@ -286,6 +286,7 @@ pub mod bench_support {
                         target,
                         type_id: 1,
                         schema_reversed: false,
+                        relationship_id: None,
                     });
                     if source + 1 < node_count {
                         segment.edge_deletes.push(SegmentEdge {
@@ -293,6 +294,7 @@ pub mod bench_support {
                             target: source + 1,
                             type_id: 1,
                             schema_reversed: false,
+                            relationship_id: None,
                         });
                     }
                 }
@@ -325,6 +327,7 @@ pub mod bench_support {
                 target: source.wrapping_add(3) % node_count,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             });
         }
         vec![segment]
@@ -353,6 +356,7 @@ pub mod bench_support {
                 target,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source,
@@ -374,6 +378,7 @@ pub mod bench_support {
                 target,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             });
         }
         vec![segment]

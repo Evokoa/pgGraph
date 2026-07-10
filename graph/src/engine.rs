@@ -151,6 +151,8 @@ pub struct EdgeMutation {
     pub(crate) source: u32,
     pub(crate) target: u32,
     pub(crate) type_id: u8,
+    pub(crate) schema_reversed: bool,
+    pub(crate) relationship_id: Option<crate::edge_store::RelationshipId>,
     pub(crate) kind: MutationKind,
 }
 
@@ -847,7 +849,13 @@ impl Engine {
             match mutation.kind {
                 MutationKind::Insert => {
                     deletes.remove(&key);
-                    inserts.insert((key.0, key.1, key.2, false, None));
+                    inserts.insert((
+                        key.0,
+                        key.1,
+                        key.2,
+                        mutation.schema_reversed,
+                        mutation.relationship_id,
+                    ));
                 }
                 MutationKind::Delete => {
                     inserts.retain(|(source, target, type_id, _, _)| {
@@ -1465,12 +1473,16 @@ mod tests {
             source: 0,
             target: 1,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Insert,
         });
         engine.edge_buffer.push(crate::engine::EdgeMutation {
             source: 1,
             target: 2,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Delete,
         });
 
@@ -1818,6 +1830,8 @@ mod tests {
             source: 1,
             target: 0,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Insert,
         })
         .unwrap();
@@ -2003,6 +2017,8 @@ mod tests {
             source: 4,
             target: 3,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Insert,
         });
 
@@ -2025,6 +2041,8 @@ mod tests {
             source: 1,
             target: 2,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Delete,
         });
 
@@ -2109,6 +2127,8 @@ mod tests {
             source: 1,
             target: 2,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Insert,
         });
 
@@ -2167,6 +2187,7 @@ mod tests {
                     target: 3,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 });
         });
 
@@ -2192,6 +2213,7 @@ mod tests {
                     target: 3,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 });
         });
         eng.set_projection_mode(crate::config::ProjectionMode::CsrReadonly);
@@ -2218,6 +2240,7 @@ mod tests {
                     target: 3,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 });
         });
 
@@ -2247,6 +2270,8 @@ mod tests {
             source: 4,
             target: 3,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Insert,
         });
 
@@ -2279,6 +2304,7 @@ mod tests {
                     target: 3,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 });
         });
 
@@ -2333,6 +2359,8 @@ mod tests {
             source: 4,
             target: 3,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Insert,
         });
 
@@ -2370,6 +2398,7 @@ mod tests {
                     target: 3,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 });
             segment
                 .edge_weights
@@ -2422,6 +2451,7 @@ mod tests {
                     target: 3,
                     type_id: 1,
                     schema_reversed: false,
+                    relationship_id: None,
                 });
         });
 
@@ -2458,6 +2488,8 @@ mod tests {
             source: 2,
             target: 3,
             type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
             kind: MutationKind::Insert,
         });
 
@@ -2492,6 +2524,8 @@ mod tests {
                 source,
                 target,
                 type_id: 1,
+                schema_reversed: false,
+                relationship_id: None,
                 kind: MutationKind::Delete,
             });
         }

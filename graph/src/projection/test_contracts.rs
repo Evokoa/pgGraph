@@ -68,6 +68,7 @@ fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
         target: weighted.target,
         type_id: weighted.type_id,
         schema_reversed: false,
+        relationship_id: None,
     });
     segment.edge_weights.push(SegmentEdgeWeight {
         source: weighted.source,
@@ -81,6 +82,7 @@ fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
         target: delete.target,
         type_id: delete.type_id,
         schema_reversed: false,
+        relationship_id: None,
     });
 
     segment
@@ -186,6 +188,7 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
             target: 1,
             type_id: 2,
             schema_reversed: false,
+            relationship_id: None,
         }]
     );
 }
@@ -200,6 +203,7 @@ fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {
         target: 3,
         type_id: 1,
         schema_reversed: false,
+        relationship_id: None,
     });
     let mut delete = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 2)
         .expect("delete segment");
@@ -208,6 +212,7 @@ fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {
         target: 1,
         type_id: 1,
         schema_reversed: false,
+        relationship_id: None,
     });
     let full_rebuild = edge_store_from_tuples(4, &[(0, 2, 1), (0, 3, 1)]);
     let expected = CsrNeighbors::new(&full_rebuild);
@@ -230,12 +235,14 @@ fn status_reports_manifest_watermark_segments_chunks_gc_and_repair() {
         target: 1,
         type_id: 1,
         schema_reversed: false,
+        relationship_id: None,
     });
     segment.edge_deletes.push(SegmentEdge {
         source: 1,
         target: 0,
         type_id: 1,
         schema_reversed: false,
+        relationship_id: None,
     });
     segment
         .write_to_path(&segment_path)

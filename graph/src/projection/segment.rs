@@ -16,7 +16,7 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 const MAGIC: &[u8; 8] = b"PGGSEG01";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HEADER_SIZE: usize = 160;
 const CHECKSUM_OFFSET: usize = 124;
 const RESERVED_OFFSET: usize = 128;
@@ -75,6 +75,8 @@ pub(crate) struct SegmentEdge {
     pub(crate) type_id: u8,
     /// Whether this row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
+    /// Stable relationship identity when this edge is backed by a source row.
+    pub(crate) relationship_id: Option<crate::edge_store::RelationshipId>,
 }
 
 /// Weighted edge row.
@@ -234,6 +236,7 @@ impl DeltaSegment {
                 target: row.target,
                 type_id: row.type_id,
                 schema_reversed: row.schema_reversed,
+                relationship_id: None,
             };
             if row.tombstone {
                 segment.edge_deletes.push(edge);
@@ -389,12 +392,14 @@ pub(crate) fn fuzz_seed_bytes(name: &str) -> Option<Vec<u8>> {
                 target: 1,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             });
             segment.edge_deletes.push(SegmentEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source: 0,
@@ -496,6 +501,7 @@ fn validate_segment(segment: &DeltaSegment) -> GraphResult<()> {
                 target: weight.target,
                 type_id: weight.type_id,
                 schema_reversed: weight.schema_reversed,
+                relationship_id: None,
             },
         )?;
     }
@@ -608,8 +614,8 @@ fn validate_section_ranges(
     offsets: &[u64; SECTION_COUNT],
 ) -> GraphResult<[std::ops::Range<usize>; SECTION_COUNT]> {
     let widths = [
-        Some(10_usize),
-        Some(10),
+        Some(14_usize),
+        Some(14),
         Some(14),
         Some(5),
         Some(17),
@@ -666,6 +672,11 @@ fn encode_edges(out: &mut Vec<u8>, rows: &[SegmentEdge]) {
         push_u32(out, row.target);
         out.push(row.type_id);
         out.push(u8::from(row.schema_reversed));
+        push_u32(
+            out,
+            row.relationship_id
+                .unwrap_or(crate::edge_store::NO_RELATIONSHIP_ID),
+        );
     }
 }
 
@@ -739,18 +750,21 @@ fn encode_tenants(out: &mut Vec<u8>, rows: &[SegmentTenant]) {
 fn decode_edges(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdge>> {
     let mut rows = Vec::with_capacity(count as usize);
     for idx in 0..count as usize {
-        let offset = idx * 10;
+        let offset = idx * 14;
         let schema_reversed = read_u8(bytes, offset + 9)?;
         if schema_reversed > 1 {
             return Err(segment_corrupt(format!(
                 "schema_reversed flag must be 0 or 1, found {schema_reversed}"
             )));
         }
+        let relationship_id = read_u32(bytes, offset + 10)?;
         rows.push(SegmentEdge {
             source: read_u32(bytes, offset)?,
             target: read_u32(bytes, offset + 4)?,
             type_id: read_u8(bytes, offset + 8)?,
             schema_reversed: schema_reversed != 0,
+            relationship_id: (relationship_id != crate::edge_store::NO_RELATIONSHIP_ID)
+                .then_some(relationship_id),
         });
     }
     Ok(rows)
@@ -992,12 +1006,14 @@ mod tests {
             target: 1,
             type_id: 2,
             schema_reversed: false,
+            relationship_id: Some(42),
         });
         segment.edge_deletes.push(SegmentEdge {
             source: 2,
             target: 3,
             type_id: 4,
             schema_reversed: false,
+            relationship_id: None,
         });
         segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
@@ -1013,6 +1029,7 @@ mod tests {
         assert_eq!(decoded.header.kind, SegmentKind::Edge);
         assert_eq!(decoded.header.direction, TraversalDirection::Out);
         assert_eq!(decoded.edge_inserts, segment.edge_inserts);
+        assert_eq!(decoded.edge_inserts[0].relationship_id, Some(42));
         assert_eq!(decoded.edge_deletes, segment.edge_deletes);
         assert_eq!(decoded.edge_weights, segment.edge_weights);
     }
@@ -1027,12 +1044,14 @@ mod tests {
             target: 0,
             type_id: 2,
             schema_reversed: true,
+            relationship_id: None,
         });
         segment.edge_deletes.push(SegmentEdge {
             source: 3,
             target: 2,
             type_id: 4,
             schema_reversed: true,
+            relationship_id: None,
         });
         segment.edge_weights.push(SegmentEdgeWeight {
             source: 1,
@@ -1180,6 +1199,7 @@ mod tests {
             target: 1,
             type_id: 2,
             schema_reversed: false,
+            relationship_id: None,
         });
         let bytes = segment.to_bytes().expect("segment encodes");
 
@@ -1223,6 +1243,7 @@ mod tests {
             target: 99,
             type_id: 2,
             schema_reversed: false,
+            relationship_id: None,
         });
 
         let decoded = DeltaSegment::from_bytes(&segment.to_bytes().expect("segment encodes"))
@@ -1273,6 +1294,7 @@ mod tests {
             target: 0,
             type_id: 2,
             schema_reversed: false,
+            relationship_id: None,
         });
 
         let err = segment

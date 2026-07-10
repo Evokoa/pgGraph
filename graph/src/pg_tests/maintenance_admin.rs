@@ -2207,6 +2207,7 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
         target: 1,
         type_id: 1,
     schema_reversed: false,
+    relationship_id: None,
     });
     write_pgtest_segment(&chunk_path, &chunk);
     let chunk_checksum = format!(
@@ -2400,6 +2401,7 @@ fn write_projection_status_segment(path: &std::path::Path, level: u8) {
             target: 1,
             type_id: 1,
         schema_reversed: false,
+        relationship_id: None,
         });
     segment
         .edge_deletes
@@ -2408,6 +2410,7 @@ fn write_projection_status_segment(path: &std::path::Path, level: u8) {
             target: 0,
             type_id: 1,
         schema_reversed: false,
+        relationship_id: None,
         });
     write_pgtest_segment(path, &segment);
 }

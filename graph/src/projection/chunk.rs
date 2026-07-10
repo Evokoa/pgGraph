@@ -363,6 +363,7 @@ fn build_base_chunk_segment(
             target: edge.target,
             type_id: edge.type_id,
             schema_reversed: edge.schema_reversed,
+            relationship_id: None,
         });
         if let Some(weight) = edge.weight {
             segment.edge_weights.push(SegmentEdgeWeight {
@@ -604,6 +605,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         segment.write_to_path(&path).expect("segment writes");
         let mut manifest = ProjectionManifest::base_only(2, "base.pggraph", "crc32:base", 1, 10, 1);

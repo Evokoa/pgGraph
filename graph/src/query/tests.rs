@@ -3951,6 +3951,7 @@ fn gql_relationship_expansion_uses_layered_manifest_snapshot() {
             target: 3,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
     });
 
@@ -3973,6 +3974,8 @@ fn gql_relationship_expansion_layered_manifest_preserves_pending_edge_buffer_ove
         source: 1,
         target: 2,
         type_id: 1,
+        schema_reversed: false,
+        relationship_id: None,
         kind: MutationKind::Insert,
     });
 

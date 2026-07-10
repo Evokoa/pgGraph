@@ -35,11 +35,15 @@ struct LayeredEdge {
     type_id: u8,
     schema_reversed: bool,
     weight: Option<u32>,
+    relationship_id: Option<crate::edge_store::RelationshipId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DurableEdgeState {
-    Present(Option<u32>),
+    Present {
+        weight: Option<u32>,
+        relationship_id: Option<crate::edge_store::RelationshipId>,
+    },
     Deleted,
 }
 
@@ -359,6 +363,7 @@ impl<'a> LayeredNeighbors<'a> {
                             type_id,
                             schema_reversed: schema_reversed != 0,
                             weight: weights.and_then(|values| values.get(idx)).copied(),
+                            relationship_id: None,
                         },
                     ))
                 })
@@ -413,6 +418,7 @@ impl<'a> LayeredNeighbors<'a> {
                                 type_id,
                                 schema_reversed: schema_reversed != 0,
                                 weight: weights.and_then(|weights| weights.get(idx).copied()),
+                                relationship_id: None,
                             },
                         );
                     }
@@ -439,6 +445,7 @@ impl<'a> LayeredNeighbors<'a> {
                                 type_id,
                                 schema_reversed: schema_reversed != 0,
                                 weight: weights.and_then(|weights| weights.get(idx).copied()),
+                                relationship_id: None,
                             },
                         );
                     }
@@ -479,6 +486,7 @@ impl<'a> LayeredNeighbors<'a> {
                             type_id,
                             schema_reversed: schema_reversed != 0,
                             weight: weights.and_then(|weights| weights.get(idx).copied()),
+                            relationship_id: None,
                         },
                     );
                 }
@@ -568,6 +576,7 @@ impl<'a> LayeredNeighbors<'a> {
                         target: edge.target,
                         schema_reversed: edge.schema_reversed,
                         weight: edge.weight,
+                        relationship_id: edge.relationship_id,
                     },
                 );
             }
@@ -604,7 +613,7 @@ impl NeighborSource for LayeredNeighbors<'_> {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
-                    relationship_id: None,
+                    relationship_id: edge.relationship_id,
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -619,7 +628,7 @@ impl NeighborSource for LayeredNeighbors<'_> {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
-                    relationship_id: None,
+                    relationship_id: edge.relationship_id,
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -723,7 +732,7 @@ fn merge_committed_overlay_maps(
         }
     }
     if let Some(inserted) = inserts.get(&node_idx) {
-        for &(target, type_id, schema_reversed, _) in inserted {
+        for &(target, type_id, schema_reversed, relationship_id) in inserted {
             merged.insert(
                 (target, type_id, schema_reversed),
                 LayeredEdge {
@@ -731,6 +740,7 @@ fn merge_committed_overlay_maps(
                     type_id,
                     schema_reversed,
                     weight: None,
+                    relationship_id,
                 },
             );
         }
@@ -806,13 +816,11 @@ impl<'a> LayeredBuilder<'a> {
             );
         }
         for edge in &segment.edge_inserts {
-            self.insert_edge(
-                segment.header.direction,
-                edge.source,
-                edge.target,
-                edge.type_id,
-                edge.schema_reversed,
-                weights
+            let layered_edge = LayeredEdge {
+                target: edge.target,
+                type_id: edge.type_id,
+                schema_reversed: edge.schema_reversed,
+                weight: weights
                     .get(&EdgeKey {
                         source: edge.source,
                         target: edge.target,
@@ -820,7 +828,9 @@ impl<'a> LayeredBuilder<'a> {
                         schema_reversed: edge.schema_reversed,
                     })
                     .copied(),
-            );
+                relationship_id: edge.relationship_id,
+            };
+            self.insert_edge(segment.header.direction, edge.source, layered_edge);
         }
     }
 
@@ -841,72 +851,69 @@ impl<'a> LayeredBuilder<'a> {
         }
     }
 
-    fn insert_edge(
-        &mut self,
-        direction: TraversalDirection,
-        source: u32,
-        target: u32,
-        type_id: u8,
-        schema_reversed: bool,
-        weight: Option<u32>,
-    ) {
+    fn insert_edge(&mut self, direction: TraversalDirection, source: u32, edge: LayeredEdge) {
         match direction {
             TraversalDirection::Out => {
                 self.out_edges.insert(
                     EdgeKey {
                         source,
-                        target,
-                        type_id,
-                        schema_reversed,
+                        target: edge.target,
+                        type_id: edge.type_id,
+                        schema_reversed: edge.schema_reversed,
                     },
-                    DurableEdgeState::Present(weight),
+                    DurableEdgeState::Present {
+                        weight: edge.weight,
+                        relationship_id: edge.relationship_id,
+                    },
                 );
                 self.in_edges.insert(
                     EdgeKey {
-                        source: target,
+                        source: edge.target,
                         target: source,
-                        type_id,
-                        schema_reversed,
+                        type_id: edge.type_id,
+                        schema_reversed: edge.schema_reversed,
                     },
-                    DurableEdgeState::Present(weight),
+                    DurableEdgeState::Present {
+                        weight: edge.weight,
+                        relationship_id: edge.relationship_id,
+                    },
                 );
             }
             TraversalDirection::In => {
                 self.in_edges.insert(
                     EdgeKey {
                         source,
-                        target,
-                        type_id,
-                        schema_reversed,
+                        target: edge.target,
+                        type_id: edge.type_id,
+                        schema_reversed: edge.schema_reversed,
                     },
-                    DurableEdgeState::Present(weight),
+                    DurableEdgeState::Present {
+                        weight: edge.weight,
+                        relationship_id: edge.relationship_id,
+                    },
                 );
                 self.out_edges.insert(
                     EdgeKey {
-                        source: target,
+                        source: edge.target,
                         target: source,
-                        type_id,
-                        schema_reversed,
+                        type_id: edge.type_id,
+                        schema_reversed: edge.schema_reversed,
                     },
-                    DurableEdgeState::Present(weight),
+                    DurableEdgeState::Present {
+                        weight: edge.weight,
+                        relationship_id: edge.relationship_id,
+                    },
                 );
             }
             TraversalDirection::Any => {
-                self.insert_edge(
-                    TraversalDirection::Out,
-                    source,
-                    target,
-                    type_id,
-                    schema_reversed,
-                    weight,
-                );
+                self.insert_edge(TraversalDirection::Out, source, edge);
                 self.insert_edge(
                     TraversalDirection::In,
-                    target,
-                    source,
-                    type_id,
-                    schema_reversed,
-                    weight,
+                    edge.target,
+                    LayeredEdge {
+                        target: source,
+                        ..edge
+                    },
                 );
             }
         }
@@ -1016,7 +1023,10 @@ fn finish_direction(
     let mut out = HashMap::<u32, DurableEdges>::new();
     for (key, state) in edges {
         match state {
-            DurableEdgeState::Present(weight) => {
+            DurableEdgeState::Present {
+                weight,
+                relationship_id,
+            } => {
                 if suppress_base_duplicates && base_edge_exists(base, key) && weight.is_none() {
                     continue;
                 }
@@ -1028,6 +1038,7 @@ fn finish_direction(
                         type_id: key.type_id,
                         schema_reversed: key.schema_reversed,
                         weight,
+                        relationship_id,
                     });
             }
             DurableEdgeState::Deleted => {
@@ -1079,6 +1090,7 @@ mod tests {
             target: 3,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         let mut delete = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 2)
             .expect("delete segment");
@@ -1087,12 +1099,46 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         let layered = LayeredNeighbors::new(&base, vec![insert, delete]);
         let full_rebuild = edge_store_from_tuples(4, &[(0, 2, 1), (0, 3, 1)]);
         let expected = CsrNeighbors::new(&full_rebuild);
 
         assert_full_csr_equivalence(4, &expected, &layered);
+    }
+
+    #[test]
+    fn layered_neighbors_preserve_segment_relationship_id() {
+        let base = edge_store_from_tuples(4, &[(0, 1, 1)]);
+        let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 1)
+            .expect("insert segment");
+        segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 3,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(77),
+        });
+        let layered = LayeredNeighbors::new(&base, vec![segment]);
+
+        assert_eq!(
+            layered.neighbors(0).collect::<Vec<_>>(),
+            vec![
+                Neighbor {
+                    target: 1,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: None,
+                },
+                Neighbor {
+                    target: 3,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(77),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1106,6 +1152,7 @@ mod tests {
             target: 2,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         tx_delta::record_deleted_edge(0, 2, 1).expect("record tx delete");
         tx_delta::record_added_edge(
@@ -1151,6 +1198,7 @@ mod tests {
             target: 2,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         let layered = LayeredNeighbors::new(&base, vec![inbound]);
         let actual = layered.merged_neighbors(TraversalDirection::In, 0, false);
@@ -1192,18 +1240,21 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         let layered = LayeredNeighbors::new(&base, vec![segment]);
 
@@ -1236,6 +1287,7 @@ mod tests {
             target: 2,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
@@ -1376,6 +1428,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         let segment_path = dir.segment_path(1, 0);
         segment
@@ -1408,6 +1461,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         let segment_path = dir.segment_path(1, 0);
         segment
@@ -1435,6 +1489,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         let mut insert = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 2, 2)
             .expect("insert segment");
@@ -1443,6 +1498,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
         });
         let layered = LayeredNeighbors::new(&base, vec![insert, delete]);
 

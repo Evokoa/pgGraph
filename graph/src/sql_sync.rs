@@ -1614,13 +1614,42 @@ pub(crate) fn apply_row_edge_mutations(
         let target_oid = context.table_oid(&edge.to_table);
         let target = resolve_sync_endpoint(eng, target_oid, &to_pk, &context.all_table_oids);
         if let (Some(source), Some(target)) = (source, target) {
-            push_sync_edge_delta(eng, source, target, type_id, kind)?;
+            let relationship_id = if matches!(kind, engine::MutationKind::Insert) {
+                let Some(source_key) = row_pk_value(row, &edge.source_key_columns) else {
+                    continue;
+                };
+                Some(intern_sync_relationship_identity(
+                    eng,
+                    edge.mapping_id,
+                    source_key,
+                )?)
+            } else {
+                None
+            };
+            push_sync_edge_delta(eng, source, target, type_id, false, relationship_id, kind)?;
             if edge.bidirectional {
-                push_sync_edge_delta(eng, target, source, type_id, kind)?;
+                push_sync_edge_delta(eng, target, source, type_id, true, relationship_id, kind)?;
             }
         }
     }
     Ok(())
+}
+
+fn intern_sync_relationship_identity(
+    eng: &mut engine::Engine,
+    mapping_id: u64,
+    source_key: String,
+) -> safety::GraphResult<crate::edge_store::RelationshipId> {
+    let relationship_id =
+        crate::edge_store::RelationshipId::try_from(eng.relationship_identities.len()).map_err(
+            |_| safety::GraphError::Internal("relationship identity count exceeds u32".to_string()),
+        )?;
+    eng.relationship_identities
+        .push(Some(crate::edge_store::RelationshipIdentity {
+            mapping_id,
+            source_key,
+        }));
+    Ok(relationship_id)
 }
 
 pub(crate) fn push_sync_edge_delta(
@@ -1628,12 +1657,16 @@ pub(crate) fn push_sync_edge_delta(
     source: u32,
     target: u32,
     type_id: u8,
+    schema_reversed: bool,
+    relationship_id: Option<crate::edge_store::RelationshipId>,
     kind: engine::MutationKind,
 ) -> safety::GraphResult<()> {
     eng.push_edge_mutation(engine::EdgeMutation {
         source,
         target,
         type_id,
+        schema_reversed,
+        relationship_id,
         kind,
     })
 }
@@ -1971,10 +2004,12 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_sync_op, parse_sync_properties, required_sync_i64, required_sync_string,
-        tenant_change_from_entry, ParsedSyncRows, SyncLogEntry, SyncOp, SyncReplayContext,
+        intern_sync_relationship_identity, parse_sync_op, parse_sync_properties, required_sync_i64,
+        required_sync_string, tenant_change_from_entry, ParsedSyncRows, SyncLogEntry, SyncOp,
+        SyncReplayContext,
     };
     use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredTable};
+    use crate::engine::Engine;
     use crate::safety::GraphError;
     use proptest::prelude::*;
     use std::collections::{HashMap, HashSet};
@@ -2085,6 +2120,24 @@ mod tests {
 
         assert!(matches!(err, GraphError::Internal(_)));
         assert!(err.to_string().contains("table_name"));
+    }
+
+    #[test]
+    fn sync_relationship_identity_interning_uses_mapping_and_source_key() {
+        let mut engine = Engine::new();
+
+        let relationship_id = intern_sync_relationship_identity(&mut engine, 9, "r-1".to_string())
+            .expect("relationship identity interns");
+
+        assert_eq!(relationship_id, 1);
+        assert_eq!(engine.relationship_identities.len(), 2);
+        assert_eq!(
+            engine.relationship_identities[1],
+            Some(crate::edge_store::RelationshipIdentity {
+                mapping_id: 9,
+                source_key: "r-1".to_string(),
+            })
+        );
     }
 
     proptest! {

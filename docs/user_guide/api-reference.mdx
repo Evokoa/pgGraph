@@ -109,6 +109,9 @@ above the active manifest watermark. `max_rows` and `max_bytes` bound one
 ingestion pass; `NULL` uses the configured defaults. Segment manifests record
 the dirty source-node range when committed rows provide one, so later reads and
 maintenance do not have to treat every L0 segment as whole-graph coverage.
+For registered edge-row mappings, inserted relationship segments also retain
+the source relationship identity used by GQL relationship values and
+relationship-row visibility checks.
 
 ### `graph.projection_status()`
 
@@ -184,6 +187,9 @@ compactor reads the active manifest, validates the referenced durable segments,
 and either writes a higher-level compacted segment or, when
 `dirty_chunk_segment_threshold` is reached, writes replacement base chunks for
 the affected source-node ranges. Existing base CSR bytes are never overwritten.
+Until relationship-aware compaction is complete, use rebuild or un-compacted
+mutable-overlay segments when GQL relationship values must retain source-row
+identity across maintenance.
 
 ### `graph.projection_gc()`
 

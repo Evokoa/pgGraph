@@ -11,5 +11,7 @@ query/path propagation, base relationship hydration, and mapped relationship-row
 RLS for single-pattern reads, supported joins, and base wildcard path outputs
 are implemented and targeted on PostgreSQL 17 tests; transaction-local
 relationship `CREATE` overlays now preserve source identity for same-transaction
-visibility and hydration. Continue with sync, compaction, broader writes, and
-savepoint use of persisted relationship IDs.
+visibility and hydration; trigger-sync inserted relationship edges now carry
+source identity through durable segments and layered mutable-overlay reads.
+Continue with compaction, broader writes, and savepoint use of persisted
+relationship IDs.
