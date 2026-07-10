@@ -73,8 +73,6 @@ pgGraph 是一个 PostgreSQL 扩展，用于直接针对普通 PostgreSQL 表运
 > [!TIP]
 > **寻找托管版本？** 我们已经在 [polygres.com](https://polygres.com) 上推出了 pgGraph 的托管版本，为 Postgres 提供完整的高性能 GraphRAG。
 
-> [!IMPORTANT]
-> pgGraph 处于早期 alpha 阶段。虽然内部测试表明它已相当稳定，但目前请避免在生产环境中使用；建议在 Docker 或专用开发数据库中尝试它，并分享反馈来帮助我们改进项目。
 
 ## 为什么选择 pgGraph？
 

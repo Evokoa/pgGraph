@@ -75,11 +75,6 @@ lets you query it from SQL using functions in the `graph` schema.
 > [!TIP]
 > **Looking for a managed version?** We have launched a managed version of pgGraph on [polygres.com](https://polygres.com) for full high performance GraphRAG on Postgres.
 
-> [!IMPORTANT]
-> pgGraph is in early alpha. Even though we have tested it to be stable,
-> please avoid production use for now; try it in
-> Docker or a dedicated development database and share feedback to help the
-> project grow.
 
 ## Why pgGraph?
 
