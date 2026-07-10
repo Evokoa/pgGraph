@@ -170,6 +170,24 @@ correctness, tails, memory, build/load, update lag, and operational cost.
 Roadmap item is delivered, rejected, or trigger-deferred outside active work;
 Known Issues contains only newly discovered unresolved defects, if any.
 
+## Checkpoint 10: Schema-Flexible Dynamic Graphs (Late)
+
+This checkpoint does not alter checkpoints 0 through 9 or the current public
+backlog-closure gate. After checkpoint 9, complete
+[DYN-0 through DYN-6](./11-schema-flexible-dynamic-graphs.md):
+
+- data-driven node and relationship labels from typed source columns;
+- evolving top-level JSONB properties without duplicating source documents;
+- bounded label dictionaries, membership, sync, and selected property indexes;
+- exact `GraphValue` conversion, multi-source label scans, batched visibility/
+  hydration, PostgreSQL JSONB pushdown, and PostgreSQL-first writes;
+- explicit pgGraph-extension semantics where PostgreSQL 19 native property
+  graphs do not expose equivalent dynamic clauses.
+
+**Exit:** dynamic label/property mappings satisfy their full security,
+transaction, memory/spill, rebuild-versus-sync, PostgreSQL-version, explain,
+operations, and performance gates without regressing declared/static graphs.
+
 ## Checkpoint Discipline
 
 At every checkpoint:

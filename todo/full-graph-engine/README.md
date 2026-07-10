@@ -63,6 +63,7 @@ reproducible correctness, latency, throughput, build, sync, and memory results.
 | [PostgreSQL 19 property graphs](./08-postgresql-19-property-graphs.md) | Native catalog, build, query, security, and release support. |
 | [Public backlog closure](./09-public-backlog-closure.md) | One disposition and closure gate for every Roadmap and Known Issues item. |
 | [Rust type safety and pgrx boundaries](./10-rust-type-safety-pgrx-boundaries.md) | Enums, newtypes, exact values, safe mmap/FFI, and pgrx-first integration. |
+| [Schema-flexible dynamic graphs](./11-schema-flexible-dynamic-graphs.md) | Late work package for data-driven labels and JSONB properties after the current backlog is clear. |
 | [Progress](./progress.md) | Living status and next checkpoint. |
 
 The earlier [out-of-core build plan](../out-of-core-build-plan.md) is a useful
