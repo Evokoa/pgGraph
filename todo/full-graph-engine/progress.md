@@ -138,6 +138,14 @@ until the corresponding deterministic checksum fixtures are selected.
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 652 passed, 1 ignored; doctests 0 |
 | Rust docs | `cd graph && cargo doc --features pg17 --no-deps` | PASS |
+
+### 2026-07-09 Checkpoint 1A filter/catalog gate
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" -- -D warnings` | PASS |
+| PostgreSQL 17 suite | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 908 passed, 1 ignored; doctests 0 |
 | PostgreSQL-backed tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 888 passed, 1 ignored; doctests 0 |
 
 ### 2026-07-09 Mapped-Layout Safety Phase
