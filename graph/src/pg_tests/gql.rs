@@ -830,6 +830,20 @@ fn gql_preserves_parallel_source_relationship_rows() {
     .expect("parallel relationship query failed")
     .unwrap_or_default();
     assert_eq!(count, 2, "parallel source rows must remain distinct");
+
+    let hydrated_edge_ids = Spi::get_one::<String>(
+        "SELECT string_agg(row #>> '{r,id}', ',' ORDER BY row #>> '{r,id}')
+           FROM graph.gql(
+               'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                RETURN u, r, v',
+               hydrate := true
+           )
+          WHERE row #>> '{u,_id,id}' = 'u1'
+            AND row #>> '{v,_id,id}' = 'u2'",
+    )
+    .expect("parallel hydrated relationship query failed")
+    .unwrap_or_default();
+    assert_eq!(hydrated_edge_ids, "f1,f_parallel");
 }
 
 #[pg_test]

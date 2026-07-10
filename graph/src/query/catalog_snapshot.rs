@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::builder::{RegisteredEdge, RegisteredTable};
+use crate::builder::{PrimaryKeySpec, RegisteredEdge, RegisteredTable};
 use crate::catalog::{read_catalog, sql_table_name_from_oid};
 use crate::gql::errors::{GqlError, Span};
 use crate::quote::quote_ident;
@@ -47,6 +47,8 @@ pub(crate) struct RelTypeInfo {
 /// Source-table details required for mapped edge writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeMappingInfo {
+    /// Durable catalog identity for this relationship mapping.
+    pub(crate) mapping_id: u64,
     /// Registered edge row table OID.
     pub(crate) edge_table_oid: u32,
     /// Registered source node table OID.
@@ -57,6 +59,8 @@ pub(crate) struct EdgeMappingInfo {
     pub(crate) source_column: String,
     /// Edge row column containing the target node key.
     pub(crate) target_column: String,
+    /// Primary-key columns that identify one edge source row.
+    pub(crate) source_key_columns: PrimaryKeySpec,
     /// Whether the edge was registered as bidirectional.
     pub(crate) bidirectional: bool,
     /// Dynamic relationship label column, when the edge registration uses one.
@@ -252,11 +256,13 @@ fn load_rels(
                     source_table_oid.and_then(|oid| registered_table_oids.get(&oid).copied());
                 let target_table_oid = edge.to_table_oid;
                 let edge_mapping = source_table_oid.map(|source_table_oid| EdgeMappingInfo {
+                    mapping_id: edge.mapping_id,
                     edge_table_oid,
                     source_table_oid,
                     target_table_oid,
                     source_column: edge.from_column.clone(),
                     target_column: edge.to_column.clone(),
+                    source_key_columns: edge.source_key_columns.clone(),
                     bidirectional: edge.bidirectional,
                     label_column: edge.label_column.clone(),
                 });
@@ -506,11 +512,13 @@ impl FakeCatalog {
             from_table_oid: spec.from_table_oid,
             to_table_oid: spec.to_table_oid,
             edge_mapping: Some(EdgeMappingInfo {
+                mapping_id: spec.edge_table_oid as u64,
                 edge_table_oid: spec.edge_table_oid,
                 source_table_oid: spec.from_table_oid,
                 target_table_oid: spec.to_table_oid,
                 source_column: spec.source_column.to_string(),
                 target_column: spec.target_column.to_string(),
+                source_key_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
                 bidirectional: spec.bidirectional,
                 label_column: spec.label_column.map(str::to_string),
             }),

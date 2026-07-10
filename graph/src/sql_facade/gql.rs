@@ -3104,55 +3104,115 @@ fn hydrate_gql_relationship_rows(
     let Some(edge_mapping) = &plan.edge_mapping else {
         return Ok(hydrated);
     };
+    let relationship_identities =
+        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
     for row in rows {
         let (Some(start), Some(end)) = (&row.rel_start, &row.rel_end) else {
             continue;
         };
-        let key = crate::query::value::RelationshipKey::new(&plan.rel_type, start, end);
+        let key = crate::query::value::RelationshipKey::with_relationship_id(
+            &plan.rel_type,
+            row.relationship_id,
+            start,
+            end,
+        );
         if hydrated.contains_key(&key) {
             continue;
         }
-        if let Some(relationship) = hydrate_relationship(edge_mapping, &plan.rel_type, start, end)?
-        {
-            hydrated.insert(key, relationship.0);
-        }
+        let relationship = hydrate_required_relationship(
+            edge_mapping,
+            &relationship_identities,
+            row.relationship_id,
+        )?;
+        hydrated.insert(key, relationship.0);
     }
     Ok(hydrated)
 }
 
-fn hydrate_relationship(
+fn hydrate_required_relationship(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
-    rel_type: &str,
-    start: &crate::query::execute::GqlNodeCoordinate,
-    end: &crate::query::execute::GqlNodeCoordinate,
-) -> safety::GraphResult<Option<pgrx::JsonB>> {
+    relationship_identities: &[Option<crate::edge_store::RelationshipIdentity>],
+    relationship_id: Option<crate::edge_store::RelationshipId>,
+) -> safety::GraphResult<pgrx::JsonB> {
+    let identity =
+        relationship_source_identity(edge_mapping, relationship_identities, relationship_id)?;
     let table_name = regclass_text(edge_mapping.edge_table_oid)?;
-    let source_column = quote_ident(&edge_mapping.source_column);
-    let target_column = quote_ident(&edge_mapping.target_column);
+    let source_key_predicate = relationship_source_key_predicate(edge_mapping);
     let mut sql = format!(
         "SELECT to_jsonb(edge_row.*)
          FROM {table_name} edge_row
-         WHERE edge_row.{source_column}::text = $1
-           AND edge_row.{target_column}::text = $2"
+         WHERE {source_key_predicate} = $1"
     );
-    let mut args = vec![start.node_id.as_str().into(), end.node_id.as_str().into()];
-    if let Some(label_column) = &edge_mapping.label_column {
-        let label_column = quote_ident(label_column);
-        sql.push_str(&format!(" AND edge_row.{label_column}::text = $3"));
-        args.push(rel_type.into());
-    }
+    let args = vec![identity.source_key.as_str().into()];
     sql.push_str(" LIMIT 1");
     Spi::connect(|client| {
         let result = client.select(&sql, None, &args).map_err(|err| {
             safety::GraphError::Internal(format!("relationship hydration failed: {err}"))
         })?;
         if result.is_empty() {
-            return Ok(None);
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL relationship source row `{}` is not visible in edge table OID {}",
+                    identity.source_key, edge_mapping.edge_table_oid
+                ),
+            });
         }
-        result.first().get::<pgrx::JsonB>(1).map_err(|err| {
-            safety::GraphError::Internal(format!("relationship hydration read failed: {err}"))
-        })
+        result
+            .first()
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("relationship hydration read failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "relationship hydration returned a NULL json row".to_string(),
+                )
+            })
     })
+}
+
+fn relationship_source_identity<'a>(
+    edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
+    relationship_identities: &'a [Option<crate::edge_store::RelationshipIdentity>],
+    relationship_id: Option<crate::edge_store::RelationshipId>,
+) -> safety::GraphResult<&'a crate::edge_store::RelationshipIdentity> {
+    let relationship_id = relationship_id.ok_or_else(|| safety::GraphError::GqlExecution {
+        reason: "GQL relationship hydration requires a stable source-row relationship identity"
+            .to_string(),
+    })?;
+    let identity = relationship_identities
+        .get(relationship_id as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| safety::GraphError::GqlExecution {
+            reason: format!("GQL relationship identity `{relationship_id}` is not available"),
+        })?;
+    if identity.mapping_id != edge_mapping.mapping_id {
+        return Err(safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL relationship identity `{relationship_id}` belongs to mapping {}, not {}",
+                identity.mapping_id, edge_mapping.mapping_id
+            ),
+        });
+    }
+    Ok(identity)
+}
+
+fn relationship_source_key_predicate(
+    edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
+) -> String {
+    let columns = edge_mapping.source_key_columns.columns();
+    if columns.len() > 1 {
+        let parts = columns
+            .iter()
+            .map(|column| format!("edge_row.{}::text", quote_ident(column)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("jsonb_build_array({parts})::text")
+    } else if let Some(column) = columns.first() {
+        format!("edge_row.{}::text", quote_ident(column))
+    } else {
+        "NULL::text".to_string()
+    }
 }
 
 fn hydrate_required_node(
@@ -3306,4 +3366,59 @@ fn test_recheck_delete_edge_predicate(
             .unwrap_or_else(|err| err.report());
         true
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edge_mapping(mapping_id: u64) -> crate::query::catalog_snapshot::EdgeMappingInfo {
+        crate::query::catalog_snapshot::EdgeMappingInfo {
+            mapping_id,
+            edge_table_oid: 30,
+            source_table_oid: 10,
+            target_table_oid: 20,
+            source_column: "user_id".to_string(),
+            target_column: "company_id".to_string(),
+            source_key_columns: crate::builder::PrimaryKeySpec::from_columns(vec![
+                "tenant_id".to_string(),
+                "edge_id".to_string(),
+            ]),
+            bidirectional: false,
+            label_column: None,
+        }
+    }
+
+    #[test]
+    fn relationship_identity_validation_rejects_missing_and_wrong_mapping() {
+        let mapping = edge_mapping(7);
+        let identities = vec![
+            None,
+            Some(crate::edge_store::RelationshipIdentity {
+                mapping_id: 8,
+                source_key: "edge-1".to_string(),
+            }),
+        ];
+
+        assert!(relationship_source_identity(&mapping, &identities, None)
+            .unwrap_err()
+            .to_string()
+            .contains("stable source-row relationship identity"));
+        assert!(relationship_source_identity(&mapping, &identities, Some(9))
+            .unwrap_err()
+            .to_string()
+            .contains("is not available"));
+        assert!(relationship_source_identity(&mapping, &identities, Some(1))
+            .unwrap_err()
+            .to_string()
+            .contains("belongs to mapping 8, not 7"));
+    }
+
+    #[test]
+    fn relationship_source_key_predicate_uses_registered_primary_key_columns() {
+        assert_eq!(
+            relationship_source_key_predicate(&edge_mapping(7)),
+            "jsonb_build_array(edge_row.\"tenant_id\"::text, edge_row.\"edge_id\"::text)::text"
+        );
+    }
 }

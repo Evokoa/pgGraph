@@ -138,10 +138,14 @@ adjacency row, but the returned relationship object still uses the original
 registered source endpoint as `_start` and target endpoint as `_end`. When the
 relationship is backed by a registered edge row table and `hydrate := true`,
 returning the relationship variable also includes readable edge-row columns
-that do not use reserved `_` prefixes. With `hydrate := false`, relationship
-values stay coordinate-only. Relationship property expressions such as
-`r.weight` remain outside the current subset; return the whole relationship
-value to receive hydrated edge-row properties.
+that do not use reserved `_` prefixes. pgGraph hydrates those columns by the
+relationship source row's registered primary key, not by endpoint lookup, so
+parallel edge rows with equal endpoints keep separate properties. If the graph
+cannot prove the source-row identity for a mapped relationship, hydration fails
+instead of choosing an arbitrary matching edge row. With `hydrate := false`,
+relationship values stay coordinate-only. Relationship property expressions
+such as `r.weight` remain outside the current subset; return the whole
+relationship value to receive hydrated edge-row properties.
 
 Parallel relationship rows with the same type and endpoints remain separate
 matches when the graph artifact has source-row relationship identity metadata.

@@ -2,6 +2,7 @@
 
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
+use crate::edge_store::RelationshipId;
 use crate::safety::{GraphError, GraphResult};
 
 use super::execute::{GqlNodeCoordinate, GqlNodeRow, GqlPathRelationship, GqlRow};
@@ -23,6 +24,7 @@ pub(crate) type HydratedRelationships = HashMap<RelationshipKey, serde_json::Val
 /// Stable key for a relationship coordinate in registered edge direction.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RelationshipKey {
+    pub(crate) relationship_id: Option<RelationshipId>,
     pub(crate) rel_type: String,
     pub(crate) start_table_oid: u32,
     pub(crate) start_id: String,
@@ -31,13 +33,16 @@ pub(crate) struct RelationshipKey {
 }
 
 impl RelationshipKey {
-    /// Create a key from a relationship type and endpoint coordinates.
-    pub(crate) fn new(
+    /// Create a key from a relationship type, optional source-row identity, and
+    /// endpoint coordinates.
+    pub(crate) fn with_relationship_id(
         rel_type: impl Into<String>,
+        relationship_id: Option<RelationshipId>,
         start: &GqlNodeCoordinate,
         end: &GqlNodeCoordinate,
     ) -> Self {
         Self {
+            relationship_id,
             rel_type: rel_type.into(),
             start_table_oid: start.table_oid,
             start_id: start.node_id.clone(),
@@ -1938,7 +1943,12 @@ fn relationship_value(
         "_start": relationship_endpoint(rel_start, plan),
         "_end": relationship_endpoint(rel_end, plan),
     });
-    let key = RelationshipKey::new(&plan.rel_type, rel_start, rel_end);
+    let key = RelationshipKey::with_relationship_id(
+        &plan.rel_type,
+        row.relationship_id,
+        rel_start,
+        rel_end,
+    );
     if let Some(properties) = hydrated_relationships.get(&key) {
         merge_relationship_properties(&mut value, properties);
     }

@@ -8,7 +8,7 @@ Last updated: 2026-07-10
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
-| 1A. Security and identity | In progress | Coordinate-only node visibility, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, and base-CSR query/path ID propagation are enforced on PostgreSQL 17; relationship-row RLS, hydration, overlays, compaction, and savepoints remain. |
+| 1A. Security and identity | In progress | Coordinate-only node visibility, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, and base relationship hydration are enforced on PostgreSQL 17; relationship-row RLS, overlays, sync, compaction, writes, and savepoints remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
@@ -23,10 +23,11 @@ Last updated: 2026-07-10
 
 ## Completed This Review
 
-- Preserved parallel source relationship rows through base CSR construction and
-  GQL traversal; an explicit PostgreSQL-backed regression verifies two equal
-  endpoint/type rows return two matches. Durable source-row keys remain the
-  next 1A slice for hydration, RLS, mutable overlays, and persistence.
+- Preserved parallel source relationship rows through base CSR construction,
+  GQL traversal, path identity, and base relationship hydration. PostgreSQL 17
+  regressions verify two equal endpoint/type rows return two matches and hydrate
+  separate edge-row IDs. Relationship-row RLS, mutable overlays, sync,
+  compaction, and writes remain open.
 
 - Added durable source primary-key metadata to relationship registrations and
   catalog fingerprints. Existing mappings backfill declared primary keys and
@@ -48,11 +49,10 @@ Last updated: 2026-07-10
   and target relation OIDs, catalog fingerprints include all registered OIDs,
   and source-key metadata is checked against the live primary key before use.
 
-- Relationship identity remains open: source keys are durable catalog metadata,
-  but no `RelationshipId` yet travels with a CSR adjacency, persisted artifact,
-  overlay, path, hydration request, or relationship-row visibility check.
-  Do not claim relationship-row RLS or property hydration correctness until the
-  identity dictionary and per-adjacency references are versioned together.
+- Relationship identity remains open outside the base CSR query path: source
+  keys and relationship IDs are durable and used for base GQL hydration, but
+  overlays, layered segments, compaction, sync replay, writes, and
+  relationship-row visibility checks still need end-to-end identity handling.
 
 - Added durable relationship mapping IDs to the catalog. OID-first
   re-registration preserves the mapping surrogate, which will combine with the
@@ -266,4 +266,17 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | One-hop relationship ID propagation | `cd graph && cargo test --features pg17 executor_propagates_relationship_ids_into_rows_and_paths` | PASS: 1 passed |
 | Wildcard parallel relationship identity | `cd graph && cargo test --features pg17 wildcard_path_executor_preserves_parallel_relationship_ids` | PASS after red regression confirmed endpoint-only dedup collapsed `[Some(41), Some(42)]` to `[Some(41)]` |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 673 passed, 1 ignored, doctests 0 |
+| Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |
+
+### 2026-07-10 Relationship Hydration Identity Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Compile | `cd graph && cargo check --features "pg17 development"` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Relationship identity validation | `cd graph && cargo test --features pg17 relationship_identity_validation_rejects_missing_and_wrong_mapping` | PASS: 1 passed |
+| Relationship source-key predicate | `cd graph && cargo test --features pg17 relationship_source_key_predicate_uses_registered_primary_key_columns` | PASS: 1 passed |
+| PostgreSQL parallel hydration regression | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_preserves_parallel_source_relationship_rows` | PASS: 1 passed; verifies equal endpoint/type rows hydrate `f1,f_parallel` instead of repeating one endpoint match |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 675 passed, 1 ignored, doctests 0 |
 | Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |
