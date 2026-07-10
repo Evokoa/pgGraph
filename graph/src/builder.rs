@@ -168,6 +168,8 @@ fn structural_text_value(value: Option<String>) -> Option<String> {
 /// Registered table in the graph catalog.
 #[derive(Debug, Clone)]
 pub struct RegisteredTable {
+    /// PostgreSQL OID that remains stable across relation renames.
+    pub table_oid: u32,
     pub table_name: String,
     pub id_columns: PrimaryKeySpec,
     pub columns: PropertyColumns,
@@ -177,8 +179,12 @@ pub struct RegisteredTable {
 /// Registered edge in the graph catalog.
 #[derive(Debug, Clone)]
 pub struct RegisteredEdge {
+    /// PostgreSQL OID of the source edge relation.
+    pub from_table_oid: u32,
     pub from_table: String,
     pub from_column: String,
+    /// PostgreSQL OID of the target node relation.
+    pub to_table_oid: u32,
     pub to_table: String,
     pub to_column: String,
     pub label: String,
@@ -190,6 +196,8 @@ pub struct RegisteredEdge {
 /// Registered typed filter column in the graph catalog.
 #[derive(Debug, Clone)]
 pub struct RegisteredFilterColumn {
+    /// PostgreSQL OID of the source relation.
+    pub table_oid: u32,
     pub table_name: String,
     pub column_name: String,
     pub column_type: String,
@@ -309,12 +317,12 @@ pub fn build_graph(
 
     // Phase 1: Load all nodes from registered tables
     for table in tables {
-        let oid = get_table_oid(&table.table_name)?;
+        let oid = table.table_oid;
         table_oid_map.insert(table.table_name.clone(), oid);
 
         let table_filter_columns: Vec<&RegisteredFilterColumn> = filter_columns
             .iter()
-            .filter(|filter| filter.table_name == table.table_name)
+            .filter(|filter| filter.table_oid == table.table_oid)
             .collect();
 
         let pk_expression = table.id_columns.select_expr();
@@ -405,12 +413,7 @@ pub fn build_graph(
     node_lookup_batch.flush()?;
     index_node_lookup_spool()?;
 
-    register_filter_columns(
-        &mut engine,
-        &table_oid_map,
-        filter_columns,
-        &filter_populated_counts,
-    );
+    register_filter_columns(&mut engine, filter_columns, &filter_populated_counts);
     for (column_name, node_idx, value) in pending_filter_values {
         if let Some(global_filter_idx) = engine.filter_index.find_column(&column_name) {
             let value = value.map(|value| match value {
@@ -446,12 +449,12 @@ pub fn build_graph(
         } else {
             None
         };
-        let from_oid = table_oid_map.get(&edge.from_table).copied();
-        let to_oid = table_oid_map.get(&edge.to_table).copied();
+        let from_oid = Some(edge.from_table_oid);
+        let to_oid = Some(edge.to_table_oid);
         let fk_style_source = from_oid.and_then(|_| {
             tables
                 .iter()
-                .find(|table| table.table_name == edge.from_table)
+                .find(|table| table.table_oid == edge.from_table_oid)
                 .map(|table| primary_key_expr(&table.id_columns))
         });
         let from_expr = fk_style_source
@@ -945,15 +948,12 @@ fn load_edge_store_from_spool(
 
 fn register_filter_columns(
     engine: &mut Engine,
-    table_oid_map: &HashMap<String, u32>,
     filter_columns: &[RegisteredFilterColumn],
     populated_counts: &HashMap<String, usize>,
 ) {
     let node_count = engine.node_store.node_count() as usize;
     for filter in filter_columns {
-        let Some(table_oid) = table_oid_map.get(&filter.table_name).copied() else {
-            continue;
-        };
+        let table_oid = filter.table_oid;
         if engine
             .filter_index
             .find_column(&filter.column_name)
@@ -1043,32 +1043,6 @@ fn parse_uuid_u128(value: &str) -> GraphResult<u128> {
     })
 }
 
-/// Get the OID for a table name via SPI.
-fn get_table_oid(table_name: &str) -> GraphResult<u32> {
-    Spi::connect(|client| {
-        let result = client
-            .select(
-                "SELECT $1::regclass::oid::integer",
-                None,
-                &[table_name.into()],
-            )
-            .map_err(|e| {
-                GraphError::Internal(format!(
-                    "Cannot resolve table OID for {}: {}",
-                    table_name, e
-                ))
-            })?;
-
-        let row = result.first();
-        let oid: i32 = row
-            .get::<i32>(1)
-            .map_err(|e| GraphError::Internal(format!("OID read error: {}", e)))?
-            .ok_or_else(|| GraphError::Internal(format!("NULL OID for {}", table_name)))?;
-
-        Ok(oid as u32)
-    })
-}
-
 fn primary_key_expr(primary_key: &PrimaryKeySpec) -> String {
     if primary_key.columns().len() > 1 {
         primary_key.select_expr()
@@ -1104,6 +1078,7 @@ mod tests {
     #[test]
     fn memory_estimate_reuses_table_counts_across_nodes_and_edges() {
         let tables = vec![RegisteredTable {
+            table_oid: 42,
             table_name: "public.accounts".to_string(),
             id_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
             columns: PropertyColumns::from_columns(Vec::new()),
@@ -1111,8 +1086,10 @@ mod tests {
         }];
         let edges = vec![
             RegisteredEdge {
+                from_table_oid: 42,
                 from_table: "public.accounts".to_string(),
                 from_column: "parent_id".to_string(),
+                to_table_oid: 42,
                 to_table: "public.accounts".to_string(),
                 to_column: "id".to_string(),
                 label: "parent".to_string(),
@@ -1121,8 +1098,10 @@ mod tests {
                 label_column: None,
             },
             RegisteredEdge {
+                from_table_oid: 42,
                 from_table: "public.accounts".to_string(),
                 from_column: "owner_id".to_string(),
+                to_table_oid: 42,
                 to_table: "public.accounts".to_string(),
                 to_column: "id".to_string(),
                 label: "owner".to_string(),

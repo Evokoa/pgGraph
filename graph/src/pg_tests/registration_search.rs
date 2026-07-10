@@ -1,6 +1,43 @@
 use crate::catalog::table_oid_from_name;
 
 #[pg_test]
+fn registered_relation_oid_survives_rename_and_rejects_recreation() {
+    Spi::run("SELECT graph.reset() ").expect("reset failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persistence for isolated test");
+    Spi::run(
+        "CREATE SCHEMA graph_identity_pgtest;
+         CREATE TABLE graph_identity_pgtest.nodes (id text PRIMARY KEY, name text NOT NULL);
+         INSERT INTO graph_identity_pgtest.nodes VALUES ('n1', 'before rename');
+         SELECT graph.add_table('graph_identity_pgtest.nodes'::regclass, 'id', ARRAY['name']);
+         SELECT * FROM graph.build();
+         ALTER TABLE graph_identity_pgtest.nodes RENAME TO renamed_nodes;
+         SET search_path TO pg_catalog;
+         SELECT * FROM graph.build();",
+    )
+    .expect("registered OID should survive a table rename and caller search-path change");
+
+    Spi::run(
+        "DROP TABLE graph_identity_pgtest.renamed_nodes;
+         CREATE TABLE graph_identity_pgtest.renamed_nodes (id text PRIMARY KEY, name text NOT NULL);",
+    )
+    .expect("drop/recreate fixture failed");
+    Spi::run(
+        "DO $$
+         BEGIN
+             PERFORM * FROM graph.build();
+             RAISE EXCEPTION 'drop/recreate unexpectedly retargeted the registered relation';
+         EXCEPTION WHEN OTHERS THEN
+             IF SQLERRM NOT LIKE '%registered table relation no longer exists%' THEN
+                 RAISE;
+             END IF;
+         END
+         $$;",
+    )
+    .expect("drop/recreate must fail closed instead of retargeting the registered OID");
+    Spi::run("DROP SCHEMA graph_identity_pgtest CASCADE").expect("fixture cleanup failed");
+}
+
+#[pg_test]
 fn registered_tables_and_edges_reflect_public_registration_apis() {
     reset_and_create_fixtures();
     Spi::run(

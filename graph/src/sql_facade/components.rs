@@ -10,7 +10,7 @@ use super::*;
 /// Returns one row per node with its component ID and component size.
 /// This is a global O(V+E) algorithm — it touches every node and edge.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -61,7 +61,7 @@ fn connected_components() -> Result<
 /// Returns a single row with component count, largest component size, isolated
 /// node count, and total active node count.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"

@@ -100,10 +100,10 @@ violations AS (
       )
 
     UNION ALL
-    SELECT format('%s(%s): security definer must pin search_path to pg_catalog, public', proname, args)
+    SELECT format('%s(%s): security definer must pin search_path to pg_catalog', proname, args)
     FROM exported
     WHERE prosecdef
-      AND NOT (COALESCE(proconfig, ARRAY[]::text[]) @> ARRAY['search_path=pg_catalog, public'])
+      AND NOT (COALESCE(proconfig, ARRAY[]::text[]) @> ARRAY['search_path=pg_catalog'])
 
     UNION ALL
     SELECT format('%s(%s): leakproof is not expected', proname, args)

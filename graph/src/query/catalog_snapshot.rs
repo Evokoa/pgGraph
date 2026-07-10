@@ -3,9 +3,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builder::{RegisteredEdge, RegisteredTable};
-use crate::catalog::{read_catalog, sql_table_name_from_catalog, table_oid_from_name};
+use crate::catalog::{read_catalog, sql_table_name_from_catalog};
 use crate::gql::errors::{GqlError, Span};
 use crate::quote::quote_ident;
+use crate::safety::GraphError;
 use crate::safety::GraphResult;
 
 #[derive(Debug, Clone)]
@@ -201,7 +202,7 @@ fn incident_rel_types(rels: &[RelTypeInfo], table_oid: u32) -> Vec<RelTypeInfo> 
 fn load_labels(tables: &[RegisteredTable]) -> GraphResult<HashMap<String, LabelEntry>> {
     let mut labels = HashMap::with_capacity(tables.len());
     for table in tables {
-        let table_oid = table_oid_from_name(&table.table_name)?;
+        let table_oid = table.table_oid;
         if let Some(label) = gql_label_from_regclass(&table.table_name) {
             let mut properties = table.columns.iter().cloned().collect::<BTreeSet<_>>();
             properties.extend(table.id_columns.columns().iter().cloned());
@@ -237,10 +238,7 @@ fn load_rels(
         .collect::<HashSet<_>>();
     let mut registered_table_oids = HashMap::with_capacity(tables.len());
     for table in tables {
-        registered_table_oids.insert(
-            table_oid_from_name(&table.table_name)?,
-            table.table_name.as_str(),
-        );
+        registered_table_oids.insert(table.table_oid, table.table_name.as_str());
     }
     let mut rels = Vec::with_capacity(edges.len());
     for edge in edges {
@@ -248,11 +246,11 @@ fn load_rels(
             if registered_tables.contains(edge.from_table.as_str()) {
                 (Some(edge.from_table.as_str()), None)
             } else {
-                let edge_table_oid = table_oid_from_name(&edge.from_table)?;
+                let edge_table_oid = edge.from_table_oid;
                 let source_table_oid = edge_source_fk_table_oid(edge)?;
                 let from_node_table =
                     source_table_oid.and_then(|oid| registered_table_oids.get(&oid).copied());
-                let target_table_oid = table_oid_from_name(&edge.to_table)?;
+                let target_table_oid = edge.to_table_oid;
                 let edge_mapping = source_table_oid.map(|source_table_oid| EdgeMappingInfo {
                     edge_table_oid,
                     source_table_oid,
@@ -267,8 +265,16 @@ fn load_rels(
         let Some(from_node_table) = from_node_table else {
             continue;
         };
-        let source_table_oid = table_oid_from_name(from_node_table)?;
-        let target_table_oid = table_oid_from_name(&edge.to_table)?;
+        let source_table_oid = tables
+            .iter()
+            .find(|table| table.table_name == from_node_table)
+            .map(|table| table.table_oid)
+            .ok_or_else(|| {
+                GraphError::Internal(format!(
+                    "registered source table disappeared: {from_node_table}"
+                ))
+            })?;
+        let target_table_oid = edge.to_table_oid;
         for rel_type in relationship_type_names(edge)? {
             rels.push(RelTypeInfo {
                 rel_type: rel_type.clone(),
@@ -345,7 +351,7 @@ fn gql_identifier_from_text(text: &str) -> Option<String> {
 }
 
 fn edge_source_fk_table_oid(edge: &RegisteredEdge) -> GraphResult<Option<u32>> {
-    let from_table_oid = table_oid_from_name(&edge.from_table)?;
+    let from_table_oid = edge.from_table_oid;
     pgrx::Spi::connect(|client| {
         let rows = client
             .select(

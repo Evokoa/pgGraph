@@ -16,7 +16,7 @@ type DirectNodeRow = (
 ///
 /// See: `docs/user_guide/querying.mdx`
 #[pg_extern(schema = "graph", cost = 1000, security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::too_many_arguments,
     clippy::type_complexity,
@@ -357,7 +357,7 @@ pub(super) fn shortest_path(
                     s.node_id,
                     s.edge_label,
                     node,
-                    regclass_text(s.node_table.0).unwrap_or_else(|err| err.report()),
+                    relation_name(s.node_table.0).unwrap_or_else(|err| err.report()),
                 )
             })
             .collect::<Vec<_>>();
@@ -414,7 +414,7 @@ fn weighted_shortest_path(
                 (
                     step.step,
                     pgrx::pg_sys::Oid::from_u32(step.node_table.0),
-                    regclass_text(step.node_table.0).unwrap_or_else(|err| err.report()),
+                    relation_name(step.node_table.0).unwrap_or_else(|err| err.report()),
                     step.node_id,
                     step.edge_label,
                     step.edge_weight.map(i64::from),
@@ -472,7 +472,7 @@ fn direct_get_node_rows(
             matched.graph.graph_id,
             matched.graph.graph_name,
             pgrx::pg_sys::Oid::from_u32(matched.table_oid),
-            regclass_text(matched.table_oid)?,
+            relation_name(matched.table_oid)?,
             id.to_string(),
             i64::from(matched.node_idx),
             node,
@@ -573,7 +573,7 @@ fn resolve_direct_node(
             reason: format!("graph '{graph_name}' has no registered node label '{label}'"),
         }
     })?;
-    let table_oid = catalog::table_oid_from_name(&table.table_name)?;
+    let table_oid = table.table_oid;
     acl::check_table_acl(table_oid)?;
     let node_idx = ENGINE.with(|engine| {
         let engine = engine.borrow();

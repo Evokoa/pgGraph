@@ -43,12 +43,12 @@ pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
     let (tables, _edges, filter_columns) = read_catalog()?;
     let mut installed = 0usize;
     for table in &tables {
-        let oid = table_oid_from_name(&table.table_name)?;
+        let oid = table.table_oid;
         let qt = sync::get_qualified_table(oid)?;
         let mut trigger_columns = table.columns.to_vec();
         for filter in filter_columns
             .iter()
-            .filter(|filter| filter.table_name == table.table_name)
+            .filter(|filter| filter.table_oid == table.table_oid)
         {
             if !trigger_columns
                 .iter()
@@ -79,7 +79,7 @@ pub(crate) fn remove_sync_triggers() -> safety::GraphResult<usize> {
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let mut removed = 0usize;
     for table in &tables {
-        let oid = table_oid_from_name(&table.table_name)?;
+        let oid = table.table_oid;
         let qt = sync::get_qualified_table(oid)?;
         let table_sql = sync::qualified_table_sql(&qt);
         Spi::run(&format!(
@@ -356,21 +356,11 @@ impl SyncReplayContext {
         let mut table_oids = HashMap::new();
 
         for table in &tables {
-            if let Ok(oid) = table_oid_from_name(&table.table_name) {
-                table_oids.insert(table.table_name.clone(), oid);
-            }
+            table_oids.insert(table.table_name.clone(), table.table_oid);
         }
         for edge in &edges {
-            if !table_oids.contains_key(&edge.from_table) {
-                if let Ok(oid) = table_oid_from_name(&edge.from_table) {
-                    table_oids.insert(edge.from_table.clone(), oid);
-                }
-            }
-            if !table_oids.contains_key(&edge.to_table) {
-                if let Ok(oid) = table_oid_from_name(&edge.to_table) {
-                    table_oids.insert(edge.to_table.clone(), oid);
-                }
-            }
+            table_oids.insert(edge.from_table.clone(), edge.from_table_oid);
+            table_oids.insert(edge.to_table.clone(), edge.to_table_oid);
         }
 
         let all_table_oids = table_oids.values().copied().collect::<Vec<_>>();
@@ -859,15 +849,7 @@ fn apply_sync_row_operation(
     match operation {
         SyncRowOperation::Insert { pk, tenant } => {
             sync::sync_insert(eng, table_oid, pk, tenant)?;
-            refresh_filter_index_from_sync(
-                eng,
-                table_oid,
-                pk,
-                &context.filters,
-                &context.table_oids,
-                entry,
-                rows,
-            )?;
+            refresh_filter_index_from_sync(eng, table_oid, pk, &context.filters, entry, rows)?;
             apply_row_edge_mutations(
                 eng,
                 context,
@@ -895,15 +877,7 @@ fn apply_sync_row_operation(
                 sync::sync_delete_tenant(eng, table_oid, old_pk, old_tenant)?;
                 sync::sync_insert(eng, table_oid, new_pk, new_tenant)?;
             }
-            refresh_filter_index_from_sync(
-                eng,
-                table_oid,
-                new_pk,
-                &context.filters,
-                &context.table_oids,
-                entry,
-                rows,
-            )?;
+            refresh_filter_index_from_sync(eng, table_oid, new_pk, &context.filters, entry, rows)?;
             apply_row_edge_mutations(
                 eng,
                 context,
@@ -1341,7 +1315,7 @@ fn append_projection_filter_rows_for_pk(
         return Ok(());
     };
     for filter in &context.filters {
-        if context.table_oid(&filter.table_name) != Some(table_oid) {
+        if filter.table_oid != table_oid {
             continue;
         }
         let Some(column_idx) = eng.filter_index.find_column(&filter.column_name) else {
@@ -1477,7 +1451,6 @@ fn refresh_filter_index_from_sync(
     table_oid: u32,
     pk: &str,
     filters: &[builder::RegisteredFilterColumn],
-    table_oids: &HashMap<String, u32>,
     entry: &SyncLogEntry,
     rows: &ParsedSyncRows,
 ) -> safety::GraphResult<()> {
@@ -1489,7 +1462,7 @@ fn refresh_filter_index_from_sync(
         .collect::<HashMap<_, _>>();
 
     for filter in filters {
-        if table_oids.get(&filter.table_name).copied() != Some(table_oid) {
+        if filter.table_oid != table_oid {
             continue;
         }
         let Some(column_idx) = eng.filter_index.find_column(&filter.column_name) else {
@@ -2021,6 +1994,7 @@ mod tests {
     fn tenant_change_prefers_old_and_new_row_images() {
         let context = SyncReplayContext {
             tables: vec![RegisteredTable {
+                table_oid: 42,
                 table_name: "public.accounts".to_string(),
                 id_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
                 columns: PropertyColumns::from_columns(vec!["name".to_string()]),

@@ -29,10 +29,18 @@ pub(crate) fn read_catalog_for_graph(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT table_name::text, id_column, columns, tenant_column
-                   FROM graph._registered_tables
-                  WHERE graph_id = $1::uuid
-                  ORDER BY table_name",
+                "SELECT registered.table_oid::integer,
+                        pg_catalog.quote_ident(namespace.nspname) || '.' || pg_catalog.quote_ident(relation.relname),
+                        registered.id_column,
+                        registered.columns,
+                        registered.tenant_column
+                   FROM graph._registered_tables AS registered
+                   LEFT JOIN pg_catalog.pg_class AS relation
+                     ON relation.oid = registered.table_oid
+                   LEFT JOIN pg_catalog.pg_namespace AS namespace
+                     ON namespace.oid = relation.relnamespace
+                  WHERE registered.graph_id = $1::uuid
+                  ORDER BY registered.table_name",
                 None,
                 &[graph_id.into()],
             )
@@ -43,20 +51,41 @@ pub(crate) fn read_catalog_for_graph(
                 ))
             })?;
         for row in result {
+            let table_oid = row
+                .get::<i32>(1)
+                .map_err(|e| {
+                    safety::GraphError::Internal(format!("catalog read error (table_oid): {e}"))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered table has no relation OID; re-register it".to_string(),
+                    )
+                })
+                .and_then(|oid| {
+                    u32::try_from(oid).map_err(|_| {
+                        safety::GraphError::Internal(format!(
+                            "registered table has invalid relation OID {oid}"
+                        ))
+                    })
+                })?;
             let table_name = row
-                .get::<String>(1)
+                .get::<String>(2)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (table_name): {}", e))
                 })?
-                .unwrap_or_default();
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered table relation no longer exists; re-register it".to_string(),
+                    )
+                })?;
             let id_column = row
-                .get::<String>(2)
+                .get::<String>(3)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (id_column): {}", e))
                 })?
                 .unwrap_or_default();
             let columns_str = row
-                .get::<String>(3)
+                .get::<String>(4)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (columns): {}", e))
                 })?
@@ -64,7 +93,7 @@ pub(crate) fn read_catalog_for_graph(
             let id_columns = builder::PrimaryKeySpec::from_catalog_text(&id_column);
             let columns = builder::PropertyColumns::from_catalog_text(&columns_str);
             let tenant_column = row
-                .get::<String>(4)
+                .get::<String>(5)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (tenant_column): {}",
@@ -74,6 +103,7 @@ pub(crate) fn read_catalog_for_graph(
                 .filter(|s| !s.is_empty());
 
             tables.push(builder::RegisteredTable {
+                table_oid,
                 table_name,
                 id_columns,
                 columns,
@@ -86,10 +116,27 @@ pub(crate) fn read_catalog_for_graph(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT from_table::text, from_column, to_table::text, to_column, label, bidirectional, weight_column, label_column
-                   FROM graph._registered_edges
-                  WHERE graph_id = $1::uuid
-                  ORDER BY from_table, from_column, to_table, to_column, label",
+                "SELECT registered.from_table_oid::integer,
+                        pg_catalog.quote_ident(source_namespace.nspname) || '.' || pg_catalog.quote_ident(source_relation.relname),
+                        registered.from_column,
+                        registered.to_table_oid::integer,
+                        pg_catalog.quote_ident(target_namespace.nspname) || '.' || pg_catalog.quote_ident(target_relation.relname),
+                        registered.to_column,
+                        registered.label,
+                        registered.bidirectional,
+                        registered.weight_column,
+                        registered.label_column
+                   FROM graph._registered_edges AS registered
+                   LEFT JOIN pg_catalog.pg_class AS source_relation
+                     ON source_relation.oid = registered.from_table_oid
+                   LEFT JOIN pg_catalog.pg_namespace AS source_namespace
+                     ON source_namespace.oid = source_relation.relnamespace
+                   LEFT JOIN pg_catalog.pg_class AS target_relation
+                     ON target_relation.oid = registered.to_table_oid
+                   LEFT JOIN pg_catalog.pg_namespace AS target_namespace
+                     ON target_namespace.oid = target_relation.relnamespace
+                  WHERE registered.graph_id = $1::uuid
+                  ORDER BY registered.from_table, registered.from_column, registered.to_table, registered.to_column, registered.label",
                 None,
                 &[graph_id.into()],
             )
@@ -100,38 +147,84 @@ pub(crate) fn read_catalog_for_graph(
                 ))
             })?;
         for row in result {
-            let from_table = row
-                .get::<String>(1)
+            let from_table_oid = row
+                .get::<i32>(1)
                 .map_err(|e| {
-                    safety::GraphError::Internal(format!("catalog read error (from_table): {}", e))
+                    safety::GraphError::Internal(format!(
+                        "catalog read error (from_table_oid): {e}"
+                    ))
                 })?
-                .unwrap_or_default();
-            let from_column = row
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered edge has no source relation OID; re-register it".to_string(),
+                    )
+                })
+                .and_then(|oid| {
+                    u32::try_from(oid).map_err(|_| {
+                        safety::GraphError::Internal(format!(
+                            "registered edge has invalid source relation OID {oid}"
+                        ))
+                    })
+                })?;
+            let from_table = row
                 .get::<String>(2)
+                .map_err(|e| {
+                    safety::GraphError::Internal(format!("catalog read error (from_table): {e}"))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered edge source relation no longer exists; re-register it"
+                            .to_string(),
+                    )
+                })?;
+            let from_column = row
+                .get::<String>(3)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (from_column): {}", e))
                 })?
                 .unwrap_or_default();
+            let to_table_oid = row
+                .get::<i32>(4)
+                .map_err(|e| {
+                    safety::GraphError::Internal(format!("catalog read error (to_table_oid): {e}"))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered edge has no target relation OID; re-register it".to_string(),
+                    )
+                })
+                .and_then(|oid| {
+                    u32::try_from(oid).map_err(|_| {
+                        safety::GraphError::Internal(format!(
+                            "registered edge has invalid target relation OID {oid}"
+                        ))
+                    })
+                })?;
             let to_table = row
-                .get::<String>(3)
+                .get::<String>(5)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (to_table): {}", e))
                 })?
-                .unwrap_or_default();
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered edge target relation no longer exists; re-register it"
+                            .to_string(),
+                    )
+                })?;
             let to_column = row
-                .get::<String>(4)
+                .get::<String>(6)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (to_column): {}", e))
                 })?
                 .unwrap_or_default();
             let label = row
-                .get::<String>(5)
+                .get::<String>(7)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (label): {}", e))
                 })?
                 .unwrap_or_default();
             let bidirectional = row
-                .get::<bool>(6)
+                .get::<bool>(8)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (bidirectional): {}",
@@ -140,7 +233,7 @@ pub(crate) fn read_catalog_for_graph(
                 })?
                 .unwrap_or(true);
             let weight_column = row
-                .get::<String>(7)
+                .get::<String>(9)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (weight_column): {}",
@@ -149,7 +242,7 @@ pub(crate) fn read_catalog_for_graph(
                 })?
                 .filter(|s| !s.is_empty());
             let label_column = row
-                .get::<String>(8)
+                .get::<String>(10)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (label_column): {}",
@@ -159,8 +252,10 @@ pub(crate) fn read_catalog_for_graph(
                 .filter(|s| !s.is_empty());
 
             edges.push(builder::RegisteredEdge {
+                from_table_oid,
                 from_table,
                 from_column,
+                to_table_oid,
                 to_table,
                 to_column,
                 label,
@@ -175,10 +270,17 @@ pub(crate) fn read_catalog_for_graph(
     Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT table_name::text, column_name, column_type
-                   FROM graph._registered_filter_columns
-                  WHERE graph_id = $1::uuid
-                  ORDER BY table_name, column_name",
+                "SELECT registered.table_oid::integer,
+                        pg_catalog.quote_ident(namespace.nspname) || '.' || pg_catalog.quote_ident(relation.relname),
+                        registered.column_name,
+                        registered.column_type
+                   FROM graph._registered_filter_columns AS registered
+                   LEFT JOIN pg_catalog.pg_class AS relation
+                     ON relation.oid = registered.table_oid
+                   LEFT JOIN pg_catalog.pg_namespace AS namespace
+                     ON namespace.oid = relation.relnamespace
+                  WHERE registered.graph_id = $1::uuid
+                  ORDER BY registered.table_name, registered.column_name",
                 None,
                 &[graph_id.into()],
             )
@@ -189,25 +291,49 @@ pub(crate) fn read_catalog_for_graph(
                 ))
             })?;
         for row in result {
+            let table_oid = row
+                .get::<i32>(1)
+                .map_err(|e| {
+                    safety::GraphError::Internal(format!(
+                        "catalog read error (filter table_oid): {e}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered filter has no relation OID; re-register it".to_string(),
+                    )
+                })
+                .and_then(|oid| {
+                    u32::try_from(oid).map_err(|_| {
+                        safety::GraphError::Internal(format!(
+                            "registered filter has invalid relation OID {oid}"
+                        ))
+                    })
+                })?;
             let table_name = row
-                .get::<String>(1)
+                .get::<String>(2)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (table_name): {}", e))
                 })?
-                .unwrap_or_default();
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "registered filter relation no longer exists; re-register it".to_string(),
+                    )
+                })?;
             let column_name = row
-                .get::<String>(2)
+                .get::<String>(3)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (column_name): {}", e))
                 })?
                 .unwrap_or_default();
             let column_type = row
-                .get::<String>(3)
+                .get::<String>(4)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (column_type): {}", e))
                 })?
                 .unwrap_or_else(|| "numeric".to_string());
             filter_columns.push(builder::RegisteredFilterColumn {
+                table_oid,
                 table_name,
                 column_name,
                 column_type,

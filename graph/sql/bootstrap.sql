@@ -364,6 +364,33 @@ ALTER TABLE graph._registered_edges
 ALTER TABLE graph._registered_filter_columns
     ADD COLUMN IF NOT EXISTS graph_id UUID;
 
+-- Relation OIDs are the durable identity for registered source tables. The
+-- legacy text columns remain display metadata so existing dumps can be read,
+-- but runtime catalog reads derive names from these OIDs.
+ALTER TABLE graph._registered_tables
+    ADD COLUMN IF NOT EXISTS table_oid OID;
+
+ALTER TABLE graph._registered_edges
+    ADD COLUMN IF NOT EXISTS from_table_oid OID,
+    ADD COLUMN IF NOT EXISTS to_table_oid OID;
+
+ALTER TABLE graph._registered_filter_columns
+    ADD COLUMN IF NOT EXISTS table_oid OID;
+
+UPDATE graph._registered_tables
+SET table_oid = pg_catalog.to_regclass(table_name)::oid
+WHERE table_oid IS NULL;
+
+UPDATE graph._registered_edges
+SET from_table_oid = pg_catalog.to_regclass(from_table)::oid,
+    to_table_oid = pg_catalog.to_regclass(to_table)::oid
+WHERE from_table_oid IS NULL
+   OR to_table_oid IS NULL;
+
+UPDATE graph._registered_filter_columns
+SET table_oid = pg_catalog.to_regclass(table_name)::oid
+WHERE table_oid IS NULL;
+
 UPDATE graph._registered_tables
 SET graph_id = '00000000-0000-0000-0000-000000000001'::uuid
 WHERE graph_id IS NULL;

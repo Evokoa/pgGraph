@@ -1,8 +1,6 @@
 //! SQL hydration helpers for source rows returned by graph operations.
 
-use crate::catalog::{
-    primary_key_expr, read_catalog, sql_table_name_from_catalog, table_oid_from_name,
-};
+use crate::catalog::{primary_key_expr, read_catalog, sql_table_name_from_catalog};
 use crate::{acl, safety, types};
 use pgrx::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -15,7 +13,7 @@ pub(crate) fn hydrate_node(
     let table = tables
         .iter()
         .find_map(|table| {
-            table_oid_from_name(&table.table_name)
+            Ok::<u32, crate::safety::GraphError>(table.table_oid)
                 .ok()
                 .filter(|oid| *oid == table_oid)
                 .map(|_| table)
@@ -72,7 +70,7 @@ pub(crate) fn hydrate_nodes(
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let mut tables_by_oid = HashMap::with_capacity(needed_table_oids.len());
     for table in &tables {
-        let oid = table_oid_from_name(&table.table_name)?;
+        let oid = table.table_oid;
         if needed_table_oids.contains(&oid) {
             tables_by_oid.insert(oid, table);
             if tables_by_oid.len() == needed_table_oids.len() {

@@ -16,7 +16,7 @@ fn test_enabled() -> bool {
     name = "_selected_graph_id_for_current_role",
     security_definer
 )]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn selected_graph_id_for_current_role() -> String {
     with_panic_boundary("_selected_graph_id_for_current_role()", || {
         let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
@@ -31,7 +31,7 @@ fn selected_graph_id_for_current_role() -> String {
     name = "_pending_sync_rows_for_current_role",
     security_definer
 )]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
     with_panic_boundary("_pending_sync_rows_for_current_role()", || {
         crate::sql_sync::pending_sync_rows_direct(applied_sync_id)
@@ -44,7 +44,7 @@ fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
     name = "_max_sync_log_id_for_current_role",
     security_definer
 )]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn max_sync_log_id_for_current_role() -> i64 {
     with_panic_boundary("_max_sync_log_id_for_current_role()", || {
         crate::sql_sync::max_sync_log_id_direct().unwrap_or_else(|err| err.report())
@@ -189,7 +189,7 @@ fn drop_graph(
 
 /// List graph metadata visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -221,7 +221,7 @@ fn list_graphs() -> TableIterator<
 
 /// Return the session-selected graph metadata.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -253,7 +253,7 @@ fn current_graph() -> TableIterator<
 
 /// Select graph metadata for later graph-scoped calls.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -351,7 +351,7 @@ fn revoke_graph(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn graph_privileges(
     graph_name: default!(Option<&str>, "NULL"),
     tenant: default!(Option<&str>, "NULL"),
@@ -411,7 +411,7 @@ fn transfer_graph_ownership(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -497,7 +497,7 @@ fn set_graph_quota(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -522,7 +522,7 @@ fn graph_quotas() -> TableIterator<
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -798,16 +798,7 @@ fn registered_table_name_for_graph(
                 "SELECT table_name
                     FROM graph._registered_tables
                     WHERE graph_id = $1::uuid
-                      AND (to_regclass(table_name) = $2::oid
-                       OR (
-                           position('.' in table_name) = 0
-                           AND EXISTS (
-                               SELECT 1
-                               FROM pg_class
-                               WHERE oid = $2::oid
-                                 AND relname = table_name
-                           )
-                       ))
+                      AND table_oid = $2::oid
                     ORDER BY table_name
                     LIMIT 1",
                 None,
@@ -1691,7 +1682,7 @@ fn projection_metadata_status_snapshot(
 ///
 /// See: `docs/user_guide/build-and-persistence.mdx`
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 pub(super) fn build() -> TableIterator<
     'static,
     (
@@ -1720,7 +1711,7 @@ pub(super) fn build() -> TableIterator<
 
 /// Build a named graph without requiring a separate `set_current_graph()` call.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2315,7 +2306,7 @@ fn build_status_for_graph(
 
 /// Register a table for graph indexing.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn add_table(
     table_name: pgrx::pg_sys::Oid,
     id_column: &str,
@@ -2348,7 +2339,7 @@ fn add_table(
 
 /// Register a table for graph indexing using one or more primary-key columns.
 #[pg_extern(schema = "graph", name = "add_table", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn add_table_with_id_columns(
     table_name: pgrx::pg_sys::Oid,
     id_columns: Vec<String>,
@@ -2361,7 +2352,7 @@ fn add_table_with_id_columns(
 
 /// Register a table for a named graph without changing session selection.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn add_table_to_graph(
     graph_name: &str,
     table_name: pgrx::pg_sys::Oid,
@@ -2399,7 +2390,7 @@ fn add_table_to_graph(
 
 /// Register a table for a named graph using one or more primary-key columns.
 #[pg_extern(schema = "graph", name = "add_table_to_graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn add_table_to_graph_with_id_columns(
     graph_name: &str,
     table_name: pgrx::pg_sys::Oid,
@@ -2423,7 +2414,7 @@ fn add_table_to_graph_with_id_columns(
 
 /// Register an edge relationship.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::too_many_arguments,
     reason = "pgrx SQL ABI exposes each SQL argument"
@@ -2485,7 +2476,7 @@ fn add_edge(
 
 /// Register an edge relationship for a named graph without changing session selection.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::too_many_arguments,
     reason = "pgrx SQL ABI exposes each SQL argument"
@@ -2553,7 +2544,7 @@ fn add_edge_to_graph(
 
 /// List tables registered for graph indexing.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2577,7 +2568,7 @@ fn registered_tables() -> TableIterator<
 
 /// List tables registered for a named graph.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2626,10 +2617,14 @@ fn registered_tables_for_graph_id(
 > {
     let rows = Spi::connect(|client| {
         let result = client.select(
-            "SELECT table_name, id_column, columns, tenant_column
-                 FROM graph._registered_tables
-                 WHERE graph_id = $1::uuid
-                 ORDER BY table_name",
+            "SELECT COALESCE(relation.relname::text, registered.table_name),
+                    registered.id_column,
+                    registered.columns,
+                    registered.tenant_column
+                 FROM graph._registered_tables AS registered
+                 LEFT JOIN pg_catalog.pg_class AS relation ON relation.oid = registered.table_oid
+                 WHERE registered.graph_id = $1::uuid
+                 ORDER BY registered.table_name",
             None,
             &[graph_id.into()],
         )?;
@@ -2655,7 +2650,7 @@ fn registered_tables_for_graph_id(
 
 /// List edge relationships registered for graph indexing.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2683,7 +2678,7 @@ fn registered_edges() -> TableIterator<
 
 /// List edge relationships registered for a named graph.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2740,10 +2735,19 @@ fn registered_edges_for_graph_id(
 > {
     let rows = Spi::connect(|client| {
             let result = client.select(
-                "SELECT from_table, from_column, to_table, to_column, label, bidirectional, weight_column, label_column
-                 FROM graph._registered_edges
-                 WHERE graph_id = $1::uuid
-                 ORDER BY from_table, from_column, to_table, to_column, label",
+                "SELECT COALESCE(source_relation.relname::text, registered.from_table),
+                        registered.from_column,
+                        COALESCE(target_relation.relname::text, registered.to_table),
+                        registered.to_column,
+                        registered.label,
+                        registered.bidirectional,
+                        registered.weight_column,
+                        registered.label_column
+                 FROM graph._registered_edges AS registered
+                 LEFT JOIN pg_catalog.pg_class AS source_relation ON source_relation.oid = registered.from_table_oid
+                 LEFT JOIN pg_catalog.pg_class AS target_relation ON target_relation.oid = registered.to_table_oid
+                 WHERE registered.graph_id = $1::uuid
+                 ORDER BY registered.from_table, registered.from_column, registered.to_table, registered.to_column, registered.label",
                 None,
                 &[graph_id.into()],
             )?;
@@ -2898,8 +2902,8 @@ fn insert_filter_column_for_graph(
     column_type: &str,
 ) -> safety::GraphResult<()> {
     Spi::run_with_args(
-        "INSERT INTO graph._registered_filter_columns (graph_id, table_name, column_name, column_type)
-         VALUES ($1::uuid, $2, $3, $4)
+        "INSERT INTO graph._registered_filter_columns (graph_id, table_name, table_oid, column_name, column_type)
+         VALUES ($1::uuid, $2, pg_catalog.to_regclass($2)::oid, $3, $4)
          ON CONFLICT (graph_id, table_name, column_name)
          DO UPDATE SET column_type = EXCLUDED.column_type",
         &[
@@ -3165,7 +3169,8 @@ fn remove_table(table_name: pgrx::pg_sys::Oid) {
         let graph =
             catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
         let table = regclass_text(table_name.to_u32()).unwrap_or_else(|err| err.report());
-        remove_table_from_graph_id(&graph.graph_id, &table).unwrap_or_else(|err| err.report());
+        remove_table_from_graph_id(&graph.graph_id, table_name.to_u32())
+            .unwrap_or_else(|err| err.report());
         pgrx::notice!(
             "graph: unregistered table {}. Call graph.build() to rebuild.",
             table
@@ -3185,7 +3190,8 @@ fn remove_table_from_graph(
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
         let table = regclass_text(table_name.to_u32()).unwrap_or_else(|err| err.report());
-        remove_table_from_graph_id(&graph.graph_id, &table).unwrap_or_else(|err| err.report());
+        remove_table_from_graph_id(&graph.graph_id, table_name.to_u32())
+            .unwrap_or_else(|err| err.report());
         pgrx::notice!(
             "graph: unregistered table {} from graph '{}'. Call graph.build() to rebuild.",
             table,
@@ -3194,12 +3200,15 @@ fn remove_table_from_graph(
     });
 }
 
-fn remove_table_from_graph_id(graph_id: &str, table: &str) -> safety::GraphResult<()> {
+fn remove_table_from_graph_id(graph_id: &str, table_oid: u32) -> safety::GraphResult<()> {
     Spi::run_with_args(
         "DELETE FROM graph._registered_tables
           WHERE graph_id = $1::uuid
-            AND table_name = $2",
-        &[graph_id.into(), table.into()],
+            AND table_oid = $2::oid",
+        &[
+            graph_id.into(),
+            pgrx::pg_sys::Oid::from_u32(table_oid).into(),
+        ],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("registered table delete failed: {err}"))
@@ -3207,15 +3216,21 @@ fn remove_table_from_graph_id(graph_id: &str, table: &str) -> safety::GraphResul
     Spi::run_with_args(
         "DELETE FROM graph._registered_filter_columns
           WHERE graph_id = $1::uuid
-            AND table_name = $2",
-        &[graph_id.into(), table.into()],
+            AND table_oid = $2::oid",
+        &[
+            graph_id.into(),
+            pgrx::pg_sys::Oid::from_u32(table_oid).into(),
+        ],
     )
     .map_err(|err| safety::GraphError::Internal(format!("filter column delete failed: {err}")))?;
     Spi::run_with_args(
         "DELETE FROM graph._registered_edges
           WHERE graph_id = $1::uuid
-            AND (from_table = $2 OR to_table = $2)",
-        &[graph_id.into(), table.into()],
+            AND (from_table_oid = $2::oid OR to_table_oid = $2::oid)",
+        &[
+            graph_id.into(),
+            pgrx::pg_sys::Oid::from_u32(table_oid).into(),
+        ],
     )
     .map_err(|err| safety::GraphError::Internal(format!("registered edge delete failed: {err}")))
 }
@@ -3333,8 +3348,8 @@ fn alter_edge_for_graph_id(
         .collect::<std::collections::HashSet<_>>();
 
     for edge in &edges {
-        let from_oid = crate::catalog::table_oid_from_name(&edge.from_table)?;
-        let to_oid = crate::catalog::table_oid_from_name(&edge.to_table)?;
+        let from_oid = edge.from_table_oid;
+        let to_oid = edge.to_table_oid;
         let from_table_registered = registered_tables.contains(edge.from_table.as_str());
         validate_edge_endpoint_columns(
             from_oid,
@@ -3482,7 +3497,7 @@ fn graph_map_tables(
         .map(|table| {
             let filters = filter_columns
                 .iter()
-                .filter(|filter| filter.table_name == table.table_name)
+                .filter(|filter| filter.table_oid == table.table_oid)
                 .map(|filter| {
                     serde_json::json!({
                         "column": filter.column_name,
@@ -3491,7 +3506,8 @@ fn graph_map_tables(
                 })
                 .collect::<Vec<_>>();
             serde_json::json!({
-                "table_name": table.table_name,
+                "table_name": crate::catalog::relation_name(table.table_oid)
+                    .unwrap_or_else(|_| table.table_name.clone()),
                 "primary_key": table.id_columns.columns(),
                 "properties": table.columns.to_vec(),
                 "tenant_column": table.tenant_column,
@@ -3510,9 +3526,11 @@ fn graph_map_edges(edges: &[builder::RegisteredEdge]) -> Vec<serde_json::Value> 
         .iter()
         .map(|edge| {
             serde_json::json!({
-                "from_table": edge.from_table,
+                "from_table": crate::catalog::relation_name(edge.from_table_oid)
+                    .unwrap_or_else(|_| edge.from_table.clone()),
                 "from_column": edge.from_column,
-                "to_table": edge.to_table,
+                "to_table": crate::catalog::relation_name(edge.to_table_oid)
+                    .unwrap_or_else(|_| edge.to_table.clone()),
                 "to_column": edge.to_column,
                 "label": edge.label,
                 "bidirectional": edge.bidirectional,
@@ -3538,7 +3556,8 @@ fn graph_map_filters(filter_columns: &[builder::RegisteredFilterColumn]) -> Vec<
         .iter()
         .map(|filter| {
             serde_json::json!({
-                "table_name": filter.table_name,
+                "table_name": crate::catalog::relation_name(filter.table_oid)
+                    .unwrap_or_else(|_| filter.table_name.clone()),
                 "column": filter.column_name,
                 "type": filter.column_type
             })
@@ -3751,7 +3770,7 @@ fn graph_table_oids(graph_id: &str) -> safety::GraphResult<Vec<i32>> {
     let (tables, _edges, _filters) = crate::catalog::read_catalog_for_graph(graph_id)?;
     let mut oids = tables
         .iter()
-        .filter_map(|table| crate::catalog::table_oid_from_name(&table.table_name).ok())
+        .map(|table| table.table_oid)
         .map(|oid| oid as i32)
         .collect::<Vec<_>>();
     oids.sort_unstable();
@@ -3888,7 +3907,7 @@ fn estimate() -> TableIterator<
 ///
 /// See: `docs/user_guide/sync-and-maintenance.mdx`
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn apply_sync() -> TableIterator<
     'static,
     (
@@ -4660,7 +4679,7 @@ fn run_due_jobs_result(
 /// Sync policies are durable records. They are executed by calling
 /// `graph.run_sync_policy()` or `graph.run_job()`.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -4918,7 +4937,7 @@ fn drop_sync_policy(
 
 /// Run an explicit sync policy immediately.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -4967,7 +4986,7 @@ fn run_sync_policy(
 
 /// List sync policies visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5017,7 +5036,7 @@ fn sync_policy_status(
 
 /// List durable jobs visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5071,7 +5090,7 @@ fn jobs(
 
 /// List durable job run history visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5124,7 +5143,7 @@ fn job_runs(
 
 /// Summarize durable job outcomes visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -5196,7 +5215,7 @@ fn job_stats(
 
 /// Run a durable job immediately.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5247,7 +5266,7 @@ fn run_job(
 
 /// Run due durable jobs through the hosted scheduler path.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5494,7 +5513,7 @@ fn ingest_projection(
 ///
 /// See: `docs/user_guide/sync-and-maintenance.mdx`
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn vacuum() -> TableIterator<
     'static,
     (
@@ -5521,7 +5540,7 @@ fn vacuum() -> TableIterator<
 
 /// Vacuum a named graph without requiring a separate `set_current_graph()`.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn vacuum_graph(
     graph_name: &str,
     graph_tenant: default!(Option<&str>, "NULL"),
@@ -5552,7 +5571,7 @@ fn vacuum_graph(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -6006,7 +6025,7 @@ fn cached_estimated_table_rows(
 /// Ensures sync catalog tables exist and attaches triggers that write to
 /// `graph._sync_log`.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, public)]
+#[search_path(pg_catalog)]
 fn enable_sync() {
     with_panic_boundary("enable_sync()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());

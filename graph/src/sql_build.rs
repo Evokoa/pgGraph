@@ -1,9 +1,7 @@
 //! SQL-layer build, vacuum, and maintenance execution helpers.
 
 use crate::api_types::{BuildExecutionResult, MaintenanceExecutionResult, VacuumExecutionResult};
-use crate::catalog::{
-    catalog_fingerprint, read_catalog, selected_or_default_graph_metadata, table_oid_from_name,
-};
+use crate::catalog::{catalog_fingerprint, read_catalog, selected_or_default_graph_metadata};
 use crate::sql_sync::{
     current_sync_mode, install_sync_triggers, max_sync_log_id, remove_sync_triggers,
 };
@@ -505,12 +503,12 @@ pub(crate) fn check_build_acls_result(
     edges: &[builder::RegisteredEdge],
 ) -> safety::GraphResult<()> {
     for table in tables {
-        let oid = table_oid_from_name(&table.table_name)?;
+        let oid = table.table_oid;
         acl::check_table_acl(oid)?;
     }
     for edge in edges {
-        let from_oid = table_oid_from_name(&edge.from_table)?;
-        let to_oid = table_oid_from_name(&edge.to_table)?;
+        let from_oid = edge.from_table_oid;
+        let to_oid = edge.to_table_oid;
         acl::check_table_acl(from_oid)?;
         acl::check_table_acl(to_oid)?;
     }

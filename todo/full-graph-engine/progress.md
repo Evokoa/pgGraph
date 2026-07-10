@@ -7,7 +7,7 @@ Last updated: 2026-07-09
 | Checkpoint | Status | Evidence / next action |
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
-| Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00E implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, and definer functions pin a vetted search path. Execute RUST-00F next; run Miri/sanitizer and supported-major evidence before checkpoint exit. |
+| Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
 | 1A. Security and identity | Not started | RLS topology, relationship identity, filter identity, savepoints. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
@@ -53,10 +53,11 @@ Checkpoint 0 regression pack, in this order:
    UUID, SQL NULL, and tombstone values across sync, segment v3, consecutive
    manifest generations, and fresh-backend reload.
 4. **Complete on PG17; supported-major matrix pending:** security-definer catalog
-   metadata asserts a pinned `pg_catalog, public` path for every approved
-   definer function. The explicit `public` compatibility entry remains until
-   RUST-00F replaces name-based registered-relation resolution with OID identity.
-5. **Next:** stable-relation-identity rename/search-path/drop-recreate tests.
+   metadata asserts a pinned `pg_catalog` path for every approved definer
+   function.
+5. **Complete on PG17; supported-major matrix pending:** registered-relation
+   OID identity survives rename and search-path changes and fails closed after
+   drop/recreate.
 6. Two-role GQL RLS test with `hydrate := false` for node, relationship, path,
    scalar identity, aggregate count, and existence.
 7. Same-name filter columns on two registered tables.
@@ -75,6 +76,7 @@ correctness and safety boundary.
 - 2026-07-09 — Checkpoint 0 error-boundary phase: replaced direct `errfinish()` FFI with pgrx stack unwinding, standard SQLSTATEs, stable `PGxxx` diagnostics, and a destructor regression.
 - 2026-07-09 — Checkpoint 0 durable-filter phase: added projection segment v3 tagged values, staged exact filter reload, consecutive-generation retention, and signed/temporal/text/UUID/NULL/tombstone regressions.
 - 2026-07-09 — Checkpoint 0 RUST-00E security-definer phase: every approved definer function now has pgrx-generated `pg_catalog, public` `search_path` metadata, with a catalog audit regression and public security guidance; RUST-00F will remove the temporary public compatibility entry by storing relation identity as OIDs.
+- 2026-07-09 — Checkpoint 0 RUST-00F relation-identity phase: registration, discovery, filtering, synchronization, and removal now retain PostgreSQL OIDs; catalog reads derive qualified SQL names from those OIDs, while public result labels remain compatible. Rename/search-path and drop/recreate behavior is covered on PG17.
 - 2026-07-09 — Independent three-phase review: fixed watermark-only artifact retention, pre-copy ingest budgeting, filter node-range validation, and malformed base dictionary fail-closed handling; the follow-up review and final gates were green.
 
 ## Decisions

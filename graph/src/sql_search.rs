@@ -2,8 +2,8 @@
 
 use crate::api_types::SearchOutputRow;
 use crate::catalog::{
-    primary_key_expr, read_catalog, regclass_text, sql_table_name_from_catalog,
-    table_oid_from_name, validate_column_exists,
+    primary_key_expr, read_catalog, relation_name, sql_table_name_from_catalog,
+    validate_column_exists,
 };
 use crate::quote::quote_ident;
 use crate::{acl, safety, types};
@@ -95,7 +95,7 @@ pub(crate) fn validate_search_request(
         if !table.columns.iter().any(|column| column == property_key) {
             continue;
         }
-        let oid = table_oid_from_name(&table.table_name)?;
+        let oid = table.table_oid;
         if table_filter.is_none_or(|filter| filter == oid) {
             saw_registered_property = true;
             acl::check_table_acl(oid)?;
@@ -184,7 +184,7 @@ fn source_table_search_statements(
         statements.push(SourceSearchStatement {
             table_oid,
             table_name: table_name.as_sql().to_string(),
-            display_table_name: regclass_text(table_oid).unwrap_or_else(|_| table_oid.to_string()),
+            display_table_name: relation_name(table_oid).unwrap_or_else(|_| table_oid.to_string()),
             query,
             params,
         });

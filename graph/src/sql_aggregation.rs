@@ -4,7 +4,7 @@ use crate::api_types::{
     AggregateAccumulator, AggregateKind, AggregateSpec, AggregationTraversalRequest,
     TraverseRequest, TraverseRow,
 };
-use crate::catalog::{regclass_text, table_oid_from_name, validate_column_exists};
+use crate::catalog::{table_oid_from_name, validate_column_exists};
 use crate::sql_hydration::{hydrate_node, hydrate_nodes};
 use crate::sql_traversal::{
     execute_traverse_rows, json_i32_field, json_number_as_f64, json_number_from_f64,
@@ -623,7 +623,7 @@ pub(crate) fn expand_rows_to_parent_path(
                 pgrx::JsonB(row.6 .0.clone()),
                 node,
                 row.8.clone(),
-                regclass_text(table_oid)?,
+                crate::catalog::relation_name(table_oid)?,
             ));
         }
     }

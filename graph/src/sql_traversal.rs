@@ -1,7 +1,7 @@
 //! SQL-layer traversal request validation, execution, and path formatting.
 
 use crate::api_types::{TraverseRequest, TraverseRow};
-use crate::catalog::{regclass_text, table_oid_from_name};
+use crate::catalog::{regclass_text, relation_name, table_oid_from_name};
 use crate::sql_filters::{
     hydration_filters_match, parse_structured_filter, typed_pushdown_filter_op,
     ParsedStructuredFilter,
@@ -124,7 +124,7 @@ pub(crate) fn execute_traverse_candidates(
             .then_with(|| left.node_table.cmp(&right.node_table))
             .then_with(|| left.node_id.cmp(&right.node_id))
     });
-    let root_table_name = regclass_text(request.root_table.to_u32())?;
+    let root_table_name = relation_name(request.root_table.to_u32())?;
     let needs_hydration_verification = !structured_filter.hydration_filters.is_empty();
     let hydrated = if needs_hydration_verification {
         hydrate_nodes(&page)?
@@ -240,7 +240,7 @@ pub(crate) fn paginate_and_format_traverse_candidates(
                 )),
                 node,
                 candidate.root_table_name,
-                regclass_text(candidate.row.node_table.0)?,
+                relation_name(candidate.row.node_table.0)?,
             ))
         })
         .collect()
@@ -252,7 +252,7 @@ pub(crate) fn path_coordinates_json(
     path.into_iter()
         .map(|coord| {
             Ok(serde_json::json!({
-                "table": regclass_text(coord.table_oid.0)?,
+                "table": relation_name(coord.table_oid.0)?,
                 "id": coord.node_id,
             }))
         })

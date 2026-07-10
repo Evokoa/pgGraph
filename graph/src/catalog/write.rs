@@ -31,8 +31,8 @@ pub(crate) fn insert_registered_table_for_graph(
     let id_column = id_columns.as_catalog_text();
     let columns = columns.as_catalog_text();
     Spi::run_with_args(
-        "INSERT INTO graph._registered_tables (graph_id, table_name, id_column, columns, tenant_column)
-         VALUES ($1::uuid, $2, $3, $4, $5)
+        "INSERT INTO graph._registered_tables (graph_id, table_name, table_oid, id_column, columns, tenant_column)
+         VALUES ($1::uuid, $2, pg_catalog.to_regclass($2)::oid, $3, $4, $5)
          ON CONFLICT (graph_id, table_name) DO UPDATE SET
            id_column = EXCLUDED.id_column,
            columns = EXCLUDED.columns,
@@ -70,8 +70,8 @@ pub(crate) fn insert_registered_edge_for_graph(
 ) -> safety::GraphResult<()> {
     Spi::run_with_args(
         "INSERT INTO graph._registered_edges
-           (graph_id, from_table, from_column, to_table, to_column, label, bidirectional, weight_column, label_column)
-         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)
+           (graph_id, from_table, from_table_oid, from_column, to_table, to_table_oid, to_column, label, bidirectional, weight_column, label_column)
+         VALUES ($1::uuid, $2, pg_catalog.to_regclass($2)::oid, $3, $4, pg_catalog.to_regclass($4)::oid, $5, $6, $7, $8, $9)
          ON CONFLICT (graph_id, from_table, from_column, to_table, to_column, label)
          DO UPDATE SET
             bidirectional = EXCLUDED.bidirectional,

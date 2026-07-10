@@ -818,11 +818,7 @@ fn insert_mapped_node(
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
-        .find(|table| {
-            crate::catalog::table_oid_from_name(&table.table_name)
-                .ok()
-                .is_some_and(|oid| oid == plan.table_oid)
-        })
+        .find(|table| table.table_oid == plan.table_oid)
         .ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "cannot insert node into unregistered table OID {}",
@@ -945,11 +941,7 @@ fn merge_mapped_node(
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
-        .find(|table| {
-            crate::catalog::table_oid_from_name(&table.table_name)
-                .ok()
-                .is_some_and(|oid| oid == plan.table_oid)
-        })
+        .find(|table| table.table_oid == plan.table_oid)
         .ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "cannot merge node into unregistered table OID {}",
@@ -1296,11 +1288,7 @@ fn lock_node_coordinate(
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
-        .find(|table| {
-            crate::catalog::table_oid_from_name(&table.table_name)
-                .ok()
-                .is_some_and(|oid| oid == table_oid)
-        })
+        .find(|table| table.table_oid == table_oid)
         .ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "{operation} cannot lock unregistered table OID {table_oid}"
@@ -1397,11 +1385,7 @@ fn update_mapped_property(
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
-        .find(|table| {
-            crate::catalog::table_oid_from_name(&table.table_name)
-                .ok()
-                .is_some_and(|oid| oid == plan.table_oid)
-        })
+        .find(|table| table.table_oid == plan.table_oid)
         .ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "cannot update node in unregistered table OID {}",
@@ -1485,11 +1469,7 @@ fn remove_mapped_property(
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
-        .find(|table| {
-            crate::catalog::table_oid_from_name(&table.table_name)
-                .ok()
-                .is_some_and(|oid| oid == plan.table_oid)
-        })
+        .find(|table| table.table_oid == plan.table_oid)
         .ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "cannot remove property from unregistered table OID {}",
@@ -1571,11 +1551,7 @@ fn delete_mapped_node_row(
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
-        .find(|table| {
-            crate::catalog::table_oid_from_name(&table.table_name)
-                .ok()
-                .is_some_and(|oid| oid == plan.table_oid)
-        })
+        .find(|table| table.table_oid == plan.table_oid)
         .ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "cannot delete node from unregistered table OID {}",
@@ -1650,9 +1626,7 @@ fn delete_incident_edge_rows(
         let edge = edges
             .iter()
             .find(|edge| {
-                crate::catalog::table_oid_from_name(&edge.from_table)
-                    .ok()
-                    .is_some_and(|oid| oid == incident.edge_table_oid)
+                edge.from_table_oid == incident.edge_table_oid
                     && edge.from_column == incident.source_column
                     && edge.to_column == incident.target_column
                     && edge.label == incident.rel_type
@@ -1778,9 +1752,7 @@ fn delete_mapped_edge_row(
     let edge = edges
         .iter()
         .find(|edge| {
-            crate::catalog::table_oid_from_name(&edge.from_table)
-                .ok()
-                .is_some_and(|oid| oid == plan.edge_table_oid)
+            edge.from_table_oid == plan.edge_table_oid
                 && edge.from_column == plan.source_column
                 && edge.to_column == plan.target_column
                 && (edge.label == plan.rel_type || edge.label_column.is_some())

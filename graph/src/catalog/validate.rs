@@ -8,15 +8,7 @@ pub(crate) fn registered_schema_drift_reason(
     filter_columns: &[builder::RegisteredFilterColumn],
 ) -> Option<String> {
     for table in tables {
-        let oid = match table_oid_from_name(&table.table_name) {
-            Ok(oid) => oid,
-            Err(err) => {
-                return Some(format!(
-                    "registered table '{}' is unavailable: {}",
-                    table.table_name, err
-                ));
-            }
-        };
+        let oid = table.table_oid;
         if let Err(err) = validate_registered_table(
             oid,
             &table.id_columns.as_catalog_text(),
@@ -31,24 +23,8 @@ pub(crate) fn registered_schema_drift_reason(
     }
 
     for edge in edges {
-        let from_oid = match table_oid_from_name(&edge.from_table) {
-            Ok(oid) => oid,
-            Err(err) => {
-                return Some(format!(
-                    "registered edge '{}' source table '{}' is unavailable: {}",
-                    edge.label, edge.from_table, err
-                ));
-            }
-        };
-        let to_oid = match table_oid_from_name(&edge.to_table) {
-            Ok(oid) => oid,
-            Err(err) => {
-                return Some(format!(
-                    "registered edge '{}' target table '{}' is unavailable: {}",
-                    edge.label, edge.to_table, err
-                ));
-            }
-        };
+        let from_oid = edge.from_table_oid;
+        let to_oid = edge.to_table_oid;
         if let Err(err) = validate_column_exists(from_oid, &edge.from_column) {
             return Some(format!(
                 "registered edge '{}' source column '{}.{}' is invalid: {}",
@@ -57,7 +33,7 @@ pub(crate) fn registered_schema_drift_reason(
         }
         let from_table_registered = tables
             .iter()
-            .any(|table| table.table_name == edge.from_table);
+            .any(|table| table.table_oid == edge.from_table_oid);
         if let Err(err) = validate_edge_endpoint_columns(
             from_oid,
             &edge.from_table,
@@ -91,15 +67,7 @@ pub(crate) fn registered_schema_drift_reason(
     }
 
     for filter in filter_columns {
-        let table_oid = match table_oid_from_name(&filter.table_name) {
-            Ok(oid) => oid,
-            Err(err) => {
-                return Some(format!(
-                    "registered filter table '{}' is unavailable: {}",
-                    filter.table_name, err
-                ));
-            }
-        };
+        let table_oid = filter.table_oid;
         if let Err(err) =
             validate_filter_column_type(table_oid, &filter.column_name, &filter.column_type)
         {
@@ -140,6 +108,34 @@ pub(crate) fn regclass_text(table_oid: u32) -> safety::GraphResult<String> {
             .map_err(|e| safety::GraphError::Internal(format!("regclass read failed: {}", e)))?
             .ok_or_else(|| {
                 safety::GraphError::Internal(format!("NULL regclass for OID {}", table_oid))
+            })
+    })
+}
+
+/// Return the relation label exposed by pgGraph's public result types.
+///
+/// SQL generation must use [`regclass_text`] because it needs an unambiguous,
+/// schema-qualified relation reference. Public APIs historically expose the
+/// relation name itself, so keep that representation independent from the
+/// security-definer function search path.
+pub(crate) fn relation_name(table_oid: u32) -> safety::GraphResult<String> {
+    Spi::connect(|client| {
+        let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
+        let result = client
+            .select(
+                "SELECT relname::text FROM pg_catalog.pg_class WHERE oid = $1::oid",
+                None,
+                &[table_oid.into()],
+            )
+            .map_err(|e| {
+                safety::GraphError::Internal(format!("relation name lookup failed: {e}"))
+            })?;
+        result
+            .first()
+            .get::<String>(1)
+            .map_err(|e| safety::GraphError::Internal(format!("relation name read failed: {e}")))?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(format!("NULL relation name for OID {table_oid}"))
             })
     })
 }

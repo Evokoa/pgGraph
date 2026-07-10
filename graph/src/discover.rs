@@ -77,6 +77,7 @@ pub fn discover_schema(
             });
 
             tables.push(RegisteredTable {
+                table_oid: required_table_oid(table)?,
                 table_name: format!(
                     "{}.{}",
                     quote_ident(schema_name),
@@ -126,6 +127,7 @@ pub fn discover_schema(
                 });
 
                 tables.push(RegisteredTable {
+                    table_oid: required_table_oid(table)?,
                     table_name: format!(
                         "{}.{}",
                         quote_ident(schema_name),
@@ -153,12 +155,14 @@ pub fn discover_schema(
         });
 
         edges.push(registered_edge(
+            required_fk_oid(fk.from_oid, "source")?,
             format!(
                 "{}.{}",
                 quote_ident(schema_name),
                 quote_ident(&fk.from_table)
             ),
             &fk.from_column,
+            required_fk_oid(fk.to_oid, "target")?,
             format!("{}.{}", quote_ident(schema_name), quote_ident(&fk.to_table)),
             &fk.to_column,
             &fk.from_column,
@@ -203,7 +207,7 @@ pub fn discover_table_set(
                 table,
                 PrimaryKeySpec::from_columns(vec![id_column]),
                 tenant_column,
-            ));
+            )?);
         } else if table.id_is_primary
             && classify_as_junction(
                 table.table_oid,
@@ -243,7 +247,7 @@ pub fn discover_table_set(
                     tenant_column,
                 ),
             });
-            tables.push(registered_table(table, id_columns, tenant_column));
+            tables.push(registered_table(table, id_columns, tenant_column)?);
         }
     }
 
@@ -266,8 +270,10 @@ pub fn discover_table_set(
                 details: format!("label={}, bidirectional=true", label),
             });
             edges.push(registered_edge(
+                *junction_oid,
                 regclass_text(*junction_oid)?,
                 &first_fk.from_column,
+                required_fk_oid(fk.to_oid, "junction target")?,
                 regclass_text(required_fk_oid(fk.to_oid, "junction target")?)?,
                 &fk.from_column,
                 &fk.from_column,
@@ -300,8 +306,10 @@ pub fn discover_table_set(
             details: format!("label={}, bidirectional=true", label),
         });
         edges.push(registered_edge(
+            required_fk_oid(fk.from_oid, "source")?,
             regclass_text(required_fk_oid(fk.from_oid, "source")?)?,
             &fk.from_column,
+            required_fk_oid(fk.to_oid, "target")?,
             regclass_text(required_fk_oid(fk.to_oid, "target")?)?,
             &fk.to_column,
             &fk.from_column,
@@ -324,10 +332,14 @@ struct DiscoveredFk {
 /// Discover all tables and their primary key columns.
 fn discover_tables_with_pks(schema_name: &str) -> GraphResult<Vec<DiscoveredTable>> {
     // Query all tables with their PK columns (supports composite PKs)
-    let table_pk_query = "SELECT t.table_name::text AS table_name,
+    let table_pk_query = "SELECT relation.oid::integer AS table_oid,
+                t.table_name::text AS table_name,
                 kcu.column_name::text AS pk_column,
                 kcu.ordinal_position
          FROM information_schema.tables t
+         JOIN pg_catalog.pg_namespace namespace ON namespace.nspname = t.table_schema
+         JOIN pg_catalog.pg_class relation
+           ON relation.relnamespace = namespace.oid AND relation.relname = t.table_name
          JOIN information_schema.table_constraints tc
            ON tc.table_schema = t.table_schema AND tc.table_name = t.table_name
            AND tc.constraint_type = 'PRIMARY KEY'
@@ -337,7 +349,7 @@ fn discover_tables_with_pks(schema_name: &str) -> GraphResult<Vec<DiscoveredTabl
            AND t.table_type = 'BASE TABLE'
          ORDER BY t.table_name, kcu.ordinal_position";
 
-    let mut table_map: Vec<(String, Vec<String>)> = Vec::new();
+    let mut table_map: Vec<(u32, String, Vec<String>)> = Vec::new();
 
     Spi::connect(|client| {
         let result = client
@@ -345,33 +357,39 @@ fn discover_tables_with_pks(schema_name: &str) -> GraphResult<Vec<DiscoveredTabl
             .map_err(|e| GraphError::Internal(format!("Schema discovery failed: {}", e)))?;
 
         for row in result {
+            let table_oid = row
+                .get::<i32>(1)
+                .map_err(|e| GraphError::Internal(format!("Cannot read table_oid: {}", e)))?
+                .ok_or_else(|| {
+                    GraphError::Internal("Schema discovery returned a NULL table OID".to_string())
+                })?;
             let table_name: String = row
-                .get::<String>(1)
+                .get::<String>(2)
                 .map_err(|e| GraphError::Internal(format!("Cannot read table_name: {}", e)))?
                 .unwrap_or_default();
             let pk_column: String = row
-                .get::<String>(2)
+                .get::<String>(3)
                 .map_err(|e| GraphError::Internal(format!("Cannot read pk_column: {}", e)))?
                 .unwrap_or_default();
 
             // Group PK columns by table name
             if let Some(last) = table_map.last_mut() {
-                if last.0 == table_name {
-                    last.1.push(pk_column);
+                if last.0 == table_oid as u32 {
+                    last.2.push(pk_column);
                     continue;
                 }
             }
-            table_map.push((table_name, vec![pk_column]));
+            table_map.push((table_oid as u32, table_name, vec![pk_column]));
         }
         Ok::<(), GraphError>(())
     })?;
 
     // For each table, discover text/varchar columns
     let mut discovered = Vec::new();
-    for (table_name, pk_columns) in table_map {
+    for (table_oid, table_name, pk_columns) in table_map {
         let text_columns = discover_text_columns(schema_name, &table_name, &pk_columns)?;
         discovered.push(DiscoveredTable {
-            table_oid: None,
+            table_oid: Some(table_oid),
             schema_name: schema_name.to_string(),
             table_name,
             pk_columns,
@@ -424,17 +442,23 @@ fn discover_text_columns(
 /// Discover all foreign key relationships in a schema.
 fn discover_foreign_keys(schema_name: &str) -> GraphResult<Vec<DiscoveredFk>> {
     let fk_query = "SELECT
-            tc.table_name::text AS from_table,
-            kcu.column_name::text AS from_column,
-            ccu.table_name::text AS to_table,
-            ccu.column_name::text AS to_column
-         FROM information_schema.table_constraints tc
-         JOIN information_schema.key_column_usage kcu
-           ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-         JOIN information_schema.constraint_column_usage ccu
-           ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
-         WHERE tc.constraint_type = 'FOREIGN KEY'
-           AND tc.table_schema = $1";
+            c.conrelid::oid::integer AS from_oid,
+            from_class.relname::text AS from_table,
+            from_attr.attname::text AS from_column,
+            c.confrelid::oid::integer AS to_oid,
+            to_class.relname::text AS to_table,
+            to_attr.attname::text AS to_column
+         FROM pg_catalog.pg_constraint c
+         JOIN pg_catalog.pg_class from_class ON from_class.oid = c.conrelid
+         JOIN pg_catalog.pg_namespace from_namespace ON from_namespace.oid = from_class.relnamespace
+         JOIN pg_catalog.pg_class to_class ON to_class.oid = c.confrelid
+         JOIN pg_catalog.unnest(c.conkey) WITH ORDINALITY AS fk_from(attnum, n) ON true
+         JOIN pg_catalog.unnest(c.confkey) WITH ORDINALITY AS fk_to(attnum, n) ON fk_to.n = fk_from.n
+         JOIN pg_catalog.pg_attribute from_attr ON from_attr.attrelid = c.conrelid AND from_attr.attnum = fk_from.attnum
+         JOIN pg_catalog.pg_attribute to_attr ON to_attr.attrelid = c.confrelid AND to_attr.attnum = fk_to.attnum
+         WHERE c.contype = 'f'
+           AND from_namespace.nspname = $1
+         ORDER BY c.conrelid, c.oid, fk_from.n";
 
     let mut fks = Vec::new();
     Spi::connect(|client| {
@@ -443,28 +467,40 @@ fn discover_foreign_keys(schema_name: &str) -> GraphResult<Vec<DiscoveredFk>> {
             .map_err(|e| GraphError::Internal(format!("FK discovery failed: {}", e)))?;
 
         for row in result {
+            let from_oid = row
+                .get::<i32>(1)
+                .map_err(|e| GraphError::Internal(format!("Cannot read from_oid: {}", e)))?
+                .ok_or_else(|| {
+                    GraphError::Internal("FK discovery returned a NULL source OID".to_string())
+                })?;
             let from_table: String = row
-                .get::<String>(1)
+                .get::<String>(2)
                 .map_err(|e| GraphError::Internal(format!("Cannot read from_table: {}", e)))?
                 .unwrap_or_default();
             let from_column: String = row
-                .get::<String>(2)
+                .get::<String>(3)
                 .map_err(|e| GraphError::Internal(format!("Cannot read from_column: {}", e)))?
                 .unwrap_or_default();
+            let to_oid = row
+                .get::<i32>(4)
+                .map_err(|e| GraphError::Internal(format!("Cannot read to_oid: {}", e)))?
+                .ok_or_else(|| {
+                    GraphError::Internal("FK discovery returned a NULL target OID".to_string())
+                })?;
             let to_table: String = row
-                .get::<String>(3)
+                .get::<String>(5)
                 .map_err(|e| GraphError::Internal(format!("Cannot read to_table: {}", e)))?
                 .unwrap_or_default();
             let to_column: String = row
-                .get::<String>(4)
+                .get::<String>(6)
                 .map_err(|e| GraphError::Internal(format!("Cannot read to_column: {}", e)))?
                 .unwrap_or_default();
 
             fks.push(DiscoveredFk {
-                from_oid: None,
+                from_oid: Some(from_oid as u32),
                 from_table,
                 from_column,
-                to_oid: None,
+                to_oid: Some(to_oid as u32),
                 to_table,
                 to_column,
             });
@@ -691,8 +727,9 @@ fn registered_table(
     table: &DiscoveredTable,
     id_columns: PrimaryKeySpec,
     tenant_column: Option<&str>,
-) -> RegisteredTable {
-    RegisteredTable {
+) -> GraphResult<RegisteredTable> {
+    Ok(RegisteredTable {
+        table_oid: required_table_oid(table)?,
         table_name: format!(
             "{}.{}",
             quote_ident(&table.schema_name),
@@ -701,7 +738,7 @@ fn registered_table(
         id_columns,
         columns: PropertyColumns::from_columns(table.text_columns.clone()),
         tenant_column: tenant_column.map(ToString::to_string),
-    }
+    })
 }
 
 fn discovery_details(
@@ -730,15 +767,19 @@ fn edge_label(label_source_column: &str) -> String {
 }
 
 fn registered_edge(
+    from_table_oid: u32,
     from_table: String,
     from_column: &str,
+    to_table_oid: u32,
     to_table: String,
     to_column: &str,
     label_source_column: &str,
 ) -> RegisteredEdge {
     RegisteredEdge {
+        from_table_oid,
         from_table,
         from_column: from_column.to_string(),
+        to_table_oid,
         to_table,
         to_column: to_column.to_string(),
         label: edge_label(label_source_column),
@@ -896,8 +937,10 @@ mod tests {
     #[test]
     fn registered_edge_uses_shared_defaults_and_label_source_column() {
         let edge = registered_edge(
+            11,
             "public.user_groups".to_string(),
             "user_id",
+            12,
             "public.groups".to_string(),
             "group_id",
             "group_id",
