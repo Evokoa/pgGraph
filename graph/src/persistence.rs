@@ -27,7 +27,7 @@
 //! [Section 8: NodeStore.primary_key_offsets]  — (node_count + 1) × 8 bytes
 //! [Section 9: NodeStore.primary_key_bytes]    — variable length UTF-8
 //! [Section 10: FilterIndex (Bincode)]         — variable length
-//! [Section 11: edge_type_registry (Bincode)]  — variable length
+//! [Section 11: edge metadata (Bincode)]       — variable length
 //! ```
 //!
 //! ## Memory Model
@@ -38,8 +38,8 @@
 //! - **Forward EdgeStore** (`edge_offsets`, `targets`, `type_ids`, optional
 //!   `weights`): mmap-backed and shared through the OS page cache
 //! - **ResolutionIndex**: mmap'd, zero-copy, binary search
-//! - **FilterIndex** and **edge type registry**: bincode sections deserialized
-//!   into backend-local heap
+//! - **FilterIndex**, edge type registry, and relationship identity metadata:
+//!   bincode sections deserialized into backend-local heap
 //! - **Reverse EdgeStore**: derived into an owned CSR per backend
 //!
 //! See: `docs/contributor_guide/memory-model.mdx`
@@ -51,8 +51,10 @@ use std::path::{Path, PathBuf};
 use memmap2::Mmap;
 
 use crate::config;
-use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
-use crate::engine::{Engine, MmapResolutionState};
+use crate::edge_store::{
+    EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays, RelationshipId, RelationshipIdentity,
+};
+use crate::engine::{Engine, MmapBackedGraph, MmapResolutionState};
 use crate::filter_index::FilterIndex;
 use crate::graph_policy::GraphId;
 use crate::node_store::{MmapNodeArrayParts, MmapNodeArrays, NodeStore};
@@ -63,13 +65,20 @@ use crate::safety::{GraphError, GraphResult};
 /// Magic bytes for .pggraph files.
 const MAGIC: &[u8; 4] = b"PGGH";
 /// Current file format version.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 /// Header size in bytes.
 const HEADER_SIZE: usize = 128;
 /// Number of sections.
 const NUM_SECTIONS: usize = 12;
 const CRC_OFFSET: usize = 20 + NUM_SECTIONS * 8;
 const INTERRUPT_CHECK_INTERVAL: u32 = 4096;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedEdgeMetadata {
+    edge_type_registry: Vec<String>,
+    relationship_ids: Vec<RelationshipId>,
+    relationship_identities: Vec<Option<RelationshipIdentity>>,
+}
 
 fn check_for_interrupts() {
     #[cfg(not(test))]
@@ -498,7 +507,7 @@ fn validate_section_layout(
     validate_section_min_len(&ranges, 7, resolution_min_len, "resolution_index")?;
 
     validate_length_prefixed_section(mmap, &ranges, 10, "filter index")?;
-    validate_length_prefixed_section(mmap, &ranges, 11, "edge type registry")?;
+    validate_length_prefixed_section(mmap, &ranges, 11, "edge metadata")?;
 
     validate_persisted_contents(mmap, &ranges, node_count, edge_count)?;
 
@@ -610,11 +619,14 @@ fn write_graph_file_internal(
     writer.write_length_prefixed_payload(&filter_bytes, "filter index")?;
 
     writer.begin_section(11, None)?;
-    let edge_type_bytes = bincode::serde::encode_to_vec(&engine.edge_type_registry, bincode_config)
-        .map_err(|e| {
-            GraphError::Internal(format!("edge_type_registry serialization failed: {}", e))
-        })?;
-    writer.write_length_prefixed_payload(&edge_type_bytes, "edge type registry")?;
+    let edge_metadata = PersistedEdgeMetadata {
+        edge_type_registry: engine.edge_type_registry.clone(),
+        relationship_ids: engine.edge_store.relationship_ids_slice().to_vec(),
+        relationship_identities: engine.relationship_identities.clone(),
+    };
+    let edge_metadata_bytes = bincode::serde::encode_to_vec(&edge_metadata, bincode_config)
+        .map_err(|e| GraphError::Internal(format!("edge metadata serialization failed: {}", e)))?;
+    writer.write_length_prefixed_payload(&edge_metadata_bytes, "edge metadata")?;
 
     let file = writer.finish(
         engine.node_store.node_count(),
@@ -722,16 +734,17 @@ pub fn read_projection_mode(path: &Path) -> GraphResult<Option<config::Projectio
 
 /// Load a graph from a .pggraph file.
 ///
-/// The loader validates the header, section layout, CRC, CSR invariants, and
-/// primary-key offset table before constructing an [`Engine`].
+/// The loader validates the header, section layout, CRC, CSR invariants,
+/// relationship identity metadata, and primary-key offset table before
+/// constructing an [`Engine`].
 ///
 /// After load:
 /// - NodeStore active bits, table OIDs, primary-key offsets, and primary-key
 ///   bytes are mmap-backed.
 /// - The forward EdgeStore CSR arrays are mmap-backed.
 /// - ResolutionIndex lookups read the mmap-backed resolution section.
-/// - FilterIndex and the edge type registry are bincode-deserialized into
-///   backend-local heap.
+/// - FilterIndex, the edge type registry, and relationship identity metadata
+///   are bincode-deserialized into backend-local heap.
 /// - The reverse EdgeStore CSR is rebuilt into backend-local heap for inbound
 ///   traversal.
 ///
@@ -850,18 +863,14 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     .ok_or_else(|| GraphError::CorruptFile {
         reason: "invalid mmap edge section metadata".to_string(),
     })?;
-    // SAFETY: edge_arrays points into mmap, and engine._mmap owns the mapping
-    // for at least as long as this EdgeStore is reachable.
-    let edge_store = unsafe { EdgeStore::from_mmap(edge_arrays) };
-
     // ── ResolutionIndex: mmap'd, zero-copy (handled by Engine) ──
     let ri_start = section_ranges[7].0;
     let ri_end = section_ranges[7].1;
     let ri_len = ri_end - ri_start;
 
-    // FilterIndex and edge_type_registry are variable-size bincode sections.
-    // They are deserialized into backend-local heap rather than kept as
-    // mmap-backed stores.
+    // FilterIndex and edge metadata are variable-size bincode sections. They
+    // are deserialized into backend-local heap rather than kept as mmap-backed
+    // stores.
     let bincode_config = bincode::config::standard();
     let filter_data = length_prefixed_payload(&mmap, &section_ranges, 10, "filter index")?;
     let filter_index: FilterIndex = decode_bincode_section(
@@ -872,14 +881,15 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     )?;
     filter_index.validate_persisted_layout(node_count)?;
 
-    let registry_data = length_prefixed_payload(&mmap, &section_ranges, 11, "edge type registry")?;
-    let edge_type_registry: Vec<String> = decode_bincode_section(
+    let registry_data = length_prefixed_payload(&mmap, &section_ranges, 11, "edge metadata")?;
+    let edge_metadata: PersistedEdgeMetadata = decode_bincode_section(
         registry_data,
         bincode_config,
-        "edge type registry",
-        "edge_type_registry deserialization failed",
+        "edge metadata",
+        "edge metadata deserialization failed",
     )?;
-    if edge_type_registry
+    if edge_metadata
+        .edge_type_registry
         .first()
         .is_none_or(|label| !label.is_empty())
     {
@@ -887,16 +897,71 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
             reason: "edge type registry must reserve empty label at index 0".to_string(),
         });
     }
+    if edge_metadata.relationship_ids.len() != edge_count as usize {
+        return Err(GraphError::CorruptFile {
+            reason: "relationship identity sidecar length does not match edge count".to_string(),
+        });
+    }
+    if edge_metadata
+        .relationship_identities
+        .first()
+        .is_none_or(Option::is_some)
+    {
+        return Err(GraphError::CorruptFile {
+            reason: "relationship identity dictionary must reserve ID 0".to_string(),
+        });
+    }
+    for (idx, identity) in edge_metadata
+        .relationship_identities
+        .iter()
+        .enumerate()
+        .skip(1)
+    {
+        if let Some(identity) = identity {
+            if identity.mapping_id == 0 {
+                return Err(GraphError::CorruptFile {
+                    reason: format!("relationship identity dictionary slot {idx} is invalid"),
+                });
+            }
+        }
+    }
+    for &id in &edge_metadata.relationship_ids {
+        if id == 0 {
+            continue;
+        }
+        match edge_metadata.relationship_identities.get(id as usize) {
+            Some(Some(identity)) => {
+                debug_assert!(identity.mapping_id != 0);
+            }
+            Some(None) => {
+                return Err(GraphError::CorruptFile {
+                    reason: format!("relationship ID {id} points to an empty dictionary slot"),
+                });
+            }
+            None => {
+                return Err(GraphError::CorruptFile {
+                    reason: format!("relationship ID {id} is outside dictionary"),
+                });
+            }
+        }
+    }
+
+    // SAFETY: edge_arrays points into mmap, and engine._mmap owns the mapping
+    // for at least as long as this EdgeStore is reachable.
+    let edge_store = unsafe {
+        EdgeStore::from_mmap_with_relationship_ids(edge_arrays, edge_metadata.relationship_ids)
+    };
 
     let mut engine = Engine::new();
-    engine.install_mmap_backed_graph(
+    engine.install_mmap_backed_graph(MmapBackedGraph {
         node_store,
         edge_store,
         filter_index,
-        edge_type_registry,
+        edge_type_registry: edge_metadata.edge_type_registry,
+        relationship_identities: edge_metadata.relationship_identities,
         mmap,
-        MmapResolutionState::new(ri_start, ri_len),
-    );
+        resolution_state: MmapResolutionState::new(ri_start, ri_len),
+    });
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
         engine.record_applied_sync_id(applied_sync_id);
     }
@@ -1166,7 +1231,7 @@ mod tests {
     //! section metadata cannot reach mmap-backed stores unchecked.
 
     use super::*;
-    use crate::edge_store::RawEdge;
+    use crate::edge_store::{IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder};
     use crate::filter_index::{FilterColumnType, PersistedFilterValue};
     use crate::projection::manifest::{
         ManifestSegmentRef, ProjectionManifest, ProjectionManifestStore,
@@ -1435,6 +1500,83 @@ mod tests {
         assert_eq!(reloaded_schema, &[1]);
         assert_eq!(reloaded_weights, &[11]);
         assert_eq!(reloaded.edge_store.schema_reversed_slice(), &[0, 1]);
+    }
+
+    #[test]
+    fn persisted_mmap_load_preserves_relationship_identity_metadata() {
+        let engine = graph_with_identified_relationship();
+        let path = temp_graph_path("relationship-identity-roundtrip");
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        write_graph_file(&loaded, &path).unwrap();
+        let reloaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert_eq!(loaded.edge_store.relationship_ids_slice(), &[1]);
+        assert_eq!(loaded.reverse_edge_store.relationship_ids_slice(), &[1]);
+        assert_eq!(loaded.relationship_identities[0], None);
+        assert_eq!(
+            loaded.relationship_identities[1],
+            Some(RelationshipIdentity {
+                mapping_id: 42,
+                source_key: "edge:100".to_string(),
+            })
+        );
+        assert_eq!(reloaded.edge_store.relationship_ids_slice(), &[1]);
+        assert_eq!(
+            reloaded.relationship_identities[1],
+            Some(RelationshipIdentity {
+                mapping_id: 42,
+                source_key: "edge:100".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn persisted_relationship_identity_allows_empty_source_key() {
+        let mut engine = graph_with_identified_relationship();
+        engine.relationship_identities[1] = Some(RelationshipIdentity {
+            mapping_id: 42,
+            source_key: String::new(),
+        });
+        let path = temp_graph_path("relationship-identity-empty-source-key");
+        write_graph_file(&engine, &path).unwrap();
+
+        let loaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert_eq!(
+            loaded.relationship_identities[1],
+            Some(RelationshipIdentity {
+                mapping_id: 42,
+                source_key: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn load_graph_file_rejects_empty_relationship_identity_slot() {
+        let engine = graph_with_identified_relationship();
+        let path = temp_graph_path("relationship-identity-empty-slot");
+        write_graph_file(&engine, &path).unwrap();
+        rewrite_edge_metadata_section(
+            &path,
+            &PersistedEdgeMetadata {
+                edge_type_registry: engine.edge_type_registry.clone(),
+                relationship_ids: vec![1],
+                relationship_identities: vec![None, None],
+            },
+        );
+
+        let err = match load_graph_file(&path) {
+            Ok(_) => panic!("malformed relationship dictionary must fail closed"),
+            Err(err) => err,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(
+            matches!(err, GraphError::CorruptFile { reason } if reason.contains("empty dictionary slot"))
+        );
     }
 
     #[test]
@@ -2213,6 +2355,33 @@ mod tests {
         file.flush().unwrap();
     }
 
+    fn rewrite_edge_metadata_section(path: &Path, edge_metadata: &PersistedEdgeMetadata) {
+        use std::io::{Read, Seek, Write};
+
+        let section_start = read_section_offset(path, 11);
+        let mut data = Vec::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_end(&mut data)
+            .unwrap();
+        let section_end = data.len();
+        let payload = bincode::serde::encode_to_vec(edge_metadata, bincode::config::standard())
+            .expect("test metadata serializes");
+        let replacement_len = 4 + payload.len();
+        assert!(
+            section_start as usize + replacement_len <= section_end,
+            "replacement metadata must fit in the existing section"
+        );
+
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(section_start)).unwrap();
+        file.write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        file.write_all(&payload).unwrap();
+        file.flush().unwrap();
+        rewrite_crc(path);
+    }
+
     fn graph_with_relationship() -> Engine {
         let mut engine = Engine::new();
         let a = engine.node_store.add_node(10, "A".to_string());
@@ -2230,6 +2399,38 @@ mod tests {
             }],
             true,
         );
+        engine.built = true;
+        engine
+    }
+
+    fn graph_with_identified_relationship() -> Engine {
+        let mut engine = Engine::new();
+        let a = engine.node_store.add_node(10, "A-1".to_string());
+        let b = engine.node_store.add_node(10, "B-2".to_string());
+        engine.resolution_insert(10, "A-1", a);
+        engine.resolution_insert(10, "B-2", b);
+        let edge_type = engine.register_edge_type("officer_of").unwrap();
+        let mut builder = SortedEdgeStoreBuilder::new(2, true);
+        builder
+            .try_push_identified(IdentifiedRawEdge {
+                edge: RawEdge {
+                    source: a,
+                    target: b,
+                    type_id: edge_type,
+                    weight: Some(7),
+                    schema_reversed: false,
+                },
+                relationship_id: 1,
+            })
+            .unwrap();
+        engine.edge_store = builder.finish();
+        engine.relationship_identities = vec![
+            None,
+            Some(RelationshipIdentity {
+                mapping_id: 42,
+                source_key: "edge:100".to_string(),
+            }),
+        ];
         engine.built = true;
         engine
     }

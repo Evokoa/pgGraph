@@ -57,6 +57,16 @@ impl MmapResolutionState {
     }
 }
 
+pub(crate) struct MmapBackedGraph {
+    pub(crate) node_store: NodeStore,
+    pub(crate) edge_store: EdgeStore,
+    pub(crate) filter_index: FilterIndex,
+    pub(crate) edge_type_registry: Vec<String>,
+    pub(crate) relationship_identities: Vec<Option<RelationshipIdentity>>,
+    pub(crate) mmap: memmap2::Mmap,
+    pub(crate) resolution_state: MmapResolutionState,
+}
+
 /// The core graph engine. Holds all data stores.
 pub struct Engine {
     /// Node metadata. After `.pggraph` load, base arrays are mmap-backed until a
@@ -435,25 +445,18 @@ impl Engine {
         self.last_vacuum = vacuumed_at;
     }
 
-    pub(crate) fn install_mmap_backed_graph(
-        &mut self,
-        node_store: NodeStore,
-        edge_store: EdgeStore,
-        filter_index: FilterIndex,
-        edge_type_registry: Vec<String>,
-        mmap: memmap2::Mmap,
-        resolution_state: MmapResolutionState,
-    ) {
-        let reverse_edge_store = edge_store.reversed();
-        self.node_store = node_store;
-        self.edge_store = edge_store;
+    pub(crate) fn install_mmap_backed_graph(&mut self, graph: MmapBackedGraph) {
+        let reverse_edge_store = graph.edge_store.reversed();
+        self.node_store = graph.node_store;
+        self.edge_store = graph.edge_store;
         self.reverse_edge_store = reverse_edge_store;
-        self.filter_index = filter_index;
-        self.edge_type_registry = edge_type_registry;
+        self.filter_index = graph.filter_index;
+        self.edge_type_registry = graph.edge_type_registry;
+        self.relationship_identities = graph.relationship_identities;
         self.rebuild_table_membership();
         self.finish_build(None);
-        self.resolution_store = ResolutionStore::MmapBacked(resolution_state);
-        self._mmap = Some(mmap);
+        self.resolution_store = ResolutionStore::MmapBacked(graph.resolution_state);
+        self._mmap = Some(graph.mmap);
     }
 
     /// Register a new edge type label. Returns the u8 type ID.

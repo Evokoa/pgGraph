@@ -1,6 +1,6 @@
 # Full Graph Engine Progress
 
-Last updated: 2026-07-09
+Last updated: 2026-07-10
 
 ## Current State
 
@@ -8,7 +8,7 @@ Last updated: 2026-07-09
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
-| 1A. Security and identity | In progress | Coordinate-only node visibility, base-CSR relationship multiplicity, and table-qualified filter identity are enforced on PostgreSQL 17; durable relationship keys, relationship-row RLS, and savepoints remain. |
+| 1A. Security and identity | In progress | Coordinate-only node visibility, base-CSR relationship multiplicity, table-qualified filter identity, and persisted relationship identity sidecars are enforced on PostgreSQL 17; relationship-row RLS, hydration, overlays, compaction, and savepoints remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
@@ -67,6 +67,12 @@ Last updated: 2026-07-09
   remain intentionally pending; no relationship behavior relies on the
   sidecar before reload support exists.
 
+- Persisted relationship identity sidecars and their source-row dictionary in
+  artifact format v4. Mmap loads validate sidecar length, reserved ID 0,
+  nonzero dictionary entries, mapping IDs, and dictionary references before
+  installing the graph. Query, hydration, RLS, overlays, and compaction still
+  need to use these IDs before KI-015 can close.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.
@@ -123,6 +129,7 @@ correctness and safety boundary.
 - 2026-07-09 — Checkpoint 0 RUST-00F relation-identity phase: registration, discovery, filtering, synchronization, and removal now retain PostgreSQL OIDs; catalog reads derive qualified SQL names from those OIDs, while public result labels remain compatible. Rename/search-path and drop/recreate behavior is covered on PG17.
 - 2026-07-09 — Checkpoint 1A node-visibility subphase: GQL batches source-node visibility checks under the caller's PostgreSQL ACL/RLS context before returning coordinates, including `hydrate := false`; relationship-row visibility remains coupled to the pending durable relationship-identity work.
 - 2026-07-09 — Independent three-phase review: fixed watermark-only artifact retention, pre-copy ingest budgeting, filter node-range validation, and malformed base dictionary fail-closed handling; the follow-up review and final gates were green.
+- 2026-07-10 — Checkpoint 1A relationship-artifact subphase: `.pggraph` v4 now persists and validates per-adjacency relationship IDs plus the source-row identity dictionary, including reverse CSR reload preservation.
 
 ## Decisions
 
@@ -229,3 +236,17 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Rust docs | `cd graph && cargo doc --features pg17 --no-deps` | PASS |
 | Rust doctests | `cd graph && cargo test --doc --features pg17` | PASS: 0 doctests |
 | PostgreSQL-backed tests | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 904 passed, 1 ignored; doctests 0 |
+
+### 2026-07-10 Relationship Identity Artifact Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Compile | `cd graph && cargo check --features "pg17 development"` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Relationship identity roundtrip | `cd graph && cargo test --features pg17 persisted_mmap_load_preserves_relationship_identity_metadata` | PASS: 1 passed |
+| Empty relationship source key | `cd graph && cargo test --features pg17 persisted_relationship_identity_allows_empty_source_key` | PASS: 1 passed |
+| Malformed relationship dictionary | `cd graph && cargo test --features pg17 load_graph_file_rejects_empty_relationship_identity_slot` | PASS: 1 passed |
+| Mmap persistence subset | `cd graph && cargo test --features pg17 persistence::tests::persisted_mmap_load` | PASS: 3 passed |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 671 passed, 1 ignored; doctests 0 |
+| Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |

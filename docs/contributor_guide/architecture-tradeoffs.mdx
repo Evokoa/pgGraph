@@ -63,10 +63,10 @@ The boundary matters:
   corrupt, rebuild it from source tables.
 - pgGraph maps artifact sections read-only. Sync overlays and mutable derived
   state remain backend-local.
-- Reverse CSR, filter indexes, and edge type registry data are still currently
-  backend-local heap structures after load. Whether these should move into
-  mmap-friendly sections is an open question discussed in
-  [Where We May Be Wrong](#where-we-may-be-wrong) below.
+- Reverse CSR, filter indexes, edge metadata, and relationship identity
+  dictionaries are still currently backend-local heap structures after load.
+  Whether these should move into mmap-friendly sections is an open question
+  discussed in [Where We May Be Wrong](#where-we-may-be-wrong) below.
 
 That does not make mmap free. It still means pgGraph must account for page
 faults, OS eviction decisions, file integrity, artifact validation, memory

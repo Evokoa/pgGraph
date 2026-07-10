@@ -162,6 +162,7 @@ Named-graph changes moved each of these components from implicit global state to
   <PipelineStep title="temporary edge rows sorted by source/target/type" />
   <PipelineStep title="SortedEdgeStoreBuilder">
     - forward CSR EdgeStore
+    - relationship-ID sidecar
     - reverse CSR EdgeStore
   </PipelineStep>
   <PipelineStep title="active Engine" />
@@ -183,8 +184,8 @@ store:
     - mmap-backed forward EdgeStore arrays
     - mmap-backed ResolutionIndex section
     - heap FilterIndex from bincode
-    - heap edge_type_registry from bincode
-    - heap reverse_edge_store from forward CSR
+    - heap edge metadata from bincode
+    - heap reverse_edge_store from forward CSR and relationship IDs
   </PipelineStep>
   <PipelineStep title="Engine owns _mmap and all derived stores" />
 </PipelineDiagram>

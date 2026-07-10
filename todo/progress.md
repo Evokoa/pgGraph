@@ -4,7 +4,8 @@ The active phased program is tracked in
 [`full-graph-engine/progress.md`](./full-graph-engine/progress.md). That file is
 the authoritative checkpoint handoff, measurement log, and next-action record.
 
-Last synchronized: 2026-07-09
+Last synchronized: 2026-07-10
 
-Current phase: Checkpoint 0 RUST-00F is implemented and verified on PostgreSQL
-17; continue with the next ordered checkpoint item.
+Current phase: Checkpoint 1A relationship identity persistence is implemented
+and targeted on PostgreSQL 17 Rust tests; continue with query, hydration, RLS,
+overlay, compaction, and savepoint use of persisted relationship IDs.

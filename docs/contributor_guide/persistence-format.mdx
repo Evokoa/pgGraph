@@ -9,7 +9,7 @@ as length-prefixed bincode payloads.
 ```text
 Header, 128 bytes
   magic              4 bytes   "PGGH"
-  version            u32       current version = 3
+  version            u32       current version = 4
   flags              u32       currently 0
   node_count         u32
   edge_count         u32
@@ -27,8 +27,13 @@ Section 7   resolution index            4 + entry_count * 16
 Section 8   primary key offsets         (node_count + 1) * 8
 Section 9   primary key bytes           UTF-8
 Section 10  filter index                u32 length + bincode 2 standard payload
-Section 11  edge type registry          u32 length + bincode 2 standard payload
+Section 11  edge metadata               u32 length + bincode 2 standard payload
 ```
+
+Section 11 contains the edge type registry, one relationship-ID sidecar entry
+per persisted adjacency, and the relationship identity dictionary used by those
+sidecar entries. ID `0` is reserved for adjacencies that do not yet have a
+source-row identity.
 
 ## Write Path
 
@@ -40,7 +45,7 @@ Section 11  edge type registry          u32 length + bincode 2 standard payload
 4. Aligns fixed-width sections as needed.
 5. Streams primary-key offsets and primary-key bytes in separate passes so the
    writer does not stage the full artifact body in memory.
-6. Serializes `FilterIndex` and edge type registry as length-prefixed bincode 2
+6. Serializes `FilterIndex` and edge metadata as length-prefixed bincode 2
    standard metadata sections.
 7. Computes CRC32 incrementally over the payload after the header.
 8. Backpatches header fields and section offsets.
@@ -70,7 +75,8 @@ construct mmap-backed NodeStore arrays
 construct mmap-backed forward EdgeStore CSR
 keep ResolutionIndex section mmap-backed
 deserialize FilterIndex into backend heap
-deserialize edge_type_registry into backend heap
+deserialize edge metadata into backend heap
+validate relationship identity sidecar and dictionary
 build reverse EdgeStore CSR into backend heap
 set resolution mode to MmapBacked
 store mmap in Engine._mmap
@@ -83,9 +89,9 @@ The persisted forward graph arrays and resolution section are mmap-backed after
 load. Forward edge arrays include the `schema_reversed` byte section that marks
 generated reverse copies of bidirectional registered edge rows. The reverse CSR
 is not mmap-backed today; it is derived into backend-local heap and preserves
-the same schema-direction flags. The bincode 2 standard sections, including
-`FilterIndex` and `edge_type_registry`, are also deserialized into
-backend-local heap.
+the same schema-direction flags and relationship-ID sidecar values. The bincode
+2 standard sections, including `FilterIndex` and edge metadata, are also
+deserialized into backend-local heap.
 </Callout>
 
 ## Validation Boundaries

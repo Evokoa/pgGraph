@@ -95,10 +95,11 @@ CSR invariants:
 | Forward `EdgeStore.targets` | mmap-backed |
 | Forward `EdgeStore.type_ids` | mmap-backed |
 | Forward `EdgeStore.weights` | mmap-backed when present |
+| Forward `EdgeStore.relationship_ids` | backend-local heap sidecar validated from persisted edge metadata |
 | `ResolutionIndex` | mmap-backed section |
 | `FilterIndex` | bincode payload deserialized into backend heap |
-| `edge_type_registry` | bincode payload deserialized into backend heap |
-| `reverse_edge_store` | built as owned heap from forward edges |
+| `edge_type_registry` and relationship identity dictionary | bincode payload deserialized into backend heap |
+| `reverse_edge_store` | built as owned heap from forward edges, including relationship IDs |
 | Sync overlays | backend-local heap |
 
 ## FilterIndex Storage

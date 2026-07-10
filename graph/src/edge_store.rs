@@ -346,7 +346,7 @@ impl EdgeStore {
         }
     }
 
-    /// Create an mmap-backed EdgeStore from raw pointers.
+    /// Create an mmap-backed EdgeStore from raw pointers and relationship IDs.
     ///
     /// # Safety
     ///
@@ -355,11 +355,18 @@ impl EdgeStore {
     /// `node_count + 1` initialized `u32` values, `targets_ptr` must contain
     /// `edge_count` initialized `u32` values, `type_ids_ptr` must contain
     /// `edge_count` initialized bytes, and `weights_ptr` must contain
-    /// `edge_count` initialized `u32` values when `has_weights` is true.
-    pub(crate) unsafe fn from_mmap(arrays: MmapEdgeArrays) -> Self {
+    /// `edge_count` initialized `u32` values when `has_weights` is true. The
+    /// `relationship_ids` sidecar must have exactly `edge_count` entries and
+    /// every nonzero ID must have been validated against the owning engine's
+    /// relationship identity dictionary before this store is constructed.
+    pub(crate) unsafe fn from_mmap_with_relationship_ids(
+        arrays: MmapEdgeArrays,
+        relationship_ids: Vec<RelationshipId>,
+    ) -> Self {
+        debug_assert_eq!(relationship_ids.len(), arrays.edge_count as usize);
         Self {
             backing: EdgeBacking::Mmap { arrays },
-            relationship_ids: vec![NO_RELATIONSHIP_ID; arrays.edge_count as usize],
+            relationship_ids,
         }
     }
 
@@ -1225,8 +1232,10 @@ mod tests {
         // declared region, and outlive the mapped store used in this test.
         let arrays =
             unsafe { MmapEdgeArrays::new(fixture.parts()).expect("valid mapped edge fixture") };
-        // SAFETY: `fixture` remains alive until after `store` is last used.
-        let store = unsafe { EdgeStore::from_mmap(arrays) };
+        // SAFETY: `fixture` remains alive until after `store` is last used, and
+        // the zero sidecar has exactly one entry for the single mapped edge.
+        let store =
+            unsafe { EdgeStore::from_mmap_with_relationship_ids(arrays, vec![NO_RELATIONSHIP_ID]) };
 
         assert_eq!(store.node_count(), 2);
         assert_eq!(store.edge_count(), 1);
