@@ -28,6 +28,10 @@ Last updated: 2026-07-09
   endpoint/type rows return two matches. Durable source-row keys remain the
   next 1A slice for hydration, RLS, mutable overlays, and persistence.
 
+- Added durable source primary-key metadata to relationship registrations and
+  catalog fingerprints. Existing mappings backfill declared primary keys and
+  fail closed when no stable relationship identity is available.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.

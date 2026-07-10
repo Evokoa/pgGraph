@@ -119,6 +119,7 @@ pub(crate) fn read_catalog_for_graph(
                 "SELECT registered.from_table_oid::integer,
                         pg_catalog.quote_ident(source_namespace.nspname) || '.' || pg_catalog.quote_ident(source_relation.relname),
                         registered.from_column,
+                        registered.source_key_columns,
                         registered.to_table_oid::integer,
                         pg_catalog.quote_ident(target_namespace.nspname) || '.' || pg_catalog.quote_ident(target_relation.relname),
                         registered.to_column,
@@ -183,8 +184,16 @@ pub(crate) fn read_catalog_for_graph(
                     safety::GraphError::Internal(format!("catalog read error (from_column): {}", e))
                 })?
                 .unwrap_or_default();
+            let source_key_columns = row
+                .get::<String>(4)
+                .map_err(|e| safety::GraphError::Internal(format!("catalog read error (source_key_columns): {e}")))?
+                .filter(|columns| !columns.trim().is_empty())
+                .map(|columns| builder::PrimaryKeySpec::from_catalog_text(&columns))
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
+                    reason: format!("registered edge source relation OID {from_table_oid} has no stable primary-key mapping; re-register it"),
+                })?;
             let to_table_oid = row
-                .get::<i32>(4)
+                .get::<i32>(5)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (to_table_oid): {e}"))
                 })?
@@ -201,7 +210,7 @@ pub(crate) fn read_catalog_for_graph(
                     })
                 })?;
             let to_table = row
-                .get::<String>(5)
+                .get::<String>(6)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (to_table): {}", e))
                 })?
@@ -212,19 +221,19 @@ pub(crate) fn read_catalog_for_graph(
                     )
                 })?;
             let to_column = row
-                .get::<String>(6)
+                .get::<String>(7)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (to_column): {}", e))
                 })?
                 .unwrap_or_default();
             let label = row
-                .get::<String>(7)
+                .get::<String>(8)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!("catalog read error (label): {}", e))
                 })?
                 .unwrap_or_default();
             let bidirectional = row
-                .get::<bool>(8)
+                .get::<bool>(9)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (bidirectional): {}",
@@ -233,7 +242,7 @@ pub(crate) fn read_catalog_for_graph(
                 })?
                 .unwrap_or(true);
             let weight_column = row
-                .get::<String>(9)
+                .get::<String>(10)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (weight_column): {}",
@@ -242,7 +251,7 @@ pub(crate) fn read_catalog_for_graph(
                 })?
                 .filter(|s| !s.is_empty());
             let label_column = row
-                .get::<String>(10)
+                .get::<String>(11)
                 .map_err(|e| {
                     safety::GraphError::Internal(format!(
                         "catalog read error (label_column): {}",
@@ -255,6 +264,7 @@ pub(crate) fn read_catalog_for_graph(
                 from_table_oid,
                 from_table,
                 from_column,
+                source_key_columns,
                 to_table_oid,
                 to_table,
                 to_column,
@@ -373,6 +383,7 @@ pub(crate) fn catalog_fingerprint(
     for edge in edge_rows {
         edge.from_table.hash(&mut hasher);
         edge.from_column.hash(&mut hasher);
+        edge.source_key_columns.hash(&mut hasher);
         edge.to_table.hash(&mut hasher);
         edge.to_column.hash(&mut hasher);
         edge.label.hash(&mut hasher);

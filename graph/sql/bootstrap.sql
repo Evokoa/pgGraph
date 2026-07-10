@@ -372,7 +372,8 @@ ALTER TABLE graph._registered_tables
 
 ALTER TABLE graph._registered_edges
     ADD COLUMN IF NOT EXISTS from_table_oid OID,
-    ADD COLUMN IF NOT EXISTS to_table_oid OID;
+    ADD COLUMN IF NOT EXISTS to_table_oid OID,
+    ADD COLUMN IF NOT EXISTS source_key_columns TEXT;
 
 ALTER TABLE graph._registered_filter_columns
     ADD COLUMN IF NOT EXISTS table_oid OID;
@@ -386,6 +387,23 @@ SET from_table_oid = pg_catalog.to_regclass(from_table)::oid,
     to_table_oid = pg_catalog.to_regclass(to_table)::oid
 WHERE from_table_oid IS NULL
    OR to_table_oid IS NULL;
+
+-- Backfill durable relationship source keys for existing mappings. Relations
+-- without a declared primary key remain NULL and are rejected with guidance at
+-- catalog read time; `ctid` is deliberately never used as a substitute.
+UPDATE graph._registered_edges AS registered
+SET source_key_columns = (
+    SELECT string_agg(attribute.attname::text, ',' ORDER BY key_column.ordinality)
+      FROM pg_catalog.pg_index AS index
+      JOIN pg_catalog.unnest(index.indkey) WITH ORDINALITY
+           AS key_column(attnum, ordinality) ON true
+      JOIN pg_catalog.pg_attribute AS attribute
+        ON attribute.attrelid = index.indrelid
+       AND attribute.attnum = key_column.attnum
+     WHERE index.indrelid = registered.from_table_oid
+       AND index.indisprimary
+)
+WHERE source_key_columns IS NULL;
 
 UPDATE graph._registered_filter_columns
 SET table_oid = pg_catalog.to_regclass(table_name)::oid

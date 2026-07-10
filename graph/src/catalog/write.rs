@@ -85,19 +85,24 @@ pub(crate) fn insert_registered_edge_for_graph(
     graph_id: &str,
     edge: RegisteredEdgeInsert<'_>,
 ) -> safety::GraphResult<()> {
+    let source_table_oid = super::table_oid_from_name(edge.from_table)?;
+    let source_key_columns = super::primary_key_columns(source_table_oid)?.join(",");
     Spi::run_with_args(
         "INSERT INTO graph._registered_edges
-           (graph_id, from_table, from_table_oid, from_column, to_table, to_table_oid, to_column, label, bidirectional, weight_column, label_column)
-         VALUES ($1::uuid, $2, pg_catalog.to_regclass($2)::oid, $3, $4, pg_catalog.to_regclass($4)::oid, $5, $6, $7, $8, $9)
+           (graph_id, from_table, from_table_oid, from_column, source_key_columns, to_table, to_table_oid, to_column, label, bidirectional, weight_column, label_column)
+         VALUES ($1::uuid, $2, $3::oid, $4, $5, $6, pg_catalog.to_regclass($6)::oid, $7, $8, $9, $10, $11)
          ON CONFLICT (graph_id, from_table, from_column, to_table, to_column, label)
          DO UPDATE SET
             bidirectional = EXCLUDED.bidirectional,
             weight_column = EXCLUDED.weight_column,
-            label_column = EXCLUDED.label_column",
+            label_column = EXCLUDED.label_column,
+            source_key_columns = EXCLUDED.source_key_columns",
         &[
             graph_id.into(),
             edge.from_table.into(),
+            pgrx::pg_sys::Oid::from_u32(source_table_oid).into(),
             edge.from_column.into(),
+            source_key_columns.into(),
             edge.to_table.into(),
             edge.to_column.into(),
             edge.label.into(),

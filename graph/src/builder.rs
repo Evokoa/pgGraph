@@ -183,6 +183,9 @@ pub struct RegisteredEdge {
     pub from_table_oid: u32,
     pub from_table: String,
     pub from_column: String,
+    /// Declared PostgreSQL primary-key columns that identify one source
+    /// relationship row independently of its endpoints.
+    pub source_key_columns: PrimaryKeySpec,
     /// PostgreSQL OID of the target node relation.
     pub to_table_oid: u32,
     pub to_table: String,
@@ -1090,6 +1093,7 @@ mod tests {
                 from_table_oid: 42,
                 from_table: "public.accounts".to_string(),
                 from_column: "parent_id".to_string(),
+                source_key_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
                 to_table_oid: 42,
                 to_table: "public.accounts".to_string(),
                 to_column: "id".to_string(),
@@ -1102,6 +1106,7 @@ mod tests {
                 from_table_oid: 42,
                 from_table: "public.accounts".to_string(),
                 from_column: "owner_id".to_string(),
+                source_key_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
                 to_table_oid: 42,
                 to_table: "public.accounts".to_string(),
                 to_column: "id".to_string(),

@@ -779,6 +779,10 @@ fn registered_edge(
         from_table_oid,
         from_table,
         from_column: from_column.to_string(),
+        // Registration resolves and persists the authoritative PK tuple using
+        // the relation OID. Discovery values are intentionally not consumed
+        // directly by projection construction.
+        source_key_columns: PrimaryKeySpec::from_columns(Vec::new()),
         to_table_oid,
         to_table,
         to_column: to_column.to_string(),

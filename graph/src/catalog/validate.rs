@@ -225,6 +225,45 @@ pub(crate) fn primary_key_expr(alias: &str, primary_key: &builder::PrimaryKeySpe
     }
 }
 
+/// Return the declared primary-key columns for a relation in index order.
+///
+/// Relationship mappings use this tuple as their authoritative source-row
+/// identity. A unique index is not substituted here: PostgreSQL primary keys
+/// give the durable, non-null contract required by relationship hydration,
+/// visibility, and mutation paths.
+pub(crate) fn primary_key_columns(table_oid: u32) -> safety::GraphResult<Vec<String>> {
+    Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT array_agg(attribute.attname::text ORDER BY key_column.ordinality)::text[]
+                   FROM pg_catalog.pg_index AS index
+                   JOIN pg_catalog.unnest(index.indkey) WITH ORDINALITY
+                        AS key_column(attnum, ordinality) ON true
+                   JOIN pg_catalog.pg_attribute AS attribute
+                     ON attribute.attrelid = index.indrelid
+                    AND attribute.attnum = key_column.attnum
+                  WHERE index.indrelid = $1::oid
+                    AND index.indisprimary
+                  GROUP BY index.indexrelid",
+                None,
+                &[pgrx::pg_sys::Oid::from_u32(table_oid).into()],
+            )
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("primary-key lookup failed: {err}"))
+            })?;
+        result
+            .first()
+            .get::<Vec<String>>(1)
+            .map_err(|err| safety::GraphError::Internal(format!("primary-key read failed: {err}")))?
+            .filter(|columns| !columns.is_empty())
+            .ok_or_else(|| safety::GraphError::InvalidFilter {
+                reason: format!(
+                    "relationship source table OID {table_oid} must have a primary key"
+                ),
+            })
+    })
+}
+
 pub(crate) fn validate_column_exists(table_oid: u32, column: &str) -> safety::GraphResult<()> {
     let exists = Spi::connect(|client| {
         let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
