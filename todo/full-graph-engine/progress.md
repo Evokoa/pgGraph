@@ -32,6 +32,10 @@ Last updated: 2026-07-09
   catalog fingerprints. Existing mappings backfill declared primary keys and
   fail closed when no stable relationship identity is available.
 
+- Began the filter-identity migration by keying build-time filter registration
+  and value assignment by PostgreSQL table OID plus attribute name, so
+  same-named registered columns no longer overwrite one another during build.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.

@@ -312,8 +312,9 @@ pub fn build_graph(
 
     let mut engine = Engine::new();
     let mut table_oid_map: HashMap<String, u32> = HashMap::new();
-    let mut pending_filter_values: Vec<(String, u32, Option<PendingFilterValue>)> = Vec::new();
-    let mut filter_populated_counts: HashMap<String, usize> = HashMap::new();
+    let mut pending_filter_values: Vec<((u32, String), u32, Option<PendingFilterValue>)> =
+        Vec::new();
+    let mut filter_populated_counts: HashMap<(u32, String), usize> = HashMap::new();
     create_node_lookup_spool()?;
     let mut node_lookup_batch =
         NodeLookupBatch::with_capacity(crate::config::BUILD_BATCH_SIZE.get());
@@ -393,11 +394,11 @@ pub fn build_graph(
                         )?;
                         if value.is_some() {
                             *filter_populated_counts
-                                .entry(filter_col.column_name.clone())
+                                .entry((filter_col.table_oid, filter_col.column_name.clone()))
                                 .or_insert(0) += 1;
                         }
                         pending_filter_values.push((
-                            filter_col.column_name.clone(),
+                            (filter_col.table_oid, filter_col.column_name.clone()),
                             node_idx,
                             value,
                         ));
@@ -418,8 +419,11 @@ pub fn build_graph(
     index_node_lookup_spool()?;
 
     register_filter_columns(&mut engine, filter_columns, &filter_populated_counts);
-    for (column_name, node_idx, value) in pending_filter_values {
-        if let Some(global_filter_idx) = engine.filter_index.find_column(&column_name) {
+    for ((table_oid, column_name), node_idx, value) in pending_filter_values {
+        if let Some(global_filter_idx) = engine
+            .filter_index
+            .find_column_for_table(table_oid, &column_name)
+        {
             let value = value.map(|value| match value {
                 PendingFilterValue::Encoded(value) => value,
                 PendingFilterValue::Text(value) => {
@@ -953,20 +957,20 @@ fn load_edge_store_from_spool(
 fn register_filter_columns(
     engine: &mut Engine,
     filter_columns: &[RegisteredFilterColumn],
-    populated_counts: &HashMap<String, usize>,
+    populated_counts: &HashMap<(u32, String), usize>,
 ) {
     let node_count = engine.node_store.node_count() as usize;
     for filter in filter_columns {
         let table_oid = filter.table_oid;
         if engine
             .filter_index
-            .find_column(&filter.column_name)
+            .find_column_for_table(table_oid, &filter.column_name)
             .is_none()
         {
             let column_type =
                 FilterColumnType::parse(&filter.column_type).unwrap_or(FilterColumnType::Numeric);
             let populated_count = populated_counts
-                .get(&filter.column_name)
+                .get(&(table_oid, filter.column_name.clone()))
                 .copied()
                 .unwrap_or(0);
             engine

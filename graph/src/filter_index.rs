@@ -543,6 +543,17 @@ impl FilterIndex {
             .position(|c| c.column_name == column_name)
     }
 
+    /// Find a registered column by its owning relation and attribute name.
+    ///
+    /// Graphs may register the same attribute name on multiple tables. Build
+    /// and synchronization paths must use this identity-aware lookup rather
+    /// than treating the first matching display name as authoritative.
+    pub fn find_column_for_table(&self, table_oid: u32, column_name: &str) -> Option<usize> {
+        self.columns
+            .iter()
+            .position(|column| column.table_oid == table_oid && column.column_name == column_name)
+    }
+
     /// Return the encoded domain for a registered column.
     pub fn column_type(&self, column_idx: usize) -> Option<FilterColumnType> {
         self.columns
@@ -1046,6 +1057,22 @@ mod tests {
     fn find_column_returns_none_for_unregistered() {
         let fi = FilterIndex::new();
         assert!(fi.find_column("nonexistent").is_none());
+    }
+
+    #[test]
+    fn table_qualified_lookup_keeps_same_named_columns_distinct() {
+        let mut index = FilterIndex::new();
+        let users_status = index.register_column(101, "status".to_string(), 2);
+        let companies_status = index.register_column(202, "status".to_string(), 2);
+
+        assert_eq!(
+            index.find_column_for_table(101, "status"),
+            Some(users_status)
+        );
+        assert_eq!(
+            index.find_column_for_table(202, "status"),
+            Some(companies_status)
+        );
     }
 
     #[test]
