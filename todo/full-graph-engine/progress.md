@@ -40,6 +40,10 @@ Last updated: 2026-07-09
   sync replay paths; ambiguous user-facing names remain rejected until every
   legacy name-only helper is retired.
 
+- Verified same-name filter ambiguity against PostgreSQL 17: unscoped
+  structured filters remain rejected instead of selecting an arbitrary table,
+  while internal build, pushdown, and sync lookups use relation-qualified keys.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.
