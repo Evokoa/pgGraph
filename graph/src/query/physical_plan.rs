@@ -209,6 +209,8 @@ pub(crate) struct PhysicalJoinPattern {
     pub(crate) source_slot: usize,
     /// Relationship type label.
     pub(crate) rel_type: String,
+    /// Registered edge-row mapping for relationship visibility checks.
+    pub(crate) edge_mapping: Option<EdgeMappingInfo>,
     /// Traversal direction.
     pub(crate) direction: BoundDirection,
     /// Hop bounds for this relationship pattern.

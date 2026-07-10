@@ -1479,6 +1479,46 @@ fn multi_pattern_join_reuses_node_variables_by_coordinate() {
 }
 
 #[test]
+fn multi_pattern_join_carries_edge_mapping_metadata() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[r:friend]->(v:users), \
+         (u)-[:friend]->(v) RETURN r",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert_eq!(logical.patterns.len(), 2);
+    assert_eq!(
+        logical.patterns[0]
+            .edge_mapping
+            .as_ref()
+            .map(|mapping| mapping.edge_table_oid),
+        Some(30)
+    );
+
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    assert_eq!(
+        physical.patterns[0]
+            .edge_mapping
+            .as_ref()
+            .map(|mapping| mapping.edge_table_oid),
+        Some(30)
+    );
+    assert_eq!(
+        physical.patterns[1]
+            .edge_mapping
+            .as_ref()
+            .map(|mapping| mapping.edge_table_oid),
+        Some(30)
+    );
+}
+
+#[test]
 fn multi_pattern_join_independent_patterns_are_cartesian() {
     let statement = bind_statement_query(
         "MATCH (u:users)-[:works_at]->(c:companies), \

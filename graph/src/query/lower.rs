@@ -106,6 +106,7 @@ fn lower_join_pattern(pattern: LogicalJoinPattern) -> PhysicalJoinPattern {
     PhysicalJoinPattern {
         source_slot: pattern.source_slot,
         rel_type: pattern.rel_type,
+        edge_mapping: pattern.edge_mapping,
         direction: pattern.direction,
         hops: pattern.hops,
         target_slot: pattern.target_slot,

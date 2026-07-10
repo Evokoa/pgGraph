@@ -291,6 +291,7 @@ pub(super) fn execute_statement(
                 crate::query::execute::execute_join(&engine.borrow(), &plan, tenant_scope)
             })?;
             ensure_gql_rows_visible(&matches)?;
+            ensure_gql_join_relationship_rows_visible(&matches, &plan)?;
             let hydrated = hydrate_gql_rows(
                 &matches,
                 crate::query::value::join_requires_hydration(&plan, hydrate),
@@ -3082,16 +3083,78 @@ fn ensure_gql_relationship_rows_visible(
     };
     let relationship_identities =
         ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
-    let mut source_keys = Vec::new();
+    let mut relationship_ids = Vec::new();
     for row in rows {
         if row.rel_start.is_none() || row.rel_end.is_none() {
             continue;
         }
-        let identity = relationship_source_identity(
+        relationship_ids.push(row.relationship_id);
+    }
+    ensure_relationship_source_keys_visible(
+        edge_mapping,
+        &relationship_identities,
+        relationship_ids,
+    )
+}
+
+/// Check mapped relationship source-row visibility for multi-pattern joins.
+fn ensure_gql_join_relationship_rows_visible(
+    rows: &[crate::query::execute::GqlRow],
+    plan: &crate::query::physical_plan::PhysicalJoinPlan,
+) -> safety::GraphResult<()> {
+    if plan
+        .patterns
+        .iter()
+        .all(|pattern| pattern.edge_mapping.is_none())
+    {
+        return Ok(());
+    }
+    let relationship_identities =
+        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    for (pattern_idx, pattern) in plan.patterns.iter().enumerate() {
+        let Some(edge_mapping) = &pattern.edge_mapping else {
+            continue;
+        };
+        let mut relationship_ids = Vec::new();
+        for row in rows {
+            let Some(paths) = &row.join_path_relationships else {
+                continue;
+            };
+            let Some(path) = paths.get(pattern_idx) else {
+                return Err(safety::GraphError::Internal(format!(
+                    "join row is missing relationship path slot {pattern_idx}"
+                )));
+            };
+            let Some(relationships) = path else {
+                continue;
+            };
+            relationship_ids.extend(
+                relationships
+                    .iter()
+                    .map(|relationship| relationship.relationship_id),
+            );
+        }
+        ensure_relationship_source_keys_visible(
             edge_mapping,
             &relationship_identities,
-            row.relationship_id,
+            relationship_ids,
         )?;
+    }
+    Ok(())
+}
+
+fn ensure_relationship_source_keys_visible<I>(
+    edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
+    relationship_identities: &[Option<crate::edge_store::RelationshipIdentity>],
+    relationship_ids: I,
+) -> safety::GraphResult<()>
+where
+    I: IntoIterator<Item = Option<crate::edge_store::RelationshipId>>,
+{
+    let mut source_keys = Vec::new();
+    for relationship_id in relationship_ids {
+        let identity =
+            relationship_source_identity(edge_mapping, relationship_identities, relationship_id)?;
         source_keys.push(identity.source_key.clone());
     }
     if source_keys.is_empty() {

@@ -236,7 +236,7 @@ fn bind_join_read(
             &rel_by_var,
             &path_by_var,
         )?;
-        validate_join_relationship(
+        let rel_info = validate_join_relationship(
             catalog,
             rel,
             rel_type,
@@ -263,6 +263,7 @@ fn bind_join_read(
         patterns.push(LogicalJoinPattern {
             source_slot,
             rel_type: rel_type.text.clone(),
+            edge_mapping: rel_info.edge_mapping,
             direction: bind_direction(rel.direction),
             hops,
             target_slot,
@@ -461,7 +462,7 @@ fn validate_join_relationship(
     rel_type: &ast::Ident,
     source: &LogicalJoinNodeSlot,
     target: &LogicalJoinNodeSlot,
-) -> Result<(), GqlError> {
+) -> Result<super::catalog_snapshot::RelTypeInfo, GqlError> {
     let source = BoundNode {
         var: source.var.clone(),
         label: source.label.clone(),
@@ -476,8 +477,7 @@ fn validate_join_relationship(
         primary_key_columns: Vec::new(),
         properties: target.properties.clone(),
     };
-    resolve_relationship(catalog, rel, rel_type, &source, &target)?;
-    Ok(())
+    resolve_relationship(catalog, rel, rel_type, &source, &target)
 }
 
 fn bind_join_predicate(

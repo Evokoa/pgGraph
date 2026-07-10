@@ -7,7 +7,7 @@ the authoritative checkpoint handoff, measurement log, and next-action record.
 Last synchronized: 2026-07-10
 
 Current phase: Checkpoint 1A relationship identity persistence, base-CSR GQL
-query/path propagation, base relationship hydration, and mapped single-pattern
-relationship-row RLS are implemented and targeted on PostgreSQL 17 tests;
-continue with join/wildcard relationship RLS, overlay, sync, compaction, writes,
-and savepoint use of persisted relationship IDs.
+query/path propagation, base relationship hydration, and mapped relationship-row
+RLS for single-pattern reads plus supported joins are implemented and targeted
+on PostgreSQL 17 tests; continue with wildcard relationship RLS, overlay, sync,
+compaction, writes, and savepoint use of persisted relationship IDs.
