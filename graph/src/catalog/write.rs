@@ -86,13 +86,35 @@ pub(crate) fn insert_registered_edge_for_graph(
     edge: RegisteredEdgeInsert<'_>,
 ) -> safety::GraphResult<()> {
     let source_table_oid = super::table_oid_from_name(edge.from_table)?;
+    let target_table_oid = super::table_oid_from_name(edge.to_table)?;
     let source_key_columns = super::primary_key_columns(source_table_oid)?.join(",");
     Spi::run_with_args(
-        "INSERT INTO graph._registered_edges
+        "WITH updated AS (
+             UPDATE graph._registered_edges AS registered
+                SET from_table = $2,
+                    from_column = $4,
+                    source_key_columns = $5,
+                    to_table = $6,
+                    to_column = $8,
+                    bidirectional = $10,
+                    weight_column = $11,
+                    label_column = $12
+              WHERE registered.graph_id = $1::uuid
+                AND registered.from_table_oid = $3::oid
+                AND registered.to_table_oid = $7::oid
+                AND registered.from_column = $4
+                AND registered.to_column = $8
+                AND registered.label = $9
+          RETURNING 1
+         )
+         INSERT INTO graph._registered_edges
            (graph_id, from_table, from_table_oid, from_column, source_key_columns, to_table, to_table_oid, to_column, label, bidirectional, weight_column, label_column)
-         VALUES ($1::uuid, $2, $3::oid, $4, $5, $6, pg_catalog.to_regclass($6)::oid, $7, $8, $9, $10, $11)
+         SELECT $1::uuid, $2, $3::oid, $4, $5, $6, $7::oid, $8, $9, $10, $11, $12
+          WHERE NOT EXISTS (SELECT 1 FROM updated)
          ON CONFLICT (graph_id, from_table, from_column, to_table, to_column, label)
          DO UPDATE SET
+            from_table_oid = EXCLUDED.from_table_oid,
+            to_table_oid = EXCLUDED.to_table_oid,
             bidirectional = EXCLUDED.bidirectional,
             weight_column = EXCLUDED.weight_column,
             label_column = EXCLUDED.label_column,
@@ -104,6 +126,7 @@ pub(crate) fn insert_registered_edge_for_graph(
             edge.from_column.into(),
             source_key_columns.into(),
             edge.to_table.into(),
+            pgrx::pg_sys::Oid::from_u32(target_table_oid).into(),
             edge.to_column.into(),
             edge.label.into(),
             edge.bidirectional.into(),

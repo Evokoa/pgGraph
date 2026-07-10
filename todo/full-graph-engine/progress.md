@@ -44,6 +44,10 @@ Last updated: 2026-07-09
   structured filters remain rejected instead of selecting an arbitrary table,
   while internal build, pushdown, and sync lookups use relation-qualified keys.
 
+- Independent 1A review follow-up: edge re-registration now updates by source
+  and target relation OIDs, catalog fingerprints include all registered OIDs,
+  and source-key metadata is checked against the live primary key before use.
+
 - Reviewed roadmap, known issues, TODO history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.

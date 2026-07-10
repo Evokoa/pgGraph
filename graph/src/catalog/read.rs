@@ -366,6 +366,7 @@ pub(crate) fn catalog_fingerprint(
     let mut table_rows = tables.to_vec();
     table_rows.sort_by(|a, b| a.table_name.cmp(&b.table_name));
     for table in table_rows {
+        table.table_oid.hash(&mut hasher);
         table.table_name.hash(&mut hasher);
         table.id_columns.hash(&mut hasher);
         table.columns.hash(&mut hasher);
@@ -381,10 +382,12 @@ pub(crate) fn catalog_fingerprint(
             .then(a.label.cmp(&b.label))
     });
     for edge in edge_rows {
+        edge.from_table_oid.hash(&mut hasher);
         edge.from_table.hash(&mut hasher);
         edge.from_column.hash(&mut hasher);
         edge.source_key_columns.hash(&mut hasher);
         edge.to_table.hash(&mut hasher);
+        edge.to_table_oid.hash(&mut hasher);
         edge.to_column.hash(&mut hasher);
         edge.label.hash(&mut hasher);
         edge.bidirectional.hash(&mut hasher);
@@ -398,6 +401,7 @@ pub(crate) fn catalog_fingerprint(
             .then(a.column_name.cmp(&b.column_name))
     });
     for filter in filter_rows {
+        filter.table_oid.hash(&mut hasher);
         filter.table_name.hash(&mut hasher);
         filter.column_name.hash(&mut hasher);
         filter.column_type.hash(&mut hasher);

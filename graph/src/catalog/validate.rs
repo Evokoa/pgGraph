@@ -25,6 +25,24 @@ pub(crate) fn registered_schema_drift_reason(
     for edge in edges {
         let from_oid = edge.from_table_oid;
         let to_oid = edge.to_table_oid;
+        match primary_key_columns(from_oid) {
+            Ok(columns) if columns == edge.source_key_columns.columns() => {}
+            Ok(columns) => {
+                return Some(format!(
+                    "registered edge '{}' source key no longer matches table OID {}: catalog [{}], current [{}]",
+                    edge.label,
+                    from_oid,
+                    edge.source_key_columns.as_catalog_text(),
+                    columns.join(",")
+                ));
+            }
+            Err(err) => {
+                return Some(format!(
+                    "registered edge '{}' source key is invalid: {}",
+                    edge.label, err
+                ));
+            }
+        }
         if let Err(err) = validate_column_exists(from_oid, &edge.from_column) {
             return Some(format!(
                 "registered edge '{}' source column '{}.{}' is invalid: {}",
