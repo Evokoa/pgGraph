@@ -289,7 +289,7 @@ fn build_compacted_segment(
     for range in ranges {
         for source in range.start..range.end {
             let base_edges = edge_set(base, source);
-            let final_edges = weighted_edge_map_from_layered(&layered, source);
+            let final_edges = edge_map_from_layered(&layered, source);
             for &(target, type_id, schema_reversed) in base_edges.keys() {
                 if final_edges.contains_key(&(target, type_id, schema_reversed)) {
                     continue;
@@ -302,8 +302,8 @@ fn build_compacted_segment(
                     relationship_id: None,
                 });
             }
-            for (&(target, type_id, schema_reversed), &weight) in final_edges.iter() {
-                if base_edges.get(&(target, type_id, schema_reversed)) == Some(&weight) {
+            for (&(target, type_id, schema_reversed), edge) in final_edges.iter() {
+                if base_edges.get(&(target, type_id, schema_reversed)) == Some(&edge.weight) {
                     continue;
                 }
                 compacted.edge_inserts.push(SegmentEdge {
@@ -311,9 +311,9 @@ fn build_compacted_segment(
                     target,
                     type_id,
                     schema_reversed,
-                    relationship_id: None,
+                    relationship_id: edge.relationship_id,
                 });
-                if let Some(weight) = weight {
+                if let Some(weight) = edge.weight {
                     compacted.edge_weights.push(SegmentEdgeWeight {
                         source,
                         target,
@@ -383,10 +383,16 @@ fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<(u32, u8, bool), Option<
         .collect()
 }
 
-fn weighted_edge_map_from_layered(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompactedEdge {
+    weight: Option<u32>,
+    relationship_id: Option<crate::edge_store::RelationshipId>,
+}
+
+fn edge_map_from_layered(
     layered: &LayeredNeighbors<'_>,
     source: u32,
-) -> BTreeMap<(u32, u8, bool), Option<u32>> {
+) -> BTreeMap<(u32, u8, bool), CompactedEdge> {
     let weights = layered
         .weighted_neighbors(source)
         .into_iter()
@@ -402,9 +408,12 @@ fn weighted_edge_map_from_layered(
         .map(|neighbor| {
             (
                 (neighbor.target, neighbor.type_id, neighbor.schema_reversed),
-                weights
-                    .get(&(neighbor.target, neighbor.type_id, neighbor.schema_reversed))
-                    .copied(),
+                CompactedEdge {
+                    weight: weights
+                        .get(&(neighbor.target, neighbor.type_id, neighbor.schema_reversed))
+                        .copied(),
+                    relationship_id: neighbor.relationship_id,
+                },
             )
         })
         .collect()
@@ -680,6 +689,47 @@ mod tests {
                     schema_reversed: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_segment_relationship_ids() {
+        let dir = ProjectionArtifactDir::new("compaction_preserves_segment_relationship_ids");
+        std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+        let base = edge_store_from_tuples(4, &[]);
+        let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 1, 1)
+            .expect("edge segment");
+        segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(91),
+        });
+        let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
+        let path = dir.segment_path(1, 0);
+        segment.write_to_path(&path).expect("segment writes");
+        manifest
+            .segments
+            .push(segment_ref(dir.path(), &path, &segment).expect("segment ref"));
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+
+        let result =
+            compact_generation(dir.path(), &manifest, &base, CompactionBudgets::generous())
+                .expect("compaction publishes");
+        let provider = ManifestSegmentProvider::new(dir.path(), &result.manifest);
+        let actual = LayeredNeighbors::from_provider(&base, &provider).expect("compacted loads");
+
+        assert_eq!(
+            actual.neighbors(0).collect::<Vec<_>>(),
+            vec![crate::projection::neighbors::Neighbor {
+                target: 1,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(91),
+            }]
         );
     }
 

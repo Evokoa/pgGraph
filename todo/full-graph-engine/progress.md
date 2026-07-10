@@ -8,7 +8,7 @@ Last updated: 2026-07-10
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
-| 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, transaction-local relationship CREATE identity, trigger-sync edge identity, mutable-overlay segment relationship IDs, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, and base relationship hydration are enforced on PostgreSQL 17; compaction, broader writes, and savepoints remain. |
+| 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, transaction-local relationship CREATE identity, trigger-sync edge identity, mutable-overlay segment relationship IDs, representable compacted segment relationship IDs, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, and base relationship hydration are enforced on PostgreSQL 17; parallel-aware compaction, broader writes, and savepoints remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
@@ -32,7 +32,9 @@ Last updated: 2026-07-10
   preserve source identity for same-transaction visibility and hydration.
   Trigger-sync inserted relationship edges now intern source keys, persist those
   IDs in durable projection segments, and expose them through layered
-  mutable-overlay neighbor reads. Compaction, broader writes, and savepoints
+  mutable-overlay neighbor reads. Compacted segment rows preserve those IDs
+  when the row is representable by the current source/target/type/direction
+  compaction key. Parallel-aware compaction, broader writes, and savepoints
   remain open.
 
 - Added durable source primary-key metadata to relationship registrations and
@@ -58,9 +60,10 @@ Last updated: 2026-07-10
 - Relationship identity remains open outside the covered base, transaction, and
   trigger-sync segment paths: source keys and relationship IDs are durable and
   used for base GQL hydration, transaction-local creates, sync-published
-  segment reads, and selected relationship-row visibility checks, but
-  compaction, broader writes, savepoints, and complete relationship-row
-  visibility still need end-to-end identity handling.
+  segment reads, representable compacted segment reads, and selected
+  relationship-row visibility checks, but parallel-aware compaction, broader
+  writes, savepoints, and complete relationship-row visibility still need
+  end-to-end identity handling.
 
 - Added durable relationship mapping IDs to the catalog. OID-first
   re-registration preserves the mapping surrogate, which will combine with the
@@ -144,6 +147,7 @@ correctness and safety boundary.
 - 2026-07-09 — Independent three-phase review: fixed watermark-only artifact retention, pre-copy ingest budgeting, filter node-range validation, and malformed base dictionary fail-closed handling; the follow-up review and final gates were green.
 - 2026-07-10 — Checkpoint 1A relationship-artifact subphase: `.pggraph` v4 now persists and validates per-adjacency relationship IDs plus the source-row identity dictionary, including reverse CSR reload preservation.
 - 2026-07-10 — Checkpoint 1A sync/layered identity subphase: trigger-sync inserted edge rows now intern relationship source keys, durable segment edge rows store optional relationship IDs, and layered mutable-overlay reads preserve those IDs for GQL relationship values; compaction remains the next identity gap.
+- 2026-07-10 — Checkpoint 1A compaction identity subphase: projection compaction now preserves relationship IDs for compacted rows representable by the existing edge key; parallel-aware compaction remains open for identical endpoint/type/direction relationship rows.
 
 ## Decisions
 
@@ -277,6 +281,17 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Whitespace | `git diff --check` | PASS |
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 681 passed, 1 ignored; doctests 0 |
+| Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |
+
+### 2026-07-10 Compaction Relationship Identity Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Focused compaction ID preservation | `cd graph && cargo test --features pg17 projection::compact::tests::compaction_preserves_segment_relationship_ids` | PASS: 1 passed |
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Whitespace | `git diff --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 682 passed, 1 ignored; doctests 0 |
 | Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |
 
 ### 2026-07-10 Relationship ID Query Propagation Phase
