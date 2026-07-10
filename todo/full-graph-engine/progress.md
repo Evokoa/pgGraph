@@ -8,7 +8,7 @@ Last updated: 2026-07-09
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
-| 1A. Security and identity | In progress | Coordinate-only node visibility and base-CSR relationship multiplicity are enforced on PostgreSQL 17; durable relationship keys, relationship-row RLS, filter identity, and savepoints remain. |
+| 1A. Security and identity | In progress | Coordinate-only node visibility, base-CSR relationship multiplicity, and table-qualified filter identity are enforced on PostgreSQL 17; durable relationship keys, relationship-row RLS, and savepoints remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
