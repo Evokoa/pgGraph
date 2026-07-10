@@ -363,6 +363,10 @@ pub(crate) struct PhysicalCreateRelationship {
     pub(crate) edge_source_column: String,
     /// Edge row target key column.
     pub(crate) edge_target_column: String,
+    /// Durable catalog identity for the relationship mapping.
+    pub(crate) edge_mapping_id: u64,
+    /// Primary-key columns that identify one inserted edge source row.
+    pub(crate) edge_source_key_columns: crate::builder::PrimaryKeySpec,
     /// Whether the edge row is registered bidirectionally.
     pub(crate) bidirectional: bool,
     /// Dynamic relationship label column, when registered.

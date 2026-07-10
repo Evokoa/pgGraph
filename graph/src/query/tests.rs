@@ -4947,6 +4947,7 @@ fn executor_traverses_transaction_created_node_entry_points() {
             type_id: 1,
             schema_reversed: false,
             weight: None,
+            relationship_id: None,
         },
     )
     .expect("record tx edge");
@@ -5032,6 +5033,7 @@ fn executor_traverses_tx_nodes_matching_source_id_disjunctions() {
             type_id: 1,
             schema_reversed: false,
             weight: None,
+            relationship_id: None,
         },
     )
     .expect("record tx edge");
@@ -5073,6 +5075,7 @@ fn multi_pattern_join_traverses_transaction_created_node_entry_points() {
             type_id: 1,
             schema_reversed: false,
             weight: None,
+            relationship_id: None,
         },
     )
     .expect("record tx edge");
@@ -5140,6 +5143,7 @@ fn wildcard_path_traverses_transaction_created_node_entry_points() {
             type_id: 1,
             schema_reversed: false,
             weight: None,
+            relationship_id: None,
         },
     )
     .expect("record tx edge");

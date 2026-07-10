@@ -405,6 +405,7 @@ fn execute_create_relationship(
         plan,
         &source.node.node_id,
         &target.node.node_id,
+        &created.source_key,
         tenant_scope,
     )?;
     project_created_relationship(
@@ -776,6 +777,7 @@ struct CreatedNode {
 
 struct CreatedRelationship {
     row: serde_json::Value,
+    source_key: String,
 }
 
 struct MergedNode {
@@ -903,6 +905,7 @@ fn insert_mapped_relationship(
     let insert_shape = create_relationship_insert_shape(plan)?;
     let values =
         create_relationship_values_json(plan, &insert_shape, source_id, target_id, params)?;
+    let source_key_expr = create_relationship_source_key_predicate(plan, "inserted");
     let query = format!(
         "WITH inserted AS (
              INSERT INTO {table_name} ({})
@@ -910,7 +913,7 @@ fn insert_mapped_relationship(
              FROM jsonb_populate_record(NULL::{table_name}, $1::jsonb) AS rec
              RETURNING *
          )
-         SELECT to_jsonb(inserted.*)
+         SELECT to_jsonb(inserted.*), {source_key_expr}
          FROM inserted",
         insert_shape.columns.join(", "),
         insert_shape.selectors.join(", "),
@@ -936,8 +939,42 @@ fn insert_mapped_relationship(
                     "GQL relationship CREATE returned no row JSON".to_string(),
                 )
             })?;
-        Ok(CreatedRelationship { row: row_json.0 })
+        let source_key = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL relationship CREATE source-key read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "GQL relationship CREATE returned a NULL source key".to_string(),
+                )
+            })?;
+        Ok(CreatedRelationship {
+            row: row_json.0,
+            source_key,
+        })
     })
+}
+
+fn create_relationship_source_key_predicate(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    alias: &str,
+) -> String {
+    let columns = plan.edge_source_key_columns.columns();
+    if columns.len() > 1 {
+        let parts = columns
+            .iter()
+            .map(|column| format!("{alias}.{}::text", quote_ident(column)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("jsonb_build_array({parts})::text")
+    } else if let Some(column) = columns.first() {
+        format!("{alias}.{}::text", quote_ident(column))
+    } else {
+        "NULL::text".to_string()
+    }
 }
 
 fn merge_mapped_node(
@@ -2283,9 +2320,10 @@ fn record_added_relationship_delta(
     plan: &crate::query::physical_plan::PhysicalCreateRelationship,
     source_id: &str,
     target_id: &str,
+    source_key: &str,
     tenant_scope: Option<&str>,
 ) -> safety::GraphResult<()> {
-    let (source, target, type_id) = ENGINE.with(|engine| {
+    let (source, target, type_id, base_identity_count) = ENGINE.with(|engine| {
         let engine = engine.borrow();
         let source = resolve_built_or_added_node(
             &engine,
@@ -2312,8 +2350,20 @@ fn record_added_relationship_delta(
                     plan.rel_type
                 ),
             })?;
-        Ok::<_, safety::GraphError>((source, target, type_id))
+        Ok::<_, safety::GraphError>((
+            source,
+            target,
+            type_id,
+            engine.relationship_identities.len(),
+        ))
     })?;
+    let relationship_id = crate::projection::tx_delta::record_relationship_identity(
+        base_identity_count,
+        crate::edge_store::RelationshipIdentity {
+            mapping_id: plan.edge_mapping_id,
+            source_key: source_key.to_string(),
+        },
+    )?;
     crate::projection::tx_delta::record_added_edge(
         source,
         crate::projection::tx_delta::DeltaEdge {
@@ -2321,6 +2371,7 @@ fn record_added_relationship_delta(
             type_id,
             schema_reversed: false,
             weight: None,
+            relationship_id: Some(relationship_id),
         },
     )?;
     if plan.bidirectional {
@@ -2331,6 +2382,7 @@ fn record_added_relationship_delta(
                 type_id,
                 schema_reversed: true,
                 weight: None,
+                relationship_id: Some(relationship_id),
             },
         )?;
     }
@@ -3082,8 +3134,7 @@ fn ensure_gql_relationship_rows_visible(
     let Some(edge_mapping) = &plan.edge_mapping else {
         return Ok(());
     };
-    let relationship_identities =
-        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    let relationship_identities = relationship_identity_snapshot();
     let mut relationship_ids = Vec::new();
     for row in rows {
         if row.rel_start.is_none() || row.rel_end.is_none() {
@@ -3098,6 +3149,16 @@ fn ensure_gql_relationship_rows_visible(
     )
 }
 
+fn relationship_identity_snapshot() -> Vec<Option<crate::edge_store::RelationshipIdentity>> {
+    let mut identities = ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    identities.extend(
+        crate::projection::tx_delta::relationship_identities()
+            .into_iter()
+            .map(Some),
+    );
+    identities
+}
+
 /// Check mapped relationship source-row visibility for multi-pattern joins.
 fn ensure_gql_join_relationship_rows_visible(
     rows: &[crate::query::execute::GqlRow],
@@ -3110,8 +3171,7 @@ fn ensure_gql_join_relationship_rows_visible(
     {
         return Ok(());
     }
-    let relationship_identities =
-        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    let relationship_identities = relationship_identity_snapshot();
     for (pattern_idx, pattern) in plan.patterns.iter().enumerate() {
         let Some(edge_mapping) = &pattern.edge_mapping else {
             continue;
@@ -3152,8 +3212,7 @@ fn ensure_gql_wildcard_relationship_rows_visible(
     if plan.edge_mappings_by_id.is_empty() {
         return Ok(());
     }
-    let relationship_identities =
-        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    let relationship_identities = relationship_identity_snapshot();
     let mut ids_by_mapping =
         std::collections::BTreeMap::<u64, Vec<Option<crate::edge_store::RelationshipId>>>::new();
 
@@ -3293,8 +3352,7 @@ fn hydrate_gql_relationship_rows(
     let Some(edge_mapping) = &plan.edge_mapping else {
         return Ok(hydrated);
     };
-    let relationship_identities =
-        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    let relationship_identities = relationship_identity_snapshot();
     for row in rows {
         let (Some(start), Some(end)) = (&row.rel_start, &row.rel_end) else {
             continue;
@@ -3466,6 +3524,7 @@ fn test_record_tx_edge(
                     type_id,
                     weight: None,
                     schema_reversed: false,
+                    relationship_id: None,
                 },
             ),
             "delete" => {

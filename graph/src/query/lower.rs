@@ -329,6 +329,8 @@ fn lower_create_relationship(plan: LogicalCreateRelationship) -> PhysicalCreateR
         edge_target_table_oid: plan.edge.target_table_oid,
         edge_source_column: plan.edge.source_column,
         edge_target_column: plan.edge.target_column,
+        edge_mapping_id: plan.edge_mapping_id,
+        edge_source_key_columns: plan.edge_source_key_columns,
         bidirectional: plan.edge.bidirectional,
         label_column: plan
             .relationship

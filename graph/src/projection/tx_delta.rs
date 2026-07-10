@@ -8,6 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::edge_store::{RelationshipId, RelationshipIdentity};
 use crate::filter_index::EncodedFilterValue;
 use crate::projection::neighbors::{EdgeOverlay, OverlayDeletes, OverlayInserts};
 use crate::safety::{GraphError, GraphResult};
@@ -37,6 +38,9 @@ pub(crate) struct DeltaEdge {
     pub(crate) schema_reversed: bool,
     /// Optional weight captured from a mapped edge row.
     pub(crate) weight: Option<u32>,
+    /// Stable relationship identity for mapped edge rows created in this
+    /// transaction.
+    pub(crate) relationship_id: Option<RelationshipId>,
 }
 
 /// Per-transaction graph projection delta.
@@ -47,6 +51,7 @@ pub(crate) struct TxGraphDelta {
     added_edges: HashMap<u32, Vec<DeltaEdge>>,
     deleted_edges: HashSet<(u32, u32, u8)>,
     filter_updates: HashMap<(usize, u32), Option<EncodedFilterValue>>,
+    relationship_identities: Vec<RelationshipIdentity>,
 }
 
 /// Lightweight statistics exposed through graph status surfaces.
@@ -110,6 +115,11 @@ impl TxGraphDelta {
             .values()
             .map(|edges| edges.capacity() * std::mem::size_of::<DeltaEdge>())
             .sum::<usize>();
+        let relationship_identity_key_bytes = self
+            .relationship_identities
+            .iter()
+            .map(|identity| identity.source_key.capacity())
+            .sum::<usize>();
         self.added_nodes.capacity() * std::mem::size_of::<AddedNode>()
             + node_pk_bytes
             + node_tenant_bytes
@@ -121,6 +131,8 @@ impl TxGraphDelta {
             + self.filter_updates.capacity()
                 * (std::mem::size_of::<(usize, u32)>()
                     + std::mem::size_of::<Option<EncodedFilterValue>>())
+            + self.relationship_identities.capacity() * std::mem::size_of::<RelationshipIdentity>()
+            + relationship_identity_key_bytes
     }
 
     fn is_dirty(&self) -> bool {
@@ -129,6 +141,7 @@ impl TxGraphDelta {
             || !self.added_edges.is_empty()
             || !self.deleted_edges.is_empty()
             || !self.filter_updates.is_empty()
+            || !self.relationship_identities.is_empty()
     }
 
     #[cfg(test)]
@@ -453,6 +466,39 @@ pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()>
     Ok(())
 }
 
+/// Intern a transaction-local relationship identity after PostgreSQL accepts
+/// the source edge row.
+pub(crate) fn record_relationship_identity(
+    base_identity_count: usize,
+    identity: RelationshipIdentity,
+) -> GraphResult<RelationshipId> {
+    ensure_write_capacity(0, 0, estimated_relationship_identity_bytes(&identity))?;
+    TX_DELTA.with(|delta| {
+        let mut borrowed = delta.borrow_mut();
+        let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        let offset = delta.relationship_identities.len();
+        let id = base_identity_count.checked_add(offset).ok_or_else(|| {
+            GraphError::Internal("relationship identity count overflowed usize".to_string())
+        })?;
+        let id = RelationshipId::try_from(id).map_err(|_| {
+            GraphError::Internal(format!("relationship identity `{id}` is out of range"))
+        })?;
+        delta.relationship_identities.push(identity);
+        Ok(id)
+    })
+}
+
+/// Return transaction-local relationship identities in allocation order.
+pub(crate) fn relationship_identities() -> Vec<RelationshipIdentity> {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .map(|delta| delta.relationship_identities.clone())
+            .unwrap_or_default()
+    })
+}
+
 /// Record a transaction-local edge deletion.
 #[allow(
     dead_code,
@@ -516,6 +562,7 @@ pub(crate) fn edge_overlay(direction: TraversalDirection) -> EdgeOverlay {
                     target,
                     edge.type_id,
                     edge.schema_reversed,
+                    edge.relationship_id,
                 ));
             }
         }
@@ -549,6 +596,7 @@ pub(crate) fn weighted_edge_overlay(
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
                     weight: edge.weight,
+                    relationship_id: edge.relationship_id,
                 });
             }
         }
@@ -593,6 +641,10 @@ fn estimated_deleted_edge_bytes() -> usize {
 fn estimated_filter_update_bytes() -> usize {
     std::mem::size_of::<(usize, u32)>()
         .saturating_add(std::mem::size_of::<Option<EncodedFilterValue>>())
+}
+
+fn estimated_relationship_identity_bytes(identity: &RelationshipIdentity) -> usize {
+    std::mem::size_of::<RelationshipIdentity>().saturating_add(identity.source_key.len())
 }
 
 fn orient_edge(direction: TraversalDirection, source: u32, target: u32) -> (u32, u32) {
@@ -764,6 +816,7 @@ mod tests {
                     type_id: 1,
                     weight: Some(3),
                     schema_reversed: false,
+                    relationship_id: None,
                 },
             );
             delta.deleted_edges.insert((1, 2, 1));
@@ -792,6 +845,56 @@ mod tests {
 
         assert!(with_tenant > without_tenant);
         clear_current_transaction_state();
+    }
+
+    #[test]
+    fn stats_include_transaction_relationship_identities() {
+        clear_current_transaction_state();
+
+        let id = record_relationship_identity(
+            10,
+            RelationshipIdentity {
+                mapping_id: 7,
+                source_key: "relationship-source-key".to_string(),
+            },
+        )
+        .expect("record relationship identity");
+
+        assert_eq!(id, 10);
+        assert_eq!(
+            relationship_identities(),
+            vec![RelationshipIdentity {
+                mapping_id: 7,
+                source_key: "relationship-source-key".to_string(),
+            }]
+        );
+        let stats = stats();
+        assert!(stats.dirty);
+        assert!(stats.memory_bytes >= std::mem::size_of::<RelationshipIdentity>());
+        clear_current_transaction_state();
+    }
+
+    #[test]
+    fn relationship_identity_memory_limit_rejects_before_recording() {
+        clear_current_transaction_state();
+        set_test_limits(100_000, 100_000, 8);
+
+        let err = record_relationship_identity(
+            0,
+            RelationshipIdentity {
+                mapping_id: 1,
+                source_key: "long-relationship-source-key".to_string(),
+            },
+        )
+        .expect_err("memory cap should reject relationship identity");
+
+        assert!(matches!(
+            err,
+            GraphError::OverlayLimit { kind, .. } if kind == "overlay_memory_bytes"
+        ));
+        assert!(relationship_identities().is_empty());
+        assert_eq!(stats(), TxDeltaStats::default());
+        clear_for_test();
     }
 
     #[test]
@@ -853,6 +956,7 @@ mod tests {
                 type_id: 1,
                 weight: None,
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("record insert");
@@ -868,6 +972,7 @@ mod tests {
                 type_id: 1,
                 weight: None,
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("record insert after delete");
@@ -875,7 +980,7 @@ mod tests {
         assert!(deletes.is_empty());
         assert!(inserts
             .get(&2)
-            .is_some_and(|edges| edges.contains(&(1, 1, false))));
+            .is_some_and(|edges| edges.contains(&(1, 1, false, None))));
 
         record_deleted_edge(1, 2, 1).expect("record delete after insert");
         let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
@@ -896,6 +1001,7 @@ mod tests {
                 type_id: 1,
                 weight: None,
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("delete plus add should be net neutral at limit");
@@ -909,6 +1015,7 @@ mod tests {
                 type_id: 1,
                 weight: None,
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("record insert at limit");
@@ -966,6 +1073,7 @@ mod tests {
                 type_id: 1,
                 weight: None,
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect_err("subtransaction should be rejected");

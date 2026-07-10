@@ -55,7 +55,7 @@ fn add_overlay_edges(config: &mut BfsConfig, graph: &graph_gen::BenchGraph, stri
         let inserted_target = source.wrapping_add(17) % node_count;
         config
             .overlay_insert_edges
-            .insert(source, vec![(inserted_target, 1, false)]);
+            .insert(source, vec![(inserted_target, 1, false, None)]);
 
         let (targets, type_ids) = graph.edge_store.neighbors(source);
         if let Some((&target, &type_id)) = targets.first().zip(type_ids.first()) {

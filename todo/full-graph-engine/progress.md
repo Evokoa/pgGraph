@@ -8,7 +8,7 @@ Last updated: 2026-07-10
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
-| 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, and base relationship hydration are enforced on PostgreSQL 17; overlays, sync, compaction, writes, and savepoints remain. |
+| 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, transaction-local relationship CREATE identity, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, and base relationship hydration are enforced on PostgreSQL 17; sync, compaction, broader writes, and savepoints remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
@@ -28,8 +28,9 @@ Last updated: 2026-07-10
   regressions verify two equal endpoint/type rows return two matches and hydrate
   separate edge-row IDs. Mapped single-pattern, supported join, and base
   wildcard relationship rows are checked under caller RLS before
-  coordinate-only output. Mutable overlays, sync, compaction, and writes remain
-  open.
+  coordinate-only output. Transaction-local relationship `CREATE` overlays now
+  preserve source identity for same-transaction visibility and hydration. Sync,
+  compaction, broader writes, and savepoints remain open.
 
 - Added durable source primary-key metadata to relationship registrations and
   catalog fingerprints. Existing mappings backfill declared primary keys and
@@ -316,6 +317,19 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Compile | `cd graph && cargo check --features "pg17 development"` | PASS |
 | Wildcard mapping metadata regression | `cd graph && cargo test --features pg17 wildcard_path_carries_edge_mapping_metadata` | PASS: 1 passed |
 | PostgreSQL wildcard relationship RLS regression | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_wildcard_relationships_fail_closed_when_edge_row_is_not_visible` | PASS: 1 passed; verifies `hydrate := false` and `hydrate := true` both fail closed when edge-table RLS hides a mapped relationship row returned through a wildcard path |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 677 passed, 1 ignored, doctests 0 |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Independent Rust review | `rust-reviewing` subagent over the join, wildcard, and transaction overlay identity phases | ATTEMPTED: subagent stalled without findings and was interrupted; local review found no blockers |
+| Whitespace | `git diff --check` | PASS |
+| Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |
+
+### 2026-07-10 Transaction Overlay Relationship Identity Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Compile | `cd graph && cargo check --features "pg17 development"` | PASS |
+| PostgreSQL same-transaction relationship hydration regression | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_create_relationship_inserts_edge_row_and_records_delta` | PASS: 1 passed; verifies a mapped relationship created through `graph.gql()` can be read and hydrated later in the same transaction through the transaction-local overlay |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 677 passed, 1 ignored, doctests 0 |
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Whitespace | `git diff --check` | PASS |

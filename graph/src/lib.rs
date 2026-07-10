@@ -165,7 +165,8 @@ pub mod bench_support {
     pub use crate::types::{EdgeTypeFilter, FilterCondition, FilterOp};
     use crate::types::{TraversalDirection, WeightedPathStep};
 
-    type OverlayInserts = HashMap<u32, Vec<(u32, u8, bool)>>;
+    type OverlayInserts =
+        HashMap<u32, Vec<(u32, u8, bool, Option<crate::edge_store::RelationshipId>)>>;
     type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
 
     /// Durable projection shape exercised by release-readiness benchmarks.
@@ -384,7 +385,7 @@ pub mod bench_support {
         for source in (0..node_count).step_by(509) {
             inserts.insert(
                 source,
-                vec![(source.wrapping_add(23) % node_count, 1, false)],
+                vec![(source.wrapping_add(23) % node_count, 1, false, None)],
             );
             deletes.insert(
                 source,

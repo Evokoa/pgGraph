@@ -2404,6 +2404,7 @@ fn gql_create_relationship_inserts_edge_row_and_records_delta() {
         source_rows,
         tx_added_edges,
         same_tx_gql_count,
+        same_tx_hydrated_id,
     ) = Spi::connect(|client| {
         let created = client
             .select(
@@ -2457,6 +2458,21 @@ fn gql_create_relationship_inserts_edge_row_and_records_delta() {
             .get::<i64>(1)
             .expect("same transaction relationship count read failed")
             .unwrap_or_default();
+        let same_tx_hydrated_id = client
+            .select(
+                "SELECT row #>> '{r,id}'
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN r',
+                    hydrate := true
+                 )",
+                None,
+                &[],
+            )
+            .expect("same transaction hydrated relationship read failed")
+            .first()
+            .get::<String>(1)
+            .expect("same transaction hydrated relationship id read failed")
+            .unwrap_or_default();
         Ok::<_, pgrx::spi::Error>((
             created
                 .get::<String>(1)
@@ -2477,6 +2493,7 @@ fn gql_create_relationship_inserts_edge_row_and_records_delta() {
             source_rows,
             tx_added_edges,
             same_tx_gql_count,
+            same_tx_hydrated_id,
         ))
     })
     .expect("relationship create verification failed");
@@ -2488,6 +2505,7 @@ fn gql_create_relationship_inserts_edge_row_and_records_delta() {
     assert_eq!(source_rows, 1);
     assert_eq!(tx_added_edges, 1);
     assert_eq!(same_tx_gql_count, 1);
+    assert_eq!(same_tx_hydrated_id, "f2");
 }
 
 #[pg_test]

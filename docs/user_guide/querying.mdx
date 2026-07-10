@@ -415,14 +415,18 @@ overwriting the concurrent change.
 Within the same transaction, node-only `MATCH`, relationship traversal,
 multi-pattern joins, wildcard path reads, and later relationship `CREATE`
 statements can read newly created nodes through backend-local temporary graph
-node indexes. `SET` updates registered non-key, non-tenant property columns and
-refreshes any registered typed filter index value for that backend. `REMOVE`
-sets a mapped scalar column to SQL `NULL` or removes a registered dotted key
-from a JSONB property column; repeated `REMOVE` calls are idempotent. Labels map
-to registered source tables, so label removal is not part of the supported
-write model. `CREATE` for relationships inserts exactly one registered edge row
-after matching and locking one source endpoint and one target endpoint; the new
-edge is visible through the transaction-local overlay. `DELETE` tombstones the
+node indexes. Mapped relationship `CREATE` also records the inserted edge row's
+source identity in the transaction-local overlay, so later relationship reads in
+the same transaction can enforce visibility and hydrate the created edge row by
+its registered primary key. `SET` updates registered non-key, non-tenant
+property columns and refreshes any registered typed filter index value for that
+backend. `REMOVE` sets a mapped scalar column to SQL `NULL` or removes a
+registered dotted key from a JSONB property column; repeated `REMOVE` calls are
+idempotent. Labels map to registered source tables, so label removal is not part
+of the supported write model. `CREATE` for relationships inserts exactly one
+registered edge row after matching and locking one source endpoint and one
+target endpoint; the new edge is visible through the transaction-local overlay.
+`DELETE` tombstones the
 matching graph edge in the current backend after PostgreSQL deletes exactly one
 edge row; endpoint nodes are not deleted. `DETACH DELETE` enumerates registered
 incident edge-row tables, deletes matching forward and reverse edge rows first,

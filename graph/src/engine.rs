@@ -828,7 +828,13 @@ impl Engine {
     }
 
     pub(crate) fn traversal_edge_overlay(&self, direction: TraversalDirection) -> EdgeOverlay {
-        let mut inserts: HashSet<(u32, u32, u8, bool)> = HashSet::new();
+        let mut inserts: HashSet<(
+            u32,
+            u32,
+            u8,
+            bool,
+            Option<crate::edge_store::RelationshipId>,
+        )> = HashSet::new();
         let mut deletes: HashSet<(u32, u32, u8)> = HashSet::new();
 
         for mutation in &self.edge_buffer {
@@ -841,11 +847,12 @@ impl Engine {
             match mutation.kind {
                 MutationKind::Insert => {
                     deletes.remove(&key);
-                    inserts.insert((key.0, key.1, key.2, false));
+                    inserts.insert((key.0, key.1, key.2, false, None));
                 }
                 MutationKind::Delete => {
-                    inserts
-                        .retain(|(source, target, type_id, _)| (*source, *target, *type_id) != key);
+                    inserts.retain(|(source, target, type_id, _, _)| {
+                        (*source, *target, *type_id) != key
+                    });
                     deletes.insert(key);
                 }
             }
@@ -855,24 +862,27 @@ impl Engine {
         for (source, targets) in tx_deletes {
             for (target, type_id) in targets {
                 let key = (source, target, type_id);
-                inserts.retain(|(source, target, type_id, _)| (*source, *target, *type_id) != key);
+                inserts
+                    .retain(|(source, target, type_id, _, _)| (*source, *target, *type_id) != key);
                 deletes.insert(key);
             }
         }
         for (source, targets) in tx_inserts {
-            for (target, type_id, schema_reversed) in targets {
+            for (target, type_id, schema_reversed, relationship_id) in targets {
                 let key = (source, target, type_id);
                 deletes.remove(&key);
-                inserts.insert((source, target, type_id, schema_reversed));
+                inserts.insert((source, target, type_id, schema_reversed, relationship_id));
             }
         }
 
         let mut insert_map: OverlayInserts = HashMap::new();
-        for (source, target, type_id, schema_reversed) in inserts {
-            insert_map
-                .entry(source)
-                .or_default()
-                .push((target, type_id, schema_reversed));
+        for (source, target, type_id, schema_reversed, relationship_id) in inserts {
+            insert_map.entry(source).or_default().push((
+                target,
+                type_id,
+                schema_reversed,
+                relationship_id,
+            ));
         }
         let mut delete_map: OverlayDeletes = HashMap::new();
         for (source, target, type_id) in deletes {
@@ -1839,6 +1849,7 @@ mod tests {
                 type_id: 1,
                 weight: None,
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("record tx edge insert");
@@ -2034,6 +2045,7 @@ mod tests {
                 type_id: 1,
                 weight: None,
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("record tx edge insert");
@@ -2130,6 +2142,7 @@ mod tests {
                 type_id: 1,
                 weight: Some(1),
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("record tx edge insert");

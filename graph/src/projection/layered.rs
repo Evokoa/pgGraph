@@ -723,7 +723,7 @@ fn merge_committed_overlay_maps(
         }
     }
     if let Some(inserted) = inserts.get(&node_idx) {
-        for &(target, type_id, schema_reversed) in inserted {
+        for &(target, type_id, schema_reversed, _) in inserted {
             merged.insert(
                 (target, type_id, schema_reversed),
                 LayeredEdge {
@@ -1115,6 +1115,7 @@ mod tests {
                 type_id: 1,
                 weight: None,
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("record tx insert");
@@ -1300,6 +1301,7 @@ mod tests {
                 type_id: 1,
                 weight: Some(4),
                 schema_reversed: false,
+                relationship_id: None,
             },
         )
         .expect("record weighted tx insert");
