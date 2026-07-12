@@ -35,6 +35,8 @@
 
 - [ ] Source, PGXN, Docker/package, checksum/SBOM/signing, license, and dependency
       policy gates are green for every supported target.
+- [ ] The gitleaks history and pending-change scans pass with no unreviewed
+      secret finding, and any false-positive exception is narrow and documented.
 - [ ] Quickstart, playground, examples, and operations guides pass from clean
       release artifacts rather than a development checkout.
 - [ ] Public docs render without broken links, stale claims, duplicated

@@ -13,6 +13,7 @@ root unless noted otherwise.
 |---|---|---|
 | `check_doc_references.py` | Editing docs or moving files | Validates local Markdown/MDX references so docs do not point at missing local files. |
 | `check_docs_drift.sh` | Before PRs and releases | Runs the aggregate documentation drift suite: local references, SQL API/GUC drift, and Rust source-map drift. |
+| `check_secrets.sh` | Before commits and releases | Runs gitleaks with redacted output. The default `all` mode scans full Git history and pending tracked changes; `history` and `changes` run either side independently. |
 | `check_dependency_updates.py` | Before releases and dependency bumps | Checks pinned Cargo, Python, Docker, and Nix flake GitHub inputs against upstream registries. It recommends only releases or commits at least 6 hours old by default and never updates files unless called with `--update ... --yes`. |
 | `check_rust_doc_map_drift.py` | Editing contributor internals docs | Checks that Rust source files and contributor documentation stay aligned. Supports `--list` for inventory inspection. |
 | `check_sql_api_drift.py` | Editing SQL APIs, GUCs, or API docs | Compares implemented SQL-facing functions and GUCs against documented API references. Supports `--list-implemented`. |
@@ -45,6 +46,21 @@ inventory output:
 python3 scripts/check_sql_api_drift.py --list-implemented
 python3 scripts/check_rust_doc_map_drift.py --list
 ```
+
+## Secret Scanning
+
+The release gate runs gitleaks by default. You can run the same check directly
+from any directory inside the repository:
+
+```bash
+scripts/check_secrets.sh all
+```
+
+Use `changes` for a quick pre-commit scan or `history` when only committed
+history needs validation. Findings are redacted, and each scan has a
+300-second timeout by default. Set `GITLEAKS_TIMEOUT_SECONDS` to a positive
+integer to change that limit. The script fails clearly when gitleaks is not
+installed; it never installs packages itself.
 
 Use these checks whenever you change:
 

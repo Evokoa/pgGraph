@@ -30,6 +30,12 @@ RUN_CROSS_BACKEND_DURABLE="${RUN_CROSS_BACKEND_DURABLE:-1}"
 RUN_PROJECTION_RECOVERY="${RUN_PROJECTION_RECOVERY:-1}"
 RUN_TX_DELTA_LIFECYCLE="${RUN_TX_DELTA_LIFECYCLE:-1}"
 RUN_GQL_WRITE_RECHECK="${RUN_GQL_WRITE_RECHECK:-1}"
+RUN_SECRETS="${RUN_SECRETS:-1}"
+
+if [[ "$RUN_SECRETS" == "1" ]]; then
+  ../scripts/check_secrets.sh all
+fi
+
 if [[ "$RUN_FULL_MATRIX" == "1" ]]; then
   ./tests/heavy/run_pg_matrix.sh
 fi

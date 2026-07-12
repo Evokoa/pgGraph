@@ -22,3 +22,7 @@ remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
 and dynamic graphs are post-1.0 roadmap work. The next implementation work is
 still R1/Checkpoint 1A parallel-aware compaction, followed by broader identity,
 visibility, filter, and savepoint closure.
+
+2026-07-11 release-gate maintenance: added an enabled-by-default gitleaks gate
+for full Git history and pending tracked changes, with redacted output and a
+standalone `scripts/check_secrets.sh` entry point.
