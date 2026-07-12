@@ -114,9 +114,11 @@ same-type/same-endpoint source rows as distinct matches. Pending overlay and
 layered segment neighbors currently report no stable relationship ID; code that
 requires an authoritative source relationship row must treat that as
 unavailable rather than guessing from endpoints.
-Mutable write operators must reject execution while a PostgreSQL subtransaction
-is active; the current delta model does not attempt per-savepoint overlay
-rollback.
+Mutable write operators use lazy transaction-delta snapshots for PostgreSQL
+subtransactions. The first graph write at each active nesting level captures
+the prior overlay; a subtransaction commit retains its changes, while an abort
+restores the captured overlay. Callback registration seeds its depth from
+PostgreSQL so a first extension call made inside an existing savepoint is safe.
 
 ## Status Computation
 

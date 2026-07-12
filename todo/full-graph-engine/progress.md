@@ -290,6 +290,7 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Old segment rejection | `cd graph && cargo test --features pg17 projection::segment::tests::delta_segment_rejects_pre_typed_filter_format_version` | PASS: 1 passed |
 | Formatting | `cd graph && cargo fmt --check` | PASS |
 | Whitespace | `git diff --check` | PASS |
+
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 681 passed, 1 ignored; doctests 0 |
 | Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |
@@ -300,6 +301,19 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 |---|---|---|
 | Focused compaction ID preservation | `cd graph && cargo test --features pg17 projection::compact::tests::compaction_preserves_segment_relationship_ids` | PASS: 1 passed |
 | Formatting | `cd graph && cargo fmt --check` | PASS |
+| Whitespace | `git diff --check` | PASS |
+
+### 2026-07-11 R1 Savepoint Delta Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Transaction-delta unit tests | `cd graph && cargo test --features pg17 projection::tx_delta::tests` | PASS: 17 passed, including nested snapshot memory preflight |
+| PostgreSQL savepoint lifecycle | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta ./tests/heavy/tx_delta_lifecycle.sh` | PASS: rollback restores the prior overlay and release retains it, including lazy callback registration inside a savepoint |
+| PostgreSQL-first GQL lifecycle | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_create_tx ./tests/heavy/gql_create_tx_lifecycle.sh` | PASS: nested savepoint abort/release and PL/pgSQL exception subtransactions keep source rows and graph overlays consistent |
+| Independent Rust review | `rust-reviewing` subagent over savepoint callbacks and frames | PASS after charging snapshot copies before cloning, adding nested real-GQL and PL exception coverage, and clearing state at transaction prepare |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 685 passed, 1 ignored, doctests 0 |
+| Contract and docs drift | `scripts/check_docs_drift.sh` | PASS |
 | Whitespace | `git diff --check` | PASS |
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 682 passed, 1 ignored; doctests 0 |

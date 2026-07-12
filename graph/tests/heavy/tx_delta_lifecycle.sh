@@ -178,6 +178,48 @@ assert_reverse_count 0 "rollback discard"
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >/dev/null
 BEGIN;
+SAVEPOINT graph_overlay_write;
+SELECT graph._test_record_tx_edge(
+    'public.graph_tx_delta_nodes'::regclass,
+    'u2',
+    'public.graph_tx_delta_nodes'::regclass,
+    'u1',
+    'friend',
+    'insert'
+);
+ROLLBACK TO SAVEPOINT graph_overlay_write;
+DO $$
+BEGIN
+    IF (SELECT tx_delta_dirty FROM graph.status()) THEN
+        RAISE EXCEPTION 'savepoint rollback retained transaction overlay';
+    END IF;
+END
+$$;
+RELEASE SAVEPOINT graph_overlay_write;
+
+SAVEPOINT graph_overlay_release;
+SELECT graph._test_record_tx_edge(
+    'public.graph_tx_delta_nodes'::regclass,
+    'u2',
+    'public.graph_tx_delta_nodes'::regclass,
+    'u1',
+    'friend',
+    'insert'
+);
+RELEASE SAVEPOINT graph_overlay_release;
+DO $$
+BEGIN
+    IF NOT (SELECT tx_delta_dirty FROM graph.status()) THEN
+        RAISE EXCEPTION 'savepoint release discarded transaction overlay';
+    END IF;
+END
+$$;
+ROLLBACK;
+SQL
+assert_reverse_count 0 "savepoint rollback and release"
+
+psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >/dev/null
+BEGIN;
 SELECT graph._test_record_tx_edge(
     'public.graph_tx_delta_nodes'::regclass,
     'u2',

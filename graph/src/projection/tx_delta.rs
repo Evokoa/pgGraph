@@ -44,7 +44,7 @@ pub(crate) struct DeltaEdge {
 }
 
 /// Per-transaction graph projection delta.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct TxGraphDelta {
     added_nodes: Vec<AddedNode>,
     deleted_nodes: HashSet<u32>,
@@ -74,6 +74,7 @@ pub(crate) struct TxDeltaStats {
 thread_local! {
     static TX_DELTA: RefCell<Option<TxGraphDelta>> = const { RefCell::new(None) };
     static SUBTRANSACTION_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static SUBTRANSACTION_SNAPSHOTS: RefCell<Vec<Option<TxGraphDelta>>> = const { RefCell::new(Vec::new()) };
     #[cfg(test)]
     static TEST_MAX_TX_DELTA_NODES: Cell<usize> = const { Cell::new(100_000) };
     #[cfg(test)]
@@ -398,10 +399,14 @@ pub(crate) fn ensure_write_capacity(
     )?;
     enforce_limit(
         "overlay_memory_bytes",
-        stats.memory_bytes.saturating_add(additional_memory_bytes),
+        stats
+            .memory_bytes
+            .saturating_add(pending_snapshot_bytes())
+            .saturating_add(additional_memory_bytes),
         max_overlay_memory_bytes(),
     )?;
-    reject_if_subtransaction()
+    snapshot_active_subtransactions();
+    Ok(())
 }
 
 #[cfg(not(test))]
@@ -665,6 +670,10 @@ pub(crate) fn register_transaction_callbacks() {
         // transaction hooks. The callback functions below do not allocate
         // through PostgreSQL, do not call SPI, and do not raise errors.
         unsafe {
+            let nesting = pgrx::pg_sys::GetCurrentTransactionNestLevel();
+            SUBTRANSACTION_DEPTH.with(|depth| {
+                depth.set(u32::try_from(nesting.saturating_sub(1)).unwrap_or_default());
+            });
             pgrx::pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());
             pgrx::pg_sys::RegisterSubXactCallback(Some(subxact_callback), std::ptr::null_mut());
         }
@@ -690,7 +699,8 @@ unsafe extern "C-unwind" fn xact_callback(
     use pgrx::pg_sys::XactEvent;
     if matches!(
         event,
-        XactEvent::XACT_EVENT_COMMIT
+        XactEvent::XACT_EVENT_PREPARE
+            | XactEvent::XACT_EVENT_COMMIT
             | XactEvent::XACT_EVENT_ABORT
             | XactEvent::XACT_EVENT_PARALLEL_COMMIT
             | XactEvent::XACT_EVENT_PARALLEL_ABORT
@@ -713,10 +723,10 @@ unsafe extern "C-unwind" fn subxact_callback(
             SUBTRANSACTION_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
         }
         SubXactEvent::SUBXACT_EVENT_COMMIT_SUB => {
-            decrement_subtransaction_depth();
+            finish_subtransaction(false);
         }
         SubXactEvent::SUBXACT_EVENT_ABORT_SUB => {
-            decrement_subtransaction_depth();
+            finish_subtransaction(true);
         }
         SubXactEvent::SUBXACT_EVENT_PRE_COMMIT_SUB => {}
         _ => {}
@@ -725,29 +735,29 @@ unsafe extern "C-unwind" fn subxact_callback(
 
 /// Return current transaction-delta statistics.
 pub(crate) fn stats() -> TxDeltaStats {
-    TX_DELTA.with(|delta| {
+    let mut stats = TX_DELTA.with(|delta| {
         delta
             .borrow()
             .as_ref()
             .map(TxGraphDelta::stats)
             .unwrap_or_default()
-    })
+    });
+    stats.memory_bytes = stats
+        .memory_bytes
+        .saturating_add(SUBTRANSACTION_SNAPSHOTS.with(|snapshots| {
+            snapshots
+                .borrow()
+                .iter()
+                .flatten()
+                .map(TxGraphDelta::estimated_heap_bytes)
+                .sum::<usize>()
+        }));
+    stats
 }
 
+#[cfg(test)]
 fn subtransaction_active() -> bool {
     SUBTRANSACTION_DEPTH.with(|depth| depth.get() > 0)
-}
-
-fn reject_if_subtransaction() -> GraphResult<()> {
-    if subtransaction_active() {
-        return Err(GraphError::UnsupportedOperation {
-            operation: "mutable graph write inside a subtransaction".to_string(),
-            reason:
-                "transaction-local graph overlays reject SAVEPOINT and PL subtransaction writes"
-                    .to_string(),
-        });
-    }
-    Ok(())
 }
 
 fn clear_current_delta() {
@@ -759,9 +769,53 @@ fn clear_current_delta() {
 fn clear_current_transaction_state() {
     clear_current_delta();
     SUBTRANSACTION_DEPTH.with(|depth| depth.set(0));
+    SUBTRANSACTION_SNAPSHOTS.with(|snapshots| snapshots.borrow_mut().clear());
 }
 
-fn decrement_subtransaction_depth() {
+fn snapshot_active_subtransactions() {
+    let depth = SUBTRANSACTION_DEPTH.with(Cell::get) as usize;
+    if depth == 0 {
+        return;
+    }
+    let current = TX_DELTA.with(|delta| delta.borrow().clone().unwrap_or_default());
+    SUBTRANSACTION_SNAPSHOTS.with(|snapshots| {
+        let mut snapshots = snapshots.borrow_mut();
+        while snapshots.len() < depth {
+            snapshots.push(Some(current.clone()));
+        }
+    });
+}
+
+fn pending_snapshot_bytes() -> usize {
+    let depth = SUBTRANSACTION_DEPTH.with(Cell::get) as usize;
+    let captured = SUBTRANSACTION_SNAPSHOTS.with(|snapshots| snapshots.borrow().len());
+    let missing = depth.saturating_sub(captured);
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .map(TxGraphDelta::estimated_heap_bytes)
+            .unwrap_or_default()
+            .saturating_mul(missing)
+    })
+}
+
+fn finish_subtransaction(aborted: bool) {
+    let depth = SUBTRANSACTION_DEPTH.with(Cell::get) as usize;
+    if depth == 0 {
+        return;
+    }
+    let snapshot = SUBTRANSACTION_SNAPSHOTS.with(|snapshots| {
+        let mut snapshots = snapshots.borrow_mut();
+        let snapshot = snapshots.get_mut(depth - 1).and_then(Option::take);
+        snapshots.truncate(depth - 1);
+        snapshot
+    });
+    if aborted {
+        if let Some(snapshot) = snapshot {
+            TX_DELTA.with(|delta| *delta.borrow_mut() = Some(snapshot));
+        }
+    }
     SUBTRANSACTION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
 }
 
@@ -776,6 +830,7 @@ fn with_delta_for_test(mut f: impl FnMut(&mut TxGraphDelta)) {
 
 #[cfg(test)]
 fn set_subtransaction_depth_for_test(depth: u32) {
+    SUBTRANSACTION_SNAPSHOTS.with(|snapshots| snapshots.borrow_mut().clear());
     SUBTRANSACTION_DEPTH.with(|cell| cell.set(depth));
 }
 
@@ -1043,28 +1098,86 @@ mod tests {
         clear_current_transaction_state();
         set_subtransaction_depth_for_test(2);
 
-        decrement_subtransaction_depth();
+        finish_subtransaction(false);
 
         assert!(subtransaction_active());
-        decrement_subtransaction_depth();
+        finish_subtransaction(false);
         assert!(!subtransaction_active());
     }
 
     #[test]
-    fn subtransaction_abort_preserves_outer_delta_and_depth() {
+    fn subtransaction_abort_restores_outer_delta_and_depth() {
         clear_current_transaction_state();
         with_delta_for_test(|delta| delta.add_node_for_test(100, "new-node", 42));
-        set_subtransaction_depth_for_test(2);
+        set_subtransaction_depth_for_test(1);
+        record_added_edge(
+            1,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        )
+        .expect("subtransaction write records");
 
-        decrement_subtransaction_depth();
+        finish_subtransaction(true);
 
-        assert!(stats().dirty);
-        assert!(subtransaction_active());
+        assert_eq!(stats().added_nodes, 1);
+        assert_eq!(stats().added_edges, 0);
+        assert!(!subtransaction_active());
     }
 
     #[test]
-    fn subtransaction_rejection_is_explicit() {
+    fn subtransaction_commit_keeps_delta() {
+        clear_current_transaction_state();
         set_subtransaction_depth_for_test(1);
+
+        record_added_edge(
+            1,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        )
+        .expect("subtransaction write records");
+        finish_subtransaction(false);
+
+        assert_eq!(stats().added_edges, 1);
+        assert!(!subtransaction_active());
+    }
+
+    #[test]
+    fn capacity_rejection_does_not_create_subtransaction_snapshot() {
+        clear_current_transaction_state();
+        set_subtransaction_depth_for_test(1);
+
+        let err = ensure_write_capacity(100_001, 0, 0)
+            .expect_err("node capacity should reject before subtransaction");
+
+        assert!(matches!(
+            err,
+            GraphError::OverlayLimit { kind, .. } if kind == "tx_delta_nodes"
+        ));
+        assert!(SUBTRANSACTION_SNAPSHOTS.with(|snapshots| snapshots.borrow().is_empty()));
+        set_subtransaction_depth_for_test(0);
+    }
+
+    #[test]
+    fn nested_snapshot_memory_is_rejected_before_cloning() {
+        clear_current_transaction_state();
+        with_delta_for_test(|delta| delta.add_node_for_test(100, "outer-node", 42));
+        let current_bytes = stats().memory_bytes;
+        set_test_limits(
+            100_000,
+            100_000,
+            current_bytes.saturating_add(estimated_added_edge_bytes()),
+        );
+        set_subtransaction_depth_for_test(2);
 
         let err = record_added_edge(
             1,
@@ -1076,25 +1189,16 @@ mod tests {
                 relationship_id: None,
             },
         )
-        .expect_err("subtransaction should be rejected");
-
-        assert!(matches!(err, GraphError::UnsupportedOperation { .. }));
-        set_subtransaction_depth_for_test(0);
-    }
-
-    #[test]
-    fn capacity_rejection_reports_overlay_limit_before_subtransaction_guard() {
-        clear_current_transaction_state();
-        set_subtransaction_depth_for_test(1);
-
-        let err = ensure_write_capacity(100_001, 0, 0)
-            .expect_err("node capacity should reject before subtransaction");
+        .expect_err("snapshot copies must be charged before cloning");
 
         assert!(matches!(
             err,
-            GraphError::OverlayLimit { kind, .. } if kind == "tx_delta_nodes"
+            GraphError::OverlayLimit { kind, .. } if kind == "overlay_memory_bytes"
         ));
-        set_subtransaction_depth_for_test(0);
+        assert!(SUBTRANSACTION_SNAPSHOTS.with(|snapshots| snapshots.borrow().is_empty()));
+        assert_eq!(stats().added_nodes, 1);
+        assert_eq!(stats().added_edges, 0);
+        clear_for_test();
     }
 
     #[test]

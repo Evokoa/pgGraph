@@ -446,9 +446,10 @@ racing the same key converge on one PostgreSQL source row. `MERGE` requires
 `SELECT` and `INSERT` on the mapped source table; `UPDATE` is required only when
 the statement includes `ON MATCH SET`. `CREATE`, `SET`, `REMOVE`, `DELETE`,
 `DETACH DELETE`, and `MERGE` are rejected on `csr_readonly`
-projections. GQL writes are not accepted inside savepoints or PL
-subtransactions because the backend-local graph overlay is scoped to the
-top-level PostgreSQL transaction. Multi-row graph writes and creating new
+projections. GQL writes participate in PostgreSQL savepoints and PL
+subtransactions: releasing a savepoint retains its transaction-local graph
+overlay, while rolling it back restores the overlay visible before that
+savepoint. Multi-row graph writes and creating new
 PostgreSQL schema objects from GQL are not part of this release's GQL subset.
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical

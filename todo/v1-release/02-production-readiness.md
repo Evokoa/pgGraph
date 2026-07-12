@@ -10,7 +10,7 @@
       scalar identities, aggregates, existence, and hydration-disabled output.
 - [ ] Finish table-qualified filter identity and remove ambiguous internal
       name-only lookup paths.
-- [ ] Add subtransaction/savepoint delta frames with rollback and release tests.
+- [x] Add subtransaction/savepoint delta frames with rollback and release tests.
 - [ ] Complete READ COMMITTED, REPEATABLE READ, SERIALIZABLE, constraint,
       trigger, partition, composite-key, and concurrent-write coverage for the
       advertised write profile.

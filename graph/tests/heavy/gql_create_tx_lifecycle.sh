@@ -55,6 +55,73 @@ END
 $$;
 
 BEGIN;
+SAVEPOINT outer_graph_write;
+SELECT graph.gql(
+    'CREATE (u:graph_gql_create_tx_nodes {id: ''savepoint-outer'', name: ''Outer''}) RETURN u'
+);
+SAVEPOINT inner_graph_abort;
+SELECT graph.gql(
+    'CREATE (u:graph_gql_create_tx_nodes {id: ''savepoint-abort'', name: ''Abort''}) RETURN u'
+);
+ROLLBACK TO SAVEPOINT inner_graph_abort;
+RELEASE SAVEPOINT inner_graph_abort;
+SAVEPOINT inner_graph_release;
+SELECT graph.gql(
+    'CREATE (u:graph_gql_create_tx_nodes {id: ''savepoint-release'', name: ''Release''}) RETURN u'
+);
+RELEASE SAVEPOINT inner_graph_release;
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM public.graph_gql_create_tx_nodes
+        WHERE id IN ('savepoint-outer', 'savepoint-release')) <> 2 THEN
+        RAISE EXCEPTION 'nested savepoint release did not retain source rows';
+    END IF;
+    IF (SELECT count(*) FROM public.graph_gql_create_tx_nodes
+        WHERE id = 'savepoint-abort') <> 0 THEN
+        RAISE EXCEPTION 'nested savepoint rollback retained source row';
+    END IF;
+    IF (SELECT tx_delta_added_nodes FROM graph.status()) <> 2 THEN
+        RAISE EXCEPTION 'nested savepoint overlay count did not match source rows';
+    END IF;
+END
+$$;
+ROLLBACK TO SAVEPOINT outer_graph_write;
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM public.graph_gql_create_tx_nodes
+        WHERE id LIKE 'savepoint-%') <> 0 THEN
+        RAISE EXCEPTION 'outer savepoint rollback retained source rows';
+    END IF;
+    IF (SELECT tx_delta_dirty FROM graph.status()) THEN
+        RAISE EXCEPTION 'outer savepoint rollback retained graph overlay';
+    END IF;
+END
+$$;
+RELEASE SAVEPOINT outer_graph_write;
+ROLLBACK;
+
+BEGIN;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM graph.gql(
+            'CREATE (u:graph_gql_create_tx_nodes {id: ''pl-abort'', name: ''PL Abort''}) RETURN u'
+        );
+        RAISE EXCEPTION 'force PL subtransaction rollback';
+    EXCEPTION WHEN raise_exception THEN
+        NULL;
+    END;
+    IF (SELECT count(*) FROM public.graph_gql_create_tx_nodes WHERE id = 'pl-abort') <> 0 THEN
+        RAISE EXCEPTION 'PL exception retained source row';
+    END IF;
+    IF (SELECT tx_delta_dirty FROM graph.status()) THEN
+        RAISE EXCEPTION 'PL exception retained graph overlay';
+    END IF;
+END
+$$;
+ROLLBACK;
+
+BEGIN;
 SELECT graph.gql(
     'CREATE (u:graph_gql_create_tx_nodes {id: ''rollback-node'', name: ''Rolled Back''}) RETURN u'
 );

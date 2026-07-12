@@ -4,7 +4,7 @@ The active phased program is tracked in
 [`full-graph-engine/progress.md`](./full-graph-engine/progress.md). That file is
 the authoritative checkpoint handoff, measurement log, and next-action record.
 
-Last synchronized: 2026-07-10
+Last synchronized: 2026-07-11
 
 Current phase: Checkpoint 1A relationship identity persistence, base-CSR GQL
 query/path propagation, base relationship hydration, and mapped relationship-row
@@ -13,16 +13,21 @@ are implemented and targeted on PostgreSQL 17 tests; transaction-local
 relationship `CREATE` overlays now preserve source identity for same-transaction
 visibility and hydration; trigger-sync inserted relationship edges now carry
 source identity through durable segments, layered mutable-overlay reads, and
-representable compacted segment rows. Continue with parallel-aware compaction,
-broader writes, and savepoint use of persisted relationship IDs.
+representable compacted segment rows. Parallel-aware compaction, dirty-range
+chunk replacement, and savepoint rollback/release are complete. Continue with
+broader write identity, visibility, filter, and isolation coverage.
 
 Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
 and dynamic graphs are post-1.0 roadmap work. The next implementation work is
-still R1/Checkpoint 1A broader write identity, visibility, filter, and savepoint
-closure; parallel-aware compaction and dirty-range identity preservation are
-complete.
+still R1/Checkpoint 1A broader write identity, visibility, filter, and isolation
+closure; parallel-aware compaction, dirty-range identity preservation, and
+savepoint delta handling are complete.
+
+2026-07-11 R1 savepoints — Transaction-local graph overlays now follow nested
+PostgreSQL savepoint and PL subtransaction release/rollback semantics, including
+when the extension is first loaded from inside an existing savepoint.
 
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
