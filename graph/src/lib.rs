@@ -363,6 +363,7 @@ pub mod bench_support {
                 target,
                 type_id: 1,
                 schema_reversed: false,
+                relationship_id: None,
                 weight: 1,
             });
         }

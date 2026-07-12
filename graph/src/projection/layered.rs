@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::edge_store::EdgeStore;
+use crate::edge_store::{EdgeStore, RelationshipId, NO_RELATIONSHIP_ID};
 use crate::projection::chunk::SourceRange;
 use crate::projection::manifest::{ManifestChunkRef, ManifestSegmentRef, ProjectionManifest};
 use crate::projection::neighbors::{
@@ -27,6 +27,7 @@ struct EdgeKey {
     target: u32,
     type_id: u8,
     schema_reversed: bool,
+    relationship_id: Option<RelationshipId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +51,10 @@ enum DurableEdgeState {
 #[derive(Debug, Default)]
 struct DurableEdges {
     inserts: Vec<LayeredEdge>,
-    deletes: HashSet<(u32, u8, bool)>,
+    deletes: HashSet<(u32, u8, bool, Option<RelationshipId>)>,
 }
+
+type MergedEdgeKey = (u32, u8, bool, Option<RelationshipId>);
 
 /// Source of decoded durable segments for a layered projection snapshot.
 pub(crate) trait SegmentProvider {
@@ -320,6 +323,7 @@ impl<'a> LayeredNeighbors<'a> {
                     type_id: edge.type_id,
                     weight,
                     schema_reversed: edge.schema_reversed,
+                    relationship_id: edge.relationship_id,
                 })
             })
             .collect()
@@ -348,7 +352,9 @@ impl<'a> LayeredNeighbors<'a> {
             && self.tenant_memberships.is_empty()
             && !tx_delta::edge_delta_dirty()
         {
-            let (targets, type_ids, schema_reversed) = self.base.neighbors_with_schema(node_idx);
+            let (targets, type_ids, schema_reversed, relationship_ids) = self
+                .base
+                .neighbors_with_schema_and_relationship_ids(node_idx);
             let weights = base_weight_slice(self.base, node_idx);
             let mut neighbors = targets
                 .iter()
@@ -363,7 +369,10 @@ impl<'a> LayeredNeighbors<'a> {
                             type_id,
                             schema_reversed: schema_reversed != 0,
                             weight: weights.and_then(|values| values.get(idx)).copied(),
-                            relationship_id: None,
+                            relationship_id: relationship_ids
+                                .get(idx)
+                                .copied()
+                                .filter(|&id| id != NO_RELATIONSHIP_ID),
                         },
                     ))
                 })
@@ -374,7 +383,7 @@ impl<'a> LayeredNeighbors<'a> {
             return neighbors;
         }
 
-        let mut merged = BTreeMap::<(u32, u8, bool), LayeredEdge>::new();
+        let mut merged = BTreeMap::<MergedEdgeKey, LayeredEdge>::new();
         self.merge_base(direction, node_idx, &mut merged);
         self.merge_durable(direction, node_idx, &mut merged);
         self.merge_committed_overlay(direction, node_idx, &mut merged);
@@ -382,8 +391,8 @@ impl<'a> LayeredNeighbors<'a> {
 
         let mut neighbors = merged
             .into_iter()
-            .filter(|((target, _, _), _)| self.node_visible(*target))
-            .map(|((target, _, _), edge)| (target, edge))
+            .filter(|((target, _, _, _), _)| self.node_visible(*target))
+            .map(|((target, _, _, _), edge)| (target, edge))
             .collect::<Vec<_>>();
         if reversed {
             neighbors.reverse();
@@ -395,15 +404,16 @@ impl<'a> LayeredNeighbors<'a> {
         &self,
         direction: TraversalDirection,
         node_idx: u32,
-        merged: &mut BTreeMap<(u32, u8, bool), LayeredEdge>,
+        merged: &mut BTreeMap<MergedEdgeKey, LayeredEdge>,
     ) {
         match direction {
             TraversalDirection::Out => {
                 if self.base_chunk_covers(node_idx) {
                     merge_durable_map(&self.base_chunk_out, node_idx, merged);
                 } else {
-                    let (targets, type_ids, schema_reversed) =
-                        self.base.neighbors_with_schema(node_idx);
+                    let (targets, type_ids, schema_reversed, relationship_ids) = self
+                        .base
+                        .neighbors_with_schema_and_relationship_ids(node_idx);
                     let weights = base_weight_slice(self.base, node_idx);
                     for (idx, ((&target, &type_id), &schema_reversed)) in targets
                         .iter()
@@ -412,13 +422,24 @@ impl<'a> LayeredNeighbors<'a> {
                         .enumerate()
                     {
                         merged.insert(
-                            (target, type_id, schema_reversed != 0),
+                            (
+                                target,
+                                type_id,
+                                schema_reversed != 0,
+                                relationship_ids
+                                    .get(idx)
+                                    .copied()
+                                    .filter(|&id| id != NO_RELATIONSHIP_ID),
+                            ),
                             LayeredEdge {
                                 target,
                                 type_id,
                                 schema_reversed: schema_reversed != 0,
                                 weight: weights.and_then(|weights| weights.get(idx).copied()),
-                                relationship_id: None,
+                                relationship_id: relationship_ids
+                                    .get(idx)
+                                    .copied()
+                                    .filter(|&id| id != NO_RELATIONSHIP_ID),
                             },
                         );
                     }
@@ -426,8 +447,8 @@ impl<'a> LayeredNeighbors<'a> {
             }
             TraversalDirection::In => {
                 if let Some(base_in) = self.base_in {
-                    let (targets, type_ids, schema_reversed) =
-                        base_in.neighbors_with_schema(node_idx);
+                    let (targets, type_ids, schema_reversed, relationship_ids) =
+                        base_in.neighbors_with_schema_and_relationship_ids(node_idx);
                     let weights = base_weight_slice(base_in, node_idx);
                     for (idx, ((&target, &type_id), &schema_reversed)) in targets
                         .iter()
@@ -439,13 +460,24 @@ impl<'a> LayeredNeighbors<'a> {
                             continue;
                         }
                         merged.insert(
-                            (target, type_id, schema_reversed != 0),
+                            (
+                                target,
+                                type_id,
+                                schema_reversed != 0,
+                                relationship_ids
+                                    .get(idx)
+                                    .copied()
+                                    .filter(|&id| id != NO_RELATIONSHIP_ID),
+                            ),
                             LayeredEdge {
                                 target,
                                 type_id,
                                 schema_reversed: schema_reversed != 0,
                                 weight: weights.and_then(|weights| weights.get(idx).copied()),
-                                relationship_id: None,
+                                relationship_id: relationship_ids
+                                    .get(idx)
+                                    .copied()
+                                    .filter(|&id| id != NO_RELATIONSHIP_ID),
                             },
                         );
                     }
@@ -464,13 +496,14 @@ impl<'a> LayeredNeighbors<'a> {
     fn merge_base_in_by_scan(
         &self,
         node_idx: u32,
-        merged: &mut BTreeMap<(u32, u8, bool), LayeredEdge>,
+        merged: &mut BTreeMap<MergedEdgeKey, LayeredEdge>,
     ) {
         for source in 0..self.base.node_count() {
             if self.base_chunk_covers(source) {
                 continue;
             }
-            let (targets, type_ids, schema_reversed) = self.base.neighbors_with_schema(source);
+            let (targets, type_ids, schema_reversed, relationship_ids) =
+                self.base.neighbors_with_schema_and_relationship_ids(source);
             let weights = base_weight_slice(self.base, source);
             for (idx, ((&target, &type_id), &schema_reversed)) in targets
                 .iter()
@@ -480,13 +513,24 @@ impl<'a> LayeredNeighbors<'a> {
             {
                 if target == node_idx {
                     merged.insert(
-                        (source, type_id, schema_reversed != 0),
+                        (
+                            source,
+                            type_id,
+                            schema_reversed != 0,
+                            relationship_ids
+                                .get(idx)
+                                .copied()
+                                .filter(|&id| id != NO_RELATIONSHIP_ID),
+                        ),
                         LayeredEdge {
                             target: source,
                             type_id,
                             schema_reversed: schema_reversed != 0,
                             weight: weights.and_then(|weights| weights.get(idx).copied()),
-                            relationship_id: None,
+                            relationship_id: relationship_ids
+                                .get(idx)
+                                .copied()
+                                .filter(|&id| id != NO_RELATIONSHIP_ID),
                         },
                     );
                 }
@@ -505,7 +549,7 @@ impl<'a> LayeredNeighbors<'a> {
         &self,
         direction: TraversalDirection,
         node_idx: u32,
-        merged: &mut BTreeMap<(u32, u8, bool), LayeredEdge>,
+        merged: &mut BTreeMap<MergedEdgeKey, LayeredEdge>,
     ) {
         match direction {
             TraversalDirection::Out => merge_durable_map(&self.durable_out, node_idx, merged),
@@ -521,7 +565,7 @@ impl<'a> LayeredNeighbors<'a> {
         &self,
         direction: TraversalDirection,
         node_idx: u32,
-        merged: &mut BTreeMap<(u32, u8, bool), LayeredEdge>,
+        merged: &mut BTreeMap<MergedEdgeKey, LayeredEdge>,
     ) {
         match direction {
             TraversalDirection::Out => merge_committed_overlay_maps(
@@ -557,12 +601,12 @@ impl<'a> LayeredNeighbors<'a> {
         &self,
         direction: TraversalDirection,
         node_idx: u32,
-        merged: &mut BTreeMap<(u32, u8, bool), LayeredEdge>,
+        merged: &mut BTreeMap<MergedEdgeKey, LayeredEdge>,
     ) {
         let (inserts, deletes) = tx_delta::weighted_edge_overlay(direction);
         if let Some(deleted) = deletes.get(&node_idx) {
             for &(target, type_id) in deleted {
-                merged.retain(|&(edge_target, edge_type_id, _), _| {
+                merged.retain(|&(edge_target, edge_type_id, _, _), _| {
                     edge_target != target || edge_type_id != type_id
                 });
             }
@@ -570,7 +614,12 @@ impl<'a> LayeredNeighbors<'a> {
         if let Some(inserted) = inserts.get(&node_idx) {
             for edge in inserted {
                 merged.insert(
-                    (edge.target, edge.type_id, edge.schema_reversed),
+                    (
+                        edge.target,
+                        edge.type_id,
+                        edge.schema_reversed,
+                        edge.relationship_id,
+                    ),
                     LayeredEdge {
                         type_id: edge.type_id,
                         target: edge.target,
@@ -652,7 +701,7 @@ impl NeighborSource for DirectionalLayeredNeighbors<'_, '_> {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
-                    relationship_id: None,
+                    relationship_id: edge.relationship_id,
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -668,7 +717,7 @@ impl NeighborSource for DirectionalLayeredNeighbors<'_, '_> {
                     target,
                     type_id: edge.type_id,
                     schema_reversed: edge.schema_reversed,
-                    relationship_id: None,
+                    relationship_id: edge.relationship_id,
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -706,14 +755,30 @@ fn base_weight_slice(base: &EdgeStore, node_idx: u32) -> Option<&[u32]> {
 fn merge_durable_map(
     durable: &HashMap<u32, DurableEdges>,
     node_idx: u32,
-    merged: &mut BTreeMap<(u32, u8, bool), LayeredEdge>,
+    merged: &mut BTreeMap<MergedEdgeKey, LayeredEdge>,
 ) {
     if let Some(edges) = durable.get(&node_idx) {
-        for &(target, type_id, schema_reversed) in &edges.deletes {
-            merged.remove(&(target, type_id, schema_reversed));
+        for &(target, type_id, schema_reversed, relationship_id) in &edges.deletes {
+            if let Some(relationship_id) = relationship_id {
+                merged.remove(&(target, type_id, schema_reversed, Some(relationship_id)));
+            } else {
+                merged.retain(|&(edge_target, edge_type_id, edge_reversed, _), _| {
+                    edge_target != target
+                        || edge_type_id != type_id
+                        || edge_reversed != schema_reversed
+                });
+            }
         }
         for edge in &edges.inserts {
-            merged.insert((edge.target, edge.type_id, edge.schema_reversed), *edge);
+            merged.insert(
+                (
+                    edge.target,
+                    edge.type_id,
+                    edge.schema_reversed,
+                    edge.relationship_id,
+                ),
+                *edge,
+            );
         }
     }
 }
@@ -722,11 +787,11 @@ fn merge_committed_overlay_maps(
     inserts: &OverlayInserts,
     deletes: &OverlayDeletes,
     node_idx: u32,
-    merged: &mut BTreeMap<(u32, u8, bool), LayeredEdge>,
+    merged: &mut BTreeMap<MergedEdgeKey, LayeredEdge>,
 ) {
     if let Some(deleted) = deletes.get(&node_idx) {
         for &(target, type_id) in deleted {
-            merged.retain(|&(edge_target, edge_type_id, _), _| {
+            merged.retain(|&(edge_target, edge_type_id, _, _), _| {
                 edge_target != target || edge_type_id != type_id
             });
         }
@@ -734,7 +799,7 @@ fn merge_committed_overlay_maps(
     if let Some(inserted) = inserts.get(&node_idx) {
         for &(target, type_id, schema_reversed, relationship_id) in inserted {
             merged.insert(
-                (target, type_id, schema_reversed),
+                (target, type_id, schema_reversed, relationship_id),
                 LayeredEdge {
                     target,
                     type_id,
@@ -801,6 +866,7 @@ impl<'a> LayeredBuilder<'a> {
                         target: row.target,
                         type_id: row.type_id,
                         schema_reversed: row.schema_reversed,
+                        relationship_id: row.relationship_id,
                     },
                     row.weight,
                 )
@@ -813,6 +879,7 @@ impl<'a> LayeredBuilder<'a> {
                 edge.target,
                 edge.type_id,
                 edge.schema_reversed,
+                edge.relationship_id,
             );
         }
         for edge in &segment.edge_inserts {
@@ -826,6 +893,7 @@ impl<'a> LayeredBuilder<'a> {
                         target: edge.target,
                         type_id: edge.type_id,
                         schema_reversed: edge.schema_reversed,
+                        relationship_id: edge.relationship_id,
                     })
                     .copied(),
                 relationship_id: edge.relationship_id,
@@ -860,6 +928,7 @@ impl<'a> LayeredBuilder<'a> {
                         target: edge.target,
                         type_id: edge.type_id,
                         schema_reversed: edge.schema_reversed,
+                        relationship_id: edge.relationship_id,
                     },
                     DurableEdgeState::Present {
                         weight: edge.weight,
@@ -872,6 +941,7 @@ impl<'a> LayeredBuilder<'a> {
                         target: source,
                         type_id: edge.type_id,
                         schema_reversed: edge.schema_reversed,
+                        relationship_id: edge.relationship_id,
                     },
                     DurableEdgeState::Present {
                         weight: edge.weight,
@@ -886,6 +956,7 @@ impl<'a> LayeredBuilder<'a> {
                         target: edge.target,
                         type_id: edge.type_id,
                         schema_reversed: edge.schema_reversed,
+                        relationship_id: edge.relationship_id,
                     },
                     DurableEdgeState::Present {
                         weight: edge.weight,
@@ -898,6 +969,7 @@ impl<'a> LayeredBuilder<'a> {
                         target: source,
                         type_id: edge.type_id,
                         schema_reversed: edge.schema_reversed,
+                        relationship_id: edge.relationship_id,
                     },
                     DurableEdgeState::Present {
                         weight: edge.weight,
@@ -926,46 +998,51 @@ impl<'a> LayeredBuilder<'a> {
         target: u32,
         type_id: u8,
         schema_reversed: bool,
+        relationship_id: Option<RelationshipId>,
     ) {
         match direction {
             TraversalDirection::Out => {
-                self.out_edges.insert(
+                record_edge_delete(
+                    &mut self.out_edges,
                     EdgeKey {
                         source,
                         target,
                         type_id,
                         schema_reversed,
+                        relationship_id,
                     },
-                    DurableEdgeState::Deleted,
                 );
-                self.in_edges.insert(
+                record_edge_delete(
+                    &mut self.in_edges,
                     EdgeKey {
                         source: target,
                         target: source,
                         type_id,
                         schema_reversed,
+                        relationship_id,
                     },
-                    DurableEdgeState::Deleted,
                 );
             }
             TraversalDirection::In => {
-                self.in_edges.insert(
+                record_edge_delete(
+                    &mut self.in_edges,
                     EdgeKey {
                         source,
                         target,
                         type_id,
                         schema_reversed,
+                        relationship_id,
                     },
-                    DurableEdgeState::Deleted,
                 );
-                self.out_edges.insert(
+                record_edge_delete(
+                    &mut self.out_edges,
                     EdgeKey {
                         source: target,
                         target: source,
                         type_id,
                         schema_reversed,
+                        relationship_id,
                     },
-                    DurableEdgeState::Deleted,
                 );
             }
             TraversalDirection::Any => {
@@ -975,6 +1052,7 @@ impl<'a> LayeredBuilder<'a> {
                     target,
                     type_id,
                     schema_reversed,
+                    relationship_id,
                 );
                 self.remove_edge(
                     TraversalDirection::In,
@@ -982,6 +1060,7 @@ impl<'a> LayeredBuilder<'a> {
                     source,
                     type_id,
                     schema_reversed,
+                    relationship_id,
                 );
             }
         }
@@ -1046,6 +1125,7 @@ fn finish_direction(
                     key.target,
                     key.type_id,
                     key.schema_reversed,
+                    key.relationship_id,
                 ));
             }
         }
@@ -1053,16 +1133,35 @@ fn finish_direction(
     out
 }
 
+fn record_edge_delete(edges: &mut BTreeMap<EdgeKey, DurableEdgeState>, key: EdgeKey) {
+    if key.relationship_id.is_none() {
+        edges.retain(|existing, _| {
+            existing.source != key.source
+                || existing.target != key.target
+                || existing.type_id != key.type_id
+                || existing.schema_reversed != key.schema_reversed
+        });
+    }
+    edges.insert(key, DurableEdgeState::Deleted);
+}
+
 fn base_edge_exists(base: &EdgeStore, key: EdgeKey) -> bool {
-    let (targets, type_ids, schema_reversed) = base.neighbors_with_schema(key.source);
+    let (targets, type_ids, schema_reversed, relationship_ids) =
+        base.neighbors_with_schema_and_relationship_ids(key.source);
     targets
         .iter()
         .zip(type_ids.iter())
         .zip(schema_reversed.iter())
-        .any(|((&target, &type_id), &schema_reversed)| {
+        .enumerate()
+        .any(|(idx, ((&target, &type_id), &schema_reversed))| {
             target == key.target
                 && type_id == key.type_id
                 && (schema_reversed != 0) == key.schema_reversed
+                && relationship_ids
+                    .get(idx)
+                    .copied()
+                    .filter(|&id| id != NO_RELATIONSHIP_ID)
+                    == key.relationship_id
         })
 }
 
@@ -1293,6 +1392,7 @@ mod tests {
             source: 0,
             target: 2,
             type_id: 1,
+            relationship_id: None,
             weight: 3,
             schema_reversed: false,
         });
@@ -1304,12 +1404,14 @@ mod tests {
                 WeightedNeighbor {
                     target: 1,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 10,
                     schema_reversed: false,
                 },
                 WeightedNeighbor {
                     target: 2,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 3,
                     schema_reversed: false,
                 },
@@ -1365,12 +1467,14 @@ mod tests {
                 WeightedNeighbor {
                     target: 1,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 10,
                     schema_reversed: false,
                 },
                 WeightedNeighbor {
                     target: 2,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 4,
                     schema_reversed: false,
                 },

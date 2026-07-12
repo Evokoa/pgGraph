@@ -141,6 +141,8 @@ pub(crate) struct WeightedNeighbor {
     pub(crate) weight: u32,
     /// Whether this edge row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
+    /// Durable relationship identity for the weighted source row when available.
+    pub(crate) relationship_id: Option<RelationshipId>,
 }
 
 /// Source of weighted graph neighbors for shortest-path algorithms.
@@ -160,17 +162,23 @@ impl WeightedNeighborSource for EdgeStore {
     fn weighted_neighbors(&self, node_idx: u32) -> Vec<WeightedNeighbor> {
         let (targets, type_ids, schema_reversed, weights) =
             self.neighbors_weighted_with_schema(node_idx);
+        let (_, _, _, relationship_ids) = self.neighbors_with_schema_and_relationship_ids(node_idx);
         targets
             .iter()
             .zip(type_ids.iter())
             .zip(schema_reversed.iter())
             .zip(weights.iter())
+            .enumerate()
             .map(
-                |(((&target, &type_id), &schema_reversed), &weight)| WeightedNeighbor {
+                |(idx, (((&target, &type_id), &schema_reversed), &weight))| WeightedNeighbor {
                     target,
                     type_id,
                     weight,
                     schema_reversed: schema_reversed != 0,
+                    relationship_id: relationship_ids
+                        .get(idx)
+                        .copied()
+                        .filter(|&id| id != crate::edge_store::NO_RELATIONSHIP_ID),
                 },
             )
             .collect()

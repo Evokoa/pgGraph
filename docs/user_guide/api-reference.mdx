@@ -188,9 +188,10 @@ and either writes a higher-level compacted segment or, when
 `dirty_chunk_segment_threshold` is reached, writes replacement base chunks for
 the affected source-node ranges. Existing base CSR bytes are never overwritten.
 Compacted segment rows retain their source relationship identity when one is
-available. Rebuild remains the safest maintenance path for workloads that rely
-on multiple parallel relationship rows with the same source, target, type, and
-schema direction until parallel-aware compaction is complete.
+available. Parallel relationship rows with identical source, target, type, and
+schema direction remain separate through segment compaction and dirty-range
+base-chunk rewrite; identity-specific tombstones remove only the matching
+source relationship row.
 
 ### `graph.projection_gc()`
 

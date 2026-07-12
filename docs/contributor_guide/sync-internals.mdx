@@ -278,9 +278,12 @@ index's storage and text-dictionary arrays must agree before any segment value
 is applied. An invalid value or malformed index leaves the prior engine state
 unchanged.
 
-Projection segment versions are not read across this format boundary. After an
-upgrade from a release that wrote segment format v2, rebuild the graph from its
-authoritative PostgreSQL tables before serving the mutable projection. A clean
+Projection segment versions are not read across format boundaries. Segment
+format v5 keys topology, tombstone, and weight rows by optional stable
+relationship identity, which preserves equal-endpoint parallel relationships
+through layered reads, compaction, and dirty-range chunk replacement. After an
+upgrade from a release that wrote an older segment format, rebuild the graph
+from its authoritative PostgreSQL tables before serving the mutable projection. A clean
 `graph.build()` publishes a compatible base and manifest; old derived segment
 files can then be removed by the normal generation cleanup path.
 

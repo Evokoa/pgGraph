@@ -94,11 +94,12 @@ metadata lets compaction and diagnostics reason about the affected source-node
 span without rewriting existing mmap'd CSR bytes.
 </Callout>
 
-Durable filter values use projection segment format v3. Upgrading from a
-release that wrote segment format v2 requires a fresh `graph.build()` before
-the persisted mutable graph is served. The rebuild reads PostgreSQL source
-tables, which remain authoritative; it does not require rewriting application
-rows or graph registrations.
+Projection segment format v5 carries stable relationship identity on topology,
+deletion, and weight rows so parallel source relationships remain distinct
+through compaction. Older segment versions are rejected across this format
+boundary and require a fresh `graph.build()` before the persisted mutable graph
+is served. The rebuild reads authoritative PostgreSQL source tables and does
+not rewrite application rows or graph registrations.
 
 ## Query Freshness
 

@@ -8,7 +8,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::edge_store::{EdgeStore, RawEdge};
+use crate::edge_store::{
+    EdgeStore, IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder, NO_RELATIONSHIP_ID,
+};
 use crate::projection::chunk::{
     publish_base_chunk_rewrite_with_segments, EdgeStoreChunkSource, SourceRange,
 };
@@ -20,6 +22,8 @@ use crate::projection::neighbors::{NeighborSource, WeightedNeighborSource};
 use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentEdgeWeight, SegmentKind};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
+
+type CompactionEdgeKey = (u32, u8, bool, Option<crate::edge_store::RelationshipId>);
 
 /// Bounds for one compaction pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,8 +294,8 @@ fn build_compacted_segment(
         for source in range.start..range.end {
             let base_edges = edge_set(base, source);
             let final_edges = edge_map_from_layered(&layered, source);
-            for &(target, type_id, schema_reversed) in base_edges.keys() {
-                if final_edges.contains_key(&(target, type_id, schema_reversed)) {
+            for &(target, type_id, schema_reversed, relationship_id) in base_edges.keys() {
+                if final_edges.contains_key(&(target, type_id, schema_reversed, relationship_id)) {
                     continue;
                 }
                 compacted.edge_deletes.push(SegmentEdge {
@@ -299,11 +303,13 @@ fn build_compacted_segment(
                     target,
                     type_id,
                     schema_reversed,
-                    relationship_id: None,
+                    relationship_id,
                 });
             }
-            for (&(target, type_id, schema_reversed), edge) in final_edges.iter() {
-                if base_edges.get(&(target, type_id, schema_reversed)) == Some(&edge.weight) {
+            for (&(target, type_id, schema_reversed, relationship_id), edge) in final_edges.iter() {
+                if base_edges.get(&(target, type_id, schema_reversed, relationship_id))
+                    == Some(&edge.weight)
+                {
                     continue;
                 }
                 compacted.edge_inserts.push(SegmentEdge {
@@ -311,7 +317,7 @@ fn build_compacted_segment(
                     target,
                     type_id,
                     schema_reversed,
-                    relationship_id: edge.relationship_id,
+                    relationship_id,
                 });
                 if let Some(weight) = edge.weight {
                     compacted.edge_weights.push(SegmentEdgeWeight {
@@ -319,6 +325,7 @@ fn build_compacted_segment(
                         target,
                         type_id,
                         schema_reversed,
+                        relationship_id,
                         weight,
                     });
                 }
@@ -335,37 +342,51 @@ fn materialize_layered_store(
 ) -> GraphResult<EdgeStore> {
     let provider = ManifestSegmentProvider::new(root, previous);
     let layered = LayeredNeighbors::from_provider(base, &provider)?;
-    let mut edges = Vec::new();
     let has_weights = layered.has_weighted_edges();
+    let mut builder = SortedEdgeStoreBuilder::new(base.node_count(), has_weights);
     for source in 0..base.node_count() {
         let weights = layered
             .weighted_neighbors(source)
             .into_iter()
             .map(|neighbor| {
                 (
-                    (neighbor.target, neighbor.type_id, neighbor.schema_reversed),
+                    (
+                        neighbor.target,
+                        neighbor.type_id,
+                        neighbor.schema_reversed,
+                        neighbor.relationship_id,
+                    ),
                     neighbor.weight,
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        edges.extend(layered.neighbors(source).map(|neighbor| {
-            RawEdge {
-                source,
-                target: neighbor.target,
-                type_id: neighbor.type_id,
-                weight: weights
-                    .get(&(neighbor.target, neighbor.type_id, neighbor.schema_reversed))
-                    .copied(),
-                schema_reversed: neighbor.schema_reversed,
-            }
-        }));
+        for neighbor in layered.neighbors(source) {
+            builder.try_push_identified(IdentifiedRawEdge {
+                edge: RawEdge {
+                    source,
+                    target: neighbor.target,
+                    type_id: neighbor.type_id,
+                    weight: weights
+                        .get(&(
+                            neighbor.target,
+                            neighbor.type_id,
+                            neighbor.schema_reversed,
+                            neighbor.relationship_id,
+                        ))
+                        .copied(),
+                    schema_reversed: neighbor.schema_reversed,
+                },
+                relationship_id: neighbor.relationship_id.unwrap_or(NO_RELATIONSHIP_ID),
+            })?;
+        }
     }
-    EdgeStore::try_from_edges(base.node_count(), edges, has_weights)
+    Ok(builder.finish())
 }
 
-fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<(u32, u8, bool), Option<u32>> {
+fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<CompactionEdgeKey, Option<u32>> {
     let (targets, type_ids, schema_reversed, weights) =
         store.neighbors_weighted_with_schema(source);
+    let (_, _, _, relationship_ids) = store.neighbors_with_schema_and_relationship_ids(source);
     targets
         .iter()
         .zip(type_ids.iter())
@@ -373,7 +394,15 @@ fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<(u32, u8, bool), Option<
         .enumerate()
         .map(|(idx, ((&target, &type_id), &schema_reversed))| {
             (
-                (target, type_id, schema_reversed != 0),
+                (
+                    target,
+                    type_id,
+                    schema_reversed != 0,
+                    relationship_ids
+                        .get(idx)
+                        .copied()
+                        .filter(|&id| id != crate::edge_store::NO_RELATIONSHIP_ID),
+                ),
                 store
                     .has_weights()
                     .then(|| weights.get(idx).copied())
@@ -392,13 +421,18 @@ struct CompactedEdge {
 fn edge_map_from_layered(
     layered: &LayeredNeighbors<'_>,
     source: u32,
-) -> BTreeMap<(u32, u8, bool), CompactedEdge> {
+) -> BTreeMap<CompactionEdgeKey, CompactedEdge> {
     let weights = layered
         .weighted_neighbors(source)
         .into_iter()
         .map(|neighbor| {
             (
-                (neighbor.target, neighbor.type_id, neighbor.schema_reversed),
+                (
+                    neighbor.target,
+                    neighbor.type_id,
+                    neighbor.schema_reversed,
+                    neighbor.relationship_id,
+                ),
                 neighbor.weight,
             )
         })
@@ -407,10 +441,20 @@ fn edge_map_from_layered(
         .neighbors(source)
         .map(|neighbor| {
             (
-                (neighbor.target, neighbor.type_id, neighbor.schema_reversed),
+                (
+                    neighbor.target,
+                    neighbor.type_id,
+                    neighbor.schema_reversed,
+                    neighbor.relationship_id,
+                ),
                 CompactedEdge {
                     weight: weights
-                        .get(&(neighbor.target, neighbor.type_id, neighbor.schema_reversed))
+                        .get(&(
+                            neighbor.target,
+                            neighbor.type_id,
+                            neighbor.schema_reversed,
+                            neighbor.relationship_id,
+                        ))
                         .copied(),
                     relationship_id: neighbor.relationship_id,
                 },
@@ -647,6 +691,7 @@ mod tests {
             source: 0,
             target: 1,
             type_id: 1,
+            relationship_id: None,
             weight: 11,
             schema_reversed: false,
         });
@@ -654,6 +699,7 @@ mod tests {
             source: 0,
             target: 2,
             type_id: 1,
+            relationship_id: None,
             weight: 13,
             schema_reversed: false,
         });
@@ -679,12 +725,14 @@ mod tests {
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 11,
                     schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 2,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 13,
                     schema_reversed: false,
                 },
@@ -734,6 +782,163 @@ mod tests {
     }
 
     #[test]
+    fn compaction_preserves_parallel_relationship_rows_and_identity_delete() {
+        let dir = ProjectionArtifactDir::new(
+            "compaction_preserves_parallel_relationship_rows_and_identity_delete",
+        );
+        std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+        let base = edge_store_from_tuples(4, &[]);
+
+        let mut inserted =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 1, 1)
+                .expect("insert segment");
+        for relationship_id in [91, 92] {
+            inserted.edge_inserts.push(SegmentEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(relationship_id),
+            });
+            inserted.edge_weights.push(SegmentEdgeWeight {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(relationship_id),
+                weight: relationship_id,
+            });
+        }
+        let mut deleted = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 1, 2)
+            .expect("delete segment");
+        deleted.edge_deletes.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(91),
+        });
+
+        let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
+        for (index, segment) in [&inserted, &deleted].into_iter().enumerate() {
+            let path = dir.segment_path(1, index as u32);
+            segment.write_to_path(&path).expect("segment writes");
+            manifest
+                .segments
+                .push(segment_ref(dir.path(), &path, segment).expect("segment ref"));
+        }
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+
+        let before = LayeredNeighbors::from_provider(
+            &base,
+            &ManifestSegmentProvider::new(dir.path(), &manifest),
+        )
+        .expect("layered input loads")
+        .neighbors(0)
+        .collect::<Vec<_>>();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].relationship_id, Some(92));
+
+        let result = compact_generation(
+            dir.path(),
+            &manifest,
+            &base,
+            CompactionBudgets {
+                dirty_chunk_segment_threshold: Some(1),
+                ..CompactionBudgets::generous()
+            },
+        )
+        .expect("compaction publishes");
+        assert_eq!(result.manifest.base_chunks.len(), 1);
+        let after = LayeredNeighbors::from_provider(
+            &base,
+            &ManifestSegmentProvider::new(dir.path(), &result.manifest),
+        )
+        .expect("compacted output loads")
+        .neighbors(0)
+        .collect::<Vec<_>>();
+
+        assert_eq!(after, before);
+        assert_eq!(
+            LayeredNeighbors::from_provider(
+                &base,
+                &ManifestSegmentProvider::new(dir.path(), &result.manifest),
+            )
+            .expect("rewritten weighted chunk loads")
+            .weighted_neighbors(0)
+            .into_iter()
+            .map(|neighbor| (neighbor.relationship_id, neighbor.weight))
+            .collect::<Vec<_>>(),
+            vec![(Some(92), 92)]
+        );
+    }
+
+    #[test]
+    fn compaction_keeps_identical_endpoint_parallel_relationships() {
+        let dir = ProjectionArtifactDir::new(
+            "compaction_keeps_identical_endpoint_parallel_relationships",
+        );
+        std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+        let base = edge_store_from_tuples(4, &[]);
+        let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 1, 1)
+            .expect("edge segment");
+        for (relationship_id, weight) in [(91, 11), (92, 13)] {
+            segment.edge_inserts.push(SegmentEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(relationship_id),
+            });
+            segment.edge_weights.push(SegmentEdgeWeight {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(relationship_id),
+                weight,
+            });
+        }
+        let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
+        let path = dir.segment_path(1, 0);
+        segment.write_to_path(&path).expect("segment writes");
+        manifest
+            .segments
+            .push(segment_ref(dir.path(), &path, &segment).expect("segment ref"));
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+
+        let result =
+            compact_generation(dir.path(), &manifest, &base, CompactionBudgets::generous())
+                .expect("compaction publishes");
+        let relationship_ids = LayeredNeighbors::from_provider(
+            &base,
+            &ManifestSegmentProvider::new(dir.path(), &result.manifest),
+        )
+        .expect("compacted output loads")
+        .neighbors(0)
+        .map(|neighbor| neighbor.relationship_id)
+        .collect::<Vec<_>>();
+
+        assert_eq!(relationship_ids, vec![Some(91), Some(92)]);
+        assert_eq!(
+            LayeredNeighbors::from_provider(
+                &base,
+                &ManifestSegmentProvider::new(dir.path(), &result.manifest),
+            )
+            .expect("compacted weighted output loads")
+            .weighted_neighbors(0)
+            .into_iter()
+            .map(|neighbor| (neighbor.relationship_id, neighbor.weight))
+            .collect::<Vec<_>>(),
+            vec![(Some(91), 11), (Some(92), 13)]
+        );
+    }
+
+    #[test]
     fn compaction_preserves_weighted_schema_reversed_parallel_edges() {
         let dir = ProjectionArtifactDir::new(
             "compaction_preserves_weighted_schema_reversed_parallel_edges",
@@ -762,6 +967,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
             weight: 11,
         });
         weighted.edge_weights.push(SegmentEdgeWeight {
@@ -769,6 +975,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: true,
+            relationship_id: None,
             weight: 13,
         });
         let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
@@ -793,12 +1000,14 @@ mod tests {
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 11,
                     schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 13,
                     schema_reversed: true,
                 },
@@ -862,6 +1071,7 @@ mod tests {
             source: 0,
             target: 1,
             type_id: 1,
+            relationship_id: None,
             weight: 11,
             schema_reversed: false,
         });
@@ -869,6 +1079,7 @@ mod tests {
             source: 0,
             target: 3,
             type_id: 1,
+            relationship_id: None,
             weight: 13,
             schema_reversed: false,
         });
@@ -908,12 +1119,14 @@ mod tests {
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 11,
                     schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 3,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 13,
                     schema_reversed: false,
                 },
@@ -951,6 +1164,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: false,
+            relationship_id: None,
             weight: 11,
         });
         edge_segment.edge_weights.push(SegmentEdgeWeight {
@@ -958,6 +1172,7 @@ mod tests {
             target: 1,
             type_id: 1,
             schema_reversed: true,
+            relationship_id: None,
             weight: 13,
         });
         let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
@@ -986,12 +1201,14 @@ mod tests {
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 11,
                     schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 13,
                     schema_reversed: true,
                 },

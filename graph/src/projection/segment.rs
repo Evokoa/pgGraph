@@ -16,7 +16,7 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 const MAGIC: &[u8; 8] = b"PGGSEG01";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 const HEADER_SIZE: usize = 160;
 const CHECKSUM_OFFSET: usize = 124;
 const RESERVED_OFFSET: usize = 128;
@@ -90,6 +90,8 @@ pub(crate) struct SegmentEdgeWeight {
     pub(crate) type_id: u8,
     /// Whether this row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
+    /// Stable relationship identity for this weighted source row.
+    pub(crate) relationship_id: Option<crate::edge_store::RelationshipId>,
     /// Edge weight.
     pub(crate) weight: u32,
 }
@@ -248,6 +250,7 @@ impl DeltaSegment {
                         target: row.target,
                         type_id: row.type_id,
                         schema_reversed: row.schema_reversed,
+                        relationship_id: None,
                         weight,
                     });
                 }
@@ -405,6 +408,7 @@ pub(crate) fn fuzz_seed_bytes(name: &str) -> Option<Vec<u8>> {
                 source: 0,
                 target: 1,
                 type_id: 1,
+                relationship_id: None,
                 weight: 5,
                 schema_reversed: false,
             });
@@ -616,7 +620,7 @@ fn validate_section_ranges(
     let widths = [
         Some(14_usize),
         Some(14),
-        Some(14),
+        Some(18),
         Some(5),
         Some(17),
         None,
@@ -686,6 +690,11 @@ fn encode_edge_weights(out: &mut Vec<u8>, rows: &[SegmentEdgeWeight]) {
         push_u32(out, row.target);
         out.push(row.type_id);
         out.push(u8::from(row.schema_reversed));
+        push_u32(
+            out,
+            row.relationship_id
+                .unwrap_or(crate::edge_store::NO_RELATIONSHIP_ID),
+        );
         push_u32(out, row.weight);
     }
 }
@@ -773,7 +782,7 @@ fn decode_edges(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdge>> {
 fn decode_edge_weights(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdgeWeight>> {
     let mut rows = Vec::with_capacity(count as usize);
     for idx in 0..count as usize {
-        let offset = idx * 14;
+        let offset = idx * 18;
         let schema_reversed = read_u8(bytes, offset + 9)?;
         if schema_reversed > 1 {
             return Err(segment_corrupt(format!(
@@ -785,7 +794,11 @@ fn decode_edge_weights(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdgeW
             target: read_u32(bytes, offset + 4)?,
             type_id: read_u8(bytes, offset + 8)?,
             schema_reversed: schema_reversed != 0,
-            weight: read_u32(bytes, offset + 10)?,
+            relationship_id: match read_u32(bytes, offset + 10)? {
+                crate::edge_store::NO_RELATIONSHIP_ID => None,
+                relationship_id => Some(relationship_id),
+            },
+            weight: read_u32(bytes, offset + 14)?,
         });
     }
     Ok(rows)
@@ -1019,6 +1032,7 @@ mod tests {
             source: 0,
             target: 1,
             type_id: 2,
+            relationship_id: Some(42),
             weight: 7,
             schema_reversed: false,
         });
@@ -1032,6 +1046,7 @@ mod tests {
         assert_eq!(decoded.edge_inserts[0].relationship_id, Some(42));
         assert_eq!(decoded.edge_deletes, segment.edge_deletes);
         assert_eq!(decoded.edge_weights, segment.edge_weights);
+        assert_eq!(decoded.edge_weights[0].relationship_id, Some(42));
     }
 
     #[test]
@@ -1058,6 +1073,7 @@ mod tests {
             target: 0,
             type_id: 2,
             schema_reversed: true,
+            relationship_id: None,
             weight: 17,
         });
 

@@ -74,6 +74,7 @@ fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
         source: weighted.source,
         target: weighted.target,
         type_id: weighted.type_id,
+        relationship_id: None,
         weight: weighted.weight.expect("fixture has weight"),
         schema_reversed: false,
     });

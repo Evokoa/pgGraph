@@ -2406,6 +2406,7 @@ mod tests {
                     source: 0,
                     target: 3,
                     type_id: 1,
+                    relationship_id: None,
                     weight: 2,
                     schema_reversed: false,
                 });

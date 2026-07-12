@@ -14,7 +14,7 @@ release blocker.
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
-| 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, transaction-local relationship CREATE identity, trigger-sync edge identity, mutable-overlay segment relationship IDs, representable compacted segment relationship IDs, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, and base relationship hydration are enforced on PostgreSQL 17; parallel-aware compaction, broader writes, and savepoints remain. |
+| 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, transaction-local relationship CREATE identity, trigger-sync edge identity, mutable-overlay segment relationship IDs, parallel-aware compaction and chunk replacement, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, and base relationship hydration are enforced on PostgreSQL 17; broader writes and savepoints remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
@@ -157,7 +157,8 @@ correctness and safety boundary.
 - 2026-07-09 — Independent three-phase review: fixed watermark-only artifact retention, pre-copy ingest budgeting, filter node-range validation, and malformed base dictionary fail-closed handling; the follow-up review and final gates were green.
 - 2026-07-10 — Checkpoint 1A relationship-artifact subphase: `.pggraph` v4 now persists and validates per-adjacency relationship IDs plus the source-row identity dictionary, including reverse CSR reload preservation.
 - 2026-07-10 — Checkpoint 1A sync/layered identity subphase: trigger-sync inserted edge rows now intern relationship source keys, durable segment edge rows store optional relationship IDs, and layered mutable-overlay reads preserve those IDs for GQL relationship values; compaction remains the next identity gap.
-- 2026-07-10 — Checkpoint 1A compaction identity subphase: projection compaction now preserves relationship IDs for compacted rows representable by the existing edge key; parallel-aware compaction remains open for identical endpoint/type/direction relationship rows.
+- 2026-07-10 — Checkpoint 1A compaction identity subphase: projection compaction initially preserved relationship IDs only for rows representable by the topology key.
+- 2026-07-11 — Checkpoint 1A parallel compaction subphase: segment format v5, identity-aware layered keys, weighted rows, specific tombstones, materialization, and dirty-range chunk replacement now preserve identical endpoint/type/direction relationship rows independently.
 
 ## Decisions
 
@@ -391,4 +392,19 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Python syntax | `PYTHONPYCACHEPREFIX=/tmp/pggraph-pycache python3 -m py_compile scripts/check_release_contract.py` | PASS |
 | Shell syntax | `bash -n graph/tests/heavy/alpha_to_v1_fixture.sh graph/tests/heavy/run_release_gate.sh` | PASS |
 | Independent release review | `rust-reviewing` subagent over the R0 diff | PASS: no release-blocking issue remains |
+| Whitespace | `git diff --check` | PASS |
+
+### 2026-07-11 R1 Parallel Relationship Compaction Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 684 passed, 1 ignored, doctests 0 |
+| Compaction regressions | `cd graph && cargo test --features pg17 compaction_` | PASS: 16 passed; parallel identities, weights, and identity-specific deletion survive compaction |
+| Segment regressions | `cd graph && cargo test --features pg17 projection::segment::tests` | PASS: 12 passed; segment v5 identity sidecars round-trip |
+| Layered-store regressions | `cd graph && cargo test --features pg17 projection::layered::tests` | PASS: 13 passed |
+| Chunk rewrite regressions | `cd graph && cargo test --features pg17 projection::chunk::tests` | PASS: 7 passed; dirty-range rewrites retain relationship IDs |
+| Independent Rust review | `rust-reviewing` subagent over the R1 compaction diff | PASS after adding the requested forced dirty-range chunk rewrite regression for parallel IDs, weights, and an identity tombstone |
+| Contract and docs drift | `scripts/check_docs_drift.sh` | PASS |
 | Whitespace | `git diff --check` | PASS |

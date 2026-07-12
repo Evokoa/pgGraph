@@ -20,8 +20,13 @@ Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
 and dynamic graphs are post-1.0 roadmap work. The next implementation work is
-still R1/Checkpoint 1A parallel-aware compaction, followed by broader identity,
-visibility, filter, and savepoint closure.
+still R1/Checkpoint 1A broader write identity, visibility, filter, and savepoint
+closure; parallel-aware compaction and dirty-range identity preservation are
+complete.
+
+2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
+preserve equal-endpoint parallel relationship rows, weights, and specific
+tombstones through normal compaction and dirty-range base-chunk replacement.
 
 2026-07-11 release-gate maintenance: added an enabled-by-default gitleaks gate
 for full Git history and pending tracked changes, with redacted output and a

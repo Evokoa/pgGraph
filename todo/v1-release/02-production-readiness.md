@@ -2,7 +2,7 @@
 
 ## R1: Correctness, Security, Identity, And Transactions
 
-- [ ] Finish parallel-aware relationship compaction without collapsing distinct
+- [x] Finish parallel-aware relationship compaction without collapsing distinct
       source rows that share endpoints, type, and direction.
 - [ ] Carry stable relationship identity through every advertised read, write,
       sync, hydration, visibility, and recovery path.
@@ -16,7 +16,7 @@
       advertised write profile.
 - [ ] Complete supported-major evidence for mapped safety, guarded PostgreSQL
       errors, definer search paths, relation identity, and exact durable values.
-- [ ] Create the machine-readable 1.0 capability/conformance registry and make
+- [x] Create the machine-readable 1.0 capability/conformance registry and make
       documentation drift fail CI.
 
 ## R2: Resource Containment And Safe Publication

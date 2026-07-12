@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::edge_store::{EdgeStore, RawEdge};
+use crate::edge_store::{EdgeStore, IdentifiedRawEdge, RawEdge, NO_RELATIONSHIP_ID};
 use crate::projection::manifest::{
     ManifestChunkRef, ManifestFileRef, ProjectionManifest, ProjectionManifestStore,
 };
@@ -49,7 +49,7 @@ pub(crate) trait BaseChunkSource {
     fn node_count(&self) -> u32;
 
     /// Return full replacement edges for `range`.
-    fn edges_in_range(&self, range: SourceRange) -> GraphResult<Vec<RawEdge>>;
+    fn edges_in_range(&self, range: SourceRange) -> GraphResult<Vec<IdentifiedRawEdge>>;
 }
 
 /// Base chunk source backed by an [`EdgeStore`].
@@ -68,7 +68,7 @@ impl BaseChunkSource for EdgeStoreChunkSource<'_> {
         self.store.node_count()
     }
 
-    fn edges_in_range(&self, range: SourceRange) -> GraphResult<Vec<RawEdge>> {
+    fn edges_in_range(&self, range: SourceRange) -> GraphResult<Vec<IdentifiedRawEdge>> {
         if range.end > self.store.node_count() {
             return Err(GraphError::CorruptFile {
                 reason: format!(
@@ -83,18 +83,27 @@ impl BaseChunkSource for EdgeStoreChunkSource<'_> {
         for source in range.start..range.end {
             let (targets, type_ids, schema_reversed, weights) =
                 self.store.neighbors_weighted_with_schema(source);
+            let (_, _, _, relationship_ids) = self
+                .store
+                .neighbors_with_schema_and_relationship_ids(source);
             for (idx, ((&target, &type_id), &schema_reversed)) in targets
                 .iter()
                 .zip(type_ids.iter())
                 .zip(schema_reversed.iter())
                 .enumerate()
             {
-                edges.push(RawEdge {
-                    source,
-                    target,
-                    type_id,
-                    weight: weights.get(idx).copied(),
-                    schema_reversed: schema_reversed != 0,
+                edges.push(IdentifiedRawEdge {
+                    edge: RawEdge {
+                        source,
+                        target,
+                        type_id,
+                        weight: weights.get(idx).copied(),
+                        schema_reversed: schema_reversed != 0,
+                    },
+                    relationship_id: relationship_ids
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(NO_RELATIONSHIP_ID),
                 });
             }
         }
@@ -357,13 +366,16 @@ fn build_base_chunk_segment(
         range.end,
         sync_watermark,
     )?;
-    for edge in edges {
+    for identified in edges {
+        let edge = identified.edge;
+        let relationship_id = (identified.relationship_id != NO_RELATIONSHIP_ID)
+            .then_some(identified.relationship_id);
         segment.edge_inserts.push(SegmentEdge {
             source: edge.source,
             target: edge.target,
             type_id: edge.type_id,
             schema_reversed: edge.schema_reversed,
-            relationship_id: None,
+            relationship_id,
         });
         if let Some(weight) = edge.weight {
             segment.edge_weights.push(SegmentEdgeWeight {
@@ -371,6 +383,7 @@ fn build_base_chunk_segment(
                 target: edge.target,
                 type_id: edge.type_id,
                 schema_reversed: edge.schema_reversed,
+                relationship_id,
                 weight,
             });
         }
