@@ -1,5 +1,13 @@
 # Build Order
 
+This is the long-term engine build order. The
+[pgGraph 1.0 release program](../v1-release/README.md) owns release scope:
+checkpoints 0 through 3 are production blockers, checkpoint 4 and checkpoint 5
+are required only where they close a demonstrated 1.0 risk, checkpoint 6 is
+limited to the advertised 1.0 GQL profile, and checkpoints 7, 8, and 10 are
+post-1.0 roadmap work. Checkpoint 9 supplies the 1.0 documentation, packaging,
+operations, and release-evidence closure.
+
 ## Principle
 
 Correctness, security, and hard resource containment precede syntax breadth.

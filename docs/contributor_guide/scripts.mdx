@@ -16,7 +16,7 @@ root unless noted otherwise.
 | `check_dependency_updates.py` | Before releases and dependency bumps | Checks pinned Cargo, Python, Docker, and Nix flake GitHub inputs against upstream registries. It recommends only releases or commits at least 6 hours old by default and never updates files unless called with `--update ... --yes`. |
 | `check_rust_doc_map_drift.py` | Editing contributor internals docs | Checks that Rust source files and contributor documentation stay aligned. Supports `--list` for inventory inspection. |
 | `check_sql_api_drift.py` | Editing SQL APIs, GUCs, or API docs | Compares implemented SQL-facing functions and GUCs against documented API references. Supports `--list-implemented`. |
-| `clean_generated_artifacts.sh` | Before packaging, archiving, or release prep | Deletes generated local artifacts that should not ship: `graph/target/`, `graph/fuzz/target/`, and `.DS_Store` files. Has `--dry-run`. |
+| `clean_generated_artifacts.sh` | Before packaging, archiving, or release prep | Deletes Cargo and fuzz build outputs plus `.DS_Store` files. Has `--dry-run`. |
 | `inspect_pggraph_artifact.py` | Debugging persistence or release evidence | Reads a `.pggraph` artifact and prints section metadata as JSON. Used by synthetic release evidence workflows when an artifact is available. |
 | `build_docker_pggraph_package.sh` | Building extension artifacts with Docker | Builds `graph-pg<major>/` package directories for one PostgreSQL major or all supported majors. |
 | `copy_pggraph_package_to_docker_postgres.sh` | Installing a prebuilt package into a running container | Copies `graph.control`, `graph--<version>.sql`, and `graph.so` into a running PostgreSQL container, then optionally creates the extension. |
@@ -105,7 +105,7 @@ It deletes:
 | Path | Reason |
 |---|---|
 | `graph/target/` | Cargo/pgrx build output |
-| `graph/fuzz/target/` | Fuzz build output |
+| Fuzz Cargo target directory | Fuzz build output |
 | `.DS_Store` files | macOS Finder metadata |
 
 It intentionally keeps test and release assets such as `graph/fuzz/corpus/`,

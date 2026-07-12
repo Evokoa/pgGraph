@@ -41,6 +41,6 @@ cd graph
 ./tests/heavy/run_pg_matrix_docker.sh
 ```
 
-See [Contributor Guide: Scripts](docs/contributor_guide/scripts.mdx) and
-[Testing And Release](docs/contributor_guide/testing-release.mdx) for the full
+See [Contributor Guide: Scripts](../docs/contributor_guide/scripts.mdx) and
+[Testing And Release](../docs/contributor_guide/testing-release.mdx) for the full
 inventory.

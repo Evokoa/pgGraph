@@ -1,6 +1,12 @@
 # Full Graph Engine Progress
 
-Last updated: 2026-07-10
+Last updated: 2026-07-11
+
+The authoritative 1.0 scope now lives in
+[`../v1-release/README.md`](../v1-release/README.md). This file continues to
+track detailed full-engine implementation evidence; it does not make
+PostgreSQL 19, full ISO GQL, competitive breadth, or dynamic graphs a 1.0
+release blocker.
 
 ## Current State
 
@@ -137,6 +143,10 @@ Do not implement broad syntax until these tests establish the current
 correctness and safety boundary.
 
 ## Phase Updates
+
+- 2026-07-11 — Release planning phase: separated production-critical 1.0 work
+  from the long-term engine roadmap and added compatibility, documentation,
+  playground/script overhaul, and release-candidate plans.
 
 - 2026-07-09 — Checkpoint 0 mapped-layout phase: made node metadata lookups fallible, validated mapped PK/CSR contents at crate-private constructors, and kept traversal/component corruption failures typed.
 - 2026-07-09 — Checkpoint 0 error-boundary phase: replaced direct `errfinish()` FFI with pgrx stack unwinding, standard SQLSTATEs, stable `PGxxx` diagnostics, and a destructor regression.

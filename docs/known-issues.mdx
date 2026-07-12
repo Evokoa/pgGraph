@@ -76,6 +76,7 @@ do not change the intended public SQL contract.
 |---|---|---|---|
 | KI-005 | Overlay neighbor merging and transaction-delta lookups may be material traversal hot paths on dirty mutable projections. | Measure and close | Benchmark degree, segment depth, transaction inserts/deletes/tombstones, direction, weights, allocations, and p95/p99 with correctness checks. Optimize material regressions or close with an approved regression threshold and retained gate. |
 | KI-025 | Background-worker jobs can return a Rust `GraphResult::Err` normally from a pgrx transaction closure after mutating job state, making partial commit behavior accidental. | P1 transaction fix | Centralize worker transaction policy, distinguish atomic work from intentional progress checkpoints, inject failures in every phase, and prove no unintended commit or stuck `running` job. |
+| KI-009 | The supported GQL write surface lacks a finite failure/SQLSTATE and rollback matrix. | Partially hardened | Cover readonly, unmapped/type, constraint, trigger, ACL/RLS, stale/disappeared match, cancellation, rollback, and savepoint failures for every write, and assert both source rows and projection/transaction deltas remain correct. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 
@@ -85,15 +86,6 @@ not block use of the current documented SQL surface.
 | ID | Issue | Status | Notes |
 |---|---|---|---|
 | KI-006 | `graph.cypher()` is a narrow openCypher compatibility preview over pgGraph's supported GQL subset, not full openCypher compatibility. | Documented limitation | Keep compatibility rows honest and route broader openCypher expansion through [Roadmap](./roadmap), not this register. |
-| KI-007 | SQL/PGQ remains an internal adapter seam, and pgGraph cannot yet consume PostgreSQL 19 native property graph definitions. | PostgreSQL 19 implementation planned | Add PG19 toolchain support, consume native graph mappings without duplicate registration, handle DDL invalidation and PostgreSQL security semantics, rebase SQL/PGQ on canonical IR, and differential-test supported results against `GRAPH_TABLE` while keeping PG14-18 green. |
-
-## P3: Internals and Maintainability
-
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-008 | Several implementation and test modules mix unrelated responsibilities, stringly closed state, raw cross-domain integers, and PostgreSQL/unsafe boundary concerns. | Planned refactor | Split cohesive modules inside the pgrx crate first while introducing canonical enums/newtypes, exact graph values, a pgrx-first PostgreSQL adapter, and an unsafe allowlist. File size is a signal, not the closing criterion. |
-| KI-009 | The supported GQL write surface lacks a finite failure/SQLSTATE and rollback matrix. | Partially hardened | Cover readonly, unmapped/type, constraint, trigger, ACL/RLS, stale/disappeared match, cancellation, rollback, and savepoint failures for every write, and assert both source rows and projection/transaction deltas remain correct. |
-| KI-010 | `nixpkgs` and `rust-overlay` lock inputs are stale in environments where `nix` is unavailable. | Deferred tooling refresh | The dependency checker reports these lock inputs, but refreshing them requires a Nix-capable environment to run `nix flake lock --update-input nixpkgs` and `nix flake lock --update-input rust-overlay`, then verify the development shell still exposes the expected Rust, PostgreSQL, and pgrx tooling. |
 
 ## Resolved Items Awaiting Retirement
 

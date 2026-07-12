@@ -1,5 +1,10 @@
 # Public Roadmap And Known-Issues Closure Ledger
 
+> **Scope:** This ledger is the long-term public-roadmap accountability map,
+> not the pgGraph 1.0 release checklist. The
+> [1.0 release program](../v1-release/README.md) owns R0-R7. Rows marked
+> `POST-1.0` are intentionally outside that release.
+
 ## Purpose
 
 This is the accountability map for clearing the current public Roadmap and
@@ -25,6 +30,7 @@ Inventory snapshot for 2026-07-09:
 | `RESOLVED-RETIRE` | Behavior is shipped; verify release evidence and remove it from active Known Issues. |
 | `DEFER-TRIGGER` | Remove it from the active roadmap and record an explicit revisit trigger/non-goal. |
 | `CLOSED` | Evidence is linked and public docs have been updated. |
+| `POST-1.0` | Active roadmap work that does not block the 1.0 release. |
 
 Allowed final dispositions:
 
@@ -54,7 +60,9 @@ compares them with stable IDs in this ledger, and fails on missing/duplicate
 coverage. Completed IDs remain in a short archive so identifiers are never
 reused.
 
-## Open Source V1 Rows
+## Version 1.0 Public-Surface Rows
+
+These rows are owned by R6 and R7 in the 1.0 release program.
 
 | ID | Public item | Owner | Closure evidence | Status |
 |---|---|---|---|---|
@@ -65,20 +73,20 @@ reused.
 | V1-API | API clarity | GQL conformance and quality plans | Generated/drift-gated inventory covers exported SQL functions, GUCs, reserved options, SQLSTATEs, volatility/security context, permissions, and version support. | OPEN |
 | V1-OPS | Operations | [Quality and operations](./06-quality-performance-operations.md) | Reproducible backup/restore, crash, concurrency, memory, package, generation rollback, and cleanup procedures pass release gates. | OPEN |
 
-## Near-Term Roadmap Rows
+## Engine Roadmap Rows
 
 | ID | Public item | Owner | Closure evidence | Status |
 |---|---|---|---|---|
 | RM-01 | Correctness and security | Checkpoints 0, 1A, 1C and [Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md) | KI-014 through KI-025 closed; two-role, multigraph, filter/value, mapped-soundness, error-guard, definer-path, relation-identity, transaction, publication, and failure tests green. | OPEN |
 | RM-02 | Resource governance | [Memory governance](./01-memory-governance.md), checkpoints 1B, 3, 5 | Build/load/query/sync/compaction/analytics stay within hard envelopes or return typed resource errors. | OPEN |
 | RM-03 | Out-of-core build | Memory/storage plans, checkpoint 2 | Forced-spill build completes below heap requirement and is equivalent at a declared source watermark. | OPEN |
-| RM-04 | Full GQL conformance | [GQL plan](./02-gql-conformance.md), checkpoint 6 | Every applicable ISO GQL row is green and generated public docs do not overclaim. | OPEN |
-| RM-05 | Planner/runtime | [Planner plan](./03-planner-runtime.md), checkpoint 5 | Costed streaming IR, spill, explain estimates/actuals, bounded pathological queries, and differential plan equivalence are green. | OPEN |
+| RM-04 | Full GQL conformance | [GQL plan](./02-gql-conformance.md), checkpoint 6 | Every applicable ISO GQL row is green and generated public docs do not overclaim. | POST-1.0 |
+| RM-05 | Planner/runtime | [Planner plan](./03-planner-runtime.md), checkpoint 5 | Costed streaming IR, spill, explain estimates/actuals, bounded pathological queries, and differential plan equivalence are green. The bounded subset required by the advertised 1.0 profile remains in R5. | POST-1.0 |
 | RM-06 | Storage and sync | [Storage plan](./04-projection-storage-sync.md), checkpoints 1C-3 | Identity-preserving vNext generations, watermark catch-up, mmap residency, bounded compaction, crash/CAS tests green. | OPEN |
-| RM-07 | PostgreSQL 19 | [PG19 native property graphs](./08-postgresql-19-property-graphs.md), checkpoint 7 | PG19-0 through PG19-5 complete; native mapping needs no duplicate registration; PG14-18 remain green. | OPEN |
-| RM-08 | Refactoring | [Refactor plan](./05-refactor-plan.md), [Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md), checkpoint 4 | Planned mega-modules split with acyclic dependencies; canonical enums/newtypes and pgrx adapters replace stringly/raw boundaries; unsafe is allowlisted; SQL contracts and tests/benchmarks remain green. | OPEN |
+| RM-07 | PostgreSQL 19 | [PG19 native property graphs](./08-postgresql-19-property-graphs.md), checkpoint 7 | PG19-0 through PG19-5 complete; native mapping needs no duplicate registration; PG14-18 remain green. | POST-1.0 |
+| RM-08 | Refactoring | [Refactor plan](./05-refactor-plan.md), [Rust boundary plan](./10-rust-type-safety-pgrx-boundaries.md), checkpoint 4 | Planned mega-modules split with acyclic dependencies; canonical enums/newtypes and pgrx adapters replace stringly/raw boundaries; unsafe is allowlisted; SQL contracts and tests/benchmarks remain green. Release-risk subsets remain in R4. | POST-1.0 |
 | RM-09 | CI/CD rollout | V1-CI and [quality plan](./06-quality-performance-operations.md) | Each documented tier runs automatically at its stated cadence; a release candidate has archived evidence. | OPEN |
-| RM-10 | Competitive evidence | Planner/quality plans, checkpoint 8 | Reproducible checked scorecards publish p50/p95/p99, throughput, RSS/PSS, spill, build/load, sync lag, and semantics. | OPEN |
+| RM-10 | Competitive evidence | Planner/quality plans, checkpoint 8 | Reproducible checked scorecards publish p50/p95/p99, throughput, RSS/PSS, spill, build/load, sync lag, and semantics. | POST-1.0 |
 
 ## Reserved And Future Roadmap Rows
 

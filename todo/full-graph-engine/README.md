@@ -1,5 +1,10 @@
 # Full Graph Engine Program
 
+> **Release scope:** This program describes the long-term engine. The
+> [pgGraph 1.0 release program](../v1-release/README.md) is the authoritative
+> source for 1.0 blockers and explicitly places broader standards, PostgreSQL
+> 19, competitive, and dynamic-graph work after 1.0.
+
 ## Mission
 
 Build pgGraph into a complete ISO GQL graph engine inside PostgreSQL while

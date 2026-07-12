@@ -6,11 +6,10 @@ not a dated release commitment.
 </Callout>
 
 pgGraph's roadmap keeps one boundary fixed: PostgreSQL remains the source of
-truth. The target is a complete ISO GQL graph engine inside PostgreSQL, backed
-by PostgreSQL-authoritative projections rather than a separate durable graph
-store. Existing SQL functions remain supported frontends, SQL/PGQ has its own
-standards boundary, and optional compatibility languages lower into the same
-typed planner and runtime.
+truth. Version 1.0 focuses on making the documented SQL API and supported GQL
+profile production-ready on PostgreSQL 14 through 18. Broader standards,
+PostgreSQL 19, and competitive feature work follow without expanding the 1.0
+contract or creating a separate durable graph store.
 
 ## Current Baseline
 
@@ -48,18 +47,16 @@ system easy to install, easy to verify, and hard to misunderstand.
 | API clarity | Document every exported SQL function, reserved option, error class, and security boundary. |
 | Operations | Keep backup/restore, crash recovery, concurrency, memory, and package checks reproducible from documented scripts. |
 
-## Near-Term Work
+## Version 1.0 Production Work
 
 ```mermaid
 flowchart LR
-  A["P0 correctness and security"] --> D["Canonical graph IR"]
-  B["P0 bounded resource governor"] --> D
-  C["P0 relationship identity"] --> E["Artifact vNext"]
-  D --> F["Streaming costed runtime"]
-  E --> F
-  F --> G["Full ISO GQL slices"]
-  G --> H["PostgreSQL 19 SQL/PGQ interop"]
-  H --> I["Competitive engine program"]
+  A["Correctness, security, identity"] --> D["Bounded storage and operations"]
+  B["Resource governance"] --> D
+  C["Safe generation publication"] --> D
+  D --> E["Supported SQL and GQL profile"]
+  E --> F["Docs, packaging, CI, operations"]
+  F --> G["1.0 release evidence"]
 ```
 
 | Area | Planned improvement |
@@ -67,13 +64,29 @@ flowchart LR
 | Correctness and security | Close coordinate-only RLS visibility, parallel-relationship identity, same-named filter identity, savepoint, and cross-backend publication gaps before broadening syntax. |
 | Resource governance | Enforce hard byte/work/disk budgets across build, mmap load, query, sync, compaction, and analytics. Prefer adaptive chunks and spill to OOM. |
 | Out-of-core build | Stream node, relationship, filter, resolution, outbound, and inbound runs into a validated generation-specific artifact. |
-| GQL conformance | Track ISO/IEC 39075:2024 and applicable corrections in one machine-readable parser-to-docs ledger, then implement vertical feature slices until every applicable requirement is complete. |
-| Planner/runtime | Replace source-order materialization with typed binding-table IR, graph/PostgreSQL statistics, cost/resource planning, streaming operators, and spillable blocking work. |
+| Supported query profile | Freeze the SQL and GQL behavior advertised for 1.0 in a machine-readable registry. Give each advertised capability correctness, diagnostics, security, transaction, resource, and documentation evidence; reject unsupported syntax deterministically. |
+| Bounded execution | Stream or spill operators used by the supported profile where necessary to enforce documented limits. General cost-based planning is post-1.0 work. |
 | Storage and sync | Persist both CSR directions and stable relationship/filter identities; publish snapshots with cross-backend generation compare-and-swap and source watermarks. |
-| PostgreSQL 19 | Support native `CREATE PROPERTY GRAPH` definitions as an authoritative mapping source without duplicate pgGraph registration; add version-gated catalog, DDL invalidation, security, SQL/PGQ differential, packaging, and CI support while retaining PostgreSQL 14-18 frontends. |
-| Refactoring and Rust boundaries | Decompose build, projection, binder, executor, evaluator, engine, persistence, SQL facade, sync, and tests while replacing stringly closed state with canonical enums, raw cross-domain integers with production newtypes, JSON/`f64` semantic values with exact graph values, and scattered unsafe/PostgreSQL calls with pgrx-first reviewed adapters. |
+| Compatibility and upgrades | Publish 1.x stability and deprecation rules for SQL, configuration, catalogs, artifacts, diagnostics, scripts, and examples. Test fresh installs, upgrades, rebuilds, backup/restore, and rollback expectations across PostgreSQL 14-18. |
+| Release-risk refactoring | Isolate typed PostgreSQL, unsafe, artifact, publication, resource-policy, playground, and release-script boundaries where current coupling blocks production evidence. Broader module decomposition remains post-1.0. |
+| Playground and scripts | Modularize the playground, share one structured query catalog with its release validator, remove private-catalog coupling, consolidate script lifecycle helpers, and drive release tiers from one inventory while preserving documented wrappers. |
 | CI/CD rollout | First gate `cargo fmt --check`, `cargo clippy`, `cargo test`, `cargo doc`, and docs drift checks; next gate `cargo pgrx test`; final gate synthetic/heavy release scripts. |
-| Competitive evidence | Publish checked workload results with latency percentiles, throughput, RSS/PSS, spill, build/load time, sync lag, storage amplification, and equivalent semantics. |
+| Release evidence | Publish checked correctness, security, compatibility, memory, performance, packaging, recovery, and documentation evidence from clean release artifacts. |
+
+## Post-1.0 Direction
+
+After the 1.0 production contract is green, the roadmap continues with:
+
+| Area | Direction |
+|---|---|
+| Full ISO GQL | Implement applicable ISO/IEC 39075:2024 requirements in vertical slices backed by the conformance registry. |
+| Costed streaming runtime | Add canonical typed binding-table IR, statistics, cost/resource planning, alternative physical plans, streaming operators, spillable blocking work, and explain estimates/actuals. |
+| PostgreSQL 19 and SQL/PGQ | Consume native property graph definitions without duplicate registration, keep SQL/PGQ conformance separate from GQL, and differential-test `GRAPH_TABLE`. |
+| Broader refactoring | Complete the planned module decomposition and consider a pure core crate only after dependency evidence supports it. |
+| Competitive engine work | Add plan caching, selective residency, optional WAL-driven sync, quota-controlled analytics, semantic-guided expansion, and reproducible competitive scorecards. |
+| Schema-flexible graphs | Add bounded data-driven labels and evolving JSONB-backed properties after the static graph engine and compatibility model are mature. |
+| Compatibility frontends | Keep openCypher narrow unless a separately measured and maintained compatibility surface is justified. |
+| Deferred research | COPY scanning, full A*, extra analytics, embedding caches, and distributed execution remain evidence- or demand-triggered decisions. |
 
 ## Alpha Hardening Status
 
@@ -102,6 +115,10 @@ open.
 
 The current public follow-up list is tracked in [Known Issues](./known-issues).
 Work is ranked by user impact:
+
+P0 is part of the 1.0 production gate. P1 contributes only where it is needed
+to make the advertised 1.0 profile correct and bounded. P2 and P3 are
+post-1.0 directions.
 
 | Priority | Focus | Examples |
 |---|---|---|
@@ -189,10 +206,11 @@ where the heuristic can be made admissible. pgVector distance alone is likely
 better treated as a semantic ranking signal unless edge costs are intentionally
 designed around the same metric.
 
-## Reserved Features
+## Post-1.0 Reserved And Conditional Features
 
-Some configuration values and internals are intentionally shaped for future
-work, but are not current behavior.
+These directions are outside the 1.0 production release. Some configuration
+values and internals are intentionally shaped for future work, but are not
+current behavior or implied 1.0 commitments.
 
 | Feature | Current status | Roadmap direction |
 |---|---|---|
