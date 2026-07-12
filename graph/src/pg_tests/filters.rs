@@ -711,3 +711,83 @@ fn traverse_rejects_ambiguous_raw_jsonb_filter_columns() {
 
     assert!(ambiguous_column);
 }
+
+#[pg_test]
+fn table_scoped_same_named_filters_stay_distinct_through_sync() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_filter_context_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT REFERENCES public.graph_test_filter_context_pgtest(id),
+                age INT NOT NULL
+            )",
+    )
+    .expect("create filter context table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_filter_context_pgtest (id, parent_id, age)
+             VALUES ('c1', NULL, 41), ('c2', 'c1', 5)",
+    )
+    .expect("insert filter context rows failed");
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run("SELECT graph.add_table('graph_test_filter_context_pgtest'::regclass, 'id', NULL)")
+        .expect("add context table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("add users edge failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_filter_context_pgtest'::regclass,
+                'parent_id',
+                'graph_test_filter_context_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add context edge failed");
+    Spi::run("SELECT graph.add_filter_column('graph_test_users_pgtest'::regclass, 'age')")
+        .expect("add users age filter failed");
+    Spi::run("SELECT graph.add_filter_column('graph_test_filter_context_pgtest'::regclass, 'age')")
+        .expect("add context age filter failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')").expect("build failed");
+
+    let scoped_count = |table: &str, start: &str, node_id: &str, direction: &str| {
+        Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM graph.traverse(
+                {}::regclass, {}, 1,
+                direction := {},
+                node_tables := ARRAY[{}::regclass],
+                filter := '{{\"node\":{{\"where\":{{\"age\":{{\"eq\":41}}}}}}}}'::jsonb,
+                hydrate := false
+             ) WHERE node_id = {}",
+            super::sql_literal(table),
+            super::sql_literal(start),
+            super::sql_literal(direction),
+            super::sql_literal(table),
+            super::sql_literal(node_id)
+        ))
+        .expect("scoped same-name traversal failed")
+        .unwrap_or(0)
+    };
+    assert_eq!(scoped_count("graph_test_users_pgtest", "u1", "u2", "out"), 1);
+    assert_eq!(scoped_count("graph_test_filter_context_pgtest", "c1", "c2", "in"), 0);
+
+    Spi::run("UPDATE public.graph_test_filter_context_pgtest SET age = 41 WHERE id = 'c2'")
+        .expect("update context age failed");
+    Spi::run("SELECT graph.apply_sync()").expect("apply context sync failed");
+
+    assert_eq!(scoped_count("graph_test_users_pgtest", "u1", "u2", "out"), 1);
+    assert_eq!(scoped_count("graph_test_filter_context_pgtest", "c1", "c2", "in"), 1);
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+    Spi::run("SET graph.sync_mode = 'manual'").expect("restore sync mode failed");
+}

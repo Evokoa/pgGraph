@@ -8,7 +8,7 @@
       sync, hydration, visibility, and recovery path.
 - [ ] Complete relationship-row ACL/RLS checks for nodes, relationships, paths,
       scalar identities, aggregates, existence, and hydration-disabled output.
-- [ ] Finish table-qualified filter identity and remove ambiguous internal
+- [x] Finish table-qualified filter identity and remove ambiguous internal
       name-only lookup paths.
 - [x] Add subtransaction/savepoint delta frames with rollback and release tests.
 - [ ] Complete READ COMMITTED, REPEATABLE READ, SERIALIZABLE, constraint,

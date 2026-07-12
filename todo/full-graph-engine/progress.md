@@ -14,7 +14,7 @@ release blocker.
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
-| 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, transaction-local relationship CREATE identity, trigger-sync edge identity, mutable-overlay segment relationship IDs, parallel-aware compaction and chunk replacement, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, and base relationship hydration are enforced on PostgreSQL 17; broader writes and savepoints remain. |
+| 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, transaction-local relationship CREATE identity, trigger-sync edge identity, mutable-overlay segment relationship IDs, parallel-aware compaction and chunk replacement, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, base relationship hydration, and savepoint overlays are enforced on PostgreSQL 17; broader writes and isolation coverage remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
@@ -289,6 +289,20 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Focused sync identity interning | `cd graph && cargo test --features pg17 sql_sync::tests::sync_relationship_identity_interning_uses_mapping_and_source_key` | PASS: 1 passed |
 | Old segment rejection | `cd graph && cargo test --features pg17 projection::segment::tests::delta_segment_rejects_pre_typed_filter_format_version` | PASS: 1 passed |
 | Formatting | `cd graph && cargo fmt --check` | PASS |
+| Whitespace | `git diff --check` | PASS |
+
+### 2026-07-11 R1 Table-Qualified Filter Identity Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Same-name identity unit regression | `cd graph && cargo test --features pg17 same_named` | PASS: table OID plus column identity keeps equal display names distinct |
+| Structured filter unit tests | `cd graph && cargo test --features pg17 sql_filters::tests` | PASS: 12 passed |
+| PostgreSQL ambiguous-filter regression | `cd graph && cargo pgrx test --features "pg17 development" pg17 traverse_rejects_ambiguous_raw_jsonb_filter_columns` | PASS: ambiguous unqualified public filters fail instead of choosing a table |
+| PostgreSQL scoped sync regression | `cd graph && cargo pgrx test --features "pg17 development" pg17 table_scoped_same_named_filters_stay_distinct_through_sync` | PASS: scoped traversal selects the owning table's value and sync updates only that table's same-named filter index |
+| Independent Rust review | `rust-reviewing` subagent over filter lookup call sites and tests | PASS after adding the requested positive table-scoped build/query/sync regression; no production name-only lookup remains |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 685 passed, 1 ignored, doctests 0 |
+| Contract and docs drift | `scripts/check_docs_drift.sh` | PASS |
 | Whitespace | `git diff --check` | PASS |
 
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
