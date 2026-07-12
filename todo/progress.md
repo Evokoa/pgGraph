@@ -33,6 +33,10 @@ when the extension is first loaded from inside an existing savepoint.
 use table OID plus column identity; ambiguous unqualified public filters fail
 with guidance instead of selecting the first same-named column.
 
+2026-07-11 R1 relationship visibility — PostgreSQL 17 RLS regressions now prove
+fail-closed behavior before aggregate, existence, and relationship-list output;
+mutable-overlay role coverage remains.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

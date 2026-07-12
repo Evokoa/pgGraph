@@ -305,6 +305,13 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Contract and docs drift | `scripts/check_docs_drift.sh` | PASS |
 | Whitespace | `git diff --check` | PASS |
 
+### 2026-07-11 R1 Relationship Visibility Result Shapes
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Single-pattern RLS result shapes | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_coordinate_only_relationships_fail_closed_when_edge_row_is_not_visible` | PASS: coordinate, hydrated, aggregate, and existence output fail closed |
+| Wildcard relationship-list RLS | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_wildcard_relationships_fail_closed_when_edge_row_is_not_visible` | PASS: path, relationship, and `relationships(path)` output fail closed |
+
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 681 passed, 1 ignored; doctests 0 |
 | Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |

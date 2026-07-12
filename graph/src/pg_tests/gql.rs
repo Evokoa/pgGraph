@@ -601,10 +601,36 @@ fn gql_coordinate_only_relationships_fail_closed_when_edge_row_is_not_visible() 
         )
     ))
     .expect("relationship hydrated SQLSTATE capture failed");
+    let aggregate_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                 RETURN count(r) AS relationship_count',
+                hydrate := false
+             )"
+        )
+    ))
+    .expect("relationship aggregate SQLSTATE capture failed");
+    let existence_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT EXISTS (
+                SELECT 1 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                     RETURN r',
+                    hydrate := false
+                )
+             )"
+        )
+    ))
+    .expect("relationship existence SQLSTATE capture failed");
     Spi::run("RESET ROLE").expect("reset relationship rls role failed");
 
     assert_eq!(coordinate_sqlstate.as_deref(), Some("22000"));
     assert_eq!(hydrated_sqlstate.as_deref(), Some("22000"));
+    assert_eq!(aggregate_sqlstate.as_deref(), Some("22000"));
+    assert_eq!(existence_sqlstate.as_deref(), Some("22000"));
 }
 
 #[pg_test]
@@ -692,10 +718,22 @@ fn gql_wildcard_relationships_fail_closed_when_edge_row_is_not_visible() {
         )
     ))
     .expect("wildcard relationship hydrated SQLSTATE capture failed");
+    let relationship_list_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH p=(u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                 RETURN relationships(p) AS relationships',
+                hydrate := false
+             )"
+        )
+    ))
+    .expect("wildcard relationship-list SQLSTATE capture failed");
     Spi::run("RESET ROLE").expect("reset relationship rls role failed");
 
     assert_eq!(coordinate_sqlstate.as_deref(), Some("22000"));
     assert_eq!(hydrated_sqlstate.as_deref(), Some("22000"));
+    assert_eq!(relationship_list_sqlstate.as_deref(), Some("22000"));
 }
 
 #[pg_test]

@@ -19,5 +19,14 @@
     "date": "2026-07-11",
     "new_schema_sha256": "f350af92d3266e94543c956ca0db88df8b9edb5fdb7a4cf97890444f8ab6b150",
     "previous_schema_sha256": null
+  },
+  {
+    "acknowledgement": "r1-relationship-visibility-result-shapes",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-07-11",
+    "new_schema_sha256": "f350af92d3266e94543c956ca0db88df8b9edb5fdb7a4cf97890444f8ab6b150",
+    "previous_schema_sha256": "f350af92d3266e94543c956ca0db88df8b9edb5fdb7a4cf97890444f8ab6b150"
   }
 ]
