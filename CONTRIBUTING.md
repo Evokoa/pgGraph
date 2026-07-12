@@ -63,6 +63,10 @@ The Nix path is opt-in; the brew/apt paths above remain fully supported.
 - Update user-guide docs for SQL or operational behavior changes.
 - Update contributor-guide docs for storage, loader, memory model, safety, or
   internal architecture changes.
+- Review whether the change affects a documented SQL signature or result shape,
+  GUC, SQLSTATE/diagnostic, catalog migration, artifact format, script contract,
+  upgrade, rebuild, deprecation, or rollback guarantee. Mark breaking changes
+  explicitly and update the compatibility inventory and release notes.
 
 ## Scope
 

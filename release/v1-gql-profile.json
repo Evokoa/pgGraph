@@ -1,0 +1,23 @@
+{
+  "claim": "documented_pggraph_1x_subset",
+  "full_iso_gql": false,
+  "full_opencypher": false,
+  "public_sql_pgq": false,
+  "capabilities": [
+    {"id": "match", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_single_directed_match_matches_traverse_fixture"}]},
+    {"id": "optional_match_single_relationship", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_matches_left_outer_sql"}]},
+    {"id": "where_node_properties", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_filters_orders_and_paginates_null_rows"}]},
+    {"id": "with", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_with_projection_scope_aliases_and_shadows"}]},
+    {"id": "return_projection", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_defaults_to_hydrated_nodes_and_projects_ids_explicitly"}]},
+    {"id": "distinct", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_distinct_matches_sql_distinct_counts"}]},
+    {"id": "order_limit_offset", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_filters_orders_and_paginates_null_rows"}]},
+    {"id": "aggregates", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_aggregates_match_sql_grouping_and_numeric_results"}]},
+    {"id": "bounded_paths_and_path_functions", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_path_values_and_functions_have_stable_shape"}]},
+    {"id": "mapped_single_node_create", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_node_inserts_mapped_row_and_records_delta"}]},
+    {"id": "mapped_single_relationship_create", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_relationship_inserts_edge_row_and_records_delta"}]},
+    {"id": "mapped_single_node_set_remove", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_set_property_updates_source_row_and_filter_index"}, {"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_remove_typed_property_sets_source_column_null_idempotently"}]},
+    {"id": "mapped_single_relationship_delete", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_delete_edge_removes_source_row_and_tombstones_neighbors"}]},
+    {"id": "mapped_single_node_detach_delete", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_detach_delete_removes_incident_edges_before_node"}]},
+    {"id": "mapped_single_node_merge", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_merge_node_inserts_then_updates_mapped_row"}]}
+  ]
+}

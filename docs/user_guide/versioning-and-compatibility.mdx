@@ -1,0 +1,98 @@
+# Versioning And Compatibility
+
+pgGraph 1.x uses semantic versioning for its documented SQL API, configuration,
+diagnostics, packaging, and operational behavior. PostgreSQL source tables stay
+authoritative across every upgrade; graph artifacts and projection segments are
+derived state and can be rebuilt.
+
+## Supported Release Matrix
+
+pgGraph 1.0 supports PostgreSQL 14 through 18. PostgreSQL 17 is the default
+development and playground reference version. Published container images target
+Linux on AMD64 and ARM64; PGXN source packages are available for supported
+source-build environments.
+
+A patch release never removes a PostgreSQL major. A minor 1.x release may
+retire a major only after upstream PostgreSQL support ends, with at least one
+minor release and 90 days of notice. The final compatible pgGraph minor remains
+the supported line for installations that cannot yet upgrade PostgreSQL.
+
+## Stable 1.x Surfaces
+
+Within the 1.x line, pgGraph preserves documented SQL function names,
+signatures, argument defaults, result shapes, volatility and security context;
+documented GUC names, accepted values, and defaults; standard SQLSTATE classes
+and stable `PGxxx` diagnostic identifiers; extension-catalog meaning and
+supported upgrade paths; and documented script entry points, flags, environment
+variables, exit semantics, and user-visible output locations.
+
+Minor releases may add new functions, configuration values, or supported query
+capabilities. They do not append fields to an existing result row or otherwise
+change a positional contract. A new result shape uses a new explicitly
+versioned function or contract.
+
+Undocumented internal Rust modules, extension-owned catalog tables, helper
+scripts, temporary files, and artifact bytes are not public APIs. They may
+change, but supported upgrades migrate internal catalogs safely and never ask
+users to edit them directly.
+
+## Artifacts And Rebuilds
+
+The 1.0 contract requires every artifact reader to validate its format and
+feature version before mapping data. Compatible artifacts load normally. An
+incompatible, future, corrupt, or incomplete artifact must fail closed with an
+actionable rebuild error and must never be silently reinterpreted. Cross-backend
+validation-before-publication and last-good-generation retention remain release
+gates until the 1.0 release evidence is complete.
+
+Because PostgreSQL tables are the source of truth, rebuilding derived graph
+state is the compatibility fallback. Release notes identify any release that
+requires a rebuild and provide the exact build, validation, and rollback steps.
+
+## Deprecation
+
+An ordinary 1.x deprecation provides a documented replacement, retains the old
+surface for at least two minor releases and six months (whichever is longer),
+and tests both paths throughout that window. Removal waits for a major release.
+Security or data-corruption emergencies may require a faster change; those
+releases include an upgrade preflight, prominent migration instructions, and a
+supported restore or rebuild procedure.
+
+## Upgrade Procedure
+
+Before upgrading, take a PostgreSQL backup and record the installed version and
+graph state:
+
+```bash
+pg_dump --format=custom --file=pggraph-before-upgrade.dump DBNAME
+psql -X -d DBNAME -c "SELECT extversion FROM pg_extension WHERE extname = 'graph';"
+psql -X -d DBNAME -c "SELECT * FROM graph.status();"
+```
+
+For a supported 1.x-to-1.x update, install the new package for the same
+PostgreSQL major, then run and validate:
+
+```sql
+ALTER EXTENSION graph UPDATE TO 'X.Y.Z';
+SELECT extversion FROM pg_extension WHERE extname = 'graph';
+SELECT * FROM graph.status();
+```
+
+The alpha-to-1.0 transition is intentionally rebuild-based: preserve or restore
+the PostgreSQL source tables, install 1.0 cleanly, reapply reviewed graph
+registration, and run `graph.build()`. Alpha extension-owned catalogs and graph
+artifacts are not an in-place compatibility promise. The repository's signed
+`v0.1.8` migration fixture exercises this source-preserving path.
+
+Binary downgrade is supported only when the target release notes say its
+catalogs and artifacts remain compatible. Otherwise restore the pre-upgrade
+backup and package. pgGraph stops before an irreversible migration when a safe
+rollback cannot be guaranteed.
+
+## Compatibility Inventory
+
+The repository maintains `release/v1-contract.json` as a machine-readable
+inventory of supported PostgreSQL majors, distribution targets, SQL function
+names, GUCs, diagnostics, and the declared GQL profile. Release checks compare
+that inventory with implementation sources. Any drift requires an explicit
+compatibility review before the inventory can be regenerated.

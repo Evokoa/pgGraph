@@ -1,0 +1,8 @@
+{
+  "artifact_fixture": null,
+  "migration": "preserve_source_reinstall_reregister_rebuild",
+  "producer_commit": "6430c8fbb5a42cc02c02c86861eee375f1185e65",
+  "producer_tag": "v0.1.8",
+  "source_checksum_algorithm": "md5_sorted_text_rows",
+  "source_checksum_expected": "7597c464628b5c2e0674ea849bd8337a"
+}

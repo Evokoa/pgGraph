@@ -379,3 +379,16 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Whitespace | `git diff --check` | PASS |
 | Documentation drift | `scripts/check_docs_drift.sh` | FAIL: pre-existing missing inline path references to `graph/fuzz/target/` in `docs/contributor_guide/scripts.mdx` |
+
+### 2026-07-11 R0 Release Contract Phase
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Generated SQL contract | `cd graph && cargo pgrx schema --features pg17 --out /tmp/pggraph-schema.sql`; `python3 scripts/check_release_contract.py --schema-file /tmp/pggraph-schema.sql` | PASS: 155 schema blocks and 153 function contracts match the frozen baseline |
+| Contract and docs drift | `scripts/check_docs_drift.sh` | PASS |
+| Alpha-to-1.0 fixture | `DBNAME=pggraph_alpha_gate graph/tests/heavy/alpha_to_v1_fixture.sh all-current` | PASS: source checksum, 3 nodes, 2 edges, and 2-row traversal verified in a disposable PostgreSQL 17 database |
+| Secret scan | `scripts/check_secrets.sh changes` | PASS |
+| Python syntax | `PYTHONPYCACHEPREFIX=/tmp/pggraph-pycache python3 -m py_compile scripts/check_release_contract.py` | PASS |
+| Shell syntax | `bash -n graph/tests/heavy/alpha_to_v1_fixture.sh graph/tests/heavy/run_release_gate.sh` | PASS |
+| Independent release review | `rust-reviewing` subagent over the R0 diff | PASS: no release-blocking issue remains |
+| Whitespace | `git diff --check` | PASS |

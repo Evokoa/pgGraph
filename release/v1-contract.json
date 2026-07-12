@@ -1,0 +1,462 @@
+{
+  "artifact_policy": {
+    "authoritative_source": "PostgreSQL source tables",
+    "incompatible_action": "fail_closed_and_rebuild",
+    "silent_reinterpretation": false
+  },
+  "diagnostics": [
+    {
+      "diagnostic": "PG000",
+      "sqlstate": "XX000",
+      "variant": "Internal"
+    },
+    {
+      "diagnostic": "PG001",
+      "sqlstate": "53200",
+      "variant": "Oom"
+    },
+    {
+      "diagnostic": "PG002",
+      "sqlstate": "42501",
+      "variant": "AclDenied"
+    },
+    {
+      "diagnostic": "PG003",
+      "sqlstate": "55000",
+      "variant": "NotBuilt"
+    },
+    {
+      "diagnostic": "PG004",
+      "sqlstate": "54000",
+      "variant": "EdgeTypeLimit"
+    },
+    {
+      "diagnostic": "PG005",
+      "sqlstate": "22023",
+      "variant": "InvalidFilter"
+    },
+    {
+      "diagnostic": "PG006",
+      "sqlstate": "55P03",
+      "variant": "BuildLocked"
+    },
+    {
+      "diagnostic": "PG008",
+      "sqlstate": "54000",
+      "variant": "EdgeBufferFull"
+    },
+    {
+      "diagnostic": "PG009",
+      "sqlstate": "XX001",
+      "variant": "CorruptFile"
+    },
+    {
+      "diagnostic": "PG010",
+      "sqlstate": "P0002",
+      "variant": "NodeNotFound"
+    },
+    {
+      "diagnostic": "PG011",
+      "sqlstate": "0A000",
+      "variant": "IncompatibleVersion"
+    },
+    {
+      "diagnostic": "PG012",
+      "sqlstate": "55000",
+      "variant": "ReadOnly"
+    },
+    {
+      "diagnostic": "PG013",
+      "sqlstate": "42601",
+      "variant": "GqlSyntax"
+    },
+    {
+      "diagnostic": "PG014",
+      "sqlstate": "0A000",
+      "variant": "GqlUnsupported"
+    },
+    {
+      "diagnostic": "PG015",
+      "sqlstate": "22023",
+      "variant": "GqlSemantic"
+    },
+    {
+      "diagnostic": "PG016",
+      "sqlstate": "22023",
+      "variant": "GqlParameter"
+    },
+    {
+      "diagnostic": "PG017",
+      "sqlstate": "22000",
+      "variant": "GqlExecution"
+    },
+    {
+      "diagnostic": "PG018",
+      "sqlstate": "0A000",
+      "variant": "UnsupportedOperation"
+    },
+    {
+      "diagnostic": "PG019",
+      "sqlstate": "54000",
+      "variant": "OverlayLimit"
+    },
+    {
+      "diagnostic": "PG020",
+      "sqlstate": "55000",
+      "variant": "Disabled"
+    }
+  ],
+  "distribution": {
+    "containers": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "source": [
+      "PGXN",
+      "GitHub release archive"
+    ]
+  },
+  "gql_implementation_sha256": "df6ee697d06420f1d389e9a93c7e8b0051eeb45626a2ae8aa98350c21eee423c",
+  "gql_profile": {
+    "capabilities": [
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_single_directed_match_matches_traverse_fixture"
+          }
+        ],
+        "id": "match"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_optional_match_matches_left_outer_sql"
+          }
+        ],
+        "id": "optional_match_single_relationship"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_optional_match_filters_orders_and_paginates_null_rows"
+          }
+        ],
+        "id": "where_node_properties"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_with_projection_scope_aliases_and_shadows"
+          }
+        ],
+        "id": "with"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_defaults_to_hydrated_nodes_and_projects_ids_explicitly"
+          }
+        ],
+        "id": "return_projection"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_distinct_matches_sql_distinct_counts"
+          }
+        ],
+        "id": "distinct"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_optional_match_filters_orders_and_paginates_null_rows"
+          }
+        ],
+        "id": "order_limit_offset"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_aggregates_match_sql_grouping_and_numeric_results"
+          }
+        ],
+        "id": "aggregates"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_path_values_and_functions_have_stable_shape"
+          }
+        ],
+        "id": "bounded_paths_and_path_functions"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_create_node_inserts_mapped_row_and_records_delta"
+          }
+        ],
+        "id": "mapped_single_node_create"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_create_relationship_inserts_edge_row_and_records_delta"
+          }
+        ],
+        "id": "mapped_single_relationship_create"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_set_property_updates_source_row_and_filter_index"
+          },
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_remove_typed_property_sets_source_column_null_idempotently"
+          }
+        ],
+        "id": "mapped_single_node_set_remove"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_delete_edge_removes_source_row_and_tombstones_neighbors"
+          }
+        ],
+        "id": "mapped_single_relationship_delete"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_detach_delete_removes_incident_edges_before_node"
+          }
+        ],
+        "id": "mapped_single_node_detach_delete"
+      },
+      {
+        "evidence": [
+          {
+            "path": "graph/src/pg_tests/gql.rs",
+            "symbol": "gql_merge_node_inserts_then_updates_mapped_row"
+          }
+        ],
+        "id": "mapped_single_node_merge"
+      }
+    ],
+    "claim": "documented_pggraph_1x_subset",
+    "full_iso_gql": false,
+    "full_opencypher": false,
+    "public_sql_pgq": false
+  },
+  "guc_source_sha256": "4a60c20b7a36d05b16659a353749bf020d1e4da351a04803c557cafa6c806db1",
+  "gucs": [
+    "graph.auto_load",
+    "graph.build_batch_size",
+    "graph.build_scan_mode",
+    "graph.compaction_threshold",
+    "graph.data_dir",
+    "graph.default_case_sensitive",
+    "graph.default_hydrate",
+    "graph.default_max_depth",
+    "graph.default_projection_mode",
+    "graph.default_search_mode",
+    "graph.edge_buffer_size",
+    "graph.enabled",
+    "graph.enforce_tenant_scope",
+    "graph.hot_eager_load",
+    "graph.idle_unload_secs",
+    "graph.low_memory_build",
+    "graph.max_exact_path_count",
+    "graph.max_frontier",
+    "graph.max_loaded_graphs_per_backend",
+    "graph.max_nodes",
+    "graph.max_overlay_memory_mb",
+    "graph.max_tx_delta_edges",
+    "graph.max_tx_delta_nodes",
+    "graph.memory_limit_mb",
+    "graph.mutable_enabled",
+    "graph.oom_action",
+    "graph.persist_on_build",
+    "graph.projection_retention_generations",
+    "graph.query_freshness",
+    "graph.sync_batch_size",
+    "graph.sync_mode",
+    "graph.tenant_setting",
+    "graph.vacuum_interval_secs"
+  ],
+  "internal_sql_functions": [
+    "_max_sync_log_id_for_current_role",
+    "_pending_sync_rows_for_current_role",
+    "_selected_graph_id_for_current_role",
+    "test_enabled"
+  ],
+  "postgresql": {
+    "default_test_major": 17,
+    "playground_reference_major": 17,
+    "supported_majors": [
+      14,
+      15,
+      16,
+      17,
+      18
+    ]
+  },
+  "public_sql_functions": [
+    "active_generation_count",
+    "add_edge",
+    "add_edge_to_graph",
+    "add_filter_column",
+    "add_filter_column_to_graph",
+    "add_sync_policy",
+    "add_table",
+    "add_table_to_graph",
+    "aggregate",
+    "all",
+    "alter_edge",
+    "alter_graph",
+    "alter_job",
+    "alter_sync_policy",
+    "apply_sync",
+    "at_least",
+    "at_most",
+    "auto_discover",
+    "auto_discover_tables",
+    "between",
+    "build",
+    "build_async_graph",
+    "build_graph",
+    "build_status",
+    "build_status_for_graph",
+    "component",
+    "component_stats",
+    "components",
+    "connected_components",
+    "connection",
+    "contains_text",
+    "create_graph",
+    "create_row_predicate_subgraph",
+    "current_graph",
+    "cypher",
+    "cypher_compatibility",
+    "cypher_explain",
+    "drop_graph",
+    "drop_sync_policy",
+    "enable_sync",
+    "eq",
+    "equals",
+    "estimate",
+    "expand",
+    "find",
+    "find_related",
+    "format_path",
+    "get_neighbors",
+    "get_node",
+    "gql",
+    "gql_explain",
+    "grant_graph",
+    "graph_map",
+    "graph_privileges",
+    "graph_quota_usage",
+    "graph_quotas",
+    "graph_runtime_status",
+    "greater_than",
+    "gt",
+    "gte",
+    "in",
+    "ingest_projection",
+    "is_not_null",
+    "is_null",
+    "isolated_nodes",
+    "job_runs",
+    "job_stats",
+    "jobs",
+    "largest_component",
+    "less_than",
+    "list_edges",
+    "list_graphs",
+    "load_graph",
+    "loaded_graphs",
+    "lt",
+    "lte",
+    "maintenance",
+    "maintenance_graph",
+    "maintenance_status",
+    "maintenance_status_for_graph",
+    "memory_profile",
+    "neighborhood",
+    "neq",
+    "node_ref",
+    "node_ref_string",
+    "not_equals",
+    "not_in",
+    "on_node",
+    "path",
+    "path_count_estimate",
+    "pgq",
+    "prefix_text",
+    "preview_discover",
+    "preview_discover_tables",
+    "projection_compact",
+    "projection_gc",
+    "projection_repair",
+    "projection_status",
+    "registered_edges",
+    "registered_edges_for_graph",
+    "registered_tables",
+    "registered_tables_for_graph",
+    "remove_edge",
+    "remove_edge_from_graph",
+    "remove_job",
+    "remove_table",
+    "remove_table_from_graph",
+    "rename_edge",
+    "reset",
+    "revoke_graph",
+    "run_due_jobs",
+    "run_due_jobs_async",
+    "run_job",
+    "run_scheduled_maintenance",
+    "run_sync_policy",
+    "search",
+    "search_nodes",
+    "select_graph",
+    "set_current_graph",
+    "set_graph_quota",
+    "set_graph_residency",
+    "shortest_path",
+    "status",
+    "sync_health",
+    "sync_policy_status",
+    "transfer_graph_ownership",
+    "traverse",
+    "traverse_search",
+    "unload_graph",
+    "vacuum",
+    "vacuum_graph",
+    "weighted_shortest_path"
+  ],
+  "release_line": "1.x",
+  "schema_version": 2,
+  "sql_schema": {
+    "entity_block_count": 155,
+    "function_contract_count": 153,
+    "function_contracts_sha256": "94999bfdea4deb5bcadf9e7e4b456f28acb458a516b638f4c7baba8db220a1d2",
+    "normalized_sha256": "f350af92d3266e94543c956ca0db88df8b9edb5fdb7a4cf97890444f8ab6b150"
+  }
+}

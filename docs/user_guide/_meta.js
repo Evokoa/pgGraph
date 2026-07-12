@@ -1,6 +1,7 @@
 export default {
   index: 'Overview',
   installation: 'Installation',
+  'versioning-and-compatibility': 'Versioning And Compatibility',
   configuration: 'Configuration',
   'schema-registration': 'Schema Registration',
   'build-and-persistence': 'Build And Persistence',

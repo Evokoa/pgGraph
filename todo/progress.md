@@ -26,3 +26,7 @@ visibility, filter, and savepoint closure.
 2026-07-11 release-gate maintenance: added an enabled-by-default gitleaks gate
 for full Git history and pending tracked changes, with redacted output and a
 standalone `scripts/check_secrets.sh` entry point.
+
+2026-07-11 R0 — Froze the PostgreSQL 14-18 and documented GQL 1.x contract,
+published compatibility/deprecation guidance, added a drift-checked API/GUC/
+diagnostic inventory, release-note template, and versioned migration fixtures.

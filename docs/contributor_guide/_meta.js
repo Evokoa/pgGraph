@@ -14,5 +14,6 @@ export default {
   scripts: 'Scripts',
   benchmarking: 'Benchmarking',
   'release-gate-checklist': 'Release Gate Checklist',
+  'release-note-template': 'Release Note Template',
   'testing-release': 'Testing And Release'
 }

@@ -1,0 +1,48 @@
+# Release Note Template
+
+Use this structure for every pgGraph release. Remove empty sections only when
+the release truly has no relevant user-visible change.
+
+## `vX.Y.Z`: Release Title
+
+Summarize the release outcome and intended users in one short paragraph.
+
+### Highlights
+
+- List user-visible capabilities, correctness fixes, and operational changes.
+
+### Compatibility
+
+- State supported PostgreSQL majors and distribution targets.
+- List SQL, result-shape, GUC, diagnostic, script, or default changes.
+- State whether the machine-readable 1.x contract changed.
+
+### Migration And Upgrade
+
+- Give exact extension-update and validation commands.
+- Identify catalog migrations and required prerequisites.
+
+### Artifact And Rebuild Impact
+
+- State whether existing artifacts load, require rebuild, or are rejected.
+- Give the rebuild command and expected serving/rollback behavior.
+
+### Rollback
+
+- State whether binary downgrade is supported.
+- Otherwise give the backup-restore procedure and irreversible boundary.
+
+### Security And Resource Impact
+
+- Describe ACL/RLS, privilege, memory, disk, timeout, and concurrency changes.
+
+### Deprecations
+
+- List deprecated surfaces, replacements, warning behavior, and earliest
+  eligible removal release/date.
+
+### Release Validation
+
+- Link archived commands, PostgreSQL versions, package/container digests,
+  correctness checksums, performance and memory results, and reviewed
+  exceptions.

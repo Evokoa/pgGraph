@@ -31,6 +31,7 @@ RUN_PROJECTION_RECOVERY="${RUN_PROJECTION_RECOVERY:-1}"
 RUN_TX_DELTA_LIFECYCLE="${RUN_TX_DELTA_LIFECYCLE:-1}"
 RUN_GQL_WRITE_RECHECK="${RUN_GQL_WRITE_RECHECK:-1}"
 RUN_SECRETS="${RUN_SECRETS:-1}"
+RUN_ALPHA_TO_V1_FIXTURE="${RUN_ALPHA_TO_V1_FIXTURE:-1}"
 
 if [[ "$RUN_SECRETS" == "1" ]]; then
   ../scripts/check_secrets.sh all
@@ -43,6 +44,10 @@ fi
 cargo fmt --check
 cargo clippy --features "$DEVELOPMENT_FEATURES" --all-targets -- -D warnings
 cargo doc --features "$PG_VERSION_FEATURE" --no-deps
+generated_contract_schema="$(mktemp "${TMPDIR:-/tmp}/pggraph-contract-schema.XXXXXX.sql")"
+trap 'rm -f "${generated_contract_schema}"' EXIT
+cargo pgrx schema --features "$PG_VERSION_FEATURE" --out "$generated_contract_schema"
+../scripts/check_release_contract.py --schema-file "$generated_contract_schema"
 cargo test --features "$PG_VERSION_FEATURE"
 cargo pgrx test --features "$DEVELOPMENT_FEATURES" "$PG_VERSION_FEATURE"
 cargo deny check advisories bans licenses sources
@@ -55,6 +60,10 @@ fi
 
 if [[ "$RUN_INSTALL" == "1" ]]; then
   DBNAME="${DB_PREFIX}_install" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" ./tests/heavy/fresh_install_smoke.sh
+fi
+
+if [[ "$RUN_ALPHA_TO_V1_FIXTURE" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_alpha_to_v1" ./tests/heavy/alpha_to_v1_fixture.sh all-current
 fi
 
 if [[ "$RUN_METADATA" == "1" ]]; then

@@ -73,12 +73,14 @@ but upgrades must still migrate them safely without data loss.
 
 ## R0 Checklist
 
-- [ ] Approve the supported PostgreSQL 14-18 matrix and platform/package matrix.
-- [ ] Decide the exact 1.0 SQL and GQL supported profile from current behavior.
-- [ ] Generate the public API/configuration/diagnostic inventory.
-- [ ] Choose the artifact compatibility window and golden fixture policy.
-- [ ] Add versioned extension-upgrade fixtures and rollback expectations.
-- [ ] Publish the compatibility and deprecation policy in public docs.
-- [ ] Add a release-note template with compatibility, migration, rebuild, and
+- [x] Approve the supported PostgreSQL 14-18 matrix and platform/package matrix.
+- [x] Decide the exact 1.0 SQL and GQL supported profile from current behavior.
+- [x] Generate the public API/configuration/diagnostic inventory.
+- [x] Choose the artifact compatibility window and golden fixture policy.
+- [x] Add the signed alpha-to-1.0 source-preserving migration fixture and define
+      versioned 1.x extension-upgrade fixtures beginning with the first real
+      1.x-to-1.x release pair.
+- [x] Publish the compatibility and deprecation policy in public docs.
+- [x] Add a release-note template with compatibility, migration, rebuild, and
       rollback sections.
-- [ ] Add a breaking-change review checkbox to contribution/release guidance.
+- [x] Add a breaking-change review checkbox to contribution/release guidance.

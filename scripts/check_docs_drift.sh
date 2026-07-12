@@ -18,3 +18,4 @@ cd "${ROOT_DIR}"
 python3 scripts/check_doc_references.py
 python3 scripts/check_sql_api_drift.py
 python3 scripts/check_rust_doc_map_drift.py
+python3 scripts/check_release_contract.py
