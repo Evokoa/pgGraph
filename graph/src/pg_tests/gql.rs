@@ -2738,6 +2738,111 @@ fn gql_create_node_inserts_mapped_row_and_records_delta() {
 }
 
 #[pg_test]
+fn gql_create_respects_partition_routing_constraints_and_user_triggers() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_partitioned_nodes_pgtest (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL CHECK (name <> 'blocked')
+         ) PARTITION BY HASH (id);
+         CREATE TABLE public.graph_gql_partitioned_nodes_p0_pgtest
+           PARTITION OF public.graph_gql_partitioned_nodes_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE public.graph_gql_partitioned_nodes_p1_pgtest
+           PARTITION OF public.graph_gql_partitioned_nodes_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         CREATE FUNCTION public.graph_gql_partition_guard_pgtest()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.name = 'triggered' THEN
+             RAISE EXCEPTION 'partition trigger rejected row';
+           END IF;
+           RETURN NEW;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_partition_guard
+           BEFORE INSERT ON public.graph_gql_partitioned_nodes_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_partition_guard_pgtest();
+         SELECT graph.add_table(
+           'graph_gql_partitioned_nodes_pgtest'::regclass,
+           id_column := 'id',
+           columns := ARRAY['name']
+         );
+         SELECT * FROM graph.build(mode := 'mutable_overlay');",
+    )
+    .expect("create partitioned write fixture failed");
+    create_error_sqlstate_helper();
+
+    for (name, expected_sqlstate) in [("blocked", "23514"), ("triggered", "P0001")] {
+        let query = format!(
+            "SELECT * FROM graph.gql(
+               'CREATE (u:graph_gql_partitioned_nodes_pgtest {{id: ''{name}'', name: ''{name}''}}) RETURN u'
+             )"
+        );
+        let sqlstate = Spi::get_one::<String>(&format!(
+            "SELECT public.graph_test_sqlstate({})",
+            super::sql_literal(&query)
+        ))
+        .expect("capture rejected partitioned write failed")
+        .unwrap_or_default();
+        assert_eq!(sqlstate, expected_sqlstate);
+    }
+    let rejected_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM public.graph_gql_partitioned_nodes_pgtest
+          WHERE id IN ('blocked', 'triggered')",
+    )
+    .expect("rejected partition rows count failed")
+    .unwrap_or_default();
+    let dirty_after_rejections = Spi::get_one::<bool>(
+        "SELECT tx_delta_dirty FROM graph.status()",
+    )
+    .expect("rejected overlay status failed")
+    .unwrap_or(true);
+    assert_eq!(rejected_rows, 0);
+    assert!(!dirty_after_rejections);
+
+    Spi::run(
+        "SELECT * FROM graph.gql(
+           'CREATE (u:graph_gql_partitioned_nodes_pgtest {id: ''accepted'', name: ''Accepted''}) RETURN u'
+         )",
+    )
+    .expect("accepted partitioned write failed");
+    let (partition_name, matched) = Spi::connect(|client| {
+        let partition_name = client
+            .select(
+                "SELECT tableoid::regclass::text
+                   FROM public.graph_gql_partitioned_nodes_pgtest
+                  WHERE id = 'accepted'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<String>(1)?
+            .unwrap_or_default();
+        let matched = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM graph.gql(
+                     'MATCH (u:graph_gql_partitioned_nodes_pgtest {id: ''accepted''}) RETURN u',
+                     hydrate := false
+                   )",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((partition_name, matched))
+    })
+    .expect("accepted partition write verification failed");
+    assert!(partition_name.contains("graph_gql_partitioned_nodes_p"));
+    assert_eq!(matched, 1);
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+}
+
+#[pg_test]
 fn gql_create_relationship_inserts_edge_row_and_records_delta() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");

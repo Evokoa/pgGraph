@@ -53,6 +53,10 @@ identities without hiding parallel siblings.
 prove durable post-build relationship segments remain fail-closed under RLS for
 coordinate, hydrated, aggregate, and existence outputs.
 
+2026-07-12 R1 PostgreSQL write boundaries — Partition routing, CHECK failures,
+and user-trigger failures now have PostgreSQL-backed GQL CREATE coverage with
+rejected writes proven absent from transaction-local graph state.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

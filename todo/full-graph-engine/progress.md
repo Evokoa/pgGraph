@@ -162,6 +162,7 @@ correctness and safety boundary.
 - 2026-07-12 — Checkpoint 1A durable identity subphase: manifest version 2 now references a checksummed cumulative relationship-identity dictionary, reload validates segment IDs against it, and trigger replay covers standalone mapped relationship tables without requiring node registration.
 - 2026-07-12 — Checkpoint 1A identity-delete subphase: transaction and immediate overlays now key tombstones by direction and optional relationship ID, GQL deletes carry the matched identity to PostgreSQL primary-key DML, and durable sync deletion preserves parallel siblings after reload.
 - 2026-07-12 — Checkpoint 1A mutable-overlay visibility subphase: caller-role RLS checks now have durable post-build segment coverage across coordinate, hydrated, aggregate, and existence result shapes on PostgreSQL 17.
+- 2026-07-12 — Checkpoint 1A PostgreSQL write-boundary subphase: GQL CREATE now has PostgreSQL 17 evidence for partition routing plus CHECK-constraint and user-trigger rejection without residual transaction deltas.
 
 ## Decisions
 
@@ -493,3 +494,15 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Gate | Exact command | Result |
 |---|---|---|
 | PostgreSQL 17 two-role RLS | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_mutable_overlay_relationships_fail_closed_under_rls` | PASS: one post-build durable relationship is hidden from coordinate, hydrated, aggregate, and existence output |
+
+### 2026-07-12 R1 PostgreSQL Write-Boundary Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Partition/constraint/trigger | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_create_respects_partition_routing_constraints_and_user_triggers` | PASS: accepted row lands in a child partition; CHECK and user-trigger failures leave no source row or transaction delta |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 697 passed, 1 ignored, doctests 0 |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust documentation | `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "pg17 development"` | PASS |
+| Contract and docs drift | `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh` | PASS after acknowledged PostgreSQL write-boundary contract refresh |
+| Independent Rust review | `rust-reviewing` subagent over the write-boundary diff and SQLSTATE follow-up | PASS: exact CHECK and trigger SQLSTATEs, rejected-state cleanup, partition routing, documentation, and matrix pin are release-ready |
+| Whitespace | `git diff --check` | PASS |

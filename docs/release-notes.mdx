@@ -55,6 +55,9 @@ gate evidence through signed tags and package publishing.
 - Made relationship tombstones identity-specific across GQL writes, trigger
   replay, durable projection ingestion, and reload so deleting one parallel
   source row does not hide equal-endpoint siblings.
+- Added write conformance coverage proving PostgreSQL partition routing,
+  constraints, and user triggers remain authoritative and rejected writes do
+  not leave transaction-local graph state.
 - Added graph-scoped projection and sync behavior so replay, dirty-range
   ingest, copy-on-write compaction, and runtime selection ignore unrelated
   graph state.
