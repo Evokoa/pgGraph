@@ -358,6 +358,31 @@ impl Engine {
         let segments = ManifestSegmentProvider::new(&root, manifest).load_segments()?;
         let mut filter_index = self.filter_index.clone();
         for segment in segments {
+            for relationship_id in segment
+                .edge_inserts
+                .iter()
+                .chain(segment.edge_deletes.iter())
+                .filter_map(|edge| edge.relationship_id)
+                .chain(
+                    segment
+                        .edge_weights
+                        .iter()
+                        .filter_map(|edge| edge.relationship_id),
+                )
+            {
+                if self
+                    .relationship_identities
+                    .get(relationship_id as usize)
+                    .and_then(Option::as_ref)
+                    .is_none()
+                {
+                    return Err(GraphError::CorruptFile {
+                        reason: format!(
+                            "projection segment relationship ID {relationship_id} is outside the active identity dictionary"
+                        ),
+                    });
+                }
+            }
             for filter in segment.filters {
                 let column_idx =
                     usize::try_from(filter.column_id).map_err(|_| GraphError::CorruptFile {

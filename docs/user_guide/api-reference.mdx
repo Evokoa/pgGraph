@@ -109,9 +109,11 @@ above the active manifest watermark. `max_rows` and `max_bytes` bound one
 ingestion pass; `NULL` uses the configured defaults. Segment manifests record
 the dirty source-node range when committed rows provide one, so later reads and
 maintenance do not have to treat every L0 segment as whole-graph coverage.
-For registered edge-row mappings, inserted relationship segments also retain
-the source relationship identity used by GQL relationship values and
-relationship-row visibility checks.
+For registered edge-row mappings, inserted relationship segments retain the
+source relationship identity used by GQL relationship values and
+relationship-row visibility checks. The cumulative identity dictionary is
+checksummed and referenced by the active projection manifest, so those
+identities survive backend reloads.
 
 ### `graph.projection_status()`
 

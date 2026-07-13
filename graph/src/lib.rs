@@ -540,6 +540,7 @@ pub mod bench_support {
                     target: (idx + 1) % 64,
                     type_id: 1,
                     weight: Some(1),
+                    relationship_identity: None,
                     table_oid: None,
                     pk_hash: None,
                     node_idx: None,

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::safety::{GraphError, GraphResult};
 
 /// Current JSON manifest format version.
-pub(crate) const MANIFEST_VERSION: u32 = 1;
+pub(crate) const MANIFEST_VERSION: u32 = 2;
 /// Validation state for a generation whose artifacts are ready to read.
 pub(crate) const VALIDATION_STATUS_VALID: &str = "valid";
 /// Validation state for a generation that has been marked corrupt.
@@ -45,6 +45,9 @@ pub(crate) struct ProjectionManifest {
     pub(crate) base_artifact_version: u32,
     /// Durable segment files layered over the base artifact.
     pub(crate) segments: Vec<ManifestSegmentRef>,
+    /// Cumulative post-build relationship identity dictionary artifact.
+    #[serde(default)]
+    pub(crate) relationship_identities: Option<ManifestIdentityRef>,
     /// Base chunks that are active for this generation.
     pub(crate) base_chunks: Vec<ManifestChunkRef>,
     /// Files that became obsolete when this generation was published.
@@ -84,6 +87,7 @@ impl ProjectionManifest {
             base_artifact_checksum: base_artifact_checksum.into(),
             base_artifact_version,
             segments: Vec::new(),
+            relationship_identities: None,
             base_chunks: Vec::new(),
             obsolete_files: Vec::new(),
             sync_watermark,
@@ -148,6 +152,9 @@ impl ProjectionManifest {
         for segment in &self.segments {
             segment.validate()?;
         }
+        if let Some(identities) = &self.relationship_identities {
+            identities.validate()?;
+        }
         for chunk in &self.base_chunks {
             chunk.validate()?;
         }
@@ -187,6 +194,39 @@ impl ProjectionManifest {
     /// Whether this generation references only the base `.pggraph` artifact.
     pub(crate) fn is_base_only(&self) -> bool {
         self.segments.is_empty() && self.base_chunks.is_empty()
+    }
+}
+
+/// Relationship identity dictionary reference stored in a manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ManifestIdentityRef {
+    /// Dictionary path relative to the projection artifact directory.
+    pub(crate) path: String,
+    /// CRC32 checksum of the complete dictionary artifact.
+    pub(crate) checksum: String,
+    /// Number of dictionary slots, including reserved slot zero.
+    pub(crate) entry_count: u32,
+    /// Artifact byte size used by status and garbage collection accounting.
+    pub(crate) bytes: u64,
+}
+
+impl ManifestIdentityRef {
+    fn validate(&self) -> GraphResult<()> {
+        if self.path.trim().is_empty() {
+            return Err(manifest_corrupt("relationship identity path is required"));
+        }
+        if self.checksum.trim().is_empty() {
+            return Err(manifest_corrupt(
+                "relationship identity checksum is required",
+            ));
+        }
+        if self.entry_count == 0 {
+            return Err(manifest_corrupt(
+                "relationship identity dictionary must contain reserved slot zero",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -340,6 +380,13 @@ impl ProjectionManifestStore {
 
     fn validate_active_references(&self, manifest: &ProjectionManifest) -> GraphResult<()> {
         require_existing_reference(&self.root, &manifest.base_artifact_path, "base artifact")?;
+        if let Some(identities) = &manifest.relationship_identities {
+            require_existing_reference(
+                &self.root,
+                &identities.path,
+                "relationship identity dictionary",
+            )?;
+        }
         for segment in &manifest.segments {
             require_existing_reference(&self.root, &segment.path, "segment")?;
         }
@@ -354,6 +401,13 @@ impl ProjectionManifestStore {
         manifest: &ProjectionManifest,
     ) -> GraphResult<()> {
         require_existing_reference(&self.root, &manifest.base_artifact_path, "base artifact")?;
+        if let Some(identities) = &manifest.relationship_identities {
+            require_existing_reference(
+                &self.root,
+                &identities.path,
+                "relationship identity dictionary",
+            )?;
+        }
         for segment in &manifest.segments {
             require_existing_reference(&self.root, &segment.path, "segment")?;
         }
@@ -1052,6 +1106,26 @@ mod tests {
             .load_latest_current()
             .expect_err("missing referenced base rejects");
 
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
+    fn projection_manifest_rejects_missing_identity_dictionary() {
+        let dir =
+            ProjectionArtifactDir::new("projection_manifest_rejects_missing_identity_dictionary");
+        std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+        let store = ProjectionManifestStore::new(dir.path());
+        let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:base", 2, 0, 1);
+        manifest.relationship_identities = Some(ManifestIdentityRef {
+            path: "missing-identities.bin".to_string(),
+            checksum: "crc32:00000000".to_string(),
+            entry_count: 1,
+            bytes: 32,
+        });
+
+        let err = store
+            .publish(&manifest)
+            .expect_err("missing identity dictionary rejects");
         assert!(matches!(err, GraphError::CorruptFile { .. }));
     }
 

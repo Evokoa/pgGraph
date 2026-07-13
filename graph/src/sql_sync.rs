@@ -40,33 +40,53 @@ pub(crate) fn current_sync_mode() -> safety::GraphResult<config::SyncMode> {
 }
 
 pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
-    let (tables, _edges, filter_columns) = read_catalog()?;
-    let mut installed = 0usize;
+    let (tables, edges, filter_columns) = read_catalog()?;
+    let mut trigger_specs =
+        std::collections::BTreeMap::<u32, (builder::PrimaryKeySpec, Vec<String>)>::new();
     for table in &tables {
-        let oid = table.table_oid;
-        let qt = sync::get_qualified_table(oid)?;
-        let mut trigger_columns = table.columns.to_vec();
+        let mut columns = table.columns.to_vec();
         for filter in filter_columns
             .iter()
             .filter(|filter| filter.table_oid == table.table_oid)
         {
-            if !trigger_columns
-                .iter()
-                .any(|column| column == &filter.column_name)
-            {
-                trigger_columns.push(filter.column_name.clone());
+            if !columns.iter().any(|column| column == &filter.column_name) {
+                columns.push(filter.column_name.clone());
             }
         }
         if let Some(tenant_column) = &table.tenant_column {
-            if !trigger_columns.iter().any(|column| column == tenant_column) {
-                trigger_columns.push(tenant_column.clone());
+            if !columns.iter().any(|column| column == tenant_column) {
+                columns.push(tenant_column.clone());
             }
         }
-        let trigger_sql = sync::generate_trigger_sql(&qt, &table.id_columns, &trigger_columns);
+        trigger_specs.insert(table.table_oid, (table.id_columns.clone(), columns));
+    }
+    for edge in &edges {
+        let (primary_key, columns) = trigger_specs
+            .entry(edge.from_table_oid)
+            .or_insert_with(|| (edge.source_key_columns.clone(), Vec::new()));
+        if primary_key.columns().is_empty() {
+            *primary_key = edge.source_key_columns.clone();
+        }
+        for column in edge
+            .source_key_columns
+            .columns()
+            .iter()
+            .chain(std::iter::once(&edge.from_column))
+            .chain(edge.weight_column.iter())
+            .chain(edge.label_column.iter())
+        {
+            if !columns.iter().any(|existing| existing == column) {
+                columns.push(column.clone());
+            }
+        }
+    }
+    let mut installed = 0usize;
+    for (oid, (primary_key, trigger_columns)) in trigger_specs {
+        let qt = sync::get_qualified_table(oid)?;
+        let trigger_sql = sync::generate_trigger_sql(&qt, &primary_key, &trigger_columns);
         Spi::run(&trigger_sql).map_err(|e| {
             safety::GraphError::Internal(format!(
-                "trigger creation failed for {}: {}",
-                table.table_name, e
+                "trigger creation failed for relation OID {oid}: {e}"
             ))
         })?;
         installed += 1;
@@ -76,10 +96,14 @@ pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
 }
 
 pub(crate) fn remove_sync_triggers() -> safety::GraphResult<usize> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let (tables, edges, _filter_columns) = read_catalog()?;
     let mut removed = 0usize;
-    for table in &tables {
-        let oid = table.table_oid;
+    let table_oids = tables
+        .iter()
+        .map(|table| table.table_oid)
+        .chain(edges.iter().map(|edge| edge.from_table_oid))
+        .collect::<std::collections::BTreeSet<_>>();
+    for oid in table_oids {
         let qt = sync::get_qualified_table(oid)?;
         let table_sql = sync::qualified_table_sql(&qt);
         Spi::run(&format!(
@@ -90,8 +114,7 @@ pub(crate) fn remove_sync_triggers() -> safety::GraphResult<usize> {
         ))
         .map_err(|err| {
             safety::GraphError::Internal(format!(
-                "trigger removal failed for {}: {}",
-                table.table_name, err
+                "trigger removal failed for relation OID {oid}: {err}"
             ))
         })?;
         removed += 1;
@@ -348,6 +371,7 @@ pub(crate) struct SyncReplayContext {
     all_table_oids: Vec<u32>,
     edge_source_tables: HashSet<String>,
     edge_source_oids: HashSet<u32>,
+    edge_source_node_oids: HashMap<u64, u32>,
 }
 
 impl SyncReplayContext {
@@ -372,6 +396,12 @@ impl SyncReplayContext {
             .iter()
             .filter_map(|edge| table_oids.get(&edge.from_table).copied())
             .collect::<HashSet<_>>();
+        let mut edge_source_node_oids = HashMap::with_capacity(edges.len());
+        for edge in &edges {
+            if let Some(source_oid) = sync_edge_source_node_oid(edge, &tables)? {
+                edge_source_node_oids.insert(edge.mapping_id, source_oid);
+            }
+        }
 
         Ok(Self {
             tables,
@@ -381,6 +411,7 @@ impl SyncReplayContext {
             all_table_oids,
             edge_source_tables,
             edge_source_oids,
+            edge_source_node_oids,
         })
     }
 
@@ -409,6 +440,49 @@ impl SyncReplayContext {
         self.all_table_oids.push(oid);
         Ok(oid)
     }
+}
+
+fn sync_edge_source_node_oid(
+    edge: &builder::RegisteredEdge,
+    tables: &[builder::RegisteredTable],
+) -> safety::GraphResult<Option<u32>> {
+    if tables
+        .iter()
+        .any(|table| table.table_oid == edge.from_table_oid)
+    {
+        return Ok(Some(edge.from_table_oid));
+    }
+    Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT c.confrelid::oid::integer
+               FROM pg_constraint c
+               JOIN unnest(c.conkey) WITH ORDINALITY AS fk_from(attnum, n) ON true
+               JOIN pg_attribute from_attr
+                 ON from_attr.attrelid = c.conrelid
+                AND from_attr.attnum = fk_from.attnum
+              WHERE c.contype = 'f'
+                AND c.conrelid = $1::oid
+                AND from_attr.attname = $2
+              ORDER BY c.oid
+              LIMIT 2",
+            None,
+            &[
+                pgrx::pg_sys::Oid::from_u32(edge.from_table_oid).into(),
+                edge.from_column.clone().into(),
+            ],
+        )?;
+        if rows.len() != 1 {
+            return Ok(None);
+        }
+        rows.first()
+            .get::<i32>(1)
+            .map(|oid| oid.map(|oid| oid as u32))
+    })
+    .map_err(|err| {
+        safety::GraphError::Internal(format!(
+            "relationship source foreign-key lookup failed: {err}"
+        ))
+    })
 }
 
 struct LegacySyncEntry {
@@ -604,6 +678,8 @@ fn ingest_projection_until_internal(
         .unwrap_or(previous_watermark);
     let mut context = SyncReplayContext::load()?;
     let rows = projection_rows_from_sync_entries(&entries, &mut context)?;
+    let relationship_identities =
+        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
     let base_artifact_path = graph_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -620,8 +696,15 @@ fn ingest_projection_until_internal(
     let result = if rows.is_empty() {
         ingester.publish_empty_watermark(consumed_watermark)?
     } else {
-        ingester.ingest_committed_rows(&rows, MutationBufferLimits::new(row_limit, byte_limit))?
+        ingester.ingest_committed_rows_with_identities(
+            &rows,
+            MutationBufferLimits::new(row_limit, byte_limit),
+            &relationship_identities,
+        )?
     };
+    if let Some(identities) = result.relationship_identities.as_ref() {
+        ENGINE.with(|engine| engine.borrow_mut().relationship_identities = identities.clone());
+    }
     Ok(projection_ingest_stats(result, previous_watermark))
 }
 
@@ -1094,6 +1177,7 @@ fn append_projection_node_row(
         type_id: 0,
         schema_reversed: false,
         weight: None,
+        relationship_identity: None,
         table_oid: Some(table_oid),
         pk_hash: Some(ResolutionIndexBuilder::hash_pk(pk)),
         node_idx: Some(node_idx),
@@ -1119,17 +1203,9 @@ fn append_projection_edge_rows(
         if context.table_oid(&edge.from_table) != Some(table_oid) {
             continue;
         }
-        let Some(from_table) = context
-            .tables
-            .iter()
-            .find(|table| table.table_name == edge.from_table)
+        let Some((source_oid, from_pk, target_oid, to_pk)) =
+            projection_edge_endpoints(context, edge, row)
         else {
-            continue;
-        };
-        let Some(from_pk) = row_pk_value(row, &from_table.id_columns) else {
-            continue;
-        };
-        let Some(to_pk) = row_text_value(row, &edge.from_column) else {
             continue;
         };
         let edge_label = edge
@@ -1146,18 +1222,20 @@ fn append_projection_edge_rows(
         let Some(type_id) = eng.edge_type_id(&edge_label) else {
             continue;
         };
-        let source = resolve_projection_endpoint(
-            eng,
-            context.table_oid(&edge.from_table),
-            &from_pk,
-            &context.all_table_oids,
-        );
-        let target = resolve_projection_endpoint(
-            eng,
-            context.table_oid(&edge.to_table),
-            &to_pk,
-            &context.all_table_oids,
-        );
+        let source_key = row_pk_value(row, &edge.source_key_columns).ok_or_else(|| {
+            safety::GraphError::Internal(format!(
+                "mapped relationship sync row {} is missing source key columns",
+                entry.id
+            ))
+        })?;
+        let relationship_identity = crate::edge_store::RelationshipIdentity {
+            mapping_id: edge.mapping_id,
+            source_key,
+        };
+        let source =
+            resolve_projection_endpoint(eng, source_oid, &from_pk, &context.all_table_oids);
+        let target =
+            resolve_projection_endpoint(eng, Some(target_oid), &to_pk, &context.all_table_oids);
         if let (Some(source), Some(target)) = (source, target) {
             push_projection_edge_row(
                 ProjectionEdgeRow {
@@ -1167,6 +1245,7 @@ fn append_projection_edge_rows(
                     type_id,
                     schema_reversed: false,
                     weight,
+                    relationship_identity: Some(relationship_identity.clone()),
                     operation,
                 },
                 out,
@@ -1180,6 +1259,7 @@ fn append_projection_edge_rows(
                         type_id,
                         schema_reversed: true,
                         weight,
+                        relationship_identity: Some(relationship_identity),
                         operation,
                     },
                     out,
@@ -1190,6 +1270,32 @@ fn append_projection_edge_rows(
     Ok(())
 }
 
+fn projection_edge_endpoints(
+    context: &SyncReplayContext,
+    edge: &builder::RegisteredEdge,
+    row: &serde_json::Value,
+) -> Option<(Option<u32>, String, u32, String)> {
+    let target_oid = edge.to_table_oid;
+    if let Some(from_table) = context
+        .tables
+        .iter()
+        .find(|table| table.table_oid == edge.from_table_oid)
+    {
+        return Some((
+            Some(edge.from_table_oid),
+            row_pk_value(row, &from_table.id_columns)?,
+            target_oid,
+            row_text_value(row, &edge.from_column)?,
+        ));
+    }
+    Some((
+        context.edge_source_node_oids.get(&edge.mapping_id).copied(),
+        row_text_value(row, &edge.from_column)?,
+        target_oid,
+        row_text_value(row, &edge.to_column)?,
+    ))
+}
+
 struct ProjectionEdgeRow<'a> {
     entry: &'a SyncLogEntry,
     source: u32,
@@ -1197,6 +1303,7 @@ struct ProjectionEdgeRow<'a> {
     type_id: u8,
     schema_reversed: bool,
     weight: Option<u32>,
+    relationship_identity: Option<crate::edge_store::RelationshipIdentity>,
     operation: MutationOperation,
 }
 
@@ -1212,6 +1319,7 @@ fn push_projection_edge_row(row: ProjectionEdgeRow<'_>, out: &mut Vec<Projection
         type_id: row.type_id,
         schema_reversed: row.schema_reversed,
         weight: row.weight,
+        relationship_identity: row.relationship_identity,
         table_oid: None,
         pk_hash: None,
         node_idx: None,
@@ -1341,6 +1449,7 @@ fn append_projection_filter_rows_for_pk(
             type_id: 0,
             schema_reversed: false,
             weight: None,
+            relationship_identity: None,
             table_oid: None,
             pk_hash: None,
             node_idx: Some(node_idx),
@@ -1432,16 +1541,7 @@ fn potential_row_edge_mutation_count(
         if from_oid != Some(table_oid) {
             continue;
         }
-        let Some(from_table) = context
-            .tables
-            .iter()
-            .find(|table| table.table_name == edge.from_table)
-        else {
-            continue;
-        };
-        if row_pk_value(row, &from_table.id_columns).is_none()
-            || row_text_value(row, &edge.from_column).is_none()
-        {
+        if projection_edge_endpoints(context, edge, row).is_none() {
             continue;
         }
         count = count.saturating_add(if edge.bidirectional { 2 } else { 1 });
@@ -1590,17 +1690,9 @@ pub(crate) fn apply_row_edge_mutations(
         if from_oid != Some(table_oid) {
             continue;
         }
-        let Some(from_table) = context
-            .tables
-            .iter()
-            .find(|table| table.table_name == edge.from_table)
+        let Some((source_oid, from_pk, target_oid, to_pk)) =
+            projection_edge_endpoints(context, edge, row)
         else {
-            continue;
-        };
-        let Some(from_pk) = row_pk_value(row, &from_table.id_columns) else {
-            continue;
-        };
-        let Some(to_pk) = row_text_value(row, &edge.from_column) else {
             continue;
         };
         let edge_label = edge
@@ -1610,9 +1702,8 @@ pub(crate) fn apply_row_edge_mutations(
             .filter(|label| !label.trim().is_empty())
             .unwrap_or_else(|| edge.label.clone());
         let type_id = eng.register_edge_type(&edge_label)?;
-        let source = resolve_sync_endpoint(eng, from_oid, &from_pk, &context.all_table_oids);
-        let target_oid = context.table_oid(&edge.to_table);
-        let target = resolve_sync_endpoint(eng, target_oid, &to_pk, &context.all_table_oids);
+        let source = resolve_sync_endpoint(eng, source_oid, &from_pk, &context.all_table_oids);
+        let target = resolve_sync_endpoint(eng, Some(target_oid), &to_pk, &context.all_table_oids);
         if let (Some(source), Some(target)) = (source, target) {
             let relationship_id = if matches!(kind, engine::MutationKind::Insert) {
                 let Some(source_key) = row_pk_value(row, &edge.source_key_columns) else {
@@ -1640,15 +1731,25 @@ fn intern_sync_relationship_identity(
     mapping_id: u64,
     source_key: String,
 ) -> safety::GraphResult<crate::edge_store::RelationshipId> {
+    let identity = crate::edge_store::RelationshipIdentity {
+        mapping_id,
+        source_key,
+    };
+    if let Some((relationship_id, _)) = eng
+        .relationship_identities
+        .iter()
+        .enumerate()
+        .find(|(_, existing)| existing.as_ref() == Some(&identity))
+    {
+        return crate::edge_store::RelationshipId::try_from(relationship_id).map_err(|_| {
+            safety::GraphError::Internal("relationship identity count exceeds u32".to_string())
+        });
+    }
     let relationship_id =
         crate::edge_store::RelationshipId::try_from(eng.relationship_identities.len()).map_err(
             |_| safety::GraphError::Internal("relationship identity count exceeds u32".to_string()),
         )?;
-    eng.relationship_identities
-        .push(Some(crate::edge_store::RelationshipIdentity {
-            mapping_id,
-            source_key,
-        }));
+    eng.relationship_identities.push(Some(identity));
     Ok(relationship_id)
 }
 
@@ -2047,6 +2148,7 @@ mod tests {
             all_table_oids: vec![42],
             edge_source_tables: HashSet::new(),
             edge_source_oids: HashSet::new(),
+            edge_source_node_oids: HashMap::new(),
         };
         let entry = SyncLogEntry {
             id: 1,
@@ -2128,8 +2230,11 @@ mod tests {
 
         let relationship_id = intern_sync_relationship_identity(&mut engine, 9, "r-1".to_string())
             .expect("relationship identity interns");
+        let repeated_id = intern_sync_relationship_identity(&mut engine, 9, "r-1".to_string())
+            .expect("existing relationship identity resolves");
 
         assert_eq!(relationship_id, 1);
+        assert_eq!(repeated_id, relationship_id);
         assert_eq!(engine.relationship_identities.len(), 2);
         assert_eq!(
             engine.relationship_identities[1],

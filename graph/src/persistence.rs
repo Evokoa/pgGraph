@@ -970,6 +970,40 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     }
     let manifest_root = projection_manifest_root(path);
     if let Some(manifest) = load_projection_manifest(path, computed_crc, &manifest_root)? {
+        if let Some(reference) = &manifest.relationship_identities {
+            let identity_path = manifest_root.join(&reference.path);
+            let actual_bytes = std::fs::metadata(&identity_path)
+                .map_err(|err| GraphError::CorruptFile {
+                    reason: format!("relationship identity artifact metadata read failed: {err}"),
+                })?
+                .len();
+            if actual_bytes != reference.bytes {
+                return Err(GraphError::CorruptFile {
+                    reason: "relationship identity manifest byte count mismatch".to_string(),
+                });
+            }
+            let dictionary = crate::projection::identity::read_manifest_identity_artifact(
+                &identity_path,
+                &reference.checksum,
+                reference.bytes,
+                reference.entry_count,
+            )?;
+            if dictionary.identities().len() != reference.entry_count as usize {
+                return Err(GraphError::CorruptFile {
+                    reason: "relationship identity manifest entry count mismatch".to_string(),
+                });
+            }
+            if !dictionary
+                .identities()
+                .starts_with(&engine.relationship_identities)
+            {
+                return Err(GraphError::CorruptFile {
+                    reason: "relationship identity artifact does not extend the base dictionary"
+                        .to_string(),
+                });
+            }
+            engine.relationship_identities = dictionary.identities().to_vec();
+        }
         if !manifest.segments.is_empty() {
             engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
         }

@@ -1,6 +1,6 @@
 # Full Graph Engine Progress
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 The authoritative 1.0 scope now lives in
 [`../v1-release/README.md`](../v1-release/README.md). This file continues to
@@ -159,6 +159,7 @@ correctness and safety boundary.
 - 2026-07-10 — Checkpoint 1A sync/layered identity subphase: trigger-sync inserted edge rows now intern relationship source keys, durable segment edge rows store optional relationship IDs, and layered mutable-overlay reads preserve those IDs for GQL relationship values; compaction remains the next identity gap.
 - 2026-07-10 — Checkpoint 1A compaction identity subphase: projection compaction initially preserved relationship IDs only for rows representable by the topology key.
 - 2026-07-11 — Checkpoint 1A parallel compaction subphase: segment format v5, identity-aware layered keys, weighted rows, specific tombstones, materialization, and dirty-range chunk replacement now preserve identical endpoint/type/direction relationship rows independently.
+- 2026-07-12 — Checkpoint 1A durable identity subphase: manifest version 2 now references a checksummed cumulative relationship-identity dictionary, reload validates segment IDs against it, and trigger replay covers standalone mapped relationship tables without requiring node registration.
 
 ## Decisions
 
@@ -453,4 +454,19 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Chunk rewrite regressions | `cd graph && cargo test --features pg17 projection::chunk::tests` | PASS: 7 passed; dirty-range rewrites retain relationship IDs |
 | Independent Rust review | `rust-reviewing` subagent over the R1 compaction diff | PASS after adding the requested forced dirty-range chunk rewrite regression for parallel IDs, weights, and an identity tombstone |
 | Contract and docs drift | `scripts/check_docs_drift.sh` | PASS |
+| Whitespace | `git diff --check` | PASS |
+
+### 2026-07-12 R1 Durable Relationship Identity Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 694 passed, 1 ignored, doctests 0 |
+| Layered reload regression | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_relationship_expansion_uses_layered_manifest_snapshot` | PASS: unit and PostgreSQL-backed cases |
+| Parallel identity reload regression | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_ingested_parallel_relationship_identity_survives_reload` | PASS: standalone relationship trigger, two equal-topology rows, fresh-backend hydration IDs `f1,f_parallel` |
+| No-FK relationship replay | `cd graph && cargo pgrx test --features "pg17 development" pg17 standalone_relationship_sync_without_fk_uses_registered_endpoint_fallback` | PASS: endpoint resolution falls back across registered node tables without physical FK metadata |
+| Rust documentation | `cd graph && cargo doc --features pg17 --no-deps` | PASS |
+| Independent Rust review | `rust-reviewing` subagent over the durable identity diff and follow-up fixes | PASS after closing transient dictionary publication, duplicate interning, empty-key compatibility, no-FK replay, bounded artifact reads, and failed-validation cleanup findings |
+| Contract and docs drift | `scripts/check_docs_drift.sh`; `scripts/check_release_contract.py` | PASS after acknowledged GQL implementation hash refresh |
 | Whitespace | `git diff --check` | PASS |

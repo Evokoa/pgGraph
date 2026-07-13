@@ -262,6 +262,10 @@ fn status_from_manifest(
         dirty_chunk_bytes = dirty_chunk_bytes.saturating_add(file_len_i64(&path));
     }
 
+    let identity_bytes = manifest
+        .relationship_identities
+        .as_ref()
+        .map_or(0, |identities| identities.bytes.min(i64::MAX as u64) as i64);
     let obsolete_file_count = manifest.obsolete_files.len().min(i32::MAX as usize) as i32;
     let obsolete_bytes = manifest.obsolete_files.iter().fold(0_i64, |acc, file| {
         acc.saturating_add(file.bytes.min(i64::MAX as u64) as i64)
@@ -282,7 +286,8 @@ fn status_from_manifest(
     let artifact_bytes = base_artifact_bytes
         .saturating_add(manifest_bytes)
         .saturating_add(segment_bytes)
-        .saturating_add(dirty_chunk_bytes);
+        .saturating_add(dirty_chunk_bytes)
+        .saturating_add(identity_bytes);
     let compaction_backlog = manifest
         .segments
         .len()

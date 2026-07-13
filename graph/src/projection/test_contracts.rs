@@ -164,6 +164,7 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
         target: 1,
         type_id: 2,
         weight: None,
+        relationship_identity: None,
         table_oid: None,
         pk_hash: None,
         node_idx: None,

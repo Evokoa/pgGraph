@@ -15,6 +15,7 @@ pub(crate) mod compact;
     reason = "Microphase 12 adds generation-aware GC before scheduled maintenance wires it"
 )]
 pub(crate) mod gc;
+pub(crate) mod identity;
 pub(crate) mod ingest;
 #[allow(
     dead_code,

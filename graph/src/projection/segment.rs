@@ -238,7 +238,7 @@ impl DeltaSegment {
                 target: row.target,
                 type_id: row.type_id,
                 schema_reversed: row.schema_reversed,
-                relationship_id: None,
+                relationship_id: row.relationship_id,
             };
             if row.tombstone {
                 segment.edge_deletes.push(edge);
@@ -250,7 +250,7 @@ impl DeltaSegment {
                         target: row.target,
                         type_id: row.type_id,
                         schema_reversed: row.schema_reversed,
-                        relationship_id: None,
+                        relationship_id: row.relationship_id,
                         weight,
                     });
                 }
@@ -1355,6 +1355,7 @@ mod tests {
             target,
             type_id: 1,
             weight,
+            relationship_id: None,
             operation,
             schema_reversed: false,
         }

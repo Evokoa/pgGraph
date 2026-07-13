@@ -216,6 +216,9 @@ fn insert_manifest_references(
         root,
         &manifest.base_artifact_path,
     )?);
+    if let Some(identities) = &manifest.relationship_identities {
+        protected.insert(resolve_manifest_reference(root, &identities.path)?);
+    }
     for segment in &manifest.segments {
         protected.insert(resolve_manifest_reference(root, &segment.path)?);
     }

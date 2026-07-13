@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+use crate::edge_store::RelationshipId;
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
@@ -59,6 +60,8 @@ pub(crate) struct CommittedMutation {
     pub(crate) schema_reversed: bool,
     /// Optional edge weight.
     pub(crate) weight: Option<u32>,
+    /// Durable relationship identity assigned by the generation dictionary.
+    pub(crate) relationship_id: Option<RelationshipId>,
     /// Operation kind.
     pub(crate) operation: MutationOperation,
 }
@@ -82,6 +85,8 @@ pub(crate) struct NormalizedMutation {
     pub(crate) schema_reversed: bool,
     /// Optional edge weight.
     pub(crate) weight: Option<u32>,
+    /// Durable relationship identity assigned by the generation dictionary.
+    pub(crate) relationship_id: Option<RelationshipId>,
     /// Operation represented by this normalized row.
     pub(crate) operation: MutationOperation,
     /// Whether this mutation is a tombstone.
@@ -193,6 +198,7 @@ fn normalize_group(group: &[CommittedMutation]) -> Option<NormalizedMutation> {
         type_id: selected.type_id,
         schema_reversed: selected.schema_reversed,
         weight: selected.weight,
+        relationship_id: selected.relationship_id,
         operation: selected.operation,
         tombstone: selected.operation.is_delete(),
     })
@@ -211,6 +217,7 @@ fn compare_precedence(left: &CommittedMutation, right: &CommittedMutation) -> Or
         .then_with(|| left.sync_id.cmp(&right.sync_id))
         .then_with(|| left.operation.cmp(&right.operation))
         .then_with(|| left.weight.cmp(&right.weight))
+        .then_with(|| left.relationship_id.cmp(&right.relationship_id))
 }
 
 fn compare_normalized_mutations(left: &NormalizedMutation, right: &NormalizedMutation) -> Ordering {
@@ -221,6 +228,7 @@ fn compare_normalized_mutations(left: &NormalizedMutation, right: &NormalizedMut
         direction_sort_key(left.direction),
         left.type_id,
         left.schema_reversed,
+        left.relationship_id,
         left.target,
         left.operation,
         left.tombstone,
@@ -232,6 +240,7 @@ fn compare_normalized_mutations(left: &NormalizedMutation, right: &NormalizedMut
             direction_sort_key(right.direction),
             right.type_id,
             right.schema_reversed,
+            right.relationship_id,
             right.target,
             right.operation,
             right.tombstone,
@@ -255,6 +264,7 @@ struct MutationKey {
     target: u32,
     type_id: u8,
     schema_reversed: bool,
+    relationship_id: Option<RelationshipId>,
 }
 
 impl PartialOrd for MutationKey {
@@ -273,6 +283,7 @@ impl Ord for MutationKey {
             self.target,
             self.type_id,
             self.schema_reversed,
+            self.relationship_id,
         )
             .cmp(&(
                 other.generation_id,
@@ -282,6 +293,7 @@ impl Ord for MutationKey {
                 other.target,
                 other.type_id,
                 other.schema_reversed,
+                other.relationship_id,
             ))
     }
 }
@@ -296,6 +308,7 @@ impl From<&CommittedMutation> for MutationKey {
             target: row.target,
             type_id: row.type_id,
             schema_reversed: row.schema_reversed,
+            relationship_id: row.relationship_id,
         }
     }
 }
@@ -351,6 +364,50 @@ mod tests {
         let normalized = normalize_committed_mutations(&rows, limits()).expect("rows normalize");
 
         assert!(normalized.rows.is_empty());
+    }
+
+    #[test]
+    fn normalization_preserves_parallel_relationship_identities() {
+        let insert_first = CommittedMutation {
+            relationship_id: Some(11),
+            ..mutation(1, 1, 1, 2, MutationOperation::InsertEdge)
+        };
+        let insert_second = CommittedMutation {
+            relationship_id: Some(12),
+            ..mutation(2, 1, 1, 2, MutationOperation::InsertEdge)
+        };
+        let delete_first = CommittedMutation {
+            relationship_id: Some(11),
+            ..mutation(3, 1, 1, 2, MutationOperation::DeleteEdge)
+        };
+
+        let parallel =
+            normalize_committed_mutations(&[insert_first.clone(), insert_second.clone()], limits())
+                .expect("parallel identities normalize");
+        assert_eq!(
+            parallel
+                .rows
+                .iter()
+                .map(|row| row.relationship_id)
+                .collect::<Vec<_>>(),
+            vec![Some(11), Some(12)]
+        );
+
+        let distinct = normalize_committed_mutations(&[delete_first, insert_second], limits())
+            .expect("distinct identity mutations normalize");
+        assert_eq!(distinct.rows.len(), 2);
+        let cancelled = normalize_committed_mutations(
+            &[
+                insert_first,
+                CommittedMutation {
+                    relationship_id: Some(11),
+                    ..mutation(4, 1, 1, 2, MutationOperation::DeleteEdge)
+                },
+            ],
+            limits(),
+        )
+        .expect("same identity pair normalizes");
+        assert!(cancelled.rows.is_empty());
     }
 
     #[test]
@@ -508,6 +565,7 @@ mod tests {
             target,
             type_id: 1,
             weight,
+            relationship_id: None,
             operation,
             schema_reversed: false,
         }

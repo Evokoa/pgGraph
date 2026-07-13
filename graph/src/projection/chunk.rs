@@ -231,6 +231,7 @@ fn publish_base_chunk_rewrite_with_segments_and_reason(
         BaseChunkRewriteReason::Compaction => manifest.mark_compaction(),
         BaseChunkRewriteReason::Repair => manifest.mark_repair(),
     }
+    manifest.relationship_identities = previous.relationship_identities.clone();
     manifest.segments = retained_segments;
     manifest.base_chunks = base_chunks;
     manifest.obsolete_files = obsolete_files;

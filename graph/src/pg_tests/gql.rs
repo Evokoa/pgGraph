@@ -1068,6 +1068,152 @@ fn gql_preserves_parallel_source_relationship_rows() {
 }
 
 #[pg_test]
+fn gql_ingested_parallel_relationship_identity_survives_reload() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persisted build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("disable query auto-sync failed");
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+            'graph_test_friendships_pgtest'::regclass,
+            'user_id',
+            'graph_test_users_pgtest'::regclass,
+            'friend_id',
+            'friend',
+            bidirectional := false
+        )",
+    )
+    .expect("add friendship mapping failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable friendship graph failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f_parallel', 'u1', 'u2')",
+    )
+    .expect("insert post-build parallel relationship failed");
+    let published = Spi::get_one::<i64>(
+        "SELECT segments_published FROM graph.ingest_projection()",
+    )
+    .expect("ingest parallel relationship failed")
+    .unwrap_or_default();
+    assert!(published > 0);
+    Spi::run("SET graph.auto_load = on").expect("enable auto-load failed");
+    super::ENGINE.with(|engine| *engine.borrow_mut() = super::engine::Engine::new());
+
+    let (count, hydrated_ids) = Spi::connect(|client| {
+        let count = client
+            .select(
+                "SELECT count(*)::bigint FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                     RETURN u, v',
+                    hydrate := false
+                 )
+                 WHERE row #>> '{u,_id,id}' = 'u1'
+                   AND row #>> '{v,_id,id}' = 'u2'",
+                None,
+                &[],
+            )
+            .expect("reloaded parallel coordinate query failed")
+            .first()
+            .get::<i64>(1)
+            .expect("parallel count reads")
+            .unwrap_or_default();
+        let hydrated_ids = client
+            .select(
+                "SELECT string_agg(row #>> '{r,id}', ',' ORDER BY row #>> '{r,id}')
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
+                     RETURN u, r, v',
+                    hydrate := true
+                 )
+                 WHERE row #>> '{u,_id,id}' = 'u1'
+                   AND row #>> '{v,_id,id}' = 'u2'",
+                None,
+                &[],
+            )
+            .expect("reloaded parallel hydration query failed")
+            .first()
+            .get::<String>(1)
+            .expect("hydrated IDs read")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((count, hydrated_ids))
+    })
+    .expect("reloaded parallel results read");
+
+    assert_eq!(count, 2);
+    assert_eq!(hydrated_ids, "f1,f_parallel");
+    Spi::run("SET graph.auto_load = off").expect("restore auto-load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("restore persisted build failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+    Spi::run("SET graph.sync_mode = 'manual'").expect("restore sync mode failed");
+}
+
+#[pg_test]
+fn standalone_relationship_sync_without_fk_uses_registered_endpoint_fallback() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest
+           DROP CONSTRAINT graph_test_friendships_pgtest_user_id_fkey,
+           DROP CONSTRAINT graph_test_friendships_pgtest_friend_id_fkey",
+    )
+    .expect("drop relationship endpoint constraints failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persisted build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("disable query auto-sync failed");
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+            'graph_test_friendships_pgtest'::regclass,
+            'user_id',
+            'graph_test_users_pgtest'::regclass,
+            'friend_id',
+            'friend',
+            bidirectional := false
+        )",
+    )
+    .expect("add relationship mapping failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f_reverse', 'u2', 'u1')",
+    )
+    .expect("insert relationship without FK failed");
+    let published = Spi::get_one::<i64>(
+        "SELECT segments_published FROM graph.ingest_projection()",
+    )
+    .expect("ingest relationship without FK failed")
+    .unwrap_or_default();
+    assert!(published > 0);
+    Spi::run("SET graph.auto_load = on").expect("enable auto-load failed");
+    super::ENGINE.with(|engine| *engine.borrow_mut() = super::engine::Engine::new());
+
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass,
+             'u2',
+             1,
+             edge_types := ARRAY['friend'],
+             hydrate := false
+           )
+          WHERE node_id = 'u1'",
+    )
+    .expect("reloaded fallback traversal failed")
+    .unwrap_or_default();
+    assert_eq!(count, 1);
+    Spi::run("SET graph.auto_load = off").expect("restore auto-load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("restore persisted build failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+    Spi::run("SET graph.sync_mode = 'manual'").expect("restore sync mode failed");
+}
+
+#[pg_test]
 fn gql_aggregates_match_sql_grouping_and_numeric_results() {
     reset_and_create_fixtures();
     Spi::run(

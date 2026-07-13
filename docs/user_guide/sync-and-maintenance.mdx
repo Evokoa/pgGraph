@@ -101,6 +101,19 @@ boundary and require a fresh `graph.build()` before the persisted mutable graph
 is served. The rebuild reads authoritative PostgreSQL source tables and does
 not rewrite application rows or graph registrations.
 
+Mutable projection manifests also reference a checksummed relationship-identity
+dictionary for rows ingested after the base build. This keeps mapped
+relationship primary keys stable across backend reloads and allows parallel
+rows with the same endpoints and type to remain separately hydratable. A
+manifest written before this dictionary reference was introduced is not served
+as a current mutable generation; rebuild the graph from its PostgreSQL source
+tables after upgrading.
+
+Trigger mode installs sync triggers on registered node tables and on mapped
+relationship source tables. Relationship tables do not need a separate
+`graph.add_table()` registration: their declared primary key and mapped
+endpoint columns are captured by the relationship trigger.
+
 ## Query Freshness
 
 `graph.query_freshness` controls whether topology reads apply pending

@@ -119,6 +119,7 @@ pub(crate) fn compact_generation(
     manifest.previous_generation_id = Some(previous.generation_id);
     manifest.inherit_operation_timestamps(previous);
     manifest.mark_compaction();
+    manifest.relationship_identities = previous.relationship_identities.clone();
     manifest.base_chunks = previous.base_chunks.clone();
     manifest.segments = retained_segments;
     manifest.segments.push(segment_ref);

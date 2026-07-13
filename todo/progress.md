@@ -4,7 +4,7 @@ The active phased program is tracked in
 [`full-graph-engine/progress.md`](./full-graph-engine/progress.md). That file is
 the authoritative checkpoint handoff, measurement log, and next-action record.
 
-Last synchronized: 2026-07-11
+Last synchronized: 2026-07-12
 
 Current phase: Checkpoint 1A relationship identity persistence, base-CSR GQL
 query/path propagation, base relationship hydration, and mapped relationship-row
@@ -40,6 +40,10 @@ mutable-overlay role coverage remains.
 2026-07-12 R1 relationship authorization — Join and wildcard plans preflight
 every mapped edge-table ACL even for empty results, and mapped wildcard rows
 fail closed when stable source identity is missing or belongs to another plan.
+
+2026-07-12 R1 durable relationship identity — Post-build relationship rows now
+retain canonical identities through manifest publication, backend reload, and
+standalone mapped relationship-table trigger replay; delete specificity remains.
 
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific

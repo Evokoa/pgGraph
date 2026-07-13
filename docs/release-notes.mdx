@@ -48,6 +48,10 @@ gate evidence through signed tags and package publishing.
 - Added GQL `CREATE` support for registered relationships, including source-row
   inserts, transaction-local visibility, and hydrated relationship rows in
   query results.
+- Preserved identities for relationship rows ingested after a persisted build
+  by storing a checksummed manifest-referenced dictionary; standalone mapped
+  relationship tables now receive trigger-sync coverage without requiring a
+  separate node-table registration.
 - Added graph-scoped projection and sync behavior so replay, dirty-range
   ingest, copy-on-write compaction, and runtime selection ignore unrelated
   graph state.

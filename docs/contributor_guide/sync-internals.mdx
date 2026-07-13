@@ -204,10 +204,13 @@ The core projection ingester filters committed sync rows above the latest
 manifest watermark, normalizes edge mutations, writes L0 edge segments by
 direction, writes node/resolution/filter/tenant L0 deltas into node segments,
 and narrows each segment's source-node range to the rows it actually covers
-when that range is known. It then publishes durable no-overwrite segment files,
-validates segment reloads, and publishes the next manifest under an
-artifact-root ingestion publication lock. Aborted transaction rows are ignored,
-and the manifest watermark advances only after segment publication succeeds.
+when that range is known. Mapped relationship source keys are interned into a
+deterministically ordered cumulative dictionary, written as a checksummed
+artifact, and referenced by projection manifest version 2. It then publishes
+durable no-overwrite segment files, validates segment and identity-artifact
+reloads, and publishes the next manifest under an artifact-root ingestion
+publication lock. Aborted transaction rows are ignored, and the manifest
+watermark advances only after every referenced artifact succeeds.
 
 The admin-only `graph.ingest_projection(max_rows bigint DEFAULT NULL,
 max_bytes bigint DEFAULT NULL)` entrypoint reads committed `graph._sync_log`
@@ -218,6 +221,13 @@ persisted `main.pggraph` artifact. The base graph must be persisted, such as by
 building with `graph.persist_on_build = on`; scheduled maintenance treats a
 missing persisted artifact as a no-op so existing in-memory sync maintenance
 keeps its behavior.
+
+Trigger installation uses the union of registered node relations and mapped
+relationship source relations. For a standalone relationship table, replay
+resolves the source and target from the registered endpoint columns and uses
+the relationship table's primary key as the canonical identity. For an
+FK-style edge stored on a registered node table, replay continues to use the
+node primary key as the source and the mapped foreign-key column as the target.
 
 The layered projection runtime merges base CSR neighbors, durable edge
 insert/delete/weight segments, durable node visibility and tenant membership
@@ -286,6 +296,13 @@ upgrade from a release that wrote an older segment format, rebuild the graph
 from its authoritative PostgreSQL tables before serving the mutable projection. A clean
 `graph.build()` publishes a compatible base and manifest; old derived segment
 files can then be removed by the normal generation cleanup path.
+
+Manifest version 2 adds the cumulative post-build relationship-identity
+dictionary reference. The loader validates its checksum, declared slot count,
+reserved empty slot, uniqueness, and base-dictionary prefix before installing
+segments. Segment relationship IDs outside that dictionary fail closed. GC
+protects identity artifacts referenced by retained manifests and accounts for
+their bytes in projection status.
 
 Ingestion generations retain all segment, base-chunk, and obsolete-file
 references from the preceding manifest before appending new segments. A sync

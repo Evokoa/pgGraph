@@ -10,9 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::edge_store::RelationshipIdentity;
 use crate::filter_index::PersistedFilterValue;
+use crate::projection::identity::{
+    read_identity_artifact, read_manifest_identity_artifact, write_identity_artifact,
+    RelationshipIdentityDictionary,
+};
 use crate::projection::manifest::{
-    ManifestSegmentRef, ProjectionManifest, ProjectionManifestStore,
+    ManifestFileRef, ManifestIdentityRef, ManifestSegmentRef, ProjectionManifest,
+    ProjectionManifestStore,
 };
 use crate::projection::normalize::{
     normalize_committed_mutations, CommittedMutation, MutationBufferLimits, MutationOperation,
@@ -41,6 +47,7 @@ pub(crate) struct ProjectionSyncRow {
     pub(crate) type_id: u8,
     pub(crate) schema_reversed: bool,
     pub(crate) weight: Option<u32>,
+    pub(crate) relationship_identity: Option<RelationshipIdentity>,
     pub(crate) table_oid: Option<u32>,
     pub(crate) pk_hash: Option<u64>,
     pub(crate) node_idx: Option<u32>,
@@ -50,8 +57,11 @@ pub(crate) struct ProjectionSyncRow {
 }
 
 impl ProjectionSyncRow {
-    fn to_committed_mutation(&self) -> CommittedMutation {
-        CommittedMutation {
+    fn to_committed_mutation(
+        &self,
+        dictionary: &RelationshipIdentityDictionary,
+    ) -> GraphResult<CommittedMutation> {
+        Ok(CommittedMutation {
             sync_id: self.sync_id,
             generation_id: self.generation_id,
             direction: self.direction,
@@ -60,8 +70,13 @@ impl ProjectionSyncRow {
             type_id: self.type_id,
             schema_reversed: self.schema_reversed,
             weight: self.weight,
+            relationship_id: self
+                .relationship_identity
+                .as_ref()
+                .map(|identity| dictionary.id_for(identity))
+                .transpose()?,
             operation: self.operation,
-        }
+        })
     }
 }
 
@@ -71,6 +86,8 @@ pub(crate) struct ProjectionIngestResult {
     pub(crate) manifest: Option<ProjectionManifest>,
     pub(crate) rows_ingested: usize,
     pub(crate) segments_published: usize,
+    /// Cumulative identity dictionary installed by this publication.
+    pub(crate) relationship_identities: Option<Vec<Option<RelationshipIdentity>>>,
 }
 
 /// Ingestion publication lock.
@@ -147,13 +164,27 @@ impl ProjectionIngester {
     /// Returns validation and filesystem errors from segment writing and
     /// manifest publication. Returns [`GraphError::BuildLocked`] if another
     /// projection publication is already active.
+    #[allow(
+        dead_code,
+        reason = "test and benchmark callers use the base-only convenience path"
+    )]
     pub(crate) fn ingest_committed_rows(
         &self,
         rows: &[ProjectionSyncRow],
         limits: MutationBufferLimits,
     ) -> GraphResult<ProjectionIngestResult> {
+        self.ingest_committed_rows_with_identities(rows, limits, &[None])
+    }
+
+    /// Publish committed rows using the base artifact's identity dictionary.
+    pub(crate) fn ingest_committed_rows_with_identities(
+        &self,
+        rows: &[ProjectionSyncRow],
+        limits: MutationBufferLimits,
+        base_relationship_identities: &[Option<RelationshipIdentity>],
+    ) -> GraphResult<ProjectionIngestResult> {
         let _guard = self.lock.try_enter()?;
-        self.ingest_committed_rows_locked(rows, limits)
+        self.ingest_committed_rows_locked(rows, limits, base_relationship_identities)
     }
 
     /// Publish a no-segment generation that only advances the sync watermark.
@@ -175,6 +206,7 @@ impl ProjectionIngester {
                 manifest: None,
                 rows_ingested: 0,
                 segments_published: 0,
+                relationship_identities: None,
             });
         }
         let generation_id = previous.as_ref().map_or_else(
@@ -196,16 +228,18 @@ impl ProjectionIngester {
         if let Some(previous) = previous.as_ref() {
             manifest.inherit_operation_timestamps(previous);
             manifest.segments = previous.segments.clone();
+            manifest.relationship_identities = previous.relationship_identities.clone();
             manifest.base_chunks = previous.base_chunks.clone();
             manifest.obsolete_files = previous.obsolete_files.clone();
         }
-        manifest.previous_generation_id = previous.map(|manifest| manifest.generation_id);
+        manifest.previous_generation_id = previous.as_ref().map(|manifest| manifest.generation_id);
         manifest.mark_ingestion();
         self.store.publish(&manifest)?;
         Ok(ProjectionIngestResult {
             manifest: Some(manifest),
             rows_ingested: 0,
             segments_published: 0,
+            relationship_identities: None,
         })
     }
 
@@ -213,6 +247,7 @@ impl ProjectionIngester {
         &self,
         rows: &[ProjectionSyncRow],
         limits: MutationBufferLimits,
+        base_relationship_identities: &[Option<RelationshipIdentity>],
     ) -> GraphResult<ProjectionIngestResult> {
         let previous = self.store.load_latest_current()?;
         let previous_watermark = previous
@@ -228,11 +263,29 @@ impl ProjectionIngester {
                 manifest: None,
                 rows_ingested: 0,
                 segments_published: 0,
+                relationship_identities: None,
             });
         }
         validate_ingestion_limits(committed_rows.iter().copied(), limits)?;
 
         let generation_id = next_generation_id(previous.as_ref(), &committed_rows)?;
+        let mut identity_dictionary =
+            self.load_identity_dictionary(previous.as_ref(), base_relationship_identities)?;
+        let prior_identity_count = identity_dictionary.identities().len();
+        identity_dictionary.intern_all(
+            committed_rows
+                .iter()
+                .filter_map(|row| row.relationship_identity.clone()),
+        )?;
+        let identity_changed = identity_dictionary.identities().len() > prior_identity_count;
+        let identity_artifact_required = identity_changed
+            || (previous
+                .as_ref()
+                .and_then(|manifest| manifest.relationship_identities.as_ref())
+                .is_none()
+                && committed_rows
+                    .iter()
+                    .any(|row| row.relationship_identity.is_some()));
         let sync_watermark = committed_rows
             .iter()
             .map(|row| i64::try_from(row.sync_id))
@@ -243,7 +296,7 @@ impl ProjectionIngester {
             .unwrap_or(previous_watermark);
 
         let mut new_segment_refs = Vec::new();
-        for edge_segment in self.edge_segments(&committed_rows, limits)? {
+        for edge_segment in self.edge_segments(&committed_rows, limits, &identity_dictionary)? {
             let path =
                 self.write_segment(generation_id, new_segment_refs.len() as u32, &edge_segment)?;
             new_segment_refs.push(segment_ref(&self.root, &path, &edge_segment)?);
@@ -253,6 +306,19 @@ impl ProjectionIngester {
                 self.write_segment(generation_id, new_segment_refs.len() as u32, &node_segment)?;
             new_segment_refs.push(segment_ref(&self.root, &path, &node_segment)?);
         }
+        let identity_ref = if identity_artifact_required {
+            match self.write_identity_dictionary(generation_id, &identity_dictionary) {
+                Ok(reference) => Some(reference),
+                Err(err) => {
+                    cleanup_segment_refs(&self.root, &new_segment_refs)?;
+                    return Err(err);
+                }
+            }
+        } else {
+            previous
+                .as_ref()
+                .and_then(|manifest| manifest.relationship_identities.clone())
+        };
 
         let mut manifest = ProjectionManifest::base_only(
             generation_id,
@@ -268,12 +334,34 @@ impl ProjectionIngester {
             manifest.base_chunks = previous.base_chunks.clone();
             manifest.obsolete_files = previous.obsolete_files.clone();
         }
-        manifest.previous_generation_id = previous.map(|manifest| manifest.generation_id);
+        manifest.relationship_identities = identity_ref.clone();
+        if identity_artifact_required {
+            if let Some(previous_identity) = previous
+                .as_ref()
+                .and_then(|manifest| manifest.relationship_identities.as_ref())
+            {
+                manifest.obsolete_files.push(ManifestFileRef {
+                    path: previous_identity.path.clone(),
+                    bytes: previous_identity.bytes,
+                });
+            }
+        }
+        manifest.previous_generation_id = previous.as_ref().map(|manifest| manifest.generation_id);
         manifest.mark_ingestion();
         manifest.segments.extend(new_segment_refs.iter().cloned());
         if let Err(err) = self.store.publish(&manifest) {
             if !self.store.manifest_path(generation_id).exists() {
                 cleanup_segment_refs(&self.root, &new_segment_refs)?;
+                if identity_ref.as_ref().is_some_and(|reference| {
+                    previous
+                        .as_ref()
+                        .and_then(|manifest| manifest.relationship_identities.as_ref())
+                        != Some(reference)
+                }) {
+                    if let Some(reference) = identity_ref {
+                        let _ = std::fs::remove_file(self.root.join(reference.path));
+                    }
+                }
             }
             return Err(err);
         }
@@ -282,6 +370,7 @@ impl ProjectionIngester {
             rows_ingested: committed_rows.len(),
             segments_published: new_segment_refs.len(),
             manifest: Some(manifest),
+            relationship_identities: Some(identity_dictionary.identities().to_vec()),
         })
     }
 
@@ -294,6 +383,7 @@ impl ProjectionIngester {
         &self,
         rows: &[&ProjectionSyncRow],
         limits: MutationBufferLimits,
+        identity_dictionary: &RelationshipIdentityDictionary,
     ) -> GraphResult<Vec<DeltaSegment>> {
         let mut segments = Vec::new();
         for direction in [
@@ -306,8 +396,8 @@ impl ProjectionIngester {
                 .copied()
                 .filter(|row| row.operation.is_edge())
                 .filter(|row| row.direction == direction)
-                .map(ProjectionSyncRow::to_committed_mutation)
-                .collect::<Vec<_>>();
+                .map(|row| row.to_committed_mutation(identity_dictionary))
+                .collect::<GraphResult<Vec<_>>>()?;
             if edge_rows.is_empty() {
                 continue;
             }
@@ -328,6 +418,56 @@ impl ProjectionIngester {
         Ok(segments)
     }
 
+    fn load_identity_dictionary(
+        &self,
+        previous: Option<&ProjectionManifest>,
+        base_relationship_identities: &[Option<RelationshipIdentity>],
+    ) -> GraphResult<RelationshipIdentityDictionary> {
+        if let Some(reference) =
+            previous.and_then(|manifest| manifest.relationship_identities.as_ref())
+        {
+            return read_manifest_identity_artifact(
+                &self.root.join(&reference.path),
+                &reference.checksum,
+                reference.bytes,
+                reference.entry_count,
+            );
+        }
+        RelationshipIdentityDictionary::try_from_identities(base_relationship_identities.to_vec())
+    }
+
+    fn write_identity_dictionary(
+        &self,
+        generation_id: u64,
+        dictionary: &RelationshipIdentityDictionary,
+    ) -> GraphResult<ManifestIdentityRef> {
+        let file_name = format!("relationship-identities-{generation_id:020}.bin");
+        let path = self.root.join(&file_name);
+        let (checksum, bytes) = write_identity_artifact(&self.root, &path, dictionary)?;
+        let decoded = match read_identity_artifact(&path, &checksum) {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(err);
+            }
+        };
+        if decoded != *dictionary {
+            let _ = std::fs::remove_file(&path);
+            return Err(GraphError::CorruptFile {
+                reason: "relationship identity artifact validation changed dictionary contents"
+                    .to_string(),
+            });
+        }
+        Ok(ManifestIdentityRef {
+            path: file_name,
+            checksum,
+            entry_count: u32::try_from(dictionary.identities().len()).map_err(|_| {
+                GraphError::Internal("relationship identity count exceeds u32".to_string())
+            })?,
+            bytes,
+        })
+    }
+
     fn write_segment(
         &self,
         generation_id: u64,
@@ -336,8 +476,15 @@ impl ProjectionIngester {
     ) -> GraphResult<PathBuf> {
         let path = self.root.join(segment_file_name(generation_id, segment_id));
         write_segment_atomically(&self.root, &path, segment)?;
-        let decoded = DeltaSegment::read_from_path(&path)?;
+        let decoded = match DeltaSegment::read_from_path(&path) {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(err);
+            }
+        };
         if decoded.header.sync_watermark != segment.header.sync_watermark {
+            let _ = std::fs::remove_file(&path);
             return Err(GraphError::CorruptFile {
                 reason: "projection ingest segment failed validation reload".to_string(),
             });
@@ -626,6 +773,13 @@ fn validate_ingestion_limits<'a>(
                         .map_or(0, PersistedFilterValue::heap_bytes),
                 )
             })
+            .and_then(|total| {
+                total.checked_add(
+                    row.relationship_identity
+                        .as_ref()
+                        .map_or(0, |identity| identity.source_key.len()),
+                )
+            })
             .ok_or_else(|| {
                 GraphError::Internal("projection ingest byte estimate overflowed".into())
             })?;
@@ -835,6 +989,7 @@ mod tests {
                 target: 2,
                 type_id: 0,
                 weight: None,
+                relationship_identity: None,
                 table_oid: Some(100),
                 pk_hash: Some(7000),
                 node_idx: Some(2),
@@ -853,6 +1008,7 @@ mod tests {
                 target: 2,
                 type_id: 0,
                 weight: None,
+                relationship_identity: None,
                 table_oid: Some(100),
                 pk_hash: Some(7000),
                 node_idx: Some(2),
@@ -871,6 +1027,7 @@ mod tests {
                 target: 4,
                 type_id: 0,
                 weight: None,
+                relationship_identity: None,
                 table_oid: Some(100),
                 pk_hash: Some(7001),
                 node_idx: Some(4),
@@ -889,6 +1046,7 @@ mod tests {
                 target: 4,
                 type_id: 0,
                 weight: None,
+                relationship_identity: None,
                 table_oid: Some(101),
                 pk_hash: Some(7002),
                 node_idx: Some(4),
@@ -1179,6 +1337,88 @@ mod tests {
         assert!(matches!(overflow_err, GraphError::Internal(_)));
     }
 
+    #[test]
+    fn projection_ingest_persists_parallel_relationship_identity_dictionary() {
+        let dir = seeded_artifacts("projection_ingest_parallel_relationship_identities");
+        let ingester = ingester(&dir);
+        let identity = |source_key: &str| RelationshipIdentity {
+            mapping_id: 7,
+            source_key: source_key.to_string(),
+        };
+        let mut first = edge_row(1, 0, 1, Some(11), MutationOperation::InsertEdge);
+        first.relationship_identity = Some(identity("edge-a"));
+        let mut second = edge_row(2, 0, 1, Some(13), MutationOperation::InsertEdge);
+        second.relationship_identity = Some(identity("edge-b"));
+
+        let result = ingester
+            .ingest_committed_rows_with_identities(
+                &[second, first],
+                MutationBufferLimits::new(10, 10_000),
+                &[None],
+            )
+            .expect("parallel identities publish");
+        let manifest = result.manifest.clone().expect("manifest publishes");
+        let identity_ref = manifest
+            .relationship_identities
+            .as_ref()
+            .expect("identity dictionary is referenced");
+        let dictionary =
+            read_identity_artifact(&dir.path().join(&identity_ref.path), &identity_ref.checksum)
+                .expect("identity dictionary reads");
+        assert_eq!(
+            dictionary.id_for(&identity("edge-a")).expect("edge-a id"),
+            1
+        );
+        assert_eq!(
+            dictionary.id_for(&identity("edge-b")).expect("edge-b id"),
+            2
+        );
+
+        let segment = load_segment(&dir, &manifest.segments[0].path);
+        assert_eq!(segment.edge_inserts.len(), 2);
+        assert_eq!(
+            segment
+                .edge_inserts
+                .iter()
+                .map(|edge| edge.relationship_id)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2)]
+        );
+        assert_eq!(
+            result.relationship_identities,
+            Some(dictionary.identities().to_vec())
+        );
+    }
+
+    #[test]
+    fn projection_ingest_publishes_preinterned_identity_without_prior_dictionary() {
+        let dir = seeded_artifacts("projection_ingest_preinterned_relationship_identity");
+        let ingester = ingester(&dir);
+        let identity = RelationshipIdentity {
+            mapping_id: 7,
+            source_key: "edge-a".to_string(),
+        };
+        let mut row = edge_row(1, 0, 1, None, MutationOperation::InsertEdge);
+        row.relationship_identity = Some(identity.clone());
+
+        let result = ingester
+            .ingest_committed_rows_with_identities(
+                &[row],
+                MutationBufferLimits::new(10, 10_000),
+                &[None, Some(identity.clone())],
+            )
+            .expect("preinterned identity publishes");
+        let manifest = result.manifest.expect("manifest publishes");
+        let reference = manifest
+            .relationship_identities
+            .expect("first relationship segment forces a durable dictionary");
+        let dictionary =
+            read_identity_artifact(&dir.path().join(reference.path), &reference.checksum)
+                .expect("durable dictionary reads");
+
+        assert_eq!(dictionary.id_for(&identity).expect("identity resolves"), 1);
+    }
+
     fn seeded_artifacts(name: &str) -> ProjectionArtifactDir {
         let dir = ProjectionArtifactDir::new(name);
         std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base artifact writes");
@@ -1210,6 +1450,7 @@ mod tests {
             target,
             type_id: 2,
             weight,
+            relationship_identity: None,
             table_oid: None,
             pk_hash: None,
             node_idx: None,
