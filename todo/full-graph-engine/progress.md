@@ -305,6 +305,17 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Contract and docs drift | `scripts/check_docs_drift.sh` | PASS |
 | Whitespace | `git diff --check` | PASS |
 
+### 2026-07-12 R1 Relationship Authorization Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Wildcard identity unit regression | `cd graph && cargo test --features pg17 wildcard_relationship_mapping` | PASS: mapped missing/mismatched identities fail closed while intentionally unmapped types remain supported |
+| Wildcard binding metadata | `cd graph && cargo test --features pg17 wildcard_path_carries_edge_mapping_metadata` | PASS: mapped relationship type labels survive logical-to-physical lowering |
+| PostgreSQL empty-result ACL preflight | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_join_and_wildcard_preflight_edge_acl_before_empty_results` | PASS: join and wildcard/EXISTS return SQLSTATE 42501 without edge-table SELECT even when predicates match no rows |
+| Independent Rust review | `rust-reviewing` subagent over authorization diff | PASS after correcting the regression fixture to build an empty mapped topology and documenting conservative wildcard candidate ACL scope |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 686 passed, 1 ignored, doctests 0 |
+
 ### 2026-07-11 R1 Relationship Visibility Result Shapes
 
 | Gate | Exact command | Result |

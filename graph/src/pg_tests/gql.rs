@@ -737,6 +737,54 @@ fn gql_wildcard_relationships_fail_closed_when_edge_row_is_not_visible() {
 }
 
 #[pg_test]
+fn gql_join_and_wildcard_preflight_edge_acl_before_empty_results() {
+    reset_and_create_fixtures();
+    Spi::run("DELETE FROM public.graph_test_friendships_pgtest")
+        .expect("clear friendship rows failed");
+    build_friendship_fixture_graph();
+    Spi::run("DROP ROLE IF EXISTS graph_gql_edge_acl_preflight")
+        .expect("drop edge ACL role failed");
+    Spi::run("CREATE ROLE graph_gql_edge_acl_preflight").expect("create edge ACL role failed");
+    Spi::run(
+        "GRANT USAGE ON SCHEMA graph, public TO graph_gql_edge_acl_preflight;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_gql_edge_acl_preflight;",
+    )
+    .expect("grant node-only ACL fixture failed");
+    create_error_sqlstate_helper();
+
+    Spi::run("SET ROLE graph_gql_edge_acl_preflight").expect("set edge ACL role failed");
+    let join_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest),
+                       (u)-[:friend]->(v)
+                 RETURN u, v',
+                hydrate := false
+             )"
+        )
+    ))
+    .expect("join edge ACL SQLSTATE capture failed");
+    let wildcard_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT EXISTS (
+                SELECT 1 FROM graph.gql(
+                    'MATCH p=(u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                     RETURN p',
+                    hydrate := false
+                )
+             )"
+        )
+    ))
+    .expect("wildcard edge ACL SQLSTATE capture failed");
+    Spi::run("RESET ROLE").expect("reset edge ACL role failed");
+
+    assert_eq!(join_sqlstate.as_deref(), Some("42501"));
+    assert_eq!(wildcard_sqlstate.as_deref(), Some("42501"));
+}
+
+#[pg_test]
 fn gql_with_projection_scope_aliases_and_shadows() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

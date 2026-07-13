@@ -1541,7 +1541,8 @@ fn bind_wildcard_path_read(
         .into_iter()
         .map(|rel| rel.rel_type)
         .collect::<std::collections::BTreeSet<_>>();
-    let edge_mappings_by_id = wildcard_edge_mappings_by_id(catalog, &segments);
+    let (edge_mappings_by_id, mapped_rel_types) =
+        wildcard_edge_mapping_metadata(catalog, &segments);
     Ok(LogicalWildcardPathPlan {
         path_var,
         source_var,
@@ -1557,16 +1558,20 @@ fn bind_wildcard_path_read(
         table_labels,
         rel_type_labels,
         edge_mappings_by_id,
+        mapped_rel_types,
         predicate,
         skip: query.skip,
         limit: query.limit,
     })
 }
 
-fn wildcard_edge_mappings_by_id(
+fn wildcard_edge_mapping_metadata(
     catalog: &impl CatalogSnapshot,
     segments: &[LogicalWildcardPathSegment],
-) -> std::collections::BTreeMap<u64, EdgeMappingInfo> {
+) -> (
+    std::collections::BTreeMap<u64, EdgeMappingInfo>,
+    std::collections::BTreeSet<String>,
+) {
     let mut rel_type_filters = std::collections::BTreeSet::new();
     let mut has_unfiltered_segment = false;
     for segment in segments {
@@ -1577,15 +1582,19 @@ fn wildcard_edge_mappings_by_id(
         rel_type_filters.extend(segment.rel_type_filters.iter().cloned());
     }
 
-    catalog
+    let mut mappings = std::collections::BTreeMap::new();
+    let mut mapped_rel_types = std::collections::BTreeSet::new();
+    for rel in catalog
         .rel_types()
         .into_iter()
         .filter(|rel| has_unfiltered_segment || rel_type_filters.contains(&rel.rel_type))
-        .filter_map(|rel| {
-            rel.edge_mapping
-                .map(|mapping| (mapping.mapping_id, mapping))
-        })
-        .collect()
+    {
+        if let Some(mapping) = rel.edge_mapping {
+            mapped_rel_types.insert(rel.rel_type);
+            mappings.insert(mapping.mapping_id, mapping);
+        }
+    }
+    (mappings, mapped_rel_types)
 }
 
 fn bind_wildcard_path_predicate(

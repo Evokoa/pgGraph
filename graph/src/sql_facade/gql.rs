@@ -205,11 +205,28 @@ fn check_join_acl(plan: &crate::query::physical_plan::PhysicalJoinPlan) {
     for table_oid in plan.required_table_oids() {
         acl::check_table_acl(table_oid).unwrap_or_else(|err| err.report());
     }
+    let edge_table_oids = plan
+        .patterns
+        .iter()
+        .filter_map(|pattern| pattern.edge_mapping.as_ref())
+        .map(|mapping| mapping.edge_table_oid)
+        .collect::<std::collections::BTreeSet<_>>();
+    for table_oid in edge_table_oids {
+        acl::check_table_acl(table_oid).unwrap_or_else(|err| err.report());
+    }
 }
 
 fn check_wildcard_path_acl(plan: &crate::query::physical_plan::PhysicalWildcardPathPlan) {
     for table_oid in &plan.required_node_table_oids {
         acl::check_table_acl(*table_oid).unwrap_or_else(|err| err.report());
+    }
+    let edge_table_oids = plan
+        .edge_mappings_by_id
+        .values()
+        .map(|mapping| mapping.edge_table_oid)
+        .collect::<std::collections::BTreeSet<_>>();
+    for table_oid in edge_table_oids {
+        acl::check_table_acl(table_oid).unwrap_or_else(|err| err.report());
     }
 }
 
@@ -3218,25 +3235,19 @@ fn ensure_gql_wildcard_relationship_rows_visible(
 
     for row in rows {
         for relationship in &row.path_relationships {
-            let Some(relationship_id) = relationship.relationship_id else {
+            let Some((relationship_id, mapping_id)) = wildcard_relationship_mapping(
+                relationship,
+                &relationship_identities,
+                &plan.edge_mappings_by_id,
+                &plan.mapped_rel_types,
+            )?
+            else {
                 continue;
             };
-            let Some(identity) = relationship_identities
-                .get(relationship_id as usize)
-                .and_then(Option::as_ref)
-            else {
-                return Err(safety::GraphError::GqlExecution {
-                    reason: format!(
-                        "GQL relationship identity `{relationship_id}` is not available"
-                    ),
-                });
-            };
-            if plan.edge_mappings_by_id.contains_key(&identity.mapping_id) {
-                ids_by_mapping
-                    .entry(identity.mapping_id)
-                    .or_default()
-                    .push(Some(relationship_id));
-            }
+            ids_by_mapping
+                .entry(mapping_id)
+                .or_default()
+                .push(Some(relationship_id));
         }
     }
 
@@ -3253,6 +3264,45 @@ fn ensure_gql_wildcard_relationship_rows_visible(
         )?;
     }
     Ok(())
+}
+
+fn wildcard_relationship_mapping(
+    relationship: &crate::query::execute::GqlPathRelationship,
+    relationship_identities: &[Option<crate::edge_store::RelationshipIdentity>],
+    edge_mappings_by_id: &std::collections::BTreeMap<
+        u64,
+        crate::query::catalog_snapshot::EdgeMappingInfo,
+    >,
+    mapped_rel_types: &std::collections::BTreeSet<String>,
+) -> safety::GraphResult<Option<(crate::edge_store::RelationshipId, u64)>> {
+    let Some(relationship_id) = relationship.relationship_id else {
+        if mapped_rel_types.contains(&relationship.rel_type) {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL mapped relationship type `{}` has no stable source identity",
+                    relationship.rel_type
+                ),
+            });
+        }
+        return Ok(None);
+    };
+    let Some(identity) = relationship_identities
+        .get(relationship_id as usize)
+        .and_then(Option::as_ref)
+    else {
+        return Err(safety::GraphError::GqlExecution {
+            reason: format!("GQL relationship identity `{relationship_id}` is not available"),
+        });
+    };
+    if !edge_mappings_by_id.contains_key(&identity.mapping_id) {
+        return Err(safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL relationship identity `{relationship_id}` references mapping {} outside the wildcard plan",
+                identity.mapping_id
+            ),
+        });
+    }
+    Ok(Some((relationship_id, identity.mapping_id)))
 }
 
 fn ensure_relationship_source_keys_visible<I>(
@@ -3667,6 +3717,57 @@ mod tests {
         assert_eq!(
             relationship_source_key_predicate(&edge_mapping(7)),
             "jsonb_build_array(edge_row.\"tenant_id\"::text, edge_row.\"edge_id\"::text)::text"
+        );
+    }
+
+    #[test]
+    fn wildcard_relationship_mapping_fails_closed_for_mapped_identity_gaps() {
+        let coordinate = crate::query::execute::GqlNodeCoordinate {
+            table_oid: 10,
+            node_id: "node-1".to_string(),
+        };
+        let relationship =
+            |rel_type: &str, relationship_id| crate::query::execute::GqlPathRelationship {
+                rel_type: rel_type.to_string(),
+                start: coordinate.clone(),
+                end: coordinate.clone(),
+                relationship_id,
+            };
+        let mappings = [(7, edge_mapping(7))].into();
+        let mapped_types = ["friend".to_string()].into();
+
+        let missing = wildcard_relationship_mapping(
+            &relationship("friend", None),
+            &[],
+            &mappings,
+            &mapped_types,
+        )
+        .expect_err("mapped relationship without identity must fail closed");
+        assert!(missing.to_string().contains("no stable source identity"));
+
+        let wrong_mapping = wildcard_relationship_mapping(
+            &relationship("friend", Some(0)),
+            &[Some(crate::edge_store::RelationshipIdentity {
+                mapping_id: 8,
+                source_key: "edge-1".to_string(),
+            })],
+            &mappings,
+            &mapped_types,
+        )
+        .expect_err("identity outside wildcard mappings must fail closed");
+        assert!(wrong_mapping
+            .to_string()
+            .contains("outside the wildcard plan"));
+
+        assert_eq!(
+            wildcard_relationship_mapping(
+                &relationship("unmapped", None),
+                &[],
+                &mappings,
+                &mapped_types,
+            )
+            .expect("unmapped relationship type may omit source-row identity"),
+            None
         );
     }
 }

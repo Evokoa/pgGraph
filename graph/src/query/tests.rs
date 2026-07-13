@@ -250,6 +250,7 @@ fn wildcard_path_carries_edge_mapping_metadata() {
             .collect::<Vec<_>>(),
         vec![30]
     );
+    assert_eq!(logical.mapped_rel_types, ["friend".to_string()].into());
 
     let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
         super::logical_plan::LogicalStatement::WildcardPathRead(logical),
@@ -265,6 +266,7 @@ fn wildcard_path_carries_edge_mapping_metadata() {
             .collect::<Vec<_>>(),
         vec![30]
     );
+    assert_eq!(physical.mapped_rel_types, ["friend".to_string()].into());
 }
 
 #[test]

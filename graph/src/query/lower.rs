@@ -133,6 +133,7 @@ fn lower_wildcard_path(plan: LogicalWildcardPathPlan) -> PhysicalWildcardPathPla
         table_labels: plan.table_labels,
         rel_type_labels: plan.rel_type_labels,
         edge_mappings_by_id: plan.edge_mappings_by_id,
+        mapped_rel_types: plan.mapped_rel_types,
         predicate: plan.predicate,
         skip: plan.skip,
         limit: plan.limit,

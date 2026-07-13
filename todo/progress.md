@@ -37,6 +37,10 @@ with guidance instead of selecting the first same-named column.
 fail-closed behavior before aggregate, existence, and relationship-list output;
 mutable-overlay role coverage remains.
 
+2026-07-12 R1 relationship authorization — Join and wildcard plans preflight
+every mapped edge-table ACL even for empty results, and mapped wildcard rows
+fail closed when stable source identity is missing or belongs to another plan.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.
