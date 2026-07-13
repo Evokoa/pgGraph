@@ -49,6 +49,10 @@ standalone mapped relationship-table trigger replay; delete specificity remains.
 durable ingestion, and GQL row deletion now tombstone canonical relationship
 identities without hiding parallel siblings.
 
+2026-07-12 R1 mutable relationship visibility — Two-role PostgreSQL 17 tests
+prove durable post-build relationship segments remain fail-closed under RLS for
+coordinate, hydrated, aggregate, and existence outputs.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

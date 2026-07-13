@@ -4,9 +4,9 @@
 
 - [x] Finish parallel-aware relationship compaction without collapsing distinct
       source rows that share endpoints, type, and direction.
-- [ ] Carry stable relationship identity through every advertised read, write,
+- [x] Carry stable relationship identity through every advertised read, write,
       sync, hydration, visibility, and recovery path.
-- [ ] Complete relationship-row ACL/RLS checks for nodes, relationships, paths,
+- [x] Complete relationship-row ACL/RLS checks for nodes, relationships, paths,
       scalar identities, aggregates, existence, and hydration-disabled output.
 - [x] Finish table-qualified filter identity and remove ambiguous internal
       name-only lookup paths.

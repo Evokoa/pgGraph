@@ -161,6 +161,7 @@ correctness and safety boundary.
 - 2026-07-11 — Checkpoint 1A parallel compaction subphase: segment format v5, identity-aware layered keys, weighted rows, specific tombstones, materialization, and dirty-range chunk replacement now preserve identical endpoint/type/direction relationship rows independently.
 - 2026-07-12 — Checkpoint 1A durable identity subphase: manifest version 2 now references a checksummed cumulative relationship-identity dictionary, reload validates segment IDs against it, and trigger replay covers standalone mapped relationship tables without requiring node registration.
 - 2026-07-12 — Checkpoint 1A identity-delete subphase: transaction and immediate overlays now key tombstones by direction and optional relationship ID, GQL deletes carry the matched identity to PostgreSQL primary-key DML, and durable sync deletion preserves parallel siblings after reload.
+- 2026-07-12 — Checkpoint 1A mutable-overlay visibility subphase: caller-role RLS checks now have durable post-build segment coverage across coordinate, hydrated, aggregate, and existence result shapes on PostgreSQL 17.
 
 ## Decisions
 
@@ -486,3 +487,9 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Bidirectional reverse deletion | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_delete_edge_handles_bidirectional_reverse_match` | PASS |
 | Independent Rust review | `rust-reviewing` subagent over the identity-delete diff and follow-up fixes | PASS after preserving wildcard tombstones beside identified inserts and adding composite-key and two-role RLS gates |
 | Rust documentation | `cd graph && cargo doc --features pg17 --no-deps` | PASS |
+
+### 2026-07-12 R1 Mutable-Overlay Relationship RLS Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| PostgreSQL 17 two-role RLS | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_mutable_overlay_relationships_fail_closed_under_rls` | PASS: one post-build durable relationship is hidden from coordinate, hydrated, aggregate, and existence output |

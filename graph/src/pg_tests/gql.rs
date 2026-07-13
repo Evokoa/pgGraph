@@ -634,6 +634,141 @@ fn gql_coordinate_only_relationships_fail_closed_when_edge_row_is_not_visible() 
 }
 
 #[pg_test]
+fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persisted build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("disable auto sync failed");
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+           'graph_test_friendships_pgtest'::regclass,
+           'user_id',
+           'graph_test_users_pgtest'::regclass,
+           'friend_id',
+           'friend',
+           bidirectional := false
+         )",
+    )
+    .expect("add friendship mapping failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f_overlay_hidden', 'u2', 'u1')",
+    )
+    .expect("insert overlay relationship failed");
+    let published = Spi::get_one::<i64>(
+        "SELECT segments_published FROM graph.ingest_projection()",
+    )
+    .expect("ingest overlay relationship failed")
+    .unwrap_or_default();
+    assert!(published > 0, "overlay RLS fixture requires a durable segment");
+    Spi::run("SET graph.auto_load = on").expect("enable auto-load failed");
+    super::ENGINE.with(|engine| *engine.borrow_mut() = super::engine::Engine::new());
+    let superuser_count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN r',
+             hydrate := false
+           )",
+    )
+    .expect("load overlay relationship failed")
+    .unwrap_or_default();
+    assert_eq!(superuser_count, 1);
+
+    Spi::run("DROP ROLE IF EXISTS graph_gql_overlay_rls").expect("drop overlay role failed");
+    Spi::run("CREATE ROLE graph_gql_overlay_rls").expect("create overlay role failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_gql_overlay_visible
+           ON public.graph_test_friendships_pgtest FOR SELECT
+           TO graph_gql_overlay_rls USING (id <> 'f_overlay_hidden');
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_overlay_rls;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_gql_overlay_rls;
+         GRANT SELECT ON public.graph_test_friendships_pgtest TO graph_gql_overlay_rls;",
+    )
+    .expect("configure overlay RLS failed");
+    create_error_sqlstate_helper();
+    let queries = [
+        "SELECT * FROM graph.gql(
+           'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN u, r, v',
+           hydrate := false
+         )",
+        "SELECT * FROM graph.gql(
+           'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN u, r, v',
+           hydrate := true
+         )",
+        "SELECT * FROM graph.gql(
+           'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN count(r) AS relationship_count',
+           hydrate := false
+         )",
+        "SELECT EXISTS (
+           SELECT 1 FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN r',
+             hydrate := false
+           )
+         )",
+    ];
+    Spi::run("SET ROLE graph_gql_overlay_rls").expect("set overlay role failed");
+    let (visible_source_rows, hidden_source_rows, node_query_rows) = Spi::connect(|client| {
+        let visible_source_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM public.graph_test_friendships_pgtest
+                  WHERE id = 'f1'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let hidden_source_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM public.graph_test_friendships_pgtest
+                  WHERE id = 'f_overlay_hidden'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let node_query_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM graph.gql(
+                     'MATCH (u:graph_test_users_pgtest {id: ''u1''}) RETURN u',
+                     hydrate := false
+                   )",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((visible_source_rows, hidden_source_rows, node_query_rows))
+    })
+    .expect("restricted-role control queries failed");
+    assert_eq!((visible_source_rows, hidden_source_rows, node_query_rows), (1, 0, 1));
+    for query in queries {
+        let sqlstate = Spi::get_one::<String>(&format!(
+            "SELECT public.graph_test_sqlstate({})",
+            super::sql_literal(query)
+        ))
+        .expect("overlay RLS SQLSTATE capture failed");
+        assert_eq!(sqlstate.as_deref(), Some("22000"));
+    }
+    Spi::run("RESET ROLE").expect("reset overlay role failed");
+    Spi::run("SET graph.auto_load = off").expect("restore auto-load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("restore persisted build failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+    Spi::run("SET graph.sync_mode = 'manual'").expect("restore sync mode failed");
+}
+
+#[pg_test]
 fn gql_join_relationships_fail_closed_when_edge_row_is_not_visible() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();
