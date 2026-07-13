@@ -4277,6 +4277,189 @@ fn gql_delete_edge_removes_source_row_and_tombstones_neighbors() {
 }
 
 #[pg_test]
+fn synced_parallel_relationship_delete_preserves_sibling_through_reload() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f_parallel', 'u1', 'u2')",
+    )
+    .expect("insert parallel relationship failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persisted build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("disable auto sync failed");
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+            'graph_test_friendships_pgtest'::regclass,
+            'user_id',
+            'graph_test_users_pgtest'::regclass,
+            'friend_id',
+            'friend',
+            bidirectional := false
+        )",
+    )
+    .expect("add friendship mapping failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    Spi::run("DELETE FROM public.graph_test_friendships_pgtest WHERE id = 'f1'")
+        .expect("delete one parallel relationship failed");
+
+    let assert_only_sibling = || {
+        let ids = Spi::get_one::<String>(
+            "SELECT string_agg(row #>> '{r,id}', ',' ORDER BY row #>> '{r,id}')
+               FROM graph.gql(
+                 'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u2''}) RETURN r'
+               )",
+        )
+        .expect("parallel sibling query failed")
+        .unwrap_or_default();
+        assert_eq!(ids, "f_parallel");
+    };
+    let published = Spi::get_one::<i64>(
+        "SELECT segments_published FROM graph.ingest_projection()",
+    )
+    .expect("ingest identity delete failed")
+    .unwrap_or_default();
+    assert!(published > 0);
+    Spi::run("SET graph.auto_load = on").expect("enable auto-load failed");
+    super::ENGINE.with(|engine| *engine.borrow_mut() = super::engine::Engine::new());
+    assert_only_sibling();
+
+    let source_rows = Spi::get_one::<String>(
+        "SELECT string_agg(id, ',' ORDER BY id)
+           FROM public.graph_test_friendships_pgtest
+          WHERE user_id = 'u1' AND friend_id = 'u2'",
+    )
+    .expect("source relationship rows read failed")
+    .unwrap_or_default();
+    assert_eq!(source_rows, "f_parallel");
+    Spi::run("SET graph.auto_load = off").expect("restore auto-load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("restore persisted build failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+    Spi::run("SET graph.sync_mode = 'manual'").expect("restore sync mode failed");
+}
+
+#[pg_test]
+fn gql_delete_relationship_with_composite_source_key() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "CREATE TABLE public.graph_gql_composite_nodes_pgtest (
+             id TEXT PRIMARY KEY
+         );
+         CREATE TABLE public.graph_gql_composite_edges_pgtest (
+             edge_id TEXT NOT NULL,
+             revision INTEGER NOT NULL,
+             source_id TEXT NOT NULL REFERENCES public.graph_gql_composite_nodes_pgtest(id),
+             target_id TEXT NOT NULL REFERENCES public.graph_gql_composite_nodes_pgtest(id),
+             PRIMARY KEY (edge_id, revision)
+         );
+         INSERT INTO public.graph_gql_composite_nodes_pgtest VALUES ('n1'), ('n2');
+         INSERT INTO public.graph_gql_composite_edges_pgtest
+         VALUES ('edge', 1, 'n1', 'n2');",
+    )
+    .expect("create composite relationship fixture failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table('graph_gql_composite_nodes_pgtest'::regclass, 'id');
+         SELECT graph.add_edge(
+           'graph_gql_composite_edges_pgtest'::regclass,
+           'source_id',
+           'graph_gql_composite_nodes_pgtest'::regclass,
+           'target_id',
+           'linked',
+           bidirectional := false
+         );
+         SELECT * FROM graph.build(mode := 'mutable_overlay');",
+    )
+    .expect("build composite relationship graph failed");
+
+    Spi::run(
+        "SELECT * FROM graph.gql(
+           'MATCH (a:graph_gql_composite_nodes_pgtest {id: ''n1''})-[r:linked]->(b:graph_gql_composite_nodes_pgtest {id: ''n2''}) DELETE r RETURN a.id AS source'
+         )",
+    )
+    .expect("delete composite-key relationship failed");
+    let rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_gql_composite_edges_pgtest",
+    )
+    .expect("composite relationship count failed")
+    .unwrap_or(-1);
+    assert_eq!(rows, 0);
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+}
+
+#[pg_test]
+fn gql_delete_rls_denial_keeps_source_row_and_projection() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+           'graph_test_friendships_pgtest'::regclass,
+           'user_id',
+           'graph_test_users_pgtest'::regclass,
+           'friend_id',
+           'friend',
+           bidirectional := false
+         )",
+    )
+    .expect("add relationship mapping failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+    Spi::run("DROP ROLE IF EXISTS graph_gql_delete_rls").expect("drop delete role failed");
+    Spi::run("CREATE ROLE graph_gql_delete_rls").expect("create delete role failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_gql_delete_select
+           ON public.graph_test_friendships_pgtest FOR SELECT
+           TO graph_gql_delete_rls USING (true);
+         CREATE POLICY graph_gql_delete_deny
+           ON public.graph_test_friendships_pgtest FOR DELETE
+           TO graph_gql_delete_rls USING (false);
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_delete_rls;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_gql_delete_rls;
+         GRANT SELECT, DELETE ON public.graph_test_friendships_pgtest TO graph_gql_delete_rls;",
+    )
+    .expect("configure delete RLS fixture failed");
+    create_error_capture_helper();
+
+    Spi::run("SET ROLE graph_gql_delete_rls").expect("set delete role failed");
+    let denied = Spi::get_one::<bool>(&format!(
+        "SELECT public.graph_test_sql_raises({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+               'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u2''}) DELETE r RETURN u.id AS source'
+             )"
+        )
+    ))
+    .expect("capture denied delete failed")
+    .unwrap_or(false);
+    Spi::run("RESET ROLE").expect("reset delete role failed");
+
+    let source_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_test_friendships_pgtest WHERE id = 'f1'",
+    )
+    .expect("source relationship count failed")
+    .unwrap_or_default();
+    let projected = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[:friend]->(v:graph_test_users_pgtest {id: ''u2''}) RETURN u, v'
+           )",
+    )
+    .expect("projection relationship count failed")
+    .unwrap_or_default();
+    assert!(denied);
+    assert_eq!(source_rows, 1);
+    assert_eq!(projected, 1);
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+}
+
+#[pg_test]
 fn gql_delete_edge_write_recheck_rejects_stale_endpoint_predicate() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");

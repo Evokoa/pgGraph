@@ -63,7 +63,7 @@ fn add_overlay_edges(config: &mut BfsConfig, graph: &graph_gen::BenchGraph, stri
                 .overlay_deleted_edges
                 .entry(source)
                 .or_default()
-                .insert((target, type_id));
+                .insert((target, type_id, false, None));
         }
     }
 }

@@ -291,6 +291,10 @@ pub(crate) struct LogicalDeleteEdge {
     pub(crate) target: BoundNode,
     /// Registered edge row mapping.
     pub(crate) edge: BoundMappedEdge,
+    /// Durable catalog identity for the relationship mapping.
+    pub(crate) edge_mapping_id: u64,
+    /// Primary-key columns that identify one edge source row.
+    pub(crate) edge_source_key_columns: crate::builder::PrimaryKeySpec,
     /// Optional hydrated-row predicate selecting the relationship match.
     pub(crate) predicate: Option<Predicate>,
     /// Return slots in requested order.

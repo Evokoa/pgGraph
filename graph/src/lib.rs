@@ -167,7 +167,8 @@ pub mod bench_support {
 
     type OverlayInserts =
         HashMap<u32, Vec<(u32, u8, bool, Option<crate::edge_store::RelationshipId>)>>;
-    type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
+    type OverlayDeletes =
+        HashMap<u32, HashSet<(u32, u8, bool, Option<crate::edge_store::RelationshipId>)>>;
 
     /// Durable projection shape exercised by release-readiness benchmarks.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,7 +396,7 @@ pub mod bench_support {
             );
             deletes.insert(
                 source,
-                HashSet::from([(source.wrapping_add(1) % node_count, 1)]),
+                HashSet::from([(source.wrapping_add(1) % node_count, 1, false, None)]),
             );
         }
         (inserts, deletes)

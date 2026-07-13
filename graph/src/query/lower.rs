@@ -305,6 +305,8 @@ fn lower_delete_edge(plan: LogicalDeleteEdge) -> PhysicalDeleteEdge {
         edge_table_oid: plan.edge.edge_table_oid,
         edge_source_table_oid: plan.edge.source_table_oid,
         edge_target_table_oid: plan.edge.target_table_oid,
+        edge_mapping_id: plan.edge_mapping_id,
+        edge_source_key_columns: plan.edge_source_key_columns,
         source_column: plan.edge.source_column,
         target_column: plan.edge.target_column,
         bidirectional: plan.edge.bidirectional,

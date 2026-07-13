@@ -605,9 +605,12 @@ impl<'a> LayeredNeighbors<'a> {
     ) {
         let (inserts, deletes) = tx_delta::weighted_edge_overlay(direction);
         if let Some(deleted) = deletes.get(&node_idx) {
-            for &(target, type_id) in deleted {
-                merged.retain(|&(edge_target, edge_type_id, _, _), _| {
-                    edge_target != target || edge_type_id != type_id
+            for &(target, type_id, schema_reversed, relationship_id) in deleted {
+                merged.retain(|&(edge_target, edge_type_id, edge_reversed, edge_id), _| {
+                    edge_target != target
+                        || edge_type_id != type_id
+                        || edge_reversed != schema_reversed
+                        || (relationship_id.is_some() && edge_id != relationship_id)
                 });
             }
         }
@@ -790,9 +793,12 @@ fn merge_committed_overlay_maps(
     merged: &mut BTreeMap<MergedEdgeKey, LayeredEdge>,
 ) {
     if let Some(deleted) = deletes.get(&node_idx) {
-        for &(target, type_id) in deleted {
-            merged.retain(|&(edge_target, edge_type_id, _, _), _| {
-                edge_target != target || edge_type_id != type_id
+        for &(target, type_id, schema_reversed, relationship_id) in deleted {
+            merged.retain(|&(edge_target, edge_type_id, edge_reversed, edge_id), _| {
+                edge_target != target
+                    || edge_type_id != type_id
+                    || edge_reversed != schema_reversed
+                    || (relationship_id.is_some() && edge_id != relationship_id)
             });
         }
     }

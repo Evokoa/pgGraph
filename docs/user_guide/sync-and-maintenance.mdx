@@ -40,6 +40,12 @@ change is written once, and `graph.apply_sync()`, query freshness, and
 tables. Changes for unrelated graphs do not advance or replay the selected
 graph's backend-local sync state.
 
+Mapped relationship INSERT, UPDATE, and DELETE replay uses the relationship
+source table's registered primary key as canonical identity. Deleting one of
+several relationship rows with equal endpoints and type therefore tombstones
+only that row through immediate overlays, durable ingestion, reload, and
+compaction.
+
 ```text
 source table DML
       |

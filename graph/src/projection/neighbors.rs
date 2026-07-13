@@ -12,8 +12,11 @@ use crate::edge_store::{EdgeStore, RelationshipId, NO_RELATIONSHIP_ID};
 pub(crate) type OverlayInsert = (u32, u8, bool, Option<RelationshipId>);
 /// Pending edge inserts keyed by source node.
 pub(crate) type OverlayInserts = HashMap<u32, Vec<OverlayInsert>>;
+/// One pending edge tombstone. `relationship_id = None` is a legacy
+/// topology-wide tombstone; identified tombstones remove only one source row.
+pub(crate) type OverlayDelete = (u32, u8, bool, Option<RelationshipId>);
 /// Pending edge deletes keyed by source node.
-pub(crate) type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
+pub(crate) type OverlayDeletes = HashMap<u32, HashSet<OverlayDelete>>;
 /// Insert and delete overlay maps for one edge orientation.
 pub(crate) type EdgeOverlay = (OverlayInserts, OverlayDeletes);
 
@@ -287,7 +290,7 @@ enum OverlayPhase {
 pub(crate) struct OverlayNeighborIter<'a> {
     targets: &'a [u32],
     type_ids: &'a [u8],
-    deleted: Option<&'a HashSet<(u32, u8)>>,
+    deleted: Option<&'a HashSet<OverlayDelete>>,
     inserted: Option<&'a [OverlayInsert]>,
     base: CsrNeighborIter<'a>,
     insert_pos: usize,
@@ -302,7 +305,7 @@ impl<'a> OverlayNeighborIter<'a> {
         schema_reversed: &'a [u8],
         relationship_ids: &'a [RelationshipId],
         inserted: Option<&'a [OverlayInsert]>,
-        deleted: Option<&'a HashSet<(u32, u8)>>,
+        deleted: Option<&'a HashSet<OverlayDelete>>,
     ) -> Self {
         Self {
             targets,
@@ -322,7 +325,7 @@ impl<'a> OverlayNeighborIter<'a> {
         schema_reversed: &'a [u8],
         relationship_ids: &'a [RelationshipId],
         inserted: Option<&'a [OverlayInsert]>,
-        deleted: Option<&'a HashSet<(u32, u8)>>,
+        deleted: Option<&'a HashSet<OverlayDelete>>,
     ) -> Self {
         Self {
             targets,
@@ -336,16 +339,32 @@ impl<'a> OverlayNeighborIter<'a> {
         }
     }
 
-    fn base_contains(&self, target: u32, type_id: u8, schema_reversed: bool) -> bool {
+    fn base_contains(
+        &self,
+        target: u32,
+        type_id: u8,
+        schema_reversed: bool,
+        relationship_id: Option<RelationshipId>,
+    ) -> bool {
         self.targets
             .iter()
             .zip(self.type_ids.iter())
             .zip(self.base.schema_reversed.iter())
-            .any(|((&base_target, &base_type), &base_schema_reversed)| {
-                base_target == target
-                    && base_type == type_id
-                    && (base_schema_reversed != 0) == schema_reversed
-            })
+            .enumerate()
+            .any(
+                |(idx, ((&base_target, &base_type), &base_schema_reversed))| {
+                    base_target == target
+                        && base_type == type_id
+                        && (base_schema_reversed != 0) == schema_reversed
+                        && self
+                            .base
+                            .relationship_ids
+                            .get(idx)
+                            .copied()
+                            .filter(|id| *id != NO_RELATIONSHIP_ID)
+                            == relationship_id
+                },
+            )
     }
 
     fn inserted_duplicate(
@@ -354,13 +373,20 @@ impl<'a> OverlayNeighborIter<'a> {
         target: u32,
         type_id: u8,
         schema_reversed: bool,
+        relationship_id: Option<RelationshipId>,
     ) -> bool {
         self.inserted.is_some_and(|inserted| {
             inserted[..pos].iter().any(
-                |&(inserted_target, inserted_type, inserted_schema_reversed, _)| {
+                |&(
+                    inserted_target,
+                    inserted_type,
+                    inserted_schema_reversed,
+                    inserted_relationship_id,
+                )| {
                     inserted_target == target
                         && inserted_type == type_id
                         && inserted_schema_reversed == schema_reversed
+                        && inserted_relationship_id == relationship_id
                 },
             )
         })
@@ -368,10 +394,19 @@ impl<'a> OverlayNeighborIter<'a> {
 
     fn next_base(&mut self) -> Option<Neighbor> {
         for neighbor in self.base.by_ref() {
-            if self
-                .deleted
-                .is_some_and(|deleted| deleted.contains(&(neighbor.target, neighbor.type_id)))
-            {
+            if self.deleted.is_some_and(|deleted| {
+                deleted.contains(&(
+                    neighbor.target,
+                    neighbor.type_id,
+                    neighbor.schema_reversed,
+                    None,
+                )) || deleted.contains(&(
+                    neighbor.target,
+                    neighbor.type_id,
+                    neighbor.schema_reversed,
+                    neighbor.relationship_id,
+                ))
+            }) {
                 continue;
             }
             return Some(neighbor);
@@ -394,8 +429,8 @@ impl<'a> OverlayNeighborIter<'a> {
                 pos
             };
             let (target, type_id, schema_reversed, relationship_id) = inserted[pos];
-            if self.base_contains(target, type_id, schema_reversed)
-                || self.inserted_duplicate(pos, target, type_id, schema_reversed)
+            if self.base_contains(target, type_id, schema_reversed, relationship_id)
+                || self.inserted_duplicate(pos, target, type_id, schema_reversed, relationship_id)
             {
                 continue;
             }
@@ -506,7 +541,7 @@ mod tests {
             ],
         );
         let mut deletes = OverlayDeletes::new();
-        deletes.insert(0, HashSet::from([(1, 1)]));
+        deletes.insert(0, HashSet::from([(1, 1, false, None)]));
         let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
 
         let actual = neighbors.neighbors(0).collect::<Vec<_>>();

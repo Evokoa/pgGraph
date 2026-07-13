@@ -862,10 +862,16 @@ impl Engine {
             bool,
             Option<crate::edge_store::RelationshipId>,
         )> = HashSet::new();
-        let mut deletes: HashSet<(u32, u32, u8)> = HashSet::new();
+        let mut deletes: HashSet<(
+            u32,
+            u32,
+            u8,
+            bool,
+            Option<crate::edge_store::RelationshipId>,
+        )> = HashSet::new();
 
         for mutation in &self.edge_buffer {
-            let key = match direction {
+            let (source, target, type_id) = match direction {
                 TraversalDirection::Any | TraversalDirection::Out => {
                     (mutation.source, mutation.target, mutation.type_id)
                 }
@@ -873,37 +879,63 @@ impl Engine {
             };
             match mutation.kind {
                 MutationKind::Insert => {
-                    deletes.remove(&key);
+                    deletes.retain(|deleted| {
+                        deleted.0 != source
+                            || deleted.1 != target
+                            || deleted.2 != type_id
+                            || deleted.3 != mutation.schema_reversed
+                            || deleted.4 != mutation.relationship_id
+                    });
                     inserts.insert((
-                        key.0,
-                        key.1,
-                        key.2,
+                        source,
+                        target,
+                        type_id,
                         mutation.schema_reversed,
                         mutation.relationship_id,
                     ));
                 }
                 MutationKind::Delete => {
-                    inserts.retain(|(source, target, type_id, _, _)| {
-                        (*source, *target, *type_id) != key
+                    inserts.retain(|inserted| {
+                        inserted.0 != source
+                            || inserted.1 != target
+                            || inserted.2 != type_id
+                            || inserted.3 != mutation.schema_reversed
+                            || (mutation.relationship_id.is_some()
+                                && inserted.4 != mutation.relationship_id)
                     });
-                    deletes.insert(key);
+                    deletes.insert((
+                        source,
+                        target,
+                        type_id,
+                        mutation.schema_reversed,
+                        mutation.relationship_id,
+                    ));
                 }
             }
         }
 
         let (tx_inserts, tx_deletes) = tx_delta::edge_overlay(direction);
         for (source, targets) in tx_deletes {
-            for (target, type_id) in targets {
-                let key = (source, target, type_id);
-                inserts
-                    .retain(|(source, target, type_id, _, _)| (*source, *target, *type_id) != key);
-                deletes.insert(key);
+            for (target, type_id, schema_reversed, relationship_id) in targets {
+                inserts.retain(|inserted| {
+                    inserted.0 != source
+                        || inserted.1 != target
+                        || inserted.2 != type_id
+                        || inserted.3 != schema_reversed
+                        || (relationship_id.is_some() && inserted.4 != relationship_id)
+                });
+                deletes.insert((source, target, type_id, schema_reversed, relationship_id));
             }
         }
         for (source, targets) in tx_inserts {
             for (target, type_id, schema_reversed, relationship_id) in targets {
-                let key = (source, target, type_id);
-                deletes.remove(&key);
+                deletes.retain(|deleted| {
+                    deleted.0 != source
+                        || deleted.1 != target
+                        || deleted.2 != type_id
+                        || deleted.3 != schema_reversed
+                        || deleted.4 != relationship_id
+                });
                 inserts.insert((source, target, type_id, schema_reversed, relationship_id));
             }
         }
@@ -918,11 +950,13 @@ impl Engine {
             ));
         }
         let mut delete_map: OverlayDeletes = HashMap::new();
-        for (source, target, type_id) in deletes {
-            delete_map
-                .entry(source)
-                .or_default()
-                .insert((target, type_id));
+        for (source, target, type_id, schema_reversed, relationship_id) in deletes {
+            delete_map.entry(source).or_default().insert((
+                target,
+                type_id,
+                schema_reversed,
+                relationship_id,
+            ));
         }
         (insert_map, delete_map)
     }
@@ -1514,6 +1548,31 @@ mod tests {
         assert_eq!(engine.edge_buffer.len(), 2);
         assert_eq!(engine.edge_buffer[0].kind, MutationKind::Insert);
         assert_eq!(engine.edge_buffer[1].kind, MutationKind::Delete);
+    }
+
+    #[test]
+    fn committed_wildcard_delete_coexists_with_identified_insert() {
+        let mut engine = Engine::new();
+        engine.edge_buffer.push(EdgeMutation {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+            kind: MutationKind::Delete,
+        });
+        engine.edge_buffer.push(EdgeMutation {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(9),
+            kind: MutationKind::Insert,
+        });
+
+        let (inserts, deletes) = engine.traversal_edge_overlay(TraversalDirection::Out);
+        assert_eq!(inserts.get(&0), Some(&vec![(1, 1, false, Some(9))]));
+        assert_eq!(deletes.get(&0), Some(&HashSet::from([(1, 1, false, None)])));
     }
 
     #[test]

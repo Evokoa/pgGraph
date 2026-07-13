@@ -431,9 +431,10 @@ idempotent. Labels map to registered source tables, so label removal is not part
 of the supported write model. `CREATE` for relationships inserts exactly one
 registered edge row after matching and locking one source endpoint and one
 target endpoint; the new edge is visible through the transaction-local overlay.
-`DELETE` tombstones the
-matching graph edge in the current backend after PostgreSQL deletes exactly one
-edge row; endpoint nodes are not deleted. `DETACH DELETE` enumerates registered
+`DELETE` tombstones the matching graph edge by its registered source-row
+primary-key identity in the current backend after PostgreSQL deletes exactly
+one edge row. Parallel relationship rows with equal endpoints and type are not
+removed as siblings; endpoint nodes are not deleted. `DETACH DELETE` enumerates registered
 incident edge-row tables, deletes matching forward and reverse edge rows first,
 then deletes the
 matched node row and tombstones the node and deleted graph edges in the current

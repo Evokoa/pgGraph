@@ -1705,18 +1705,14 @@ pub(crate) fn apply_row_edge_mutations(
         let source = resolve_sync_endpoint(eng, source_oid, &from_pk, &context.all_table_oids);
         let target = resolve_sync_endpoint(eng, Some(target_oid), &to_pk, &context.all_table_oids);
         if let (Some(source), Some(target)) = (source, target) {
-            let relationship_id = if matches!(kind, engine::MutationKind::Insert) {
-                let Some(source_key) = row_pk_value(row, &edge.source_key_columns) else {
-                    continue;
-                };
-                Some(intern_sync_relationship_identity(
-                    eng,
-                    edge.mapping_id,
-                    source_key,
-                )?)
-            } else {
-                None
+            let Some(source_key) = row_pk_value(row, &edge.source_key_columns) else {
+                continue;
             };
+            let relationship_id = Some(intern_sync_relationship_identity(
+                eng,
+                edge.mapping_id,
+                source_key,
+            )?);
             push_sync_edge_delta(eng, source, target, type_id, false, relationship_id, kind)?;
             if edge.bidirectional {
                 push_sync_edge_delta(eng, target, source, type_id, true, relationship_id, kind)?;

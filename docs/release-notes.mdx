@@ -52,6 +52,9 @@ gate evidence through signed tags and package publishing.
   by storing a checksummed manifest-referenced dictionary; standalone mapped
   relationship tables now receive trigger-sync coverage without requiring a
   separate node-table registration.
+- Made relationship tombstones identity-specific across GQL writes, trigger
+  replay, durable projection ingestion, and reload so deleting one parallel
+  source row does not hide equal-endpoint siblings.
 - Added graph-scoped projection and sync behavior so replay, dirty-range
   ingest, copy-on-write compaction, and runtime selection ignore unrelated
   graph state.

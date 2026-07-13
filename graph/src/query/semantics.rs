@@ -2788,6 +2788,8 @@ fn bind_delete_edge(
             target_column: edge_mapping.target_column,
             bidirectional: edge_mapping.bidirectional,
         },
+        edge_mapping_id: edge_mapping.mapping_id,
+        edge_source_key_columns: edge_mapping.source_key_columns,
         predicate,
         returns,
     })

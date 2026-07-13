@@ -45,6 +45,10 @@ fail closed when stable source identity is missing or belongs to another plan.
 retain canonical identities through manifest publication, backend reload, and
 standalone mapped relationship-table trigger replay; delete specificity remains.
 
+2026-07-12 R1 relationship deletion — Transaction overlays, immediate sync,
+durable ingestion, and GQL row deletion now tombstone canonical relationship
+identities without hiding parallel siblings.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

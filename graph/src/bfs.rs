@@ -965,7 +965,7 @@ mod tests {
         let mut overlay_insert_edges = std::collections::HashMap::new();
         overlay_insert_edges.insert(0, vec![(3, 1, false, None), (1, 1, false, None)]);
         let mut overlay_deleted_edges = std::collections::HashMap::new();
-        overlay_deleted_edges.insert(0, HashSet::from([(1, 1)]));
+        overlay_deleted_edges.insert(0, HashSet::from([(1, 1, false, None)]));
 
         let config = BfsConfig {
             seed_node: 0,

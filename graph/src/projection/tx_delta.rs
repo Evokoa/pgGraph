@@ -49,7 +49,7 @@ pub(crate) struct TxGraphDelta {
     added_nodes: Vec<AddedNode>,
     deleted_nodes: HashSet<u32>,
     added_edges: HashMap<u32, Vec<DeltaEdge>>,
-    deleted_edges: HashSet<(u32, u32, u8)>,
+    deleted_edges: HashSet<(u32, u32, u8, bool, Option<RelationshipId>)>,
     filter_updates: HashMap<(usize, u32), Option<EncodedFilterValue>>,
     relationship_identities: Vec<RelationshipIdentity>,
 }
@@ -128,7 +128,8 @@ impl TxGraphDelta {
             + self.added_edges.capacity()
                 * (std::mem::size_of::<u32>() + std::mem::size_of::<Vec<DeltaEdge>>())
             + added_edge_bytes
-            + self.deleted_edges.capacity() * std::mem::size_of::<(u32, u32, u8)>()
+            + self.deleted_edges.capacity()
+                * std::mem::size_of::<(u32, u32, u8, bool, Option<RelationshipId>)>()
             + self.filter_updates.capacity()
                 * (std::mem::size_of::<(usize, u32)>()
                     + std::mem::size_of::<Option<EncodedFilterValue>>())
@@ -447,9 +448,15 @@ fn max_overlay_memory_bytes() -> usize {
 pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()> {
     let cancels_delete = TX_DELTA.with(|delta| {
         delta.borrow().as_ref().is_some_and(|delta| {
-            delta
-                .deleted_edges
-                .contains(&(source, edge.target, edge.type_id))
+            delta.deleted_edges.iter().any(
+                |&(deleted_source, target, type_id, schema_reversed, relationship_id)| {
+                    deleted_source == source
+                        && target == edge.target
+                        && type_id == edge.type_id
+                        && schema_reversed == edge.schema_reversed
+                        && relationship_id == edge.relationship_id
+                },
+            )
         })
     });
     if cancels_delete {
@@ -460,10 +467,14 @@ pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()>
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
-        if delta
-            .deleted_edges
-            .remove(&(source, edge.target, edge.type_id))
-        {
+        let deleted_key = delta.deleted_edges.iter().copied().find(|deleted| {
+            deleted.0 == source
+                && deleted.1 == edge.target
+                && deleted.2 == edge.type_id
+                && deleted.3 == edge.schema_reversed
+                && deleted.4 == edge.relationship_id
+        });
+        if deleted_key.is_some_and(|key| delta.deleted_edges.remove(&key)) {
             return;
         }
         delta.added_edges.entry(source).or_default().push(edge);
@@ -510,12 +521,26 @@ pub(crate) fn relationship_identities() -> Vec<RelationshipIdentity> {
     reason = "Phase 2E write operators call this after PostgreSQL accepts edge DML"
 )]
 pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> GraphResult<()> {
+    record_deleted_edge_with_identity(source, target, type_id, false, None)
+}
+
+/// Record a transaction-local edge deletion with optional source-row identity.
+pub(crate) fn record_deleted_edge_with_identity(
+    source: u32,
+    target: u32,
+    type_id: u8,
+    schema_reversed: bool,
+    relationship_id: Option<RelationshipId>,
+) -> GraphResult<()> {
     let cancels_insert = TX_DELTA.with(|delta| {
         delta.borrow().as_ref().is_some_and(|delta| {
             delta.added_edges.get(&source).is_some_and(|edges| {
-                edges
-                    .iter()
-                    .any(|edge| edge.target == target && edge.type_id == type_id)
+                edges.iter().any(|edge| {
+                    edge.target == target
+                        && edge.type_id == type_id
+                        && edge.schema_reversed == schema_reversed
+                        && (relationship_id.is_none() || edge.relationship_id == relationship_id)
+                })
             })
         })
     });
@@ -528,7 +553,12 @@ pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> Grap
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
         if let Some(edges) = delta.added_edges.get_mut(&source) {
-            edges.retain(|edge| edge.target != target || edge.type_id != type_id);
+            edges.retain(|edge| {
+                edge.target != target
+                    || edge.type_id != type_id
+                    || edge.schema_reversed != schema_reversed
+                    || (relationship_id.is_some() && edge.relationship_id != relationship_id)
+            });
             if edges.is_empty() {
                 delta.added_edges.remove(&source);
             }
@@ -536,7 +566,9 @@ pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> Grap
                 return;
             }
         }
-        delta.deleted_edges.insert((source, target, type_id));
+        delta
+            .deleted_edges
+            .insert((source, target, type_id, schema_reversed, relationship_id));
     });
     Ok(())
 }
@@ -573,9 +605,14 @@ pub(crate) fn edge_overlay(direction: TraversalDirection) -> EdgeOverlay {
         }
 
         let mut deletes = OverlayDeletes::new();
-        for &(source, target, type_id) in &delta.deleted_edges {
+        for &(source, target, type_id, schema_reversed, relationship_id) in &delta.deleted_edges {
             let (source, target) = orient_edge(direction, source, target);
-            deletes.entry(source).or_default().insert((target, type_id));
+            deletes.entry(source).or_default().insert((
+                target,
+                type_id,
+                schema_reversed,
+                relationship_id,
+            ));
         }
 
         (inserts, deletes)
@@ -607,9 +644,14 @@ pub(crate) fn weighted_edge_overlay(
         }
 
         let mut deletes = OverlayDeletes::new();
-        for &(source, target, type_id) in &delta.deleted_edges {
+        for &(source, target, type_id, schema_reversed, relationship_id) in &delta.deleted_edges {
             let (source, target) = orient_edge(direction, source, target);
-            deletes.entry(source).or_default().insert((target, type_id));
+            deletes.entry(source).or_default().insert((
+                target,
+                type_id,
+                schema_reversed,
+                relationship_id,
+            ));
         }
 
         (inserts, deletes)
@@ -874,7 +916,7 @@ mod tests {
                     relationship_id: None,
                 },
             );
-            delta.deleted_edges.insert((1, 2, 1));
+            delta.deleted_edges.insert((1, 2, 1, false, None));
         });
 
         let stats = stats();
@@ -1041,6 +1083,54 @@ mod tests {
         let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
         assert!(inserts.is_empty());
         assert!(deletes.is_empty());
+    }
+
+    #[test]
+    fn identified_delete_preserves_parallel_transaction_sibling() {
+        clear_current_transaction_state();
+        for relationship_id in [11, 12] {
+            record_added_edge(
+                1,
+                DeltaEdge {
+                    target: 2,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                    relationship_id: Some(relationship_id),
+                },
+            )
+            .expect("record parallel insert");
+        }
+
+        record_deleted_edge_with_identity(1, 2, 1, false, Some(11))
+            .expect("record identified delete");
+        let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
+
+        assert_eq!(inserts.get(&1), Some(&vec![(2, 1, false, Some(12))]));
+        assert!(deletes.is_empty());
+        clear_current_transaction_state();
+    }
+
+    #[test]
+    fn wildcard_delete_coexists_with_later_identified_insert() {
+        clear_current_transaction_state();
+        record_deleted_edge(1, 2, 1).expect("record wildcard delete");
+        record_added_edge(
+            1,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: Some(12),
+            },
+        )
+        .expect("record identified insert");
+
+        let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
+        assert_eq!(inserts.get(&1), Some(&vec![(2, 1, false, Some(12))]));
+        assert_eq!(deletes.get(&1), Some(&HashSet::from([(2, 1, false, None)])));
+        clear_current_transaction_state();
     }
 
     #[test]

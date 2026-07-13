@@ -160,6 +160,7 @@ correctness and safety boundary.
 - 2026-07-10 — Checkpoint 1A compaction identity subphase: projection compaction initially preserved relationship IDs only for rows representable by the topology key.
 - 2026-07-11 — Checkpoint 1A parallel compaction subphase: segment format v5, identity-aware layered keys, weighted rows, specific tombstones, materialization, and dirty-range chunk replacement now preserve identical endpoint/type/direction relationship rows independently.
 - 2026-07-12 — Checkpoint 1A durable identity subphase: manifest version 2 now references a checksummed cumulative relationship-identity dictionary, reload validates segment IDs against it, and trigger replay covers standalone mapped relationship tables without requiring node registration.
+- 2026-07-12 — Checkpoint 1A identity-delete subphase: transaction and immediate overlays now key tombstones by direction and optional relationship ID, GQL deletes carry the matched identity to PostgreSQL primary-key DML, and durable sync deletion preserves parallel siblings after reload.
 
 ## Decisions
 
@@ -470,3 +471,18 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Independent Rust review | `rust-reviewing` subagent over the durable identity diff and follow-up fixes | PASS after closing transient dictionary publication, duplicate interning, empty-key compatibility, no-FK replay, bounded artifact reads, and failed-validation cleanup findings |
 | Contract and docs drift | `scripts/check_docs_drift.sh`; `scripts/check_release_contract.py` | PASS after acknowledged GQL implementation hash refresh |
 | Whitespace | `git diff --check` | PASS |
+
+### 2026-07-12 R1 Identity-Specific Relationship Delete Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Formatting | `cd graph && cargo fmt --check` | PASS |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 697 passed, 1 ignored, doctests 0 |
+| GQL delete regressions | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_delete` | PASS: 8 existing delete cases |
+| Parallel durable deletion | `cd graph && cargo pgrx test --features "pg17 development" pg17 synced_parallel_relationship_delete_preserves_sibling_through_reload` | PASS: direct PostgreSQL deletion of one equal-topology row preserves and hydrates the sibling after ingestion and reload |
+| Composite identity deletion | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_delete_relationship_with_composite_source_key` | PASS |
+| RLS denial | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_delete_rls_denial_keeps_source_row_and_projection` | PASS: denied PostgreSQL DELETE leaves both source row and projection visible |
+| Bidirectional reverse deletion | `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_delete_edge_handles_bidirectional_reverse_match` | PASS |
+| Independent Rust review | `rust-reviewing` subagent over the identity-delete diff and follow-up fixes | PASS after preserving wildcard tombstones beside identified inserts and adding composite-key and two-role RLS gates |
+| Rust documentation | `cd graph && cargo doc --features pg17 --no-deps` | PASS |

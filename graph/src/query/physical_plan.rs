@@ -320,6 +320,10 @@ pub(crate) struct PhysicalDeleteEdge {
     pub(crate) edge_source_table_oid: u32,
     /// Registered target node table OID.
     pub(crate) edge_target_table_oid: u32,
+    /// Durable catalog identity for the relationship mapping.
+    pub(crate) edge_mapping_id: u64,
+    /// Primary-key columns that identify one edge source row.
+    pub(crate) edge_source_key_columns: crate::builder::PrimaryKeySpec,
     /// Edge row source key column.
     pub(crate) source_column: String,
     /// Edge row target key column.
