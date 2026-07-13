@@ -50,10 +50,12 @@ pub(crate) struct ProjectionSyncRow {
     pub(crate) relationship_identity: Option<RelationshipIdentity>,
     pub(crate) table_oid: Option<u32>,
     pub(crate) pk_hash: Option<u64>,
+    pub(crate) primary_key: Option<String>,
     pub(crate) node_idx: Option<u32>,
     pub(crate) filter_column_id: Option<u32>,
     pub(crate) filter_value: Option<PersistedFilterValue>,
     pub(crate) tenant_hash: Option<u64>,
+    pub(crate) tenant: Option<String>,
 }
 
 impl ProjectionSyncRow {
@@ -183,72 +185,45 @@ impl ProjectionIngester {
         limits: MutationBufferLimits,
         base_relationship_identities: &[Option<RelationshipIdentity>],
     ) -> GraphResult<ProjectionIngestResult> {
-        let _guard = self.lock.try_enter()?;
-        self.ingest_committed_rows_locked(rows, limits, base_relationship_identities)
+        self.ingest_committed_rows_with_identities_validated(
+            rows,
+            limits,
+            base_relationship_identities,
+            |_| Ok(()),
+        )
+        .map(|(result, _)| result)
     }
 
-    /// Publish a no-segment generation that only advances the sync watermark.
-    ///
-    /// # Errors
-    ///
-    /// Returns filesystem, validation, or publication-lock errors.
-    pub(crate) fn publish_empty_watermark(
-        &self,
-        sync_watermark: i64,
-    ) -> GraphResult<ProjectionIngestResult> {
-        let _guard = self.lock.try_enter()?;
-        let previous = self.store.load_latest_current()?;
-        let previous_watermark = previous
-            .as_ref()
-            .map_or(0, |manifest| manifest.sync_watermark);
-        if sync_watermark <= previous_watermark {
-            return Ok(ProjectionIngestResult {
-                manifest: None,
-                rows_ingested: 0,
-                segments_published: 0,
-                relationship_identities: None,
-            });
-        }
-        let generation_id = previous.as_ref().map_or_else(
-            || Ok(1),
-            |manifest| {
-                manifest.generation_id.checked_add(1).ok_or_else(|| {
-                    GraphError::Internal("projection generation id overflowed".into())
-                })
-            },
-        )?;
-        let mut manifest = ProjectionManifest::base_only(
-            generation_id,
-            self.base_artifact_path.clone(),
-            self.base_artifact_checksum.clone(),
-            self.base_artifact_version,
-            sync_watermark,
-            now_unix_micros()?,
-        );
-        if let Some(previous) = previous.as_ref() {
-            manifest.inherit_operation_timestamps(previous);
-            manifest.segments = previous.segments.clone();
-            manifest.relationship_identities = previous.relationship_identities.clone();
-            manifest.base_chunks = previous.base_chunks.clone();
-            manifest.obsolete_files = previous.obsolete_files.clone();
-        }
-        manifest.previous_generation_id = previous.as_ref().map(|manifest| manifest.generation_id);
-        manifest.mark_ingestion();
-        self.store.publish(&manifest)?;
-        Ok(ProjectionIngestResult {
-            manifest: Some(manifest),
-            rows_ingested: 0,
-            segments_published: 0,
-            relationship_identities: None,
-        })
-    }
-
-    fn ingest_committed_rows_locked(
+    /// Publish committed rows after validating the complete candidate manifest.
+    pub(crate) fn ingest_committed_rows_with_identities_validated<F, T>(
         &self,
         rows: &[ProjectionSyncRow],
         limits: MutationBufferLimits,
         base_relationship_identities: &[Option<RelationshipIdentity>],
-    ) -> GraphResult<ProjectionIngestResult> {
+        validate_candidate: F,
+    ) -> GraphResult<(ProjectionIngestResult, Option<T>)>
+    where
+        F: FnOnce(&ProjectionManifest) -> GraphResult<T>,
+    {
+        let _guard = self.lock.try_enter()?;
+        self.ingest_committed_rows_locked(
+            rows,
+            limits,
+            base_relationship_identities,
+            validate_candidate,
+        )
+    }
+
+    fn ingest_committed_rows_locked<F, T>(
+        &self,
+        rows: &[ProjectionSyncRow],
+        limits: MutationBufferLimits,
+        base_relationship_identities: &[Option<RelationshipIdentity>],
+        validate_candidate: F,
+    ) -> GraphResult<(ProjectionIngestResult, Option<T>)>
+    where
+        F: FnOnce(&ProjectionManifest) -> GraphResult<T>,
+    {
         let previous = self.store.load_latest_current()?;
         let previous_watermark = previous
             .as_ref()
@@ -259,12 +234,15 @@ impl ProjectionIngester {
             .filter(|row| i64::try_from(row.sync_id).is_ok_and(|id| id > previous_watermark))
             .collect::<Vec<_>>();
         if committed_rows.is_empty() {
-            return Ok(ProjectionIngestResult {
-                manifest: None,
-                rows_ingested: 0,
-                segments_published: 0,
-                relationship_identities: None,
-            });
+            return Ok((
+                ProjectionIngestResult {
+                    manifest: None,
+                    rows_ingested: 0,
+                    segments_published: 0,
+                    relationship_identities: None,
+                },
+                None,
+            ));
         }
         validate_ingestion_limits(committed_rows.iter().copied(), limits)?;
 
@@ -349,29 +327,41 @@ impl ProjectionIngester {
         manifest.previous_generation_id = previous.as_ref().map(|manifest| manifest.generation_id);
         manifest.mark_ingestion();
         manifest.segments.extend(new_segment_refs.iter().cloned());
+        let validated = match validate_candidate(&manifest) {
+            Ok(validated) => validated,
+            Err(err) => {
+                cleanup_candidate_artifacts(
+                    &self.root,
+                    &new_segment_refs,
+                    identity_artifact_required
+                        .then_some(identity_ref.as_ref())
+                        .flatten(),
+                )?;
+                return Err(err);
+            }
+        };
         if let Err(err) = self.store.publish(&manifest) {
             if !self.store.manifest_path(generation_id).exists() {
-                cleanup_segment_refs(&self.root, &new_segment_refs)?;
-                if identity_ref.as_ref().is_some_and(|reference| {
-                    previous
-                        .as_ref()
-                        .and_then(|manifest| manifest.relationship_identities.as_ref())
-                        != Some(reference)
-                }) {
-                    if let Some(reference) = identity_ref {
-                        let _ = std::fs::remove_file(self.root.join(reference.path));
-                    }
-                }
+                cleanup_candidate_artifacts(
+                    &self.root,
+                    &new_segment_refs,
+                    identity_artifact_required
+                        .then_some(identity_ref.as_ref())
+                        .flatten(),
+                )?;
             }
             return Err(err);
         }
 
-        Ok(ProjectionIngestResult {
-            rows_ingested: committed_rows.len(),
-            segments_published: new_segment_refs.len(),
-            manifest: Some(manifest),
-            relationship_identities: Some(identity_dictionary.identities().to_vec()),
-        })
+        Ok((
+            ProjectionIngestResult {
+                rows_ingested: committed_rows.len(),
+                segments_published: new_segment_refs.len(),
+                manifest: Some(manifest),
+                relationship_identities: Some(identity_dictionary.identities().to_vec()),
+            },
+            Some(validated),
+        ))
     }
 
     #[cfg(test)]
@@ -476,17 +466,18 @@ impl ProjectionIngester {
     ) -> GraphResult<PathBuf> {
         let path = self.root.join(segment_file_name(generation_id, segment_id));
         write_segment_atomically(&self.root, &path, segment)?;
-        let decoded = match DeltaSegment::read_from_path(&path) {
+        let mut decoded = match DeltaSegment::read_from_path(&path) {
             Ok(decoded) => decoded,
             Err(err) => {
                 let _ = std::fs::remove_file(&path);
                 return Err(err);
             }
         };
-        if decoded.header.sync_watermark != segment.header.sync_watermark {
+        decoded.header.checksum = segment.header.checksum;
+        if decoded != *segment {
             let _ = std::fs::remove_file(&path);
             return Err(GraphError::CorruptFile {
-                reason: "projection ingest segment failed validation reload".to_string(),
+                reason: "projection ingest segment validation changed its contents".to_string(),
             });
         }
         Ok(path)
@@ -511,28 +502,37 @@ fn node_segment(
         sync_watermark,
     )?;
     let mut node_states = BTreeMap::<u32, Vec<NodeStateDelta>>::new();
-    let mut resolutions = BTreeMap::<(u32, u64), Vec<ResolutionDelta>>::new();
+    let mut resolutions = BTreeMap::<(u32, u32, String), Vec<ResolutionDelta>>::new();
     let mut filters = BTreeMap::<(u32, u32), Vec<FilterDelta<'_>>>::new();
-    let mut tenants = BTreeMap::<(u32, u64), Vec<TenantDelta>>::new();
+    let mut tenants = BTreeMap::<(u32, String), Vec<TenantDelta>>::new();
     for (sequence, row) in rows
         .iter()
         .filter(|row| !row.operation.is_edge())
         .enumerate()
     {
         let node_idx = row.node_idx.unwrap_or(row.source);
-        if let (Some(table_oid), Some(pk_hash)) = (row.table_oid, row.pk_hash) {
+        if let (Some(table_oid), Some(pk_hash), Some(primary_key)) =
+            (row.table_oid, row.pk_hash, row.primary_key.as_ref())
+        {
+            if pk_hash != crate::resolution_index::ResolutionIndexBuilder::hash_pk(primary_key) {
+                return Err(GraphError::CorruptFile {
+                    reason: "projection node primary key does not match its hash".to_string(),
+                });
+            }
             node_states
                 .entry(node_idx)
                 .or_default()
                 .push(NodeStateDelta {
                     sync_id: row.sync_id,
+                    sequence,
                     active: row.operation.is_insert(),
                 });
             resolutions
-                .entry((table_oid, pk_hash))
+                .entry((node_idx, table_oid, primary_key.clone()))
                 .or_default()
                 .push(ResolutionDelta {
                     sync_id: row.sync_id,
+                    sequence,
                     node_idx,
                     tombstone: row.operation.is_delete(),
                 });
@@ -548,12 +548,18 @@ fn node_segment(
                     tombstone: row.operation.is_delete(),
                 });
         }
-        if let Some(tenant_hash) = row.tenant_hash {
+        if let (Some(tenant_hash), Some(tenant)) = (row.tenant_hash, row.tenant.as_ref()) {
+            if tenant_hash != xxhash_rust::xxh3::xxh3_64(tenant.as_bytes()) {
+                return Err(GraphError::CorruptFile {
+                    reason: "projection tenant identifier does not match its hash".to_string(),
+                });
+            }
             tenants
-                .entry((node_idx, tenant_hash))
+                .entry((node_idx, tenant.clone()))
                 .or_default()
                 .push(TenantDelta {
                     sync_id: row.sync_id,
+                    sequence,
                     tombstone: row.operation.is_delete(),
                 });
         }
@@ -566,11 +572,12 @@ fn node_segment(
             });
         }
     }
-    for ((table_oid, pk_hash), group) in resolutions {
+    for ((_node_idx, table_oid, primary_key), group) in resolutions {
         if let Some(delta) = select_resolution(&group) {
             segment.resolutions.push(SegmentResolution {
                 table_oid,
-                pk_hash,
+                pk_hash: crate::resolution_index::ResolutionIndexBuilder::hash_pk(&primary_key),
+                primary_key: Some(primary_key),
                 node_idx: delta.node_idx,
                 tombstone: delta.tombstone,
             });
@@ -586,11 +593,12 @@ fn node_segment(
             });
         }
     }
-    for ((node_idx, tenant_hash), group) in tenants {
+    for ((node_idx, tenant), group) in tenants {
         if let Some(delta) = select_tenant(&group) {
             segment.tenants.push(SegmentTenant {
                 node_idx,
-                tenant_hash,
+                tenant_hash: xxhash_rust::xxh3::xxh3_64(tenant.as_bytes()),
+                tenant: Some(tenant),
                 tombstone: delta.tombstone,
             });
         }
@@ -662,12 +670,14 @@ fn node_segment_source_range(segment: &DeltaSegment) -> GraphResult<Option<(u32,
 #[derive(Debug, Clone, Copy)]
 struct NodeStateDelta {
     sync_id: u64,
+    sequence: usize,
     active: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ResolutionDelta {
     sync_id: u64,
+    sequence: usize,
     node_idx: u32,
     tombstone: bool,
 }
@@ -683,29 +693,21 @@ struct FilterDelta<'a> {
 #[derive(Debug, Clone, Copy)]
 struct TenantDelta {
     sync_id: u64,
+    sequence: usize,
     tombstone: bool,
 }
 
 fn select_node_state(group: &[NodeStateDelta]) -> Option<NodeStateDelta> {
-    if group.len() == 2
-        && group.iter().any(|delta| delta.active)
-        && group.iter().any(|delta| !delta.active)
-    {
-        return None;
-    }
     group
         .iter()
-        .max_by_key(|delta| (!delta.active, delta.sync_id))
+        .max_by_key(|delta| (delta.sync_id, delta.sequence))
         .copied()
 }
 
 fn select_resolution(group: &[ResolutionDelta]) -> Option<ResolutionDelta> {
-    if cancels_tombstone_pair(group.iter().map(|delta| delta.tombstone)) {
-        return None;
-    }
     group
         .iter()
-        .max_by_key(|delta| (delta.tombstone, delta.sync_id, delta.node_idx))
+        .max_by_key(|delta| (delta.sync_id, delta.sequence))
         .copied()
 }
 
@@ -717,18 +719,10 @@ fn select_filter<'a>(group: &[FilterDelta<'a>]) -> Option<FilterDelta<'a>> {
 }
 
 fn select_tenant(group: &[TenantDelta]) -> Option<TenantDelta> {
-    if cancels_tombstone_pair(group.iter().map(|delta| delta.tombstone)) {
-        return None;
-    }
     group
         .iter()
-        .max_by_key(|delta| (delta.tombstone, delta.sync_id))
+        .max_by_key(|delta| (delta.sync_id, delta.sequence))
         .copied()
-}
-
-fn cancels_tombstone_pair(tombstones: impl Iterator<Item = bool>) -> bool {
-    let values = tombstones.collect::<Vec<_>>();
-    values.len() == 2 && values.iter().any(|value| !value) && values.iter().any(|value| *value)
 }
 
 fn next_generation_id(
@@ -780,6 +774,8 @@ fn validate_ingestion_limits<'a>(
                         .map_or(0, |identity| identity.source_key.len()),
                 )
             })
+            .and_then(|total| total.checked_add(row.primary_key.as_ref().map_or(0, String::len)))
+            .and_then(|total| total.checked_add(row.tenant.as_ref().map_or(0, String::len)))
             .ok_or_else(|| {
                 GraphError::Internal("projection ingest byte estimate overflowed".into())
             })?;
@@ -838,6 +834,24 @@ fn cleanup_segment_refs(root: &Path, segments: &[ManifestSegmentRef]) -> GraphRe
         sync_directory(root)?;
     }
     Ok(())
+}
+
+fn cleanup_candidate_artifacts(
+    root: &Path,
+    segments: &[ManifestSegmentRef],
+    identity: Option<&ManifestIdentityRef>,
+) -> GraphResult<()> {
+    cleanup_segment_refs(root, segments)?;
+    let Some(identity) = identity else {
+        return Ok(());
+    };
+    match std::fs::remove_file(root.join(&identity.path)) {
+        Ok(()) => sync_directory(root),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(GraphError::Internal(format!(
+            "remove unpublished projection identity dictionary: {err}"
+        ))),
+    }
 }
 
 fn write_segment_atomically(
@@ -991,11 +1005,15 @@ mod tests {
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
-                pk_hash: Some(7000),
+                pk_hash: Some(crate::resolution_index::ResolutionIndexBuilder::hash_pk(
+                    "node-2",
+                )),
+                primary_key: Some("node-2".to_string()),
                 node_idx: Some(2),
                 filter_column_id: Some(3),
                 filter_value: Some(PersistedFilterValue::Numeric(88)),
-                tenant_hash: Some(8001),
+                tenant_hash: Some(xxhash_rust::xxh3::xxh3_64(b"tenant-a")),
+                tenant: Some("tenant-a".to_string()),
                 schema_reversed: false,
             },
             ProjectionSyncRow {
@@ -1010,11 +1028,15 @@ mod tests {
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
-                pk_hash: Some(7000),
+                pk_hash: Some(crate::resolution_index::ResolutionIndexBuilder::hash_pk(
+                    "node-2",
+                )),
+                primary_key: Some("node-2".to_string()),
                 node_idx: Some(2),
                 filter_column_id: Some(3),
                 filter_value: Some(PersistedFilterValue::Numeric(88)),
-                tenant_hash: Some(8001),
+                tenant_hash: Some(xxhash_rust::xxh3::xxh3_64(b"tenant-a")),
+                tenant: Some("tenant-a".to_string()),
                 schema_reversed: false,
             },
             ProjectionSyncRow {
@@ -1029,11 +1051,15 @@ mod tests {
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
-                pk_hash: Some(7001),
+                pk_hash: Some(crate::resolution_index::ResolutionIndexBuilder::hash_pk(
+                    "node-4",
+                )),
+                primary_key: Some("node-4".to_string()),
                 node_idx: Some(4),
                 filter_column_id: Some(3),
                 filter_value: Some(PersistedFilterValue::Numeric(99)),
-                tenant_hash: Some(8002),
+                tenant_hash: Some(xxhash_rust::xxh3::xxh3_64(b"tenant-b")),
+                tenant: Some("tenant-b".to_string()),
                 schema_reversed: false,
             },
             ProjectionSyncRow {
@@ -1048,11 +1074,15 @@ mod tests {
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(101),
-                pk_hash: Some(7002),
+                pk_hash: Some(crate::resolution_index::ResolutionIndexBuilder::hash_pk(
+                    "node-4",
+                )),
+                primary_key: Some("node-4".to_string()),
                 node_idx: Some(4),
                 filter_column_id: Some(4),
                 filter_value: Some(PersistedFilterValue::Numeric(100)),
-                tenant_hash: Some(8003),
+                tenant_hash: Some(xxhash_rust::xxh3::xxh3_64(b"tenant-c")),
+                tenant: Some("tenant-c".to_string()),
                 schema_reversed: false,
             },
         ];
@@ -1071,8 +1101,18 @@ mod tests {
         assert_eq!(node.header.source_end, 5);
         assert_eq!(edge.edge_weights[0].weight, 7);
         assert_eq!(edge.header.direction, TraversalDirection::Out);
-        assert_eq!(node.node_states[0].node_idx, 4);
-        assert_eq!(node.resolutions[0].pk_hash, 7001);
+        assert!(node
+            .node_states
+            .iter()
+            .any(|row| row.node_idx == 2 && !row.active));
+        assert!(node
+            .node_states
+            .iter()
+            .any(|row| row.node_idx == 4 && row.active));
+        assert!(node
+            .resolutions
+            .iter()
+            .any(|row| row.primary_key.as_deref() == Some("node-4") && !row.tombstone));
         assert_eq!(
             node.filters
                 .iter()
@@ -1084,11 +1124,14 @@ mod tests {
             .filters
             .iter()
             .any(|row| row.node_idx == 2 && row.tombstone));
-        assert_eq!(node.tenants[0].tenant_hash, 8002);
-        assert_eq!(node.node_states.len(), 1);
-        assert_eq!(node.resolutions.len(), 2);
+        assert!(node
+            .tenants
+            .iter()
+            .any(|row| row.tenant.as_deref() == Some("tenant-b") && !row.tombstone));
+        assert_eq!(node.node_states.len(), 2);
+        assert_eq!(node.resolutions.len(), 3);
         assert_eq!(node.filters.len(), 3);
-        assert_eq!(node.tenants.len(), 2);
+        assert_eq!(node.tenants.len(), 3);
     }
 
     #[test]
@@ -1133,6 +1176,41 @@ mod tests {
         assert!(
             segment.node_states.is_empty(),
             "filter-only rows must not be interpreted as node lifecycle deltas"
+        );
+    }
+
+    #[test]
+    fn node_segment_serializes_new_identities_in_allocation_order() {
+        let mut lexical_last = edge_row(1, 0, 0, None, MutationOperation::UpsertNode);
+        lexical_last.direction = TraversalDirection::Any;
+        lexical_last.table_oid = Some(42);
+        lexical_last.primary_key = Some("z-last".to_string());
+        lexical_last.pk_hash = Some(crate::resolution_index::ResolutionIndexBuilder::hash_pk(
+            "z-last",
+        ));
+        lexical_last.node_idx = Some(1);
+        let mut lexical_first = lexical_last.clone();
+        lexical_first.sync_id = 2;
+        lexical_first.source = 2;
+        lexical_first.target = 2;
+        lexical_first.primary_key = Some("a-first".to_string());
+        lexical_first.pk_hash = Some(crate::resolution_index::ResolutionIndexBuilder::hash_pk(
+            "a-first",
+        ));
+        lexical_first.node_idx = Some(2);
+        let rows = [&lexical_last, &lexical_first];
+
+        let segment = node_segment(&rows, MutationBufferLimits::new(10, 10_000), 2)
+            .expect("node segment builds")
+            .expect("node segment exists");
+
+        assert_eq!(
+            segment
+                .resolutions
+                .iter()
+                .map(|resolution| resolution.node_idx)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 
@@ -1236,6 +1314,42 @@ mod tests {
     }
 
     #[test]
+    fn candidate_validation_failure_keeps_previous_manifest_current() {
+        let dir = seeded_artifacts("projection_candidate_validation_failure");
+        let publisher = ingester(&dir);
+        let first = publisher
+            .ingest_committed_rows(
+                &[edge_row(1, 0, 1, Some(7), MutationOperation::InsertEdge)],
+                MutationBufferLimits::new(10, 10_000),
+            )
+            .expect("initial generation publishes")
+            .manifest
+            .expect("initial manifest exists");
+
+        let error = publisher
+            .ingest_committed_rows_with_identities_validated(
+                &[edge_row(2, 1, 2, Some(7), MutationOperation::InsertEdge)],
+                MutationBufferLimits::new(10, 10_000),
+                &[None],
+                |_| {
+                    Err::<(), _>(GraphError::CorruptFile {
+                        reason: "candidate semantic validation failed".to_string(),
+                    })
+                },
+            )
+            .expect_err("invalid candidate is not published");
+
+        assert!(matches!(error, GraphError::CorruptFile { .. }));
+        let current = publisher
+            .store
+            .load_latest_current()
+            .expect("current manifest loads")
+            .expect("previous manifest remains current");
+        assert_eq!(current.generation_id, first.generation_id);
+        assert_eq!(current.sync_watermark, first.sync_watermark);
+    }
+
+    #[test]
     fn projection_ingest_aborted_gql_write_is_not_published() {
         let dir = seeded_artifacts("projection_ingest_aborted");
         let ingester = ingester(&dir);
@@ -1305,16 +1419,6 @@ mod tests {
         assert_eq!(second.segments[0], first.segments[0]);
         assert_eq!(first_segment.header.direction, TraversalDirection::Out);
         assert_eq!(second_segment.header.direction, TraversalDirection::In);
-
-        let watermark_only = publisher
-            .publish_empty_watermark(3)
-            .expect("watermark-only generation publishes")
-            .manifest
-            .expect("watermark-only manifest");
-        assert_eq!(watermark_only.sync_watermark, 3);
-        assert_eq!(watermark_only.segments, second.segments);
-        assert_eq!(watermark_only.base_chunks, second.base_chunks);
-        assert_eq!(watermark_only.obsolete_files, second.obsolete_files);
 
         let overflow_dir = seeded_artifacts("projection_ingest_generation_overflow");
         ProjectionManifestStore::new(overflow_dir.path())
@@ -1453,10 +1557,12 @@ mod tests {
             relationship_identity: None,
             table_oid: None,
             pk_hash: None,
+            primary_key: None,
             node_idx: None,
             filter_column_id: None,
             filter_value: None,
             tenant_hash: None,
+            tenant: None,
             schema_reversed: false,
         }
     }

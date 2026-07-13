@@ -149,7 +149,7 @@ pub enum GraphError {
     #[error("Unsupported graph operation {operation}: {reason}")]
     UnsupportedOperation { operation: String, reason: String }, // PG018
 
-    #[error("Another build() or vacuum() is already running")]
+    #[error("Another graph maintenance operation or registered source transaction is active")]
     BuildLocked, // PG006
 
     #[error("Edge mutation buffer full ({size} entries). Graph is in read-only mode.")]
@@ -348,7 +348,7 @@ impl GraphError {
                 "Use a supported query shape, or run graph.vacuum()/graph.maintenance() to merge pending graph overlays before retrying.".to_string()
             }
             GraphError::BuildLocked => {
-                "Wait for the current build() or vacuum() to complete, or check pg_stat_activity for blocking sessions.".to_string()
+                "Wait for the active graph operation or source transaction to complete, then retry; inspect pg_stat_activity for long-running sessions.".to_string()
             }
             GraphError::EdgeBufferFull { .. } => {
                 "Run graph.vacuum() to merge pending mutations, or increase graph.edge_buffer_size.".to_string()

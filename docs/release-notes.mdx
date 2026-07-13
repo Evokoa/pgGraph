@@ -60,7 +60,24 @@ gate evidence through signed tags and package publishing.
   not leave transaction-local graph state.
 - Added a two-session isolation gate proving backend-local mapped writes follow
   PostgreSQL READ COMMITTED, REPEATABLE READ, and SERIALIZABLE visibility
-  rules; persisted new-node coverage remains gated by KI-026.
+  rules; the persisted variant now covers durable new-node identity but remains
+  gated by repeated-build manifest rebasing (KI-027).
+- Added durable post-build node identities with contiguous allocation, exact
+  primary-key and tenant payloads, typed filter restoration, same-batch edge
+  endpoints independent of sync-row order, tenant moves that preserve identity,
+  transient lifecycle tombstones, fresh-candidate validation, cold-backend
+  reload, and graph-scoped cross-backend publication locking.
+- Made unrepresentable durable mutations fail closed without advancing the
+  projection watermark; incremental `TRUNCATE` and standalone endpoint
+  identity changes report rebuild guidance.
+- Added a shared-writer/exclusive-ingest PostgreSQL transaction barrier so
+  durable ingestion cannot skip an active lower sync ID or publish a writer's
+  own row before rollback. Exact target endpoints also cannot attach to another
+  table with the same primary key.
+- Added a fail-closed trigger-definition preflight for upgrades. Run
+  `graph.enable_sync()` or a trigger-mode `graph.build()` to refresh older sync
+  triggers before durable ingestion; trigger-mode builds refresh them before
+  taking the source snapshot.
 - Added graph-scoped projection and sync behavior so replay, dirty-range
   ingest, copy-on-write compaction, and runtime selection ignore unrelated
   graph state.

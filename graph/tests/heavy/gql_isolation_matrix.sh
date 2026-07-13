@@ -5,9 +5,15 @@ DBNAME="${DBNAME:-pggraph_gql_isolation}"
 PG_VERSION_FEATURE="${PG_VERSION_FEATURE:-pg17}"
 PG_MAJOR="${PG_VERSION_FEATURE#pg}"
 PG_CONFIG="${PG_CONFIG:-}"
+PERSIST_ON_BUILD="${PERSIST_ON_BUILD:-off}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRAPH_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/pggraph-gql-isolation.XXXXXX")"
+
+if [[ "$PERSIST_ON_BUILD" != "on" && "$PERSIST_ON_BUILD" != "off" ]]; then
+  echo "PERSIST_ON_BUILD must be 'on' or 'off'" >&2
+  exit 2
+fi
 
 cleanup() {
   rm -rf "$WORKDIR"
@@ -33,10 +39,10 @@ cargo pgrx install --pg-config "$PG_CONFIG" \
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 
-psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >/dev/null
+psql -X -v ON_ERROR_STOP=1 -v persist_on_build="$PERSIST_ON_BUILD" -d "$DBNAME" <<'SQL' >/dev/null
 CREATE EXTENSION graph;
 SELECT graph.reset();
-SET graph.persist_on_build = off;
+SET graph.persist_on_build = :'persist_on_build';
 SET graph.sync_mode = 'trigger';
 SET graph.query_freshness = 'apply_pending_sync';
 SET graph.mutable_enabled = on;
@@ -60,7 +66,7 @@ psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
   "ALTER DATABASE \"$DBNAME\" SET graph.mutable_enabled = on" >/dev/null
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
-  "ALTER DATABASE \"$DBNAME\" SET graph.persist_on_build = off" >/dev/null
+  "ALTER DATABASE \"$DBNAME\" SET graph.persist_on_build = '$PERSIST_ON_BUILD'" >/dev/null
 
 wait_for_reader() {
   local lock_key="$1"

@@ -544,10 +544,12 @@ pub mod bench_support {
                     relationship_identity: None,
                     table_oid: None,
                     pk_hash: None,
+                    primary_key: None,
                     node_idx: None,
                     filter_column_id: None,
                     filter_value: None,
                     tenant_hash: None,
+                    tenant: None,
                     schema_reversed: false,
                 })
                 .collect::<Vec<_>>();

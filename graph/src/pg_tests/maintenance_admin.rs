@@ -2482,16 +2482,42 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
     Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_ingest_pgtest CASCADE")
         .expect("drop projection ingest table failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_ingest_edges_pgtest CASCADE")
+        .expect("drop projection ingest edge table failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_composite_pgtest CASCADE")
+        .expect("drop projection composite table failed");
     Spi::run(
         "CREATE TABLE public.graph_test_projection_ingest_pgtest (
                 id TEXT PRIMARY KEY,
                 parent_id TEXT NULL
-                    REFERENCES public.graph_test_projection_ingest_pgtest(id),
+                    REFERENCES public.graph_test_projection_ingest_pgtest(id)
+                    DEFERRABLE INITIALLY DEFERRED,
                 score BIGINT NOT NULL,
                 tenant_id TEXT NOT NULL
             )",
     )
     .expect("create projection ingest table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_projection_ingest_edges_pgtest (
+                id TEXT PRIMARY KEY,
+                from_id TEXT NOT NULL
+                    REFERENCES public.graph_test_projection_ingest_pgtest(id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                to_id TEXT NOT NULL
+                    REFERENCES public.graph_test_projection_ingest_pgtest(id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )",
+    )
+    .expect("create standalone projection edge table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_projection_composite_pgtest (
+                organization TEXT NOT NULL,
+                local_id TEXT NOT NULL,
+                note TEXT NOT NULL,
+                PRIMARY KEY (organization, local_id)
+            )",
+    )
+    .expect("create composite projection table failed");
     Spi::run(
         "INSERT INTO public.graph_test_projection_ingest_pgtest (id, parent_id, score, tenant_id)
              VALUES ('root', NULL, 1, 'tenant-a')",
@@ -2518,6 +2544,25 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
     )
     .expect("add projection ingest edge failed");
     Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_projection_ingest_edges_pgtest'::regclass,
+                from_column := 'from_id',
+                to_table := 'graph_test_projection_ingest_pgtest'::regclass,
+                to_column := 'to_id',
+                label := 'linked',
+                bidirectional := false
+            )",
+    )
+    .expect("add standalone projection edge failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_projection_composite_pgtest'::regclass,
+                ARRAY['organization', 'local_id'],
+                ARRAY['note']
+            )",
+    )
+    .expect("add composite projection table failed");
+    Spi::run(
         "SELECT graph.add_filter_column(
                 'graph_test_projection_ingest_pgtest'::regclass,
                 'score',
@@ -2534,10 +2579,27 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
         "initial projection ingest must not replay rows included in persisted build"
     );
     Spi::run(
+        "UPDATE public.graph_test_projection_ingest_pgtest
+            SET score = 2
+          WHERE id = 'root'",
+    )
+    .expect("update projection ingest root failed");
+    Spi::run(
         "INSERT INTO public.graph_test_projection_ingest_pgtest (id, parent_id, score, tenant_id)
              VALUES ('child', 'root', 99, 'tenant-a')",
     )
     .expect("insert projection ingest child failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_ingest_edges_pgtest (id, from_id, to_id)
+             VALUES ('rel-1', 'child', 'root')",
+    )
+    .expect("insert standalone projection edge failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_composite_pgtest
+                    (organization, local_id, note)
+             VALUES ('組織', 'clé-1', 'post-build composite')",
+    )
+    .expect("insert post-build composite node failed");
     Spi::run("SELECT graph.unload_graph('default')")
         .expect("unload default graph before apply sync failed");
     Spi::run("SELECT graph.select_graph('default')")
@@ -2555,7 +2617,6 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
     )
     .expect("loaded_graphs name after projection apply failed")
     .unwrap_or_default();
-
     let (rows_ingested, segments_published, sync_watermark) = Spi::connect(|client| {
         let result = client
             .select(
@@ -2573,6 +2634,76 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
         ))
     })
     .expect("ingest_projection row read failed");
+    let child_reaches_root = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph.traverse(
+             'graph_test_projection_ingest_pgtest'::regclass,
+             'child',
+             1,
+             direction := 'any',
+             tenant := 'tenant-a',
+             hydrate := false
+           )
+          WHERE node_id = 'root'",
+    )
+    .expect("reloaded child traversal failed")
+    .unwrap_or_default();
+    let child_filter_match = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph.traverse(
+             'graph_test_projection_ingest_pgtest'::regclass,
+             'child',
+             0,
+             filter := '{\"node\":{\"where\":{\"score\":{\"eq\":99}}}}'::jsonb,
+             tenant := 'tenant-a',
+             hydrate := false
+           )",
+    )
+    .expect("reloaded child filter and tenant query failed")
+    .unwrap_or_default();
+    let tenant_membership_restored = crate::ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        let Some(child_idx) = engine.resolve(
+            Spi::get_one::<pgrx::pg_sys::Oid>(
+                "SELECT 'graph_test_projection_ingest_pgtest'::regclass::oid",
+            )
+            .expect("projection table OID query failed")
+            .map(u32::from)
+            .unwrap_or_default(),
+            "child",
+        ) else {
+            return false;
+        };
+        engine
+            .tenant_membership
+            .get("tenant-a")
+            .is_some_and(|nodes| nodes.contains(child_idx))
+    });
+    let durable_edge_present = crate::ENGINE.with(|engine| {
+        use crate::projection::neighbors::NeighborSource;
+
+        let engine = engine.borrow();
+        let table_oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+            "SELECT 'graph_test_projection_ingest_pgtest'::regclass::oid",
+        )
+        .expect("projection edge table OID query failed")
+        .map(u32::from)
+        .unwrap_or_default();
+        let (Some(child_idx), Some(root_idx)) = (
+            engine.resolve(table_oid, "child"),
+            engine.resolve(table_oid, "root"),
+        ) else {
+            return false;
+        };
+        let Ok(Some(layered)) = engine.layered_neighbors() else {
+            return false;
+        };
+        layered
+            .for_direction(crate::types::TraversalDirection::Any)
+            .neighbors(child_idx)
+            .any(|neighbor| neighbor.target == root_idx)
+    });
+
     let max_sync_id = Spi::get_one::<i64>("SELECT max(id) FROM graph._sync_log")
         .expect("max sync id read failed")
         .unwrap_or(0);
@@ -2592,14 +2723,231 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
     assert_eq!(loaded_before_apply, 0);
     assert_eq!(loaded_after_apply, 1);
     assert_eq!(loaded_after_apply_name, "default");
+    assert_eq!(child_filter_match, 1);
+    assert!(tenant_membership_restored);
+    assert!(durable_edge_present);
+    let standalone_edge_did_not_create_node = crate::ENGINE.with(|engine| {
+        use crate::projection::neighbors::NeighborSource;
+
+        let engine = engine.borrow();
+        let edge_table_oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+            "SELECT 'graph_test_projection_ingest_edges_pgtest'::regclass::oid",
+        )
+        .expect("standalone edge table OID query failed")
+        .map(u32::from)
+        .unwrap_or_default();
+        let node_table_oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+            "SELECT 'graph_test_projection_ingest_pgtest'::regclass::oid",
+        )
+        .expect("standalone edge node table OID query failed")
+        .map(u32::from)
+        .unwrap_or_default();
+        let linked_type = engine.edge_type_id("linked");
+        let linked_edge_present = match (
+            engine.resolve(node_table_oid, "child"),
+            engine.resolve(node_table_oid, "root"),
+            linked_type,
+            engine.layered_neighbors().ok().flatten(),
+        ) {
+            (Some(child_idx), Some(root_idx), Some(linked_type), Some(layered)) => layered
+                .for_direction(crate::types::TraversalDirection::Any)
+                .neighbors(child_idx)
+                .any(|neighbor| {
+                    neighbor.target == root_idx && neighbor.type_id == linked_type
+                }),
+            _ => false,
+        };
+        engine.resolve(edge_table_oid, "rel-1").is_none() && linked_edge_present
+    });
+    assert!(standalone_edge_did_not_create_node);
+    let composite_identity_restored = crate::ENGINE.with(|engine| {
+        let table_oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+            "SELECT 'graph_test_projection_composite_pgtest'::regclass::oid",
+        )
+        .expect("composite table OID query failed")
+        .map(u32::from)
+        .unwrap_or_default();
+        let primary_key = Spi::get_one::<String>(
+            "SELECT jsonb_build_array('組織'::text, 'clé-1'::text)::text",
+        )
+        .expect("composite primary key encoding failed")
+        .unwrap_or_default();
+        engine.borrow().resolve(table_oid, &primary_key).is_some()
+    });
+    assert!(composite_identity_restored);
+    assert_eq!(child_reaches_root, 1);
     assert_eq!(loaded_after_ingest, 1);
     assert_eq!(loaded_after_ingest_name, "default");
+
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_ingest_pgtest (id, parent_id, score, tenant_id)
+             VALUES ('grandchild', 'child', 101, 'tenant-b')",
+    )
+    .expect("insert second projection batch failed");
+    let second_batch_segments = Spi::get_one::<i64>(
+        "SELECT segments_published FROM graph.ingest_projection()",
+    )
+    .expect("ingest second projection batch failed")
+    .unwrap_or_default();
+    let grandchild_filter_match = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM graph.traverse(
+             'graph_test_projection_ingest_pgtest'::regclass,
+             'grandchild',
+             0,
+             filter := '{\"node\":{\"where\":{\"score\":{\"eq\":101}}}}'::jsonb,
+             tenant := 'tenant-b',
+             hydrate := false
+           )",
+    )
+    .expect("second-batch node reload query failed")
+    .unwrap_or_default();
+    assert!(second_batch_segments >= 2);
+    assert_eq!(grandchild_filter_match, 1);
+    Spi::run("SET CONSTRAINTS ALL DEFERRED").expect("defer projection foreign keys failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_ingest_pgtest
+                    (id, parent_id, score, tenant_id)
+             VALUES ('future-child', 'future-parent', 202, 'tenant-c')",
+    )
+    .expect("insert child before future parent failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_ingest_pgtest
+                    (id, parent_id, score, tenant_id)
+             VALUES ('future-parent', NULL, 203, 'tenant-c')",
+    )
+    .expect("insert future parent failed");
+    Spi::run("SELECT * FROM graph.ingest_projection()")
+        .expect("ingest future-endpoint batch failed");
+    let future_edge_present = crate::ENGINE.with(|engine| {
+        use crate::projection::neighbors::NeighborSource;
+
+        let engine = engine.borrow();
+        let table_oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+            "SELECT 'graph_test_projection_ingest_pgtest'::regclass::oid",
+        )
+        .expect("future endpoint table OID query failed")
+        .map(u32::from)
+        .unwrap_or_default();
+        let (Some(child_idx), Some(parent_idx)) = (
+            engine.resolve(table_oid, "future-child"),
+            engine.resolve(table_oid, "future-parent"),
+        ) else {
+            return false;
+        };
+        engine
+            .layered_neighbors()
+            .ok()
+            .flatten()
+            .is_some_and(|layered| {
+                layered
+                    .for_direction(crate::types::TraversalDirection::Any)
+                    .neighbors(child_idx)
+                    .any(|neighbor| neighbor.target == parent_idx)
+            })
+    });
+    assert!(future_edge_present);
+
+    let root_idx_before = crate::ENGINE.with(|engine| {
+        let table_oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+            "SELECT 'graph_test_projection_ingest_pgtest'::regclass::oid",
+        )
+        .expect("tenant update table OID query failed")
+        .map(u32::from)
+        .unwrap_or_default();
+        engine.borrow().resolve(table_oid, "root")
+    });
+    Spi::run(
+        "UPDATE public.graph_test_projection_ingest_pgtest
+            SET tenant_id = 'tenant-b'
+          WHERE id = 'root'",
+    )
+    .expect("update root tenant failed");
+    Spi::run("SELECT * FROM graph.ingest_projection()")
+        .expect("ingest tenant-only update failed");
+    let tenant_move_preserved_identity_and_edge = crate::ENGINE.with(|engine| {
+        use crate::projection::neighbors::NeighborSource;
+
+        let engine = engine.borrow();
+        let table_oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+            "SELECT 'graph_test_projection_ingest_pgtest'::regclass::oid",
+        )
+        .expect("tenant move table OID query failed")
+        .map(u32::from)
+        .unwrap_or_default();
+        let (Some(root_idx), Some(child_idx)) = (
+            engine.resolve(table_oid, "root"),
+            engine.resolve(table_oid, "child"),
+        ) else {
+            return false;
+        };
+        root_idx_before == Some(root_idx)
+            && !engine
+                .tenant_membership
+                .get("tenant-a")
+                .is_some_and(|nodes| nodes.contains(root_idx))
+            && engine
+                .tenant_membership
+                .get("tenant-b")
+                .is_some_and(|nodes| nodes.contains(root_idx))
+            && engine
+                .layered_neighbors()
+                .ok()
+                .flatten()
+                .is_some_and(|layered| {
+                    layered
+                        .for_direction(crate::types::TraversalDirection::Any)
+                        .neighbors(child_idx)
+                        .any(|neighbor| neighbor.target == root_idx)
+                })
+    });
+    assert!(tenant_move_preserved_identity_and_edge);
+
+    let watermark_before_invalid = Spi::get_one::<i64>(
+        "SELECT manifest_watermark FROM graph.projection_status()",
+    )
+    .expect("watermark before invalid relationship failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_ingest_edges_pgtest (id, from_id, to_id)
+             VALUES ('invalid-endpoint', 'child', 'missing-node')",
+    )
+    .expect("insert invalid relationship endpoint failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_ingest_pgtest
+                    (id, parent_id, score, tenant_id)
+             VALUES ('valid-alongside-invalid', NULL, 401, 'tenant-f')",
+    )
+    .expect("insert valid row alongside invalid relationship failed");
+    Spi::run(
+        "CREATE OR REPLACE FUNCTION public.graph_test_projection_mixed_error()
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 PERFORM * FROM graph.ingest_projection();
+                 RETURN NULL;
+             EXCEPTION WHEN others THEN
+                 RETURN SQLSTATE || '|' || SQLERRM;
+             END
+             $$",
+    )
+    .expect("create mixed projection error helper failed");
+    let mixed_error =
+        Spi::get_one::<String>("SELECT public.graph_test_projection_mixed_error()")
+            .expect("mixed projection error query failed")
+            .unwrap_or_default();
+    let watermark_after_invalid = Spi::get_one::<i64>(
+        "SELECT manifest_watermark FROM graph.projection_status()",
+    )
+    .expect("watermark after invalid relationship failed");
+    assert!(mixed_error.starts_with("0A000|"), "unexpected error: {mixed_error}");
+    assert_eq!(watermark_after_invalid, watermark_before_invalid);
     Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
     Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
 }
 
 #[pg_test]
-fn ingest_projection_advances_watermark_for_no_row_sync_batches() {
+fn ingest_projection_rejects_truncate_without_advancing_watermark() {
     reset_and_create_fixtures();
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
     Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
@@ -2626,38 +2974,134 @@ fn ingest_projection_advances_watermark_for_no_row_sync_batches() {
     )
     .expect("add projection no-row table failed");
     Spi::run("SELECT * FROM graph.build()").expect("build projection no-row graph failed");
+    let watermark_before = Spi::get_one::<i64>(
+        "SELECT manifest_watermark FROM graph.projection_status()",
+    )
+    .expect("projection watermark before truncate failed");
     Spi::run("TRUNCATE public.graph_test_projection_no_rows_pgtest")
         .expect("truncate projection no-row table failed");
-    Spi::run("SELECT * FROM graph.apply_sync()").expect("apply projection no-row sync failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_no_rows_pgtest (id, note)
+             VALUES ('representable-after-truncate', 'must not advance watermark')",
+    )
+    .expect("insert representable row after truncate failed");
+    Spi::run(
+        "CREATE OR REPLACE FUNCTION public.graph_test_projection_ingest_error()
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 PERFORM * FROM graph.ingest_projection();
+                 RETURN NULL;
+             EXCEPTION WHEN others THEN
+                 RETURN SQLSTATE || '|' || SQLERRM;
+             END
+             $$",
+    )
+    .expect("create projection ingest error helper failed");
 
-    let (rows_ingested, segments_published, sync_watermark) = Spi::connect(|client| {
-        let result = client
-            .select(
-                "SELECT rows_ingested, segments_published, sync_watermark
-                   FROM graph.ingest_projection()",
-                None,
-                &[],
-            )
-            .expect("ingest no-row projection query failed");
-        let row = result.first();
-        Ok::<_, pgrx::spi::Error>((
-            row.get::<i64>(1)?.unwrap_or(-1),
-            row.get::<i64>(2)?.unwrap_or(-1),
-            row.get::<i64>(3)?.unwrap_or(-1),
-        ))
-    })
-    .expect("ingest no-row projection row read failed");
+    let error = Spi::get_one::<String>("SELECT public.graph_test_projection_ingest_error()")
+        .expect("truncate ingest error query failed")
+        .unwrap_or_default();
+    let watermark_after = Spi::get_one::<i64>(
+        "SELECT manifest_watermark FROM graph.projection_status()",
+    )
+    .expect("projection watermark after truncate failed");
     let max_sync_id = Spi::get_one::<i64>("SELECT max(id) FROM graph._sync_log")
         .expect("max sync id read failed")
         .unwrap_or(0);
-    let repeat_rows = Spi::get_one::<i64>("SELECT rows_ingested FROM graph.ingest_projection()")
-        .expect("repeat ingest no-row projection query failed")
-        .unwrap_or(-1);
 
-    assert_eq!(rows_ingested, 0);
-    assert_eq!(segments_published, 0);
-    assert_eq!(sync_watermark, max_sync_id);
-    assert_eq!(repeat_rows, 0);
+    assert!(error.starts_with("0A000|"), "unexpected error: {error}");
+    assert!(error.contains("rebuild the graph"), "unexpected error: {error}");
+    assert_eq!(watermark_after, watermark_before);
+    assert!(max_sync_id > watermark_after.unwrap_or(0));
+    Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
+    Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
+}
+
+#[pg_test]
+fn ingest_projection_rejects_standalone_endpoint_identity_changes() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run(
+        "DROP TABLE IF EXISTS public.graph_test_projection_guard_edges_pgtest CASCADE;
+         DROP TABLE IF EXISTS public.graph_test_projection_guard_nodes_pgtest CASCADE;
+         CREATE TABLE public.graph_test_projection_guard_nodes_pgtest (
+             id TEXT PRIMARY KEY,
+             note TEXT NOT NULL
+         );
+         CREATE TABLE public.graph_test_projection_guard_edges_pgtest (
+             id TEXT PRIMARY KEY,
+             from_id TEXT NOT NULL,
+             to_id TEXT NOT NULL,
+             CONSTRAINT guard_from_fk FOREIGN KEY (from_id)
+                 REFERENCES public.graph_test_projection_guard_nodes_pgtest(id)
+                 DEFERRABLE INITIALLY DEFERRED,
+             CONSTRAINT guard_to_fk FOREIGN KEY (to_id)
+                 REFERENCES public.graph_test_projection_guard_nodes_pgtest(id)
+                 DEFERRABLE INITIALLY DEFERRED
+         );
+         INSERT INTO public.graph_test_projection_guard_nodes_pgtest (id, note)
+         VALUES ('a', 'A'), ('b', 'B');
+         INSERT INTO public.graph_test_projection_guard_edges_pgtest (id, from_id, to_id)
+         VALUES ('edge-a-b', 'a', 'b');",
+    )
+    .expect("create standalone endpoint guard fixture failed");
+    Spi::run(
+        "SELECT graph.add_table(
+             'graph_test_projection_guard_nodes_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['note']
+         );
+         SELECT graph.add_edge(
+             'graph_test_projection_guard_edges_pgtest'::regclass,
+             from_column := 'from_id',
+             to_table := 'graph_test_projection_guard_nodes_pgtest'::regclass,
+             to_column := 'to_id',
+             label := 'guarded',
+             bidirectional := false
+         );
+         SELECT * FROM graph.build();",
+    )
+    .expect("build standalone endpoint guard fixture failed");
+    let watermark_before = Spi::get_one::<i64>(
+        "SELECT manifest_watermark FROM graph.projection_status()",
+    )
+    .expect("standalone guard watermark before mutation failed");
+
+    Spi::run(
+        "DELETE FROM public.graph_test_projection_guard_nodes_pgtest WHERE id = 'a';
+         INSERT INTO public.graph_test_projection_guard_nodes_pgtest (id, note)
+         VALUES ('a', 'replacement A');
+         CREATE OR REPLACE FUNCTION public.graph_test_projection_guard_error()
+         RETURNS text
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             PERFORM * FROM graph.ingest_projection();
+             RETURN NULL;
+         EXCEPTION WHEN others THEN
+             RETURN SQLSTATE || '|' || SQLERRM;
+         END
+         $$;",
+    )
+    .expect("replace standalone endpoint identity failed");
+
+    let error = Spi::get_one::<String>("SELECT public.graph_test_projection_guard_error()")
+        .expect("standalone endpoint guard error query failed")
+        .unwrap_or_default();
+    let watermark_after = Spi::get_one::<i64>(
+        "SELECT manifest_watermark FROM graph.projection_status()",
+    )
+    .expect("standalone guard watermark after mutation failed");
+
+    assert!(error.starts_with("0A000|"), "unexpected error: {error}");
+    assert!(
+        error.contains("standalone relationship mapping") && error.contains("rebuild the graph"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(watermark_after, watermark_before);
     Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
     Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
 }

@@ -192,7 +192,6 @@ fn execute_build_inner(
     }
 
     acquire_build_lock()?;
-
     let (tables, edges, filter_columns) = read_catalog()?;
 
     if tables.is_empty() {
@@ -205,6 +204,37 @@ fn execute_build_inner(
             sync_mode: sync_mode.as_str().to_string(),
             projection_mode: projection_mode.as_str().to_string(),
         });
+    }
+
+    // Reconcile sync triggers before taking the source snapshot. The trigger
+    // DDL obtains relation locks, so transactions that could still have run an
+    // older trigger definition finish before the writer barrier becomes the
+    // snapshot boundary for this build.
+    let writer_barrier_held = match sync_mode {
+        config::SyncMode::Manual => {
+            remove_sync_triggers()?;
+            false
+        }
+        config::SyncMode::Trigger => {
+            let current_barrier = crate::sql_sync::sync_writer_barrier_triggers_current()?;
+            if current_barrier {
+                // Current triggers already participate in the barrier, so keep
+                // the build fail-fast before trigger DDL requests table locks.
+                crate::sql_sync::acquire_sync_writer_barrier()?;
+                crate::sql_sync::ensure_no_current_transaction_sync_rows(0)?;
+            }
+            let installed = install_sync_triggers()?;
+            pgrx::warning!(
+                "graph.build(): graph.sync_mode = 'trigger' installed graph sync triggers on {} registered table(s); set graph.sync_mode = 'manual' before graph.build() to opt out",
+                installed
+            );
+            current_barrier
+        }
+        config::SyncMode::Wal => unreachable!("current_sync_mode rejects reserved wal mode"),
+    };
+    if !writer_barrier_held {
+        crate::sql_sync::acquire_sync_writer_barrier()?;
+        crate::sql_sync::ensure_no_current_transaction_sync_rows(0)?;
     }
 
     check_build_acls_result(&tables, &edges)?;
@@ -236,20 +266,6 @@ fn execute_build_inner(
         *e.borrow_mut() = new_engine;
     });
     crate::runtime_state::mark_loaded_graph(&graph);
-
-    match sync_mode {
-        config::SyncMode::Manual => {
-            remove_sync_triggers()?;
-        }
-        config::SyncMode::Trigger => {
-            let installed = install_sync_triggers()?;
-            pgrx::warning!(
-                "graph.build(): graph.sync_mode = 'trigger' installed graph sync triggers on {} registered table(s); set graph.sync_mode = 'manual' before graph.build() to opt out",
-                installed
-            );
-        }
-        config::SyncMode::Wal => unreachable!("current_sync_mode rejects reserved wal mode"),
-    }
 
     Ok(BuildExecutionResult {
         nodes_loaded,

@@ -1492,12 +1492,14 @@ mod tests {
     #[test]
     fn layered_reads_apply_tenant_filter_and_node_visibility_segments() {
         let base = edge_store_from_tuples(4, &[(0, 1, 1), (0, 2, 1), (0, 3, 1)]);
+        let tenant_hash = xxhash_rust::xxh3::xxh3_64(b"tenant-42");
         let mut node_segment =
             DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 4, 1)
                 .expect("node segment");
         node_segment.tenants.push(SegmentTenant {
             node_idx: 0,
-            tenant_hash: 42,
+            tenant_hash,
+            tenant: Some("tenant-42".to_string()),
             tombstone: false,
         });
         node_segment.node_states.push(SegmentNodeState {
@@ -1506,15 +1508,18 @@ mod tests {
         });
         node_segment.tenants.push(SegmentTenant {
             node_idx: 1,
-            tenant_hash: 42,
+            tenant_hash,
+            tenant: Some("tenant-42".to_string()),
             tombstone: false,
         });
         node_segment.tenants.push(SegmentTenant {
             node_idx: 2,
-            tenant_hash: 42,
+            tenant_hash,
+            tenant: Some("tenant-42".to_string()),
             tombstone: false,
         });
-        let layered = LayeredNeighbors::new_with_tenant(&base, vec![node_segment], Some(42));
+        let layered =
+            LayeredNeighbors::new_with_tenant(&base, vec![node_segment], Some(tenant_hash));
 
         assert_eq!(
             layered.neighbors(0).collect::<Vec<_>>(),

@@ -63,6 +63,30 @@ snapshot retention with matching source and graph results. The gate exposed
 KI-026: durable ingestion can consume a newly created node's watermark without
 persisting its identity; this is now an explicit P0 blocker for R3.
 
+2026-07-13 R1 durable node identity — Segment v6 now retains exact primary-key
+and tenant bytes, allocates contiguous post-build node slots without mutating
+the serving engine, validates and installs staged node state atomically, reloads
+after direct ingestion, serializes publication across PostgreSQL backends, and
+fails incremental TRUNCATE without advancing the watermark. PostgreSQL 17
+lifecycle, second-batch, filter, tenant, topology, and watermark tests pass.
+Independent review findings for batch ordering, tenant-only identity stability,
+transient lifecycles, pre-publication validation, cold-backend loading, and
+serving-state atomicity are fixed. Allocation now reads a clean persisted
+snapshot instead of transaction-local serving slots. Unicode composite keys,
+standalone relationship tables, later endpoints, tenant-only moves, direct
+reload, and multiple allocation batches pass the PostgreSQL lifecycle; staged
+replay unit tests cover historical PK and transient-slot state. The real
+two-publisher PostgreSQL 17 gate passes with an empty retry and no watermark
+loss. A shared-writer/exclusive-ingest PostgreSQL transaction barrier prevents
+out-of-order commits and rollbacks from being skipped, including DML and apply
+in one transaction. Older trigger definitions fail closed until refreshed,
+exact target endpoints cannot resolve against a different table with the same
+key, and standalone endpoint identity changes fail closed with rebuild
+guidance. Durable `graph.apply_sync()` statistics are verified against the
+exact published batch.
+The persisted isolation matrix now reaches repeated-build validation and
+exposes KI-027: the active manifest can retain the previous base checksum.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

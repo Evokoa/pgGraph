@@ -164,6 +164,7 @@ correctness and safety boundary.
 - 2026-07-12 — Checkpoint 1A mutable-overlay visibility subphase: caller-role RLS checks now have durable post-build segment coverage across coordinate, hydrated, aggregate, and existence result shapes on PostgreSQL 17.
 - 2026-07-12 — Checkpoint 1A PostgreSQL write-boundary subphase: GQL CREATE now has PostgreSQL 17 evidence for partition routing plus CHECK-constraint and user-trigger rejection without residual transaction deltas.
 - 2026-07-13 — Checkpoint 1A isolation subphase: a two-session gate proves the existing query-freshness path observes a later committed mapped write under READ COMMITTED while REPEATABLE READ and SERIALIZABLE retain their transaction snapshot. Durable new-node ingestion defect KI-026 remains open for the storage phase.
+- 2026-07-13 — Checkpoint 1A durable-node subphase: projection segment v6 stores exact primary-key and tenant identities, a non-serving planner allocates contiguous slots and same-batch endpoints, manifest loading stages node state atomically, direct ingest reloads the backend, cross-backend publication shares the graph advisory lock, and unrepresentable TRUNCATE fails without watermark advancement. KI-027 now tracks repeated persisted-build manifest checksum rebasing.
 
 ## Decisions
 
@@ -513,7 +514,7 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Gate | Exact command | Result |
 |---|---|---|
 | Two-session isolation matrix | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation ./tests/heavy/gql_isolation_matrix.sh` | PASS: READ COMMITTED source/GQL counts advance from 0 to 1; REPEATABLE READ and SERIALIZABLE remain 0 inside their snapshots; every row is visible after the reader transaction ends |
-| Durable-path diagnostic | Same gate with `graph.persist_on_build = on` during development | EXPECTED FAIL / KI-026: durable ingest advanced the applied watermark while the new node remained absent; tracked as a P0 storage correctness blocker |
+| Durable-path diagnostic | `cd graph && PERSIST_ON_BUILD=on PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation_persisted_ki026 ./tests/heavy/gql_isolation_matrix.sh` | EXPECTED FAIL / KI-027: durable new-node ingestion succeeds; a later repeated persisted build fails closed because the manifest still references the previous base checksum |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 697 passed, 1 ignored, doctests 0 |
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Rust documentation | `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "pg17 development"` | PASS |
@@ -521,3 +522,20 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Contract and docs drift | `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh` | PASS after acknowledged transaction-isolation implementation hash refresh |
 | Independent Rust review | `rust-reviewing` subagent over the isolation gate, orchestration, and public claims | PASS after removing a redundant runtime SPI refresh, replacing timing sleeps with advisory handshakes, adding same-reader post-commit checks, and narrowing persisted-path claims to KI-026 |
 | Whitespace | `git diff --check` | PASS |
+
+### 2026-07-13 R1 Durable Node Identity Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Rust unit suite | `cd graph && cargo test --features pg17 --lib --no-fail-fast` | PASS: 710 passed, 1 ignored |
+| Persisted lifecycle | `cd graph && cargo pgrx test --features "pg17 development" ingest_projection_publishes_committed_sync_log_rows` | PASS: clean persisted-snapshot allocation, Unicode composite identities, typed filters, tenant-only slot preservation, standalone relationship tables, later-in-batch endpoints, direct reload, and second-batch allocation |
+| TRUNCATE fail-closed | `cd graph && cargo pgrx test --features "pg17 development" ingest_projection_rejects_truncate_without_advancing_watermark` | PASS: SQLSTATE 0A000 with rebuild guidance; watermark unchanged |
+| Standalone endpoint lifecycle | `cd graph && cargo pgrx test --features "pg17 development" ingest_projection_rejects_standalone_endpoint_identity_changes` | PASS: a deferred-FK endpoint delete/reinsert fails with SQLSTATE 0A000 and rebuild guidance without advancing the watermark |
+| Standalone no-FK fallback | `cd graph && cargo pgrx test --features "pg17 development" standalone_relationship_sync_without_fk_uses_registered_endpoint_fallback` | PASS: unique registered endpoint fallback remains supported for inserts |
+| Cross-backend publication and writer barrier | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_build_lock_ki026 ./tests/heavy/build_lock_regression.sh` | PASS: build, vacuum, ingest, and active-writer contention fail closed; legacy trigger definitions require refresh; a same-transaction write cannot ingest before commit; apply statistics match the exact published batch; out-of-order commit and rollback cannot skip a sync ID; the 20,001-row publisher wins with an empty retry |
+| Persisted isolation | `cd graph && PERSIST_ON_BUILD=on PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation_persisted_ki026 ./tests/heavy/gql_isolation_matrix.sh` | EXPECTED FAIL / KI-027 during repeated persisted build checksum validation; no missing-node or advanced-watermark failure |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust documentation | `cd graph && cargo test --doc --features pg17`; `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --features pg17 --no-deps` | PASS: doctests 0; rustdoc warning-free |
+| Contract and docs drift | `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh` | PASS |
+| Shell syntax | `bash -n graph/tests/heavy/build_lock_regression.sh graph/tests/heavy/gql_isolation_matrix.sh` | PASS |
+| Independent Rust review | `rust-reviewing` subagent over KI-026 and follow-up compatibility fixes | PASS: no blockers after trigger-upgrade preflight, fail-fast lock ordering, same-transaction guard coverage, exact endpoint resolution, standalone lifecycle protection, and apply-stat consistency fixes |

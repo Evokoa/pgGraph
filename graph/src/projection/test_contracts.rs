@@ -110,7 +110,8 @@ fn delta_segment_roundtrips_node_resolution_filter_tenant_sections() {
     });
     segment.resolutions.push(SegmentResolution {
         table_oid: 100,
-        pk_hash: 7_001,
+        pk_hash: crate::resolution_index::ResolutionIndexBuilder::hash_pk("node-1"),
+        primary_key: Some("node-1".to_string()),
         node_idx: 1,
         tombstone: false,
     });
@@ -124,7 +125,8 @@ fn delta_segment_roundtrips_node_resolution_filter_tenant_sections() {
     });
     segment.tenants.push(SegmentTenant {
         node_idx: 1,
-        tenant_hash: 8_002,
+        tenant_hash: xxhash_rust::xxh3::xxh3_64(b"tenant-1"),
+        tenant: Some("tenant-1".to_string()),
         tombstone: true,
     });
 
@@ -167,10 +169,12 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
         relationship_identity: None,
         table_oid: None,
         pk_hash: None,
+        primary_key: None,
         node_idx: None,
         filter_column_id: None,
         filter_value: None,
         tenant_hash: None,
+        tenant: None,
         schema_reversed: false,
     };
 

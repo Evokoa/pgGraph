@@ -7,7 +7,7 @@ use crate::catalog::{
 use crate::filter_index::{EncodedFilterValue, FilterColumnType, PersistedFilterValue};
 use crate::persistence::{
     graph_artifact_checksum_for_path, graph_artifact_version, graph_file_path, load_graph_file,
-    projection_manifest_root, read_sync_checkpoint,
+    load_graph_file_with_projection_candidate, projection_manifest_root, read_sync_checkpoint,
 };
 use crate::projection::ingest::{ProjectionIngestResult, ProjectionIngester, ProjectionSyncRow};
 use crate::projection::manifest::ProjectionManifestStore;
@@ -84,7 +84,14 @@ pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
     for (oid, (primary_key, trigger_columns)) in trigger_specs {
         let qt = sync::get_qualified_table(oid)?;
         let trigger_sql = sync::generate_trigger_sql(&qt, &primary_key, &trigger_columns);
-        Spi::run(&trigger_sql).map_err(|e| {
+        let sql = if sync_writer_barrier_trigger_current_for_oid(oid)? {
+            trigger_sql
+                .split_once("-- Attach triggers")
+                .map_or(trigger_sql.as_str(), |(functions, _)| functions)
+        } else {
+            trigger_sql.as_str()
+        };
+        Spi::run(sql).map_err(|e| {
             safety::GraphError::Internal(format!(
                 "trigger creation failed for relation OID {oid}: {e}"
             ))
@@ -560,6 +567,8 @@ fn should_apply_sync_via_durable_projection() -> bool {
 }
 
 fn apply_sync_via_durable_projection(target_sync_id: i64) -> safety::GraphResult<SyncApplyStats> {
+    ensure_sync_writer_barrier_triggers()?;
+    acquire_sync_writer_barrier()?;
     let graph_path = graph_file_path()?;
     let root = projection_manifest_root(&graph_path);
     let previous = ProjectionManifestStore::new(root).load_latest_current()?;
@@ -567,16 +576,14 @@ fn apply_sync_via_durable_projection(target_sync_id: i64) -> safety::GraphResult
         read_sync_checkpoint(&graph_path)?.unwrap_or(0),
         |manifest| manifest.sync_watermark,
     );
+    ensure_no_current_transaction_sync_rows(previous_watermark)?;
     let batch_size = config::sync_batch_size().max(1);
     let entries =
         read_sync_log_entries_after(previous_watermark, batch_size, Some(target_sync_id))?;
     let mut stats = sync_apply_stats_from_entries(&entries);
 
-    let projection =
+    let _projection =
         ingest_projection_until_internal(Some(batch_size as i64), None, Some(target_sync_id))?;
-    if projection.sync_watermark > previous_watermark {
-        reload_engine_after_projection_ingest(&graph_path, projection.sync_watermark)?;
-    }
 
     apply_legacy_sync_buffer(&mut stats)?;
 
@@ -600,16 +607,6 @@ fn sync_apply_stats_from_entries(entries: &[SyncLogEntry]) -> SyncApplyStats {
         }
     }
     stats
-}
-
-fn reload_engine_after_projection_ingest(
-    graph_path: &std::path::Path,
-    sync_watermark: i64,
-) -> safety::GraphResult<()> {
-    let graph = selected_or_default_graph_metadata()?;
-    let mut loaded = load_graph_file(graph_path)?;
-    loaded.record_applied_sync_id(sync_watermark);
-    install_loaded_engine_for_selected_graph(&graph, loaded)
 }
 
 fn install_loaded_engine_for_selected_graph(
@@ -638,6 +635,14 @@ fn ingest_projection_until_internal(
     max_bytes: Option<i64>,
     target_sync_id: Option<i64>,
 ) -> safety::GraphResult<ProjectionIngestStats> {
+    // Serialize the read-current -> allocate -> publish sequence across PostgreSQL
+    // backends. Sharing the build/vacuum lock also prevents artifact replacement
+    // while a projection generation is being prepared.
+    crate::sql_build::acquire_build_lock()?;
+    ensure_sync_writer_barrier_triggers()?;
+    acquire_sync_writer_barrier()?;
+    ensure_engine_loaded_for_apply_sync()?;
+    let graph = selected_or_default_graph_metadata()?;
     let graph_path = graph_file_path()?;
     if !graph_path.exists() {
         return Err(safety::GraphError::NotBuilt);
@@ -664,6 +669,7 @@ fn ingest_projection_until_internal(
     crate::catalog::enforce_artifact_storage_quota(
         current_artifact_bytes.saturating_add(byte_limit.min(i64::MAX as usize) as i64),
     )?;
+    ensure_no_current_transaction_sync_rows(previous_watermark)?;
     let entries = read_sync_log_entries_after(previous_watermark, row_limit, target_sync_id)?;
     if entries.is_empty() {
         return Ok(ProjectionIngestStats {
@@ -671,15 +677,29 @@ fn ingest_projection_until_internal(
             ..ProjectionIngestStats::default()
         });
     }
-    let consumed_watermark = entries
-        .iter()
-        .map(|entry| entry.id)
-        .max()
-        .unwrap_or(previous_watermark);
+    if entries.iter().any(|entry| entry.op == SyncOp::Truncate) {
+        return Err(safety::GraphError::UnsupportedOperation {
+            operation: "durable projection ingestion".to_string(),
+            reason: "TRUNCATE cannot be represented incrementally; rebuild the graph".to_string(),
+        });
+    }
+    // Plan durable identities from the persisted base plus current manifest,
+    // never from the serving engine. The latter can contain transaction-local
+    // node slots that are intentionally absent from durable artifacts.
+    let planning_engine = load_graph_file(&graph_path)?;
     let mut context = SyncReplayContext::load()?;
-    let rows = projection_rows_from_sync_entries(&entries, &mut context)?;
-    let relationship_identities =
-        ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
+    let rows =
+        projection_rows_from_sync_entries_with_engine(&planning_engine, &entries, &mut context)?;
+    if rows.is_empty() {
+        return Err(safety::GraphError::UnsupportedOperation {
+            operation: "durable projection ingestion".to_string(),
+            reason: format!(
+                "{} committed sync row(s) cannot be represented incrementally; rebuild the graph",
+                entries.len()
+            ),
+        });
+    }
+    let relationship_identities = planning_engine.relationship_identities.clone();
     let base_artifact_path = graph_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -693,19 +713,23 @@ fn ingest_projection_until_internal(
         graph_artifact_checksum_for_path(&graph_path)?,
         graph_artifact_version(),
     );
-    let result = if rows.is_empty() {
-        ingester.publish_empty_watermark(consumed_watermark)?
-    } else {
-        ingester.ingest_committed_rows_with_identities(
-            &rows,
-            MutationBufferLimits::new(row_limit, byte_limit),
-            &relationship_identities,
-        )?
-    };
-    if let Some(identities) = result.relationship_identities.as_ref() {
-        ENGINE.with(|engine| engine.borrow_mut().relationship_identities = identities.clone());
+    let (result, validated_engine) = ingester.ingest_committed_rows_with_identities_validated(
+        &rows,
+        MutationBufferLimits::new(row_limit, byte_limit),
+        &relationship_identities,
+        |candidate| load_graph_file_with_projection_candidate(&graph_path, candidate),
+    )?;
+    let stats = projection_ingest_stats(result, previous_watermark);
+    if stats.sync_watermark > previous_watermark {
+        let mut validated_engine = validated_engine.ok_or_else(|| {
+            safety::GraphError::Internal(
+                "published projection candidate did not retain its validated engine".to_string(),
+            )
+        })?;
+        validated_engine.record_applied_sync_id(stats.sync_watermark);
+        install_loaded_engine_for_selected_graph(&graph, validated_engine)?;
     }
-    Ok(projection_ingest_stats(result, previous_watermark))
+    Ok(stats)
 }
 
 fn projection_ingest_stats(
@@ -796,6 +820,147 @@ pub(crate) fn guard_edge_buffer_capacity_for_sync(
         }
         Ok(())
     })
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn acquire_sync_writer_barrier() -> safety::GraphResult<()> {
+    Ok(())
+}
+
+fn ensure_sync_writer_barrier_triggers() -> safety::GraphResult<()> {
+    let missing = sync_writer_barrier_trigger_gap_count()?;
+    if missing == 0 {
+        return Ok(());
+    }
+    Err(safety::GraphError::UnsupportedOperation {
+        operation: "durable projection ingestion".to_string(),
+        reason: format!(
+            "{missing} registered source table(s) do not have the current transaction writer barrier; run graph.build() with graph.sync_mode = 'trigger' or call graph.enable_sync(), then retry"
+        ),
+    })
+}
+
+pub(crate) fn sync_writer_barrier_triggers_current() -> safety::GraphResult<bool> {
+    sync_writer_barrier_trigger_gap_count().map(|missing| missing == 0)
+}
+
+fn sync_writer_barrier_trigger_gap_count() -> safety::GraphResult<i64> {
+    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    if applicable_table_oids.is_empty() {
+        return Ok(0);
+    }
+    let expected_lock = format!(
+        "pg_advisory_xact_lock_shared({}, {})",
+        sync::SYNC_WRITER_LOCK_CLASS,
+        sync::SYNC_WRITER_LOCK_KEY
+    );
+    let applicable_table_count = applicable_table_oids.len() as i64;
+    let missing = Spi::get_one_with_args::<i64>(
+        "SELECT count(*)::bigint
+           FROM unnest($1::int4[]) AS expected(table_oid)
+          WHERE NOT EXISTS (
+                SELECT 1
+                  FROM pg_trigger trigger
+                  JOIN pg_proc function ON function.oid = trigger.tgfoid
+                 WHERE trigger.tgrelid = expected.table_oid::oid
+                   AND NOT trigger.tgisinternal
+                   AND trigger.tgenabled <> 'D'
+                   AND trigger.tgname IN (
+                       'graph_sync_insert',
+                       'graph_sync_update',
+                       'graph_sync_delete',
+                       'graph_sync_truncate'
+                   )
+                 GROUP BY trigger.tgrelid
+                HAVING count(DISTINCT trigger.tgname) = 4
+                   AND bool_and(position($2 IN pg_get_functiondef(function.oid)) > 0)
+          )",
+        &[applicable_table_oids.into(), expected_lock.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!(
+            "sync writer barrier trigger verification failed: {err}"
+        ))
+    })?
+    .unwrap_or(applicable_table_count);
+    Ok(missing)
+}
+
+fn sync_writer_barrier_trigger_current_for_oid(table_oid: u32) -> safety::GraphResult<bool> {
+    let expected_lock = format!(
+        "pg_advisory_xact_lock_shared({}, {})",
+        sync::SYNC_WRITER_LOCK_CLASS,
+        sync::SYNC_WRITER_LOCK_KEY
+    );
+    Spi::get_one_with_args::<bool>(
+        "SELECT COALESCE((
+             SELECT count(DISTINCT trigger.tgname) = 4
+                    AND bool_and(position($2 IN pg_get_functiondef(function.oid)) > 0)
+               FROM pg_trigger trigger
+               JOIN pg_proc function ON function.oid = trigger.tgfoid
+              WHERE trigger.tgrelid = $1::oid
+                AND NOT trigger.tgisinternal
+                AND trigger.tgenabled <> 'D'
+                AND trigger.tgname IN (
+                    'graph_sync_insert',
+                    'graph_sync_update',
+                    'graph_sync_delete',
+                    'graph_sync_truncate'
+                )
+         ), false)",
+        &[(table_oid as i32).into(), expected_lock.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!(
+            "sync writer barrier trigger verification failed for relation OID {table_oid}: {err}"
+        ))
+    })
+    .map(|current| current.unwrap_or(false))
+}
+
+#[cfg(not(feature = "pg_test"))]
+pub(crate) fn acquire_sync_writer_barrier() -> safety::GraphResult<()> {
+    let acquired = Spi::get_one_with_args::<bool>(
+        "SELECT pg_try_advisory_xact_lock($1, $2)",
+        &[
+            sync::SYNC_WRITER_LOCK_CLASS.into(),
+            sync::SYNC_WRITER_LOCK_KEY.into(),
+        ],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync writer barrier acquisition failed: {err}"))
+    })?
+    .unwrap_or(false);
+    acquired
+        .then_some(())
+        .ok_or(safety::GraphError::BuildLocked)
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn ensure_no_current_transaction_sync_rows(_after_id: i64) -> safety::GraphResult<()> {
+    Ok(())
+}
+
+#[cfg(not(feature = "pg_test"))]
+pub(crate) fn ensure_no_current_transaction_sync_rows(after_id: i64) -> safety::GraphResult<()> {
+    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    let has_current_rows = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM graph._sync_log
+             WHERE id > $1
+               AND table_oid::oid::integer = ANY($2::int4[])
+               AND xid = txid_current()
+         )",
+        &[after_id.into(), applicable_table_oids.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("current transaction sync check failed: {err}"))
+    })?
+    .unwrap_or(false);
+    (!has_current_rows)
+        .then_some(())
+        .ok_or(safety::GraphError::BuildLocked)
 }
 
 pub(crate) fn read_sync_log_entries_after(
@@ -983,21 +1148,12 @@ fn apply_sync_row_operation(
     }
 }
 
-fn projection_rows_from_sync_entries(
-    entries: &[SyncLogEntry],
-    context: &mut SyncReplayContext,
-) -> safety::GraphResult<Vec<ProjectionSyncRow>> {
-    ENGINE.with(|e| {
-        projection_rows_from_sync_entries_with_engine(&mut e.borrow_mut(), entries, context)
-    })
-}
-
 fn projection_rows_from_sync_entries_with_engine(
-    eng: &mut engine::Engine,
+    eng: &engine::Engine,
     entries: &[SyncLogEntry],
     context: &mut SyncReplayContext,
 ) -> safety::GraphResult<Vec<ProjectionSyncRow>> {
-    let mut rows = Vec::new();
+    let mut prepared = Vec::with_capacity(entries.len());
     for entry in entries {
         let table_oid = match entry.table_oid {
             Some(oid) => oid,
@@ -1007,27 +1163,311 @@ fn projection_rows_from_sync_entries_with_engine(
         let properties = parsed.iter().cloned().collect::<HashMap<_, _>>();
         let row_images = ParsedSyncRows::from_entry(entry)?;
         let tenant_change = tenant_change_from_entry(table_oid, &row_images, &parsed, context)?;
-        append_projection_rows_for_entry(
-            eng,
-            context,
-            table_oid,
+        prepared.push(PreparedProjectionEntry {
             entry,
-            &row_images,
-            &properties,
-            &tenant_change,
-            &mut rows,
-        )?;
-        append_projection_filter_rows(
-            eng,
-            context,
             table_oid,
-            entry,
-            &row_images,
-            &properties,
-            &mut rows,
-        )?;
+            is_node_table: context
+                .tables
+                .iter()
+                .any(|table| table.table_oid == table_oid),
+            properties,
+            row_images,
+            tenant_change,
+        });
+    }
+    guard_standalone_endpoint_lifecycle(context, &prepared)?;
+    let nodes = ProjectionNodePlanner::plan(eng, &prepared)?;
+    let mut rows = Vec::new();
+    for prepared in &prepared {
+        let row_start = rows.len();
+        append_projection_rows_for_entry(&nodes, context, prepared, &mut rows)?;
+        if prepared.is_node_table {
+            append_projection_filter_rows(
+                &nodes,
+                context,
+                prepared.table_oid,
+                prepared.entry,
+                &prepared.row_images,
+                &prepared.properties,
+                &mut rows,
+            )?;
+        }
+        if rows.len() == row_start {
+            return Err(safety::GraphError::UnsupportedOperation {
+                operation: "durable projection ingestion".to_string(),
+                reason: format!(
+                    "sync row {} cannot be represented incrementally; rebuild the graph",
+                    prepared.entry.id
+                ),
+            });
+        }
+    }
+    for node_idx in eng.node_store.node_count()..nodes.next_node_idx {
+        if !rows.iter().any(|row| {
+            row.node_idx == Some(node_idx)
+                && row.table_oid.is_some()
+                && row.primary_key.is_some()
+                && row.pk_hash.is_some()
+                && !row.operation.is_edge()
+        }) {
+            let sync_id = nodes
+                .upserts
+                .iter()
+                .find_map(|(sync_id, planned)| (*planned == node_idx).then_some(*sync_id));
+            return Err(safety::GraphError::Internal(format!(
+                "projection node planner allocated slot {node_idx} for sync row {sync_id:?} without an identity row"
+            )));
+        }
     }
     Ok(rows)
+}
+
+fn guard_standalone_endpoint_lifecycle(
+    context: &SyncReplayContext,
+    entries: &[PreparedProjectionEntry<'_>],
+) -> safety::GraphResult<()> {
+    let has_standalone_source = context.edges.iter().any(|edge| {
+        !context
+            .tables
+            .iter()
+            .any(|table| table.table_oid == edge.from_table_oid)
+    });
+    if !has_standalone_source {
+        return Ok(());
+    }
+    for prepared in entries.iter().filter(|entry| entry.is_node_table) {
+        let changes_identity = match prepared.entry.op {
+            SyncOp::Delete => true,
+            SyncOp::Update => prepared.entry.old_pk != prepared.entry.new_pk,
+            SyncOp::Insert | SyncOp::Truncate => false,
+        };
+        if changes_identity {
+            return Err(safety::GraphError::UnsupportedOperation {
+                operation: "durable projection ingestion".to_string(),
+                reason: format!(
+                    "sync row {} changes a node identity while a standalone relationship mapping is registered; rebuild the graph",
+                    prepared.entry.id
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+struct PreparedProjectionEntry<'a> {
+    entry: &'a SyncLogEntry,
+    table_oid: u32,
+    is_node_table: bool,
+    properties: HashMap<String, String>,
+    row_images: ParsedSyncRows,
+    tenant_change: TenantChange,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlannedNode {
+    node_idx: u32,
+    active: bool,
+}
+
+struct ProjectionNodePlanner<'a> {
+    engine: &'a engine::Engine,
+    timelines: HashMap<u32, HashMap<String, Vec<(i64, PlannedNode)>>>,
+    upserts: HashMap<i64, u32>,
+    deletes: HashMap<i64, u32>,
+    next_node_idx: u32,
+}
+
+impl<'a> ProjectionNodePlanner<'a> {
+    fn plan(
+        engine: &'a engine::Engine,
+        entries: &[PreparedProjectionEntry<'_>],
+    ) -> safety::GraphResult<Self> {
+        let mut planner = Self {
+            engine,
+            timelines: HashMap::new(),
+            upserts: HashMap::new(),
+            deletes: HashMap::new(),
+            next_node_idx: engine.node_store.node_count(),
+        };
+        for prepared in entries {
+            if !prepared.is_node_table {
+                continue;
+            }
+            let entry = prepared.entry;
+            match entry.op {
+                SyncOp::Insert => {
+                    if let Some(pk) = entry.new_pk.as_deref().or(entry.old_pk.as_deref()) {
+                        planner.plan_upsert(prepared.table_oid, pk, entry.id)?;
+                    }
+                }
+                SyncOp::Update => {
+                    let old_pk = entry.old_pk.as_deref().ok_or_else(|| {
+                        safety::GraphError::Internal(format!(
+                            "sync row {} missing old_pk",
+                            entry.id
+                        ))
+                    })?;
+                    let new_pk = entry.new_pk.as_deref().ok_or_else(|| {
+                        safety::GraphError::Internal(format!(
+                            "sync row {} missing new_pk",
+                            entry.id
+                        ))
+                    })?;
+                    if old_pk != new_pk {
+                        planner.plan_delete(prepared.table_oid, old_pk, entry.id);
+                    }
+                    planner.plan_upsert(prepared.table_oid, new_pk, entry.id)?;
+                }
+                SyncOp::Delete => {
+                    if let Some(pk) = entry.old_pk.as_deref().or(entry.new_pk.as_deref()) {
+                        planner.plan_delete(prepared.table_oid, pk, entry.id);
+                    }
+                }
+                SyncOp::Truncate => {}
+            }
+        }
+        Ok(planner)
+    }
+
+    fn latest_planned(&self, table_oid: u32, primary_key: &str) -> Option<PlannedNode> {
+        self.timelines
+            .get(&table_oid)
+            .and_then(|table| table.get(primary_key))
+            .and_then(|timeline| timeline.last())
+            .map(|(_, node)| *node)
+    }
+
+    fn resolve_final(&self, table_oid: u32, primary_key: &str) -> Option<u32> {
+        self.latest_planned(table_oid, primary_key).map_or_else(
+            || self.engine.resolve(table_oid, primary_key),
+            |node| node.active.then_some(node.node_idx),
+        )
+    }
+
+    fn resolve_before(&self, table_oid: u32, primary_key: &str, sync_id: i64) -> Option<u32> {
+        let planned = self
+            .timelines
+            .get(&table_oid)
+            .and_then(|table| table.get(primary_key))
+            .and_then(|timeline| timeline.iter().rev().find(|(id, _)| *id < sync_id))
+            .map(|(_, node)| *node);
+        planned.map_or_else(
+            || self.engine.resolve(table_oid, primary_key),
+            |node| node.active.then_some(node.node_idx),
+        )
+    }
+
+    fn resolve_known_before(&self, table_oid: u32, primary_key: &str, sync_id: i64) -> Option<u32> {
+        self.timelines
+            .get(&table_oid)
+            .and_then(|table| table.get(primary_key))
+            .and_then(|timeline| timeline.iter().rev().find(|(id, _)| *id < sync_id))
+            .map(|(_, node)| node.node_idx)
+            .or_else(|| self.engine.resolve_identity(table_oid, primary_key))
+    }
+
+    fn resolve_endpoint_final(
+        &self,
+        preferred_oid: Option<u32>,
+        primary_key: &str,
+        all_oids: &[u32],
+    ) -> Option<u32> {
+        if let Some(oid) = preferred_oid {
+            return self.resolve_final(oid, primary_key);
+        }
+        resolve_unique_endpoint(all_oids, |oid| self.resolve_final(oid, primary_key))
+    }
+
+    fn resolve_endpoint_known_before(
+        &self,
+        preferred_oid: Option<u32>,
+        primary_key: &str,
+        all_oids: &[u32],
+        sync_id: i64,
+    ) -> Option<u32> {
+        if let Some(oid) = preferred_oid {
+            return self.resolve_known_before(oid, primary_key, sync_id);
+        }
+        resolve_unique_endpoint(all_oids, |oid| {
+            self.resolve_known_before(oid, primary_key, sync_id)
+        })
+    }
+
+    fn plan_upsert(
+        &mut self,
+        table_oid: u32,
+        primary_key: &str,
+        sync_id: i64,
+    ) -> safety::GraphResult<()> {
+        let node_idx = match self.latest_planned(table_oid, primary_key) {
+            Some(node) if node.active => node.node_idx,
+            Some(_) => self.allocate_node_idx()?,
+            None => match self.engine.resolve(table_oid, primary_key) {
+                Some(node_idx) => node_idx,
+                None => self.allocate_node_idx()?,
+            },
+        };
+        self.timelines
+            .entry(table_oid)
+            .or_default()
+            .entry(primary_key.to_string())
+            .or_default()
+            .push((
+                sync_id,
+                PlannedNode {
+                    node_idx,
+                    active: true,
+                },
+            ));
+        self.upserts.insert(sync_id, node_idx);
+        Ok(())
+    }
+
+    fn plan_delete(&mut self, table_oid: u32, primary_key: &str, sync_id: i64) {
+        let node_idx = self.latest_planned(table_oid, primary_key).map_or_else(
+            || self.engine.resolve(table_oid, primary_key),
+            |node| node.active.then_some(node.node_idx),
+        );
+        let Some(node_idx) = node_idx else { return };
+        self.timelines
+            .entry(table_oid)
+            .or_default()
+            .entry(primary_key.to_string())
+            .or_default()
+            .push((
+                sync_id,
+                PlannedNode {
+                    node_idx,
+                    active: false,
+                },
+            ));
+        self.deletes.insert(sync_id, node_idx);
+    }
+
+    fn allocate_node_idx(&mut self) -> safety::GraphResult<u32> {
+        let node_idx = self.next_node_idx;
+        self.next_node_idx = self.next_node_idx.checked_add(1).ok_or_else(|| {
+            safety::GraphError::Internal("projection node index overflowed".to_string())
+        })?;
+        Ok(node_idx)
+    }
+}
+
+fn resolve_unique_endpoint(
+    table_oids: &[u32],
+    mut resolve: impl FnMut(u32) -> Option<u32>,
+) -> Option<u32> {
+    let mut resolved = None;
+    for &table_oid in table_oids {
+        let Some(node_idx) = resolve(table_oid) else {
+            continue;
+        };
+        if resolved.is_some_and(|existing| existing != node_idx) {
+            return None;
+        }
+        resolved = Some(node_idx);
+    }
+    resolved
 }
 
 #[allow(
@@ -1035,15 +1475,16 @@ fn projection_rows_from_sync_entries_with_engine(
     reason = "sync replay projection rows require entry, parsed row images, tenant state, and output sink"
 )]
 fn append_projection_rows_for_entry(
-    eng: &engine::Engine,
+    nodes: &ProjectionNodePlanner<'_>,
     context: &SyncReplayContext,
-    table_oid: u32,
-    entry: &SyncLogEntry,
-    rows: &ParsedSyncRows,
-    properties: &HashMap<String, String>,
-    tenant_change: &TenantChange,
+    prepared: &PreparedProjectionEntry<'_>,
     out: &mut Vec<ProjectionSyncRow>,
 ) -> safety::GraphResult<()> {
+    let entry = prepared.entry;
+    let table_oid = prepared.table_oid;
+    let rows = &prepared.row_images;
+    let properties = &prepared.properties;
+    let tenant_change = &prepared.tenant_change;
     match entry.op {
         SyncOp::Insert => {
             let pk = entry
@@ -1053,17 +1494,19 @@ fn append_projection_rows_for_entry(
                 .ok_or_else(|| {
                     safety::GraphError::Internal(format!("sync row {} missing insert pk", entry.id))
                 })?;
-            append_projection_node_row(
-                eng,
-                table_oid,
-                entry,
-                pk,
-                MutationOperation::UpsertNode,
-                tenant_change.new.as_deref(),
-                out,
-            );
+            if prepared.is_node_table {
+                append_projection_node_row(
+                    table_oid,
+                    entry,
+                    pk,
+                    nodes.upserts.get(&entry.id).copied(),
+                    MutationOperation::UpsertNode,
+                    tenant_change.new.as_deref(),
+                    out,
+                )?;
+            }
             append_projection_edge_rows(
-                eng,
+                nodes,
                 context,
                 table_oid,
                 entry,
@@ -1080,7 +1523,7 @@ fn append_projection_rows_for_entry(
                 safety::GraphError::Internal(format!("sync row {} missing new_pk", entry.id))
             })?;
             append_projection_edge_rows(
-                eng,
+                nodes,
                 context,
                 table_oid,
                 entry,
@@ -1088,32 +1531,41 @@ fn append_projection_rows_for_entry(
                 MutationOperation::DeleteEdge,
                 out,
             )?;
-            if old_pk != new_pk || tenant_change.old != tenant_change.new {
+            if prepared.is_node_table && old_pk != new_pk {
                 append_projection_node_row(
-                    eng,
                     table_oid,
                     entry,
                     old_pk,
+                    nodes.deletes.get(&entry.id).copied(),
                     MutationOperation::DeleteNode,
+                    tenant_change.old.as_deref(),
+                    out,
+                )?;
+            } else if prepared.is_node_table && tenant_change.old != tenant_change.new {
+                append_projection_tenant_tombstone(
+                    entry,
+                    nodes.upserts.get(&entry.id).copied(),
                     tenant_change.old.as_deref(),
                     out,
                 );
             }
-            append_projection_node_row(
-                eng,
-                table_oid,
-                entry,
-                new_pk,
-                MutationOperation::UpsertNode,
-                tenant_change.new.as_deref().or_else(|| {
-                    properties
-                        .get(&tenant_column_for_table(table_oid, context).unwrap_or_default())
-                        .map(String::as_str)
-                }),
-                out,
-            );
+            if prepared.is_node_table {
+                append_projection_node_row(
+                    table_oid,
+                    entry,
+                    new_pk,
+                    nodes.upserts.get(&entry.id).copied(),
+                    MutationOperation::UpsertNode,
+                    tenant_change.new.as_deref().or_else(|| {
+                        properties
+                            .get(&tenant_column_for_table(table_oid, context).unwrap_or_default())
+                            .map(String::as_str)
+                    }),
+                    out,
+                )?;
+            }
             append_projection_edge_rows(
-                eng,
+                nodes,
                 context,
                 table_oid,
                 entry,
@@ -1131,7 +1583,7 @@ fn append_projection_rows_for_entry(
                     safety::GraphError::Internal(format!("sync row {} missing delete pk", entry.id))
                 })?;
             append_projection_edge_rows(
-                eng,
+                nodes,
                 context,
                 table_oid,
                 entry,
@@ -1139,15 +1591,17 @@ fn append_projection_rows_for_entry(
                 MutationOperation::DeleteEdge,
                 out,
             )?;
-            append_projection_node_row(
-                eng,
-                table_oid,
-                entry,
-                pk,
-                MutationOperation::DeleteNode,
-                tenant_change.old.as_deref(),
-                out,
-            );
+            if prepared.is_node_table {
+                append_projection_node_row(
+                    table_oid,
+                    entry,
+                    pk,
+                    nodes.deletes.get(&entry.id).copied(),
+                    MutationOperation::DeleteNode,
+                    tenant_change.old.as_deref(),
+                    out,
+                )?;
+            }
         }
         SyncOp::Truncate => {}
     }
@@ -1155,16 +1609,16 @@ fn append_projection_rows_for_entry(
 }
 
 fn append_projection_node_row(
-    eng: &engine::Engine,
     table_oid: u32,
     entry: &SyncLogEntry,
     pk: &str,
+    node_idx: Option<u32>,
     operation: MutationOperation,
     tenant: Option<&str>,
     out: &mut Vec<ProjectionSyncRow>,
-) {
-    let Some(node_idx) = eng.resolve_existing_node(table_oid, pk) else {
-        return;
+) -> safety::GraphResult<()> {
+    let Some(node_idx) = node_idx else {
+        return Ok(());
     };
     out.push(ProjectionSyncRow {
         sync_id: entry.id as u64,
@@ -1180,15 +1634,50 @@ fn append_projection_node_row(
         relationship_identity: None,
         table_oid: Some(table_oid),
         pk_hash: Some(ResolutionIndexBuilder::hash_pk(pk)),
+        primary_key: Some(pk.to_string()),
         node_idx: Some(node_idx),
         filter_column_id: None,
         filter_value: None,
         tenant_hash: tenant.map(|tenant| xxh3_64(tenant.as_bytes())),
+        tenant: tenant.map(str::to_string),
+    });
+    Ok(())
+}
+
+fn append_projection_tenant_tombstone(
+    entry: &SyncLogEntry,
+    node_idx: Option<u32>,
+    tenant: Option<&str>,
+    out: &mut Vec<ProjectionSyncRow>,
+) {
+    let (Some(node_idx), Some(tenant)) = (node_idx, tenant) else {
+        return;
+    };
+    out.push(ProjectionSyncRow {
+        sync_id: entry.id as u64,
+        generation_id: entry.id as u64,
+        committed: true,
+        operation: MutationOperation::DeleteNode,
+        direction: TraversalDirection::Any,
+        source: node_idx,
+        target: node_idx,
+        type_id: 0,
+        schema_reversed: false,
+        weight: None,
+        relationship_identity: None,
+        table_oid: None,
+        pk_hash: None,
+        primary_key: None,
+        node_idx: Some(node_idx),
+        filter_column_id: None,
+        filter_value: None,
+        tenant_hash: Some(xxh3_64(tenant.as_bytes())),
+        tenant: Some(tenant.to_string()),
     });
 }
 
 fn append_projection_edge_rows(
-    eng: &engine::Engine,
+    nodes: &ProjectionNodePlanner<'_>,
     context: &SyncReplayContext,
     table_oid: u32,
     entry: &SyncLogEntry,
@@ -1219,9 +1708,15 @@ fn append_projection_edge_rows(
             .as_deref()
             .and_then(|column| row_u32_value(row, column))
             .transpose()?;
-        let Some(type_id) = eng.edge_type_id(&edge_label) else {
-            continue;
-        };
+        let type_id = nodes.engine.edge_type_id(&edge_label).ok_or_else(|| {
+            safety::GraphError::UnsupportedOperation {
+                operation: "durable projection ingestion".to_string(),
+                reason: format!(
+                    "sync row {} uses relationship label '{}' absent from the persisted graph; rebuild the graph",
+                    entry.id, edge_label
+                ),
+            }
+        })?;
         let source_key = row_pk_value(row, &edge.source_key_columns).ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "mapped relationship sync row {} is missing source key columns",
@@ -1232,39 +1727,67 @@ fn append_projection_edge_rows(
             mapping_id: edge.mapping_id,
             source_key,
         };
-        let source =
-            resolve_projection_endpoint(eng, source_oid, &from_pk, &context.all_table_oids);
-        let target =
-            resolve_projection_endpoint(eng, Some(target_oid), &to_pk, &context.all_table_oids);
-        if let (Some(source), Some(target)) = (source, target) {
+        let resolve = |preferred_oid, primary_key: &str, source_endpoint: bool| match operation {
+            MutationOperation::InsertEdge
+                if source_endpoint && preferred_oid == Some(table_oid) =>
+            {
+                nodes.upserts.get(&entry.id).copied().or_else(|| {
+                    nodes.resolve_endpoint_final(
+                        preferred_oid,
+                        primary_key,
+                        &context.all_table_oids,
+                    )
+                })
+            }
+            MutationOperation::InsertEdge => {
+                nodes.resolve_endpoint_final(preferred_oid, primary_key, &context.all_table_oids)
+            }
+            MutationOperation::DeleteEdge => nodes.resolve_endpoint_known_before(
+                preferred_oid,
+                primary_key,
+                &context.all_table_oids,
+                entry.id,
+            ),
+            MutationOperation::UpsertNode | MutationOperation::DeleteNode => None,
+        };
+        let source = resolve(source_oid, &from_pk, true);
+        let target = resolve(Some(target_oid), &to_pk, false);
+        let (source, target) = source.zip(target).ok_or_else(|| {
+            safety::GraphError::UnsupportedOperation {
+                operation: "durable projection ingestion".to_string(),
+                reason: format!(
+                    "sync row {} references a relationship endpoint absent from the persisted graph; rebuild the graph",
+                    entry.id
+                ),
+            }
+        })?;
+        push_projection_edge_row(
+            ProjectionEdgeRow {
+                entry,
+                source,
+                target,
+                type_id,
+                schema_reversed: false,
+                weight,
+                relationship_identity: Some(relationship_identity.clone()),
+                operation,
+            },
+            out,
+        );
+        if edge.bidirectional {
             push_projection_edge_row(
                 ProjectionEdgeRow {
                     entry,
-                    source,
-                    target,
+                    source: target,
+                    target: source,
                     type_id,
-                    schema_reversed: false,
+                    schema_reversed: true,
                     weight,
-                    relationship_identity: Some(relationship_identity.clone()),
+                    relationship_identity: Some(relationship_identity),
                     operation,
                 },
                 out,
             );
-            if edge.bidirectional {
-                push_projection_edge_row(
-                    ProjectionEdgeRow {
-                        entry,
-                        source: target,
-                        target: source,
-                        type_id,
-                        schema_reversed: true,
-                        weight,
-                        relationship_identity: Some(relationship_identity),
-                        operation,
-                    },
-                    out,
-                );
-            }
         }
     }
     Ok(())
@@ -1322,15 +1845,17 @@ fn push_projection_edge_row(row: ProjectionEdgeRow<'_>, out: &mut Vec<Projection
         relationship_identity: row.relationship_identity,
         table_oid: None,
         pk_hash: None,
+        primary_key: None,
         node_idx: None,
         filter_column_id: None,
         filter_value: None,
         tenant_hash: None,
+        tenant: None,
     });
 }
 
 fn append_projection_filter_rows(
-    eng: &mut engine::Engine,
+    nodes: &ProjectionNodePlanner<'_>,
     context: &SyncReplayContext,
     table_oid: u32,
     entry: &SyncLogEntry,
@@ -1344,7 +1869,8 @@ fn append_projection_filter_rows(
                 return Ok(());
             };
             append_projection_filter_rows_for_pk(
-                eng,
+                nodes.engine,
+                nodes,
                 context,
                 table_oid,
                 entry,
@@ -1358,7 +1884,8 @@ fn append_projection_filter_rows(
         SyncOp::Update => {
             if let Some(old_pk) = entry.old_pk.as_deref() {
                 append_projection_filter_rows_for_pk(
-                    eng,
+                    nodes.engine,
+                    nodes,
                     context,
                     table_oid,
                     entry,
@@ -1371,7 +1898,8 @@ fn append_projection_filter_rows(
             }
             if let Some(new_pk) = entry.new_pk.as_deref() {
                 append_projection_filter_rows_for_pk(
-                    eng,
+                    nodes.engine,
+                    nodes,
                     context,
                     table_oid,
                     entry,
@@ -1388,7 +1916,8 @@ fn append_projection_filter_rows(
                 return Ok(());
             };
             append_projection_filter_rows_for_pk(
-                eng,
+                nodes.engine,
+                nodes,
                 context,
                 table_oid,
                 entry,
@@ -1409,7 +1938,8 @@ fn append_projection_filter_rows(
     reason = "filter projection needs source row state, operation, and output sink at one replay boundary"
 )]
 fn append_projection_filter_rows_for_pk(
-    eng: &mut engine::Engine,
+    eng: &engine::Engine,
+    nodes: &ProjectionNodePlanner<'_>,
     context: &SyncReplayContext,
     table_oid: u32,
     entry: &SyncLogEntry,
@@ -1419,7 +1949,12 @@ fn append_projection_filter_rows_for_pk(
     operation: MutationOperation,
     out: &mut Vec<ProjectionSyncRow>,
 ) -> safety::GraphResult<()> {
-    let Some(node_idx) = eng.resolve_existing_node(table_oid, pk) else {
+    let node_idx = match operation {
+        MutationOperation::UpsertNode => nodes.resolve_final(table_oid, pk),
+        MutationOperation::DeleteNode => nodes.resolve_before(table_oid, pk, entry.id),
+        MutationOperation::InsertEdge | MutationOperation::DeleteEdge => None,
+    };
+    let Some(node_idx) = node_idx else {
         return Ok(());
     };
     for filter in &context.filters {
@@ -1452,10 +1987,12 @@ fn append_projection_filter_rows_for_pk(
             relationship_identity: None,
             table_oid: None,
             pk_hash: None,
+            primary_key: None,
             node_idx: Some(node_idx),
             filter_column_id: Some(column_idx as u32),
             filter_value: Some(value),
             tenant_hash: None,
+            tenant: None,
         });
     }
     Ok(())
@@ -1490,22 +2027,6 @@ fn persisted_filter_value_from_row_or_properties(
             &json_value_text(&raw)?,
         )?)),
     }
-}
-
-fn resolve_projection_endpoint(
-    eng: &engine::Engine,
-    preferred_oid: Option<u32>,
-    pk: &str,
-    all_oids: &[u32],
-) -> Option<u32> {
-    if let Some(oid) = preferred_oid {
-        if let Some(idx) = eng.resolve_existing_node(oid, pk) {
-            return Some(idx);
-        }
-    }
-    all_oids
-        .iter()
-        .find_map(|&oid| eng.resolve_existing_node(oid, pk))
 }
 
 fn sync_entry_edge_mutation_reservation(
@@ -1775,11 +2296,9 @@ pub(crate) fn resolve_sync_endpoint(
     all_oids: &[u32],
 ) -> Option<u32> {
     if let Some(oid) = preferred_oid {
-        if let Some(idx) = eng.resolve(oid, pk) {
-            return Some(idx);
-        }
+        return eng.resolve(oid, pk);
     }
-    all_oids.iter().find_map(|&oid| eng.resolve(oid, pk))
+    resolve_unique_endpoint(all_oids, |oid| eng.resolve(oid, pk))
 }
 
 pub(crate) fn row_pk_value(
@@ -2101,11 +2620,12 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::{
-        intern_sync_relationship_identity, parse_sync_op, parse_sync_properties, required_sync_i64,
-        required_sync_string, tenant_change_from_entry, ParsedSyncRows, SyncLogEntry, SyncOp,
-        SyncReplayContext,
+        guard_standalone_endpoint_lifecycle, intern_sync_relationship_identity, parse_sync_op,
+        parse_sync_properties, required_sync_i64, required_sync_string, resolve_unique_endpoint,
+        tenant_change_from_entry, ParsedSyncRows, PreparedProjectionEntry, ProjectionNodePlanner,
+        SyncLogEntry, SyncOp, SyncReplayContext, TenantChange,
     };
-    use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredTable};
+    use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredEdge, RegisteredTable};
     use crate::engine::Engine;
     use crate::safety::GraphError;
     use proptest::prelude::*;
@@ -2239,6 +2759,117 @@ mod tests {
                 source_key: "r-1".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn projection_node_planner_allocates_contiguous_non_serving_slots() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(42, "base".to_string());
+        engine.resolution_insert(42, "base", 0);
+        let mut planner = ProjectionNodePlanner {
+            engine: &engine,
+            timelines: HashMap::new(),
+            upserts: HashMap::new(),
+            deletes: HashMap::new(),
+            next_node_idx: 1,
+        };
+
+        planner.plan_upsert(42, "new-a", 1).unwrap();
+        planner.plan_upsert(42, "new-b", 2).unwrap();
+        assert_eq!(
+            planner.resolve_endpoint_final(Some(42), "new-b", &[42]),
+            Some(2)
+        );
+        planner.plan_delete(42, "new-a", 3);
+        planner.plan_upsert(42, "new-a", 4).unwrap();
+        assert_eq!(planner.upserts.get(&4), Some(&3));
+        planner.plan_upsert(42, "future-target", 6).unwrap();
+        assert_eq!(
+            planner.resolve_endpoint_final(Some(42), "future-target", &[42]),
+            Some(4)
+        );
+        planner.plan_upsert(42, "base", 7).unwrap();
+        assert_eq!(planner.upserts.get(&7), Some(&0));
+        assert_eq!(engine.node_store.node_count(), 1);
+        assert_eq!(engine.resolve(42, "new-a"), None);
+    }
+
+    #[test]
+    fn endpoint_fallback_requires_one_exact_table_match() {
+        assert_eq!(
+            resolve_unique_endpoint(&[10, 20], |oid| (oid == 10).then_some(7)),
+            Some(7)
+        );
+        assert_eq!(
+            resolve_unique_endpoint(&[10, 20], |oid| Some(oid / 10)),
+            None
+        );
+    }
+
+    #[test]
+    fn standalone_edges_reject_node_identity_changes() {
+        let table = RegisteredTable {
+            table_oid: 42,
+            table_name: "public.nodes".to_string(),
+            id_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
+            columns: PropertyColumns::from_columns(Vec::new()),
+            tenant_column: None,
+        };
+        let edge = RegisteredEdge {
+            mapping_id: 9,
+            from_table_oid: 84,
+            from_table: "public.edges".to_string(),
+            from_column: "from_id".to_string(),
+            source_key_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
+            to_table_oid: 42,
+            to_table: "public.nodes".to_string(),
+            to_column: "to_id".to_string(),
+            label: "linked".to_string(),
+            bidirectional: false,
+            weight_column: None,
+            label_column: None,
+        };
+        let context = SyncReplayContext {
+            tables: vec![table],
+            edges: vec![edge],
+            filters: Vec::new(),
+            table_oids: HashMap::from([
+                ("public.nodes".to_string(), 42),
+                ("public.edges".to_string(), 84),
+            ]),
+            all_table_oids: vec![42, 84],
+            edge_source_tables: HashSet::from(["public.edges".to_string()]),
+            edge_source_oids: HashSet::from([84]),
+            edge_source_node_oids: HashMap::new(),
+        };
+        let entry = SyncLogEntry {
+            id: 11,
+            op: SyncOp::Delete,
+            table_oid: Some(42),
+            table_name: "public.nodes".to_string(),
+            old_pk: Some("n1".to_string()),
+            new_pk: None,
+            properties: None,
+            old_row: None,
+            new_row: None,
+        };
+        let prepared = PreparedProjectionEntry {
+            entry: &entry,
+            table_oid: 42,
+            is_node_table: true,
+            properties: HashMap::new(),
+            row_images: ParsedSyncRows {
+                old: None,
+                new: None,
+            },
+            tenant_change: TenantChange::default(),
+        };
+
+        let error = guard_standalone_endpoint_lifecycle(&context, &[prepared])
+            .expect_err("standalone endpoint delete must fail closed");
+
+        assert!(matches!(error, GraphError::UnsupportedOperation { .. }));
+        assert!(error.to_string().contains("rebuild the graph"));
     }
 
     proptest! {

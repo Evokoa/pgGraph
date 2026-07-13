@@ -120,7 +120,7 @@ fi
 
 build_error="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
   -c "SELECT graph._test_run_build_job('background-build-lock-test')")"
-if [[ "$build_error" != *"Another build() or vacuum() is already running"* ]]; then
+if [[ "$build_error" != *"Another graph maintenance operation or registered source transaction is active"* ]]; then
   echo "background build job runner did not return the BuildLocked message"
   echo "$build_error"
   exit 1
@@ -135,7 +135,7 @@ if [[ "$build_job_status" != "failed" ]]; then
   echo "$build_job_row"
   exit 1
 fi
-if [[ "$build_job_error" != *"Another build() or vacuum() is already running"* ]]; then
+if [[ "$build_job_error" != *"Another graph maintenance operation or registered source transaction is active"* ]]; then
   echo "background build job row failed without the BuildLocked message"
   echo "$build_job_row"
   exit 1
@@ -143,7 +143,7 @@ fi
 
 maintenance_error="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
   -c "SELECT graph._test_run_maintenance_job('background-maintenance-lock-test')")"
-if [[ "$maintenance_error" != *"Another build() or vacuum() is already running"* ]]; then
+if [[ "$maintenance_error" != *"Another graph maintenance operation or registered source transaction is active"* ]]; then
   echo "background maintenance job runner did not return the BuildLocked message"
   echo "$maintenance_error"
   exit 1
@@ -158,7 +158,7 @@ if [[ "$maintenance_job_status" != "failed" ]]; then
   echo "$maintenance_job_row"
   exit 1
 fi
-if [[ "$maintenance_job_error" != *"Another build() or vacuum() is already running"* ]]; then
+if [[ "$maintenance_job_error" != *"Another graph maintenance operation or registered source transaction is active"* ]]; then
   echo "background maintenance job row failed without the BuildLocked message"
   echo "$maintenance_job_row"
   exit 1

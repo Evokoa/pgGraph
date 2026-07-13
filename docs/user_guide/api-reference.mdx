@@ -114,6 +114,25 @@ source relationship identity used by GQL relationship values and
 relationship-row visibility checks. The cumulative identity dictionary is
 checksummed and referenced by the active projection manifest, so those
 identities survive backend reloads.
+Post-build node inserts retain their exact registered table and primary-key
+identity, typed filter values, tenant membership, and mapped same-batch edge
+endpoints. Publication is serialized per graph across PostgreSQL backends, and
+a successful direct ingest reloads the current backend before returning.
+Registered source triggers take a shared transaction-scoped writer lock. A
+durable ingest takes the corresponding exclusive lock without waiting, so it
+returns SQLSTATE `55P03` while any registered source transaction is active.
+This prevents out-of-order commits and later rollbacks from being skipped by
+the durable watermark while allowing source writers to run concurrently with
+one another. A node identity change also fails with rebuild guidance when a
+standalone relationship mapping could retain rows pointing at the old node
+slot.
+Installations upgraded from an earlier trigger definition must run
+`graph.enable_sync()` or a trigger-mode `graph.build()` first. Durable ingestion
+checks all applicable trigger definitions and fails with upgrade guidance
+instead of publishing against an unprotected source table.
+Operations that cannot yet be represented incrementally, including
+`TRUNCATE`, fail with rebuild guidance and leave the manifest watermark
+unchanged.
 
 ### `graph.projection_status()`
 

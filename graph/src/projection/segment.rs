@@ -16,7 +16,7 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 const MAGIC: &[u8; 8] = b"PGGSEG01";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 const HEADER_SIZE: usize = 160;
 const CHECKSUM_OFFSET: usize = 124;
 const RESERVED_OFFSET: usize = 128;
@@ -112,6 +112,8 @@ pub(crate) struct SegmentResolution {
     pub(crate) table_oid: u32,
     /// Hash of the source primary key.
     pub(crate) pk_hash: u64,
+    /// Exact source primary key used to verify hashes and rebuild node metadata.
+    pub(crate) primary_key: Option<String>,
     /// Node index.
     pub(crate) node_idx: u32,
     /// Whether the resolution entry is removed.
@@ -138,6 +140,8 @@ pub(crate) struct SegmentTenant {
     pub(crate) node_idx: u32,
     /// Hash of the tenant identifier.
     pub(crate) tenant_hash: u64,
+    /// Exact tenant identifier used to rebuild tenant membership.
+    pub(crate) tenant: Option<String>,
     /// Whether the tenant membership is removed.
     pub(crate) tombstone: bool,
 }
@@ -273,9 +277,9 @@ impl DeltaSegment {
         encode_edges(&mut sections.edge_deletes, &self.edge_deletes);
         encode_edge_weights(&mut sections.edge_weights, &self.edge_weights);
         encode_node_states(&mut sections.node_states, &self.node_states);
-        encode_resolutions(&mut sections.resolutions, &self.resolutions);
+        encode_resolutions(&mut sections.resolutions, &self.resolutions)?;
         encode_filters(&mut sections.filters, &self.filters)?;
-        encode_tenants(&mut sections.tenants, &self.tenants);
+        encode_tenants(&mut sections.tenants, &self.tenants)?;
 
         let section_bytes = sections.as_slices();
         let counts = self.section_counts()?;
@@ -332,9 +336,9 @@ impl DeltaSegment {
         }
         validate_reserved_header_bytes(bytes)?;
         let version = read_u32(bytes, 8)?;
-        if version != VERSION {
+        if !matches!(version, 5 | VERSION) {
             return Err(GraphError::IncompatibleVersion(format!(
-                "projection segment version {version} is unsupported; expected {VERSION}"
+                "projection segment version {version} is unsupported; expected 5 or {VERSION}"
             )));
         }
         let stored_checksum = read_u32(bytes, CHECKSUM_OFFSET)?;
@@ -355,15 +359,19 @@ impl DeltaSegment {
         validate_header_shape(&header)?;
         let counts = read_counts(bytes)?;
         let offsets = read_offsets(bytes)?;
-        let ranges = validate_section_ranges(bytes.len(), &counts, &offsets)?;
+        let ranges = validate_section_ranges(bytes.len(), &counts, &offsets, version)?;
         let segment = Self {
             edge_inserts: decode_edges(section(bytes, ranges[0].clone())?, counts[0])?,
             edge_deletes: decode_edges(section(bytes, ranges[1].clone())?, counts[1])?,
             edge_weights: decode_edge_weights(section(bytes, ranges[2].clone())?, counts[2])?,
             node_states: decode_node_states(section(bytes, ranges[3].clone())?, counts[3])?,
-            resolutions: decode_resolutions(section(bytes, ranges[4].clone())?, counts[4])?,
+            resolutions: decode_resolutions(
+                section(bytes, ranges[4].clone())?,
+                counts[4],
+                version,
+            )?,
             filters: decode_filters(section(bytes, ranges[5].clone())?, counts[5])?,
-            tenants: decode_tenants(section(bytes, ranges[6].clone())?, counts[6])?,
+            tenants: decode_tenants(section(bytes, ranges[6].clone())?, counts[6], version)?,
             header,
         };
         validate_segment(&segment)?;
@@ -423,7 +431,8 @@ pub(crate) fn fuzz_seed_bytes(name: &str) -> Option<Vec<u8>> {
             });
             segment.resolutions.push(SegmentResolution {
                 table_oid: 100,
-                pk_hash: 1_001,
+                pk_hash: crate::resolution_index::ResolutionIndexBuilder::hash_pk("node-0"),
+                primary_key: Some("node-0".to_string()),
                 node_idx: 0,
                 tombstone: false,
             });
@@ -435,7 +444,8 @@ pub(crate) fn fuzz_seed_bytes(name: &str) -> Option<Vec<u8>> {
             });
             segment.tenants.push(SegmentTenant {
                 node_idx: 0,
-                tenant_hash: 2_002,
+                tenant_hash: xxhash_rust::xxh3::xxh3_64(b"tenant-0"),
+                tenant: Some("tenant-0".to_string()),
                 tombstone: false,
             });
             segment.to_bytes().ok()
@@ -514,12 +524,32 @@ fn validate_segment(segment: &DeltaSegment) -> GraphResult<()> {
     }
     for resolution in &segment.resolutions {
         validate_node_bounds(&segment.header, resolution.node_idx)?;
+        match resolution.primary_key.as_deref() {
+            Some(primary_key)
+                if resolution.pk_hash
+                    == crate::resolution_index::ResolutionIndexBuilder::hash_pk(primary_key) => {}
+            Some(_) => {
+                return Err(segment_corrupt(
+                    "resolution primary key does not match its hash",
+                ));
+            }
+            None if segment.header.version == 5 => {}
+            None => return Err(segment_corrupt("resolution primary key is missing")),
+        }
     }
     for filter in &segment.filters {
         validate_node_bounds(&segment.header, filter.node_idx)?;
     }
     for tenant in &segment.tenants {
         validate_node_bounds(&segment.header, tenant.node_idx)?;
+        match tenant.tenant.as_deref() {
+            Some(value) if tenant.tenant_hash == xxhash_rust::xxh3::xxh3_64(value.as_bytes()) => {}
+            Some(_) => {
+                return Err(segment_corrupt("tenant identifier does not match its hash"));
+            }
+            None if segment.header.version == 5 => {}
+            None => return Err(segment_corrupt("tenant identifier is missing")),
+        }
     }
     Ok(())
 }
@@ -616,15 +646,16 @@ fn validate_section_ranges(
     len: usize,
     counts: &[u32; SECTION_COUNT],
     offsets: &[u64; SECTION_COUNT],
+    version: u32,
 ) -> GraphResult<[std::ops::Range<usize>; SECTION_COUNT]> {
     let widths = [
         Some(14_usize),
         Some(14),
         Some(18),
         Some(5),
-        Some(17),
+        (version == 5).then_some(17),
         None,
-        Some(13),
+        (version == 5).then_some(13),
     ];
     let mut ranges: [std::ops::Range<usize>; SECTION_COUNT] =
         std::array::from_fn(|_| 0_usize..0_usize);
@@ -706,13 +737,22 @@ fn encode_node_states(out: &mut Vec<u8>, rows: &[SegmentNodeState]) {
     }
 }
 
-fn encode_resolutions(out: &mut Vec<u8>, rows: &[SegmentResolution]) {
+fn encode_resolutions(out: &mut Vec<u8>, rows: &[SegmentResolution]) -> GraphResult<()> {
     for row in rows {
         push_u32(out, row.table_oid);
         push_u64(out, row.pk_hash);
         push_u32(out, row.node_idx);
         out.push(u8::from(row.tombstone));
+        let primary_key = row
+            .primary_key
+            .as_deref()
+            .ok_or_else(|| segment_corrupt("resolution primary key is missing"))?;
+        let primary_key_len = u32::try_from(primary_key.len())
+            .map_err(|_| segment_corrupt("resolution primary key exceeds u32"))?;
+        push_u32(out, primary_key_len);
+        out.extend_from_slice(primary_key.as_bytes());
     }
+    Ok(())
 }
 
 fn encode_filters(out: &mut Vec<u8>, rows: &[SegmentFilterValue]) -> GraphResult<()> {
@@ -748,12 +788,21 @@ fn encode_filters(out: &mut Vec<u8>, rows: &[SegmentFilterValue]) -> GraphResult
     Ok(())
 }
 
-fn encode_tenants(out: &mut Vec<u8>, rows: &[SegmentTenant]) {
+fn encode_tenants(out: &mut Vec<u8>, rows: &[SegmentTenant]) -> GraphResult<()> {
     for row in rows {
         push_u32(out, row.node_idx);
         push_u64(out, row.tenant_hash);
         out.push(u8::from(row.tombstone));
+        let tenant = row
+            .tenant
+            .as_deref()
+            .ok_or_else(|| segment_corrupt("tenant identifier is missing"))?;
+        let tenant_len = u32::try_from(tenant.len())
+            .map_err(|_| segment_corrupt("tenant identifier exceeds u32"))?;
+        push_u32(out, tenant_len);
+        out.extend_from_slice(tenant.as_bytes());
     }
+    Ok(())
 }
 
 fn decode_edges(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdge>> {
@@ -816,16 +865,57 @@ fn decode_node_states(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentNodeSt
     Ok(rows)
 }
 
-fn decode_resolutions(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentResolution>> {
-    let mut rows = Vec::with_capacity(count as usize);
-    for idx in 0..count as usize {
-        let offset = idx * 17;
+fn decode_resolutions(
+    bytes: &[u8],
+    count: u32,
+    version: u32,
+) -> GraphResult<Vec<SegmentResolution>> {
+    if version == 5 {
+        let mut rows = Vec::with_capacity(count as usize);
+        for idx in 0..count as usize {
+            let offset = idx * 17;
+            rows.push(SegmentResolution {
+                table_oid: read_u32(bytes, offset)?,
+                pk_hash: read_u64(bytes, offset + 4)?,
+                node_idx: read_u32(bytes, offset + 12)?,
+                tombstone: decode_bool(read_u8(bytes, offset + 16)?)?,
+                primary_key: None,
+            });
+        }
+        return Ok(rows);
+    }
+    const HEADER_SIZE: usize = 21;
+    let count = usize::try_from(count)
+        .map_err(|_| segment_corrupt("resolution row count exceeds usize"))?;
+    let mut rows = Vec::with_capacity(count);
+    let mut offset = 0_usize;
+    for _ in 0..count {
+        let primary_key_len = usize::try_from(read_u32(bytes, offset + 17)?)
+            .map_err(|_| segment_corrupt("resolution primary key length exceeds usize"))?;
+        let primary_key_start = offset
+            .checked_add(HEADER_SIZE)
+            .ok_or_else(|| segment_corrupt("resolution primary key offset overflowed"))?;
+        let primary_key_end = primary_key_start
+            .checked_add(primary_key_len)
+            .ok_or_else(|| segment_corrupt("resolution primary key end overflowed"))?;
+        let primary_key = std::str::from_utf8(
+            bytes
+                .get(primary_key_start..primary_key_end)
+                .ok_or_else(|| segment_corrupt("resolution primary key extends past section"))?,
+        )
+        .map_err(|_| segment_corrupt("resolution primary key is not valid UTF-8"))?
+        .to_string();
         rows.push(SegmentResolution {
             table_oid: read_u32(bytes, offset)?,
             pk_hash: read_u64(bytes, offset + 4)?,
             node_idx: read_u32(bytes, offset + 12)?,
             tombstone: decode_bool(read_u8(bytes, offset + 16)?)?,
+            primary_key: Some(primary_key),
         });
+        offset = primary_key_end;
+    }
+    if offset != bytes.len() {
+        return Err(segment_corrupt("trailing bytes in resolution section"));
     }
     Ok(rows)
 }
@@ -892,15 +982,51 @@ fn decode_filter_value(tag: u8, payload: &[u8]) -> GraphResult<PersistedFilterVa
     }
 }
 
-fn decode_tenants(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentTenant>> {
-    let mut rows = Vec::with_capacity(count as usize);
-    for idx in 0..count as usize {
-        let offset = idx * 13;
+fn decode_tenants(bytes: &[u8], count: u32, version: u32) -> GraphResult<Vec<SegmentTenant>> {
+    if version == 5 {
+        let mut rows = Vec::with_capacity(count as usize);
+        for idx in 0..count as usize {
+            let offset = idx * 13;
+            rows.push(SegmentTenant {
+                node_idx: read_u32(bytes, offset)?,
+                tenant_hash: read_u64(bytes, offset + 4)?,
+                tombstone: decode_bool(read_u8(bytes, offset + 12)?)?,
+                tenant: None,
+            });
+        }
+        return Ok(rows);
+    }
+    const HEADER_SIZE: usize = 17;
+    let count =
+        usize::try_from(count).map_err(|_| segment_corrupt("tenant row count exceeds usize"))?;
+    let mut rows = Vec::with_capacity(count);
+    let mut offset = 0_usize;
+    for _ in 0..count {
+        let tenant_len = usize::try_from(read_u32(bytes, offset + 13)?)
+            .map_err(|_| segment_corrupt("tenant identifier length exceeds usize"))?;
+        let tenant_start = offset
+            .checked_add(HEADER_SIZE)
+            .ok_or_else(|| segment_corrupt("tenant identifier offset overflowed"))?;
+        let tenant_end = tenant_start
+            .checked_add(tenant_len)
+            .ok_or_else(|| segment_corrupt("tenant identifier end overflowed"))?;
+        let tenant = std::str::from_utf8(
+            bytes
+                .get(tenant_start..tenant_end)
+                .ok_or_else(|| segment_corrupt("tenant identifier extends past section"))?,
+        )
+        .map_err(|_| segment_corrupt("tenant identifier is not valid UTF-8"))?
+        .to_string();
         rows.push(SegmentTenant {
             node_idx: read_u32(bytes, offset)?,
             tenant_hash: read_u64(bytes, offset + 4)?,
             tombstone: decode_bool(read_u8(bytes, offset + 12)?)?,
+            tenant: Some(tenant),
         });
+        offset = tenant_end;
+    }
+    if offset != bytes.len() {
+        return Err(segment_corrupt("trailing bytes in tenant section"));
     }
     Ok(rows)
 }
@@ -1003,6 +1129,43 @@ fn segment_corrupt(reason: impl Into<String>) -> GraphError {
 }
 
 #[cfg(test)]
+pub(crate) fn encode_version_5_segment_for_test(segment: &DeltaSegment) -> Vec<u8> {
+    let mut sections = EncodedSections::default();
+    encode_edges(&mut sections.edge_inserts, &segment.edge_inserts);
+    encode_edges(&mut sections.edge_deletes, &segment.edge_deletes);
+    encode_edge_weights(&mut sections.edge_weights, &segment.edge_weights);
+    encode_node_states(&mut sections.node_states, &segment.node_states);
+    for row in &segment.resolutions {
+        push_u32(&mut sections.resolutions, row.table_oid);
+        push_u64(&mut sections.resolutions, row.pk_hash);
+        push_u32(&mut sections.resolutions, row.node_idx);
+        sections.resolutions.push(u8::from(row.tombstone));
+    }
+    encode_filters(&mut sections.filters, &segment.filters).expect("v5 filters encode");
+    for row in &segment.tenants {
+        push_u32(&mut sections.tenants, row.node_idx);
+        push_u64(&mut sections.tenants, row.tenant_hash);
+        sections.tenants.push(u8::from(row.tombstone));
+    }
+
+    let section_bytes = sections.as_slices();
+    let counts = segment.section_counts().expect("v5 counts fit");
+    let mut offsets = [0_u64; SECTION_COUNT];
+    let mut cursor = HEADER_SIZE;
+    let mut bytes = vec![0; HEADER_SIZE];
+    for (idx, section) in section_bytes.iter().enumerate() {
+        offsets[idx] = cursor as u64;
+        bytes.extend_from_slice(section);
+        cursor += section.len();
+    }
+    write_header(&mut bytes, &segment.header, &counts, &offsets, 0);
+    write_u32_at(&mut bytes, 8, 5);
+    let checksum = checksum_segment_bytes(&bytes);
+    write_u32_at(&mut bytes, CHECKSUM_OFFSET, checksum);
+    bytes
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::projection::normalize::{
@@ -1099,7 +1262,8 @@ mod tests {
         });
         segment.resolutions.push(SegmentResolution {
             table_oid: 100,
-            pk_hash: 10_001,
+            pk_hash: crate::resolution_index::ResolutionIndexBuilder::hash_pk("node-1"),
+            primary_key: Some("node-1".to_string()),
             node_idx: 1,
             tombstone: false,
         });
@@ -1111,7 +1275,8 @@ mod tests {
         });
         segment.tenants.push(SegmentTenant {
             node_idx: 1,
-            tenant_hash: 22_002,
+            tenant_hash: xxhash_rust::xxh3::xxh3_64(b"tenant-1"),
+            tenant: Some("tenant-1".to_string()),
             tombstone: false,
         });
 
@@ -1124,6 +1289,65 @@ mod tests {
         assert_eq!(decoded.resolutions, segment.resolutions);
         assert_eq!(decoded.filters, segment.filters);
         assert_eq!(decoded.tenants, segment.tenants);
+    }
+
+    #[test]
+    fn delta_segment_decodes_version_5_exact_identity_gaps_safely() {
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 2, 9)
+            .expect("segment constructs");
+        segment.resolutions.push(SegmentResolution {
+            table_oid: 100,
+            pk_hash: crate::resolution_index::ResolutionIndexBuilder::hash_pk("legacy"),
+            primary_key: Some("legacy".to_string()),
+            node_idx: 1,
+            tombstone: false,
+        });
+        segment.filters.push(SegmentFilterValue {
+            node_idx: 1,
+            column_id: 3,
+            value: PersistedFilterValue::Text("variable-width".to_string()),
+            tombstone: false,
+        });
+        segment.tenants.push(SegmentTenant {
+            node_idx: 1,
+            tenant_hash: xxhash_rust::xxh3::xxh3_64(b"legacy-tenant"),
+            tenant: Some("legacy-tenant".to_string()),
+            tombstone: false,
+        });
+
+        let decoded = DeltaSegment::from_bytes(&encode_version_5_segment_for_test(&segment))
+            .expect("version 5 segment decodes");
+
+        assert_eq!(decoded.header.version, 5);
+        assert_eq!(decoded.resolutions[0].primary_key, None);
+        assert_eq!(decoded.filters, segment.filters);
+        assert_eq!(decoded.tenants[0].tenant, None);
+    }
+
+    #[test]
+    fn delta_segment_rejects_corrupt_v6_exact_identity_hash() {
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 1, 9)
+            .expect("segment constructs");
+        segment.resolutions.push(SegmentResolution {
+            table_oid: 100,
+            pk_hash: crate::resolution_index::ResolutionIndexBuilder::hash_pk("exact"),
+            primary_key: Some("exact".to_string()),
+            node_idx: 0,
+            tombstone: false,
+        });
+        let mut bytes = segment.to_bytes().expect("segment encodes");
+        let resolution_offset =
+            usize::try_from(read_u64(&bytes, 96).expect("resolution offset reads"))
+                .expect("resolution offset fits usize");
+        bytes[resolution_offset + 21] ^= 1;
+        rewrite_checksum(&mut bytes);
+
+        let error = DeltaSegment::from_bytes(&bytes).expect_err("identity hash mismatch rejects");
+
+        assert!(matches!(
+            error,
+            GraphError::CorruptFile { reason } if reason.contains("primary key does not match")
+        ));
     }
 
     #[test]
@@ -1196,7 +1420,7 @@ mod tests {
         let segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 0, 0)
             .expect("segment constructs");
         let mut bytes = segment.to_bytes().expect("segment encodes");
-        write_u32_at(&mut bytes, 8, VERSION - 1);
+        write_u32_at(&mut bytes, 8, 4);
         rewrite_checksum(&mut bytes);
 
         assert!(matches!(

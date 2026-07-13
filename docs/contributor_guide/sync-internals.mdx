@@ -209,8 +209,27 @@ deterministically ordered cumulative dictionary, written as a checksummed
 artifact, and referenced by projection manifest version 2. It then publishes
 durable no-overwrite segment files, validates segment and identity-artifact
 reloads, and publishes the next manifest under an artifact-root ingestion
-publication lock. Aborted transaction rows are ignored, and the manifest
-watermark advances only after every referenced artifact succeeds.
+publication lock. The SQL boundary also holds the graph-scoped PostgreSQL
+transaction advisory lock across current-manifest loading, deterministic node
+allocation, validation, publication, and backend reload. Aborted transaction
+rows are ignored, and the manifest watermark advances only after every
+referenced artifact succeeds.
+
+Every generated source trigger takes a shared transaction-scoped advisory lock
+before it appends a sync row. Durable ingestion and persisted builds use the
+corresponding exclusive try-lock before reading source or sync state. Active
+source writers therefore make the graph operation fail with SQLSTATE `55P03`;
+new source writers wait behind an operation that already owns the exclusive
+lock. This creates a commit-safe snapshot boundary even when sequence
+allocation and transaction commit order differ, while shared locks still let
+source transactions run concurrently with one another. A same-transaction
+guard also rejects durable ingestion after the calling transaction has already
+written applicable sync rows. Before either durable apply path acquires the
+barrier, it verifies that all applicable row and truncate trigger functions
+contain the current shared-lock call. This makes older installed definitions a
+fail-closed upgrade condition. Trigger-mode builds reinstall the functions
+before reading source tables; the trigger DDL relation locks establish a clean
+boundary with transactions that began under an older definition.
 
 The admin-only `graph.ingest_projection(max_rows bigint DEFAULT NULL,
 max_bytes bigint DEFAULT NULL)` entrypoint reads committed `graph._sync_log`
@@ -228,6 +247,13 @@ resolves the source and target from the registered endpoint columns and uses
 the relationship table's primary key as the canonical identity. For an
 FK-style edge stored on a registered node table, replay continues to use the
 node primary key as the source and the mapped foreign-key column as the target.
+For every standalone mapping, node deletion and primary-key changes fail with
+rebuild guidance. PostgreSQL permits deferred foreign keys to survive an
+endpoint delete/reinsert transaction, so foreign-key presence alone cannot
+prove that an existing relationship row should move to the replacement node
+slot. Exact target-table resolution never falls back to another registered
+table; source fallback without a known table succeeds only when one registered
+table matches the endpoint key.
 
 The layered projection runtime merges base CSR neighbors, durable edge
 insert/delete/weight segments, durable node visibility and tenant membership
@@ -288,11 +314,23 @@ index's storage and text-dictionary arrays must agree before any segment value
 is applied. An invalid value or malformed index leaves the prior engine state
 unchanged.
 
-Projection segment versions are not read across format boundaries. Segment
-format v5 keys topology, tombstone, and weight rows by optional stable
+Projection segment v6 stores the exact UTF-8 primary key beside its table OID
+and the exact UTF-8 tenant identifier beside its hash. A batch-wide planner
+allocates new node slots contiguously before it emits topology, so relationships
+can target nodes introduced later in the same committed batch. Identity-stable
+tenant updates retain their existing slot, while insert/delete lifecycles keep
+any allocated slot as an inactive tombstone. Existing slots cannot change
+identity, and edge endpoints are validated against the final staged node count.
+The planner reads a fresh persisted base-plus-manifest snapshot while holding
+the graph publication lock; transaction-local serving slots therefore cannot
+change durable allocation order or create gaps after reload.
+The loader can read v5 resolution rows only when they verify an existing base
+node. A v5 tenant delta is rejected with rebuild guidance because its hash is
+not sufficient to reconstruct exact membership. Segment format v5 keys
+topology, tombstone, and weight rows by optional stable
 relationship identity, which preserves equal-endpoint parallel relationships
 through layered reads, compaction, and dirty-range chunk replacement. After an
-upgrade from a release that wrote an older segment format, rebuild the graph
+upgrade from an older or identity-incomplete segment format, rebuild the graph
 from its authoritative PostgreSQL tables before serving the mutable projection. A clean
 `graph.build()` publishes a compatible base and manifest; old derived segment
 files can then be removed by the normal generation cleanup path.
@@ -306,8 +344,19 @@ their bytes in projection status.
 
 Ingestion generations retain all segment, base-chunk, and obsolete-file
 references from the preceding manifest before appending new segments. A sync
-batch that advances only the watermark retains the same artifact references, so
-later generations cannot make earlier committed deltas disappear.
+batch that cannot produce a durable row does not advance the watermark.
+Incremental `TRUNCATE` currently fails with rebuild guidance rather than
+publishing an empty generation, so later generations cannot silently omit a
+committed source-table change.
+
+Before publishing a candidate manifest, ingestion loads the persisted base into
+a fresh engine and installs every candidate segment and relationship identity
+artifact. Only a candidate that passes this semantic reload can become current.
+The serving backend is replaced only by a fully loaded engine after publication;
+a failed validation leaves both the previous manifest and serving state intact.
+Inactive historical node identities remain available for relationship
+tombstones, so deleting an endpoint before deleting its mapped relationship row
+does not prevent the relationship deletion from being replayed.
 
 The engine keeps base manifest generation and sync watermark metadata
 backend-locally, and `graph.active_generation_count()` exposes the selected

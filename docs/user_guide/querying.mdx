@@ -418,9 +418,10 @@ trigger aborts before pgGraph records a transaction-local projection delta.
 For backend-local mutable projections, concurrent mapped writes follow
 PostgreSQL isolation rules. READ COMMITTED readers can observe a committed
 write on their next statement; REPEATABLE READ and SERIALIZABLE readers retain
-their transaction snapshot. Persisted mutable projections remain subject to
-[KI-026](/known-issues#p0-correctness-security-durability-and-resource-bounds) until durable
-new-node ingestion is complete.
+their transaction snapshot. Durable new-node identity and reload are supported;
+the complete persisted isolation matrix remains subject to
+[KI-027](/known-issues#p0-correctness-security-durability-and-resource-bounds)
+until repeated persisted builds atomically rebase their projection manifest.
 For `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE`, pgGraph locks
 the matched PostgreSQL source row at the final write boundary and re-checks
 the matched GQL predicate before mutating. If another transaction changes the

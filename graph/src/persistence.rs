@@ -751,6 +751,25 @@ pub fn read_projection_mode(path: &Path) -> GraphResult<Option<config::Projectio
 /// Multiple backends can share mmap-backed pages via the OS page cache.
 /// Derived and bincode-backed structures remain per-backend heap allocations.
 pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
+    load_graph_file_internal(path, None)
+}
+
+/// Load a graph artifact against an unpublished projection candidate.
+///
+/// This is the semantic validation boundary used before an ingestion manifest
+/// becomes current. The candidate's referenced immutable artifacts must
+/// already exist, but the manifest itself need not have been published.
+pub(crate) fn load_graph_file_with_projection_candidate(
+    path: &Path,
+    candidate: &ProjectionManifest,
+) -> GraphResult<Engine> {
+    load_graph_file_internal(path, Some(candidate))
+}
+
+fn load_graph_file_internal(
+    path: &Path,
+    projection_candidate: Option<&ProjectionManifest>,
+) -> GraphResult<Engine> {
     let file = fs::File::open(path)
         .map_err(|e| GraphError::Internal(format!("Cannot open {}: {}", path.display(), e)))?;
 
@@ -969,7 +988,14 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
         engine.set_projection_mode(projection_mode);
     }
     let manifest_root = projection_manifest_root(path);
-    if let Some(manifest) = load_projection_manifest(path, computed_crc, &manifest_root)? {
+    let manifest = match projection_candidate {
+        Some(candidate) => {
+            validate_projection_manifest_base(path, computed_crc, candidate)?;
+            Some(candidate.clone())
+        }
+        None => load_projection_manifest(path, computed_crc, &manifest_root)?,
+    };
+    if let Some(manifest) = manifest {
         if let Some(reference) = &manifest.relationship_identities {
             let identity_path = manifest_root.join(&reference.path);
             let actual_bytes = std::fs::metadata(&identity_path)
@@ -1007,7 +1033,11 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
         if !manifest.segments.is_empty() {
             engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
         }
-        engine.install_projection_manifest(&manifest, manifest_root)?;
+        if projection_candidate.is_some() {
+            engine.install_projection_candidate(&manifest, manifest_root)?;
+        } else {
+            engine.install_projection_manifest(&manifest, manifest_root)?;
+        }
     }
 
     Ok(engine)

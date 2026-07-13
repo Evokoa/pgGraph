@@ -34,6 +34,15 @@ registered tables. `graph.enable_sync()` is still available when operators want
 to install or reinstall those triggers explicitly. Trigger rows are durable in
 `graph._sync_log`.
 
+After upgrading from a pgGraph release whose sync triggers predate the durable
+writer barrier, run `graph.enable_sync()` before resuming durable ingestion, or
+run `graph.build()` with `graph.sync_mode = 'trigger'`. Durable
+`graph.apply_sync()` and `graph.ingest_projection()` verify the installed
+trigger definitions and fail with upgrade guidance until every registered
+source table is protected. A trigger-mode build refreshes the definitions
+before reading source rows, so transactions using an older definition finish
+before the new base snapshot is taken.
+
 For named graphs, the trigger log remains source-table oriented. A source table
 change is written once, and `graph.apply_sync()`, query freshness, and
 `graph.sync_health()` filter that log to the selected graph's registered source

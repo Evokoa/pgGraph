@@ -23,6 +23,11 @@ use crate::engine::Engine;
 use crate::quote::{quote_ident, quote_literal};
 use crate::safety::{GraphError, GraphResult};
 
+/// Advisory-lock namespace separating registered source writers from durable
+/// graph snapshots while allowing writers to run concurrently with each other.
+pub(crate) const SYNC_WRITER_LOCK_CLASS: i32 = 1_918_928_211;
+pub(crate) const SYNC_WRITER_LOCK_KEY: i32 = 1_735_552_877;
+
 pub struct QualifiedTable {
     pub oid: u32,
     pub schema: String,
@@ -297,6 +302,7 @@ pub fn generate_trigger_sql(
 CREATE OR REPLACE FUNCTION graph.{trigger_fn_name}()
 RETURNS TRIGGER AS $$
 BEGIN
+    PERFORM pg_advisory_xact_lock_shared({sync_writer_lock_class}, {sync_writer_lock_key});
     IF TG_OP = 'INSERT' THEN
         INSERT INTO graph._sync_log
             (op, table_oid, table_name, pk, old_pk, new_pk, properties, old_row, new_row, xid)
@@ -326,6 +332,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 CREATE OR REPLACE FUNCTION graph.{trigger_fn_name}_truncate()
 RETURNS TRIGGER AS $$
 BEGIN
+    PERFORM pg_advisory_xact_lock_shared({sync_writer_lock_class}, {sync_writer_lock_key});
     INSERT INTO graph._sync_log
         (op, table_oid, table_name, xid, needs_vacuum)
     VALUES
@@ -362,6 +369,8 @@ CREATE TRIGGER graph_sync_truncate
         new_pk_expr = new_pk_expr,
         old_pk_expr = old_pk_expr,
         key_val_pairs_new = key_val_pairs_new,
+        sync_writer_lock_class = SYNC_WRITER_LOCK_CLASS,
+        sync_writer_lock_key = SYNC_WRITER_LOCK_KEY,
     )
 }
 
@@ -814,5 +823,11 @@ mod tests {
         assert!(sql.contains("AFTER INSERT"), "should create insert trigger");
         assert!(sql.contains("AFTER UPDATE"), "should create update trigger");
         assert!(sql.contains("AFTER DELETE"), "should create delete trigger");
+        assert_eq!(
+            sql.matches("pg_advisory_xact_lock_shared(1918928211, 1735552877)")
+                .count(),
+            2,
+            "row and truncate trigger functions should share the source-writer lock"
+        );
     }
 }

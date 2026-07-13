@@ -354,10 +354,115 @@ impl Engine {
         manifest: &ProjectionManifest,
         root: impl Into<PathBuf>,
     ) -> crate::safety::GraphResult<()> {
-        let root = root.into();
+        self.install_projection_manifest_internal(manifest, root.into(), true)
+    }
+
+    pub(crate) fn install_projection_candidate(
+        &mut self,
+        manifest: &ProjectionManifest,
+        root: impl Into<PathBuf>,
+    ) -> crate::safety::GraphResult<()> {
+        self.install_projection_manifest_internal(manifest, root.into(), false)
+    }
+
+    fn install_projection_manifest_internal(
+        &mut self,
+        manifest: &ProjectionManifest,
+        root: PathBuf,
+        record_heartbeat: bool,
+    ) -> crate::safety::GraphResult<()> {
         let segments = ManifestSegmentProvider::new(&root, manifest).load_segments()?;
+        let mut node_store = self.node_store.to_owned_store();
+        let mut resolution_delta = ResolutionDeltaIndex::new();
         let mut filter_index = self.filter_index.clone();
-        for segment in segments {
+        let mut table_membership = self.table_membership.clone();
+        let mut tenant_membership = self.tenant_membership.clone();
+        let mut tenanted_table_oids = self.tenanted_table_oids.clone();
+
+        for segment in &segments {
+            for resolution in &segment.resolutions {
+                let exact_primary_key = match resolution.primary_key.as_deref() {
+                    Some(primary_key) => primary_key.to_string(),
+                    None => {
+                        let primary_key =
+                            node_store.primary_key(resolution.node_idx).ok_or_else(|| {
+                                GraphError::CorruptFile {
+                                reason:
+                                    "version 5 projection resolution references a missing base node"
+                                        .to_string(),
+                            }
+                            })?;
+                        if node_store.table_oid(resolution.node_idx) != Some(resolution.table_oid)
+                            || ResolutionIndexBuilder::hash_pk(primary_key) != resolution.pk_hash
+                        {
+                            return Err(GraphError::CorruptFile {
+                                reason:
+                                    "version 5 projection resolution does not match its base node"
+                                        .to_string(),
+                            });
+                        }
+                        primary_key.to_string()
+                    }
+                };
+                let node_count = node_store.node_count();
+                if resolution.node_idx == node_count {
+                    node_store.add_node(resolution.table_oid, exact_primary_key.clone());
+                } else if resolution.node_idx > node_count {
+                    return Err(GraphError::CorruptFile {
+                        reason: format!(
+                            "projection node allocation contains an index gap: slot {} ({}, table {}) follows node count {}",
+                            resolution.node_idx, exact_primary_key, resolution.table_oid, node_count
+                        ),
+                    });
+                } else if node_store.table_oid(resolution.node_idx) != Some(resolution.table_oid)
+                    || node_store.primary_key(resolution.node_idx)
+                        != Some(exact_primary_key.as_str())
+                {
+                    return Err(GraphError::CorruptFile {
+                        reason: "projection node slot changes an existing identity".to_string(),
+                    });
+                }
+
+                resolution_delta.insert(
+                    resolution.table_oid,
+                    &exact_primary_key,
+                    resolution.node_idx,
+                );
+
+                if resolution.tombstone {
+                    node_store.deactivate(resolution.node_idx);
+                    if let Some(nodes) = table_membership.get_mut(&resolution.table_oid) {
+                        nodes.remove(resolution.node_idx);
+                    }
+                } else {
+                    if !node_store.is_active(resolution.node_idx) {
+                        return Err(GraphError::CorruptFile {
+                            reason: "projection cannot reactivate an inactive node slot"
+                                .to_string(),
+                        });
+                    }
+                    table_membership
+                        .entry(resolution.table_oid)
+                        .or_default()
+                        .insert(resolution.node_idx);
+                }
+            }
+            for state in &segment.node_states {
+                if state.node_idx >= node_store.node_count() {
+                    return Err(GraphError::CorruptFile {
+                        reason: "projection node state references a missing node".to_string(),
+                    });
+                }
+                if state.active != node_store.is_active(state.node_idx) {
+                    return Err(GraphError::CorruptFile {
+                        reason: "projection node state disagrees with exact identity state"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+
+        for segment in &segments {
             for relationship_id in segment
                 .edge_inserts
                 .iter()
@@ -383,7 +488,49 @@ impl Engine {
                     });
                 }
             }
-            for filter in segment.filters {
+            for edge in segment
+                .edge_inserts
+                .iter()
+                .chain(segment.edge_deletes.iter())
+            {
+                if edge.source >= node_store.node_count() || edge.target >= node_store.node_count()
+                {
+                    return Err(GraphError::CorruptFile {
+                        reason: "projection edge references a missing node".to_string(),
+                    });
+                }
+            }
+            for edge in &segment.edge_weights {
+                if edge.source >= node_store.node_count() || edge.target >= node_store.node_count()
+                {
+                    return Err(GraphError::CorruptFile {
+                        reason: "projection edge weight references a missing node".to_string(),
+                    });
+                }
+            }
+            for tenant in &segment.tenants {
+                let exact_tenant = tenant.tenant.as_deref().ok_or_else(|| {
+                    GraphError::IncompatibleVersion(
+                        "version 5 tenant projection lacks exact identity; rebuild required"
+                            .to_string(),
+                    )
+                })?;
+                let table_oid = node_store.table_oid(tenant.node_idx).ok_or_else(|| {
+                    GraphError::CorruptFile {
+                        reason: "projection tenant references a missing node".to_string(),
+                    }
+                })?;
+                tenanted_table_oids.insert(table_oid);
+                let membership = tenant_membership
+                    .entry(exact_tenant.to_string())
+                    .or_default();
+                if tenant.tombstone {
+                    membership.remove(tenant.node_idx);
+                } else {
+                    membership.insert(tenant.node_idx);
+                }
+            }
+            for filter in &segment.filters {
                 let column_idx =
                     usize::try_from(filter.column_id).map_err(|_| GraphError::CorruptFile {
                         reason: "projection filter column id exceeds usize".to_string(),
@@ -391,14 +538,21 @@ impl Engine {
                 filter_index.apply_persisted_value(
                     column_idx,
                     filter.node_idx,
-                    self.node_store.node_count(),
+                    node_store.node_count(),
                     &filter.value,
                     filter.tombstone,
                 )?;
             }
         }
-        crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;
+        if record_heartbeat {
+            crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;
+        }
+        self.node_store = node_store;
+        self.resolution_delta = resolution_delta;
         self.filter_index = filter_index;
+        self.table_membership = table_membership;
+        self.tenant_membership = tenant_membership;
+        self.tenanted_table_oids = tenanted_table_oids;
         self.projection_manifest = Some(ProjectionManifestSnapshot::from(manifest));
         self.projection_manifest_full = Some(manifest.clone());
         self.projection_manifest_root = Some(root);
@@ -540,7 +694,7 @@ impl Engine {
         }
     }
 
-    pub(crate) fn resolve_existing_node(&self, table_oid: u32, pk: &str) -> Option<u32> {
+    pub(crate) fn resolve_identity(&self, table_oid: u32, pk: &str) -> Option<u32> {
         let verify = |idx: u32| {
             idx < self.node_store.node_count()
                 && self.node_store.table_oid(idx) == Some(table_oid)
@@ -559,8 +713,8 @@ impl Engine {
             }
             ResolutionStore::MmapBacked(resolution_state) => {
                 let mmap = self._mmap.as_ref()?;
-                let data = &mmap[resolution_state.range()];
-                ResolutionIndex::from_bytes(data)?.resolve_verified(table_oid, pk, verify)
+                ResolutionIndex::from_bytes(&mmap[resolution_state.range()])?
+                    .resolve_verified(table_oid, pk, verify)
             }
         }
     }
@@ -1723,6 +1877,300 @@ mod tests {
             .install_projection_manifest(&manifest, root)
             .expect("projection manifest installs");
         dir
+    }
+
+    fn write_projection_manifest(
+        test_name: &str,
+        segments: Vec<crate::projection::segment::DeltaSegment>,
+    ) -> (
+        crate::projection::test_fixtures::ProjectionArtifactDir,
+        ProjectionManifest,
+    ) {
+        let dir = crate::projection::test_fixtures::ProjectionArtifactDir::new(test_name);
+        let mut manifest = ProjectionManifest::base_only(
+            1,
+            "base.pggraph",
+            "crc32:base",
+            crate::persistence::graph_artifact_version(),
+            segments
+                .iter()
+                .map(|segment| segment.header.sync_watermark)
+                .max()
+                .unwrap_or(0),
+            1,
+        );
+        for (segment_id, segment) in segments.into_iter().enumerate() {
+            let segment_path = dir.segment_path(1, segment_id as u32);
+            segment
+                .write_to_path(&segment_path)
+                .expect("projection segment writes");
+            let bytes = std::fs::read(&segment_path).expect("projection segment reads");
+            manifest
+                .segments
+                .push(crate::projection::manifest::ManifestSegmentRef {
+                    path: segment_path
+                        .strip_prefix(dir.path())
+                        .expect("segment stays inside projection root")
+                        .to_string_lossy()
+                        .to_string(),
+                    checksum: format!("crc32:{:08x}", crc32fast::hash(&bytes)),
+                    level: segment.header.level,
+                    source_start: segment.header.source_start,
+                    source_end: segment.header.source_end,
+                    sync_watermark: segment.header.sync_watermark,
+                });
+        }
+        (dir, manifest)
+    }
+
+    fn write_raw_projection_manifest(
+        test_name: &str,
+        bytes: &[u8],
+        segment: &crate::projection::segment::DeltaSegment,
+    ) -> (
+        crate::projection::test_fixtures::ProjectionArtifactDir,
+        ProjectionManifest,
+    ) {
+        let dir = crate::projection::test_fixtures::ProjectionArtifactDir::new(test_name);
+        let segment_path = dir.segment_path(1, 0);
+        std::fs::write(&segment_path, bytes).expect("raw projection segment writes");
+        let mut manifest = ProjectionManifest::base_only(
+            1,
+            "base.pggraph",
+            "crc32:base",
+            crate::persistence::graph_artifact_version(),
+            segment.header.sync_watermark,
+            1,
+        );
+        manifest
+            .segments
+            .push(crate::projection::manifest::ManifestSegmentRef {
+                path: segment_path
+                    .strip_prefix(dir.path())
+                    .expect("segment stays inside projection root")
+                    .to_string_lossy()
+                    .to_string(),
+                checksum: format!("crc32:{:08x}", crc32fast::hash(bytes)),
+                level: segment.header.level,
+                source_start: segment.header.source_start,
+                source_end: segment.header.source_end,
+                sync_watermark: segment.header.sync_watermark,
+            });
+        (dir, manifest)
+    }
+
+    #[test]
+    fn projection_manifest_installs_new_exact_node_identity_and_tenant() {
+        use crate::projection::segment::{
+            DeltaSegment, SegmentKind, SegmentNodeState, SegmentResolution, SegmentTenant,
+        };
+
+        let mut engine = Engine::new();
+        engine.node_store.add_node(42, "base".to_string());
+        engine.resolution_insert(42, "base", 0);
+        engine.rebuild_table_membership();
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 1, 2, 1)
+            .expect("node segment builds");
+        segment.node_states.push(SegmentNodeState {
+            node_idx: 1,
+            active: true,
+        });
+        segment.resolutions.push(SegmentResolution {
+            table_oid: 42,
+            pk_hash: ResolutionIndexBuilder::hash_pk("新-node"),
+            primary_key: Some("新-node".to_string()),
+            node_idx: 1,
+            tombstone: false,
+        });
+        segment.tenants.push(SegmentTenant {
+            node_idx: 1,
+            tenant_hash: xxhash_rust::xxh3::xxh3_64("tenant-ß".as_bytes()),
+            tenant: Some("tenant-ß".to_string()),
+            tombstone: false,
+        });
+        let (dir, manifest) =
+            write_projection_manifest("engine_installs_exact_node_identity", vec![segment]);
+
+        engine
+            .install_projection_manifest(&manifest, dir.path())
+            .expect("exact node projection installs");
+
+        assert_eq!(engine.node_store.node_count(), 2);
+        assert_eq!(engine.resolve(42, "新-node"), Some(1));
+        assert!(engine.node_store.is_active(1));
+        assert!(engine
+            .tenant_membership
+            .get("tenant-ß")
+            .is_some_and(|nodes| nodes.contains(1)));
+    }
+
+    #[test]
+    fn projection_manifest_rejects_node_gap_without_mutating_engine() {
+        use crate::projection::segment::{DeltaSegment, SegmentKind, SegmentResolution};
+
+        let mut engine = Engine::new();
+        engine.node_store.add_node(42, "base".to_string());
+        engine.resolution_insert(42, "base", 0);
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 3, 4, 1)
+            .expect("node segment builds");
+        segment.resolutions.push(SegmentResolution {
+            table_oid: 42,
+            pk_hash: ResolutionIndexBuilder::hash_pk("gap"),
+            primary_key: Some("gap".to_string()),
+            node_idx: 3,
+            tombstone: false,
+        });
+        let (dir, manifest) =
+            write_projection_manifest("engine_rejects_projection_node_gap", vec![segment]);
+
+        let error = engine
+            .install_projection_manifest(&manifest, dir.path())
+            .expect_err("node allocation gap is rejected");
+
+        assert!(matches!(error, GraphError::CorruptFile { .. }));
+        assert_eq!(engine.node_store.node_count(), 1);
+        assert_eq!(engine.resolve(42, "base"), Some(0));
+        assert_eq!(engine.resolve(42, "gap"), None);
+        assert!(engine.projection_manifest.is_none());
+    }
+
+    #[test]
+    fn projection_manifest_delete_then_reinsert_uses_new_node_slot() {
+        use crate::projection::segment::{
+            DeltaSegment, SegmentKind, SegmentNodeState, SegmentResolution,
+        };
+
+        let mut engine = Engine::new();
+        engine.node_store.add_node(42, "same".to_string());
+        engine.resolution_insert(42, "same", 0);
+        engine.rebuild_table_membership();
+        let mut deletion =
+            DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 1, 1)
+                .expect("delete segment builds");
+        deletion.node_states.push(SegmentNodeState {
+            node_idx: 0,
+            active: false,
+        });
+        deletion.resolutions.push(SegmentResolution {
+            table_oid: 42,
+            pk_hash: ResolutionIndexBuilder::hash_pk("same"),
+            primary_key: Some("same".to_string()),
+            node_idx: 0,
+            tombstone: true,
+        });
+        let mut insertion =
+            DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 1, 2, 2)
+                .expect("insert segment builds");
+        insertion.node_states.push(SegmentNodeState {
+            node_idx: 1,
+            active: true,
+        });
+        insertion.resolutions.push(SegmentResolution {
+            table_oid: 42,
+            pk_hash: ResolutionIndexBuilder::hash_pk("same"),
+            primary_key: Some("same".to_string()),
+            node_idx: 1,
+            tombstone: false,
+        });
+        let (dir, manifest) = write_projection_manifest(
+            "engine_projection_delete_reinsert",
+            vec![deletion, insertion],
+        );
+
+        engine
+            .install_projection_manifest(&manifest, dir.path())
+            .expect("delete and reinsert projection installs");
+
+        assert!(!engine.node_store.is_active(0));
+        assert!(engine.node_store.is_active(1));
+        assert_eq!(engine.resolve(42, "same"), Some(1));
+    }
+
+    #[test]
+    fn projection_manifest_preserves_transient_node_slot_as_inactive() {
+        use crate::projection::segment::{
+            DeltaSegment, SegmentKind, SegmentNodeState, SegmentResolution,
+        };
+
+        let mut engine = Engine::new();
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 1, 2)
+            .expect("node segment builds");
+        segment.node_states.push(SegmentNodeState {
+            node_idx: 0,
+            active: false,
+        });
+        segment.resolutions.push(SegmentResolution {
+            table_oid: 42,
+            pk_hash: ResolutionIndexBuilder::hash_pk("transient"),
+            primary_key: Some("transient".to_string()),
+            node_idx: 0,
+            tombstone: true,
+        });
+        let (dir, manifest) =
+            write_projection_manifest("engine_projection_transient_node", vec![segment]);
+
+        engine
+            .install_projection_manifest(&manifest, dir.path())
+            .expect("transient allocation installs as a durable tombstone");
+
+        assert_eq!(engine.node_store.node_count(), 1);
+        assert!(!engine.node_store.is_active(0));
+        assert_eq!(engine.resolve(42, "transient"), None);
+    }
+
+    #[test]
+    fn projection_manifest_accepts_v5_resolution_for_existing_base_node() {
+        use crate::projection::segment::{DeltaSegment, SegmentKind, SegmentResolution};
+
+        let mut engine = Engine::new();
+        engine.node_store.add_node(42, "legacy".to_string());
+        engine.resolution_insert(42, "legacy", 0);
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 1, 1)
+            .expect("legacy segment builds");
+        segment.resolutions.push(SegmentResolution {
+            table_oid: 42,
+            pk_hash: ResolutionIndexBuilder::hash_pk("legacy"),
+            primary_key: Some("legacy".to_string()),
+            node_idx: 0,
+            tombstone: false,
+        });
+        let bytes = crate::projection::segment::encode_version_5_segment_for_test(&segment);
+        let (dir, manifest) =
+            write_raw_projection_manifest("engine_projection_v5_resolution", &bytes, &segment);
+
+        engine
+            .install_projection_manifest(&manifest, dir.path())
+            .expect("v5 base resolution installs");
+
+        assert_eq!(engine.resolve(42, "legacy"), Some(0));
+    }
+
+    #[test]
+    fn projection_manifest_rejects_v5_tenant_without_exact_identity() {
+        use crate::projection::segment::{DeltaSegment, SegmentKind, SegmentTenant};
+
+        let mut engine = Engine::new();
+        engine.node_store.add_node(42, "legacy".to_string());
+        engine.resolution_insert(42, "legacy", 0);
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 1, 1)
+            .expect("legacy tenant segment builds");
+        segment.tenants.push(SegmentTenant {
+            node_idx: 0,
+            tenant_hash: xxhash_rust::xxh3::xxh3_64(b"legacy-tenant"),
+            tenant: Some("legacy-tenant".to_string()),
+            tombstone: false,
+        });
+        let bytes = crate::projection::segment::encode_version_5_segment_for_test(&segment);
+        let (dir, manifest) =
+            write_raw_projection_manifest("engine_projection_v5_tenant", &bytes, &segment);
+
+        let error = engine
+            .install_projection_manifest(&manifest, dir.path())
+            .expect_err("v5 tenant without exact identity is rejected");
+
+        assert!(matches!(error, GraphError::IncompatibleVersion(_)));
+        assert!(engine.tenant_membership.is_empty());
+        assert!(engine.projection_manifest.is_none());
     }
 
     // ─── traverse() ───
