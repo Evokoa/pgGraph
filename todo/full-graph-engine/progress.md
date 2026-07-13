@@ -163,6 +163,7 @@ correctness and safety boundary.
 - 2026-07-12 — Checkpoint 1A identity-delete subphase: transaction and immediate overlays now key tombstones by direction and optional relationship ID, GQL deletes carry the matched identity to PostgreSQL primary-key DML, and durable sync deletion preserves parallel siblings after reload.
 - 2026-07-12 — Checkpoint 1A mutable-overlay visibility subphase: caller-role RLS checks now have durable post-build segment coverage across coordinate, hydrated, aggregate, and existence result shapes on PostgreSQL 17.
 - 2026-07-12 — Checkpoint 1A PostgreSQL write-boundary subphase: GQL CREATE now has PostgreSQL 17 evidence for partition routing plus CHECK-constraint and user-trigger rejection without residual transaction deltas.
+- 2026-07-13 — Checkpoint 1A isolation subphase: a two-session gate proves the existing query-freshness path observes a later committed mapped write under READ COMMITTED while REPEATABLE READ and SERIALIZABLE retain their transaction snapshot. Durable new-node ingestion defect KI-026 remains open for the storage phase.
 
 ## Decisions
 
@@ -505,4 +506,18 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Rust documentation | `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "pg17 development"` | PASS |
 | Contract and docs drift | `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh` | PASS after acknowledged PostgreSQL write-boundary contract refresh |
 | Independent Rust review | `rust-reviewing` subagent over the write-boundary diff and SQLSTATE follow-up | PASS: exact CHECK and trigger SQLSTATEs, rejected-state cleanup, partition routing, documentation, and matrix pin are release-ready |
+| Whitespace | `git diff --check` | PASS |
+
+### 2026-07-13 R1 Transaction Isolation Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Two-session isolation matrix | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation ./tests/heavy/gql_isolation_matrix.sh` | PASS: READ COMMITTED source/GQL counts advance from 0 to 1; REPEATABLE READ and SERIALIZABLE remain 0 inside their snapshots; every row is visible after the reader transaction ends |
+| Durable-path diagnostic | Same gate with `graph.persist_on_build = on` during development | EXPECTED FAIL / KI-026: durable ingest advanced the applied watermark while the new node remained absent; tracked as a P0 storage correctness blocker |
+| Rust tests | `cd graph && cargo test --features pg17` | PASS: 697 passed, 1 ignored, doctests 0 |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust documentation | `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "pg17 development"` | PASS |
+| Shell syntax | `bash -n graph/tests/heavy/gql_isolation_matrix.sh graph/tests/heavy/run_release_gate.sh` | PASS; ShellCheck is not installed in the current environment and remains for the aggregate script gate |
+| Contract and docs drift | `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh` | PASS after acknowledged transaction-isolation implementation hash refresh |
+| Independent Rust review | `rust-reviewing` subagent over the isolation gate, orchestration, and public claims | PASS after removing a redundant runtime SPI refresh, replacing timing sleeps with advisory handshakes, adding same-reader post-commit checks, and narrowing persisted-path claims to KI-026 |
 | Whitespace | `git diff --check` | PASS |

@@ -8,6 +8,12 @@ SQLSTATEs, ACL/RLS role boundaries, crash recovery, backup/restore, package
 validation, Docker, pg_upgrade, memory evidence, playground query stability, or
 mixed concurrency.
 
+`gql_isolation_matrix.sh` is the two-session backend-local mapped-write
+visibility gate. It proves that READ COMMITTED observes a later committed GQL
+write on its next statement while REPEATABLE READ and SERIALIZABLE retain their
+transaction snapshot; source rows and hydration-disabled graph results must
+agree before and after commit. The persisted variant remains gated by KI-026.
+
 Most scripts expect a disposable database and accept variables such as
 `PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and `DBNAME`. Scripts that kill or
 upgrade PostgreSQL require disposable `PGDATA` directories.

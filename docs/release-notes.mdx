@@ -58,6 +58,9 @@ gate evidence through signed tags and package publishing.
 - Added write conformance coverage proving PostgreSQL partition routing,
   constraints, and user triggers remain authoritative and rejected writes do
   not leave transaction-local graph state.
+- Added a two-session isolation gate proving backend-local mapped writes follow
+  PostgreSQL READ COMMITTED, REPEATABLE READ, and SERIALIZABLE visibility
+  rules; persisted new-node coverage remains gated by KI-026.
 - Added graph-scoped projection and sync behavior so replay, dirty-range
   ingest, copy-on-write compaction, and runtime selection ignore unrelated
   graph state.

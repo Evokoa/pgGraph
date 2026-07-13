@@ -415,6 +415,12 @@ matched graph coordinates.
 Writes targeting a registered partitioned table use ordinary PostgreSQL DML,
 so PostgreSQL chooses the child partition. A rejected constraint or user
 trigger aborts before pgGraph records a transaction-local projection delta.
+For backend-local mutable projections, concurrent mapped writes follow
+PostgreSQL isolation rules. READ COMMITTED readers can observe a committed
+write on their next statement; REPEATABLE READ and SERIALIZABLE readers retain
+their transaction snapshot. Persisted mutable projections remain subject to
+[KI-026](/known-issues#p0-correctness-security-durability-and-resource-bounds) until durable
+new-node ingestion is complete.
 For `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE`, pgGraph locks
 the matched PostgreSQL source row at the final write boundary and re-checks
 the matched GQL predicate before mutating. If another transaction changes the

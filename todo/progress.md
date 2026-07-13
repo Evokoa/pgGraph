@@ -57,6 +57,12 @@ coordinate, hydrated, aggregate, and existence outputs.
 and user-trigger failures now have PostgreSQL-backed GQL CREATE coverage with
 rejected writes proven absent from transaction-local graph state.
 
+2026-07-13 R1 transaction isolation — A two-session PostgreSQL 17 gate now
+proves READ COMMITTED statement visibility and REPEATABLE READ/SERIALIZABLE
+snapshot retention with matching source and graph results. The gate exposed
+KI-026: durable ingestion can consume a newly created node's watermark without
+persisting its identity; this is now an explicit P0 blocker for R3.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.
