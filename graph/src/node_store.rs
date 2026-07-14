@@ -8,9 +8,9 @@
 //!
 //! - **Owned** (build time): Data in `Vec<T>`, supports mutation (add/deactivate).
 //! - **Mmap** (load time): Active bits, table OIDs, primary-key offsets, and
-//!   primary-key bytes are read from the `.pggraph` file via mmap. Backends can
-//!   share those physical pages through the OS page cache. The store is
-//!   materialized into owned arrays on the first sync mutation.
+//!   primary-key bytes are read from a backend-local immutable artifact
+//!   snapshot. The store is materialized into owned arrays on the first sync
+//!   mutation.
 //!
 //! ## Arrays
 //!
@@ -24,114 +24,95 @@
 //!
 //! See: `docs/contributor_guide/memory-model.mdx`
 
+use crate::mapped_bytes::MappedBytes;
 use bitvec::prelude::*;
+use std::ops::Range;
 
-/// Validated pointer metadata for mmap-backed node arrays.
-#[derive(Clone, Copy, Debug)]
+/// Validated, owning metadata for mmap-backed node arrays.
+#[derive(Clone, Debug)]
 pub(crate) struct MmapNodeArrays {
-    active_ptr: *const u8,
-    oid_ptr: *const u32,
-    pk_offsets_ptr: *const u64,
-    pk_bytes_ptr: *const u8,
+    mmap: MappedBytes,
+    active_range: Range<usize>,
+    oid_range: Range<usize>,
+    pk_offsets_range: Range<usize>,
+    pk_bytes_range: Range<usize>,
     node_count: u32,
-    active_byte_count: usize,
-    pk_bytes_len: usize,
 }
 
-/// Raw mmap-backed node array pointers and lengths.
+/// Byte ranges for mmap-backed node arrays.
 ///
-/// Values are validated by [`MmapNodeArrays::new`] before they are used by a
-/// [`NodeStore`]. The struct groups the raw pointer contract so call sites do
-/// not pass several same-typed pointer and length arguments positionally.
-#[derive(Clone, Copy, Debug)]
+/// Values are validated by [`MmapNodeArrays::new_for_artifact`] before they are
+/// used by a [`NodeStore`]. The struct groups same-typed ranges so construction
+/// cannot accidentally reorder sections.
+#[derive(Clone, Debug)]
 pub(crate) struct MmapNodeArrayParts {
-    /// Pointer to the start of the mmap region that owns every array section.
-    pub(crate) region_ptr: *const u8,
-    /// Length in bytes of the mmap region.
-    pub(crate) region_len: usize,
-    /// Pointer to `active_byte_count` initialized packed active-bit bytes.
-    pub(crate) active_ptr: *const u8,
-    /// Pointer to `node_count` initialized source table OIDs.
-    pub(crate) oid_ptr: *const u32,
-    /// Pointer to `node_count + 1` initialized primary-key byte offsets.
-    pub(crate) pk_offsets_ptr: *const u64,
-    /// Pointer to `pk_bytes_len` initialized UTF-8 primary-key bytes.
-    pub(crate) pk_bytes_ptr: *const u8,
+    /// Read-only mapping retained by every store built from these ranges.
+    pub(crate) mmap: MappedBytes,
+    /// Packed active-bit bytes.
+    pub(crate) active_range: Range<usize>,
+    /// `node_count` source table OIDs.
+    pub(crate) oid_range: Range<usize>,
+    /// `node_count + 1` primary-key byte offsets.
+    pub(crate) pk_offsets_range: Range<usize>,
+    /// UTF-8 primary-key bytes.
+    pub(crate) pk_bytes_range: Range<usize>,
     /// Number of nodes represented by every per-node array.
     pub(crate) node_count: u32,
-    /// Number of bytes in the packed active-bit array.
-    pub(crate) active_byte_count: usize,
-    /// Number of bytes in the primary-key byte section.
-    pub(crate) pk_bytes_len: usize,
 }
 
 impl MmapNodeArrays {
-    /// Create validated mmap pointer metadata.
+    /// Create validated, owning mmap metadata.
     ///
-    /// Validation covers pointer ranges, typed alignment, the complete
+    /// Validation covers byte ranges, typed alignment, the complete
     /// primary-key offset table, terminal offsets, and UTF-8 boundaries.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure all pointers point into the same mmap region and
-    /// that the mmap outlives every [`NodeStore`] created from this metadata.
-    /// Typed pointers must be aligned and initialized for the documented
-    /// element counts.
-    pub(crate) unsafe fn new(parts: MmapNodeArrayParts) -> Option<Self> {
-        let required_ptrs_present = !parts.active_ptr.is_null()
-            && !parts.oid_ptr.is_null()
-            && !parts.pk_offsets_ptr.is_null()
-            && !parts.pk_bytes_ptr.is_null();
-        if !required_ptrs_present {
+    pub(crate) fn new_for_artifact(
+        parts: MmapNodeArrayParts,
+        _validated_artifact: &crate::persistence::ValidatedMappedGraphToken,
+    ) -> Option<Self> {
+        Self::validate(parts)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(parts: MmapNodeArrayParts) -> Option<Self> {
+        Self::validate(parts)
+    }
+
+    fn validate(parts: MmapNodeArrayParts) -> Option<Self> {
+        if !cfg!(target_endian = "little") {
             return None;
         }
-        if parts.active_byte_count != (parts.node_count as usize).div_ceil(8) {
+        let active_byte_count = (parts.node_count as usize).div_ceil(8);
+        if parts.active_range.len() != active_byte_count {
             return None;
         }
         let oid_bytes = (parts.node_count as usize).checked_mul(std::mem::size_of::<u32>())?;
         let pk_offsets_bytes = (parts.node_count as usize)
             .checked_add(1)?
             .checked_mul(std::mem::size_of::<u64>())?;
-        if !ptr_range_in_region(
-            parts.active_ptr,
-            parts.active_byte_count,
-            parts.region_ptr,
-            parts.region_len,
-        ) || !ptr_range_in_region(
-            parts.oid_ptr.cast::<u8>(),
-            oid_bytes,
-            parts.region_ptr,
-            parts.region_len,
-        ) || !ptr_range_in_region(
-            parts.pk_offsets_ptr.cast::<u8>(),
-            pk_offsets_bytes,
-            parts.region_ptr,
-            parts.region_len,
-        ) || !ptr_range_in_region(
-            parts.pk_bytes_ptr,
-            parts.pk_bytes_len,
-            parts.region_ptr,
-            parts.region_len,
-        ) {
+        if parts.oid_range.len() != oid_bytes
+            || parts.pk_offsets_range.len() != pk_offsets_bytes
+            || !range_in_region(&parts.active_range, parts.mmap.len())
+            || !range_in_region(&parts.oid_range, parts.mmap.len())
+            || !range_in_region(&parts.pk_offsets_range, parts.mmap.len())
+            || !range_in_region(&parts.pk_bytes_range, parts.mmap.len())
+        {
             return None;
         }
-        if !(parts.oid_ptr as usize).is_multiple_of(std::mem::align_of::<u32>())
-            || !(parts.pk_offsets_ptr as usize).is_multiple_of(std::mem::align_of::<u64>())
+        let base = parts.mmap.as_slice().as_ptr() as usize;
+        if !base
+            .checked_add(parts.oid_range.start)?
+            .is_multiple_of(std::mem::align_of::<u32>())
+            || !base
+                .checked_add(parts.pk_offsets_range.start)?
+                .is_multiple_of(std::mem::align_of::<u64>())
         {
             return None;
         }
 
-        // SAFETY: The pointer range, alignment, and initialized-element
-        // obligations are established above and required from the caller.
-        let pk_offsets = unsafe {
-            std::slice::from_raw_parts(parts.pk_offsets_ptr, parts.node_count as usize + 1)
-        };
-        // SAFETY: The byte range and initialization obligations are established
-        // above and required from the caller.
-        let pk_bytes =
-            unsafe { std::slice::from_raw_parts(parts.pk_bytes_ptr, parts.pk_bytes_len) };
+        let pk_offsets = u64_slice(&parts.mmap, &parts.pk_offsets_range);
+        let pk_bytes = &parts.mmap.as_slice()[parts.pk_bytes_range.clone()];
         if pk_offsets.first().copied() != Some(0)
-            || pk_offsets.last().copied() != Some(parts.pk_bytes_len as u64)
+            || pk_offsets.last().copied() != Some(pk_bytes.len() as u64)
         {
             return None;
         }
@@ -151,35 +132,58 @@ impl MmapNodeArrays {
         }
 
         Some(Self {
-            active_ptr: parts.active_ptr,
-            oid_ptr: parts.oid_ptr,
-            pk_offsets_ptr: parts.pk_offsets_ptr,
-            pk_bytes_ptr: parts.pk_bytes_ptr,
+            mmap: parts.mmap,
+            active_range: parts.active_range,
+            oid_range: parts.oid_range,
+            pk_offsets_range: parts.pk_offsets_range,
+            pk_bytes_range: parts.pk_bytes_range,
             node_count: parts.node_count,
-            active_byte_count: parts.active_byte_count,
-            pk_bytes_len: parts.pk_bytes_len,
         })
+    }
+
+    fn active_bytes(&self) -> &[u8] {
+        &self.mmap.as_slice()[self.active_range.clone()]
+    }
+
+    fn table_oids(&self) -> &[u32] {
+        u32_slice(&self.mmap, &self.oid_range)
+    }
+
+    fn primary_key_offsets(&self) -> &[u64] {
+        u64_slice(&self.mmap, &self.pk_offsets_range)
+    }
+
+    fn primary_key_bytes(&self) -> &[u8] {
+        &self.mmap.as_slice()[self.pk_bytes_range.clone()]
     }
 }
 
-fn ptr_range_in_region(
-    ptr: *const u8,
-    byte_len: usize,
-    region_ptr: *const u8,
-    region_len: usize,
-) -> bool {
-    if ptr.is_null() || region_ptr.is_null() {
-        return false;
+fn range_in_region(range: &Range<usize>, region_len: usize) -> bool {
+    range.start <= range.end && range.end <= region_len
+}
+
+fn u32_slice<'a>(mmap: &'a MappedBytes, range: &Range<usize>) -> &'a [u32] {
+    // SAFETY: MmapNodeArrays validation proves that this range is in the mapping,
+    // aligned for u32, and has a byte length divisible by four. The mapping is
+    // read-only and retained by Arc for the returned slice's lifetime.
+    unsafe {
+        std::slice::from_raw_parts(
+            mmap.as_slice()[range.clone()].as_ptr().cast::<u32>(),
+            range.len() / std::mem::size_of::<u32>(),
+        )
     }
-    let start = ptr as usize;
-    let region_start = region_ptr as usize;
-    let Some(end) = start.checked_add(byte_len) else {
-        return false;
-    };
-    let Some(region_end) = region_start.checked_add(region_len) else {
-        return false;
-    };
-    start >= region_start && end <= region_end
+}
+
+fn u64_slice<'a>(mmap: &'a MappedBytes, range: &Range<usize>) -> &'a [u64] {
+    // SAFETY: MmapNodeArrays validation proves that this range is in the mapping,
+    // aligned for u64, and has a byte length divisible by eight. The mapping is
+    // read-only and retained by Arc for the returned slice's lifetime.
+    unsafe {
+        std::slice::from_raw_parts(
+            mmap.as_slice()[range.clone()].as_ptr().cast::<u64>(),
+            range.len() / std::mem::size_of::<u64>(),
+        )
+    }
 }
 
 /// Backing store for array data: either owned Vecs or mmap-backed sections.
@@ -190,7 +194,7 @@ enum ArrayBacking {
         table_oids: Vec<u32>,
         primary_keys: Vec<String>,
     },
-    /// Load-time: read-only pointers into Engine-owned mmap memory.
+    /// Load-time: validated ranges into an Arc-owned read-only mapping.
     Mmap { arrays: MmapNodeArrays },
 }
 
@@ -226,17 +230,8 @@ impl NodeStore {
         }
     }
 
-    /// Create an mmap-backed NodeStore from raw pointers.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure all pointers point into a valid mmap'd region
-    /// that outlives this NodeStore. `oid_ptr` and `pk_offsets_ptr` must be
-    /// correctly aligned for their types. `oid_ptr` must contain `node_count`
-    /// initialized values, `active_ptr` must contain `active_byte_count` initialized bytes,
-    /// `pk_offsets_ptr` must contain `node_count + 1` initialized offsets, and
-    /// `pk_bytes_ptr` must contain `pk_bytes_len` initialized bytes.
-    pub(crate) unsafe fn from_mmap(arrays: MmapNodeArrays) -> Self {
+    /// Create an mmap-backed NodeStore from validated owning metadata.
+    pub(crate) fn from_mmap(arrays: MmapNodeArrays) -> Self {
         Self {
             backing: ArrayBacking::Mmap { arrays },
         }
@@ -297,9 +292,7 @@ impl NodeStore {
                 }
                 let byte_idx = node_idx as usize / 8;
                 let bit_idx = node_idx as usize % 8;
-                // SAFETY: MmapNodeArrays::new validates the active byte count,
-                // and the node_idx guard above keeps byte_idx in bounds.
-                let byte = unsafe { *arrays.active_ptr.add(byte_idx) };
+                let byte = arrays.active_bytes()[byte_idx];
                 (byte >> bit_idx) & 1 == 1
             }
         }
@@ -318,20 +311,16 @@ impl NodeStore {
         match &self.backing {
             ArrayBacking::Owned { is_active, .. } => is_active.count_ones() as u32,
             ArrayBacking::Mmap { arrays } => {
-                // SAFETY: MmapNodeArrays::new validates active_ptr and
-                // active_byte_count for the mmap-backed active-bit section.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(arrays.active_ptr, arrays.active_byte_count)
-                };
+                let bytes = arrays.active_bytes();
                 let mut count = 0u32;
                 for &byte in bytes {
                     count += byte.count_ones();
                 }
                 // Don't count bits beyond node_count
-                let total_bits = arrays.active_byte_count * 8;
+                let total_bits = bytes.len() * 8;
                 let excess = total_bits as u32 - arrays.node_count;
                 if excess > 0 {
-                    let last_byte = bytes[arrays.active_byte_count - 1];
+                    let last_byte = bytes[bytes.len() - 1];
                     for bit in (8 - excess as usize)..8 {
                         if (last_byte >> bit) & 1 == 1 {
                             count -= 1;
@@ -353,10 +342,7 @@ impl NodeStore {
                 if node_idx >= arrays.node_count {
                     return None;
                 }
-                // SAFETY: MmapNodeArrays::new validates oid_ptr points to
-                // node_count initialized u32 values, and the guard above keeps
-                // this index within that range.
-                Some(unsafe { *arrays.oid_ptr.add(node_idx as usize) })
+                arrays.table_oids().get(node_idx as usize).copied()
             }
         }
     }
@@ -376,21 +362,14 @@ impl NodeStore {
                     return None;
                 }
 
-                // SAFETY: MmapNodeArrays::new validates pk_offsets_ptr points
-                // to node_count + 1 initialized offsets.
-                let start = unsafe { *arrays.pk_offsets_ptr.add(node_idx as usize) as usize };
-                // SAFETY: The node_idx guard keeps node_idx + 1 within the
-                // validated offset table.
-                let end = unsafe { *arrays.pk_offsets_ptr.add(node_idx as usize + 1) as usize };
-                if start > end || end > arrays.pk_bytes_len {
+                let offsets = arrays.primary_key_offsets();
+                let start = usize::try_from(offsets[node_idx as usize]).ok()?;
+                let end = usize::try_from(offsets[node_idx as usize + 1]).ok()?;
+                let bytes = arrays.primary_key_bytes();
+                if start > end || end > bytes.len() {
                     return None;
                 }
-
-                // SAFETY: start/end are validated against pk_bytes_len above.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(arrays.pk_bytes_ptr.add(start), end - start)
-                };
-                std::str::from_utf8(bytes).ok()
+                std::str::from_utf8(&bytes[start..end]).ok()
             }
         }
     }
@@ -402,7 +381,7 @@ impl NodeStore {
 
     /// Estimate heap bytes owned directly by this store.
     ///
-    /// Mmap-backed arrays are accounted as shared file mappings, not Rust heap.
+    /// Mapped arrays are accounted once through the engine's private snapshot.
     pub fn estimated_heap_bytes(&self) -> usize {
         match &self.backing {
             ArrayBacking::Owned {
@@ -424,12 +403,11 @@ impl NodeStore {
         match &self.backing {
             ArrayBacking::Owned { .. } => 0,
             ArrayBacking::Mmap { arrays } => arrays
-                .active_byte_count
-                .saturating_add(arrays.node_count as usize * std::mem::size_of::<u32>())
-                .saturating_add(
-                    (arrays.node_count as usize + 1).saturating_mul(std::mem::size_of::<u64>()),
-                )
-                .saturating_add(arrays.pk_bytes_len),
+                .active_range
+                .len()
+                .saturating_add(arrays.oid_range.len())
+                .saturating_add(arrays.pk_offsets_range.len())
+                .saturating_add(arrays.pk_bytes_range.len()),
         }
     }
 
@@ -455,30 +433,20 @@ impl NodeStore {
                 for node_idx in 0..arrays.node_count {
                     is_active.push(self.is_active(node_idx));
                 }
-                // SAFETY: MmapNodeArrays::new validates this complete OID range,
-                // and its lifetime contract keeps the mapping alive here.
-                let table_oids = unsafe {
-                    std::slice::from_raw_parts(arrays.oid_ptr, arrays.node_count as usize).to_vec()
-                };
-                // SAFETY: MmapNodeArrays::new validates the complete offset and
-                // byte ranges, terminal offset, and every UTF-8 boundary.
-                let offsets = unsafe {
-                    std::slice::from_raw_parts(
-                        arrays.pk_offsets_ptr,
-                        arrays.node_count as usize + 1,
-                    )
-                };
-                // SAFETY: The byte range is validated by MmapNodeArrays::new.
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(arrays.pk_bytes_ptr, arrays.pk_bytes_len) };
+                let table_oids = arrays.table_oids().to_vec();
+                let offsets = arrays.primary_key_offsets();
+                let bytes = arrays.primary_key_bytes();
                 let primary_keys = offsets
                     .windows(2)
                     .map(|window| {
-                        let start = window[0] as usize;
-                        let end = window[1] as usize;
-                        // SAFETY: Constructor validation proved each offset pair
-                        // selects a valid UTF-8 substring within `bytes`.
-                        unsafe { std::str::from_utf8_unchecked(&bytes[start..end]) }.to_string()
+                        let range = usize::try_from(window[0])
+                            .ok()
+                            .zip(usize::try_from(window[1]).ok())
+                            .and_then(|(start, end)| bytes.get(start..end));
+                        range
+                            .and_then(|value| std::str::from_utf8(value).ok())
+                            .map(str::to_owned)
+                            .unwrap_or_default()
                     })
                     .collect();
                 Self {
@@ -505,13 +473,7 @@ impl NodeStore {
                 }
                 bytes
             }
-            ArrayBacking::Mmap { arrays } => {
-                // SAFETY: MmapNodeArrays::new validates active_ptr and
-                // active_byte_count.
-                unsafe {
-                    std::slice::from_raw_parts(arrays.active_ptr, arrays.active_byte_count).to_vec()
-                }
-            }
+            ArrayBacking::Mmap { arrays } => arrays.active_bytes().to_vec(),
         }
     }
 
@@ -519,10 +481,7 @@ impl NodeStore {
     pub fn table_oids_slice(&self) -> &[u32] {
         match &self.backing {
             ArrayBacking::Owned { table_oids, .. } => table_oids,
-            ArrayBacking::Mmap { arrays } => {
-                // SAFETY: MmapNodeArrays::new validates oid_ptr and node_count.
-                unsafe { std::slice::from_raw_parts(arrays.oid_ptr, arrays.node_count as usize) }
-            }
+            ArrayBacking::Mmap { arrays } => arrays.table_oids(),
         }
     }
 }
@@ -540,18 +499,42 @@ mod tests {
 
     use super::*;
 
-    fn test_region_for_slices(slices: &[(*const u8, usize)]) -> (*const u8, usize) {
-        let start = slices
-            .iter()
-            .map(|(ptr, _)| *ptr as usize)
-            .min()
-            .expect("test region requires at least one slice");
-        let end = slices
-            .iter()
-            .map(|(ptr, len)| (*ptr as usize) + len)
-            .max()
-            .expect("test region requires at least one slice");
-        (start as *const u8, end - start)
+    fn align_up(value: usize, alignment: usize) -> usize {
+        value.next_multiple_of(alignment)
+    }
+
+    fn mapped_node_parts(
+        active: &[u8],
+        oids: &[u32],
+        offsets: &[u64],
+        primary_key_bytes: &[u8],
+    ) -> MmapNodeArrayParts {
+        let active_range = 0..active.len();
+        let oid_start = align_up(active_range.end, std::mem::align_of::<u32>());
+        let oid_range = oid_start..oid_start + std::mem::size_of_val(oids);
+        let offsets_start = align_up(oid_range.end, std::mem::align_of::<u64>());
+        let pk_offsets_range = offsets_start..offsets_start + std::mem::size_of_val(offsets);
+        let pk_bytes_range = pk_offsets_range.end..pk_offsets_range.end + primary_key_bytes.len();
+        let mut mapping = vec![0u8; pk_bytes_range.end.max(1)];
+        mapping[active_range.clone()].copy_from_slice(active);
+        for (chunk, value) in mapping[oid_range.clone()].chunks_exact_mut(4).zip(oids) {
+            chunk.copy_from_slice(&value.to_le_bytes());
+        }
+        for (chunk, value) in mapping[pk_offsets_range.clone()]
+            .chunks_exact_mut(8)
+            .zip(offsets)
+        {
+            chunk.copy_from_slice(&value.to_le_bytes());
+        }
+        mapping[pk_bytes_range.clone()].copy_from_slice(primary_key_bytes);
+        MmapNodeArrayParts {
+            mmap: MappedBytes::from_test_bytes(mapping),
+            active_range,
+            oid_range,
+            pk_offsets_range,
+            pk_bytes_range,
+            node_count: oids.len() as u32,
+        }
     }
 
     #[test]
@@ -659,37 +642,9 @@ mod tests {
         let oids = [42u32];
         let pk_offsets = [0u64, 1u64];
         let pk_bytes = *b"X";
-        let (region_ptr, region_len) = test_region_for_slices(&[
-            (active.as_ptr(), active.len()),
-            (
-                oids.as_ptr().cast::<u8>(),
-                oids.len() * std::mem::size_of::<u32>(),
-            ),
-            (
-                pk_offsets.as_ptr().cast::<u8>(),
-                pk_offsets.len() * std::mem::size_of::<u64>(),
-            ),
-            (pk_bytes.as_ptr(), pk_bytes.len()),
-        ]);
-        // SAFETY: Every pointer references an initialized local array, the
-        // computed region contains all arrays, and the arrays outlive `store`.
-        let arrays = unsafe {
-            MmapNodeArrays::new(MmapNodeArrayParts {
-                region_ptr,
-                region_len,
-                active_ptr: active.as_ptr(),
-                oid_ptr: oids.as_ptr(),
-                pk_offsets_ptr: pk_offsets.as_ptr(),
-                pk_bytes_ptr: pk_bytes.as_ptr(),
-                node_count: 1,
-                active_byte_count: 1,
-                pk_bytes_len: 1,
-            })
-            .expect("valid mapped node fixture")
-        };
-        // SAFETY: `arrays` borrows the local fixture for the duration of this
-        // test, so its pointers remain valid while the store is used.
-        let store = unsafe { NodeStore::from_mmap(arrays) };
+        let arrays = MmapNodeArrays::new(mapped_node_parts(&active, &oids, &pk_offsets, &pk_bytes))
+            .expect("valid mapped node fixture");
+        let store = NodeStore::from_mmap(arrays);
 
         assert_eq!(store.table_oid(0), Some(42));
         assert_eq!(store.primary_key(0), Some("X"));
@@ -760,173 +715,83 @@ mod tests {
         let active = [0u8];
         let oids = [0u32];
         let pk_offsets = [0u64, 0u64];
-        let pk_bytes = [0u8];
-        let (region_ptr, region_len) = test_region_for_slices(&[
-            (active.as_ptr(), active.len()),
-            (
-                oids.as_ptr().cast::<u8>(),
-                oids.len() * std::mem::size_of::<u32>(),
-            ),
-            (
-                pk_offsets.as_ptr().cast::<u8>(),
-                pk_offsets.len() * std::mem::size_of::<u64>(),
-            ),
-            (pk_bytes.as_ptr(), 0),
-        ]);
-        // SAFETY: Pointers reference local arrays that outlive the store within
-        // this test, and no mmap data is dereferenced before the expected panic.
-        let arrays = unsafe {
-            MmapNodeArrays::new(MmapNodeArrayParts {
-                region_ptr,
-                region_len,
-                active_ptr: active.as_ptr(),
-                oid_ptr: oids.as_ptr(),
-                pk_offsets_ptr: pk_offsets.as_ptr(),
-                pk_bytes_ptr: pk_bytes.as_ptr(),
-                node_count: 1,
-                active_byte_count: 1,
-                pk_bytes_len: 0,
-            })
-            .expect("valid mmap node test metadata")
-        };
-        // SAFETY: The validated metadata above outlives this test store.
-        let mut store = unsafe { NodeStore::from_mmap(arrays) };
+        let arrays = MmapNodeArrays::new(mapped_node_parts(&active, &oids, &pk_offsets, &[]))
+            .expect("valid mmap node test metadata");
+        let mut store = NodeStore::from_mmap(arrays);
         store.add_node(1, "crash".to_string());
     }
 
     #[test]
     fn mmap_node_arrays_validate_region_bounds_and_alignment() {
-        let region = [0u64; 8];
-        let base = region.as_ptr().cast::<u8>();
-        let valid = MmapNodeArrayParts {
-            region_ptr: base,
-            region_len: std::mem::size_of_val(&region),
-            active_ptr: base,
-            // SAFETY: Offsets are within the local byte region used only for
-            // constructor validation in this test.
-            oid_ptr: unsafe { base.add(8).cast::<u32>() },
-            // SAFETY: See above.
-            pk_offsets_ptr: unsafe { base.add(16).cast::<u64>() },
-            // SAFETY: See above.
-            pk_bytes_ptr: unsafe { base.add(32) },
-            node_count: 1,
-            active_byte_count: 1,
-            pk_bytes_len: 0,
-        };
-
-        // SAFETY: Pointers are into the local region and are not dereferenced.
-        assert!(unsafe { MmapNodeArrays::new(valid) }.is_some());
-        // SAFETY: Pointers are into the local region and are not dereferenced.
-        assert!(unsafe {
-            MmapNodeArrays::new(MmapNodeArrayParts {
-                region_len: 16,
-                ..valid
-            })
-        }
+        let valid = mapped_node_parts(&[1], &[42], &[0, 0], &[]);
+        assert!(MmapNodeArrays::new(valid.clone()).is_some());
+        assert!(MmapNodeArrays::new(MmapNodeArrayParts {
+            oid_range: 1..5,
+            ..valid.clone()
+        })
         .is_none());
-        // SAFETY: Pointers are into the local region and are not dereferenced.
-        assert!(unsafe {
-            MmapNodeArrays::new(MmapNodeArrayParts {
-                oid_ptr: base.wrapping_add(1).cast::<u32>(),
-                ..valid
-            })
-        }
+        assert!(MmapNodeArrays::new(MmapNodeArrayParts {
+            active_range: 0..2,
+            ..valid.clone()
+        })
         .is_none());
-        // SAFETY: Pointers are into the local region and are not dereferenced.
-        assert!(unsafe {
-            MmapNodeArrays::new(MmapNodeArrayParts {
-                active_ptr: std::ptr::null(),
-                ..valid
-            })
-        }
+        assert!(MmapNodeArrays::new(MmapNodeArrayParts {
+            pk_bytes_range: valid.mmap.len()..valid.mmap.len() + 1,
+            ..valid
+        })
         .is_none());
     }
 
     #[test]
-    fn mmap_node_arrays_reject_pointer_overflow() {
-        let region = [0u64; 1];
-        let base = region.as_ptr().cast::<u8>();
-        let near_usize_end = usize::MAX as *const u8;
-
-        // SAFETY: The constructor validates the deliberately overflowing
-        // pointer metadata and returns `None` before dereferencing.
-        assert!(unsafe {
-            MmapNodeArrays::new(MmapNodeArrayParts {
-                region_ptr: base,
-                region_len: std::mem::size_of_val(&region),
-                active_ptr: near_usize_end,
-                oid_ptr: base.cast::<u32>(),
-                pk_offsets_ptr: base.cast::<u64>(),
-                pk_bytes_ptr: base,
-                node_count: 1,
-                active_byte_count: 1,
-                pk_bytes_len: 0,
-            })
-        }
-        .is_none());
+    fn mmap_node_store_owns_mapping_after_constructor_inputs_drop() {
+        let store = {
+            let arrays = MmapNodeArrays::new(mapped_node_parts(&[1], &[42], &[0, 1], b"X"))
+                .expect("valid mapped node fixture");
+            NodeStore::from_mmap(arrays)
+        };
+        assert_eq!(store.table_oid(0), Some(42));
+        assert_eq!(store.primary_key(0), Some("X"));
     }
 
     #[test]
     fn mmap_node_arrays_reject_invalid_primary_key_layout() {
-        fn parts<'a>(
-            active: &'a [u8; 1],
-            oids: &'a [u32; 1],
-            offsets: &'a [u64; 2],
-            bytes: &'a [u8],
-        ) -> MmapNodeArrayParts {
-            let (region_ptr, region_len) = test_region_for_slices(&[
-                (active.as_ptr(), active.len()),
-                (oids.as_ptr().cast::<u8>(), std::mem::size_of_val(oids)),
-                (
-                    offsets.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(offsets),
-                ),
-                (bytes.as_ptr(), bytes.len()),
-            ]);
-            MmapNodeArrayParts {
-                region_ptr,
-                region_len,
-                active_ptr: active.as_ptr(),
-                oid_ptr: oids.as_ptr(),
-                pk_offsets_ptr: offsets.as_ptr(),
-                pk_bytes_ptr: bytes.as_ptr(),
-                node_count: 1,
-                active_byte_count: 1,
-                pk_bytes_len: bytes.len(),
-            }
-        }
-
         let active = [1u8];
         let oids = [42u32];
         let valid_offsets = [0u64, 1];
         let valid_bytes = *b"X";
-        // SAFETY: All parts describe initialized, aligned local arrays that
-        // outlive the returned validation result within this test.
-        assert!(unsafe {
-            MmapNodeArrays::new(parts(&active, &oids, &valid_offsets, &valid_bytes))
-        }
+        assert!(MmapNodeArrays::new(mapped_node_parts(
+            &active,
+            &oids,
+            &valid_offsets,
+            &valid_bytes
+        ))
         .is_some());
 
         let nonzero_start = [1u64, 1];
-        // SAFETY: The memory is valid to inspect; only the persisted values are
-        // deliberately malformed.
-        assert!(unsafe {
-            MmapNodeArrays::new(parts(&active, &oids, &nonzero_start, &valid_bytes))
-        }
+        assert!(MmapNodeArrays::new(mapped_node_parts(
+            &active,
+            &oids,
+            &nonzero_start,
+            &valid_bytes
+        ))
         .is_none());
 
         let bad_terminal = [0u64, 0];
-        assert!(
-            // SAFETY: See the preceding malformed-value safety rationale.
-            unsafe { MmapNodeArrays::new(parts(&active, &oids, &bad_terminal, &valid_bytes)) }
-                .is_none()
-        );
+        assert!(MmapNodeArrays::new(mapped_node_parts(
+            &active,
+            &oids,
+            &bad_terminal,
+            &valid_bytes
+        ))
+        .is_none());
 
         let invalid_utf8 = [0xffu8];
-        // SAFETY: See the preceding malformed-value safety rationale.
-        assert!(unsafe {
-            MmapNodeArrays::new(parts(&active, &oids, &valid_offsets, &invalid_utf8))
-        }
+        assert!(MmapNodeArrays::new(mapped_node_parts(
+            &active,
+            &oids,
+            &valid_offsets,
+            &invalid_utf8
+        ))
         .is_none());
     }
 

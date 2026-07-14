@@ -24,20 +24,21 @@ use pgrx::prelude::TimestampWithTimeZone;
 use roaring::RoaringBitmap;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Resolution storage backend.
 ///
 /// - `Builder`: compact append-only entries used during node ingestion.
 /// - `Finalized`: Sorted array, used after build, compact memory, binary search.
-/// - `MmapBacked`: Resolution section borrowed from the `.pggraph` mmap and
-///   shared across backends via the OS page cache.
+/// - `MmapBacked`: Resolution section borrowed from the backend-local immutable
+///   artifact snapshot.
 pub(crate) enum ResolutionStore {
     /// Build-time: compact entries. Converted to Finalized before edge linking.
     Builder(ResolutionIndexBuilder),
     /// Post-build: sorted array in owned memory with binary-search lookups.
     Finalized(Vec<u8>),
-    /// Loaded from `.pggraph` file via mmap. The mmap handle is held by
-    /// [`Engine::_mmap`]; resolution lookups borrow that section's bytes.
+    /// Loaded from the backend-local `.pggraph` snapshot. The mapping handle is
+    /// held by [`Engine::_mmap`]; lookups borrow that section's bytes.
     MmapBacked(MmapResolutionState),
 }
 
@@ -63,7 +64,7 @@ pub(crate) struct MmapBackedGraph {
     pub(crate) filter_index: FilterIndex,
     pub(crate) edge_type_registry: Vec<String>,
     pub(crate) relationship_identities: Vec<Option<RelationshipIdentity>>,
-    pub(crate) mmap: memmap2::Mmap,
+    pub(crate) mmap: Arc<memmap2::Mmap>,
     pub(crate) resolution_state: MmapResolutionState,
 }
 
@@ -99,9 +100,9 @@ pub struct Engine {
     /// arrive after build() live here until the next rebuild/vacuum merge.
     pub(crate) resolution_delta: ResolutionDeltaIndex,
 
-    /// mmap handle. Keeps the mapping alive for mmap-backed NodeStore arrays,
-    /// forward EdgeStore arrays, and ResolutionIndex bytes.
-    pub(crate) _mmap: Option<memmap2::Mmap>,
+    /// Backend-local immutable snapshot used by resolution and accounting.
+    /// Mapped node and edge stores retain their own `Arc` clones.
+    pub(crate) _mmap: Option<Arc<memmap2::Mmap>>,
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
     pub(crate) edge_buffer: Vec<EdgeMutation>,
@@ -1324,13 +1325,18 @@ impl Engine {
 
     pub fn estimated_memory_used_mb(&self) -> f64 {
         self.estimated_heap_bytes()
+            .saturating_add(self.estimated_mmap_bytes())
             .max(self.estimated_logical_bytes()) as f64
             / 1_048_576.0
     }
 
     pub fn memory_profile(&self, concurrent_backends: i32, memory_limit_mb: i32) -> MemoryProfile {
-        let private_bytes = self.estimated_heap_bytes();
-        let shared_bytes = self.estimated_mmap_bytes();
+        let private_bytes = self
+            .estimated_heap_bytes()
+            .saturating_add(self.estimated_mmap_bytes());
+        // The public columns remain for 1.x compatibility. Artifact snapshots
+        // are backend-local now, so no mapped bytes are reported as shared.
+        let shared_bytes = 0;
         let backend_count = concurrent_backends.max(1) as usize;
         let instance_private_bytes = private_bytes.saturating_mul(backend_count);
         let instance_total_bytes = instance_private_bytes.saturating_add(shared_bytes);
@@ -1552,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_profile_multiplies_private_heap_but_not_shared_mapping() {
+    fn memory_profile_multiplies_backend_private_memory() {
         let mut engine = Engine::new();
         for i in 0..10u32 {
             engine.node_store.add_node(1, format!("n-{}", i));

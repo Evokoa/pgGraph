@@ -1,12 +1,12 @@
-//! # ResolutionIndex — mmap'd sorted array for (table_oid, pk) → node_idx
+//! # ResolutionIndex — mapped sorted array for (table_oid, pk) → node_idx
 //!
 //! During build time, entries are accumulated as compact 16-byte records. Before
 //! edge linking, entries are sorted and written as the same flat array used in
-//! the `.pggraph` file. At query time, the mmap'd array is searched via binary
-//! search.
+//! the `.pggraph` file. At query time, the mapped snapshot array is searched via
+//! binary search.
 //!
-//! This eliminates per-process duplication for the persisted resolution
-//! section: backends can share the same physical pages via the OS page cache.
+//! The persisted resolution section stays compact and requires no per-entry
+//! heap objects, but the immutable artifact snapshot is backend-local.
 //!
 //! See: `docs/contributor_guide/memory-model.mdx`
 

@@ -389,18 +389,19 @@ mod tests {
         Engine::new()
     }
 
-    fn test_region_for_slices(slices: &[(*const u8, usize)]) -> (*const u8, usize) {
-        let start = slices
-            .iter()
-            .map(|(ptr, _)| *ptr as usize)
-            .min()
-            .expect("test region requires at least one slice");
-        let end = slices
-            .iter()
-            .map(|(ptr, len)| (*ptr as usize) + len)
-            .max()
-            .expect("test region requires at least one slice");
-        (start as *const u8, end - start)
+    fn empty_mmap_node_store() -> crate::node_store::NodeStore {
+        let mapping = 0u64.to_le_bytes().to_vec();
+        let arrays =
+            crate::node_store::MmapNodeArrays::new(crate::node_store::MmapNodeArrayParts {
+                mmap: crate::mapped_bytes::MappedBytes::from_test_bytes(mapping),
+                active_range: 0..0,
+                oid_range: 0..0,
+                pk_offsets_range: 0..8,
+                pk_bytes_range: 8..8,
+                node_count: 0,
+            })
+            .expect("valid empty mmap node metadata");
+        crate::node_store::NodeStore::from_mmap(arrays)
     }
 
     #[test]
@@ -703,37 +704,7 @@ mod tests {
     #[test]
     fn sync_insert_on_mmap_store_materializes_owned_overlay() {
         let mut eng = test_engine();
-        let active = [0u8];
-        let oids = [0u32];
-        let pk_offsets = [0u64];
-        let pk_bytes = [0u8];
-        let (region_ptr, region_len) = test_region_for_slices(&[
-            (active.as_ptr(), 0),
-            (oids.as_ptr().cast::<u8>(), 0),
-            (
-                pk_offsets.as_ptr().cast::<u8>(),
-                pk_offsets.len() * std::mem::size_of::<u64>(),
-            ),
-            (pk_bytes.as_ptr(), 0),
-        ]);
-        // SAFETY: Pointers reference local arrays that outlive this test store.
-        let arrays = unsafe {
-            crate::node_store::MmapNodeArrays::new(crate::node_store::MmapNodeArrayParts {
-                region_ptr,
-                region_len,
-                active_ptr: active.as_ptr(),
-                oid_ptr: oids.as_ptr(),
-                pk_offsets_ptr: pk_offsets.as_ptr(),
-                pk_bytes_ptr: pk_bytes.as_ptr(),
-                node_count: 0,
-                active_byte_count: 0,
-                pk_bytes_len: 0,
-            })
-            .expect("valid mmap node metadata")
-        };
-        // SAFETY: The validated metadata above outlives this test store.
-        let node_store = unsafe { crate::node_store::NodeStore::from_mmap(arrays) };
-        eng.install_mmap_node_store_for_test(node_store);
+        eng.install_mmap_node_store_for_test(empty_mmap_node_store());
 
         let result = sync_insert(&mut eng, 42, "U-1", None);
         assert!(result.is_ok());
@@ -757,37 +728,7 @@ mod tests {
     #[test]
     fn sync_truncate_on_mmap_store_materializes_owned_overlay() {
         let mut eng = test_engine();
-        let active = [0u8];
-        let oids = [0u32];
-        let pk_offsets = [0u64];
-        let pk_bytes = [0u8];
-        let (region_ptr, region_len) = test_region_for_slices(&[
-            (active.as_ptr(), 0),
-            (oids.as_ptr().cast::<u8>(), 0),
-            (
-                pk_offsets.as_ptr().cast::<u8>(),
-                pk_offsets.len() * std::mem::size_of::<u64>(),
-            ),
-            (pk_bytes.as_ptr(), 0),
-        ]);
-        // SAFETY: Pointers reference local arrays that outlive this test store.
-        let arrays = unsafe {
-            crate::node_store::MmapNodeArrays::new(crate::node_store::MmapNodeArrayParts {
-                region_ptr,
-                region_len,
-                active_ptr: active.as_ptr(),
-                oid_ptr: oids.as_ptr(),
-                pk_offsets_ptr: pk_offsets.as_ptr(),
-                pk_bytes_ptr: pk_bytes.as_ptr(),
-                node_count: 0,
-                active_byte_count: 0,
-                pk_bytes_len: 0,
-            })
-            .expect("valid mmap node metadata")
-        };
-        // SAFETY: The validated metadata above outlives this test store.
-        let node_store = unsafe { crate::node_store::NodeStore::from_mmap(arrays) };
-        eng.install_mmap_node_store_for_test(node_store);
+        eng.install_mmap_node_store_for_test(empty_mmap_node_store());
 
         let result = sync_truncate(&mut eng, 42);
         assert_eq!(result.unwrap(), 0);

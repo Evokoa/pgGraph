@@ -54,7 +54,7 @@ PostgreSQL backend.
           'bounded traversal: depth, visited nodes, and frontier limits',
           'memory guard before build allocations',
           'pgrx/PostgreSQL error boundary maps GraphError to SQLSTATE',
-          'validated mmap pointer metadata before raw store reads',
+          'owning validated mmap ranges before typed store reads',
         ]}
       />
     </ArchGroup>
@@ -122,12 +122,12 @@ from paths, backend globals, or session state.
 | `Engine` | One PostgreSQL backend process | Backend lifetime, graph selection change, explicit unload, or `graph.reset()` |
 | Loaded graph slot | One PostgreSQL backend process | Tracks the graph id/name for the active `Engine` |
 | `NodeStore` owned mode | `Engine` heap | Mutable build/sync lifetime |
-| `NodeStore` mmap mode | Raw pointers into `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
-| Forward `EdgeStore` mmap mode | Raw pointers into `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
+| `NodeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | The store owns its mapping independently of engine field/drop order |
+| Forward `EdgeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | The store owns its mapping independently of engine field/drop order |
 | `reverse_edge_store` | `Engine` heap | Rebuilt per backend from forward CSR |
 | `FilterIndex` after load | `Engine` heap | Deserialized per backend from bincode |
 | `edge_type_registry` after load | `Engine` heap | Deserialized per backend from bincode |
-| `ResolutionIndex` mmap mode | Byte slice inside `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
+| `ResolutionIndex` mapped mode | Byte range inside the immutable snapshot | The engine retains an `Arc` for resolution lookup and accounting |
 | Durable projection manifests, segments, and chunks | Files beside each graph's `main.pggraph` | Shared through the filesystem and retained by graph-scoped active-generation metadata |
 | `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local compatibility sync overlay state |
 | `TxGraphDelta` | Current backend transaction | Transaction-local read-your-own-writes state only |
@@ -268,7 +268,7 @@ behavior.
 | Backend-local `Engine` | Matches PostgreSQL process isolation and avoids shared mutable Rust state. |
 | CSR for topology | Compact adjacency slices make traversal cache-friendly and predictable. |
 | Reverse CSR is materialized | Inbound traversal stays O(degree) instead of scanning all forward edges. |
-| Read-only mmap for persisted forward arrays | Later backends can start quickly and share immutable derived artifact pages through the OS page cache without replacing PostgreSQL's buffer pool. |
+| Read-only anonymous mapping for persisted forward arrays | Each backend gets a stable immutable snapshot that cannot be invalidated by same-inode writes or truncation. |
 | Bincode metadata is heap-loaded | Filter and registry structures are variable-size Rust data that are easier to validate and use as owned values. |
 | Explicit maintenance | Expensive rebuild work is visible and controllable from SQL. |
 | Durable projection generations | Committed mutable-overlay topology changes become cross-backend-visible without turning pgGraph into a second source of truth. |
@@ -283,7 +283,8 @@ escape hatch. The core unsafe boundary is mmap-backed store construction:
 |---|---|
 | `MmapNodeArrays` | Active bytes, OID array, PK offsets, and PK byte ranges are present, aligned, and bounded by the mmap. |
 | `MmapEdgeArrays` | CSR offsets, targets, type IDs, and optional weights are present, aligned, and bounded by the mmap. |
-| `Engine._mmap` | The mmap outlives every NodeStore, forward EdgeStore, and ResolutionIndex lookup that borrows from it. |
+| `MappedGraphArtifact` | Full-layout validation creates an unforgeable production capability; every mapped store retains shared ownership of the read-only mapping. |
+| `Engine._mmap` | An `Arc<Mmap>` owns the backend-local immutable snapshot for resolution lookup and accounting while node and edge stores retain independent clones. |
 | `GraphError::report()` | A pgrx `ErrorReport` unwinds Rust frames before PostgreSQL emits the standard SQLSTATE and pgGraph diagnostic. |
 
 Detailed rules live in [Safety And Security](./safety-security). Keep rustdoc

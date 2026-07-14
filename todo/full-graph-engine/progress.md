@@ -13,7 +13,7 @@ release blocker.
 | Checkpoint | Status | Evidence / next action |
 |---|---|---|
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
-| Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Safe mapped access is validated, graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. Run Miri/sanitizer and supported-major evidence before checkpoint exit. |
+| Rust type/unsafe/pgrx boundary | RUST-00A through RUST-00F implemented on PG17; matrix pending | Mapped stores now own validated ranges and pass Miri plus full Rust ASan; graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. PostgreSQL-process sanitizer and PG14-18 evidence remain. |
 | 1A. Security and identity | In progress | Coordinate-only node visibility, mapped single-pattern, supported join, and base wildcard relationship-row visibility, transaction-local relationship CREATE identity, trigger-sync edge identity, mutable-overlay segment relationship IDs, parallel-aware compaction and chunk replacement, base-CSR relationship multiplicity, table-qualified filter identity, persisted relationship identity sidecars, base-CSR query/path ID propagation, base relationship hydration, and savepoint overlays are enforced on PostgreSQL 17; broader writes and isolation coverage remain. |
 | 1B. Memory containment | Partial mitigation | Commit `8fea899` reduces old/new rebuild overlap; hard governor and query/load/compaction controls remain. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
@@ -570,3 +570,14 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Release contract and documentation drift | `python3.12 scripts/check_release_contract.py`; `scripts/check_docs_drift.sh` | PASS after acknowledged `KI-023` SQL metadata and GQL implementation hash refresh |
 | Secret and whitespace checks | `scripts/check_secrets.sh`; `git diff --check` | PASS |
 | Independent Rust review | `rust-reviewing` subagent over KI-023 plus full-suite regression fixes | PASS after restoring authoritative sync-log reads under the production writer barrier, keeping direct ingestion trigger audits strict, separating node-backed read identity from standalone-row writes, and refreshing the frozen 1.0 SQL contract |
+
+### 2026-07-14 R1 Owning Mapped-Layout Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Rust unit suite | `cd graph && cargo test --features pg17 --lib --no-fail-fast` | PASS: 718 passed, 1 ignored |
+| PostgreSQL 17 suite | `cd graph && cargo pgrx test --features "pg17 development"` | PASS: 975 passed, 1 ignored; doctests 0 |
+| AddressSanitizer | `cd graph && RUN_ASAN=1 RUN_PGRX=0 RUN_PGBENCH=0 ./tests/heavy/run_memory_sanitizers.sh` | PASS: 718 passed, 1 ignored |
+| Mapped soundness | Focused Miri plus source-inode truncation, drop-order, malformed-layout, alignment, and out-of-range regressions | PASS; snapshot bytes remain valid and are counted as backend-private memory |
+| Independent Rust review | `rust-reviewing` subagent over KI-020 and follow-up fixes | PASS after replacing file-backed typed views with an anonymous read-only snapshot and correcting accounting, portability, predicate-boundary, and lifecycle documentation |
+| Remaining matrix | PostgreSQL-process sanitizer and PostgreSQL 14-16/18 | PENDING: compatible local installations/process build unavailable |

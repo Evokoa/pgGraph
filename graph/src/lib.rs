@@ -30,6 +30,7 @@ mod engine;
 mod filter_index;
 mod gql;
 mod graph_policy;
+mod mapped_bytes;
 mod node_store;
 mod path_finder;
 mod persistence;

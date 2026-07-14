@@ -2,7 +2,8 @@
 //!
 //! The `.pggraph` file is the on-disk representation of the graph engine.
 //! It is written atomically (write to `<path>.tmp` then rename) and
-//! read via `mmap` for zero-copy access to the base graph arrays.
+//! loaded into an immutable anonymous mapping for typed access to the base
+//! graph arrays.
 //!
 //! ## File Format
 //!
@@ -34,10 +35,10 @@
 //!
 //! When loaded via `load_graph_file()`:
 //! - **NodeStore** (`is_active`, `table_oids`, primary-key offsets/bytes):
-//!   mmap-backed and shared through the OS page cache
+//!   backed by a backend-local immutable mapping
 //! - **Forward EdgeStore** (`edge_offsets`, `targets`, `type_ids`, optional
-//!   `weights`): mmap-backed and shared through the OS page cache
-//! - **ResolutionIndex**: mmap'd, zero-copy, binary search
+//!   `weights`): backed by the same backend-local immutable mapping
+//! - **ResolutionIndex**: mapped, zero-copy within the backend, binary search
 //! - **FilterIndex**, edge type registry, and relationship identity metadata:
 //!   bincode sections deserialized into backend-local heap
 //! - **Reverse EdgeStore**: derived into an owned CSR per backend
@@ -45,10 +46,11 @@
 //! See: `docs/contributor_guide/memory-model.mdx`
 
 use std::fs;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapMut};
 
 use crate::config;
 use crate::edge_store::{
@@ -57,6 +59,7 @@ use crate::edge_store::{
 use crate::engine::{Engine, MmapBackedGraph, MmapResolutionState};
 use crate::filter_index::FilterIndex;
 use crate::graph_policy::GraphId;
+use crate::mapped_bytes::MappedBytes;
 use crate::node_store::{MmapNodeArrayParts, MmapNodeArrays, NodeStore};
 use crate::projection::manifest::{ProjectionManifest, ProjectionManifestStore};
 use crate::resolution_index::{ResolutionIndex, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
@@ -72,6 +75,89 @@ const HEADER_SIZE: usize = 128;
 const NUM_SECTIONS: usize = 12;
 const CRC_OFFSET: usize = 20 + NUM_SECTIONS * 8;
 const INTERRUPT_CHECK_INTERVAL: u32 = 4096;
+
+/// Fully validated fixed-width section layout for one graph artifact.
+#[derive(Clone, Debug)]
+struct ValidatedGraphLayout {
+    ranges: [(usize, usize); NUM_SECTIONS],
+    node_count: u32,
+    edge_count: u32,
+}
+
+/// Capability proving the full artifact layout passed persistence validation.
+/// Its private field prevents mapped stores from being constructed through a
+/// production path that bypasses [`ValidatedGraphLayout`].
+pub(crate) struct ValidatedMappedGraphToken {
+    _private: (),
+}
+
+/// Owns the immutable mapping from which all mapped graph views are built.
+struct MappedGraphArtifact {
+    mmap: Arc<Mmap>,
+    layout: ValidatedGraphLayout,
+    token: ValidatedMappedGraphToken,
+}
+
+impl MappedGraphArtifact {
+    fn node_arrays(&self) -> GraphResult<MmapNodeArrays> {
+        let ranges = &self.layout.ranges;
+        MmapNodeArrays::new_for_artifact(
+            MmapNodeArrayParts {
+                mmap: MappedBytes::from_mmap(Arc::clone(&self.mmap)),
+                active_range: ranges[0].0
+                    ..ranges[0].0 + (self.layout.node_count as usize).div_ceil(8),
+                oid_range: ranges[1].0
+                    ..ranges[1].0 + self.layout.node_count as usize * std::mem::size_of::<u32>(),
+                pk_offsets_range: ranges[8].0
+                    ..ranges[8].0
+                        + (self.layout.node_count as usize + 1) * std::mem::size_of::<u64>(),
+                pk_bytes_range: ranges[9].0..ranges[9].1,
+                node_count: self.layout.node_count,
+            },
+            &self.token,
+        )
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "invalid mmap node section metadata".to_string(),
+        })
+    }
+
+    fn edge_arrays(&self) -> GraphResult<MmapEdgeArrays> {
+        let ranges = &self.layout.ranges;
+        let weights_range = (ranges[5].0 != ranges[5].1).then(|| {
+            ranges[5].0..ranges[5].0 + self.layout.edge_count as usize * std::mem::size_of::<u32>()
+        });
+        MmapEdgeArrays::new_for_artifact(
+            MmapEdgeArrayParts {
+                mmap: MappedBytes::from_mmap(Arc::clone(&self.mmap)),
+                offsets_range: ranges[2].0
+                    ..ranges[2].0
+                        + (self.layout.node_count as usize + 1) * std::mem::size_of::<u32>(),
+                targets_range: ranges[3].0
+                    ..ranges[3].0 + self.layout.edge_count as usize * std::mem::size_of::<u32>(),
+                type_ids_range: ranges[4].0..ranges[4].0 + self.layout.edge_count as usize,
+                schema_reversed_range: ranges[6].0..ranges[6].0 + self.layout.edge_count as usize,
+                weights_range,
+                node_count: self.layout.node_count,
+                edge_count: self.layout.edge_count,
+            },
+            &self.token,
+        )
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "invalid mmap edge section metadata".to_string(),
+        })
+    }
+}
+
+fn ensure_native_mapped_layout_supported(little_endian: bool) -> GraphResult<()> {
+    if little_endian {
+        Ok(())
+    } else {
+        Err(GraphError::IncompatibleVersion(
+            "mmap graph loading requires a little-endian target; rebuild and load on a supported architecture"
+                .to_string(),
+        ))
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedEdgeMetadata {
@@ -391,7 +477,8 @@ fn validate_persisted_contents(
                 ),
             });
         }
-        if current as usize > pk_bytes_len {
+        let current = persisted_pk_offset_to_usize(current, idx)?;
+        if current > pk_bytes_len {
             return Err(GraphError::CorruptFile {
                 reason: format!(
                     "primary_key_offsets[{}] exceeds primary key bytes: {} > {}",
@@ -399,8 +486,8 @@ fn validate_persisted_contents(
                 ),
             });
         }
-        let start = previous_pk as usize;
-        let end = current as usize;
+        let start = persisted_pk_offset_to_usize(previous_pk, idx - 1)?;
+        let end = current;
         std::str::from_utf8(&mmap[ranges[9].0 + start..ranges[9].0 + end]).map_err(|err| {
             GraphError::CorruptFile {
                 reason: format!(
@@ -410,10 +497,19 @@ fn validate_persisted_contents(
                 ),
             }
         })?;
-        previous_pk = current;
+        previous_pk = current as u64;
     }
 
     Ok(())
+}
+
+fn persisted_pk_offset_to_usize(offset: u64, index: usize) -> GraphResult<usize> {
+    usize::try_from(offset).map_err(|_| GraphError::CorruptFile {
+        reason: format!(
+            "primary_key_offsets[{}] cannot be represented on this platform",
+            index
+        ),
+    })
 }
 
 fn validate_section_layout(
@@ -421,7 +517,7 @@ fn validate_section_layout(
     section_offsets: &[u64; NUM_SECTIONS],
     node_count: u32,
     edge_count: u32,
-) -> GraphResult<[(usize, usize); NUM_SECTIONS]> {
+) -> GraphResult<ValidatedGraphLayout> {
     let mut starts = [0usize; NUM_SECTIONS];
     let mut prev_offset = HEADER_SIZE;
     for (i, &offset) in section_offsets.iter().enumerate() {
@@ -511,7 +607,11 @@ fn validate_section_layout(
 
     validate_persisted_contents(mmap, &ranges, node_count, edge_count)?;
 
-    Ok(ranges)
+    Ok(ValidatedGraphLayout {
+        ranges,
+        node_count,
+        edge_count,
+    })
 }
 
 /// Write the engine state to a .pggraph file.
@@ -748,8 +848,10 @@ pub fn read_projection_mode(path: &Path) -> GraphResult<Option<config::Projectio
 /// - The reverse EdgeStore CSR is rebuilt into backend-local heap for inbound
 ///   traversal.
 ///
-/// Multiple backends can share mmap-backed pages via the OS page cache.
-/// Derived and bincode-backed structures remain per-backend heap allocations.
+/// Each backend copies the artifact into an anonymous read-only mapping before
+/// creating typed views. This prevents same-inode writes or truncation by
+/// another process from invalidating Rust references. Derived and
+/// bincode-backed structures also remain per-backend allocations.
 pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     load_graph_file_internal(path, None)
 }
@@ -770,19 +872,31 @@ fn load_graph_file_internal(
     path: &Path,
     projection_candidate: Option<&ProjectionManifest>,
 ) -> GraphResult<Engine> {
-    let file = fs::File::open(path)
+    ensure_native_mapped_layout_supported(cfg!(target_endian = "little"))?;
+
+    let mut file = fs::File::open(path)
         .map_err(|e| GraphError::Internal(format!("Cannot open {}: {}", path.display(), e)))?;
 
-    // SAFETY: The file remains open until the read-only mapping is created,
-    // and Engine owns the mapping for the lifetime of all mmap-backed stores.
-    let mmap = unsafe { Mmap::map(&file) }
-        .map_err(|e| GraphError::Internal(format!("mmap failed: {}", e)))?;
-
-    if mmap.len() < HEADER_SIZE {
+    let file_len = usize::try_from(
+        file.metadata()
+            .map_err(|e| GraphError::Internal(format!("Cannot stat {}: {}", path.display(), e)))?
+            .len(),
+    )
+    .map_err(|_| GraphError::Internal("graph artifact is too large for this platform".into()))?;
+    if file_len < HEADER_SIZE {
         return Err(GraphError::CorruptFile {
             reason: "file too small for header".to_string(),
         });
     }
+    let mut snapshot = MmapMut::map_anon(file_len)
+        .map_err(|e| GraphError::Internal(format!("anonymous mmap failed: {}", e)))?;
+    file.read_exact(&mut snapshot)
+        .map_err(|e| GraphError::Internal(format!("Cannot snapshot {}: {}", path.display(), e)))?;
+    let mmap = Arc::new(
+        snapshot
+            .make_read_only()
+            .map_err(|e| GraphError::Internal(format!("read-only mmap failed: {}", e)))?,
+    );
 
     // Validate header
     if &mmap[0..4] != MAGIC {
@@ -820,68 +934,18 @@ fn load_graph_file_internal(
         });
     }
 
-    let section_ranges = validate_section_layout(&mmap, &section_offsets, node_count, edge_count)?;
+    let layout = validate_section_layout(&mmap, &section_offsets, node_count, edge_count)?;
+    let artifact = MappedGraphArtifact {
+        mmap,
+        layout,
+        token: ValidatedMappedGraphToken { _private: () },
+    };
+    let section_ranges = &artifact.layout.ranges;
 
-    // ── Construct mmap-backed NodeStore ──
-    // SAFETY: The mmap handle outlives all pointer dereferences.
-    // The .pggraph file layout guarantees correct alignment for u32/u64 arrays.
-    let active_ptr = mmap[section_ranges[0].0..].as_ptr();
-    let oid_ptr = mmap[section_ranges[1].0..].as_ptr() as *const u32;
-    let pk_offsets_ptr = mmap[section_ranges[8].0..].as_ptr() as *const u64;
-    let pk_bytes_ptr = mmap[section_ranges[9].0..].as_ptr();
-    let active_byte_count = (node_count as usize).div_ceil(8);
-    let pk_bytes_len = section_ranges[9].1 - section_ranges[9].0;
-
-    // SAFETY: validate_section_layout has already checked section bounds and
-    // cross-section invariants. MmapNodeArrays validates alignment and active
-    // byte count before NodeStore receives pointer metadata.
-    let node_arrays = unsafe {
-        MmapNodeArrays::new(MmapNodeArrayParts {
-            region_ptr: mmap.as_ptr(),
-            region_len: mmap.len(),
-            active_ptr,
-            oid_ptr,
-            pk_offsets_ptr,
-            pk_bytes_ptr,
-            node_count,
-            active_byte_count,
-            pk_bytes_len,
-        })
-    }
-    .ok_or_else(|| GraphError::CorruptFile {
-        reason: "invalid mmap node section metadata".to_string(),
-    })?;
-    // SAFETY: node_arrays points into mmap, and engine._mmap owns the mapping
-    // for at least as long as this NodeStore is reachable.
-    let node_store = unsafe { NodeStore::from_mmap(node_arrays) };
-
-    // ── Construct mmap-backed EdgeStore ──
-    let offsets_ptr = mmap[section_ranges[2].0..].as_ptr() as *const u32;
-    let targets_ptr = mmap[section_ranges[3].0..].as_ptr() as *const u32;
-    let type_ids_ptr = mmap[section_ranges[4].0..].as_ptr();
-    let weights_ptr = mmap[section_ranges[5].0..].as_ptr() as *const u32;
-    let schema_reversed_ptr = mmap[section_ranges[6].0..].as_ptr();
-    let has_weights = section_ranges[5].1 > section_ranges[5].0;
-
-    // SAFETY: validate_section_layout has checked CSR bounds and monotonicity.
-    // MmapEdgeArrays validates pointer presence and alignment.
-    let edge_arrays = unsafe {
-        MmapEdgeArrays::new(MmapEdgeArrayParts {
-            region_ptr: mmap.as_ptr(),
-            region_len: mmap.len(),
-            offsets_ptr,
-            targets_ptr,
-            type_ids_ptr,
-            weights_ptr,
-            schema_reversed_ptr,
-            node_count,
-            edge_count,
-            has_weights,
-        })
-    }
-    .ok_or_else(|| GraphError::CorruptFile {
-        reason: "invalid mmap edge section metadata".to_string(),
-    })?;
+    // The artifact is the only production construction boundary for mapped
+    // stores. Each store retains its own Arc to the immutable mapping.
+    let node_store = NodeStore::from_mmap(artifact.node_arrays()?);
+    let edge_arrays = artifact.edge_arrays()?;
     // ── ResolutionIndex: mmap'd, zero-copy (handled by Engine) ──
     let ri_start = section_ranges[7].0;
     let ri_end = section_ranges[7].1;
@@ -891,7 +955,7 @@ fn load_graph_file_internal(
     // are deserialized into backend-local heap rather than kept as mmap-backed
     // stores.
     let bincode_config = bincode::config::standard();
-    let filter_data = length_prefixed_payload(&mmap, &section_ranges, 10, "filter index")?;
+    let filter_data = length_prefixed_payload(&artifact.mmap, section_ranges, 10, "filter index")?;
     let filter_index: FilterIndex = decode_bincode_section(
         filter_data,
         bincode_config,
@@ -900,7 +964,8 @@ fn load_graph_file_internal(
     )?;
     filter_index.validate_persisted_layout(node_count)?;
 
-    let registry_data = length_prefixed_payload(&mmap, &section_ranges, 11, "edge metadata")?;
+    let registry_data =
+        length_prefixed_payload(&artifact.mmap, section_ranges, 11, "edge metadata")?;
     let edge_metadata: PersistedEdgeMetadata = decode_bincode_section(
         registry_data,
         bincode_config,
@@ -965,11 +1030,8 @@ fn load_graph_file_internal(
         }
     }
 
-    // SAFETY: edge_arrays points into mmap, and engine._mmap owns the mapping
-    // for at least as long as this EdgeStore is reachable.
-    let edge_store = unsafe {
-        EdgeStore::from_mmap_with_relationship_ids(edge_arrays, edge_metadata.relationship_ids)
-    };
+    let edge_store =
+        EdgeStore::from_mmap_with_relationship_ids(edge_arrays, edge_metadata.relationship_ids);
 
     let mut engine = Engine::new();
     engine.install_mmap_backed_graph(MmapBackedGraph {
@@ -978,7 +1040,7 @@ fn load_graph_file_internal(
         filter_index,
         edge_type_registry: edge_metadata.edge_type_registry,
         relationship_identities: edge_metadata.relationship_identities,
-        mmap,
+        mmap: artifact.mmap,
         resolution_state: MmapResolutionState::new(ri_start, ri_len),
     });
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
@@ -1309,6 +1371,16 @@ mod tests {
     #[cfg(not(feature = "pg_test"))]
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn mapped_layout_rejects_non_little_endian_targets() {
+        assert!(ensure_native_mapped_layout_supported(true).is_ok());
+        assert!(matches!(
+            ensure_native_mapped_layout_supported(false),
+            Err(GraphError::IncompatibleVersion(message))
+                if message.contains("little-endian")
+        ));
+    }
+
     #[cfg(not(feature = "pg_test"))]
     struct EnvRestore {
         key: &'static str,
@@ -1509,6 +1581,29 @@ mod tests {
         assert_eq!(reloaded.node_store.primary_key(b), Some("B-2"));
         assert_eq!(reloaded.edge_type_registry, vec!["", "officer_of"]);
         assert_eq!(reloaded.edge_store.neighbors_weighted(a).2, &[7]);
+    }
+
+    #[test]
+    fn loaded_snapshot_is_counted_and_survives_source_inode_truncation() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("snapshot-inode-isolation");
+        write_graph_file(&engine, &path).unwrap();
+        let artifact_mb = std::fs::metadata(&path).unwrap().len() as f64 / 1_048_576.0;
+
+        let loaded = load_graph_file(&path).unwrap();
+        assert!(loaded.status().memory_used_mb >= artifact_mb);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+
+        assert_eq!(loaded.node_store.primary_key(0), Some("A"));
+        assert_eq!(loaded.resolve(10, "B"), Some(1));
+        assert_eq!(loaded.edge_store.neighbors_weighted(0).0, &[1]);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -2678,6 +2773,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
         assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_pk_offset_width_overflow() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-pk-offset-width");
+        write_graph_file(&engine, &path).unwrap();
+
+        let pk_offsets = read_section_offset(&path, 8);
+        write_u64_at(&path, pk_offsets + 8, u64::MAX);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn persisted_pk_offset_rejects_values_wider_than_usize() {
+        let too_wide = u64::from(u32::MAX) + 1;
+
+        assert!(matches!(
+            persisted_pk_offset_to_usize(too_wide, 1),
+            Err(GraphError::CorruptFile { .. })
+        ));
     }
 
     #[test]

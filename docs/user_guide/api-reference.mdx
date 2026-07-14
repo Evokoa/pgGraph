@@ -273,10 +273,11 @@ RETURNS TABLE (
 )
 ```
 
-Reports sizing estimates for the current backend's active engine. Shared mmap
-bytes are counted once; backend-private heap is multiplied by
-`concurrent_backends`, with a minimum of one. This is an operator sizing aid,
-not a live connection counter or cluster-wide hard cap.
+Reports sizing estimates for the current backend's active engine. The immutable
+artifact snapshot and backend-private heap are multiplied by
+`concurrent_backends`, with a minimum of one. The `*_shared_mb` columns remain
+for 1.x compatibility and currently return zero. This is an operator sizing
+aid, not a live connection counter or cluster-wide hard cap.
 
 ## Named Graph Metadata
 

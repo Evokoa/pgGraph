@@ -103,9 +103,10 @@ SELECT *
 FROM graph.memory_profile(concurrent_backends := 8);
 ```
 
-The result separates backend-private heap from mmap-backed bytes that are
-physically shareable through the OS page cache, then projects an instance total
-for the supplied backend count.
+The result includes each backend's immutable artifact snapshot in private
+memory, then projects an instance total for the supplied backend count. The
+shared-memory columns remain present for 1.x compatibility and currently
+return zero.
 
 `graph.max_loaded_graphs_per_backend` is also enforced per backend. The current
 runtime has one backend-local graph engine slot, so the supported range is

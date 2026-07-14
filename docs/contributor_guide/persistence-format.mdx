@@ -63,7 +63,8 @@ write or reload failures propagate as build/vacuum errors.
 
 ```text
 open file
-mmap read-only
+copy into anonymous mapping
+make snapshot read-only
 validate header size
 validate magic
 validate version
@@ -71,27 +72,27 @@ read counts and offsets
 validate CRC
 validate section layout
 validate CSR and primary-key offset content
-construct mmap-backed NodeStore arrays
-construct mmap-backed forward EdgeStore CSR
-keep ResolutionIndex section mmap-backed
+construct snapshot-backed NodeStore arrays
+construct snapshot-backed forward EdgeStore CSR
+keep ResolutionIndex section snapshot-backed
 deserialize FilterIndex into backend heap
 deserialize edge metadata into backend heap
 validate relationship identity sidecar and dictionary
 build reverse EdgeStore CSR into backend heap
 set resolution mode to MmapBacked
-store mmap in Engine._mmap
+store snapshot Arc in Engine._mmap
 read sync checkpoint
 return Engine
 ```
 
 <Callout type="info">
-The persisted forward graph arrays and resolution section are mmap-backed after
-load. Forward edge arrays include the `schema_reversed` byte section that marks
-generated reverse copies of bidirectional registered edge rows. The reverse CSR
-is not mmap-backed today; it is derived into backend-local heap and preserves
-the same schema-direction flags and relationship-ID sidecar values. The bincode
-2 standard sections, including `FilterIndex` and edge metadata, are also
-deserialized into backend-local heap.
+The persisted forward graph arrays and resolution section are views over one
+backend-local immutable mapping after load. Forward edge arrays include the
+`schema_reversed` byte section that marks generated reverse copies of
+bidirectional registered edge rows. The reverse CSR is derived into
+backend-local heap and preserves the same schema-direction flags and
+relationship-ID sidecar values. The bincode 2 standard sections, including
+`FilterIndex` and edge metadata, are also deserialized into backend-local heap.
 </Callout>
 
 ## Validation Boundaries
@@ -105,7 +106,7 @@ Loader validation rejects:
 | Version mismatch | Incompatible format |
 | CRC mismatch | Corrupt payload |
 | Section offsets out of order or out of file | Invalid layout |
-| Required alignment missing | Unsafe typed pointer would be invalid |
+| Required alignment missing | Unsafe typed slice would be invalid |
 | Required section too small | Out-of-bounds typed reads |
 | Weights section wrong size | Parallel arrays would diverge |
 | `schema_reversed` value outside `0..=1` | Edge provenance flag invalid |
@@ -121,21 +122,25 @@ Loader validation rejects:
 | Edge registry index 0 not empty | Root edge type invariant broken |
 
 The section-layout validator and the crate-private mapped-array constructors
-both enforce the value invariants used by raw pointer access. This deliberate
-second check keeps malformed in-memory fixtures and future loader call sites
+both enforce the value invariants used by typed access over the immutable
+snapshot. This deliberate second check keeps malformed fixtures and loader call sites
 from constructing a mapped store even if they bypass file parsing.
 
 ## Mmap Lifetime
 
-The `Engine` owns the `Mmap` in `_mmap`. Mmap-backed stores hold raw pointers
-into that mapping. This is why the mmap must be installed in the engine before
-the returned engine escapes the loader.
+The loader copies the file into an anonymous mapping and makes it read-only
+before typed views are created. The private `MappedGraphArtifact` owns that
+`Arc<Mmap>` and constructs node and edge stores only after the complete layout
+validates. Each mapped store retains an `Arc` clone; `Engine._mmap` retains
+another clone for resolution lookup and memory accounting. Safe store access
+therefore cannot outlive its mapping, and source-inode writes or truncation
+cannot change the snapshot.
 
 ```text
 Engine
-  _mmap owns bytes
-  node_store has pointers into _mmap
-  forward edge_store has pointers into _mmap
+  _mmap shares ownership for resolution and accounting
+  node_store owns validated ranges plus Arc<Mmap>
+  forward edge_store owns validated ranges plus Arc<Mmap>
   resolution mode references _mmap section
   reverse_edge_store owns heap CSR arrays with copied schema flags
   filter_index owns heap data deserialized from bincode

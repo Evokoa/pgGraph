@@ -27,7 +27,7 @@ buffer pool, and not a separate graph database that owns your data.
 | Use SQL functions as the public API | Applications stay inside PostgreSQL, but pgGraph does not yet expose a standard graph query language directly. |
 | Precompute CSR adjacency | Traversal avoids repeatedly discovering edges through joins, but builds and maintenance become explicit operational steps. |
 | Keep engines backend-local | This matches PostgreSQL's process model and avoids shared mutable Rust state, but reverse CSR, filter indexes, and edge type registries are currently duplicated per backend. |
-| Use read-only mmap for immutable artifacts | Later backends can share physical pages through the OS page cache, but mmap has well-known database-system failure and performance tradeoffs. |
+| Copy artifacts into read-only anonymous mappings | Typed views get stable immutable bytes even if the source inode changes, at the cost of one artifact-sized private snapshot per loading backend. |
 | Enforce circuit breakers | Traversal is bounded for database safety, but pgGraph is not trying to run unbounded graph analytics in OLTP query paths. |
 
 ## Why mmap?
@@ -40,20 +40,22 @@ argues that mmap is not a suitable replacement for a traditional DBMS buffer
 pool. That warning is relevant, and pgGraph should be evaluated against it.
 </Callout>
 
-pgGraph uses mmap for immutable, rebuildable graph artifacts, not as a mutable
-database storage engine or PostgreSQL buffer-pool replacement.
+pgGraph uses anonymous read-only mappings for immutable, rebuildable graph
+artifact snapshots, not as a mutable database storage engine or PostgreSQL
+buffer-pool replacement.
 
 When `graph.persist_on_build = true`, pgGraph writes a `.pggraph` artifact from
-registered PostgreSQL tables. Later backend processes can validate that artifact
-and map fixed-width sections read-only:
+registered PostgreSQL tables. Later backend processes copy and validate that
+artifact in an anonymous read-only mapping:
 
 - node active bits, table OIDs, primary-key offsets, and primary-key bytes;
 - forward CSR offsets, targets, edge-label IDs, and optional weights;
 - the resolution index used to map source table coordinates to graph node IDs.
 
-The operating system page cache can then share those physical pages across
-isolated PostgreSQL backend processes. That avoids copying the same immutable
-base graph arrays into every backend's Rust heap.
+The snapshot keeps fixed-width data compact and prevents another process from
+invalidating typed Rust views by writing or truncating the source inode. The
+tradeoff is that each loading backend owns one artifact-sized snapshot instead
+of sharing file-backed pages across backends.
 
 The boundary matters:
 
@@ -61,7 +63,7 @@ The boundary matters:
   recovery, ACLs, RLS, backups, and application writes.
 - The `.pggraph` file is derived state. If it is missing, incompatible, or
   corrupt, rebuild it from source tables.
-- pgGraph maps artifact sections read-only. Sync overlays and mutable derived
+- pgGraph snapshots artifact sections read-only. Sync overlays and mutable derived
   state remain backend-local.
 - Reverse CSR, filter indexes, edge metadata, and relationship identity
   dictionaries are still currently backend-local heap structures after load.

@@ -111,6 +111,22 @@ publication/writer-barrier gate, release-contract drift checks, Clippy,
 rustdoc, and independent review pass. PostgreSQL 14-16 and 18 matrix evidence
 remains before the known issue can be retired.
 
+2026-07-14 R1 mapped-layout baseline — KI-020 begins from 14 passing mapped
+tests (0.10s test time, 0.55s wall time). The implementation will replace
+borrowed raw-pointer lifetime contracts with an owning validated artifact and
+explicit little-endian native-load policy before sanitizer and PG14-18 gates.
+
+2026-07-14 R1 mapped-layout checkpoint — KI-020 now uses a private validated
+artifact capability and Arc-owned aligned ranges over a backend-local anonymous
+read-only snapshot, rejects non-little-endian native loads, accounts the
+snapshot as private backend memory, and passes source-inode truncation,
+malformed-layout, Miri, full Rust ASan, and the 975-test PostgreSQL 17 suite.
+The sanitizer gate now runs correctly on macOS; its full run also drove a
+stack-safe 128-level public boolean predicate bound. Independent review findings
+for source-inode mutability, lifecycle docs, 32-bit offset conversion, and
+status accounting are fixed. PostgreSQL-process sanitizer and PG14-16/18 matrix
+evidence remain pending.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

@@ -28,6 +28,7 @@ beside it in the crate tree.
 | `api_types.rs` | SQL-facing row aliases and request structures |
 | `runtime_state.rs` | Backend-local loaded graph slot metadata and runtime graph snapshots |
 | `engine.rs` | Store orchestration, resolution dispatch, traversal, paths, status |
+| `mapped_bytes.rs` | Shared ownership wrapper for production mmap bytes and aligned Miri test bytes |
 | `node_store.rs` | Node SoA store with owned and mmap backings |
 | `edge_store.rs` | CSR edge store with owned and mmap backings |
 | `resolution_index.rs` | Build-time and finalized table+PK lookup index |

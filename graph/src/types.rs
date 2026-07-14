@@ -235,6 +235,9 @@ pub struct EngineStatus {
 
 /// Backend and instance memory sizing estimate returned by
 /// `graph.memory_profile()`.
+///
+/// The shared-memory columns are retained for 1.x SQL compatibility and are
+/// zero while artifact snapshots are backend-local.
 #[derive(Debug, Clone)]
 pub struct MemoryProfile {
     pub active_backend_private_mb: f64,

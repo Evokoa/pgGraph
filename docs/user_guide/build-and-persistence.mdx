@@ -5,6 +5,13 @@ edges, and filter columns. When `graph.persist_on_build = true`, the base graph
 is written atomically under the selected graph's UUID directory and later
 backends can load it through read-only mmap.
 
+Persisted fixed-width arrays use little-endian encoding. Zero-copy mmap loading
+is supported on little-endian targets; an unsupported big-endian target fails
+closed with compatibility and rebuild guidance instead of interpreting the
+bytes with native typed loads. Loaded node and edge views retain ownership of
+their read-only mapping, so replacing or dropping an engine cannot leave a
+live view pointing at an unmapped artifact.
+
 When persistence is requested, build, maintenance, and vacuum paths fail closed:
 an artifact write error or immediate mmap reload error aborts the operation
 instead of installing an unpersisted in-memory fallback.

@@ -14,7 +14,7 @@ data into another system.
 | SQL-first applications | The current public API is PostgreSQL SQL functions in the `graph` schema, including the `graph.gql()` SQL function for the documented GQL subset |
 | Existing relational schemas | Tables, primary keys, unique keys, and foreign keys are enough to model many graphs |
 | Operational Postgres teams | Source tables, ACLs, RLS, backups, and observability remain PostgreSQL concerns |
-| Fast backend startup | Persisted immutable forward graph arrays and resolution bytes can be mapped read-only and shared through the OS page cache |
+| Validated persisted startup | Forward graph arrays and resolution bytes load into one compact immutable mapping per backend |
 
 ## Not The Target
 
@@ -82,9 +82,9 @@ recovery.
 
 | Structure | Sharing behavior |
 |---|---|
-| Node active bits, table OIDs, primary-key bytes | mmap-backed after load |
-| Forward CSR arrays | mmap-backed after load |
-| Resolution index | mmap-backed after load |
+| Node active bits, table OIDs, primary-key bytes | Backend-local immutable mapped snapshot after load |
+| Forward CSR arrays | Backend-local immutable mapped snapshot after load |
+| Resolution index | Backend-local immutable mapped snapshot after load |
 | Reverse CSR | backend-local heap |
 | Filter index | backend-local heap after bincode deserialize |
 | Edge type registry | backend-local heap after bincode deserialize |
@@ -94,9 +94,8 @@ recovery.
 Use `graph.estimate()` before large builds and watch `memory_used_mb`,
 `edge_buffer_used`, `needs_vacuum`, and `read_only` in `graph.status()`. For
 instance sizing, run `graph.memory_profile(concurrent_backends := N)` with the
-number of sessions that may actively use the graph; pgGraph reports
-backend-private heap separately from mmap-backed bytes that can be shared
-through the OS page cache.
+number of sessions that may actively use the graph; pgGraph includes the
+immutable artifact snapshot in each backend's private-memory projection.
 
 ## Operational Guidance
 

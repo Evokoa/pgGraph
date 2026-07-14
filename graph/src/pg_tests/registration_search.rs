@@ -169,7 +169,7 @@ fn memory_profile_projects_private_heap_by_backend_count() {
 }
 
 #[pg_test]
-fn memory_profile_counts_persisted_mmap_once() {
+fn memory_profile_counts_persisted_snapshot_per_backend() {
     reset_and_create_fixtures();
     Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
     build_friendship_fixture_graph();
@@ -217,7 +217,8 @@ fn memory_profile_counts_persisted_mmap_once() {
         })
         .expect("memory_profile row read failed");
 
-    assert!(shared_mb > 0.0);
+    assert!(private_mb > 0.0);
+    assert_eq!(shared_mb, 0.0);
     assert_eq!(shared_mb, instance_shared_mb);
     assert!(instance_private_mb >= private_mb * 4.0);
     assert!((instance_total_mb - (instance_private_mb + instance_shared_mb)).abs() < 0.000001);

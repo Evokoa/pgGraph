@@ -13,7 +13,7 @@ search composition, sync overlays, status reporting, and persistence.
   { name: 'edge_type_registry', type: 'Vec<String>', desc: 'edge label table; index 0 is reserved for untyped root edges' },
   { name: 'resolution_store', type: 'ResolutionStore', desc: 'builder, finalized bytes, or mmap-backed lookup backend' },
   { name: 'resolution_delta', type: 'ResolutionDeltaIndex', desc: 'indexed post-build inserts that cannot mutate finalized/mmap index' },
-  { name: '_mmap', type: 'Option<Mmap>', desc: 'owns mmap lifetime for mmap-backed stores' },
+  { name: '_mmap', type: 'Option<Arc<Mmap>>', desc: 'retains the backend-local immutable artifact snapshot' },
   { name: 'edge_buffer', type: 'Vec<EdgeMutation>', desc: 'post-build edge insert/delete overlay' },
   { name: 'projection_mode', type: 'ProjectionMode', desc: 'csr_readonly or mutable_overlay runtime mode' },
   { name: 'tenant_membership', type: 'HashMap<String, RoaringBitmap>', desc: 'tenant to allowed node set' }
@@ -137,7 +137,7 @@ and schema drift.
 | `resolution_delta` is checked first | Synced inserts shadow immutable base indexes |
 | `resolution_delta` verifies candidates through `node_store` | Tombstones and hash collisions cannot resolve stale or wrong nodes |
 | transaction edge deltas clear at transaction end | Uncommitted overlays must not leak across transactions or backends |
-| Mmap store pointers never outlive `Engine._mmap` | Raw pointer reads depend on mmap lifetime |
+| Mapped stores retain their own `Arc<Mmap>` | Validated typed ranges cannot outlive the immutable snapshot, regardless of engine field/drop order |
 | `node_store.is_active()` gates resolved nodes | Tombstones must not appear as live results |
 | `edge_buffer.len() <= graph.edge_buffer_size` | Prevents unbounded overlay memory |
 | Transaction deltas clear at transaction end | Rollback/commit must not leak uncommitted graph state across transactions |

@@ -1,10 +1,11 @@
 # Memory Model
 
 The engine is designed around cache-friendly owned arrays during build and
-read-only mmap-backed fixed-width arrays after persistence. PostgreSQL backends
-do not share Rust heap memory. After auto-load, they can share the immutable
-fixed-width persisted base graph pages through the operating system page cache,
-while derived and variable-size structures remain per-backend heap allocations.
+read-only mapped fixed-width arrays after persistence. PostgreSQL backends do
+not share Rust heap memory or mapped snapshots. After auto-load, each backend
+copies the artifact into an anonymous read-only mapping before typed views are
+created, while derived and variable-size structures remain per-backend heap
+allocations.
 This mapping is for rebuildable graph artifacts only; PostgreSQL still owns
 authoritative table storage, WAL, MVCC, durability, and crash recovery.
 
@@ -12,13 +13,13 @@ authoritative table storage, WAL, MVCC, durability, and crash recovery.
 
 <SharedMemoryDiagram>
   <SharedMemoryBackends title="Engine struct">
-    - `node_store` -> mmap pointers
-    - `edge_store` -> mmap pointers
+    - `node_store` -> Arc-owned mmap ranges
+    - `edge_store` -> Arc-owned mmap ranges
     - `resolution_store` -> mmap section
     - `_mmap handle`
   </SharedMemoryBackends>
-  <SharedMemoryTarget title="main.pggraph">
-    - OS page cache pages
+  <SharedMemoryTarget title="Backend-local snapshot">
+    - anonymous read-only mapped pages
   </SharedMemoryTarget>
   <SharedMemoryHeap title="Per-backend heap after load">
     - **FilterIndex** — bincode section deserialized per backend
@@ -31,9 +32,10 @@ authoritative table storage, WAL, MVCC, durability, and crash recovery.
 </SharedMemoryDiagram>
 
 <Callout type="info">
-The forward base graph is not copied wholesale into each connection's private
-heap after mmap load. Node arrays, forward CSR arrays, primary-key bytes, and
-resolution bytes are mmap-backed. Forward CSR includes the schema-direction
+The forward base graph is copied once into each loading backend's anonymous
+read-only mapping, not expanded into per-field heap collections. Node arrays,
+forward CSR arrays, primary-key bytes, and resolution bytes view that mapping.
+Forward CSR includes the schema-direction
 flag bytes used to identify generated reverse copies of bidirectional edge
 rows. The reverse CSR and bincode sections are currently per-backend heap
 structures.
@@ -49,9 +51,10 @@ structures.
   { name: 'primary_keys', type: 'Vec<String> or offsets+bytes', desc: 'source primary key by node index' }
 ]} />
 
-Owned mode supports mutation. Mmap mode is read-only and uses validated raw
-pointers into `Engine._mmap`. In the persisted format, active bits, table OIDs,
-primary-key offsets, and primary-key bytes are all mmap-backed.
+Owned mode supports mutation. Mmap mode is read-only and uses validated byte
+ranges whose store retains shared ownership of the mapping. In the persisted
+format, active bits, table OIDs, primary-key offsets, and primary-key bytes are
+all mmap-backed.
 
 ## EdgeStore
 
@@ -154,11 +157,10 @@ nodes * (active bit + table_oid + average primary key)
 `graph.estimate()` and build preflight use a separate conservative estimate
 from PostgreSQL row estimates before allocating the engine.
 
-When the engine is loaded from a `.pggraph` file, this estimate is a logical size
-estimate, not a per-backend private RSS formula. Mmap-backed forward arrays and
-schema-direction flags are shared physically by the OS page cache across
-backends; reverse CSR, filter index, registry, and overlay structures remain
-per-backend heap.
+When the engine is loaded from a `.pggraph` file, the artifact snapshot is
+counted as backend-private memory. Reverse CSR, filter index, registry, and
+overlay structures are also per-backend allocations. The public shared-memory
+profile columns remain for 1.x compatibility and currently report zero.
 
 ## Mmap Materialization For Sync
 
@@ -173,17 +175,24 @@ materializes the mmap node store into owned arrays:
 Edge mutations do not rewrite CSR. They live in `edge_buffer` overlays until a
 maintenance rebuild.
 
-## Unsafe Boundary
+## Mapped Layout Safety Boundary
 
-Raw mmap pointer metadata is only constructed by validated constructors:
+The loader copies the artifact into an anonymous mapping, makes it read-only,
+and validates the complete snapshot before creating mapped stores. A private
+owning artifact retains that mapping in `Arc<Mmap>` and is the
+production construction boundary for node and edge views. Each view owns an
+`Arc` clone, so field order, engine replacement, or dropping the loader's local
+handle cannot invalidate a safe store method.
 
 | Type | Validation |
 |---|---|
-| `MmapNodeArrays::new` | pointer ranges, active byte count, `u32`/`u64` alignment, complete primary-key offsets, terminal byte count, and UTF-8 boundaries |
-| `MmapEdgeArrays::new` | pointer ranges, optional weights, `u32` alignment, monotonic CSR offsets, terminal edge count, target bounds, and schema-direction flags |
-| `validate_section_layout` | section ordering, bounds, sizes, alignment, CRC, CSR content, PK offsets |
+| `ValidatedGraphLayout` | section ordering, bounds, sizes, alignment, CRC, CSR content, target bounds, primary-key offsets, UTF-8, and length-prefixed payload framing |
+| `MmapNodeArrays::new_for_artifact` | owning byte ranges, active byte count, `u32`/`u64` alignment, complete primary-key offsets, terminal byte count, UTF-8 boundaries, and native endian policy |
+| `MmapEdgeArrays::new_for_artifact` | owning byte ranges, optional weights, `u32` alignment, monotonic CSR offsets, terminal edge count, target bounds, schema-direction flags, and native endian policy |
 
-Every unsafe raw slice or pointer dereference has a local `// SAFETY:` comment
-explaining the proof at the call site. Node metadata lookups also check the
-requested node index locally and return no value when it is outside the store;
-they do not rely on traversal callers to supply a valid index.
+The persisted format is little-endian. Native typed views over the snapshot are
+therefore enabled only on little-endian targets; other targets receive an
+incompatible-version error with rebuild guidance. The remaining unsafe blocks
+only form typed slices from already validated, aligned ranges and carry local
+`// SAFETY:` proofs. Safe accessors check node indexes and CSR offsets locally,
+returning empty or absent results for out-of-range requests.

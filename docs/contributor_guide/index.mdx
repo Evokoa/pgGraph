@@ -58,10 +58,10 @@ belong in the [User Guide](/user_guide).
 | Graph queries must stay SQL-native | SQL facade modules own user-facing call shapes and hydration |
 | Source tables are authoritative | Build, maintenance, and search read source tables through SPI |
 | Traversal must be bounded | Depth, node count, and frontier circuit breakers are first-class config |
-| Cross-backend memory should be shareable | Persisted fixed-width arrays are mmap-backed |
+| Typed persisted views need stable bytes | Each backend snapshots the artifact into an anonymous read-only mapping before validation |
 | CSR base topology is immutable | Sync edge changes use overlays until rebuild |
 | PostgreSQL ACLs must still apply | Query paths check source table privileges |
-| Unsafe mmap reads need proof | Pointer metadata constructors validate bounds/alignment before stores use raw pointers |
+| Unsafe mmap reads need proof | An owning validated artifact gives each store Arc-owned aligned ranges; safe accessors cannot outlive the mapping |
 
 ## Core Ownership Model
 
@@ -73,9 +73,10 @@ thread_local! {
 }
 ```
 
-Each backend process has its own `Engine` value. Persisted graph files and the
-OS page cache provide sharing between processes; Rust heap structures and
-backend-local sync overlays are not shared across backends.
+Each backend process has its own `Engine` value, immutable artifact snapshot,
+Rust heap structures, and sync overlays. Persisted graph files are shared, but
+loaded snapshots are backend-local so external same-inode changes cannot
+invalidate typed views.
 
 ## Contributing Rules Of Thumb
 
