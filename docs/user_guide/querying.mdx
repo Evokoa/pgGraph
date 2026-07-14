@@ -420,6 +420,14 @@ matched graph coordinates.
 Writes targeting a registered partitioned table use ordinary PostgreSQL DML,
 so PostgreSQL chooses the child partition. A rejected constraint or user
 trigger aborts before pgGraph records a transaction-local projection delta.
+After the DML statement and its triggers finish, pgGraph re-reads the affected
+source row. Trigger changes to ordinary returned properties therefore remain
+authoritative. pgGraph rejects and rolls back a write when a trigger side effect
+removes or changes the returned source identity, changes a registered node
+primary key or tenant identity during `SET`, `REMOVE`, or `MERGE ON MATCH`, or
+changes a registered endpoint or dynamic relationship label during relationship
+`CREATE`. This prevents PostgreSQL source identity from diverging from the
+transaction-local graph coordinates.
 For backend-local mutable projections, concurrent mapped writes follow
 PostgreSQL isolation rules. READ COMMITTED readers can observe a committed
 write on their next statement; REPEATABLE READ and SERIALIZABLE readers retain

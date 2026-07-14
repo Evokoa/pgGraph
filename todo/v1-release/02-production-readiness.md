@@ -13,7 +13,8 @@
 - [x] Add subtransaction/savepoint delta frames with rollback and release tests.
 - [ ] Complete READ COMMITTED, REPEATABLE READ, SERIALIZABLE, constraint,
       trigger, partition, composite-key, and concurrent-write coverage for the
-      advertised write profile.
+      advertised write profile. The ordered evidence work is tracked in
+      [QA-01](./qa-01-write-correctness-matrix-plan.md).
 - [ ] Complete supported-major evidence for mapped safety, guarded PostgreSQL
       errors, definer search paths, relation identity, and exact durable values.
 - [x] Create the machine-readable 1.0 capability/conformance registry and make

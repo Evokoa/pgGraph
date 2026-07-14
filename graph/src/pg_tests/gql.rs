@@ -3173,6 +3173,120 @@ fn gql_create_relationship_fills_registered_dynamic_label_column() {
 }
 
 #[pg_test]
+fn gql_create_relationship_rejects_trigger_rewritten_graph_identity() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest
+           ADD COLUMN rel_type TEXT NOT NULL DEFAULT 'friend';
+         CREATE FUNCTION public.graph_gql_rewrite_edge_identity_pgtest()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.id = 'rewrite-endpoint' THEN
+             NEW.friend_id := 'u2';
+           ELSIF NEW.id = 'rewrite-label' THEN
+             NEW.rel_type := 'colleague';
+           END IF;
+           RETURN NEW;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_rewrite_edge_identity
+           BEFORE INSERT ON public.graph_test_friendships_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_rewrite_edge_identity_pgtest();
+         CREATE FUNCTION public.graph_gql_after_rewrite_edge_identity_pgtest()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.id = 'after-endpoint' THEN
+             UPDATE public.graph_test_friendships_pgtest
+                SET friend_id = 'u2'
+              WHERE id = NEW.id;
+           ELSIF NEW.id = 'after-label' THEN
+             UPDATE public.graph_test_friendships_pgtest
+                SET rel_type = 'colleague'
+              WHERE id = NEW.id;
+           END IF;
+           RETURN NULL;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_after_rewrite_edge_identity
+           AFTER INSERT ON public.graph_test_friendships_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_after_rewrite_edge_identity_pgtest();
+         SELECT graph.add_table(
+           'graph_test_users_pgtest'::regclass,
+           id_column := 'id',
+           columns := ARRAY['name', 'age']
+         );
+         SELECT graph.add_edge(
+           from_table := 'graph_test_friendships_pgtest'::regclass,
+           from_column := 'user_id',
+           to_table := 'graph_test_users_pgtest'::regclass,
+           to_column := 'friend_id',
+           label := 'related_to',
+           bidirectional := false,
+           label_column := 'rel_type'
+         );
+         SELECT * FROM graph.build(mode := 'mutable_overlay');",
+    )
+    .expect("create relationship identity trigger fixture failed");
+    create_error_sqlstate_helper();
+
+    for (edge_id, rel_type) in [
+        ("rewrite-endpoint", "friend"),
+        ("rewrite-label", "friend"),
+        ("after-endpoint", "friend"),
+        ("after-label", "friend"),
+    ] {
+        let query = format!(
+            "SELECT * FROM graph.gql(
+               'MATCH (u:graph_test_users_pgtest {{id: ''u2''}}), (v:graph_test_users_pgtest {{id: ''u1''}})
+                CREATE (u)-[r:{rel_type} {{id: ''{edge_id}''}}]->(v)
+                RETURN r'
+             )"
+        );
+        let sqlstate = Spi::get_one::<String>(&format!(
+            "SELECT public.graph_test_sqlstate({})",
+            super::sql_literal(&query)
+        ))
+        .expect("capture rewritten relationship identity error failed")
+        .unwrap_or_default();
+        assert_eq!(sqlstate, "22000");
+    }
+
+    let (source_rows, tx_added_edges, overlay_dirty) = Spi::connect(|client| {
+        let source_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM public.graph_test_friendships_pgtest
+                  WHERE id IN (
+                    'rewrite-endpoint', 'rewrite-label',
+                    'after-endpoint', 'after-label'
+                  )",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let status = client
+            .select(
+                "SELECT tx_delta_added_edges, tx_delta_dirty FROM graph.status()",
+                None,
+                &[],
+            )?
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            source_rows,
+            status.get::<i32>(1)?.unwrap_or_default(),
+            status.get::<bool>(2)?.unwrap_or(true),
+        ))
+    })
+    .expect("verify rewritten relationship rollback failed");
+    assert_eq!(source_rows, 0);
+    assert_eq!(tx_added_edges, 0);
+    assert!(!overlay_dirty);
+}
+
+#[pg_test]
 fn gql_create_relationship_preserves_bidirectional_registered_direction() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
@@ -4078,6 +4192,233 @@ fn gql_set_property_updates_source_row_and_filter_index() {
     assert_eq!(returned_age, "101");
     assert_eq!(source_age, 101);
     assert_eq!(filtered_neighbor_count, 1);
+}
+
+#[pg_test]
+fn gql_node_writes_reject_trigger_rewritten_identity() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+         "CREATE TABLE public.graph_gql_identity_nodes_pgtest (
+           id TEXT PRIMARY KEY,
+           name TEXT NOT NULL,
+           status TEXT,
+           tenant_id TEXT NOT NULL DEFAULT 'tenant-a'
+         );
+         INSERT INTO public.graph_gql_identity_nodes_pgtest
+           (id, name, status, tenant_id)
+         VALUES ('set-node', 'Before set', 'active', 'tenant-a'),
+                ('remove-node', 'Before remove', 'active', 'tenant-a'),
+                ('merge-node', 'Before merge', 'active', 'tenant-a'),
+                ('after-node', 'Before after trigger', 'active', 'tenant-a'),
+                ('tenant-node', 'Before tenant trigger', 'active', 'tenant-a'),
+                ('tenant-unscoped', 'Before unscoped tenant trigger', 'active', 'tenant-a'),
+                ('after-remove', 'Before after remove', 'active', 'tenant-a'),
+                ('after-merge', 'Before after merge', 'active', 'tenant-a'),
+                ('property-node', 'Before property trigger', 'active', 'tenant-a');
+         SELECT graph.add_table(
+           'graph_gql_identity_nodes_pgtest'::regclass,
+           id_column := 'id',
+           columns := ARRAY['name', 'status'],
+           tenant_column := 'tenant_id'
+         );
+         SELECT * FROM graph.build(mode := 'mutable_overlay');
+         CREATE FUNCTION public.graph_gql_rewrite_node_identity_pgtest()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.name IN ('After set', 'After merge')
+              OR (NEW.id = 'remove-node' AND NEW.status IS NULL) THEN
+             NEW.id := NEW.id || '-moved';
+           END IF;
+           RETURN NEW;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_rewrite_node_identity
+           BEFORE UPDATE ON public.graph_gql_identity_nodes_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_rewrite_node_identity_pgtest();
+         CREATE FUNCTION public.graph_gql_after_rewrite_node_identity_pgtest()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF TG_OP = 'INSERT' AND NEW.id IN ('create-after', 'merge-after') THEN
+             UPDATE public.graph_gql_identity_nodes_pgtest
+                SET id = id || '-moved'
+              WHERE id = NEW.id;
+           ELSIF TG_OP = 'UPDATE'
+              AND NEW.id = 'after-node'
+              AND NEW.name = 'After statement set' THEN
+             UPDATE public.graph_gql_identity_nodes_pgtest
+                SET id = id || '-moved'
+              WHERE id = NEW.id;
+           ELSIF TG_OP = 'UPDATE'
+              AND NEW.id = 'tenant-node'
+              AND NEW.name = 'After tenant set'
+              AND NEW.tenant_id = 'tenant-a' THEN
+             UPDATE public.graph_gql_identity_nodes_pgtest
+                SET tenant_id = 'tenant-b'
+              WHERE id = NEW.id;
+           ELSIF TG_OP = 'UPDATE'
+              AND NEW.id = 'property-node'
+              AND NEW.name = 'Trigger input' THEN
+             UPDATE public.graph_gql_identity_nodes_pgtest
+                SET name = 'Trigger output'
+              WHERE id = NEW.id;
+           ELSIF TG_OP = 'UPDATE'
+              AND NEW.id = 'after-remove'
+              AND NEW.status IS NULL THEN
+             UPDATE public.graph_gql_identity_nodes_pgtest
+                SET id = id || '-moved'
+              WHERE id = NEW.id;
+           ELSIF TG_OP = 'UPDATE'
+              AND NEW.id = 'after-merge'
+              AND NEW.name = 'After merge statement' THEN
+             UPDATE public.graph_gql_identity_nodes_pgtest
+                SET id = id || '-moved'
+              WHERE id = NEW.id;
+           ELSIF TG_OP = 'UPDATE'
+              AND NEW.id = 'tenant-unscoped'
+              AND NEW.name = 'After unscoped tenant set'
+              AND NEW.tenant_id = 'tenant-a' THEN
+             UPDATE public.graph_gql_identity_nodes_pgtest
+                SET tenant_id = 'tenant-b'
+              WHERE id = NEW.id;
+           END IF;
+           RETURN NULL;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_after_insert_node_identity
+           AFTER INSERT ON public.graph_gql_identity_nodes_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_after_rewrite_node_identity_pgtest();
+         CREATE TRIGGER graph_gql_after_update_node_identity
+           AFTER UPDATE ON public.graph_gql_identity_nodes_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_after_rewrite_node_identity_pgtest();",
+    )
+    .expect("create node identity trigger fixture failed");
+    Spi::run("SET graph.enforce_tenant_scope = on")
+        .expect("enable tenant enforcement failed");
+    Spi::run("SET graph.tenant_setting = 'app.graph_gql_identity_tenant'")
+        .expect("set identity tenant setting failed");
+    Spi::run("SET app.graph_gql_identity_tenant = 'tenant-a'")
+        .expect("set identity tenant value failed");
+    create_error_sqlstate_helper();
+    create_error_message_helper();
+
+    for query in [
+        "MATCH (u:graph_gql_identity_nodes_pgtest {id: 'set-node'}) SET u.name = 'After set' RETURN u",
+        "MATCH (u:graph_gql_identity_nodes_pgtest {id: 'remove-node'}) REMOVE u.status RETURN u",
+        "MERGE (u:graph_gql_identity_nodes_pgtest {id: 'merge-node'}) ON MATCH SET u.name = 'After merge' RETURN u",
+        "MATCH (u:graph_gql_identity_nodes_pgtest {id: 'after-node'}) SET u.name = 'After statement set' RETURN u",
+        "MATCH (u:graph_gql_identity_nodes_pgtest {id: 'tenant-node'}) SET u.name = 'After tenant set' RETURN u",
+        "MATCH (u:graph_gql_identity_nodes_pgtest {id: 'after-remove'}) REMOVE u.status RETURN u",
+        "MERGE (u:graph_gql_identity_nodes_pgtest {id: 'after-merge'}) ON MATCH SET u.name = 'After merge statement' RETURN u",
+        "CREATE (u:graph_gql_identity_nodes_pgtest {id: 'create-after', name: 'Created', status: 'active'}) RETURN u",
+        "MERGE (u:graph_gql_identity_nodes_pgtest {id: 'merge-after', name: 'Merged', status: 'active'}) RETURN u",
+    ] {
+        let statement = format!(
+            "SELECT * FROM graph.gql({})",
+            super::sql_literal(query)
+        );
+        let sqlstate = Spi::get_one::<String>(&format!(
+            "SELECT public.graph_test_sqlstate({})",
+            super::sql_literal(&statement)
+        ))
+        .expect("capture rewritten node identity error failed")
+        .unwrap_or_default();
+        let message = Spi::get_one::<String>(&format!(
+            "SELECT public.graph_test_sql_error_message({})",
+            super::sql_literal(&statement)
+        ))
+        .expect("capture rewritten node identity message failed")
+        .unwrap_or_default();
+        assert_eq!(sqlstate, "22000", "query={query}; message={message}");
+    }
+
+    Spi::run(
+        "RESET app.graph_gql_identity_tenant;
+         SET graph.tenant_setting = '';
+         SET graph.enforce_tenant_scope = off",
+    )
+    .expect("disable identity tenant scope failed");
+    let unscoped_query =
+        "MATCH (u:graph_gql_identity_nodes_pgtest {id: 'tenant-unscoped'}) SET u.name = 'After unscoped tenant set' RETURN u";
+    let unscoped_statement = format!(
+        "SELECT * FROM graph.gql({})",
+        super::sql_literal(unscoped_query)
+    );
+    let unscoped_sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(&unscoped_statement)
+    ))
+    .expect("capture unscoped tenant identity error failed")
+    .unwrap_or_default();
+    let unscoped_message = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sql_error_message({})",
+        super::sql_literal(&unscoped_statement)
+    ))
+    .expect("capture unscoped tenant identity message failed")
+    .unwrap_or_default();
+    assert_eq!(
+        unscoped_sqlstate, "22000",
+        "query={unscoped_query}; message={unscoped_message}"
+    );
+
+    let (returned_name, source_name) = Spi::connect(|client| {
+        let returned_name = client
+            .select(
+                "SELECT row #>> '{name}'
+                   FROM graph.gql(
+                     'MATCH (u:graph_gql_identity_nodes_pgtest {id: ''property-node''})
+                      SET u.name = ''Trigger input''
+                      RETURN u.name AS name'
+                   )",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<String>(1)?
+            .unwrap_or_default();
+        let source_name = client
+            .select(
+                "SELECT name
+                   FROM public.graph_gql_identity_nodes_pgtest
+                  WHERE id = 'property-node'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<String>(1)?
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((returned_name, source_name))
+    })
+    .expect("verify post-trigger property result failed");
+    assert_eq!(returned_name, "Trigger output");
+    assert_eq!(source_name, "Trigger output");
+
+    let unchanged_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM public.graph_gql_identity_nodes_pgtest
+          WHERE tenant_id = 'tenant-a'
+            AND ((id = 'set-node' AND name = 'Before set' AND status = 'active')
+              OR (id = 'remove-node' AND name = 'Before remove' AND status = 'active')
+              OR (id = 'merge-node' AND name = 'Before merge' AND status = 'active')
+              OR (id = 'after-node' AND name = 'Before after trigger' AND status = 'active')
+              OR (id = 'tenant-node' AND name = 'Before tenant trigger' AND status = 'active')
+              OR (id = 'tenant-unscoped' AND name = 'Before unscoped tenant trigger' AND status = 'active')
+              OR (id = 'after-remove' AND name = 'Before after remove' AND status = 'active')
+              OR (id = 'after-merge' AND name = 'Before after merge' AND status = 'active'))",
+    )
+    .expect("verify trigger-rewritten node rollback failed")
+    .unwrap_or_default();
+    let moved_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM public.graph_gql_identity_nodes_pgtest
+          WHERE id LIKE '%-moved'
+             OR id IN ('create-after', 'merge-after')
+             OR tenant_id <> 'tenant-a'",
+    )
+    .expect("count trigger-rewritten node identities failed")
+    .unwrap_or_default();
+    assert_eq!(unchanged_rows, 8);
+    assert_eq!(moved_rows, 0);
 }
 
 #[pg_test]

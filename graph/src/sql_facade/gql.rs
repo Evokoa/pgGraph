@@ -905,7 +905,7 @@ fn insert_mapped_node(
              FROM jsonb_populate_record(NULL::{}, $1::jsonb) AS rec
              RETURNING *
          )
-         SELECT to_jsonb(inserted.*), {}
+         SELECT {}
          FROM inserted",
         table_name.as_sql(),
         insert_shape.columns.join(", "),
@@ -913,7 +913,7 @@ fn insert_mapped_node(
         table_name.as_sql(),
         pk_expr
     );
-    pgrx::Spi::connect_mut(|client| {
+    let returned_node_id = pgrx::Spi::connect_mut(|client| {
         let rows = client
             .update(&query, None, &[pgrx::JsonB(values).into()])
             .map_err(|err| {
@@ -924,34 +924,31 @@ fn insert_mapped_node(
                 ))
             })?;
         let row = rows.first();
-        let row_json = row
-            .get::<pgrx::JsonB>(1)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!("GQL CREATE row read failed: {err}"))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal("GQL CREATE returned no row JSON".to_string())
-            })?;
-        let node_id = row
-            .get::<String>(2)
+        row.get::<String>(1)
             .map_err(|err| {
                 safety::GraphError::Internal(format!("GQL CREATE primary key read failed: {err}"))
             })?
             .ok_or_else(|| {
                 safety::GraphError::Internal("GQL CREATE returned no primary key".to_string())
-            })?;
-        let tenant = table.tenant_column.as_deref().and_then(|column| {
-            row_json
-                .0
-                .get(column)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        });
-        Ok(CreatedNode {
-            node_id,
-            tenant,
-            row: row_json.0,
-        })
+            })
+    })?;
+    let final_row = read_node_after_statement_triggers(
+        table,
+        table_name.as_sql(),
+        &returned_node_id,
+        "GQL CREATE",
+    )?;
+    recheck_locked_row_tenant(
+        &final_row.row,
+        table.tenant_column.as_deref(),
+        tenant_scope,
+        "GQL CREATE",
+        &final_row.node_id,
+    )?;
+    Ok(CreatedNode {
+        tenant: row_tenant(&final_row.row, table.tenant_column.as_deref()),
+        node_id: final_row.node_id,
+        row: final_row.row,
     })
 }
 
@@ -973,12 +970,12 @@ fn insert_mapped_relationship(
              FROM jsonb_populate_record(NULL::{table_name}, $1::jsonb) AS rec
              RETURNING *
          )
-         SELECT to_jsonb(inserted.*), {source_key_expr}
+         SELECT {source_key_expr}
          FROM inserted",
         insert_shape.columns.join(", "),
         insert_shape.selectors.join(", "),
     );
-    pgrx::Spi::connect_mut(|client| {
+    let source_key = pgrx::Spi::connect_mut(|client| {
         let rows = client
             .update(&query, None, &[pgrx::JsonB(values).into()])
             .map_err(|err| {
@@ -987,20 +984,7 @@ fn insert_mapped_relationship(
                 ))
             })?;
         let row = rows.first();
-        let row_json = row
-            .get::<pgrx::JsonB>(1)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!(
-                    "GQL relationship CREATE row read failed: {err}"
-                ))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal(
-                    "GQL relationship CREATE returned no row JSON".to_string(),
-                )
-            })?;
-        let source_key = row
-            .get::<String>(2)
+        row.get::<String>(1)
             .map_err(|err| {
                 safety::GraphError::Internal(format!(
                     "GQL relationship CREATE source-key read failed: {err}"
@@ -1010,11 +994,118 @@ fn insert_mapped_relationship(
                 safety::GraphError::Internal(
                     "GQL relationship CREATE returned a NULL source key".to_string(),
                 )
+            })
+    })?;
+
+    let row_source_key_expr = create_relationship_source_key_predicate(plan, "edge_row");
+    let row_source_id_expr = format!("edge_row.{}::text", quote_ident(&plan.edge_source_column));
+    let row_target_id_expr = format!("edge_row.{}::text", quote_ident(&plan.edge_target_column));
+    let row_label_expr = plan
+        .label_column
+        .as_ref()
+        .map(|column| format!("edge_row.{}::text", quote_ident(column)))
+        .unwrap_or_else(|| "NULL::text".to_string());
+    let verify_query = format!(
+        "SELECT to_jsonb(edge_row.*), {row_source_id_expr},
+                {row_target_id_expr}, {row_label_expr}
+           FROM {table_name} AS edge_row
+          WHERE {row_source_key_expr} = $1"
+    );
+    pgrx::Spi::connect(|client| {
+        let rows = client
+            .select(&verify_query, None, &[source_key.as_str().into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL relationship CREATE post-trigger source-row verification failed for {table_name}: {err}"
+                ),
             })?;
+        if rows.len() != 1 {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL relationship CREATE was rejected because PostgreSQL statement triggers removed or changed registered relationship source identity `{source_key}`; the source write was rolled back"
+                ),
+            });
+        }
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL relationship CREATE post-trigger row read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "GQL relationship CREATE post-trigger verification returned no row JSON"
+                        .to_string(),
+                )
+            })?;
+        let returned_source_id = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL relationship CREATE source endpoint read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| safety::GraphError::GqlExecution {
+                reason: "GQL relationship CREATE returned a NULL registered source endpoint"
+                    .to_string(),
+            })?;
+        let returned_target_id = row
+            .get::<String>(3)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL relationship CREATE target endpoint read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| safety::GraphError::GqlExecution {
+                reason: "GQL relationship CREATE returned a NULL registered target endpoint"
+                    .to_string(),
+            })?;
+        ensure_unchanged_relationship_identity(
+            plan,
+            source_id,
+            target_id,
+            &returned_source_id,
+            &returned_target_id,
+            row.get::<String>(4).map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "GQL relationship CREATE dynamic label read failed: {err}"
+                ))
+            })?,
+        )?;
         Ok(CreatedRelationship {
             row: row_json.0,
             source_key,
         })
+    })
+}
+
+fn ensure_unchanged_relationship_identity(
+    plan: &crate::query::physical_plan::PhysicalCreateRelationship,
+    expected_source_id: &str,
+    expected_target_id: &str,
+    returned_source_id: &str,
+    returned_target_id: &str,
+    returned_label: Option<String>,
+) -> safety::GraphResult<()> {
+    let endpoints_match =
+        returned_source_id == expected_source_id && returned_target_id == expected_target_id;
+    let label_matches =
+        plan.label_column.is_none() || returned_label.as_deref() == Some(&plan.rel_type);
+    if endpoints_match && label_matches {
+        return Ok(());
+    }
+    Err(safety::GraphError::GqlExecution {
+        reason: format!(
+            "GQL relationship CREATE was rejected because a PostgreSQL trigger changed registered graph identity (expected {}-[{}]->{}, returned {}-[{}]->{}); the source write was rolled back",
+            expected_source_id,
+            plan.rel_type,
+            expected_target_id,
+            returned_source_id,
+            returned_label.as_deref().unwrap_or(&plan.rel_type),
+            returned_target_id
+        ),
     })
 }
 
@@ -1063,7 +1154,7 @@ fn merge_mapped_node(
         identity_values.clone(),
         tenant_scope,
     )? {
-        return apply_merge_match_branch(plan, locked, params);
+        return apply_merge_match_branch(plan, locked, params, tenant_scope);
     }
 
     let insert_values =
@@ -1088,13 +1179,14 @@ fn merge_mapped_node(
     .ok_or_else(|| safety::GraphError::GqlExecution {
         reason: format!("GQL MERGE could not find or insert `{}` node", plan.label),
     })?;
-    apply_merge_match_branch(plan, locked, params)
+    apply_merge_match_branch(plan, locked, params, tenant_scope)
 }
 
 fn apply_merge_match_branch(
     plan: &crate::query::physical_plan::PhysicalMergeNode,
     locked: MergedNode,
     params: &crate::query::value::QueryParams,
+    tenant_scope: Option<&str>,
 ) -> safety::GraphResult<MergedNode> {
     if let Some(on_match) = &plan.on_match {
         let set_plan = crate::query::physical_plan::PhysicalSetProperty {
@@ -1106,7 +1198,7 @@ fn apply_merge_match_branch(
             value: on_match.value.clone(),
             returns: Vec::new(),
         };
-        let updated = update_mapped_property(&set_plan, &locked.node_id, params, None)?;
+        let updated = update_mapped_property(&set_plan, &locked.node_id, params, tenant_scope)?;
         return Ok(MergedNode {
             node_id: updated.node_id,
             tenant: locked.tenant,
@@ -1139,7 +1231,7 @@ fn try_insert_merge_node(
              SELECT {}
              FROM jsonb_populate_record(NULL::{}, $1::jsonb) AS rec
              ON CONFLICT ({}) DO NOTHING
-             RETURNING to_jsonb(src.*), {}
+             RETURNING {}
          )
          SELECT * FROM inserted",
         table_sql,
@@ -1149,7 +1241,7 @@ fn try_insert_merge_node(
         conflict_columns,
         pk_expr
     );
-    pgrx::Spi::connect_mut(|client| {
+    let returned_node_id = pgrx::Spi::connect_mut(|client| {
         let rows = client
             .update(&query, None, &[pgrx::JsonB(values).into()])
             .map_err(|err| safety::GraphError::GqlExecution {
@@ -1159,16 +1251,8 @@ fn try_insert_merge_node(
             return Ok(None);
         }
         let row = rows.first();
-        let row_json = row
-            .get::<pgrx::JsonB>(1)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!("GQL MERGE inserted row read failed: {err}"))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal("GQL MERGE insert returned no row JSON".to_string())
-            })?;
         let node_id = row
-            .get::<String>(2)
+            .get::<String>(1)
             .map_err(|err| {
                 safety::GraphError::Internal(format!(
                     "GQL MERGE inserted primary key read failed: {err}"
@@ -1177,14 +1261,26 @@ fn try_insert_merge_node(
             .ok_or_else(|| {
                 safety::GraphError::Internal("GQL MERGE insert returned no primary key".to_string())
             })?;
-        let tenant = row_tenant(&row_json.0, table.tenant_column.as_deref());
-        Ok(Some(MergedNode {
-            node_id,
-            tenant,
-            row: row_json.0,
-            created: true,
-        }))
-    })
+        Ok(Some(node_id))
+    })?;
+    let Some(returned_node_id) = returned_node_id else {
+        return Ok(None);
+    };
+    let final_row =
+        read_node_after_statement_triggers(table, table_sql, &returned_node_id, "GQL MERGE")?;
+    recheck_locked_row_tenant(
+        &final_row.row,
+        table.tenant_column.as_deref(),
+        tenant_scope,
+        "GQL MERGE",
+        &final_row.node_id,
+    )?;
+    Ok(Some(MergedNode {
+        tenant: row_tenant(&final_row.row, table.tenant_column.as_deref()),
+        node_id: final_row.node_id,
+        row: final_row.row,
+        created: true,
+    }))
 }
 
 fn try_lock_merge_node(
@@ -1272,6 +1368,86 @@ fn row_tenant(row: &serde_json::Value, tenant_column: Option<&str>) -> Option<St
     })
 }
 
+fn read_node_after_statement_triggers(
+    table: &crate::builder::RegisteredTable,
+    table_sql: &str,
+    returned_node_id: &str,
+    operation: &str,
+) -> safety::GraphResult<LockedNodeRow> {
+    let pk_expr = primary_key_expr("src", &table.id_columns);
+    let query = format!(
+        "SELECT to_jsonb(src.*), {pk_expr}
+           FROM {table_sql} AS src
+          WHERE {pk_expr} = $1"
+    );
+    pgrx::Spi::connect(|client| {
+        let rows = client
+            .select(&query, None, &[returned_node_id.into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "{operation} post-trigger source-row verification failed for {table_sql}: {err}"
+                ),
+            })?;
+        if rows.len() != 1 {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!(
+                    "{operation} was rejected because PostgreSQL statement triggers removed or changed registered node identity `{returned_node_id}`; the source write was rolled back"
+                ),
+            });
+        }
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "{operation} post-trigger row read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(format!(
+                    "{operation} post-trigger verification returned no row JSON"
+                ))
+            })?;
+        let node_id = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "{operation} post-trigger primary key read failed: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(format!(
+                    "{operation} post-trigger verification returned no primary key"
+                ))
+            })?;
+        Ok(LockedNodeRow {
+            node_id,
+            row: row_json.0,
+        })
+    })
+}
+
+fn ensure_unchanged_tenant_identity(
+    operation: &str,
+    tenant_column: Option<&str>,
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> safety::GraphResult<()> {
+    let Some(tenant_column) = tenant_column else {
+        return Ok(());
+    };
+    let before_tenant = row_tenant(before, Some(tenant_column));
+    let after_tenant = row_tenant(after, Some(tenant_column));
+    if before_tenant == after_tenant {
+        return Ok(());
+    }
+    Err(safety::GraphError::GqlExecution {
+        reason: format!(
+            "{operation} was rejected because a PostgreSQL trigger changed registered tenant identity; the source write was rolled back"
+        ),
+    })
+}
+
 fn validate_merge_identity(
     values: &serde_json::Value,
     id_columns: &crate::builder::PrimaryKeySpec,
@@ -1301,7 +1477,7 @@ fn lock_and_recheck_node_write(
     params: &crate::query::value::QueryParams,
     tenant_scope: Option<&str>,
     operation: &str,
-) -> safety::GraphResult<()> {
+) -> safety::GraphResult<LockedNodeRow> {
     let locked = lock_node_coordinate(table_oid, node_id, tenant_scope, operation)?;
     let scan = crate::query::physical_plan::PhysicalNodeScan {
         optional: false,
@@ -1324,12 +1500,12 @@ fn lock_and_recheck_node_write(
         },
         optional_null: false,
     };
-    let hydrated = [((table_oid, locked.node_id), locked.row)]
+    let hydrated = [((table_oid, locked.node_id.clone()), locked.row.clone())]
         .into_iter()
         .collect();
     let matches = crate::query::value::filter_node_rows(vec![row], &scan, &hydrated, params)?;
     if matches.len() == 1 {
-        return Ok(());
+        return Ok(locked);
     }
     Err(safety::GraphError::GqlExecution {
         reason: format!(
@@ -1480,6 +1656,21 @@ fn recheck_locked_row_tenant(
     })
 }
 
+fn ensure_unchanged_node_identity(
+    operation: &str,
+    expected_node_id: &str,
+    returned_node_id: &str,
+) -> safety::GraphResult<()> {
+    if expected_node_id == returned_node_id {
+        return Ok(());
+    }
+    Err(safety::GraphError::GqlExecution {
+        reason: format!(
+            "{operation} was rejected because a PostgreSQL trigger changed registered node identity from `{expected_node_id}` to `{returned_node_id}`; the source write was rolled back"
+        ),
+    })
+}
+
 fn update_mapped_property(
     plan: &crate::query::physical_plan::PhysicalSetProperty,
     node_id: &str,
@@ -1497,7 +1688,7 @@ fn update_mapped_property(
             ))
         })?;
     let table_name = sql_table_name_from_oid(table.table_oid)?;
-    lock_and_recheck_node_write(
+    let locked = lock_and_recheck_node_write(
         plan.table_oid,
         &plan.label,
         &plan.predicate,
@@ -1525,7 +1716,7 @@ fn update_mapped_property(
         pk_expr,
         pk_expr
     );
-    pgrx::Spi::connect_mut(|client| {
+    let returned = pgrx::Spi::connect_mut(|client| {
         let rows = client
             .update(&query, None, &[node_id.into(), pgrx::JsonB(values).into()])
             .map_err(|err| safety::GraphError::GqlExecution {
@@ -1549,7 +1740,7 @@ fn update_mapped_property(
             .get::<pgrx::JsonB>(1)
             .map_err(|err| safety::GraphError::Internal(format!("GQL SET row read failed: {err}")))?
             .ok_or_else(|| safety::GraphError::Internal("GQL SET returned no row JSON".into()))?;
-        let node_id = row
+        let returned_node_id = row
             .get::<String>(2)
             .map_err(|err| {
                 safety::GraphError::Internal(format!("GQL SET primary key read failed: {err}"))
@@ -1557,10 +1748,42 @@ fn update_mapped_property(
             .ok_or_else(|| {
                 safety::GraphError::Internal("GQL SET returned no primary key".to_string())
             })?;
-        Ok(UpdatedNode {
+        ensure_unchanged_node_identity("GQL SET", node_id, &returned_node_id)?;
+        recheck_locked_row_tenant(
+            &row_json.0,
+            table.tenant_column.as_deref(),
+            tenant_scope,
+            "GQL SET",
             node_id,
+        )?;
+        Ok(UpdatedNode {
+            node_id: returned_node_id,
             row: row_json.0,
         })
+    })?;
+    let final_row = read_node_after_statement_triggers(
+        table,
+        table_name.as_sql(),
+        &returned.node_id,
+        "GQL SET",
+    )?;
+    ensure_unchanged_node_identity("GQL SET", node_id, &final_row.node_id)?;
+    ensure_unchanged_tenant_identity(
+        "GQL SET",
+        table.tenant_column.as_deref(),
+        &locked.row,
+        &final_row.row,
+    )?;
+    recheck_locked_row_tenant(
+        &final_row.row,
+        table.tenant_column.as_deref(),
+        tenant_scope,
+        "GQL SET",
+        node_id,
+    )?;
+    Ok(UpdatedNode {
+        node_id: final_row.node_id,
+        row: final_row.row,
     })
 }
 
@@ -1581,7 +1804,7 @@ fn remove_mapped_property(
             ))
         })?;
     let table_name = sql_table_name_from_oid(table.table_oid)?;
-    lock_and_recheck_node_write(
+    let locked = lock_and_recheck_node_write(
         plan.table_oid,
         &plan.label,
         &plan.predicate,
@@ -1605,7 +1828,7 @@ fn remove_mapped_property(
         pk_expr,
         pk_expr
     );
-    pgrx::Spi::connect_mut(|client| {
+    let returned = pgrx::Spi::connect_mut(|client| {
         let rows = client
             .update(&query, None, &[node_id.into()])
             .map_err(|err| safety::GraphError::GqlExecution {
@@ -1633,7 +1856,7 @@ fn remove_mapped_property(
             .ok_or_else(|| {
                 safety::GraphError::Internal("GQL REMOVE returned no row JSON".into())
             })?;
-        let node_id = row
+        let returned_node_id = row
             .get::<String>(2)
             .map_err(|err| {
                 safety::GraphError::Internal(format!("GQL REMOVE primary key read failed: {err}"))
@@ -1641,10 +1864,42 @@ fn remove_mapped_property(
             .ok_or_else(|| {
                 safety::GraphError::Internal("GQL REMOVE returned no primary key".to_string())
             })?;
-        Ok(UpdatedNode {
+        ensure_unchanged_node_identity("GQL REMOVE", node_id, &returned_node_id)?;
+        recheck_locked_row_tenant(
+            &row_json.0,
+            table.tenant_column.as_deref(),
+            tenant_scope,
+            "GQL REMOVE",
             node_id,
+        )?;
+        Ok(UpdatedNode {
+            node_id: returned_node_id,
             row: row_json.0,
         })
+    })?;
+    let final_row = read_node_after_statement_triggers(
+        table,
+        table_name.as_sql(),
+        &returned.node_id,
+        "GQL REMOVE",
+    )?;
+    ensure_unchanged_node_identity("GQL REMOVE", node_id, &final_row.node_id)?;
+    ensure_unchanged_tenant_identity(
+        "GQL REMOVE",
+        table.tenant_column.as_deref(),
+        &locked.row,
+        &final_row.row,
+    )?;
+    recheck_locked_row_tenant(
+        &final_row.row,
+        table.tenant_column.as_deref(),
+        tenant_scope,
+        "GQL REMOVE",
+        node_id,
+    )?;
+    Ok(UpdatedNode {
+        node_id: final_row.node_id,
+        row: final_row.row,
     })
 }
 

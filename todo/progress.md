@@ -127,6 +127,17 @@ for source-inode mutability, lifecycle docs, 32-bit offset conversion, and
 status accounting are fixed. PostgreSQL-process sanitizer and PG14-16/18 matrix
 evidence remain pending.
 
+2026-07-14 R1 trigger identity — Node and relationship writes now re-read their
+source rows after statement triggers. Relationship `CREATE` rejects rewritten
+source keys, endpoints, or dynamic labels; node `CREATE` and `MERGE` insert
+reject moved or removed returned identities; `SET`, `REMOVE`, and `MERGE ON
+MATCH` reject rewritten primary-key or tenant identity. PostgreSQL 17 covers
+`BEFORE` and side-effecting `AFTER` triggers plus authoritative ordinary
+property rewrites. QA-01A passes formatting, Clippy, rustdoc, release-contract
+and documentation drift, secret scanning, 718 Rust tests (1 ignored), and 977
+PostgreSQL 17 pgrx tests (1 ignored). An independent raw-diff review found no
+remaining block or request-change findings.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

@@ -1846,6 +1846,11 @@ on `csr_readonly`. The same transaction can read created nodes through
 node-only `MATCH`, relationship traversal, multi-pattern joins, wildcard path
 reads, and later relationship `CREATE` statements through backend-local
 temporary graph node indexes.
+After all statement triggers finish, pgGraph re-reads the inserted row using
+the primary key returned by PostgreSQL. If a trigger side effect removes that
+row or moves it to another primary key, pgGraph raises SQLSTATE `22000` with
+diagnostic `PG017` and rolls back the insert. Ordinary property changes made by
+triggers are returned from the final source row.
 
 `MATCH (a:label {...}), (b:label {...}) CREATE (a)-[r:type {properties}]->(b)
 RETURN ...` is supported for a single directed relationship backed by a
@@ -1859,7 +1864,12 @@ columns and a registered dynamic label column are filled from the graph pattern
 and cannot be supplied as user properties. For dynamic relationship
 label-column mappings, the GQL relationship type is written into the registered
 label column and must already exist in the built graph's dynamic label
-registry.
+registry. After all statement triggers finish, pgGraph re-reads the edge row by
+its registered source key. If a trigger side effect removes or changes that key,
+either registered endpoint, or the registered dynamic label, pgGraph raises
+SQLSTATE `22000` with diagnostic `PG017` and rolls back the source insert rather
+than recording graph coordinates for different topology. Ordinary property
+changes are returned from the final source row.
 
 `MATCH (n:label {...}) SET n.property = value RETURN ...` is supported for a
 single matched node and one registered non-key, non-tenant property column. It requires a
@@ -1868,6 +1878,12 @@ refreshes the backend's typed filter index value when the property is also a
 registered filter column. PostgreSQL rejects type mismatches according to the
 source column type. Before updating, pgGraph locks the matched source row and
 re-checks the matched GQL predicate against the current PostgreSQL row.
+If a trigger changes the registered primary key or moves the returned row out
+of the active tenant scope, pgGraph raises SQLSTATE `22000` with diagnostic
+`PG017` and rolls back the update. Trigger changes to ordinary property values
+are returned as the authoritative PostgreSQL result. A registered tenant value
+is projection identity and cannot change during this write even when tenant
+scope enforcement is disabled; such a change is also rejected and rolled back.
 
 `MATCH (n:label {...}) REMOVE n.property RETURN ...` is supported for a single
 matched node and one registered non-key, non-tenant property. It requires a
@@ -1877,6 +1893,9 @@ scalar columns to SQL `NULL`. For registered dotted JSONB property paths,
 removes are idempotent. Removing labels is rejected because labels map to
 registered source tables. Before updating, pgGraph locks the matched source row
 and re-checks the matched GQL predicate against the current PostgreSQL row.
+Primary-key changes, registered tenant-identity changes, and moves outside the
+active tenant scope made by a trigger are rejected and rolled back under the
+same identity rule as `SET`.
 
 `MATCH (a:label)-[r:type]->(b:label) DELETE r RETURN ...` is supported for a
 single matched relationship backed by a registered edge row table. Endpoint
@@ -1913,7 +1932,12 @@ when `ON MATCH SET` can update them; new rows are inserted with PostgreSQL
 `ON CREATE` expressions are evaluated only for inserted rows, and `ON MATCH`
 expressions are evaluated only for matched rows. `MERGE` requires source-table
 `SELECT` and `INSERT`; `UPDATE` is required only for statements that include
-`ON MATCH SET`.
+`ON MATCH SET`. The matched update retains the active tenant scope and rejects
+trigger changes to the registered primary key or registered tenant identity,
+regardless of whether tenant enforcement is active, before the result is exposed
+or any local projection index is updated. The insert branch
+also re-reads the returned primary key after statement triggers and rolls back
+if a trigger side effect moved or removed the row.
 
 ### `graph.gql_explain()`
 
