@@ -250,6 +250,11 @@ missing node, relationship, and path projections. Relationship properties,
 relationship/path property aggregate inputs, and numeric aggregates over
 relationship/path values remain outside the current multi-pattern subset.
 
+Boolean predicate binding accepts at most 128 nested `AND`, `OR`, or `NOT`
+levels, while inline property maps accept at most 512 entries. Queries beyond
+either limit fail with a syntax error before execution, keeping PostgreSQL
+backend stack and property-map work bounded even under sanitizer builds.
+
 Scalar properties are returned as their JSON representation: strings,
 numbers, booleans, arrays, objects, or JSON `null`. Unmatched node-only
 `OPTIONAL MATCH` rows project JSON `null` for the node and its properties.

@@ -5430,9 +5430,21 @@ fn binder_rejects_duplicate_return_names() {
 }
 
 #[test]
+fn binder_accepts_boolean_predicates_at_depth_limit() {
+    let mut query = "MATCH (u:users)-[:works_at]->(c:companies) WHERE ".to_string();
+    for _ in 0..128 {
+        query.push_str("u.id = 'u1' AND ");
+    }
+    query.push_str("u.id = 'u1' RETURN u");
+    let ast = parse(&query).unwrap();
+
+    bind(&ast, &fake_catalog()).expect("predicate at the documented depth should bind");
+}
+
+#[test]
 fn binder_rejects_deep_boolean_predicates() {
     let mut query = "MATCH (u:users)-[:works_at]->(c:companies) WHERE ".to_string();
-    for _ in 0..513 {
+    for _ in 0..129 {
         query.push_str("u.id = 'u1' AND ");
     }
     query.push_str("u.id = 'u1' RETURN u");
@@ -5441,6 +5453,33 @@ fn binder_rejects_deep_boolean_predicates() {
     let err = bind(&ast, &fake_catalog()).unwrap_err();
 
     assert!(matches!(err.kind, GqlErrorKind::Syntax { .. }));
+}
+
+#[test]
+fn binder_rejects_deep_join_and_wildcard_predicates() {
+    for (prefix, predicate, suffix) in [
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WHERE ",
+            "u.id = 'u1' AND ",
+            "u.id = 'u1' RETURN u",
+        ),
+        (
+            "MATCH p=()-[]->(e) WHERE ",
+            "e.name = 'Acme' AND ",
+            "e.name = 'Acme' RETURN p",
+        ),
+    ] {
+        let mut query = prefix.to_string();
+        for _ in 0..129 {
+            query.push_str(predicate);
+        }
+        query.push_str(suffix);
+        let ast = crate::gql::parse_statement(&query).unwrap();
+
+        let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+        assert!(matches!(err.kind, GqlErrorKind::Syntax { .. }), "{query}");
+    }
 }
 
 #[test]

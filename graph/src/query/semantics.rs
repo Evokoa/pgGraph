@@ -19,7 +19,9 @@ use super::logical_plan::{
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
-const MAX_BOUND_PREDICATE_DEPTH: usize = 512;
+// Keep recursive binding comfortably inside PostgreSQL backend and sanitizer
+// thread stacks. Inline property-map entries are bounded separately below.
+const MAX_BOUND_PREDICATE_DEPTH: usize = 128;
 const MAX_BOUND_PREDICATE_COUNT: usize = 512;
 const MAX_BOUND_HOPS: u32 = 64;
 

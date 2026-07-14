@@ -92,5 +92,23 @@
     "date": "2026-07-14",
     "new_schema_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0",
     "previous_schema_sha256": "f350af92d3266e94543c956ca0db88df8b9edb5fdb7a4cf97890444f8ab6b150"
+  },
+  {
+    "acknowledgement": "KI-020-predicate-stack-bound",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-07-14",
+    "new_schema_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0",
+    "previous_schema_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0"
+  },
+  {
+    "acknowledgement": "KI-020-predicate-bound-doc-correction",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-07-14",
+    "new_schema_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0",
+    "previous_schema_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0"
   }
 ]
