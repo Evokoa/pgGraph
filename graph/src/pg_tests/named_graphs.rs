@@ -219,6 +219,103 @@ fn graph_catalog_mutation_requires_admin_privileges() {
 }
 
 #[pg_test]
+fn temporary_catalog_shadow_cannot_bypass_graph_admin_check() {
+    Spi::run("DROP ROLE IF EXISTS graph_temp_catalog_spoof")
+        .expect("drop temp-catalog spoof role failed");
+    Spi::run("CREATE ROLE graph_temp_catalog_spoof")
+        .expect("create temp-catalog spoof role failed");
+    Spi::run("GRANT USAGE ON SCHEMA graph, public TO graph_temp_catalog_spoof")
+        .expect("grant temp-catalog spoof schema usage failed");
+    create_error_sqlstate_helper();
+    create_error_message_helper();
+
+    Spi::run("SET ROLE graph_temp_catalog_spoof").expect("set temp-catalog spoof role failed");
+    Spi::run("CREATE TEMP TABLE pg_roles (oid oid, rolsuper boolean)")
+        .expect("create temporary pg_roles shadow failed");
+    Spi::run(
+        "INSERT INTO pg_temp.pg_roles (oid, rolsuper)
+         SELECT oid, true
+         FROM pg_catalog.pg_roles
+         WHERE rolname = current_user",
+    )
+    .expect("insert temporary pg_roles shadow row failed");
+    let create_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.create_graph('temp_catalog_spoof_denied')",
+    );
+    let create_error = sql_error_message_for_prepared_helper(
+        "SELECT * FROM graph.create_graph('temp_catalog_spoof_denied')",
+    );
+    Spi::run("RESET ROLE").expect("reset temp-catalog spoof role failed");
+
+    assert_eq!(create_sqlstate, Some("42501".to_string()));
+    assert_eq!(
+        create_error.as_deref(),
+        Some("Permission denied for table graph schema admin")
+    );
+}
+
+#[pg_test]
+fn persistent_function_and_operator_shadows_cannot_bypass_graph_admin_check() {
+    Spi::run("DROP SCHEMA IF EXISTS graph_persistent_catalog_shadow CASCADE")
+        .expect("drop persistent-catalog shadow schema failed");
+    Spi::run("DROP ROLE IF EXISTS graph_persistent_catalog_spoof")
+        .expect("drop persistent-catalog spoof role failed");
+    Spi::run("CREATE ROLE graph_persistent_catalog_spoof")
+        .expect("create persistent-catalog spoof role failed");
+    Spi::run(
+        "CREATE SCHEMA graph_persistent_catalog_shadow
+         AUTHORIZATION graph_persistent_catalog_spoof",
+    )
+    .expect("create persistent-catalog shadow schema failed");
+    Spi::run("GRANT USAGE ON SCHEMA graph, public TO graph_persistent_catalog_spoof")
+        .expect("grant persistent-catalog spoof schema usage failed");
+    create_error_sqlstate_helper();
+    create_error_message_helper();
+
+    Spi::run("SET ROLE graph_persistent_catalog_spoof")
+        .expect("set persistent-catalog spoof role failed");
+    Spi::run(
+        "CREATE FUNCTION graph_persistent_catalog_shadow.has_schema_privilege(oid, text, text)
+         RETURNS boolean
+         LANGUAGE sql
+         IMMUTABLE
+         AS 'SELECT true'",
+    )
+    .expect("create has_schema_privilege shadow failed");
+    Spi::run(
+        "CREATE FUNCTION graph_persistent_catalog_shadow.oid_equals(oid, oid)
+         RETURNS boolean
+         LANGUAGE sql
+         IMMUTABLE
+         AS 'SELECT true'",
+    )
+    .expect("create oid equality shadow failed");
+    Spi::run(
+        "CREATE OPERATOR graph_persistent_catalog_shadow.= (
+            LEFTARG = oid,
+            RIGHTARG = oid,
+            FUNCTION = graph_persistent_catalog_shadow.oid_equals
+        )",
+    )
+    .expect("create oid equality operator shadow failed");
+    Spi::run("SET search_path = graph_persistent_catalog_shadow, pg_catalog")
+        .expect("set persistent hostile search path failed");
+    let create_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.create_graph('persistent_catalog_spoof_denied')",
+    );
+    let create_error = sql_error_message_for_prepared_helper(
+        "SELECT * FROM graph.create_graph('persistent_catalog_spoof_denied')",
+    );
+    Spi::run("RESET ROLE").expect("reset persistent-catalog spoof role failed");
+
+    assert_eq!(create_sqlstate, Some("42501".to_string()));
+    assert_eq!(
+        create_error.as_deref(),
+        Some("Permission denied for table graph schema admin")
+    );
+}
+
+#[pg_test]
 fn unprivileged_roles_cannot_read_named_graph_internal_catalogs() {
     create_error_sqlstate_helper();
     Spi::run("DROP ROLE IF EXISTS graph_acl_probe").expect("drop ACL probe role failed");
@@ -2061,4 +2158,12 @@ fn sqlstate_for_prepared_helper(statement: &str) -> Option<String> {
         super::sql_literal(statement)
     ))
     .expect("prepared SQLSTATE helper failed")
+}
+
+fn sql_error_message_for_prepared_helper(statement: &str) -> Option<String> {
+    Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sql_error_message({})",
+        super::sql_literal(statement)
+    ))
+    .expect("prepared SQL error message helper failed")
 }

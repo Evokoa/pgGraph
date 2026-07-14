@@ -1255,14 +1255,22 @@ fn has_graph_privilege_for_role(
     Spi::connect(|client| {
         let rows = client.select(
             "SELECT
-                COALESCE((SELECT rolsuper FROM pg_roles WHERE oid = $3::oid), false)
-                OR has_schema_privilege($3::oid, 'graph', 'CREATE')
+                COALESCE((
+                    SELECT rolsuper
+                    FROM pg_catalog.pg_roles
+                    WHERE oid OPERATOR(pg_catalog.=) $3::pg_catalog.oid
+                ), false)
+                OR pg_catalog.has_schema_privilege(
+                    $3::pg_catalog.oid,
+                    'graph',
+                    'CREATE'
+                )
                 OR EXISTS (
                     SELECT 1
                       FROM graph._graph_grants
-                     WHERE graph_id = $1::uuid
-                       AND grantee = $3::oid
-                       AND privilege = ANY($2::text[])
+                     WHERE graph_id OPERATOR(pg_catalog.=) $1::pg_catalog.uuid
+                       AND grantee OPERATOR(pg_catalog.=) $3::pg_catalog.oid
+                       AND privilege OPERATOR(pg_catalog.=) ANY($2::pg_catalog.text[])
                 )",
             None,
             &[
@@ -1476,11 +1484,10 @@ fn current_user_oid() -> safety::GraphResult<pgrx::pg_sys::Oid> {
 }
 
 pub(crate) fn current_role_oid() -> safety::GraphResult<pgrx::pg_sys::Oid> {
-    Spi::get_one::<pgrx::pg_sys::Oid>(
-        "SELECT COALESCE(NULLIF(NULLIF(current_setting('role', true), ''), 'none'), current_user)::regrole::oid",
-    )
-    .map_err(|err| graph_catalog_error("read current role oid", err))?
-    .ok_or_else(|| safety::GraphError::Internal("current role oid was null".to_string()))
+    // SAFETY: This runs inside a PostgreSQL backend. GetOuterUserId returns the
+    // caller identity outside any SECURITY DEFINER switch and does not retain
+    // or mutate Rust-managed memory.
+    Ok(unsafe { pgrx::pg_sys::GetOuterUserId() })
 }
 
 fn normalize_quota_scope_key(

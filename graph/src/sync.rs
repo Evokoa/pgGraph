@@ -40,8 +40,8 @@ pub fn get_qualified_table(oid: u32) -> GraphResult<QualifiedTable> {
         let result = client
             .select(
                 "SELECT n.nspname::text, c.relname::text
-                 FROM pg_class c
-                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 FROM pg_catalog.pg_class c
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.oid = $1::oid",
                 None,
                 &[table_oid.into()],
@@ -327,7 +327,7 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 
 CREATE OR REPLACE FUNCTION graph.{trigger_fn_name}_truncate()
 RETURNS TRIGGER AS $$
@@ -339,7 +339,7 @@ BEGIN
         ('T', {table_oid}, {table_name_lit}, txid_current(), true);
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 
 -- Attach triggers
 DROP TRIGGER IF EXISTS graph_sync_insert ON {table_sql};
@@ -828,6 +828,12 @@ mod tests {
                 .count(),
             2,
             "row and truncate trigger functions should share the source-writer lock"
+        );
+        assert_eq!(
+            sql.matches("SECURITY DEFINER SET search_path = pg_catalog, pg_temp")
+                .count(),
+            2,
+            "row and truncate trigger functions must pin a minimal search path"
         );
     }
 }

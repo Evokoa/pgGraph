@@ -16,7 +16,7 @@ CREATE SCHEMA IF NOT EXISTS graph; /* graph::graph */
 -- graph::sql_facade::admin::_max_sync_log_id_for_current_role
 CREATE  FUNCTION graph."_max_sync_log_id_for_current_role"() RETURNS bigint /* i64 */
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'max_sync_log_id_for_current_role_wrapper';
 /* </end connected objects> */
@@ -45,7 +45,7 @@ CREATE  FUNCTION graph."jobs"(
 	"last_sqlstate" TEXT  /* Option < String > */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'jobs_wrapper';
 /* </end connected objects> */
@@ -99,7 +99,7 @@ CREATE  FUNCTION graph."add_table_to_graph"(
 	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS void
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'add_table_to_graph_wrapper';
 /* </end connected objects> */
@@ -130,7 +130,7 @@ CREATE  FUNCTION graph."loaded_graphs"() RETURNS TABLE (
 	"last_access_unix_micros" bigint  /* i64 */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'loaded_graphs_wrapper';
 /* </end connected objects> */
@@ -196,7 +196,7 @@ CREATE  FUNCTION graph."registered_tables"() RETURNS TABLE (
 	"tenant_column" TEXT  /* Option < String > */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'registered_tables_wrapper';
 /* </end connected objects> */
@@ -287,7 +287,7 @@ CREATE  FUNCTION graph."sync_policy_status"(
 	"last_error" TEXT  /* Option < String > */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'sync_policy_status_wrapper';
 /* </end connected objects> */
@@ -314,7 +314,7 @@ CREATE  FUNCTION graph."connected_components"() RETURNS TABLE (
 	"component_size" INT  /* i32 */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'connected_components_wrapper';
 /* </end connected objects> */
@@ -350,7 +350,7 @@ CREATE  FUNCTION graph."graph_runtime_status"() RETURNS TABLE (
 	"last_access_unix_micros" bigint  /* Option < i64 > */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'graph_runtime_status_wrapper';
 /* </end connected objects> */
@@ -463,7 +463,7 @@ CREATE  FUNCTION graph."build_graph"(
 	"projection_mode" TEXT  /* String */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'build_graph_wrapper';
 /* </end connected objects> */
@@ -498,7 +498,7 @@ CREATE  FUNCTION graph."select_graph"(
 	"loaded" bool  /* bool */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'select_graph_wrapper';
 /* </end connected objects> */
@@ -517,7 +517,7 @@ CREATE  FUNCTION graph."graph_quotas"() RETURNS TABLE (
 	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'graph_quotas_wrapper';
 /* </end connected objects> */
@@ -544,7 +544,7 @@ CREATE  FUNCTION graph."add_sync_policy"(
 	"last_status" TEXT  /* Option < String > */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'add_sync_policy_wrapper';
 /* </end connected objects> */
@@ -740,7 +740,7 @@ CREATE  FUNCTION graph."run_due_jobs"(
 	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'run_due_jobs_wrapper';
 /* </end connected objects> */
@@ -759,7 +759,7 @@ CREATE  FUNCTION graph."add_edge"(
 	"label_column" TEXT DEFAULT NULL /* Option < String > */
 ) RETURNS void
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'add_edge_wrapper';
 /* </end connected objects> */
@@ -821,7 +821,7 @@ CREATE  FUNCTION graph."_pending_sync_rows_for_current_role"(
 	"applied_sync_id" bigint /* i64 */
 ) RETURNS bigint /* i64 */
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'pending_sync_rows_for_current_role_wrapper';
 /* </end connected objects> */
@@ -984,7 +984,7 @@ CREATE  FUNCTION graph."registered_edges_for_graph"(
 	"label_column" TEXT  /* Option < String > */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'registered_edges_for_graph_wrapper';
 /* </end connected objects> */
@@ -1103,7 +1103,7 @@ CREATE  FUNCTION graph."add_edge_to_graph"(
 	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS void
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'add_edge_to_graph_wrapper';
 /* </end connected objects> */
@@ -1203,7 +1203,7 @@ CREATE  FUNCTION graph."set_graph_residency"(
 	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'set_graph_residency_wrapper';
 /* </end connected objects> */
@@ -1253,7 +1253,7 @@ CREATE  FUNCTION graph."run_sync_policy"(
 	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'run_sync_policy_wrapper';
 /* </end connected objects> */
@@ -1422,7 +1422,7 @@ CREATE  FUNCTION graph."graph_privileges"(
 	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'graph_privileges_wrapper';
 /* </end connected objects> */
@@ -1481,7 +1481,7 @@ CREATE  FUNCTION graph."set_current_graph"(
 	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'set_current_graph_wrapper';
 /* </end connected objects> */
@@ -1540,7 +1540,7 @@ CREATE  FUNCTION graph."run_job"(
 	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'run_job_wrapper';
 /* </end connected objects> */
@@ -1625,7 +1625,7 @@ AS 'MODULE_PATHNAME', 'weighted_shortest_path_wrapper';
 -- graph::sql_facade::admin::_selected_graph_id_for_current_role
 CREATE  FUNCTION graph."_selected_graph_id_for_current_role"() RETURNS TEXT /* String */
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'selected_graph_id_for_current_role_wrapper';
 /* </end connected objects> */
@@ -2612,7 +2612,7 @@ CREATE  FUNCTION graph."current_graph"() RETURNS TABLE (
 	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'current_graph_wrapper';
 /* </end connected objects> */
@@ -2645,7 +2645,7 @@ CREATE  FUNCTION graph."graph_quota_usage"() RETURNS TABLE (
 	"exceeded" bool  /* bool */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'graph_quota_usage_wrapper';
 /* </end connected objects> */
@@ -2661,7 +2661,7 @@ CREATE  FUNCTION graph."vacuum"() RETURNS TABLE (
 	"vacuum_time_ms" double precision  /* f64 */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'vacuum_wrapper';
 /* </end connected objects> */
@@ -2675,7 +2675,7 @@ CREATE  FUNCTION graph."apply_sync"() RETURNS TABLE (
 	"deletes_applied" bigint  /* i64 */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'apply_sync_wrapper';
 /* </end connected objects> */
@@ -2694,7 +2694,7 @@ CREATE  FUNCTION graph."registered_tables_for_graph"(
 	"tenant_column" TEXT  /* Option < String > */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'registered_tables_for_graph_wrapper';
 /* </end connected objects> */
@@ -2754,7 +2754,7 @@ CREATE  FUNCTION graph."build"() RETURNS TABLE (
 	"projection_mode" TEXT  /* String */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'build_wrapper';
 /* </end connected objects> */
@@ -2769,7 +2769,7 @@ CREATE  FUNCTION graph."component_stats"() RETURNS TABLE (
 	"total_active_nodes" INT  /* i32 */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'component_stats_wrapper';
 /* </end connected objects> */
@@ -2784,7 +2784,7 @@ CREATE  FUNCTION graph."add_table"(
 	"tenant_column" TEXT DEFAULT NULL /* Option < String > */
 ) RETURNS void
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'add_table_with_id_columns_wrapper';
 /* </end connected objects> */
@@ -2846,7 +2846,7 @@ CREATE  FUNCTION graph."traverse"(
 	"node_table_name" TEXT  /* String */
 )
 SECURITY DEFINER  COST 1000
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'traverse_wrapper';
 /* </end connected objects> */
@@ -2856,7 +2856,7 @@ AS 'MODULE_PATHNAME', 'traverse_wrapper';
 -- graph::sql_facade::admin::enable_sync
 CREATE  FUNCTION graph."enable_sync"() RETURNS void
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'enable_sync_wrapper';
 /* </end connected objects> */
@@ -2887,7 +2887,7 @@ CREATE  FUNCTION graph."unload_graph"(
 	"unloaded" bool  /* bool */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'unload_graph_wrapper';
 /* </end connected objects> */
@@ -3057,7 +3057,7 @@ CREATE  FUNCTION graph."job_runs"(
 	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'job_runs_wrapper';
 /* </end connected objects> */
@@ -3107,7 +3107,7 @@ CREATE  FUNCTION graph."add_table_to_graph"(
 	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS void
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'add_table_to_graph_with_id_columns_wrapper';
 /* </end connected objects> */
@@ -3196,7 +3196,7 @@ CREATE  FUNCTION graph."maintenance"(
 	"error" TEXT  /* Option < String > */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'maintenance_wrapper';
 /* </end connected objects> */
@@ -3256,7 +3256,7 @@ CREATE  FUNCTION graph."registered_edges"() RETURNS TABLE (
 	"label_column" TEXT  /* Option < String > */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'registered_edges_wrapper';
 /* </end connected objects> */
@@ -3332,7 +3332,7 @@ CREATE  FUNCTION graph."job_stats"(
 	"last_run_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'job_stats_wrapper';
 /* </end connected objects> */
@@ -3524,7 +3524,7 @@ CREATE  FUNCTION graph."list_graphs"() RETURNS TABLE (
 	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'list_graphs_wrapper';
 /* </end connected objects> */
@@ -3544,7 +3544,7 @@ CREATE  FUNCTION graph."vacuum_graph"(
 	"vacuum_time_ms" double precision  /* f64 */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'vacuum_graph_wrapper';
 /* </end connected objects> */
@@ -3635,7 +3635,7 @@ AS 'MODULE_PATHNAME', 'lte_wrapper';
 -- graph::sql_facade::runtime::reset
 CREATE  FUNCTION graph."reset"() RETURNS void
 STRICT SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'reset_wrapper';
 /* </end connected objects> */
@@ -3754,7 +3754,7 @@ CREATE  FUNCTION graph."load_graph"(
 	"projection_mode" TEXT  /* Option < String > */
 )
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'load_graph_wrapper';
 /* </end connected objects> */
@@ -3769,7 +3769,7 @@ CREATE  FUNCTION graph."add_table"(
 	"tenant_column" TEXT DEFAULT NULL /* Option < String > */
 ) RETURNS void
 SECURITY DEFINER
-SET search_path TO pg_catalog
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'add_table_wrapper';
 /* </end connected objects> */

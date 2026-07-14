@@ -2199,6 +2199,12 @@ fn bind_create_relationship(
             "CREATE requires a relationship backed by a registered edge row table",
         )
     })?;
+    if !edge_mapping.has_standalone_edge_row() {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "CREATE for a node-backed foreign-key relationship is not supported; update the mapped PostgreSQL source row instead",
+        ));
+    }
     let properties = bind_create_relationship_properties(rel_pat, &edge_mapping)?;
     let scope = initial_relationship_scope(rel_pat, target_pat, &source, &target)?;
     let returns = bind_scoped_returns(&query.return_.items, &scope, &source, &target)?;
@@ -2828,6 +2834,12 @@ fn bind_delete_edge_mapping(
                 "DELETE requires a relationship backed by a registered edge row table",
             )
         })?;
+        if !edge_mapping.has_standalone_edge_row() {
+            return Err(GqlError::unsupported(
+                rel_pat.span,
+                "DELETE for a node-backed foreign-key relationship is not supported; update the mapped PostgreSQL source row instead",
+            ));
+        }
         return Ok(DeleteEdgeBinding {
             source,
             target,
@@ -2864,6 +2876,9 @@ fn bind_delete_edge_mapping(
         let Some(edge_mapping) = rel_info.edge_mapping.clone() else {
             continue;
         };
+        if !edge_mapping.has_standalone_edge_row() {
+            continue;
+        }
         if edge_mapping.label_column.is_some() {
             return Err(GqlError::unsupported(
                 rel_pat.span,
@@ -2988,6 +3003,12 @@ fn bind_detach_delete_node(
                 "DETACH DELETE requires incident relationships backed by registered edge row tables",
             )
         })?;
+        if !edge.has_standalone_edge_row() {
+            return Err(GqlError::unsupported(
+                query.delete.span,
+                "DETACH DELETE for node-backed foreign-key relationships is not supported; update the mapped PostgreSQL source row first",
+            ));
+        }
         if !incident_edges.iter().any(|existing: &BoundIncidentEdge| {
             existing.rel_type == rel.rel_type
                 && existing.edge.edge_table_oid == edge.edge_table_oid

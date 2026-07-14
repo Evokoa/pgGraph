@@ -539,7 +539,7 @@ fn validate_supported_relation(table_oid: u32) -> GraphResult<()> {
         let result = client
             .select(
                 "SELECT c.relkind::text
-                 FROM pg_class c
+                 FROM pg_catalog.pg_class c
                  WHERE c.oid = $1::oid",
                 None,
                 &[table_oid.into()],
@@ -601,11 +601,11 @@ fn discover_identifier(table_oid: u32) -> GraphResult<(String, String, bool, Vec
                 i.indisprimary,
                 array_agg(a.attname::text ORDER BY ord.n)::text[] AS columns,
                 bool_and(a.attnotnull) AS all_not_null
-             FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             JOIN pg_index i ON i.indrelid = c.oid
+             FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_catalog.pg_index i ON i.indrelid = c.oid
              JOIN unnest(i.indkey) WITH ORDINALITY AS ord(attnum, n) ON true
-             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
              WHERE c.oid = $1::oid
                AND (i.indisprimary OR i.indisunique)
                AND i.indpred IS NULL
@@ -661,13 +661,13 @@ fn discover_foreign_keys_for_tables(table_oids: &[u32]) -> GraphResult<Vec<Disco
             c.confrelid::oid::integer AS to_oid,
             to_class.relname::text AS to_table,
             to_attr.attname::text AS to_column
-         FROM pg_constraint c
-         JOIN pg_class from_class ON from_class.oid = c.conrelid
-         JOIN pg_class to_class ON to_class.oid = c.confrelid
+         FROM pg_catalog.pg_constraint c
+         JOIN pg_catalog.pg_class from_class ON from_class.oid = c.conrelid
+         JOIN pg_catalog.pg_class to_class ON to_class.oid = c.confrelid
          JOIN unnest(c.conkey) WITH ORDINALITY AS fk_from(attnum, n) ON true
          JOIN unnest(c.confkey) WITH ORDINALITY AS fk_to(attnum, n) ON fk_to.n = fk_from.n
-         JOIN pg_attribute from_attr ON from_attr.attrelid = c.conrelid AND from_attr.attnum = fk_from.attnum
-         JOIN pg_attribute to_attr ON to_attr.attrelid = c.confrelid AND to_attr.attnum = fk_to.attnum
+         JOIN pg_catalog.pg_attribute from_attr ON from_attr.attrelid = c.conrelid AND from_attr.attnum = fk_from.attnum
+         JOIN pg_catalog.pg_attribute to_attr ON to_attr.attrelid = c.confrelid AND to_attr.attnum = fk_to.attnum
          WHERE c.contype = 'f'
            AND c.conrelid::bigint = ANY($1::int8[])
            AND c.confrelid::bigint = ANY($1::int8[])

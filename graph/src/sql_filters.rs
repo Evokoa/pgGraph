@@ -274,7 +274,7 @@ pub(crate) fn table_has_column(table_oid: u32, column: &str) -> safety::GraphRes
             .select(
                 "SELECT EXISTS (
                 SELECT 1
-                FROM pg_attribute
+                FROM pg_catalog.pg_attribute
                 WHERE attrelid = $1::oid
                   AND attname = $2
                   AND attnum > 0

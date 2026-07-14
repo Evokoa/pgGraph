@@ -16,7 +16,7 @@ fn test_enabled() -> bool {
     name = "_selected_graph_id_for_current_role",
     security_definer
 )]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn selected_graph_id_for_current_role() -> String {
     with_panic_boundary("_selected_graph_id_for_current_role()", || {
         let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
@@ -31,7 +31,7 @@ fn selected_graph_id_for_current_role() -> String {
     name = "_pending_sync_rows_for_current_role",
     security_definer
 )]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
     with_panic_boundary("_pending_sync_rows_for_current_role()", || {
         crate::sql_sync::pending_sync_rows_direct(applied_sync_id)
@@ -44,7 +44,7 @@ fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
     name = "_max_sync_log_id_for_current_role",
     security_definer
 )]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn max_sync_log_id_for_current_role() -> i64 {
     with_panic_boundary("_max_sync_log_id_for_current_role()", || {
         crate::sql_sync::max_sync_log_id_direct().unwrap_or_else(|err| err.report())
@@ -189,7 +189,7 @@ fn drop_graph(
 
 /// List graph metadata visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -221,7 +221,7 @@ fn list_graphs() -> TableIterator<
 
 /// Return the session-selected graph metadata.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -253,7 +253,7 @@ fn current_graph() -> TableIterator<
 
 /// Select graph metadata for later graph-scoped calls.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -351,7 +351,7 @@ fn revoke_graph(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn graph_privileges(
     graph_name: default!(Option<&str>, "NULL"),
     tenant: default!(Option<&str>, "NULL"),
@@ -411,7 +411,7 @@ fn transfer_graph_ownership(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -497,7 +497,7 @@ fn set_graph_quota(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -522,7 +522,7 @@ fn graph_quotas() -> TableIterator<
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -732,8 +732,12 @@ pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
     let allowed = Spi::connect(|client| {
         let result = client.select(
             "SELECT
-                COALESCE((SELECT rolsuper FROM pg_roles WHERE oid = $1), false)
-                OR has_schema_privilege($1, 'graph', 'CREATE')",
+                COALESCE((
+                    SELECT rolsuper
+                    FROM pg_catalog.pg_roles
+                    WHERE oid OPERATOR(pg_catalog.=) $1
+                ), false)
+                OR pg_catalog.has_schema_privilege($1, 'graph', 'CREATE')",
             None,
             &[role_oid.into()],
         )?;
@@ -881,10 +885,18 @@ pub(crate) fn scheduled_maintenance_decision(
     }
 }
 
+fn scheduled_durable_ingest_allowed(
+    ingest_recommended: bool,
+    inputs: ScheduledMaintenanceInputs,
+) -> bool {
+    ingest_recommended && !inputs.needs_rebuild && !inputs.read_only
+}
+
 #[cfg(test)]
 mod scheduled_maintenance_tests {
     use super::{
-        scheduled_maintenance_decision, ScheduledMaintenanceDecision, ScheduledMaintenanceInputs,
+        scheduled_durable_ingest_allowed, scheduled_maintenance_decision,
+        ScheduledMaintenanceDecision, ScheduledMaintenanceInputs,
     };
 
     #[test]
@@ -1000,6 +1012,35 @@ mod scheduled_maintenance_tests {
             let decision = scheduled_maintenance_decision(inputs);
             assert!(decision.start_maintenance);
         }
+    }
+
+    #[test]
+    fn scheduled_durable_ingest_stops_for_rebuild_or_read_only_state() {
+        let healthy = ScheduledMaintenanceInputs {
+            pending_sync_rows: 1,
+            disabled_trigger_count: 0,
+            edge_buffer_used: 0,
+            needs_vacuum: false,
+            needs_rebuild: false,
+            read_only: false,
+            compaction_recommended: false,
+        };
+        assert!(scheduled_durable_ingest_allowed(true, healthy));
+        assert!(!scheduled_durable_ingest_allowed(false, healthy));
+        assert!(!scheduled_durable_ingest_allowed(
+            true,
+            ScheduledMaintenanceInputs {
+                needs_rebuild: true,
+                ..healthy
+            }
+        ));
+        assert!(!scheduled_durable_ingest_allowed(
+            true,
+            ScheduledMaintenanceInputs {
+                read_only: true,
+                ..healthy
+            }
+        ));
     }
 }
 
@@ -1610,9 +1651,20 @@ fn run_scheduled_maintenance() -> TableIterator<
             status = refreshed_engine_status().unwrap_or_else(|err| err.report());
             decision = scheduled_maintenance_decision((&status).into());
         }
-        if let Err(err) = ingest_projection_internal(None, None) {
-            if !matches!(err, safety::GraphError::NotBuilt) {
-                err.report();
+        let durable_ingest_recommended = projection_metadata_status_snapshot()
+            .unwrap_or_else(|err| err.report())
+            .ingest_recommended;
+        if scheduled_durable_ingest_allowed(durable_ingest_recommended, (&status).into()) {
+            match ingest_projection_internal(None, None) {
+                Ok(stats) if stats.rows_ingested > 0 => {
+                    applied_sync = true;
+                    status = refreshed_engine_status().unwrap_or_else(|err| err.report());
+                    decision = scheduled_maintenance_decision((&status).into());
+                }
+                Ok(_) | Err(safety::GraphError::NotBuilt) => {}
+                Err(err) => {
+                    err.report();
+                }
             }
         }
 
@@ -1699,7 +1751,7 @@ fn projection_metadata_status_snapshot(
 ///
 /// See: `docs/user_guide/build-and-persistence.mdx`
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 pub(super) fn build() -> TableIterator<
     'static,
     (
@@ -1728,7 +1780,7 @@ pub(super) fn build() -> TableIterator<
 
 /// Build a named graph without requiring a separate `set_current_graph()` call.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2323,7 +2375,7 @@ fn build_status_for_graph(
 
 /// Register a table for graph indexing.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn add_table(
     table_name: pgrx::pg_sys::Oid,
     id_column: &str,
@@ -2356,7 +2408,7 @@ fn add_table(
 
 /// Register a table for graph indexing using one or more primary-key columns.
 #[pg_extern(schema = "graph", name = "add_table", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn add_table_with_id_columns(
     table_name: pgrx::pg_sys::Oid,
     id_columns: Vec<String>,
@@ -2369,7 +2421,7 @@ fn add_table_with_id_columns(
 
 /// Register a table for a named graph without changing session selection.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn add_table_to_graph(
     graph_name: &str,
     table_name: pgrx::pg_sys::Oid,
@@ -2407,7 +2459,7 @@ fn add_table_to_graph(
 
 /// Register a table for a named graph using one or more primary-key columns.
 #[pg_extern(schema = "graph", name = "add_table_to_graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn add_table_to_graph_with_id_columns(
     graph_name: &str,
     table_name: pgrx::pg_sys::Oid,
@@ -2431,7 +2483,7 @@ fn add_table_to_graph_with_id_columns(
 
 /// Register an edge relationship.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::too_many_arguments,
     reason = "pgrx SQL ABI exposes each SQL argument"
@@ -2493,7 +2545,7 @@ fn add_edge(
 
 /// Register an edge relationship for a named graph without changing session selection.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::too_many_arguments,
     reason = "pgrx SQL ABI exposes each SQL argument"
@@ -2561,7 +2613,7 @@ fn add_edge_to_graph(
 
 /// List tables registered for graph indexing.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2585,7 +2637,7 @@ fn registered_tables() -> TableIterator<
 
 /// List tables registered for a named graph.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2667,7 +2719,7 @@ fn registered_tables_for_graph_id(
 
 /// List edge relationships registered for graph indexing.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2695,7 +2747,7 @@ fn registered_edges() -> TableIterator<
 
 /// List edge relationships registered for a named graph.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -3924,7 +3976,7 @@ fn estimate() -> TableIterator<
 ///
 /// See: `docs/user_guide/sync-and-maintenance.mdx`
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn apply_sync() -> TableIterator<
     'static,
     (
@@ -4696,7 +4748,7 @@ fn run_due_jobs_result(
 /// Sync policies are durable records. They are executed by calling
 /// `graph.run_sync_policy()` or `graph.run_job()`.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -4954,7 +5006,7 @@ fn drop_sync_policy(
 
 /// Run an explicit sync policy immediately.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5003,7 +5055,7 @@ fn run_sync_policy(
 
 /// List sync policies visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5053,7 +5105,7 @@ fn sync_policy_status(
 
 /// List durable jobs visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5107,7 +5159,7 @@ fn jobs(
 
 /// List durable job run history visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5160,7 +5212,7 @@ fn job_runs(
 
 /// Summarize durable job outcomes visible to the current role.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx TableIterator tuple defines this SQL function's ABI"
@@ -5232,7 +5284,7 @@ fn job_stats(
 
 /// Run a durable job immediately.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5283,7 +5335,7 @@ fn run_job(
 
 /// Run due durable jobs through the hosted scheduler path.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5530,7 +5582,7 @@ fn ingest_projection(
 ///
 /// See: `docs/user_guide/sync-and-maintenance.mdx`
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn vacuum() -> TableIterator<
     'static,
     (
@@ -5557,7 +5609,7 @@ fn vacuum() -> TableIterator<
 
 /// Vacuum a named graph without requiring a separate `set_current_graph()`.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn vacuum_graph(
     graph_name: &str,
     graph_tenant: default!(Option<&str>, "NULL"),
@@ -5588,7 +5640,7 @@ fn vacuum_graph(
 }
 
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -6042,7 +6094,7 @@ fn cached_estimated_table_rows(
 /// Ensures sync catalog tables exist and attaches triggers that write to
 /// `graph._sync_log`.
 #[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog)]
+#[search_path(pg_catalog, pg_temp)]
 fn enable_sync() {
     with_panic_boundary("enable_sync()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());

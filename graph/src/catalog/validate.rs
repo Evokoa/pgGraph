@@ -208,7 +208,7 @@ pub(crate) fn estimated_table_rows(table_name: &str) -> safety::GraphResult<i64>
         let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
         let result = client
             .select(
-                "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE oid = $1::oid",
+                "SELECT COALESCE(reltuples, 0)::bigint FROM pg_catalog.pg_class WHERE oid = $1::oid",
                 None,
                 &[table_oid.into()],
             )
@@ -289,7 +289,7 @@ pub(crate) fn validate_column_exists(table_oid: u32, column: &str) -> safety::Gr
             .select(
                 "SELECT EXISTS (
                 SELECT 1
-                FROM pg_attribute
+                FROM pg_catalog.pg_attribute
                 WHERE attrelid = $1::oid
                   AND attname = $2
                   AND attnum > 0
@@ -357,8 +357,8 @@ pub(crate) fn validate_numeric_column(table_oid: u32, column: &str) -> safety::G
         let result = client
             .select(
                 "SELECT t.typcategory = 'N'
-             FROM pg_attribute a
-             JOIN pg_type t ON t.oid = a.atttypid
+             FROM pg_catalog.pg_attribute a
+             JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
              WHERE a.attrelid = $1::oid
                AND a.attname = $2
                AND a.attnum > 0
@@ -420,9 +420,9 @@ pub(crate) fn validate_registered_table(
                 i.indisprimary,
                 array_agg(a.attname::text ORDER BY ord.n)::text[] AS columns,
                 bool_and(a.attnotnull) AS all_not_null
-             FROM pg_index i
+             FROM pg_catalog.pg_index i
              JOIN unnest(i.indkey) WITH ORDINALITY AS ord(attnum, n) ON true
-             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
              WHERE i.indrelid = {}::oid
                AND (i.indisprimary OR i.indisunique)
                AND i.indpred IS NULL
@@ -544,7 +544,7 @@ fn validate_jsonb_column(table_oid: u32, column: &str) -> safety::GraphResult<()
         let result = client
             .select(
                 "SELECT a.atttypid = 'jsonb'::regtype
-                 FROM pg_attribute a
+                 FROM pg_catalog.pg_attribute a
                  WHERE a.attrelid = $1::oid
                    AND a.attname = $2
                    AND a.attnum > 0

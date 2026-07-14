@@ -50,7 +50,7 @@ pub fn check_table_delete_acl(table_oid: u32) -> GraphResult<()> {
 }
 
 fn check_table_acl_mode(table_oid: u32, mode: pgrx::pg_sys::AclMode) -> GraphResult<()> {
-    let role_oid = current_acl_role_oid()?;
+    let role_oid = crate::catalog::current_role_oid()?;
     let acl_result = unsafe {
         // SAFETY: This runs inside a PostgreSQL backend process. `table_oid` is
         // an OID supplied by callers that already resolved catalog objects.
@@ -65,12 +65,4 @@ fn check_table_acl_mode(table_oid: u32, mode: pgrx::pg_sys::AclMode) -> GraphRes
         });
     }
     Ok(())
-}
-
-fn current_acl_role_oid() -> GraphResult<pgrx::pg_sys::Oid> {
-    pgrx::Spi::get_one::<pgrx::pg_sys::Oid>(
-        "SELECT COALESCE(NULLIF(NULLIF(current_setting('role', true), ''), 'none'), current_user)::regrole::oid",
-    )
-    .map_err(|err| GraphError::Internal(format!("current ACL role read failed: {err}")))?
-    .ok_or_else(|| GraphError::Internal("current ACL role oid was null".to_string()))
 }

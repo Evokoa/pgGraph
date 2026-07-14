@@ -229,7 +229,7 @@ playground query stability.
 | `docker_smoke.sh` | Top-level Dockerfile check | Builds the root Docker image, starts Postgres, creates the extension, and runs a small graph workflow. |
 | `package_validate.sh` | Package artifact check | Runs `cargo pgrx package` and verifies control, SQL, shared library, and release companion files. |
 | `fresh_install_smoke.sh` | Installed extension smoke | Installs pgGraph into a local PostgreSQL major and runs a quick extension workflow. |
-| `function_metadata_audit.sh` | SQL metadata contract check | Audits SQL function volatility, security, cost, rows, and parallel-safety metadata. |
+| `function_metadata_audit.sh` | SQL metadata contract check | Audits SQL function volatility, security, cost, rows, parallel-safety metadata, and generated sync-trigger definer paths. |
 | `run_sqlstate_acl_boundary.sh` | Client-visible errors and ACLs | Runs `sqlstate_acl_boundary.sql` through `psql` and asserts SQLSTATE/role behavior at the client boundary. |
 | `tx_delta_lifecycle.sh` | Mutable-overlay transaction lifecycle | Installs the internal pg_test surface and checks transaction-local overlay visibility, rollback discard, commit cleanup, backend isolation, and trigger-sync catch-up. |
 | `gql_create_tx_lifecycle.sh` | GQL `CREATE` transaction lifecycle | Installs the extension into a disposable database and checks public mapped `CREATE` rollback and commit behavior. |

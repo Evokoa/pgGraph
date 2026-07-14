@@ -39,12 +39,13 @@ pub(crate) struct RelTypeInfo {
     pub(crate) from_table_oid: u32,
     /// Target node table OID.
     pub(crate) to_table_oid: u32,
-    /// Registered edge-row mapping when this relationship is backed by a
-    /// separate edge table.
+    /// Durable source-row mapping used to identify and hydrate relationships.
+    /// Node-backed foreign-key relationships carry read metadata here but are
+    /// not writable as standalone edge rows.
     pub(crate) edge_mapping: Option<EdgeMappingInfo>,
 }
 
-/// Source-table details required for mapped edge writes.
+/// Source-table details required to identify a mapped relationship row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeMappingInfo {
     /// Durable catalog identity for this relationship mapping.
@@ -65,6 +66,18 @@ pub(crate) struct EdgeMappingInfo {
     pub(crate) bidirectional: bool,
     /// Dynamic relationship label column, when the edge registration uses one.
     pub(crate) label_column: Option<String>,
+}
+
+impl EdgeMappingInfo {
+    /// Return whether the relationship is stored in a separate edge-row table.
+    ///
+    /// Node-backed foreign-key mappings use the source node table as their
+    /// relationship table. They are readable through this metadata, but graph
+    /// writes would need to update an existing source row rather than insert or
+    /// delete a standalone edge row.
+    pub(crate) fn has_standalone_edge_row(&self) -> bool {
+        self.edge_table_oid != self.source_table_oid
+    }
 }
 
 /// Catalog lookup port for semantic binding.
@@ -246,27 +259,15 @@ fn load_rels(
     }
     let mut rels = Vec::with_capacity(edges.len());
     for edge in edges {
-        let (from_node_table, edge_mapping) =
+        let (from_node_table, relationship_source_table_oid) =
             if registered_tables.contains(edge.from_table.as_str()) {
-                (Some(edge.from_table.as_str()), None)
+                (Some(edge.from_table.as_str()), Some(edge.from_table_oid))
             } else {
                 let edge_table_oid = edge.from_table_oid;
                 let source_table_oid = edge_source_fk_table_oid(edge)?;
                 let from_node_table =
                     source_table_oid.and_then(|oid| registered_table_oids.get(&oid).copied());
-                let target_table_oid = edge.to_table_oid;
-                let edge_mapping = source_table_oid.map(|source_table_oid| EdgeMappingInfo {
-                    mapping_id: edge.mapping_id,
-                    edge_table_oid,
-                    source_table_oid,
-                    target_table_oid,
-                    source_column: edge.from_column.clone(),
-                    target_column: edge.to_column.clone(),
-                    source_key_columns: edge.source_key_columns.clone(),
-                    bidirectional: edge.bidirectional,
-                    label_column: edge.label_column.clone(),
-                });
-                (from_node_table, edge_mapping)
+                (from_node_table, source_table_oid.map(|_| edge_table_oid))
             };
         let Some(from_node_table) = from_node_table else {
             continue;
@@ -281,6 +282,17 @@ fn load_rels(
                 ))
             })?;
         let target_table_oid = edge.to_table_oid;
+        let edge_mapping = relationship_source_table_oid.map(|edge_table_oid| EdgeMappingInfo {
+            mapping_id: edge.mapping_id,
+            edge_table_oid,
+            source_table_oid,
+            target_table_oid,
+            source_column: edge.from_column.clone(),
+            target_column: edge.to_column.clone(),
+            source_key_columns: edge.source_key_columns.clone(),
+            bidirectional: edge.bidirectional,
+            label_column: edge.label_column.clone(),
+        });
         for rel_type in relationship_type_names(edge)? {
             rels.push(RelTypeInfo {
                 rel_type: rel_type.clone(),
@@ -362,9 +374,9 @@ fn edge_source_fk_table_oid(edge: &RegisteredEdge) -> GraphResult<Option<u32>> {
         let rows = client
             .select(
                 "SELECT c.confrelid::oid::integer
-                 FROM pg_constraint c
+                 FROM pg_catalog.pg_constraint c
                  JOIN unnest(c.conkey) WITH ORDINALITY AS fk_from(attnum, n) ON true
-                 JOIN pg_attribute from_attr
+                 JOIN pg_catalog.pg_attribute from_attr
                    ON from_attr.attrelid = c.conrelid
                   AND from_attr.attnum = fk_from.attnum
                  WHERE c.contype = 'f'

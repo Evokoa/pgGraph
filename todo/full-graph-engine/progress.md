@@ -555,3 +555,18 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Rust documentation | `cd graph && cargo test --doc --features pg17`; `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --features "pg17 development" --no-deps` | PASS: doctests 0; rustdoc warning-free |
 | Contract, docs, shell syntax, and whitespace | `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh`; `bash -n graph/tests/heavy/build_lock_regression.sh graph/tests/heavy/gql_isolation_matrix.sh`; `git diff --check` | PASS |
 | Independent Rust review | `rust-reviewing` subagent over KI-027 and concurrency/recovery follow-ups | PASS after serializing vacuum with active writers, acquiring the build lock before repair planning, preserving corrupt-generation artifact accounting, and correcting the public recovery description |
+
+### 2026-07-14 R1 Security-Definer Search-Path Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Full PostgreSQL 17 suite | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 970 passed, 1 ignored; doctests 0 |
+| Function metadata | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata_ki023_checkpoint ./tests/heavy/function_metadata_audit.sh` | PASS: extension and generated sync definers pin `pg_catalog, pg_temp` |
+| Publication and writer barrier | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_build_lock_ki023 ./tests/heavy/build_lock_regression.sh` | PASS: stale triggers fail closed, out-of-order commit/rollback horizons cannot skip sync IDs, and concurrent publishers remain serialized |
+| Security regressions | Full PostgreSQL 17 suite cases `generated_sync_definers_pin_search_path_and_ignore_shadow_functions`, `temporary_catalog_shadow_cannot_bypass_graph_admin_check`, and `persistent_function_and_operator_shadows_cannot_bypass_graph_admin_check` | PASS |
+| Node-backed relationship write boundary | `cd graph && cargo test --features "pg17 development" binder_rejects_create_for_node_backed_foreign_key_relationship` | PASS: readable relationship identity does not advertise standalone-row writes |
+| Scheduler rebuild priority | Full-suite case `scheduled_maintenance_prioritizes_rebuild_over_durable_ingest` plus unit decision coverage | PASS: pending durable rows never ingest against a rebuild-required or read-only graph; maintenance starts first, and scheduler-only durable catch-up reports applied work |
+| Clippy and Rust documentation | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings`; `cd graph && RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --features "pg17 development"` | PASS |
+| Release contract and documentation drift | `python3.12 scripts/check_release_contract.py`; `scripts/check_docs_drift.sh` | PASS after acknowledged `KI-023` SQL metadata and GQL implementation hash refresh |
+| Secret and whitespace checks | `scripts/check_secrets.sh`; `git diff --check` | PASS |
+| Independent Rust review | `rust-reviewing` subagent over KI-023 plus full-suite regression fixes | PASS after restoring authoritative sync-log reads under the production writer barrier, keeping direct ingestion trigger audits strict, separating node-backed read identity from standalone-row writes, and refreshing the frozen 1.0 SQL contract |

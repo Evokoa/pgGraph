@@ -57,6 +57,93 @@ fn sql_trigger_sync_handles_primary_key_changes() {
 }
 
 #[pg_test]
+fn generated_sync_definers_pin_search_path_and_ignore_shadow_functions() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_sync_definer_pgtest CASCADE")
+        .expect("drop sync definer table failed");
+    Spi::run("DROP SCHEMA IF EXISTS graph_test_sync_shadow_pgtest CASCADE")
+        .expect("drop shadow schema failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_sync_shadow_calls_pgtest")
+        .expect("drop shadow marker failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_sync_definer_pgtest (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )",
+    )
+    .expect("create sync definer table failed");
+    super::insert_registered_table(
+        "public.graph_test_sync_definer_pgtest",
+        "id",
+        "name",
+        None,
+    )
+    .expect("register sync definer table failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+
+    let pinned_functions = Spi::get_one::<i64>(
+        "WITH source AS (
+            SELECT 'public.graph_test_sync_definer_pgtest'::regclass::oid AS table_oid
+        )
+        SELECT count(*)
+        FROM pg_catalog.pg_proc AS proc
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = proc.pronamespace
+        CROSS JOIN source
+        WHERE namespace.nspname = 'graph'
+          AND proc.proname IN (
+              '_sync_' || source.table_oid::text,
+              '_sync_' || source.table_oid::text || '_truncate'
+          )
+          AND proc.prosecdef
+          AND COALESCE(proc.proconfig, ARRAY[]::text[])
+              @> ARRAY['search_path=pg_catalog, pg_temp']",
+    )
+    .expect("read generated function metadata failed")
+    .unwrap_or(0);
+    assert_eq!(pinned_functions, 2);
+
+    Spi::run("CREATE SCHEMA graph_test_sync_shadow_pgtest")
+        .expect("create shadow schema failed");
+    Spi::run("CREATE TABLE public.graph_test_sync_shadow_calls_pgtest (called boolean NOT NULL)")
+        .expect("create shadow marker failed");
+    Spi::run(
+        "CREATE FUNCTION graph_test_sync_shadow_pgtest.pg_advisory_xact_lock_shared(integer, integer)
+         RETURNS void
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             INSERT INTO public.graph_test_sync_shadow_calls_pgtest VALUES (true);
+         END;
+         $$",
+    )
+    .expect("create shadow function failed");
+    Spi::run("SET search_path = graph_test_sync_shadow_pgtest, public, pg_catalog")
+        .expect("set hostile search path failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_sync_definer_pgtest (id, name)
+         VALUES ('safe', 'Safe')",
+    )
+    .expect("source insert under hostile search path failed");
+    Spi::run("SET search_path = pg_catalog, public").expect("restore search path failed");
+
+    let shadow_calls = Spi::get_one::<i64>(
+        "SELECT count(*) FROM public.graph_test_sync_shadow_calls_pgtest",
+    )
+    .expect("read shadow call marker failed")
+    .unwrap_or(-1);
+    let sync_rows = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph._sync_log WHERE new_pk = 'safe'",
+    )
+    .expect("read sync rows failed")
+    .unwrap_or(0);
+    assert_eq!(shadow_calls, 0);
+    assert_eq!(sync_rows, 1);
+}
+
+#[pg_test]
 fn apply_sync_replays_trigger_update_and_delete_rows() {
     reset_and_create_fixtures();
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
@@ -86,7 +173,9 @@ fn apply_sync_replays_trigger_update_and_delete_rows() {
     })
     .expect("apply sync read failed");
     assert_eq!(updates, 1);
-    assert_eq!(deletes, 1);
+    // Both PostgreSQL source-row deletes were replayed: one relationship row
+    // and one node row.
+    assert_eq!(deletes, 2);
 
     let pending_sync_rows = Spi::get_one::<i64>("SELECT pending_sync_rows FROM graph.status()")
         .expect("status read failed")
@@ -3328,6 +3417,99 @@ fn scheduled_maintenance_noops_when_graph_is_healthy() {
     assert_eq!(pending, 0);
     assert_eq!(edge_buffer_used, 0);
     assert_eq!(message, "no scheduled graph maintenance needed");
+}
+
+#[pg_test]
+fn scheduled_maintenance_prioritizes_rebuild_over_durable_ingest() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync mode failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("set query freshness failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_scheduled_rebuild_pgtest CASCADE")
+        .expect("drop scheduled rebuild table failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_scheduled_rebuild_added_pgtest CASCADE")
+        .expect("drop added scheduled rebuild table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_scheduled_rebuild_pgtest (
+            id TEXT PRIMARY KEY,
+            score INTEGER NOT NULL
+        )",
+    )
+    .expect("create scheduled rebuild table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_scheduled_rebuild_pgtest (id, score)
+         VALUES ('base', 1)",
+    )
+    .expect("insert scheduled rebuild base row failed");
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_scheduled_rebuild_pgtest'::regclass,
+            id_column := 'id',
+            columns := ARRAY['score']
+        )",
+    )
+    .expect("register scheduled rebuild table failed");
+    Spi::run(
+        "SELECT graph.add_filter_column(
+            'graph_test_scheduled_rebuild_pgtest'::regclass,
+            'score',
+            column_type := 'numeric'
+        )",
+    )
+    .expect("register scheduled rebuild filter failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build scheduled rebuild graph failed");
+
+    Spi::run(
+        "CREATE TABLE public.graph_test_scheduled_rebuild_added_pgtest (
+            id TEXT PRIMARY KEY
+        )",
+    )
+    .expect("create added scheduled rebuild table failed");
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_scheduled_rebuild_added_pgtest'::regclass,
+            id_column := 'id',
+            columns := ARRAY[]::text[]
+        )",
+    )
+    .expect("register added scheduled rebuild table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_scheduled_rebuild_pgtest (id, score)
+         VALUES ('pending', 2)",
+    )
+    .expect("insert scheduled rebuild pending row failed");
+    let rebuild_and_ingest = Spi::get_one::<bool>(
+        "SELECT status.needs_rebuild AND projection.ingest_recommended
+         FROM graph.status() AS status
+         CROSS JOIN graph.projection_status() AS projection",
+    )
+    .expect("read scheduled rebuild state failed")
+    .unwrap_or(false);
+    assert!(rebuild_and_ingest);
+
+    let (applied_sync, maintenance_started, job_id, message) = Spi::connect(|client| {
+        let result = client.select(
+            "SELECT applied_sync, maintenance_started, maintenance_job_id, message
+             FROM graph.run_scheduled_maintenance()",
+            None,
+            &[],
+        )?;
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<bool>(1)?.unwrap_or(true),
+            row.get::<bool>(2)?.unwrap_or(false),
+            row.get::<String>(3)?,
+            row.get::<String>(4)?.unwrap_or_default(),
+        ))
+    })
+    .expect("run scheduled rebuild maintenance failed");
+
+    assert!(!applied_sync);
+    assert!(maintenance_started);
+    assert!(job_id.is_some());
+    assert_eq!(message, "started maintenance");
 }
 
 #[pg_test]

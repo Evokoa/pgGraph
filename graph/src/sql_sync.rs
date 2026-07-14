@@ -134,7 +134,7 @@ pub(crate) fn disabled_graph_trigger_count() -> safety::GraphResult<i32> {
     Spi::connect(|client| {
         let result = client.select(
             "SELECT count(*)::int
-             FROM pg_trigger
+             FROM pg_catalog.pg_trigger
              WHERE tgname IN ('graph_sync_insert', 'graph_sync_update', 'graph_sync_delete', 'graph_sync_truncate')
                AND tgenabled = 'D'",
             None,
@@ -462,9 +462,9 @@ fn sync_edge_source_node_oid(
     Spi::connect(|client| {
         let rows = client.select(
             "SELECT c.confrelid::oid::integer
-               FROM pg_constraint c
+               FROM pg_catalog.pg_constraint c
                JOIN unnest(c.conkey) WITH ORDINALITY AS fk_from(attnum, n) ON true
-               JOIN pg_attribute from_attr
+               JOIN pg_catalog.pg_attribute from_attr
                  ON from_attr.attrelid = c.conrelid
                 AND from_attr.attnum = fk_from.attnum
               WHERE c.contype = 'f'
@@ -639,9 +639,6 @@ fn ingest_projection_until_internal(
     // backends. Sharing the build/vacuum lock also prevents artifact replacement
     // while a projection generation is being prepared.
     crate::sql_build::acquire_build_lock()?;
-    ensure_sync_writer_barrier_triggers()?;
-    acquire_sync_writer_barrier()?;
-    ensure_engine_loaded_for_apply_sync()?;
     let graph = selected_or_default_graph_metadata()?;
     let graph_path = graph_file_path()?;
     if !graph_path.exists() {
@@ -658,6 +655,21 @@ fn ingest_projection_until_internal(
         .unwrap_or_else(|| config::sync_batch_size().max(1));
     let byte_limit = optional_nonnegative_usize(max_bytes, "max_bytes")?
         .unwrap_or_else(config::max_overlay_memory_bytes);
+    ensure_sync_writer_barrier_triggers()?;
+    acquire_sync_writer_barrier()?;
+    ensure_no_current_transaction_sync_rows(previous_watermark)?;
+    // Read only after taking the exclusive writer barrier. All earlier
+    // shared-lock writers have either committed or caused barrier acquisition
+    // to fail, and later writers cannot publish sync rows until this
+    // transaction releases the barrier.
+    let entries = read_sync_log_entries_after(previous_watermark, row_limit, target_sync_id)?;
+    if entries.is_empty() {
+        return Ok(ProjectionIngestStats {
+            sync_watermark: previous_watermark,
+            ..ProjectionIngestStats::default()
+        });
+    }
+    ensure_engine_loaded_for_apply_sync()?;
     let current_artifact_bytes = crate::projection::status::collect_projection_metadata_status(
         &root,
         max_sync_log_id()?,
@@ -669,14 +681,6 @@ fn ingest_projection_until_internal(
     crate::catalog::enforce_artifact_storage_quota(
         current_artifact_bytes.saturating_add(byte_limit.min(i64::MAX as usize) as i64),
     )?;
-    ensure_no_current_transaction_sync_rows(previous_watermark)?;
-    let entries = read_sync_log_entries_after(previous_watermark, row_limit, target_sync_id)?;
-    if entries.is_empty() {
-        return Ok(ProjectionIngestStats {
-            sync_watermark: previous_watermark,
-            ..ProjectionIngestStats::default()
-        });
-    }
     if entries.iter().any(|entry| entry.op == SyncOp::Truncate) {
         return Err(safety::GraphError::UnsupportedOperation {
             operation: "durable projection ingestion".to_string(),
@@ -860,8 +864,8 @@ fn sync_writer_barrier_trigger_gap_count() -> safety::GraphResult<i64> {
            FROM unnest($1::int4[]) AS expected(table_oid)
           WHERE NOT EXISTS (
                 SELECT 1
-                  FROM pg_trigger trigger
-                  JOIN pg_proc function ON function.oid = trigger.tgfoid
+                  FROM pg_catalog.pg_trigger trigger
+                  JOIN pg_catalog.pg_proc function ON function.oid = trigger.tgfoid
                  WHERE trigger.tgrelid = expected.table_oid::oid
                    AND NOT trigger.tgisinternal
                    AND trigger.tgenabled <> 'D'
@@ -896,8 +900,8 @@ fn sync_writer_barrier_trigger_current_for_oid(table_oid: u32) -> safety::GraphR
         "SELECT COALESCE((
              SELECT count(DISTINCT trigger.tgname) = 4
                     AND bool_and(position($2 IN pg_get_functiondef(function.oid)) > 0)
-               FROM pg_trigger trigger
-               JOIN pg_proc function ON function.oid = trigger.tgfoid
+               FROM pg_catalog.pg_trigger trigger
+               JOIN pg_catalog.pg_proc function ON function.oid = trigger.tgfoid
               WHERE trigger.tgrelid = $1::oid
                 AND NOT trigger.tgisinternal
                 AND trigger.tgenabled <> 'D'
@@ -1094,10 +1098,16 @@ fn apply_sync_row_operation(
     rows: &ParsedSyncRows,
     operation: SyncRowOperation<'_>,
 ) -> safety::GraphResult<()> {
+    let is_node_table = context
+        .tables
+        .iter()
+        .any(|table| table.table_oid == table_oid);
     match operation {
         SyncRowOperation::Insert { pk, tenant } => {
-            sync::sync_insert(eng, table_oid, pk, tenant)?;
-            refresh_filter_index_from_sync(eng, table_oid, pk, &context.filters, entry, rows)?;
+            if is_node_table {
+                sync::sync_insert(eng, table_oid, pk, tenant)?;
+                refresh_filter_index_from_sync(eng, table_oid, pk, &context.filters, entry, rows)?;
+            }
             apply_row_edge_mutations(
                 eng,
                 context,
@@ -1119,13 +1129,22 @@ fn apply_sync_row_operation(
                 rows.old.as_ref(),
                 engine::MutationKind::Delete,
             )?;
-            if old_pk == new_pk {
-                sync::sync_update_tenant(eng, table_oid, new_pk, old_tenant, new_tenant)?;
-            } else {
-                sync::sync_delete_tenant(eng, table_oid, old_pk, old_tenant)?;
-                sync::sync_insert(eng, table_oid, new_pk, new_tenant)?;
+            if is_node_table {
+                if old_pk == new_pk {
+                    sync::sync_update_tenant(eng, table_oid, new_pk, old_tenant, new_tenant)?;
+                } else {
+                    sync::sync_delete_tenant(eng, table_oid, old_pk, old_tenant)?;
+                    sync::sync_insert(eng, table_oid, new_pk, new_tenant)?;
+                }
+                refresh_filter_index_from_sync(
+                    eng,
+                    table_oid,
+                    new_pk,
+                    &context.filters,
+                    entry,
+                    rows,
+                )?;
             }
-            refresh_filter_index_from_sync(eng, table_oid, new_pk, &context.filters, entry, rows)?;
             apply_row_edge_mutations(
                 eng,
                 context,
@@ -1142,9 +1161,19 @@ fn apply_sync_row_operation(
                 rows.old.as_ref(),
                 engine::MutationKind::Delete,
             )?;
-            sync::sync_delete_tenant(eng, table_oid, pk, old_tenant)
+            if is_node_table {
+                sync::sync_delete_tenant(eng, table_oid, pk, old_tenant)
+            } else {
+                Ok(())
+            }
         }
-        SyncRowOperation::Truncate => sync::sync_truncate(eng, table_oid).map(|_| ()),
+        SyncRowOperation::Truncate if is_node_table => {
+            sync::sync_truncate(eng, table_oid).map(|_| ())
+        }
+        SyncRowOperation::Truncate => {
+            eng.mark_vacuum_required();
+            Ok(())
+        }
     }
 }
 

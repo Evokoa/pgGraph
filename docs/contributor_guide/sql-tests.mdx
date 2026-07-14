@@ -70,7 +70,7 @@ clusters where the pgrx harness is not representative enough.
 | `run_memory_sanitizers.sh` | pgrx SQL suite plus optional ASan, Valgrind, and pgbench sync smoke |
 | `package_validate.sh` | `cargo pgrx package` output, extension SQL/control/library artifacts, and packaged docs |
 | `fresh_install_smoke.sh` | Fresh local install, extension creation, build, traversal, and search |
-| `function_metadata_audit.sh` | SQL function volatility, parallel-safety, security, cost, and row metadata |
+| `function_metadata_audit.sh` | SQL function volatility, parallel-safety, security, cost, and row metadata, including generated sync trigger functions |
 | `backup_restore_validate.sh` | Dump/restore behavior for source tables, graph catalog state, sync state, and persisted artifacts |
 | `docker_smoke.sh` | Container build and extension smoke test |
 | `pg_upgrade_validate.sh` | `pg_upgrade --check` compatibility for a database containing pgGraph |

@@ -568,6 +568,35 @@ fn binder_accepts_create_for_mapped_edge_row() {
 }
 
 #[test]
+fn binder_rejects_create_for_node_backed_foreign_key_relationship() {
+    let catalog = FakeCatalog::new()
+        .with_writable_label("users", 10, ["id", "manager_id"], ["manager_id"])
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "managed_by",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 10,
+            source_column: "id",
+            target_column: "manager_id",
+            bidirectional: false,
+            label_column: None,
+        });
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users {id: 'u1'}), (v:users {id: 'u2'})
+         CREATE (u)-[r:managed_by]->(v)
+         RETURN r",
+    )
+    .unwrap();
+
+    let err = bind_statement(&ast, &catalog).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err
+        .to_string()
+        .contains("node-backed foreign-key relationship"));
+}
+
+#[test]
 fn binder_accepts_wildcard_delete_for_unique_mapped_edge_row() {
     let ast = crate::gql::parse_statement("MATCH ()-[r]->() DELETE r RETURN r").unwrap();
     let plan = bind_statement(&ast, &fake_catalog()).unwrap();

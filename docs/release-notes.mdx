@@ -78,6 +78,11 @@ gate evidence through signed tags and package publishing.
   `graph.enable_sync()` or a trigger-mode `graph.build()` to refresh older sync
   triggers before durable ingestion; trigger-mode builds refresh them before
   taking the source snapshot.
+- Pinned extension and generated trigger-sync security-definer functions to
+  `pg_catalog, pg_temp`, qualified authorization-critical catalog and operator
+  lookups, and added temporary plus persistent hostile-schema release gates.
+  Refresh existing trigger definitions with `graph.enable_sync()` after
+  upgrading.
 - Rebased mutable projection manifests after persisted build and vacuum. Each
   replacement base publishes a monotonic base-only generation with the new
   checksum and watermark, while superseded segments, chunks, and identity

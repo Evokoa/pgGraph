@@ -692,7 +692,7 @@ pub(crate) fn record_active_generation_heartbeat(
          )
          VALUES (
              $5::uuid, $1, pg_backend_pid(),
-             (SELECT oid FROM pg_database WHERE datname = current_database()),
+             (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()),
              now(), now() + ($2::double precision * interval '1 microsecond'),
              $3, $4
          )
@@ -737,7 +737,7 @@ pub(crate) fn active_generation_count() -> GraphResult<i32> {
          FROM graph._projection_generations
          WHERE graph_id = $1::uuid
            AND backend_pid <> 0
-           AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND database_oid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
            AND expires_at > now()",
         &[graph_id.into()],
     )
@@ -758,7 +758,7 @@ pub(crate) fn generation_has_active_heartbeat(generation_id: u64) -> GraphResult
              WHERE graph_id = $2::uuid
                AND generation_id = $1
                AND backend_pid <> 0
-               AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND database_oid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
                AND expires_at > now()
          )",
         &[generation_id.into(), graph_id.into()],
@@ -781,7 +781,7 @@ pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
              FROM graph._projection_generations
              WHERE graph_id = $1::uuid
                AND backend_pid <> 0
-               AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND database_oid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
                AND expires_at > now()
              ORDER BY generation_id",
             None,

@@ -22,6 +22,19 @@ dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 
 psql "$DBNAME" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS graph"
+psql "$DBNAME" -v ON_ERROR_STOP=1 <<'SQL'
+CREATE TABLE public.pggraph_metadata_sync_source (
+    id text PRIMARY KEY,
+    name text NOT NULL
+);
+SELECT graph.add_table(
+    'public.pggraph_metadata_sync_source'::regclass,
+    'id',
+    ARRAY['name']::text[],
+    NULL
+);
+SELECT graph.enable_sync();
+SQL
 
 violations="$(psql "$DBNAME" -qAt <<'SQL'
 WITH exported AS (
@@ -88,6 +101,21 @@ allowed_security_definer AS (
         ('maintenance', '"concurrently" boolean')
     ) AS allowed(proname, args)
 ),
+generated_sync_definer AS (
+    SELECT DISTINCT proc.oid
+    FROM pg_proc AS proc
+    JOIN pg_namespace AS namespace ON namespace.oid = proc.pronamespace
+    JOIN pg_trigger AS trigger ON trigger.tgfoid = proc.oid
+    WHERE namespace.nspname = 'graph'
+      AND NOT trigger.tgisinternal
+      AND trigger.tgname IN (
+          'graph_sync_insert',
+          'graph_sync_update',
+          'graph_sync_delete',
+          'graph_sync_truncate'
+      )
+      AND proc.proname ~ '^_sync_[0-9]+(_truncate)?$'
+),
 violations AS (
     SELECT format('%s(%s): security definer is not expected', proname, args) AS problem
     FROM exported e
@@ -98,12 +126,17 @@ violations AS (
           WHERE allowed.proname = e.proname
             AND allowed.args = e.args
       )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM generated_sync_definer generated
+          WHERE generated.oid = e.oid
+      )
 
     UNION ALL
-    SELECT format('%s(%s): security definer must pin search_path to pg_catalog', proname, args)
+    SELECT format('%s(%s): security definer must pin search_path to pg_catalog, pg_temp', proname, args)
     FROM exported
     WHERE prosecdef
-      AND NOT (COALESCE(proconfig, ARRAY[]::text[]) @> ARRAY['search_path=pg_catalog'])
+      AND NOT (COALESCE(proconfig, ARRAY[]::text[]) @> ARRAY['search_path=pg_catalog, pg_temp'])
 
     UNION ALL
     SELECT format('%s(%s): leakproof is not expected', proname, args)

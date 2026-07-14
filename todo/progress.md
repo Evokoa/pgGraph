@@ -94,6 +94,23 @@ and identity dictionaries for generation-aware garbage collection. The
 PostgreSQL 17 persisted isolation matrix passes repeated builds. KI-018 remains
 the separate crash-atomic generation-specific base-switch blocker.
 
+2026-07-13 R1 definer search-path reassessment — Static review found that
+pgrx-exported definer functions are pinned, but dynamically generated trigger
+sync row and truncate functions still inherit the caller search path. KI-023
+remains open until those functions and the release metadata audit are hardened.
+
+2026-07-13 R1 definer search-path hardening — Extension and generated trigger
+definers now place `pg_catalog` before explicit `pg_temp`; shared caller-role
+checks use PostgreSQL's outer-user identity and qualify authorization-critical
+catalog, function, type, and operator references. PostgreSQL 17 temporary-table,
+persistent function/operator, trigger-function, and metadata attacks pass.
+
+2026-07-14 R1 definer search-path checkpoint — KI-023 is closed on PostgreSQL
+17: the 970-test pgrx suite, generated-function metadata audit, strict
+publication/writer-barrier gate, release-contract drift checks, Clippy,
+rustdoc, and independent review pass. PostgreSQL 14-16 and 18 matrix evidence
+remains before the known issue can be retired.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

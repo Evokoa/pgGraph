@@ -2544,18 +2544,21 @@ fn gql_applies_session_tenant_scope_to_topology() {
 fn gql_reads_transaction_delta_edge_overlay() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable GQL writes failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("rebuild mutable friendship graph failed");
 
     Spi::run(
-        "SELECT graph._test_record_tx_edge(
-            'graph_test_users_pgtest'::regclass,
-            'u2',
-            'graph_test_users_pgtest'::regclass,
-            'u1',
-            'friend',
-            'insert'
-        )",
+        "SELECT *
+         FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest {id: ''u2''}),
+                   (v:graph_test_users_pgtest {id: ''u1''})
+             CREATE (u)-[r:friend {id: ''f2''}]->(v)
+             RETURN r',
+            hydrate := false
+         )",
     )
-    .expect("record tx edge insert failed");
+    .expect("create transaction relationship failed");
 
     let reverse_count = Spi::get_one::<i64>(
         "SELECT count(*)::bigint
