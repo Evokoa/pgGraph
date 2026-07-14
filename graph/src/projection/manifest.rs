@@ -339,6 +339,25 @@ impl ProjectionManifestStore {
         Ok(Some(manifest))
     }
 
+    /// Load the latest manifest metadata without validating referenced files.
+    ///
+    /// A full PostgreSQL rebuild uses this to retain generation linkage and
+    /// obsolete-file accounting even when a referenced segment or chunk is the
+    /// reason the current generation must be replaced.
+    pub(crate) fn load_latest_metadata(&self) -> GraphResult<Option<ProjectionManifest>> {
+        let Some((generation_id, path)) = self.latest_manifest_path()? else {
+            return Ok(None);
+        };
+        let manifest = self.load_manifest_file(&path)?;
+        if manifest.generation_id != generation_id {
+            return Err(manifest_corrupt(format!(
+                "manifest filename generation {generation_id} does not match JSON generation {}",
+                manifest.generation_id
+            )));
+        }
+        Ok(Some(manifest))
+    }
+
     fn load_manifest_file(&self, path: &Path) -> GraphResult<ProjectionManifest> {
         let raw =
             fs::read_to_string(path).map_err(|err| manifest_io("read manifest", path, err))?;

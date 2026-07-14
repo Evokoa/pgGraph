@@ -64,6 +64,6 @@ the persisted base build.
   ingested after commit, and rolled-back rows are never published.
 - [ ] Run the lifecycle and lock evidence on PostgreSQL 14-16 and 18 before
   retiring KI-026 from the supported-major release matrix.
-- [ ] The persisted isolation gate now passes durable new-node ingestion but
-  exposes KI-027 during repeated persisted builds; close KI-027 before retiring
-  the persisted-path limitation in KI-019.
+- [x] The PostgreSQL 17 persisted isolation gate passes durable new-node
+  ingestion and repeated builds after KI-027 manifest rebasing. PostgreSQL
+  14-16 and 18 evidence remains part of the supported-major release matrix.

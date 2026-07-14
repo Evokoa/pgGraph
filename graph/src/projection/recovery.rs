@@ -15,7 +15,8 @@ use crate::projection::chunk::{
 };
 use crate::projection::layered::{ManifestSegmentProvider, SegmentProvider};
 use crate::projection::manifest::{
-    manifest_file_name, parse_manifest_file_name, ProjectionManifest, ProjectionManifestStore,
+    manifest_file_name, parse_manifest_file_name, ManifestFileRef, ProjectionManifest,
+    ProjectionManifestStore,
 };
 use crate::safety::{GraphError, GraphResult};
 
@@ -149,10 +150,17 @@ pub(crate) fn repair_active_base_chunks(
 /// Publish a fresh base-only manifest after a successful PostgreSQL rebuild.
 pub(crate) fn publish_rebuilt_base_manifest(
     graph_path: &Path,
-    generation_id: u64,
     sync_watermark: i64,
 ) -> GraphResult<ProjectionManifest> {
     let root = projection_manifest_root(graph_path);
+    let store = ProjectionManifestStore::new(&root);
+    let previous_generation_id = latest_manifest_generation(&root)?;
+    let previous = match store.load_latest_metadata() {
+        Ok(previous) => previous,
+        Err(GraphError::CorruptFile { .. } | GraphError::IncompatibleVersion(_)) => None,
+        Err(err) => return Err(err),
+    };
+    let generation_id = next_rebuild_generation_id(&root)?;
     let base_artifact_path = graph_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -165,9 +173,50 @@ pub(crate) fn publish_rebuilt_base_manifest(
         sync_watermark,
         now_unix_micros()?,
     );
-    manifest.mark_repair();
-    ProjectionManifestStore::new(root).publish(&manifest)?;
+    if let Some(previous) = previous.as_ref() {
+        manifest.previous_generation_id = Some(previous.generation_id);
+        manifest.inherit_operation_timestamps(previous);
+        manifest.obsolete_files = previous.obsolete_files.clone();
+        append_superseded_projection_files(&root, previous, &mut manifest.obsolete_files);
+    } else {
+        manifest.previous_generation_id = previous_generation_id;
+    }
+    store.publish(&manifest)?;
     Ok(manifest)
+}
+
+fn append_superseded_projection_files(
+    root: &Path,
+    previous: &ProjectionManifest,
+    obsolete: &mut Vec<ManifestFileRef>,
+) {
+    let mut paths = obsolete
+        .iter()
+        .map(|reference| reference.path.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut push = |path: &str, known_bytes: Option<u64>| {
+        if !paths.insert(path.to_string()) {
+            return;
+        }
+        let bytes = known_bytes.unwrap_or_else(|| {
+            std::fs::metadata(root.join(path))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        });
+        obsolete.push(ManifestFileRef {
+            path: path.to_string(),
+            bytes,
+        });
+    };
+    for segment in &previous.segments {
+        push(&segment.path, None);
+    }
+    if let Some(identity) = previous.relationship_identities.as_ref() {
+        push(&identity.path, Some(identity.bytes));
+    }
+    for chunk in &previous.base_chunks {
+        push(&chunk.path, None);
+    }
 }
 
 fn validate_manifest_base_metadata(
@@ -207,10 +256,64 @@ fn validate_manifest_base_metadata(
 
 /// Return the next generation id after every final manifest file in `root`.
 pub(crate) fn next_rebuild_generation_id(root: &Path) -> GraphResult<u64> {
-    latest_manifest_generation(root)?
+    latest_known_manifest_generation(root)?
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into()))
+}
+
+/// Return whether the artifact root contains a published or quarantined
+/// projection generation that a persisted rebuild must supersede.
+pub(crate) fn has_projection_generation(root: &Path) -> GraphResult<bool> {
+    latest_known_manifest_generation(root).map(|generation| generation.is_some())
+}
+
+fn latest_known_manifest_generation(root: &Path) -> GraphResult<Option<u64>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(GraphError::Internal(format!(
+                "projection recovery read artifact directory failed for {}: {err}",
+                root.display()
+            )));
+        }
+    };
+    let mut latest = None;
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            GraphError::Internal(format!(
+                "projection recovery read artifact entry failed for {}: {err}",
+                root.display()
+            ))
+        })?;
+        if !entry
+            .file_type()
+            .map_err(|err| {
+                GraphError::Internal(format!(
+                    "projection recovery read artifact file type failed for {}: {err}",
+                    entry.path().display()
+                ))
+            })?
+            .is_file()
+        {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let generation_id = parse_manifest_file_name(&file_name).or_else(|| {
+            file_name
+                .split_once(".invalid-")
+                .and_then(|(original, _)| parse_manifest_file_name(original))
+        });
+        if let Some(generation_id) = generation_id {
+            if latest.is_none_or(|current| generation_id > current) {
+                latest = Some(generation_id);
+            }
+        }
+    }
+    Ok(latest)
 }
 
 /// Move the latest final manifest aside so a full rebuild can reload safely.
@@ -496,7 +599,8 @@ mod tests {
         write_file(dir.path().join(manifest_file_name(4)), b"{not json");
 
         let generation_id = next_rebuild_generation_id(dir.path()).expect("next generation id");
-        let manifest = publish_rebuilt_base_manifest(&graph_path, generation_id, 42)
+        quarantine_latest_manifest(dir.path()).expect("corrupt manifest quarantines");
+        let manifest = publish_rebuilt_base_manifest(&graph_path, 42)
             .expect("rebuilt projection manifest publishes");
         let loaded = validate_active_projection(dir.path())
             .expect("rebuilt generation validates")
@@ -507,6 +611,75 @@ mod tests {
         assert_eq!(loaded.generation_id, 5);
         assert_eq!(loaded.base_artifact_path, "main.pggraph");
         assert_eq!(loaded.sync_watermark, 42);
+    }
+
+    #[test]
+    fn repeated_rebuild_rebases_checksum_and_obsoletes_projection_files() {
+        use crate::engine::Engine;
+        use crate::persistence::{load_graph_file, write_graph_file};
+
+        let dir = ProjectionArtifactDir::new(
+            "repeated_rebuild_rebases_checksum_and_obsoletes_projection_files",
+        );
+        let graph_path = dir.path().join("main.pggraph");
+        let mut engine = Engine::new();
+        engine.finish_build(None);
+        write_graph_file(&engine, &graph_path).expect("initial base graph writes");
+
+        let segment_path = dir.path().join("superseded.pggraph-delta");
+        edge_segment(1, 0, &[(0, 0, 1)])
+            .write_to_path(&segment_path)
+            .expect("superseded segment writes");
+        let mut previous = ProjectionManifest::base_only(
+            1,
+            "main.pggraph",
+            graph_artifact_checksum_for_path(&graph_path).expect("initial checksum reads"),
+            graph_artifact_version(),
+            7,
+            1,
+        );
+        previous.last_ingestion_unix_micros = Some(123);
+        previous
+            .segments
+            .push(segment_ref(dir.path(), &segment_path, "crc32:00000000"));
+        ProjectionManifestStore::new(dir.path())
+            .publish(&previous)
+            .expect("previous manifest publishes");
+        assert_eq!(
+            plan_projection_recovery_for_artifact(dir.path(), Some(&graph_path))
+                .expect("corrupt segment recovery plans")
+                .action,
+            ProjectionRecoveryAction::FullRebuild
+        );
+
+        crate::sync::sync_insert(&mut engine, 42, "post-build", None)
+            .expect("replacement base changes");
+        engine.edge_store = crate::edge_store::EdgeStore::from_edges(
+            engine.node_store.node_count(),
+            Vec::new(),
+            false,
+        );
+        engine.record_applied_sync_id(9);
+        write_graph_file(&engine, &graph_path).expect("replacement base graph writes");
+        let rebased =
+            publish_rebuilt_base_manifest(&graph_path, 9).expect("replacement manifest publishes");
+        let loaded = load_graph_file(&graph_path).expect("rebased base reloads");
+
+        assert_eq!(rebased.generation_id, 2);
+        assert_eq!(rebased.previous_generation_id, Some(1));
+        assert_eq!(rebased.sync_watermark, 9);
+        assert_eq!(rebased.last_ingestion_unix_micros, Some(123));
+        assert!(rebased.segments.is_empty());
+        assert!(rebased.base_chunks.is_empty());
+        assert!(rebased.relationship_identities.is_none());
+        assert_eq!(rebased.obsolete_files.len(), 1);
+        assert_eq!(rebased.obsolete_files[0].path, "superseded.pggraph-delta");
+        assert_eq!(
+            rebased.base_artifact_checksum,
+            graph_artifact_checksum_for_path(&graph_path).expect("replacement checksum reads")
+        );
+        assert_eq!(loaded.applied_sync_id, 9);
+        assert!(loaded.resolve(42, "post-build").is_some());
     }
 
     #[test]

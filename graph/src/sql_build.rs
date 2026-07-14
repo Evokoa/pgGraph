@@ -98,6 +98,17 @@ fn persist_and_reload_engine(
     persistence::write_graph_file_with_interrupt_checks(&source, &path).map_err(|err| {
         safety::GraphError::Internal(format!("graph.{operation}(): persistence failed: {err}"))
     })?;
+    let projection_root = persistence::projection_manifest_root(&path);
+    if source.projection_mode == config::ProjectionMode::MutableOverlay
+        || crate::projection::recovery::has_projection_generation(&projection_root)?
+    {
+        crate::projection::recovery::publish_rebuilt_base_manifest(&path, source.applied_sync_id)
+            .map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "graph.{operation}(): projection manifest rebase failed: {err}"
+            ))
+        })?;
+    }
 
     let file_size = std::fs::metadata(&path)
         .map(|m| m.len() as f64 / 1_048_576.0)
@@ -206,36 +217,7 @@ fn execute_build_inner(
         });
     }
 
-    // Reconcile sync triggers before taking the source snapshot. The trigger
-    // DDL obtains relation locks, so transactions that could still have run an
-    // older trigger definition finish before the writer barrier becomes the
-    // snapshot boundary for this build.
-    let writer_barrier_held = match sync_mode {
-        config::SyncMode::Manual => {
-            remove_sync_triggers()?;
-            false
-        }
-        config::SyncMode::Trigger => {
-            let current_barrier = crate::sql_sync::sync_writer_barrier_triggers_current()?;
-            if current_barrier {
-                // Current triggers already participate in the barrier, so keep
-                // the build fail-fast before trigger DDL requests table locks.
-                crate::sql_sync::acquire_sync_writer_barrier()?;
-                crate::sql_sync::ensure_no_current_transaction_sync_rows(0)?;
-            }
-            let installed = install_sync_triggers()?;
-            pgrx::warning!(
-                "graph.build(): graph.sync_mode = 'trigger' installed graph sync triggers on {} registered table(s); set graph.sync_mode = 'manual' before graph.build() to opt out",
-                installed
-            );
-            current_barrier
-        }
-        config::SyncMode::Wal => unreachable!("current_sync_mode rejects reserved wal mode"),
-    };
-    if !writer_barrier_held {
-        crate::sql_sync::acquire_sync_writer_barrier()?;
-        crate::sql_sync::ensure_no_current_transaction_sync_rows(0)?;
-    }
+    prepare_source_snapshot_boundary(sync_mode, "build")?;
 
     check_build_acls_result(&tables, &edges)?;
     let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
@@ -313,6 +295,7 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
 pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumExecutionResult> {
     let start = std::time::Instant::now();
     acquire_build_lock()?;
+    let sync_mode = current_sync_mode()?;
 
     let (nodes_before, active_before) = ENGINE.with(|e| {
         let eng = e.borrow();
@@ -336,6 +319,7 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     }
 
     let (tables, edges, filter_columns) = read_catalog()?;
+    prepare_source_snapshot_boundary(sync_mode, "vacuum")?;
     check_build_acls_result(&tables, &edges)?;
     let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
     apply_build_memory_plan(memory_plan)?;
@@ -371,6 +355,41 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
         edges_rebuilt,
         vacuum_time_ms: start.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+fn prepare_source_snapshot_boundary(
+    sync_mode: config::SyncMode,
+    operation: &str,
+) -> safety::GraphResult<()> {
+    // Reconcile sync triggers before taking the source snapshot. Trigger DDL
+    // establishes a clean table-lock boundary for older definitions; current
+    // definitions acquire the writer barrier first and refresh only function
+    // bodies, keeping active-writer contention fail-fast.
+    let writer_barrier_held = match sync_mode {
+        config::SyncMode::Manual => {
+            remove_sync_triggers()?;
+            false
+        }
+        config::SyncMode::Trigger => {
+            let current_barrier = crate::sql_sync::sync_writer_barrier_triggers_current()?;
+            if current_barrier {
+                crate::sql_sync::acquire_sync_writer_barrier()?;
+                crate::sql_sync::ensure_no_current_transaction_sync_rows(0)?;
+            }
+            let installed = install_sync_triggers()?;
+            pgrx::warning!(
+                "graph.{operation}(): graph.sync_mode = 'trigger' installed graph sync triggers on {} registered table(s); set graph.sync_mode = 'manual' before graph.{operation}() to opt out",
+                installed
+            );
+            current_barrier
+        }
+        config::SyncMode::Wal => unreachable!("current_sync_mode rejects reserved wal mode"),
+    };
+    if !writer_barrier_held {
+        crate::sql_sync::acquire_sync_writer_barrier()?;
+        crate::sql_sync::ensure_no_current_transaction_sync_rows(0)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {

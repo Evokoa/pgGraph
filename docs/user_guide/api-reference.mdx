@@ -252,8 +252,10 @@ artifacts. Healthy or absent projection metadata returns without rebuilding.
 Corrupt base chunks are repaired by publishing a replacement generation from
 the current base graph. Corrupt manifests, corrupt active segments, or invalid
 base metadata trigger a full persisted rebuild from PostgreSQL source tables,
-then publish a fresh base-only projection manifest. The old latest manifest is
-quarantined before full rebuild so persisted reload cannot select it again.
+then publish a fresh base-only projection manifest. Readable prior metadata is
+kept until the replacement publishes so its superseded artifacts can be tracked
+for garbage collection. An unreadable prior manifest is removed only after the
+replacement has published and reloaded successfully.
 
 ### `graph.memory_profile()`
 

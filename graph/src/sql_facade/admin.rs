@@ -1321,6 +1321,7 @@ fn projection_repair() -> TableIterator<
 > {
     with_panic_boundary("projection_repair()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
+        crate::sql_build::acquire_build_lock().unwrap_or_else(|err| err.report());
         let artifact = crate::persistence::graph_file_path().unwrap_or_else(|err| err.report());
         let root = crate::persistence::projection_manifest_root(&artifact);
         let plan = crate::projection::recovery::plan_projection_recovery_for_artifact(
@@ -1359,9 +1360,13 @@ fn projection_repair() -> TableIterator<
                 let next_generation =
                     crate::projection::recovery::next_rebuild_generation_id(&root)
                         .unwrap_or_else(|err| err.report());
-                let manifest =
-                    run_full_projection_rebuild_repair(&root, &artifact, next_generation)
-                        .unwrap_or_else(|err| err.report());
+                let manifest = run_full_projection_rebuild_repair(
+                    &root,
+                    &artifact,
+                    plan.generation_id,
+                    next_generation,
+                )
+                .unwrap_or_else(|err| err.report());
                 action = crate::projection::recovery::ProjectionRecoveryAction::FullRebuild;
                 generation_id = Some(manifest.generation_id);
                 rebuilt = true;
@@ -1381,35 +1386,43 @@ fn projection_repair() -> TableIterator<
 fn run_full_projection_rebuild_repair(
     root: &std::path::Path,
     artifact: &std::path::Path,
+    replaced_generation: Option<u64>,
     next_generation: u64,
 ) -> safety::GraphResult<crate::projection::manifest::ProjectionManifest> {
-    let quarantined = crate::projection::recovery::quarantine_latest_manifest(root)?;
-    let result = (|| {
-        execute_maintenance_rebuild(true)?;
-        let manifest = crate::projection::recovery::publish_rebuilt_base_manifest(
-            artifact,
-            next_generation,
-            max_sync_log_id()?,
-        )?;
-        reload_persisted_engine_with_projection(artifact)?;
-        Ok(manifest)
-    })();
-
-    match result {
-        Ok(manifest) => Ok(manifest),
-        Err(err) => {
-            if let Some(quarantine_path) = quarantined {
-                if let Err(restore_err) =
-                    crate::projection::recovery::restore_quarantined_manifest(&quarantine_path)
-                {
-                    return Err(safety::GraphError::Internal(format!(
-                        "projection repair failed ({err}); additionally failed to restore quarantined manifest: {restore_err}"
-                    )));
-                }
-            }
-            Err(err)
+    execute_maintenance_rebuild(true)?;
+    let store = crate::projection::manifest::ProjectionManifestStore::new(root);
+    if !store.manifest_path(next_generation).is_file() {
+        crate::projection::recovery::publish_rebuilt_base_manifest(artifact, max_sync_log_id()?)?;
+    }
+    let manifest = store.load_latest_current()?.ok_or_else(|| {
+        safety::GraphError::Internal(
+            "projection rebuild did not publish a replacement manifest".to_string(),
+        )
+    })?;
+    if manifest.generation_id != next_generation {
+        return Err(safety::GraphError::Internal(format!(
+            "projection rebuild published generation {}; expected {}",
+            manifest.generation_id, next_generation
+        )));
+    }
+    reload_persisted_engine_with_projection(artifact)?;
+    if let Some(replaced_generation) = replaced_generation {
+        let replaced_path = store.manifest_path(replaced_generation);
+        if std::fs::read_to_string(&replaced_path)
+            .ok()
+            .is_some_and(|raw| {
+                crate::projection::manifest::ProjectionManifest::from_json(&raw).is_err()
+            })
+        {
+            std::fs::remove_file(&replaced_path).map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "projection repair could not remove unreadable manifest {}: {err}",
+                    replaced_path.display()
+                ))
+            })?;
         }
     }
+    Ok(manifest)
 }
 
 fn projection_recovery_action_text(

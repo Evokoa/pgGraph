@@ -60,8 +60,8 @@ gate evidence through signed tags and package publishing.
   not leave transaction-local graph state.
 - Added a two-session isolation gate proving backend-local mapped writes follow
   PostgreSQL READ COMMITTED, REPEATABLE READ, and SERIALIZABLE visibility
-  rules; the persisted variant now covers durable new-node identity but remains
-  gated by repeated-build manifest rebasing (KI-027).
+  rules. The persisted variant covers durable new-node identity and repeated
+  persisted builds.
 - Added durable post-build node identities with contiguous allocation, exact
   primary-key and tenant payloads, typed filter restoration, same-batch edge
   endpoints independent of sync-row order, tenant moves that preserve identity,
@@ -78,6 +78,10 @@ gate evidence through signed tags and package publishing.
   `graph.enable_sync()` or a trigger-mode `graph.build()` to refresh older sync
   triggers before durable ingestion; trigger-mode builds refresh them before
   taking the source snapshot.
+- Rebased mutable projection manifests after persisted build and vacuum. Each
+  replacement base publishes a monotonic base-only generation with the new
+  checksum and watermark, while superseded segments, chunks, and identity
+  dictionaries enter generation-aware garbage collection.
 - Added graph-scoped projection and sync behavior so replay, dirty-range
   ingest, copy-on-write compaction, and runtime selection ignore unrelated
   graph state.

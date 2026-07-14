@@ -84,8 +84,15 @@ exact target endpoints cannot resolve against a different table with the same
 key, and standalone endpoint identity changes fail closed with rebuild
 guidance. Durable `graph.apply_sync()` statistics are verified against the
 exact published batch.
-The persisted isolation matrix now reaches repeated-build validation and
-exposes KI-027: the active manifest can retain the previous base checksum.
+The persisted isolation matrix now passes durable new-node ingestion and
+repeated persisted builds after KI-027 manifest rebasing.
+
+2026-07-13 R1 persisted rebuild rebasing — Persisted mutable build and vacuum
+now publish a monotonic base-only manifest after replacing the base artifact,
+carry forward operation timestamps, and record superseded segments, chunks,
+and identity dictionaries for generation-aware garbage collection. The
+PostgreSQL 17 persisted isolation matrix passes repeated builds. KI-018 remains
+the separate crash-atomic generation-specific base-switch blocker.
 
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific

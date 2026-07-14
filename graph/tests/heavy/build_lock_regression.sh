@@ -478,6 +478,23 @@ if ! grep -q "55P03" "$WORKDIR/writer-barrier-build.log" ||
 fi
 set +e
 psql -X --set=VERBOSITY=verbose -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SET graph.persist_on_build = on; SELECT * FROM graph.load_graph('default'); SELECT * FROM graph.vacuum()" \
+  >"$WORKDIR/writer-barrier-vacuum.log" 2>&1
+writer_barrier_vacuum_status=$?
+set -e
+if [[ "$writer_barrier_vacuum_status" -eq 0 ]]; then
+  echo "persisted vacuum succeeded while a registered source writer was active"
+  cat "$WORKDIR/writer-barrier-vacuum.log"
+  exit 1
+fi
+if ! grep -q "55P03" "$WORKDIR/writer-barrier-vacuum.log" ||
+  ! grep -q "Another graph maintenance operation or registered source transaction is active" "$WORKDIR/writer-barrier-vacuum.log"; then
+  echo "persisted vacuum did not report the registered source writer barrier"
+  cat "$WORKDIR/writer-barrier-vacuum.log"
+  exit 1
+fi
+set +e
+psql -X --set=VERBOSITY=verbose -v ON_ERROR_STOP=1 "$DBNAME" \
   -c "SELECT rows_ingested FROM graph.ingest_projection(100, 1048576)" \
   >"$WORKDIR/writer-barrier-commit.log" 2>&1
 writer_barrier_commit_status=$?

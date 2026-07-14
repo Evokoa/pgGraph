@@ -164,7 +164,8 @@ correctness and safety boundary.
 - 2026-07-12 — Checkpoint 1A mutable-overlay visibility subphase: caller-role RLS checks now have durable post-build segment coverage across coordinate, hydrated, aggregate, and existence result shapes on PostgreSQL 17.
 - 2026-07-12 — Checkpoint 1A PostgreSQL write-boundary subphase: GQL CREATE now has PostgreSQL 17 evidence for partition routing plus CHECK-constraint and user-trigger rejection without residual transaction deltas.
 - 2026-07-13 — Checkpoint 1A isolation subphase: a two-session gate proves the existing query-freshness path observes a later committed mapped write under READ COMMITTED while REPEATABLE READ and SERIALIZABLE retain their transaction snapshot. Durable new-node ingestion defect KI-026 remains open for the storage phase.
-- 2026-07-13 — Checkpoint 1A durable-node subphase: projection segment v6 stores exact primary-key and tenant identities, a non-serving planner allocates contiguous slots and same-batch endpoints, manifest loading stages node state atomically, direct ingest reloads the backend, cross-backend publication shares the graph advisory lock, and unrepresentable TRUNCATE fails without watermark advancement. KI-027 now tracks repeated persisted-build manifest checksum rebasing.
+- 2026-07-13 — Checkpoint 1A durable-node subphase: projection segment v6 stores exact primary-key and tenant identities, a non-serving planner allocates contiguous slots and same-batch endpoints, manifest loading stages node state atomically, direct ingest reloads the backend, cross-backend publication shares the graph advisory lock, and unrepresentable TRUNCATE fails without watermark advancement.
+- 2026-07-13 — Checkpoint 1A persisted-rebuild subphase: repeated persisted mutable builds publish a monotonic base-only manifest bound to the replacement checksum and watermark, preserve operation timestamps, and retire superseded projection artifacts through generation-aware GC accounting.
 
 ## Decisions
 
@@ -514,7 +515,7 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Gate | Exact command | Result |
 |---|---|---|
 | Two-session isolation matrix | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation ./tests/heavy/gql_isolation_matrix.sh` | PASS: READ COMMITTED source/GQL counts advance from 0 to 1; REPEATABLE READ and SERIALIZABLE remain 0 inside their snapshots; every row is visible after the reader transaction ends |
-| Durable-path diagnostic | `cd graph && PERSIST_ON_BUILD=on PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation_persisted_ki026 ./tests/heavy/gql_isolation_matrix.sh` | EXPECTED FAIL / KI-027: durable new-node ingestion succeeds; a later repeated persisted build fails closed because the manifest still references the previous base checksum |
+| Persisted isolation | `cd graph && PERSIST_ON_BUILD=on PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation_persisted_ki027 ./tests/heavy/gql_isolation_matrix.sh` | PASS: durable new-node identity, reload, and repeated builds preserve source/projection agreement under READ COMMITTED, REPEATABLE READ, and SERIALIZABLE |
 | Rust tests | `cd graph && cargo test --features pg17` | PASS: 697 passed, 1 ignored, doctests 0 |
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Rust documentation | `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "pg17 development"` | PASS |
@@ -533,9 +534,24 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Standalone endpoint lifecycle | `cd graph && cargo pgrx test --features "pg17 development" ingest_projection_rejects_standalone_endpoint_identity_changes` | PASS: a deferred-FK endpoint delete/reinsert fails with SQLSTATE 0A000 and rebuild guidance without advancing the watermark |
 | Standalone no-FK fallback | `cd graph && cargo pgrx test --features "pg17 development" standalone_relationship_sync_without_fk_uses_registered_endpoint_fallback` | PASS: unique registered endpoint fallback remains supported for inserts |
 | Cross-backend publication and writer barrier | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_build_lock_ki026 ./tests/heavy/build_lock_regression.sh` | PASS: build, vacuum, ingest, and active-writer contention fail closed; legacy trigger definitions require refresh; a same-transaction write cannot ingest before commit; apply statistics match the exact published batch; out-of-order commit and rollback cannot skip a sync ID; the 20,001-row publisher wins with an empty retry |
-| Persisted isolation | `cd graph && PERSIST_ON_BUILD=on PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation_persisted_ki026 ./tests/heavy/gql_isolation_matrix.sh` | EXPECTED FAIL / KI-027 during repeated persisted build checksum validation; no missing-node or advanced-watermark failure |
+| Persisted isolation | `cd graph && PERSIST_ON_BUILD=on PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation_persisted_ki027 ./tests/heavy/gql_isolation_matrix.sh` | PASS: repeated persisted builds publish manifests matching the replacement base checksum while isolation visibility remains correct |
 | Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
 | Rust documentation | `cd graph && cargo test --doc --features pg17`; `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --features pg17 --no-deps` | PASS: doctests 0; rustdoc warning-free |
 | Contract and docs drift | `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh` | PASS |
 | Shell syntax | `bash -n graph/tests/heavy/build_lock_regression.sh graph/tests/heavy/gql_isolation_matrix.sh` | PASS |
 | Independent Rust review | `rust-reviewing` subagent over KI-026 and follow-up compatibility fixes | PASS: no blockers after trigger-upgrade preflight, fail-fast lock ordering, same-transaction guard coverage, exact endpoint resolution, standalone lifecycle protection, and apply-stat consistency fixes |
+
+### 2026-07-13 R1 Persisted Rebuild Manifest Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Rebase and recovery unit tests | `cd graph && cargo test --features pg17 projection::recovery::tests --lib` | PASS: repeated rebuild checksum/watermark rebasing, generation linkage, corrupt-segment obsolete accounting, base-only reload, corrupt-manifest recovery, and targeted chunk repair |
+| Full rebuild repair | `cd graph && cargo pgrx test --features "pg17 development" full_rebuild_restores_valid_projection_generation` | PASS: unreadable generation is superseded by the expected monotonic generation and the backend reloads it |
+| Targeted chunk repair | `cd graph && cargo pgrx test --features "pg17 development" projection_repair_rewrites_corrupt_base_chunk_generation` | PASS |
+| Persisted isolation | `cd graph && PERSIST_ON_BUILD=on PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_isolation_persisted_ki027_final ./tests/heavy/gql_isolation_matrix.sh` | PASS: durable new-node ingestion and repeated builds preserve source/projection isolation agreement |
+| Build/vacuum writer barrier | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_build_lock_ki027c ./tests/heavy/build_lock_regression.sh` | PASS: active registered writers reject persisted build, vacuum, and ingestion with 55P03; commit/rollback and exact apply-count assertions remain green |
+| Rust unit suite | `cd graph && cargo test --features pg17 --lib --no-fail-fast` | PASS: 711 passed, 1 ignored |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust documentation | `cd graph && cargo test --doc --features pg17`; `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --features "pg17 development" --no-deps` | PASS: doctests 0; rustdoc warning-free |
+| Contract, docs, shell syntax, and whitespace | `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh`; `bash -n graph/tests/heavy/build_lock_regression.sh graph/tests/heavy/gql_isolation_matrix.sh`; `git diff --check` | PASS |
+| Independent Rust review | `rust-reviewing` subagent over KI-027 and concurrency/recovery follow-ups | PASS after serializing vacuum with active writers, acquiring the build lock before repair planning, preserving corrupt-generation artifact accounting, and correcting the public recovery description |
