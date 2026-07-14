@@ -1591,7 +1591,7 @@ mod tests {
         let artifact_mb = std::fs::metadata(&path).unwrap().len() as f64 / 1_048_576.0;
 
         let loaded = load_graph_file(&path).unwrap();
-        assert!(loaded.status().memory_used_mb >= artifact_mb);
+        assert!(loaded.estimated_memory_used_mb() >= artifact_mb);
         std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
