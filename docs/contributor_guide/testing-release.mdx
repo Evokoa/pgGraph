@@ -287,9 +287,18 @@ toolchains and PostgreSQL builds.
 cd graph
 DBNAME=pggraph_pgbench ./tests/heavy/run_memory_sanitizers.sh
 RUN_ASAN=1 ./tests/heavy/run_memory_sanitizers.sh
+RUN_ASAN=1 ASAN_TEST_FILTER=mmap_ RUN_PGRX=0 RUN_PGBENCH=0 \
+  ./tests/heavy/run_memory_sanitizers.sh
 RUN_VALGRIND=1 PGDATA=/path/to/pgdata POSTGRES_BIN=/path/to/postgres \
   ./tests/heavy/run_memory_sanitizers.sh
 ```
+
+On macOS, the script locates and preloads the active nightly toolchain's ASan
+runtime before compiling instrumented dependencies. This keeps sanitizer
+interceptors available to compiler and test subprocesses without requiring a
+machine-specific `DYLD_INSERT_LIBRARIES` value.
+`ASAN_TEST_FILTER` can narrow an investigation to one Rust test name or prefix;
+leave it unset for the release gate's complete Rust suite.
 
 ### Packaging, Docker, Upgrade, And Workers
 
