@@ -184,7 +184,7 @@ operators to distinguish pgGraph conditions that share a standard SQLSTATE.
 
 | SQLSTATE | Diagnostic | Error | Common fix |
 |---|---|---|---|
-| `53200` | `PG001` | Memory limit exceeded | Raise `graph.memory_limit_mb`, reduce registered graph size, or change OOM policy |
+| `53200` | `PG001` | Memory limit exceeded | Raise `graph.memory_limit_mb` or reduce registered graph size |
 | `42501` | `PG002` | ACL denied | Grant `SELECT` on the relevant source table or graph admin privilege for admin functions |
 | `55000` | `PG003` | Graph not built | Run `SELECT * FROM graph.build();` |
 | `54000` | `PG004` | Edge type limit exceeded | Reduce distinct edge labels; max user labels are 254 |

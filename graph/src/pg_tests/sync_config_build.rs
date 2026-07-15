@@ -305,7 +305,7 @@ fn projection_mode_build_and_status_contract() {
 }
 
 #[pg_test]
-fn oom_action_error_and_readonly_are_applied_by_build() {
+fn every_oom_action_rejects_over_budget_build_before_allocation() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
     Spi::run("SELECT graph.reset()").expect("reset failed");
@@ -342,24 +342,34 @@ fn oom_action_error_and_readonly_are_applied_by_build() {
     assert!(sql_raises("SELECT * FROM graph.build()"));
 
     Spi::run("SET graph.oom_action = 'readonly'").expect("set oom readonly failed");
-    let nodes = Spi::get_one::<i64>("SELECT nodes_loaded FROM graph.build()")
-        .expect("readonly build failed")
-        .unwrap_or(0);
-    let (read_only, read_only_reason) = Spi::connect(|client| {
-        let result = client
-            .select("SELECT read_only, read_only_reason FROM graph.status()", None, &[])
-            .expect("status read_only failed");
-        let row = result.first();
-        Ok::<_, pgrx::spi::Error>((row.get::<bool>(1)?, row.get::<String>(2)?))
-    })
-    .expect("status read failed");
+    assert!(sql_raises("SELECT * FROM graph.build()"));
+    let built = crate::ENGINE.with(|engine| engine.borrow().built);
 
     Spi::run("SET graph.oom_action = 'error'").expect("restore oom action failed");
     Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
 
-    assert_eq!(nodes, 1);
-    assert_eq!(read_only, Some(true));
-    assert_eq!(read_only_reason.as_deref(), Some("memory_limit"));
+    assert!(!built, "rejected builds must not install a read-only engine");
+}
+
+#[pg_test]
+fn build_row_estimate_counts_exactly_when_statistics_are_unknown() {
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_unknown_stats_pgtest CASCADE")
+        .expect("drop unknown-statistics table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_unknown_stats_pgtest (id bigint PRIMARY KEY);
+         INSERT INTO public.graph_test_unknown_stats_pgtest VALUES (1), (2), (3);
+         UPDATE pg_catalog.pg_class
+            SET reltuples = 0
+          WHERE oid = 'public.graph_test_unknown_stats_pgtest'::regclass;",
+    )
+    .expect("create unknown-statistics fixture failed");
+
+    let rows = crate::catalog::estimated_table_rows("public.graph_test_unknown_stats_pgtest")
+        .expect("unknown statistics should fall back to an exact count");
+
+    assert_eq!(rows, 3);
+    Spi::run("DROP TABLE public.graph_test_unknown_stats_pgtest")
+        .expect("drop unknown-statistics fixture failed");
 }
 
 #[pg_test]

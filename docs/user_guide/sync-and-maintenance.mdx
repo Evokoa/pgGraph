@@ -176,7 +176,7 @@ FROM graph.sync_health();
 | `tx_delta_added_nodes` / `tx_delta_deleted_nodes` | Transaction-local node delta counts |
 | `tx_delta_added_edges` / `tx_delta_deleted_edges` | Transaction-local edge delta counts |
 | `tx_delta_memory_bytes` | Estimated transaction-delta heap memory |
-| `read_only_reason` | Typed reason such as `memory_limit` or `edge_buffer_full` when read-only |
+| `read_only_reason` | Typed serving-state reason such as `edge_buffer_full` when read-only |
 | `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` while the engine is writable |
 | `maintenance_recommended` | Overlay, read-only, vacuum, or rebuild state should be compacted |
 | `durable_ingest_recommended` | Durable projection rows are waiting to be ingested |

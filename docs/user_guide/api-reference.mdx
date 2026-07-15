@@ -74,8 +74,8 @@ RETURNS TABLE (
 ```
 
 Reports backend-local engine state and current catalog/sync validity. When
-`read_only` is true, `read_only_reason` is `memory_limit`,
-`edge_buffer_full`, or another typed reason. `projection_mode` is
+`read_only` is true, `read_only_reason` identifies the serving-state cause,
+such as `edge_buffer_full`. `projection_mode` is
 `csr_readonly` or `mutable_overlay`. Overlay columns summarize tombstones,
 memory, and durable compaction policy; `edge_buffer_used` plus `tx_delta_dirty`
 show whether pending sync or transaction-local overlays exist.

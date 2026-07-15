@@ -72,7 +72,7 @@ requires `graph.mutable_enabled = on`.
 | `graph.memory_limit_mb` | int | `2048` | `SUSET` | `64` to `32768` | Pre-build OOM guard and status limit |
 | `graph.build_batch_size` | int | `10000` | `SUSET` | `1` to `1000000` | SPI cursor fetch size and spool batch size |
 | `graph.low_memory_build` | bool | `false` | `SUSET` | `on`, `off` | Allow rebuilds to unload the current backend-local graph before constructing the replacement |
-| `graph.oom_action` | string | `error` | `SUSET` | `error`, `readonly`, `read_only`, `read-only` | Behavior when estimated build memory exceeds the limit |
+| `graph.oom_action` | string | `error` | `SUSET` | `error`; deprecated aliases `readonly`, `read_only`, `read-only` | Compatibility setting; every over-budget build is rejected before allocation |
 | `graph.max_loaded_graphs_per_backend` | int | `1` | `SUSET` | `0` to `1` | Runtime loaded-graph slot cap for each PostgreSQL backend |
 | `graph.max_tx_delta_nodes` | int | `100000` | `USERSET` | `0` to `10000000` | Maximum transaction-local node deltas before a mapped GQL write aborts |
 | `graph.max_tx_delta_edges` | int | `100000` | `USERSET` | `0` to `10000000` | Maximum transaction-local edge deltas before a mapped GQL write aborts |
@@ -80,11 +80,14 @@ requires `graph.mutable_enabled = on`.
 | `graph.compaction_threshold` | int | `50000` | `USERSET` | `1` to `10000000` | Delta or tombstone count at which status surfaces recommend compaction |
 | `graph.projection_retention_generations` | int | `2` | `USERSET` | `1` to `1000` | Minimum valid projection manifest generations retained by GC |
 
-`graph.build()` estimates memory from registered tables and edges before
-constructing the active engine. With `graph.oom_action = 'error'`, it raises
-SQLSTATE `53200` with diagnostic `PG001`.
-With `graph.oom_action = 'readonly'`, it logs a warning and marks the built
-engine read-only.
+`graph.build()` estimates memory in checked integer bytes from registered
+tables and edges before constructing the active engine. Missing or zero table
+statistics trigger an exact row-count preflight. Every over-budget build raises
+SQLSTATE `53200` with diagnostic `PG001` before engine allocation.
+
+The `readonly`, `read_only`, and `read-only` values remain readable for 1.x
+configuration compatibility but are deprecated and have the same safe
+over-budget rejection behavior as `error`.
 
 Set `graph.low_memory_build = on` when rebuilds fail only because the current
 backend already has a graph loaded. In that mode, `graph.build()` may unload the

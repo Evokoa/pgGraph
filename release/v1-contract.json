@@ -264,7 +264,7 @@
     "full_opencypher": false,
     "public_sql_pgq": false
   },
-  "guc_source_sha256": "4a60c20b7a36d05b16659a353749bf020d1e4da351a04803c557cafa6c806db1",
+  "guc_source_sha256": "d9ce12e234a65b0074bf66b8f3dda78006786800c8fa625df378b373b946a391",
   "gucs": [
     "graph.auto_load",
     "graph.build_batch_size",

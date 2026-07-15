@@ -224,12 +224,7 @@ fn execute_build_inner(
 
     report_progress(progress, build_phase, build_message)?;
     apply_build_memory_plan(memory_plan)?;
-    let mut new_engine = build_replacement_engine(
-        &tables,
-        &edges,
-        &filter_columns,
-        memory_plan.force_read_only,
-    )?;
+    let mut new_engine = build_replacement_engine(&tables, &edges, &filter_columns)?;
     new_engine.set_projection_mode(projection_mode);
 
     let nodes_loaded = new_engine.node_store.node_count() as i64;
@@ -324,12 +319,7 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
     apply_build_memory_plan(memory_plan)?;
 
-    let mut new_engine = build_replacement_engine(
-        &tables,
-        &edges,
-        &filter_columns,
-        memory_plan.force_read_only,
-    )?;
+    let mut new_engine = build_replacement_engine(&tables, &edges, &filter_columns)?;
 
     let nodes_after = new_engine.node_store.node_count() as i64;
     let edges_rebuilt = new_engine.edge_store.edge_count() as i64;
@@ -413,12 +403,8 @@ fn build_replacement_engine(
     tables: &[builder::RegisteredTable],
     edges: &[builder::RegisteredEdge],
     filter_columns: &[builder::RegisteredFilterColumn],
-    force_read_only: bool,
 ) -> safety::GraphResult<engine::Engine> {
     let mut new_engine = builder::build_graph(tables, edges, filter_columns)?;
-    if force_read_only {
-        new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
-    }
     new_engine.set_catalog_fingerprint(catalog_fingerprint(tables, edges, filter_columns));
     new_engine.record_applied_sync_id(max_sync_log_id()?);
     Ok(new_engine)
@@ -453,7 +439,6 @@ pub(crate) fn validate_projection_mode_enabled(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BuildMemoryPlan {
-    pub(crate) force_read_only: bool,
     pub(crate) unload_existing: bool,
 }
 
@@ -462,58 +447,81 @@ pub(crate) fn guard_build_memory_headroom(
     edges: &[builder::RegisteredEdge],
 ) -> safety::GraphResult<BuildMemoryPlan> {
     let estimate = builder::estimate_graph_memory(tables, edges)?;
-    let existing_mb = ENGINE.with(|e| {
+    let existing_bytes = ENGINE.with(|e| {
         let eng = e.borrow();
         if eng.built {
-            eng.estimated_memory_used_mb()
+            u64::try_from(eng.estimated_memory_used_bytes()).map_err(|_| {
+                safety::GraphError::Internal(
+                    "existing engine memory estimate does not fit u64".to_string(),
+                )
+            })
         } else {
-            0.0
+            Ok(0)
         }
-    });
-    let build_peak_mb = conservative_build_peak_mb(estimate.memory_mb);
-    let total_mb = build_peak_mb + existing_mb;
-    let limit_mb = config::MEMORY_LIMIT_MB.get() as f64;
+    })?;
+    let existing_bytes = crate::resource::ByteCount::from_bytes(existing_bytes);
+    let build_peak_bytes = conservative_build_peak_bytes(estimate.bytes)?;
+    let limit_mb = config::MEMORY_LIMIT_MB.get().max(1) as u64;
+    let limit_bytes = crate::resource::ByteCount::from_mib(limit_mb).ok_or_else(|| {
+        safety::GraphError::Internal("configured memory limit overflowed u64 bytes".to_string())
+    })?;
     let low_memory_build = config::LOW_MEMORY_BUILD.get();
-    if low_memory_build && existing_mb > 0.0 && build_peak_mb <= limit_mb {
+    if low_memory_build
+        && existing_bytes > crate::resource::ByteCount::ZERO
+        && build_peak_bytes <= limit_bytes
+    {
         pgrx::warning!(
             "graph: low-memory build unloading current backend graph before rebuild ({:.0} MB existing, {:.0} MB peak replacement, limit {:.0} MB).",
-            existing_mb,
-            build_peak_mb,
-            limit_mb
+            existing_bytes.as_mib_f64(),
+            build_peak_bytes.as_mib_f64(),
+            limit_bytes.as_mib_f64()
         );
         return Ok(BuildMemoryPlan {
-            force_read_only: false,
             unload_existing: true,
         });
     }
-    if total_mb <= limit_mb {
-        return Ok(BuildMemoryPlan {
-            force_read_only: false,
-            unload_existing: false,
-        });
-    }
 
-    match config::oom_action() {
-        config::OomAction::ReadOnly => {
-            let unload_existing = low_memory_build && existing_mb > 0.0;
+    let governor =
+        crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(limit_bytes),
+        ));
+    let _serving = governor
+        .reserve_memory(crate::resource::ResourcePhase::BuildServing, existing_bytes)
+        .map_err(resource_memory_error_to_oom)?;
+    let mut build = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::BuildReplacement,
+            crate::resource::ByteCount::ZERO,
+        )
+        .map_err(resource_memory_error_to_oom)?;
+    if let Err(error) = build.try_grow(build_peak_bytes) {
+        if matches!(config::oom_action(), config::OomAction::ReadOnly) {
             pgrx::warning!(
-                "graph: build headroom estimate ({:.0} MB peak new + {:.0} MB existing = {:.0} MB) exceeds limit ({:.0} MB). Building in read-only mode.",
-                build_peak_mb,
-                existing_mb,
-                total_mb,
-                limit_mb
-            );
-            Ok(BuildMemoryPlan {
-                force_read_only: true,
-                unload_existing,
-            })
+                    "graph.oom_action = 'readonly' is retained as a deprecated compatibility value; over-budget graph construction is rejected before allocation"
+                );
         }
-        config::OomAction::Error => Err(safety::GraphError::Oom {
-            used_mb: existing_mb.ceil() as u64,
-            need_mb: build_peak_mb.ceil() as u64,
-            limit_mb: config::MEMORY_LIMIT_MB.get() as u64,
-        }),
+        return Err(resource_memory_error_to_oom(error));
     }
+    debug_assert_eq!(build.amount(), build_peak_bytes);
+    debug_assert_eq!(
+        governor.memory_peak_phase(),
+        Some(crate::resource::ResourcePhase::BuildReplacement)
+    );
+    debug_assert_eq!(
+        governor.memory_peak(),
+        existing_bytes
+            .checked_add(build_peak_bytes)
+            .unwrap_or(limit_bytes)
+    );
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::BuildReplacement)
+        .map_err(|error| {
+            safety::GraphError::Internal(format!("build resource preflight failed: {error}"))
+        })?;
+
+    Ok(BuildMemoryPlan {
+        unload_existing: false,
+    })
 }
 
 fn apply_build_memory_plan(plan: BuildMemoryPlan) -> safety::GraphResult<()> {
@@ -526,11 +534,34 @@ fn apply_build_memory_plan(plan: BuildMemoryPlan) -> safety::GraphResult<()> {
     Ok(())
 }
 
-fn conservative_build_peak_mb(final_graph_mb: f64) -> f64 {
-    const BUILD_OVERHEAD_MULTIPLIER: f64 = 1.25;
-    const MIN_BUILD_OVERHEAD_MB: f64 = 64.0;
+fn conservative_build_peak_bytes(
+    final_graph_bytes: crate::resource::ByteCount,
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let scaled = final_graph_bytes
+        .checked_mul(5)
+        .and_then(|bytes| bytes.checked_add(crate::resource::ByteCount::from_bytes(3)))
+        .map(|bytes| crate::resource::ByteCount::from_bytes(bytes.as_u64() / 4))
+        .ok_or_else(|| {
+            safety::GraphError::Internal("build peak estimate overflowed u64".to_string())
+        })?;
+    let minimum_overhead = crate::resource::ByteCount::from_mib(64).ok_or_else(|| {
+        safety::GraphError::Internal("build overhead constant overflowed u64".to_string())
+    })?;
+    let with_overhead = final_graph_bytes
+        .checked_add(minimum_overhead)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("build peak estimate overflowed u64".to_string())
+        })?;
+    Ok(scaled.max(with_overhead))
+}
 
-    (final_graph_mb * BUILD_OVERHEAD_MULTIPLIER).max(final_graph_mb + MIN_BUILD_OVERHEAD_MB)
+fn resource_memory_error_to_oom(error: crate::resource::ResourceLimitError) -> safety::GraphError {
+    debug_assert_eq!(error.kind(), crate::resource::ResourceKind::Memory);
+    safety::GraphError::Oom {
+        used_mb: crate::resource::ByteCount::from_bytes(error.used()).ceil_mib(),
+        need_mb: crate::resource::ByteCount::from_bytes(error.requested()).ceil_mib(),
+        limit_mb: crate::resource::ByteCount::from_bytes(error.limit()).as_u64() / 1_048_576,
+    }
 }
 
 pub(crate) fn check_build_acls_result(
@@ -553,10 +584,11 @@ pub(crate) fn check_build_acls_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_lock_query_for_graph, conservative_build_peak_mb, validate_projection_mode_enabled,
-        BUILD_LOCK_CLASS_ID,
+        build_lock_query_for_graph, conservative_build_peak_bytes,
+        validate_projection_mode_enabled, BUILD_LOCK_CLASS_ID,
     };
     use crate::config::ProjectionMode;
+    use crate::resource::ByteCount;
 
     #[test]
     fn build_lock_query_uses_named_advisory_lock_class() {
@@ -590,11 +622,17 @@ mod tests {
 
     #[test]
     fn build_peak_estimate_keeps_minimum_rebuild_overhead() {
-        assert_eq!(conservative_build_peak_mb(100.0), 164.0);
+        let input = ByteCount::from_mib(100).expect("test input should fit");
+        let expected = ByteCount::from_mib(164).expect("test expectation should fit");
+        let actual = conservative_build_peak_bytes(input).expect("peak estimate should fit");
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn build_peak_estimate_scales_large_graphs() {
-        assert_eq!(conservative_build_peak_mb(1024.0), 1280.0);
+        let input = ByteCount::from_mib(1024).expect("test input should fit");
+        let expected = ByteCount::from_mib(1280).expect("test expectation should fit");
+        let actual = conservative_build_peak_bytes(input).expect("peak estimate should fit");
+        assert_eq!(actual, expected);
     }
 }

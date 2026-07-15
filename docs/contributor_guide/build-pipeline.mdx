@@ -1,8 +1,9 @@
 # Build Pipeline
 
-The builder turns registered PostgreSQL tables into an `Engine`. It is designed
-to avoid retaining all raw edges in Rust memory by using PostgreSQL temporary
-spool tables and bounded SPI cursor batches.
+Build orchestration validates a checked byte budget before the builder turns
+registered PostgreSQL tables into an `Engine`. The builder avoids retaining all
+raw edges in Rust memory by using PostgreSQL temporary spool tables and bounded
+SPI cursor batches.
 
 ## Inputs
 
@@ -22,7 +23,7 @@ inputs.
 
 <ProcessTree title="build_graph(tables, edges, filters)">
   <ProcessStep title="parse graph.build_scan_mode" />
-  <ProcessStep title="estimate graph memory from cached pg_class.reltuples reads" />
+  <ProcessStep title="reserve checked build bytes from cached or exact source counts" />
   <ProcessStep title="create pg_temp.graph_build_nodes" />
   <ProcessStep title="for each registered table">
     - open SPI cursor
@@ -165,7 +166,7 @@ At the end of `build_graph()`:
 | `engine.edge_store` | Forward CSR from edge spool |
 | `engine.reverse_edge_store` | Reverse CSR built from forward CSR |
 | `engine.built` | `true` |
-| `engine.is_read_only` | Based on OOM policy outcome |
+| `engine.is_read_only` | `false`; an over-budget build is rejected before construction |
 | `engine.last_build` | Current PostgreSQL timestamp |
 
 Persistence is orchestrated outside `builder.rs` by `sql_build.rs`.
@@ -174,7 +175,7 @@ Persistence is orchestrated outside `builder.rs` by `sql_build.rs`.
 
 | Failure | Error |
 |---|---|
-| Estimated memory exceeds limit and OOM policy is `error` | `GraphError::Oom` |
+| Estimated peak bytes exceed the configured memory limit | `GraphError::Oom` before engine construction |
 | COPY scan mode selected | `GraphError::Internal` with reserved-mode message |
 | SPI cursor/read failure | `GraphError::Internal` |
 | Edge endpoint cannot be resolved | Edge row is skipped |

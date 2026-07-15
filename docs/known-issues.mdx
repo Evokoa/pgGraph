@@ -53,7 +53,7 @@ by one byte budget.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-012 | Build preflight is not a hard memory bound; `oom_action = 'readonly'` still performs the over-budget construction. | P0 architecture fix | Low-memory rebuild reduces old/new overlap, but filters, resolution, both CSR directions, persistence buffers, stale row estimates, and PostgreSQL temp memory can exceed the estimate. Add a single remaining-memory governor, adaptive byte batches, and out-of-core spill. |
+| KI-012 | Build preflight is not yet a hard runtime memory bound. | P0 architecture fix | Checked byte preflight now rejects every over-budget build, including legacy `oom_action = 'readonly'` configurations, and low-memory rebuild reduces old/new overlap. Filters, resolution, both CSR directions, persistence buffers, stale positive row estimates, and PostgreSQL temporary memory still require live reservations, adaptive byte batches, and out-of-core spill. |
 | KI-013 | mmap load, GQL/path execution, sync, projection reads, compaction, and analytics can allocate outside the build guard. | P0 architecture fix | Persist/mmap inbound CSR and large filter metadata; add query work/byte breakers, lazy scans/neighbor merges, bounded hydration and blocking operators, pinned projection snapshots, and range compaction. |
 | KI-018 | Persisted replacement is renamed over the serving path before mmap reload validation. | P0 durability fix | Write and validate a generation-specific artifact, catch it up, then atomically switch a small manifest while retaining the previous generation. |
 

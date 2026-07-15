@@ -120,6 +120,7 @@ from paths, backend globals, or session state.
 | Object | Owner | Lifetime |
 |---|---|---|
 | `Engine` | One PostgreSQL backend process | Backend lifetime, graph selection change, explicit unload, or `graph.reset()` |
+| `ResourceGovernor` | One governed preflight or operation scope | Tracks checked reservations and elapsed budget for that scope |
 | Loaded graph slot | One PostgreSQL backend process | Tracks the graph id/name for the active `Engine` |
 | `NodeStore` owned mode | `Engine` heap | Mutable build/sync lifetime |
 | `NodeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | The store owns its mapping independently of engine field/drop order |

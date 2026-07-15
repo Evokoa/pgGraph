@@ -715,13 +715,13 @@ mod tests {
     #[test]
     fn sync_insert_on_read_only_engine_reports_read_only_reason() {
         let mut eng = test_engine();
-        eng.mark_read_only(crate::engine::ReadOnlyReason::MemoryLimit);
+        eng.mark_read_only(crate::engine::ReadOnlyReason::EdgeBufferFull);
 
         let result = sync_insert(&mut eng, 42, "U-1", None);
 
         assert!(matches!(
             result,
-            Err(GraphError::ReadOnly { reason }) if reason == "memory_limit"
+            Err(GraphError::ReadOnly { reason }) if reason == "edge_buffer_full"
         ));
     }
 

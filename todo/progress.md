@@ -4,26 +4,20 @@ The active phased program is tracked in
 [`full-graph-engine/progress.md`](./full-graph-engine/progress.md). That file is
 the authoritative checkpoint handoff, measurement log, and next-action record.
 
-Last synchronized: 2026-07-12
+Last synchronized: 2026-07-15
 
-Current phase: Checkpoint 1A relationship identity persistence, base-CSR GQL
-query/path propagation, base relationship hydration, and mapped relationship-row
-RLS for single-pattern reads, supported joins, and base wildcard path outputs
-are implemented and targeted on PostgreSQL 17 tests; transaction-local
-relationship `CREATE` overlays now preserve source identity for same-transaction
-visibility and hydration; trigger-sync inserted relationship edges now carry
-source identity through durable segments, layered mutable-overlay reads, and
-representable compacted segment rows. Parallel-aware compaction, dirty-range
-chunk replacement, and savepoint rollback/release are complete. Continue with
-broader write identity, visibility, filter, and isolation coverage.
+Current phase: R2/Checkpoint 1B immediate resource containment. R1 correctness,
+security, identity, transaction, and supported-major evidence is complete. The
+active R2A checkpoint introduces checked resource units and one statement-local
+governor, removes over-budget read-only construction, and makes build preflight
+use exact integer bytes before broader build/load/query/maintenance enforcement.
 
 Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
-and dynamic graphs are post-1.0 roadmap work. The next implementation work is
-still R1/Checkpoint 1A broader write identity, visibility, filter, and isolation
-closure; parallel-aware compaction, dirty-range identity preservation, and
-savepoint delta handling are complete.
+and dynamic graphs are post-1.0 roadmap work. R1 is complete; the next
+implementation work is R2/Checkpoint 1B resource containment and safe
+publication.
 
 2026-07-11 R1 savepoints — Transaction-local graph overlays now follow nested
 PostgreSQL savepoint and PL subtransaction release/rollback semantics, including
@@ -185,6 +179,14 @@ the existing five-major Rust and pgrx evidence, KI-014 through KI-017 and
 KI-021 through KI-024 are retired and the R1 supported-major evidence row is
 complete. Independent review passed after active-key tracking and bounded
 client cleanup removed a failure-path wait risk from the reusable DDL gate.
+
+2026-07-15 R2A checked build policy — Build estimates now use checked integer
+bytes and exact source counts when PostgreSQL statistics are unknown. A
+statement-local governor accounts for serving and replacement reservations,
+and every legacy `graph.oom_action` spelling rejects an over-budget build
+without replacing the serving graph. The 723-test Rust suite and 987-test
+PostgreSQL 17 pgrx suite pass, with formatting, Clippy, rustdoc, doctests, and
+documentation/contract drift green.
 
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific

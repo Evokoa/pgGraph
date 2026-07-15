@@ -185,7 +185,7 @@ pub enum OomAction {
     /// Return `GraphError::Oom` — the build is aborted.
     #[default]
     Error,
-    /// Log a WARNING and continue building in read-only mode.
+    /// Deprecated compatibility spelling; over-budget builds are still aborted.
     ReadOnly,
 }
 

@@ -269,6 +269,7 @@ pub(crate) fn foreign_key_target_table_oid(
 
 pub(crate) fn estimated_table_rows(table_name: &str) -> safety::GraphResult<i64> {
     let table_oid = table_oid_from_name(table_name)?;
+    let sql_table_name = sql_table_name_from_oid(table_oid)?;
     Spi::connect(|client| {
         let table_oid = pgrx::pg_sys::Oid::from_u32(table_oid);
         let result = client
@@ -284,11 +285,35 @@ pub(crate) fn estimated_table_rows(table_name: &str) -> safety::GraphResult<i64>
                 ))
             })?;
         let row = result.first();
-        Ok(row
+        let estimate = row
             .get::<i64>(1)
             .map_err(|e| safety::GraphError::Internal(format!("reltuples read failed: {}", e)))?
             .unwrap_or(0)
-            .max(0))
+            .max(0);
+        if estimate > 0 {
+            return Ok(estimate);
+        }
+
+        // Newly created, truncated, or never-analyzed tables can report zero
+        // even when they contain rows. An exact preflight scan is slower but
+        // prevents unknown statistics from authorizing an unbounded build.
+        let exact_sql = format!("SELECT count(*)::bigint FROM {}", sql_table_name.as_sql());
+        let exact = client.select(&exact_sql, None, &[]).map_err(|e| {
+            safety::GraphError::Internal(format!(
+                "exact row-count preflight failed for {}: {}",
+                table_name, e
+            ))
+        })?;
+        exact
+            .first()
+            .get::<i64>(1)
+            .map_err(|e| safety::GraphError::Internal(format!("exact row count failed: {}", e)))?
+            .ok_or_else(|| {
+                safety::GraphError::Internal(format!(
+                    "exact row-count preflight returned NULL for {}",
+                    table_name
+                ))
+            })
     })
 }
 

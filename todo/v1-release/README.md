@@ -22,8 +22,8 @@ remain visible on the public roadmap without blocking this release.
 | Phase | Scope | Exit condition | Status |
 |---|---|---|---|
 | R0 | Freeze the 1.0 product and compatibility contract | Supported surfaces, compatibility rules, deprecation policy, and release evidence format are approved and documented. | Complete |
-| R1 | Correctness, security, identity, and transactions | No open P0 correctness/security issue; RLS, parallel relationships, filter identity, savepoints, and supported-major regressions are green. | In progress |
-| R2 | Resource containment and safe publication | Build, load, query, sync, and compaction stay within enforced limits; failed or competing publication preserves the last good generation. | Planned |
+| R1 | Correctness, security, identity, and transactions | No open P0 correctness/security issue; RLS, parallel relationships, filter identity, savepoints, and supported-major regressions are green. | Complete |
+| R2 | Resource containment and safe publication | Build, load, query, sync, and compaction stay within enforced limits; failed or competing publication preserves the last good generation. | In progress |
 | R3 | Bounded storage, build, sync, and compaction | Production-scale operations spill, mmap, or fail predictably; snapshot/watermark and compaction behavior is crash-safe and equivalent. | Planned |
 | R4 | Release-risk refactoring | High-risk boundaries are typed and isolated; playground, scripts, and release orchestration have clear ownership without changing public behavior. | Planned |
 | R5 | Supported query and write profile | Every advertised SQL/GQL feature has conformance, security, transaction, resource, diagnostic, and documentation evidence. Unsupported syntax fails deterministically. | Planned |

@@ -168,14 +168,12 @@ pub enum SyncStatus {
 /// Reason an engine has entered read-only mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOnlyReason {
-    MemoryLimit,
     EdgeBufferFull,
 }
 
 impl std::fmt::Display for ReadOnlyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadOnlyReason::MemoryLimit => write!(f, "memory_limit"),
             ReadOnlyReason::EdgeBufferFull => write!(f, "edge_buffer_full"),
         }
     }
@@ -1324,10 +1322,14 @@ impl Engine {
     }
 
     pub fn estimated_memory_used_mb(&self) -> f64 {
+        self.estimated_memory_used_bytes() as f64 / 1_048_576.0
+    }
+
+    /// Return the conservative backend-private engine residency in bytes.
+    pub(crate) fn estimated_memory_used_bytes(&self) -> usize {
         self.estimated_heap_bytes()
             .saturating_add(self.estimated_mmap_bytes())
-            .max(self.estimated_logical_bytes()) as f64
-            / 1_048_576.0
+            .max(self.estimated_logical_bytes())
     }
 
     pub fn memory_profile(&self, concurrent_backends: i32, memory_limit_mb: i32) -> MemoryProfile {

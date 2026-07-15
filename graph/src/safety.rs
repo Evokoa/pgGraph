@@ -354,7 +354,7 @@ impl GraphError {
                 "Run graph.vacuum() to merge pending mutations, or increase graph.edge_buffer_size.".to_string()
             }
             GraphError::ReadOnly { reason } if reason == "memory_limit" => {
-                "Increase graph.memory_limit_mb, set graph.oom_action = 'error', or run graph.build() after reducing graph size.".to_string()
+                "Increase graph.memory_limit_mb or run graph.build() after reducing graph size.".to_string()
             }
             GraphError::ReadOnly { .. } => {
                 "Inspect graph.status().read_only_reason, then run graph.maintenance(), graph.vacuum(), or graph.build() as appropriate.".to_string()

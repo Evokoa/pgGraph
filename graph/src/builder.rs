@@ -28,6 +28,7 @@ use crate::edge_store::{
 use crate::engine::Engine;
 use crate::filter_index::{EncodedFilterValue, FilterColumnType};
 use crate::quote::quote_ident;
+use crate::resource::ByteCount;
 use crate::safety::{GraphError, GraphResult};
 
 /// Typed primary-key column set for a registered table.
@@ -212,8 +213,9 @@ pub struct RegisteredFilterColumn {
     pub column_type: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildMemoryEstimate {
-    pub memory_mb: f64,
+    pub bytes: ByteCount,
 }
 
 pub fn estimate_graph_memory(
@@ -229,22 +231,47 @@ fn estimate_graph_memory_with_counts(
     mut row_count: impl FnMut(&str) -> GraphResult<i64>,
 ) -> GraphResult<BuildMemoryEstimate> {
     let mut table_counts: HashMap<String, i64> = HashMap::new();
-    let mut est_nodes: i64 = 0;
-    let mut est_edges: i64 = 0;
+    let mut est_nodes: u64 = 0;
+    let mut est_edges: u64 = 0;
 
     for table in tables {
         let count = cached_table_count(&mut table_counts, &mut row_count, &table.table_name)?;
-        est_nodes += count;
+        let count = u64::try_from(count).map_err(|_| {
+            GraphError::Internal("negative table row estimate reached build planning".to_string())
+        })?;
+        est_nodes = est_nodes
+            .checked_add(count)
+            .ok_or_else(|| GraphError::Internal("node row estimate overflowed u64".to_string()))?;
     }
 
     for edge in edges {
         let count = cached_table_count(&mut table_counts, &mut row_count, &edge.from_table)?;
-        let multiplier = if edge.bidirectional { 2 } else { 1 };
-        est_edges += count * multiplier;
+        let count = u64::try_from(count).map_err(|_| {
+            GraphError::Internal(
+                "negative relationship row estimate reached build planning".to_string(),
+            )
+        })?;
+        let multiplier = if edge.bidirectional { 2u64 } else { 1u64 };
+        let directed_edges = count.checked_mul(multiplier).ok_or_else(|| {
+            GraphError::Internal("relationship row estimate overflowed u64".to_string())
+        })?;
+        est_edges = est_edges.checked_add(directed_edges).ok_or_else(|| {
+            GraphError::Internal("relationship row estimate overflowed u64".to_string())
+        })?;
     }
 
+    let node_bytes = ByteCount::from_bytes(est_nodes)
+        .checked_mul(140)
+        .ok_or_else(|| GraphError::Internal("node memory estimate overflowed u64".to_string()))?;
+    let edge_bytes = ByteCount::from_bytes(est_edges)
+        .checked_mul(5)
+        .ok_or_else(|| {
+            GraphError::Internal("relationship memory estimate overflowed u64".to_string())
+        })?;
     Ok(BuildMemoryEstimate {
-        memory_mb: (est_nodes as f64 * 140.0 + est_edges as f64 * 5.0) / 1_048_576.0,
+        bytes: node_bytes.checked_add(edge_bytes).ok_or_else(|| {
+            GraphError::Internal("total build memory estimate overflowed u64".to_string())
+        })?,
     })
 }
 
@@ -277,42 +304,6 @@ pub fn build_graph(
                 "graph.build_scan_mode = 'copy' requires a safe server-side COPY reader; pgrx 0.18 exposes only low-level pg_sys COPY hooks, so use 'select' in this build"
                     .to_string(),
             ));
-        }
-    }
-
-    // ── OOM Pre-flight Check ──
-    // Estimate total rows from pg_class.reltuples (fast, no table scans).
-    // Formula: ~140 bytes/node + ~5 bytes/edge
-    let limit_mb = crate::config::MEMORY_LIMIT_MB.get() as u64;
-    let estimate = estimate_graph_memory(tables, edges)?;
-    let est_mb = estimate.memory_mb;
-
-    /// Build-time engine mode. Avoids boolean blindness at the assignment site.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum GraphMode {
-        ReadWrite,
-        ReadOnly,
-    }
-
-    let mut graph_mode = GraphMode::ReadWrite;
-    if est_mb > limit_mb as f64 {
-        match crate::config::oom_action() {
-            crate::config::OomAction::ReadOnly => {
-                pgrx::warning!(
-                    "graph: estimated memory ({:.0} MB) exceeds limit ({} MB). \
-                     Building in read-only mode (graph.oom_action = 'readonly').",
-                    est_mb,
-                    limit_mb
-                );
-                graph_mode = GraphMode::ReadOnly;
-            }
-            crate::config::OomAction::Error => {
-                return Err(GraphError::Oom {
-                    used_mb: 0,
-                    need_mb: est_mb as u64,
-                    limit_mb,
-                });
-            }
         }
     }
 
@@ -599,10 +590,6 @@ pub fn build_graph(
 
     // Mark as built
     engine.finish_build(Some(pgrx::datetime::transaction_timestamp()));
-    if graph_mode == GraphMode::ReadOnly {
-        engine.mark_read_only(crate::engine::ReadOnlyReason::MemoryLimit);
-    }
-
     let elapsed = start.elapsed();
     pgrx::log!(
         "graph.build() completed: {} nodes, {} edges, {:.1}ms",
@@ -1230,7 +1217,28 @@ mod tests {
         .expect("estimate should succeed");
 
         assert_eq!(calls.borrow().get("public.accounts"), Some(&1));
-        let expected_bytes = 10.0 * 140.0 + 30.0 * 5.0;
-        assert_eq!(estimate.memory_mb, expected_bytes / 1_048_576.0);
+        let expected_bytes = 10 * 140 + 30 * 5;
+        assert_eq!(estimate.bytes.as_u64(), expected_bytes);
+    }
+
+    #[test]
+    fn memory_estimate_rejects_negative_and_overflowing_counts() {
+        let tables = vec![RegisteredTable {
+            table_oid: 42,
+            table_name: "public.accounts".to_string(),
+            id_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
+            columns: PropertyColumns::from_columns(Vec::new()),
+            tenant_column: None,
+        }];
+
+        let negative = estimate_graph_memory_with_counts(&tables, &[], |_| Ok(-1))
+            .expect_err("negative estimates must fail closed");
+        assert!(negative.to_string().contains("negative table row estimate"));
+
+        let overflowing = estimate_graph_memory_with_counts(&tables, &[], |_| Ok(i64::MAX))
+            .expect_err("byte multiplication overflow must fail closed");
+        assert!(overflowing
+            .to_string()
+            .contains("memory estimate overflowed"));
     }
 }
