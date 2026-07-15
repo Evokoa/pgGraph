@@ -11,7 +11,7 @@
 - [x] Finish table-qualified filter identity and remove ambiguous internal
       name-only lookup paths.
 - [x] Add subtransaction/savepoint delta frames with rollback and release tests.
-- [ ] Complete READ COMMITTED, REPEATABLE READ, SERIALIZABLE, constraint,
+- [x] Complete READ COMMITTED, REPEATABLE READ, SERIALIZABLE, constraint,
       trigger, partition, composite-key, and concurrent-write coverage for the
       advertised write profile. The ordered evidence work is tracked in
       [QA-01](./qa-01-write-correctness-matrix-plan.md).

@@ -121,7 +121,7 @@ It deletes:
 
 | Path | Reason |
 |---|---|
-| `graph/target/` | Cargo/pgrx build output |
+| Cargo target directory (`target/` under `graph/`) | Cargo/pgrx build output |
 | Fuzz Cargo target directory | Fuzz build output |
 | `.DS_Store` files | macOS Finder metadata |
 
@@ -224,8 +224,9 @@ playground query stability.
 | Script | Use when | What it does |
 |---|---|---|
 | `run_release_gate.sh` | Final pre-release validation | Aggregates static checks, docs, Rust tests, pgrx tests, cargo-deny, fuzz compile, package validation, install smoke, metadata audit, boundary tests, backup/restore, lock tests, concurrency, synthetic smoke, playground query validation, public GQL write transaction checks, and pgbench. Set `RUN_TX_DELTA_CRASH=1` with disposable `PGDATA` to include the internal mutable-overlay crash proof; set `RUN_BUILD_MEMORY_STRESS=1` to include opt-in build-memory stress profiles. |
-| `run_pg_matrix.sh` | Local PostgreSQL-major compatibility | Runs Rust and optionally pgrx SQL tests for officially supported PostgreSQL 14 through 18 using local `pg_config` binaries. |
+| `run_pg_matrix.sh` | Local PostgreSQL-major compatibility | Runs release-profile Rust tests and optionally pgrx SQL tests for officially supported PostgreSQL 14 through 18 using local `pg_config` binaries. |
 | `run_pg_matrix_docker.sh` | Matrix validation without local headers | Builds the Docker matrix image and runs supported PostgreSQL-major checks in Docker. |
+| `run_gql_write_matrix.sh` | Supported-major GQL write correctness | Runs the full and persisted isolation profiles plus deterministic MERGE, relationship, and stale-write races on PostgreSQL 14 through 18, using isolated temporary clusters. |
 | `docker_smoke.sh` | Top-level Dockerfile check | Builds the root Docker image, starts Postgres, creates the extension, and runs a small graph workflow. |
 | `package_validate.sh` | Package artifact check | Runs `cargo pgrx package` and verifies control, SQL, shared library, and release companion files. |
 | `fresh_install_smoke.sh` | Installed extension smoke | Installs pgGraph into a local PostgreSQL major and runs a quick extension workflow. |

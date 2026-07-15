@@ -85,6 +85,7 @@ clusters where the pgrx harness is not representative enough.
 | `measure_mmap_pss.sh` | Linux proportional set size for mmap sharing across backends |
 | `run_pg_matrix.sh` | Local PostgreSQL major-version matrix for Rust and pgrx SQL tests |
 | `run_pg_matrix_docker.sh` | Docker PostgreSQL major-version matrix |
+| `run_gql_write_matrix.sh` | PostgreSQL 14 through 18 GQL isolation and concurrent-writer matrix |
 | `run_release_gate.sh` | Aggregated release gate over static checks, pgrx tests, heavy scripts, and optional matrix/RSS runs |
 
 Most heavy scripts accept `PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and a

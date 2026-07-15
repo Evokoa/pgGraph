@@ -49,7 +49,7 @@ the PostgreSQL source tables remain authoritative.
 - [x] Corrupt and out-of-range tests cannot reach unchecked pointer arithmetic.
 - [x] Miri-eligible and Rust ASan gates pass.
 - [ ] PostgreSQL-process sanitizer gate passes.
-- [ ] PostgreSQL 14-18 mapped-load and corruption evidence passes.
+- [x] PostgreSQL 14-18 mapped-load and corruption evidence passes.
 - [x] PostgreSQL 17 release gates and independent Rust review report no blocker.
 
 ## Baseline — 2026-07-14
@@ -69,6 +69,6 @@ the PostgreSQL source tables remain authoritative.
 | Miri mapped edge, node layout, and node accessor gates | PASS: 4 + 3 + 1 tests |
 | `RUN_ASAN=1 ... ./tests/heavy/run_memory_sanitizers.sh` | PASS: 718 passed, 1 ignored; macOS runtime setup is automatic |
 | `ASAN_TEST_FILTER=mmap_` focused sanitizer gate | PASS: 14 mapped tests |
-| PostgreSQL 14-18 matrix | PENDING: only PostgreSQL 17 is installed locally; Docker image is not prebuilt |
+| PostgreSQL 14-18 matrix | PASS: 718 release Rust tests and 981 pgrx tests passed on each supported major; see the [matrix evidence](../measurements/2026-07-14-pg14-18-matrix.md) |
 | PostgreSQL-process ASan/Valgrind | PENDING: the current gate instruments Rust tests; process instrumentation still needs a disposable compatible PostgreSQL build |
 | Independent Rust review | PASS after fixing source-inode mutability, status accounting, stale lifecycle docs, predicate wording/coverage, and checked PK offset conversion |

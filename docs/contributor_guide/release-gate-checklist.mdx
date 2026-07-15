@@ -401,6 +401,7 @@ disposable cluster paths.
 | `run_release_gate.sh` | Aggregate release gate | `PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh` |
 | `run_pg_matrix.sh` | Local PostgreSQL 14 through 18 matrix | `./tests/heavy/run_pg_matrix.sh` |
 | `run_pg_matrix_docker.sh` | Docker PostgreSQL-major matrix | `./tests/heavy/run_pg_matrix_docker.sh` |
+| `run_gql_write_matrix.sh` | PostgreSQL-major GQL write matrix | `./tests/heavy/run_gql_write_matrix.sh` |
 | `package_validate.sh` | Validate pgrx package shape and companion files | `PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh` |
 | `fresh_install_smoke.sh` | Install extension and run quick workflow | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh` |
 | `function_metadata_audit.sh` | Audit SQL volatility, security, cost, rows, and parallel metadata | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata ./tests/heavy/function_metadata_audit.sh` |

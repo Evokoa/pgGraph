@@ -25,12 +25,12 @@ for pg in $PG_VERSIONS; do
   echo "==> Initializing pgrx for $feature with $pg_config"
   cargo pgrx init "--pg${pg}=${pg_config}"
 
-  echo "==> cargo test --no-default-features --features $feature"
-  cargo test --no-default-features --features "$feature"
+  echo "==> cargo test --release --no-default-features --features '$feature development'"
+  cargo test --release --no-default-features --features "$feature development"
 
   if [[ "$RUN_PGRX_SQL" == "1" ]]; then
-    echo "==> cargo pgrx test $feature"
-    cargo pgrx test "$feature"
+    echo "==> cargo pgrx test --features development $feature"
+    cargo pgrx test --features development "$feature"
   fi
 done
 

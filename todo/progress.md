@@ -158,6 +158,14 @@ readiness checks are database-scoped and abort safely on failed orchestration.
 The full and persisted new-node isolation profiles plus all focused race gates
 pass, and the required third-phase independent raw-diff review reports PASS.
 
+2026-07-14 R1 supported-major write matrix — QA-01D passes on PostgreSQL
+14.23, 15.18, 16.14, 17.10, and 18.4: each major passed 718 release Rust tests
+(1 ignored), 981 pgrx tests (1 ignored), and the full, persisted, MERGE,
+relationship, and stale-write concurrency profiles. KI-001, KI-002, KI-009,
+and KI-019 are retired; the worktree was revalidated with no accidental source
+deletions, and the independent raw-diff review passes after its cache-resume and
+KI-020 status-consistency findings were fixed.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

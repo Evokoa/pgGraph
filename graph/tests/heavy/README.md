@@ -21,6 +21,12 @@ identity and repeated-build profile. Durable incremental node deletion in a
 graph with standalone relationship mappings remains fail-closed with rebuild
 guidance, so that mode does not claim the full write-family matrix.
 
+`run_gql_write_matrix.sh` runs the full and persisted isolation profiles plus
+the deterministic MERGE, relationship, and stale-write race gates against each
+requested supported PostgreSQL major. It creates one temporary PostgreSQL
+cluster per major and removes it on exit. Set `PG_VERSIONS` to a space-separated
+subset or provide `PG_CONFIG_<major>` for a nonstandard installation path.
+
 Most scripts expect a disposable database and accept variables such as
 `PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and `DBNAME`. Scripts that kill or
 upgrade PostgreSQL require disposable `PGDATA` directories.

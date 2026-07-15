@@ -455,6 +455,17 @@ pub mod bench_support {
 
         const RELEASE_CONTRACT_LIMIT: Duration = Duration::from_millis(250);
 
+        fn assert_release_contract_latency(started: Instant, operation: &str) {
+            let elapsed = started.elapsed();
+            if cfg!(debug_assertions) {
+                return;
+            }
+            assert!(
+                elapsed < RELEASE_CONTRACT_LIMIT,
+                "{operation} took {elapsed:?}, exceeding the {RELEASE_CONTRACT_LIMIT:?} release contract"
+            );
+        }
+
         fn release_fixture() -> (NodeStoreBuilder, EdgeStoreBuilder, FilterIndexBuilder) {
             let mut nodes = NodeStoreBuilder::new();
             for idx in 0..1_024 {
@@ -504,7 +515,7 @@ pub mod bench_support {
                 LayeredProjectionBenchScenario::ManyL0,
             );
             assert!(result.visited.len() >= 9);
-            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+            assert_release_contract_latency(started, "layered BFS");
         }
 
         #[test]
@@ -513,7 +524,7 @@ pub mod bench_support {
             let started = Instant::now();
             let count = gql_layered_relationship_expansion_count(&edges, 0);
             assert!(count >= 255);
-            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+            assert_release_contract_latency(started, "GQL relationship expansion");
         }
 
         #[test]
@@ -523,7 +534,7 @@ pub mod bench_support {
             let path = weighted_layered_projection_path(&nodes, &edges, 0, 127)
                 .expect("durable weighted segment should connect the chain");
             assert_eq!(path.len(), 128);
-            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+            assert_release_contract_latency(started, "weighted layered path");
         }
 
         #[test]
@@ -560,7 +571,7 @@ pub mod bench_support {
                 .expect("projection ingest publishes");
             assert_eq!(result.rows_ingested, 64);
             assert!(result.segments_published >= 1);
-            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+            assert_release_contract_latency(started, "projection ingest publication");
         }
 
         #[test]
@@ -581,7 +592,7 @@ pub mod bench_support {
                 .expect("projection compaction publishes");
             assert_eq!(result.segments_compacted, 8);
             assert!(result.manifest.generation_id > previous.generation_id);
-            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+            assert_release_contract_latency(started, "projection compaction");
         }
 
         #[test]
@@ -609,7 +620,7 @@ pub mod bench_support {
             .expect("projection GC collects");
             assert_eq!(summary.deleted_files, 1);
             assert!(!obsolete.exists());
-            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+            assert_release_contract_latency(started, "projection garbage collection");
         }
 
         #[test]
@@ -626,7 +637,7 @@ pub mod bench_support {
                 .expect("corrupt chunk is repaired");
             assert_eq!(result.chunks_rewritten, 1);
             assert!(result.manifest.generation_id > manifest.generation_id);
-            assert!(started.elapsed() < RELEASE_CONTRACT_LIMIT);
+            assert_release_contract_latency(started, "projection repair");
         }
 
         fn write_base_artifact(root: &Path) {

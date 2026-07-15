@@ -447,6 +447,12 @@ fn source_search_queries_use_ordinary_postgres_index_plans() {
     )
     .expect("insert indexed search rows failed");
     Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+             SELECT 'filler-' || value::text, 'Unrelated ' || value::text, 40
+             FROM generate_series(1, 1000) AS value",
+    )
+    .expect("insert search planner fixture rows failed");
+    Spi::run(
         "SELECT graph.add_table(
                 'graph_test_users_pgtest'::regclass,
                 id_column := 'id',

@@ -464,6 +464,16 @@ cd graph
 ./tests/heavy/run_pg_matrix_docker.sh
 ```
 
+The Docker matrix runs `run_gql_write_matrix.sh` by default after the Rust and
+pgrx suites. This adds the full and persisted isolation profiles and the
+deterministic concurrent-writer gates for every selected major. Set
+`RUN_GQL_WRITE_MATRIX=0` only for a diagnostic build that is not release
+evidence.
+
+PostgreSQL-major Rust unit legs use Cargo's release profile. This keeps the
+embedded release-latency contracts tied to optimized code while the pgrx legs
+continue to verify the extension inside each PostgreSQL major.
+
 Set `RUN_FULL_MATRIX=1` on `run_release_gate.sh` to run every configured
 PostgreSQL major through `run_pg_matrix.sh`. Set `RUN_RSS=1` to include a
 large-build peak RSS measurement; use `MAX_RSS_MB` when there is a recorded

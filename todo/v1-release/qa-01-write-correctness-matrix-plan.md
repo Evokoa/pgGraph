@@ -41,10 +41,12 @@ capability registry; this work adds correctness evidence without expanding the
 
 ### QA-01D: Supported PostgreSQL Majors
 
-- [ ] Run the completed matrix on PostgreSQL 14, 15, 16, 17, and 18.
-- [ ] Archive commands, versions, pass counts, and any environment limitations
+- [x] Run the completed matrix on PostgreSQL 14, 15, 16, 17, and 18.
+- [x] Archive commands, versions, pass counts, and any environment limitations
       in the release evidence log.
-- [ ] Retire related known issues only after every supported-major gate passes.
+- [x] Retire related known issues only after every supported-major gate passes.
+
+Evidence: [PostgreSQL 14-18 release matrix](../measurements/2026-07-14-pg14-18-matrix.md).
 
 ## Checkpoint Gates
 

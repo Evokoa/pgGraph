@@ -62,6 +62,10 @@ gate evidence through signed tags and package publishing.
   PostgreSQL READ COMMITTED, REPEATABLE READ, and SERIALIZABLE visibility
   rules. The persisted variant covers durable new-node identity and repeated
   persisted builds.
+- Verified the release and pgrx suites plus the full, persisted, MERGE,
+  relationship, and stale-write concurrency gates on PostgreSQL 14 through 18.
+  This retires the finite write-correctness, stale-recheck, transaction-created
+  node, and mutable-write isolation limitations from Known Issues.
 - Added durable post-build node identities with contiguous allocation, exact
   primary-key and tenant payloads, typed filter restoration, same-batch edge
   endpoints independent of sync-row order, tenant moves that preserve identity,
