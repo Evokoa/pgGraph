@@ -90,6 +90,10 @@ pub struct Engine {
     pub(crate) sync_status: SyncStatus,
     pub(crate) last_build: Option<TimestampWithTimeZone>,
     pub(crate) last_vacuum: Option<TimestampWithTimeZone>,
+    pub(crate) build_resource_budget_bytes: u64,
+    pub(crate) build_resource_peak_bytes: u64,
+    pub(crate) build_resource_peak_phase: Option<crate::resource::ResourcePhase>,
+    pub(crate) build_resource_pressure_events: u64,
 
     /// Resolution store — switches from compact build entries to sorted array.
     pub(crate) resolution_store: ResolutionStore,
@@ -247,6 +251,10 @@ impl Engine {
             sync_status: SyncStatus::Idle,
             last_build: None,
             last_vacuum: None,
+            build_resource_budget_bytes: 0,
+            build_resource_peak_bytes: 0,
+            build_resource_peak_phase: None,
+            build_resource_pressure_events: 0,
             resolution_store: ResolutionStore::Builder(ResolutionIndexBuilder::new()),
             resolution_delta: ResolutionDeltaIndex::new(),
             _mmap: None,
@@ -325,10 +333,16 @@ impl Engine {
         self.invalid_reason = Some(reason.into());
     }
 
-    pub fn replace_edge_stores(&mut self, edge_store: EdgeStore) {
-        let reverse_edge_store = edge_store.reversed();
+    /// Replace both forward and reverse CSR stores from one validated forward store.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GraphError::Oom` if the reverse CSR cannot be allocated.
+    pub fn replace_edge_stores(&mut self, edge_store: EdgeStore) -> GraphResult<()> {
+        let reverse_edge_store = edge_store.try_reversed()?;
         self.edge_store = edge_store;
         self.reverse_edge_store = reverse_edge_store;
+        Ok(())
     }
 
     pub fn mark_has_unidirectional_edges(&mut self) {
@@ -625,8 +639,21 @@ impl Engine {
         self.last_vacuum = vacuumed_at;
     }
 
-    pub(crate) fn install_mmap_backed_graph(&mut self, graph: MmapBackedGraph) {
-        let reverse_edge_store = graph.edge_store.reversed();
+    pub(crate) fn record_build_resource_stats(
+        &mut self,
+        budget: crate::resource::ByteCount,
+        peak: crate::resource::ByteCount,
+        peak_phase: Option<crate::resource::ResourcePhase>,
+        pressure_events: u64,
+    ) {
+        self.build_resource_budget_bytes = budget.as_u64();
+        self.build_resource_peak_bytes = peak.as_u64();
+        self.build_resource_peak_phase = peak_phase;
+        self.build_resource_pressure_events = pressure_events;
+    }
+
+    pub(crate) fn install_mmap_backed_graph(&mut self, graph: MmapBackedGraph) -> GraphResult<()> {
+        let reverse_edge_store = graph.edge_store.try_reversed()?;
         self.node_store = graph.node_store;
         self.edge_store = graph.edge_store;
         self.reverse_edge_store = reverse_edge_store;
@@ -637,6 +664,7 @@ impl Engine {
         self.finish_build(None);
         self.resolution_store = ResolutionStore::MmapBacked(graph.resolution_state);
         self._mmap = Some(graph.mmap);
+        Ok(())
     }
 
     /// Register a new edge type label. Returns the u8 type ID.
@@ -730,6 +758,21 @@ impl Engine {
         }
     }
 
+    /// Fallibly insert into the build-time resolution accumulator.
+    pub(crate) fn try_build_resolution_insert(
+        &mut self,
+        table_oid: u32,
+        pk: &str,
+        node_idx: u32,
+    ) -> GraphResult<()> {
+        match &mut self.resolution_store {
+            ResolutionStore::Builder(builder) => builder.try_insert(table_oid, pk, node_idx),
+            _ => Err(GraphError::Internal(
+                "build resolution insertion requires builder mode".to_string(),
+            )),
+        }
+    }
+
     pub fn insert_tenant_membership(&mut self, tenant: &str, node_idx: u32) {
         self.tenant_membership
             .entry(tenant.to_string())
@@ -737,11 +780,43 @@ impl Engine {
             .insert(node_idx);
     }
 
+    pub(crate) fn try_build_insert_tenant_membership(
+        &mut self,
+        tenant: &str,
+        node_idx: u32,
+    ) -> GraphResult<()> {
+        self.tenant_membership
+            .try_reserve(1)
+            .map_err(|_| GraphError::Oom {
+                used_mb: 0,
+                need_mb: 1,
+                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+            })?;
+        self.insert_tenant_membership(tenant, node_idx);
+        Ok(())
+    }
+
     pub fn insert_table_membership(&mut self, table_oid: u32, node_idx: u32) {
         self.table_membership
             .entry(table_oid)
             .or_default()
             .insert(node_idx);
+    }
+
+    pub(crate) fn try_build_insert_table_membership(
+        &mut self,
+        table_oid: u32,
+        node_idx: u32,
+    ) -> GraphResult<()> {
+        self.table_membership
+            .try_reserve(1)
+            .map_err(|_| GraphError::Oom {
+                used_mb: 0,
+                need_mb: 1,
+                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+            })?;
+        self.insert_table_membership(table_oid, node_idx);
+        Ok(())
     }
 
     pub fn remove_table_membership(&mut self, table_oid: u32, node_idx: u32) {
@@ -1307,6 +1382,15 @@ impl Engine {
             read_only: self.is_read_only,
             read_only_reason: self.read_only_reason.map(|reason| reason.to_string()),
             projection_mode: self.projection_mode.as_str().to_string(),
+            build_resource_budget_bytes: self.build_resource_budget_bytes.min(i64::MAX as u64)
+                as i64,
+            build_resource_peak_bytes: self.build_resource_peak_bytes.min(i64::MAX as u64) as i64,
+            build_resource_peak_phase: self
+                .build_resource_peak_phase
+                .map(crate::resource::ResourcePhase::as_str)
+                .map(ToString::to_string),
+            build_resource_pressure_events: self.build_resource_pressure_events.min(i64::MAX as u64)
+                as i64,
             base_manifest_generation,
             base_manifest_sync_watermark,
             overlay_tombstone_count: overlay_tombstones.min(i32::MAX as usize) as i32,

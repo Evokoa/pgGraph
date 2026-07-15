@@ -80,6 +80,20 @@ such as `edge_buffer_full`. `projection_mode` is
 memory, and durable compaction policy; `edge_buffer_used` plus `tx_delta_dirty`
 show whether pending sync or transaction-local overlays exist.
 
+### `graph.build_resource_status()`
+
+```sql
+SELECT * FROM graph.build_resource_status();
+```
+
+Returns one row with `budget_bytes`, `peak_bytes`, `peak_phase`, and
+`pressure_events` for the most recent successful build in the current backend.
+The budget is the effective replacement budget after subtracting serving
+residency and the safety reserve from the configured limit. The peak measures
+replacement construction and persistence against that budget. Pressure events
+count adaptive byte-triggered batch flushes; row-ceiling flushes remain
+controlled by `graph.build_batch_size`.
+
 ### `graph.active_generation_count()`
 
 ```sql

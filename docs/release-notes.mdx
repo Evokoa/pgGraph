@@ -37,6 +37,10 @@ gate evidence through signed tags and package publishing.
   counts for unknown table statistics. Every over-budget build now fails before
   construction; legacy read-only OOM settings remain accepted for 1.x
   configuration compatibility but no longer authorize an unsafe build.
+- Added live phase reservations, fallible major-vector growth, adaptive
+  byte-bounded spool batches, and `graph.build_resource_status()`. Stale
+  positive statistics and long source keys are now checked during construction,
+  while the low-memory serving-engine unload path remains available.
 - Added a durable named-graph catalog with graph creation, selection,
   description, residency, grants, quotas, and metadata inspection APIs.
 - Scoped node registrations, relationship registrations, filter columns, build

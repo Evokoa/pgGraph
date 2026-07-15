@@ -14,6 +14,8 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use std::collections::HashMap;
 
+use crate::safety::{GraphError, GraphResult};
+
 /// Entry size in the persisted sorted array: 4 + 8 + 4 = 16 bytes.
 pub const ENTRY_SIZE: usize = 16;
 
@@ -61,6 +63,26 @@ impl ResolutionIndexBuilder {
     pub fn insert(&mut self, table_oid: u32, pk: &str, node_idx: u32) {
         let pk_hash = Self::hash_pk(pk);
         self.insert_hashed(table_oid, pk_hash, node_idx);
+    }
+
+    /// Fallibly insert one build-time resolution entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GraphError::Oom` when the entry array cannot grow.
+    pub(crate) fn try_insert(
+        &mut self,
+        table_oid: u32,
+        pk: &str,
+        node_idx: u32,
+    ) -> GraphResult<()> {
+        self.entries.try_reserve(1).map_err(|_| GraphError::Oom {
+            used_mb: 0,
+            need_mb: 1,
+            limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+        })?;
+        self.insert(table_oid, pk, node_idx);
+        Ok(())
     }
 
     fn insert_hashed(&mut self, table_oid: u32, pk_hash: u64, node_idx: u32) {

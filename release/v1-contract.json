@@ -341,6 +341,7 @@
     "build",
     "build_async_graph",
     "build_graph",
+    "build_resource_status",
     "build_status",
     "build_status_for_graph",
     "component",

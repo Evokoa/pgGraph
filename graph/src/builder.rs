@@ -28,7 +28,7 @@ use crate::edge_store::{
 use crate::engine::Engine;
 use crate::filter_index::{EncodedFilterValue, FilterColumnType};
 use crate::quote::quote_ident;
-use crate::resource::ByteCount;
+use crate::resource::{AdaptiveBatch, BatchAction, ByteCount, ResourcePhase};
 use crate::safety::{GraphError, GraphResult};
 
 /// Typed primary-key column set for a registered table.
@@ -291,10 +291,27 @@ fn cached_table_count(
 /// Build the graph engine from registered tables and edges.
 ///
 /// This is called by `graph.build()`.
+#[cfg(feature = "pg_test")]
 pub fn build_graph(
     tables: &[RegisteredTable],
     edges: &[RegisteredEdge],
     filter_columns: &[RegisteredFilterColumn],
+) -> GraphResult<Engine> {
+    let limit = ByteCount::from_mib(crate::config::MEMORY_LIMIT_MB.get().max(1) as u64)
+        .ok_or_else(|| GraphError::Internal("configured memory limit overflowed".to_string()))?;
+    let governor = crate::resource::ResourceGovernor::new(
+        crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(limit)),
+    );
+    let batch_byte_limit = crate::resource::adaptive_build_batch_target(limit);
+    build_graph_with_governor(tables, edges, filter_columns, &governor, batch_byte_limit)
+}
+
+pub(crate) fn build_graph_with_governor(
+    tables: &[RegisteredTable],
+    edges: &[RegisteredEdge],
+    filter_columns: &[RegisteredFilterColumn],
+    governor: &crate::resource::ResourceGovernor,
+    batch_byte_limit: ByteCount,
 ) -> GraphResult<Engine> {
     let start = Instant::now();
     match crate::config::build_scan_mode() {
@@ -312,9 +329,15 @@ pub fn build_graph(
     let mut pending_filter_values: Vec<((u32, String), u32, Option<PendingFilterValue>)> =
         Vec::new();
     let mut filter_populated_counts: HashMap<(u32, String), usize> = HashMap::new();
+    let mut persistent_memory = governor
+        .reserve_memory(ResourcePhase::Replacement, ByteCount::ZERO)
+        .map_err(resource_error_to_graph)?;
     create_node_lookup_spool()?;
-    let mut node_lookup_batch =
-        NodeLookupBatch::with_capacity(crate::config::BUILD_BATCH_SIZE.get());
+    let mut node_lookup_batch = NodeLookupBatch::with_limits(
+        governor,
+        crate::config::BUILD_BATCH_SIZE.get(),
+        batch_byte_limit,
+    )?;
 
     // Phase 1: Load all nodes from registered tables
     for table in tables {
@@ -375,13 +398,27 @@ pub fn build_graph(
                         continue;
                     };
 
-                    let node_idx = engine.node_store.add_node(oid, pk.clone());
-                    engine.insert_table_membership(oid, node_idx);
-                    node_lookup_batch.push(oid, pk.clone(), node_idx);
-                    node_lookup_batch.flush_if_full()?;
+                    persistent_memory
+                        .try_grow_in(ResourcePhase::Nodes, node_memory_bytes(&pk)?)
+                        .map_err(resource_error_to_graph)?;
+
+                    let node_idx = engine.node_store.try_add_node(oid, pk.clone())?;
+                    engine.try_build_insert_table_membership(oid, node_idx)?;
+                    node_lookup_batch.push(oid, pk.clone(), node_idx)?;
 
                     // Index in ResolutionIndex
-                    engine.resolution_insert(oid, &pk, node_idx);
+                    let resolution_bytes = ByteCount::from_usize(
+                        crate::resolution_index::ENTRY_SIZE,
+                    )
+                    .ok_or_else(|| {
+                        GraphError::Internal(
+                            "resolution entry size does not fit byte accounting".to_string(),
+                        )
+                    })?;
+                    persistent_memory
+                        .try_grow_in(ResourcePhase::Resolution, resolution_bytes)
+                        .map_err(resource_error_to_graph)?;
+                    engine.try_build_resolution_insert(oid, &pk, node_idx)?;
 
                     for (filter_idx, filter_col) in table_filter_columns.iter().enumerate() {
                         let value = read_encoded_filter_value(
@@ -389,7 +426,18 @@ pub fn build_graph(
                             filter_start_column + filter_idx,
                             filter_col,
                         )?;
+                        let filter_bytes =
+                            pending_filter_memory_bytes(&filter_col.column_name, &value)?;
+                        persistent_memory
+                            .try_grow_in(ResourcePhase::Filters, filter_bytes)
+                            .map_err(resource_error_to_graph)?;
+                        pending_filter_values
+                            .try_reserve(1)
+                            .map_err(|error| allocation_error("pending filter values", error))?;
                         if value.is_some() {
+                            filter_populated_counts.try_reserve(1).map_err(|error| {
+                                allocation_error("filter population counters", error)
+                            })?;
                             *filter_populated_counts
                                 .entry((filter_col.table_oid, filter_col.column_name.clone()))
                                 .or_insert(0) += 1;
@@ -403,7 +451,18 @@ pub fn build_graph(
 
                     if table.tenant_column.is_some() {
                         if let Ok(Some(tenant)) = row.get::<String>(tenant_column_idx) {
-                            engine.insert_tenant_membership(&tenant, node_idx);
+                            let tenant_bytes = std::mem::size_of::<String>()
+                                .checked_add(tenant.len())
+                                .and_then(ByteCount::from_usize)
+                                .ok_or_else(|| {
+                                    GraphError::Internal(
+                                        "tenant memory accounting overflowed".to_string(),
+                                    )
+                                })?;
+                            persistent_memory
+                                .try_grow_in(ResourcePhase::Tenants, tenant_bytes)
+                                .map_err(resource_error_to_graph)?;
+                            engine.try_build_insert_tenant_membership(&tenant, node_idx)?;
                         }
                     }
                 }
@@ -413,6 +472,7 @@ pub fn build_graph(
         })?;
     }
     node_lookup_batch.flush()?;
+    let node_batch_pressure_events = node_lookup_batch.pressure_events();
     index_node_lookup_spool()?;
 
     register_filter_columns(&mut engine, filter_columns, &filter_populated_counts);
@@ -446,7 +506,12 @@ pub fn build_graph(
     // raw edges in Rust.
     let has_weights = edges.iter().any(|e| e.weight_column.is_some());
     create_edge_spool()?;
-    let mut edge_batch = EdgeSpoolBatch::with_capacity(crate::config::BUILD_BATCH_SIZE.get());
+    let mut edge_batch = EdgeSpoolBatch::with_limits(
+        governor,
+        crate::config::BUILD_BATCH_SIZE.get(),
+        batch_byte_limit,
+    )?;
+    let mut edge_resolution_pressure_events = 0u64;
 
     for edge in edges {
         let static_edge_type_id = if edge.label_column.is_none() {
@@ -493,6 +558,15 @@ pub fn build_graph(
         Spi::connect(|client| {
             let mut cursor = client.open_cursor(&query, &[]);
             let batch_size = crate::config::BUILD_BATCH_SIZE.get().max(1) as i64;
+            let mut unresolved_edges = Vec::new();
+            let mut unresolved_policy = AdaptiveBatch::new(
+                ResourcePhase::EdgeResolve,
+                crate::config::BUILD_BATCH_SIZE.get().max(1) as usize,
+                batch_byte_limit,
+            );
+            let mut unresolved_memory = governor
+                .reserve_memory(ResourcePhase::EdgeResolve, ByteCount::ZERO)
+                .map_err(resource_error_to_graph)?;
             loop {
                 let table_result = cursor
                     .fetch(batch_size)
@@ -502,7 +576,6 @@ pub fn build_graph(
                     break;
                 }
 
-                let mut unresolved_edges = Vec::with_capacity(table_result.len());
                 for row in table_result {
                     let Some(from_pk) =
                         structural_text_value(row.get::<String>(1).map_err(|e| {
@@ -554,7 +627,7 @@ pub fn build_graph(
                         edge_type_id
                     };
 
-                    unresolved_edges.push(UnresolvedEdge {
+                    let unresolved = UnresolvedEdge {
                         from_pk,
                         to_pk,
                         mapping_id: edge.mapping_id,
@@ -562,10 +635,28 @@ pub fn build_graph(
                         type_id: edge_type_id,
                         weight,
                         bidirectional: edge.bidirectional,
-                    });
+                    };
+                    push_unresolved_edge(
+                        from_oid,
+                        to_oid,
+                        unresolved,
+                        &mut unresolved_edges,
+                        &mut unresolved_policy,
+                        &mut unresolved_memory,
+                        &mut edge_batch,
+                    )?;
                 }
-                resolve_edge_batch(from_oid, to_oid, &unresolved_edges, &mut edge_batch)?;
             }
+            flush_unresolved_edges(
+                from_oid,
+                to_oid,
+                &mut unresolved_edges,
+                &mut unresolved_policy,
+                &mut unresolved_memory,
+                &mut edge_batch,
+            )?;
+            edge_resolution_pressure_events =
+                edge_resolution_pressure_events.saturating_add(unresolved_policy.pressure_events());
 
             Ok::<(), GraphError>(())
         })?;
@@ -575,58 +666,96 @@ pub fn build_graph(
         }
     }
     edge_batch.flush()?;
+    let edge_batch_pressure_events = edge_batch.pressure_events();
 
     // Phase 3: Build CSR by streaming sorted temp-spooled edges.
     let node_count = engine.node_store.node_count();
     let (edge_store, relationship_identities) =
-        load_edge_store_from_spool(node_count, has_weights)?;
+        load_edge_store_from_spool(node_count, has_weights, &mut persistent_memory)?;
     if edge_store.relationship_ids_slice().len() != edge_store.edge_count() as usize {
         return Err(GraphError::Internal(
             "relationship identity sidecar does not match CSR edge count".to_string(),
         ));
     }
-    engine.replace_edge_stores(edge_store);
+    engine.replace_edge_stores(edge_store)?;
     engine.relationship_identities = relationship_identities;
 
     // Mark as built
     engine.finish_build(Some(pgrx::datetime::transaction_timestamp()));
     let elapsed = start.elapsed();
+    let pressure_events = node_batch_pressure_events
+        .saturating_add(edge_batch_pressure_events)
+        .saturating_add(edge_resolution_pressure_events);
+    engine.record_build_resource_stats(
+        governor.memory_limit(),
+        governor.memory_peak(),
+        governor.memory_peak_phase(),
+        pressure_events,
+    );
     pgrx::log!(
-        "graph.build() completed: {} nodes, {} edges, {:.1}ms",
+        "graph.build() completed: {} nodes, {} edges, {:.1}ms, {} byte-pressure flushes",
         engine.node_store.node_count(),
         engine.edge_store.edge_count(),
-        elapsed.as_secs_f64() * 1000.0
+        elapsed.as_secs_f64() * 1000.0,
+        pressure_events
     );
 
     Ok(engine)
 }
 
-struct NodeLookupBatch {
+struct NodeLookupBatch<'a> {
     table_oids: Vec<i64>,
     primary_keys: Vec<String>,
     node_indices: Vec<i64>,
-    capacity: usize,
+    policy: AdaptiveBatch,
+    memory: crate::resource::ResourceLease<'a>,
 }
 
-impl NodeLookupBatch {
-    fn with_capacity(capacity: i32) -> Self {
-        let capacity = capacity.max(1) as usize;
-        Self {
-            table_oids: Vec::with_capacity(capacity),
-            primary_keys: Vec::with_capacity(capacity),
-            node_indices: Vec::with_capacity(capacity),
-            capacity,
-        }
+impl<'a> NodeLookupBatch<'a> {
+    fn with_limits(
+        governor: &'a crate::resource::ResourceGovernor,
+        row_limit: i32,
+        byte_limit: ByteCount,
+    ) -> GraphResult<Self> {
+        Ok(Self {
+            table_oids: Vec::new(),
+            primary_keys: Vec::new(),
+            node_indices: Vec::new(),
+            policy: AdaptiveBatch::new(
+                ResourcePhase::NodeBatch,
+                row_limit.max(1) as usize,
+                byte_limit,
+            ),
+            memory: governor
+                .reserve_memory(ResourcePhase::NodeBatch, ByteCount::ZERO)
+                .map_err(resource_error_to_graph)?,
+        })
     }
 
-    fn push(&mut self, table_oid: u32, primary_key: String, node_idx: u32) {
+    fn push(&mut self, table_oid: u32, primary_key: String, node_idx: u32) -> GraphResult<()> {
+        let row_bytes = batch_row_bytes::<(i64, i64)>(&primary_key)?;
+        if self.policy.before_push(row_bytes) == BatchAction::Flush {
+            self.flush()?;
+        }
+        self.memory
+            .try_grow_in(ResourcePhase::NodeBatch, row_bytes)
+            .map_err(resource_error_to_graph)?;
+        self.table_oids
+            .try_reserve(1)
+            .map_err(|error| allocation_error("node lookup table OIDs", error))?;
+        self.primary_keys
+            .try_reserve(1)
+            .map_err(|error| allocation_error("node lookup primary keys", error))?;
+        self.node_indices
+            .try_reserve(1)
+            .map_err(|error| allocation_error("node lookup indices", error))?;
         self.table_oids.push(i64::from(table_oid));
         self.primary_keys.push(primary_key);
         self.node_indices.push(i64::from(node_idx));
-    }
-
-    fn flush_if_full(&mut self) -> GraphResult<()> {
-        if self.table_oids.len() >= self.capacity {
+        self.policy
+            .record(row_bytes)
+            .map_err(batch_accounting_error)?;
+        if self.policy.is_full() {
             self.flush()?;
         }
         Ok(())
@@ -640,18 +769,74 @@ impl NodeLookupBatch {
         let table_oids = std::mem::take(&mut self.table_oids);
         let primary_keys = std::mem::take(&mut self.primary_keys);
         let node_indices = std::mem::take(&mut self.node_indices);
-        self.table_oids = Vec::with_capacity(self.capacity);
-        self.primary_keys = Vec::with_capacity(self.capacity);
-        self.node_indices = Vec::with_capacity(self.capacity);
+        self.policy.clear();
 
-        Spi::run_with_args(
+        let result = Spi::run_with_args(
             "INSERT INTO pg_temp.graph_build_nodes (table_oid, primary_key, node_idx)
              SELECT table_oid, primary_key, node_idx
              FROM unnest($1::int8[], $2::text[], $3::int8[])
                AS node(table_oid, primary_key, node_idx)",
             &[table_oids.into(), primary_keys.into(), node_indices.into()],
         )
-        .map_err(|err| GraphError::Internal(format!("node lookup batch insert failed: {}", err)))
+        .map_err(|err| GraphError::Internal(format!("node lookup batch insert failed: {}", err)));
+        self.memory.release_all();
+        result
+    }
+
+    fn pressure_events(&self) -> u64 {
+        self.policy.pressure_events()
+    }
+}
+
+fn batch_row_bytes<T>(text: &str) -> GraphResult<ByteCount> {
+    let fixed = std::mem::size_of::<T>()
+        .checked_add(std::mem::size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(text.len()))
+        .and_then(ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("build batch row size overflowed".to_string()))?;
+    Ok(fixed)
+}
+
+fn node_memory_bytes(primary_key: &str) -> GraphResult<ByteCount> {
+    const CONSERVATIVE_NODE_BYTES: usize = 140;
+    CONSERVATIVE_NODE_BYTES
+        .checked_add(primary_key.len())
+        .and_then(ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("node memory accounting overflowed".to_string()))
+}
+
+fn pending_filter_memory_bytes(
+    column_name: &str,
+    value: &Option<PendingFilterValue>,
+) -> GraphResult<ByteCount> {
+    let text_bytes = match value {
+        Some(PendingFilterValue::Text(text)) => text.len(),
+        Some(PendingFilterValue::Encoded(_)) | None => 0,
+    };
+    std::mem::size_of::<((u32, String), u32, Option<PendingFilterValue>)>()
+        .checked_add(column_name.len())
+        .and_then(|bytes| bytes.checked_add(text_bytes))
+        .and_then(ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("filter memory accounting overflowed".to_string()))
+}
+
+fn allocation_error(_area: &str, _error: std::collections::TryReserveError) -> GraphError {
+    GraphError::Oom {
+        used_mb: 0,
+        need_mb: 1,
+        limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+    }
+}
+
+fn batch_accounting_error(error: crate::resource::ResourceLimitError) -> GraphError {
+    GraphError::Internal(format!("build batch accounting failed: {error}"))
+}
+
+fn resource_error_to_graph(error: crate::resource::ResourceLimitError) -> GraphError {
+    GraphError::Oom {
+        used_mb: ByteCount::from_bytes(error.used()).ceil_mib(),
+        need_mb: ByteCount::from_bytes(error.requested()).ceil_mib(),
+        limit_mb: ByteCount::from_bytes(error.limit()).as_u64() / 1_048_576,
     }
 }
 
@@ -678,27 +863,118 @@ fn index_node_lookup_spool() -> GraphResult<()> {
     .map_err(|err| GraphError::Internal(format!("node lookup spool index failed: {}", err)))
 }
 
+fn push_unresolved_edge(
+    from_oid: Option<u32>,
+    to_oid: Option<u32>,
+    edge: UnresolvedEdge,
+    pending: &mut Vec<UnresolvedEdge>,
+    policy: &mut AdaptiveBatch,
+    memory: &mut crate::resource::ResourceLease<'_>,
+    edge_batch: &mut EdgeSpoolBatch<'_>,
+) -> GraphResult<()> {
+    let row_bytes = unresolved_edge_memory_bytes(&edge)?;
+    if policy.before_push(row_bytes) == BatchAction::Flush {
+        flush_unresolved_edges(from_oid, to_oid, pending, policy, memory, edge_batch)?;
+    }
+    memory
+        .try_grow_in(ResourcePhase::EdgeResolve, row_bytes)
+        .map_err(resource_error_to_graph)?;
+    pending
+        .try_reserve(1)
+        .map_err(|error| allocation_error("unresolved edge batch", error))?;
+    pending.push(edge);
+    policy.record(row_bytes).map_err(batch_accounting_error)?;
+    if policy.is_full() {
+        flush_unresolved_edges(from_oid, to_oid, pending, policy, memory, edge_batch)?;
+    }
+    Ok(())
+}
+
+fn flush_unresolved_edges(
+    from_oid: Option<u32>,
+    to_oid: Option<u32>,
+    pending: &mut Vec<UnresolvedEdge>,
+    policy: &mut AdaptiveBatch,
+    memory: &mut crate::resource::ResourceLease<'_>,
+    edge_batch: &mut EdgeSpoolBatch<'_>,
+) -> GraphResult<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    memory
+        .try_grow_in(
+            ResourcePhase::EdgeResolve,
+            edge_resolution_workspace_bytes(pending)?,
+        )
+        .map_err(resource_error_to_graph)?;
+    let result = resolve_edge_batch(from_oid, to_oid, pending, edge_batch);
+    pending.clear();
+    pending.shrink_to(0);
+    policy.clear();
+    memory.release_all();
+    result
+}
+
+fn edge_resolution_workspace_bytes(edges: &[UnresolvedEdge]) -> GraphResult<ByteCount> {
+    edges
+        .iter()
+        .try_fold(0usize, |bytes, edge| {
+            bytes
+                .checked_add(edge.from_pk.len())
+                .and_then(|value| value.checked_add(edge.to_pk.len()))
+                .and_then(|value| value.checked_add(std::mem::size_of::<String>() * 2))
+                .and_then(|value| {
+                    value.checked_add(std::mem::size_of::<(Option<u32>, Option<u32>)>())
+                })
+                .ok_or(())
+        })
+        .ok()
+        .and_then(ByteCount::from_usize)
+        .ok_or_else(|| {
+            GraphError::Internal("edge resolution workspace accounting overflowed".to_string())
+        })
+}
+
+fn unresolved_edge_memory_bytes(edge: &UnresolvedEdge) -> GraphResult<ByteCount> {
+    std::mem::size_of::<UnresolvedEdge>()
+        .checked_add(edge.from_pk.len())
+        .and_then(|bytes| bytes.checked_add(edge.to_pk.len()))
+        .and_then(|bytes| bytes.checked_add(edge.source_key.len()))
+        .and_then(ByteCount::from_usize)
+        .ok_or_else(|| {
+            GraphError::Internal("unresolved edge memory accounting overflowed".to_string())
+        })
+}
+
 fn resolve_edge_batch(
     from_oid: Option<u32>,
     to_oid: Option<u32>,
     inputs: &[UnresolvedEdge],
-    edge_batch: &mut EdgeSpoolBatch,
+    edge_batch: &mut EdgeSpoolBatch<'_>,
 ) -> GraphResult<()> {
     if inputs.is_empty() {
         return Ok(());
     }
 
-    let from_keys = inputs
-        .iter()
-        .map(|edge| edge.from_pk.clone())
-        .collect::<Vec<_>>();
-    let to_keys = inputs
-        .iter()
-        .map(|edge| edge.to_pk.clone())
-        .collect::<Vec<_>>();
+    let mut from_keys = Vec::new();
+    from_keys
+        .try_reserve(inputs.len())
+        .map_err(|error| allocation_error("edge source lookup keys", error))?;
+    let mut to_keys = Vec::new();
+    to_keys
+        .try_reserve(inputs.len())
+        .map_err(|error| allocation_error("edge target lookup keys", error))?;
+    for edge in inputs {
+        from_keys.push(edge.from_pk.clone());
+        to_keys.push(edge.to_pk.clone());
+    }
     let preferred_from = from_oid.map(i64::from).unwrap_or(-1);
     let preferred_to = to_oid.map(i64::from).unwrap_or(-1);
-    let mut resolved = vec![(None, None); inputs.len()];
+    let mut resolved = Vec::new();
+    resolved
+        .try_reserve(inputs.len())
+        .map_err(|error| allocation_error("resolved edge coordinates", error))?;
+    resolved.resize(inputs.len(), (None, None));
 
     Spi::connect(|client| {
         let rows = client
@@ -813,7 +1089,7 @@ fn resolve_edge_batch(
     Ok(())
 }
 
-struct EdgeSpoolBatch {
+struct EdgeSpoolBatch<'a> {
     sources: Vec<i64>,
     targets: Vec<i64>,
     type_ids: Vec<i64>,
@@ -821,25 +1097,44 @@ struct EdgeSpoolBatch {
     schema_reversed: Vec<bool>,
     mapping_ids: Vec<i64>,
     source_keys: Vec<String>,
-    capacity: usize,
+    policy: AdaptiveBatch,
+    memory: crate::resource::ResourceLease<'a>,
 }
 
-impl EdgeSpoolBatch {
-    fn with_capacity(capacity: i32) -> Self {
-        let capacity = capacity.max(1) as usize;
-        Self {
-            sources: Vec::with_capacity(capacity),
-            targets: Vec::with_capacity(capacity),
-            type_ids: Vec::with_capacity(capacity),
-            weights: Vec::with_capacity(capacity),
-            schema_reversed: Vec::with_capacity(capacity),
-            mapping_ids: Vec::with_capacity(capacity),
-            source_keys: Vec::with_capacity(capacity),
-            capacity,
-        }
+impl<'a> EdgeSpoolBatch<'a> {
+    fn with_limits(
+        governor: &'a crate::resource::ResourceGovernor,
+        row_limit: i32,
+        byte_limit: ByteCount,
+    ) -> GraphResult<Self> {
+        Ok(Self {
+            sources: Vec::new(),
+            targets: Vec::new(),
+            type_ids: Vec::new(),
+            weights: Vec::new(),
+            schema_reversed: Vec::new(),
+            mapping_ids: Vec::new(),
+            source_keys: Vec::new(),
+            policy: AdaptiveBatch::new(
+                ResourcePhase::EdgeBatch,
+                row_limit.max(1) as usize,
+                byte_limit,
+            ),
+            memory: governor
+                .reserve_memory(ResourcePhase::EdgeBatch, ByteCount::ZERO)
+                .map_err(resource_error_to_graph)?,
+        })
     }
 
     fn push(&mut self, edge: RawEdge, mapping_id: u64, source_key: &str) -> GraphResult<()> {
+        let row_bytes = batch_row_bytes::<(i64, i64, i64, i64, bool, i64)>(source_key)?;
+        if self.policy.before_push(row_bytes) == BatchAction::Flush {
+            self.flush()?;
+        }
+        self.memory
+            .try_grow_in(ResourcePhase::EdgeBatch, row_bytes)
+            .map_err(resource_error_to_graph)?;
+        self.try_reserve_row()?;
         self.sources.push(i64::from(edge.source));
         self.targets.push(i64::from(edge.target));
         self.type_ids.push(i64::from(edge.type_id));
@@ -852,13 +1147,41 @@ impl EdgeSpoolBatch {
                 ))
             })?);
         self.source_keys.push(source_key.to_string());
+        self.policy
+            .record(row_bytes)
+            .map_err(batch_accounting_error)?;
         Ok(())
     }
 
     fn flush_if_full(&mut self) -> GraphResult<()> {
-        if self.sources.len() >= self.capacity {
+        if self.policy.is_full() {
             self.flush()?;
         }
+        Ok(())
+    }
+
+    fn try_reserve_row(&mut self) -> GraphResult<()> {
+        self.sources
+            .try_reserve(1)
+            .map_err(|error| allocation_error("edge spool sources", error))?;
+        self.targets
+            .try_reserve(1)
+            .map_err(|error| allocation_error("edge spool targets", error))?;
+        self.type_ids
+            .try_reserve(1)
+            .map_err(|error| allocation_error("edge spool type IDs", error))?;
+        self.weights
+            .try_reserve(1)
+            .map_err(|error| allocation_error("edge spool weights", error))?;
+        self.schema_reversed
+            .try_reserve(1)
+            .map_err(|error| allocation_error("edge spool directions", error))?;
+        self.mapping_ids
+            .try_reserve(1)
+            .map_err(|error| allocation_error("edge spool mapping IDs", error))?;
+        self.source_keys
+            .try_reserve(1)
+            .map_err(|error| allocation_error("edge spool source keys", error))?;
         Ok(())
     }
 
@@ -874,15 +1197,9 @@ impl EdgeSpoolBatch {
         let schema_reversed = std::mem::take(&mut self.schema_reversed);
         let mapping_ids = std::mem::take(&mut self.mapping_ids);
         let source_keys = std::mem::take(&mut self.source_keys);
-        self.sources = Vec::with_capacity(self.capacity);
-        self.targets = Vec::with_capacity(self.capacity);
-        self.type_ids = Vec::with_capacity(self.capacity);
-        self.weights = Vec::with_capacity(self.capacity);
-        self.schema_reversed = Vec::with_capacity(self.capacity);
-        self.mapping_ids = Vec::with_capacity(self.capacity);
-        self.source_keys = Vec::with_capacity(self.capacity);
+        self.policy.clear();
 
-        Spi::run_with_args(
+        let result = Spi::run_with_args(
             "INSERT INTO pg_temp.graph_build_edges (source, target, type_id, weight, schema_reversed, mapping_id, source_key)
              SELECT source, target, type_id, NULLIF(weight, 0), schema_reversed, mapping_id, source_key
              FROM unnest($1::int8[], $2::int8[], $3::int8[], $4::int8[], $5::bool[], $6::int8[], $7::text[])
@@ -897,7 +1214,13 @@ impl EdgeSpoolBatch {
                 source_keys.into(),
             ],
         )
-        .map_err(|err| GraphError::Internal(format!("edge spool batch insert failed: {}", err)))
+        .map_err(|err| GraphError::Internal(format!("edge spool batch insert failed: {}", err)));
+        self.memory.release_all();
+        result
+    }
+
+    fn pressure_events(&self) -> u64 {
+        self.policy.pressure_events()
     }
 }
 
@@ -920,6 +1243,7 @@ fn create_edge_spool() -> GraphResult<()> {
 fn load_edge_store_from_spool(
     node_count: u32,
     has_weights: bool,
+    persistent_memory: &mut crate::resource::ResourceLease<'_>,
 ) -> GraphResult<(
     crate::edge_store::EdgeStore,
     Vec<Option<RelationshipIdentity>>,
@@ -932,7 +1256,15 @@ fn load_edge_store_from_spool(
             &[],
         );
         let batch_size = crate::config::BUILD_BATCH_SIZE.get().max(1) as i64;
-        let mut builder = SortedEdgeStoreBuilder::new(node_count, has_weights);
+        let offset_count = u64::from(node_count)
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(8))
+            .map(ByteCount::from_bytes)
+            .ok_or_else(|| GraphError::Internal("CSR offset accounting overflowed".to_string()))?;
+        persistent_memory
+            .try_grow_in(ResourcePhase::Csr, offset_count)
+            .map_err(resource_error_to_graph)?;
+        let mut builder = SortedEdgeStoreBuilder::try_new(node_count, has_weights)?;
         let mut relationship_ids =
             std::collections::HashMap::<RelationshipIdentity, RelationshipId>::new();
         let mut relationship_identities = vec![None];
@@ -989,6 +1321,9 @@ fn load_edge_store_from_spool(
                         GraphError::Internal(format!("edge source key read failed: {err}"))
                     })?
                     .ok_or_else(|| GraphError::Internal("edge source key was NULL".to_string()))?;
+                persistent_memory
+                    .try_grow_in(ResourcePhase::Csr, csr_edge_memory_bytes(has_weights)?)
+                    .map_err(resource_error_to_graph)?;
                 let identity = RelationshipIdentity {
                     mapping_id,
                     source_key,
@@ -996,6 +1331,16 @@ fn load_edge_store_from_spool(
                 let relationship_id = if let Some(&id) = relationship_ids.get(&identity) {
                     id
                 } else {
+                    let identity_bytes = relationship_identity_memory_bytes(&identity.source_key)?;
+                    persistent_memory
+                        .try_grow_in(ResourcePhase::Csr, identity_bytes)
+                        .map_err(resource_error_to_graph)?;
+                    relationship_ids
+                        .try_reserve(1)
+                        .map_err(|error| allocation_error("relationship identity map", error))?;
+                    relationship_identities
+                        .try_reserve(1)
+                        .map_err(|error| allocation_error("relationship identity list", error))?;
                     let id =
                         RelationshipId::try_from(relationship_identities.len()).map_err(|_| {
                             GraphError::Internal("too many relationship identities".to_string())
@@ -1035,6 +1380,35 @@ fn load_edge_store_from_spool(
 
         Ok((builder.finish(), relationship_identities))
     })
+}
+
+fn csr_edge_memory_bytes(has_weights: bool) -> GraphResult<ByteCount> {
+    let one_direction = std::mem::size_of::<u32>()
+        .checked_add(std::mem::size_of::<u8>())
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u8>()))
+        .and_then(|bytes| {
+            bytes.checked_add(if has_weights {
+                std::mem::size_of::<u32>()
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<RelationshipId>()))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("CSR edge accounting overflowed".to_string()))?;
+    Ok(one_direction)
+}
+
+fn relationship_identity_memory_bytes(source_key: &str) -> GraphResult<ByteCount> {
+    std::mem::size_of::<RelationshipIdentity>()
+        .checked_add(std::mem::size_of::<RelationshipId>())
+        .and_then(|bytes| bytes.checked_add(source_key.len()))
+        .and_then(|bytes| bytes.checked_add(64))
+        .and_then(ByteCount::from_usize)
+        .ok_or_else(|| {
+            GraphError::Internal("relationship identity accounting overflowed".to_string())
+        })
 }
 
 fn register_filter_columns(

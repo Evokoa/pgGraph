@@ -23,7 +23,7 @@ repeatable evidence under `todo/measurements/`.
 Exit evidence: governor unit/property tests, PostgreSQL build rejection tests,
 formatting, Clippy, rustdoc, documentation/contract drift, and focused review.
 
-## R2B: Enforced Build Reservations And Adaptive Batches
+## R2B: Enforced Build Reservations And Adaptive Batches — Complete
 
 - Resolve the effective build budget from the configured cap minus current
   backend-private graph residency and a documented safety reserve.

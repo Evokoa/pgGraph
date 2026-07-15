@@ -1128,6 +1128,28 @@ fn status() -> TableIterator<
     })
 }
 
+/// Return resource accounting from the most recent successful build.
+#[pg_extern(schema = "graph")]
+fn build_resource_status() -> TableIterator<
+    'static,
+    (
+        name!(budget_bytes, i64),
+        name!(peak_bytes, i64),
+        name!(peak_phase, Option<String>),
+        name!(pressure_events, i64),
+    ),
+> {
+    with_panic_boundary("build_resource_status()", || {
+        let status = refreshed_engine_status().unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            status.build_resource_budget_bytes,
+            status.build_resource_peak_bytes,
+            status.build_resource_peak_phase,
+            status.build_resource_pressure_events,
+        )])
+    })
+}
+
 /// Return the number of unexpired active-generation backend heartbeats.
 #[pg_extern(schema = "graph")]
 fn active_generation_count() -> i32 {

@@ -70,7 +70,7 @@ requires `graph.mutable_enabled = on`.
 | GUC | Type | Default | Context | Range or values | Effect |
 |---|---:|---:|---|---|---|
 | `graph.memory_limit_mb` | int | `2048` | `SUSET` | `64` to `32768` | Pre-build OOM guard and status limit |
-| `graph.build_batch_size` | int | `10000` | `SUSET` | `1` to `1000000` | SPI cursor fetch size and spool batch size |
+| `graph.build_batch_size` | int | `10000` | `SUSET` | `1` to `1000000` | Maximum SPI cursor/spool rows; byte pressure can flush a batch earlier |
 | `graph.low_memory_build` | bool | `false` | `SUSET` | `on`, `off` | Allow rebuilds to unload the current backend-local graph before constructing the replacement |
 | `graph.oom_action` | string | `error` | `SUSET` | `error`; deprecated aliases `readonly`, `read_only`, `read-only` | Compatibility setting; every over-budget build is rejected before allocation |
 | `graph.max_loaded_graphs_per_backend` | int | `1` | `SUSET` | `0` to `1` | Runtime loaded-graph slot cap for each PostgreSQL backend |
@@ -88,6 +88,13 @@ SQLSTATE `53200` with diagnostic `PG001` before engine allocation.
 The `readonly`, `read_only`, and `read-only` values remain readable for 1.x
 configuration compatibility but are deprecated and have the same safe
 over-budget rejection behavior as `error`.
+
+The runtime build budget subtracts current backend-local serving residency and
+a safety reserve of one sixteenth of the configured limit, capped at 64 MiB.
+Node, filter, resolution, relationship, CSR, and persistence phases reserve
+against the remainder. Adaptive spool batches use one sixteenth of the
+remainder, with a 64 KiB minimum and 8 MiB maximum when that much memory is
+available.
 
 Set `graph.low_memory_build = on` when rebuilds fail only because the current
 backend already has a graph loaded. In that mode, `graph.build()` may unload the

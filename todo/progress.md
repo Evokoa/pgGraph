@@ -188,6 +188,14 @@ without replacing the serving graph. The 723-test Rust suite and 987-test
 PostgreSQL 17 pgrx suite pass, with formatting, Clippy, rustdoc, doctests, and
 documentation/contract drift green.
 
+2026-07-15 R2B live build budget — Build, CSR reversal, and optional
+persistence now hold phase-specific reservations under the effective
+replacement budget; node, edge, and endpoint spools flush on adaptive byte
+pressure and major vectors grow fallibly. Long keys, stale positive statistics,
+low-memory replacement, and persisted typed filters pass with 728 Rust tests
+and 994 PostgreSQL 17 tests (one intentional ignore in each suite), plus all
+static, documentation, contract, and secret gates.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

@@ -20,6 +20,10 @@ impl ByteCount {
         Self(bytes)
     }
 
+    pub(crate) fn from_usize(bytes: usize) -> Option<Self> {
+        u64::try_from(bytes).ok().map(Self)
+    }
+
     pub(crate) fn from_mib(mib: u64) -> Option<Self> {
         mib.checked_mul(1_048_576).map(Self)
     }
@@ -40,9 +44,26 @@ impl ByteCount {
         self.0.checked_add(other.0).map(Self)
     }
 
+    pub(crate) fn checked_sub(self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
+    }
+
     pub(crate) fn checked_mul(self, multiplier: u64) -> Option<Self> {
         self.0.checked_mul(multiplier).map(Self)
     }
+}
+
+/// Resolve the byte target for one transient build batch.
+pub(crate) fn adaptive_build_batch_target(available: ByteCount) -> ByteCount {
+    const MIN_BATCH_BYTES: u64 = 64 * 1024;
+    const MAX_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+
+    let proportional = available.as_u64() / 16;
+    ByteCount::from_bytes(
+        proportional
+            .clamp(MIN_BATCH_BYTES, MAX_BATCH_BYTES)
+            .min(available.as_u64()),
+    )
 }
 
 /// Maximum private-memory bytes available to one governed operation.
@@ -76,16 +97,116 @@ impl ElapsedBudget {
 /// Named operation phase used in accounting and stable diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResourcePhase {
-    BuildServing,
-    BuildReplacement,
+    Serving,
+    SafetyReserve,
+    Replacement,
+    Nodes,
+    NodeBatch,
+    Filters,
+    Tenants,
+    Resolution,
+    EdgeBatch,
+    EdgeResolve,
+    Csr,
+    Persistence,
 }
 
 impl ResourcePhase {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::BuildServing => "build.serving",
-            Self::BuildReplacement => "build.replacement",
+            Self::Serving => "build.serving",
+            Self::SafetyReserve => "build.safety_reserve",
+            Self::Replacement => "build.replacement",
+            Self::Nodes => "build.nodes",
+            Self::NodeBatch => "build.node_batch",
+            Self::Filters => "build.filters",
+            Self::Tenants => "build.tenants",
+            Self::Resolution => "build.resolution",
+            Self::EdgeBatch => "build.edge_batch",
+            Self::EdgeResolve => "build.edge_resolve",
+            Self::Csr => "build.csr",
+            Self::Persistence => "build.persistence",
         }
+    }
+}
+
+/// Decision returned before appending a row to an adaptive build batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchAction {
+    Append,
+    Flush,
+}
+
+/// Row-and-byte batch policy used by PostgreSQL build spools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdaptiveBatch {
+    phase: ResourcePhase,
+    row_limit: usize,
+    byte_limit: ByteCount,
+    rows: usize,
+    bytes: ByteCount,
+    pressure_events: u64,
+}
+
+impl AdaptiveBatch {
+    pub(crate) fn new(phase: ResourcePhase, row_limit: usize, byte_limit: ByteCount) -> Self {
+        Self {
+            phase,
+            row_limit: row_limit.max(1),
+            byte_limit,
+            rows: 0,
+            bytes: ByteCount::ZERO,
+            pressure_events: 0,
+        }
+    }
+
+    pub(crate) fn before_push(&mut self, row_bytes: ByteCount) -> BatchAction {
+        let exceeds_rows = self.rows >= self.row_limit;
+        let exceeds_bytes = self
+            .bytes
+            .checked_add(row_bytes)
+            .is_none_or(|next| next > self.byte_limit);
+        if self.rows != 0 && (exceeds_rows || exceeds_bytes) {
+            self.pressure_events = self.pressure_events.saturating_add(1);
+            BatchAction::Flush
+        } else {
+            BatchAction::Append
+        }
+    }
+
+    pub(crate) fn record(&mut self, row_bytes: ByteCount) -> Result<(), ResourceLimitError> {
+        self.bytes = self.bytes.checked_add(row_bytes).ok_or_else(|| {
+            ResourceLimitError::new(
+                ResourceKind::Memory,
+                self.phase,
+                self.bytes.as_u64(),
+                row_bytes.as_u64(),
+                u64::MAX,
+            )
+        })?;
+        self.rows = self.rows.checked_add(1).ok_or_else(|| {
+            ResourceLimitError::new(
+                ResourceKind::Memory,
+                self.phase,
+                self.rows as u64,
+                1,
+                usize::MAX as u64,
+            )
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn is_full(self) -> bool {
+        self.rows >= self.row_limit || (self.rows != 0 && self.bytes >= self.byte_limit)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.rows = 0;
+        self.bytes = ByteCount::ZERO;
+    }
+
+    pub(crate) const fn pressure_events(self) -> u64 {
+        self.pressure_events
     }
 }
 
@@ -243,6 +364,15 @@ impl ResourceGovernor {
         ByteCount::from_bytes(self.memory_peak.get())
     }
 
+    pub(crate) fn memory_limit(&self) -> ByteCount {
+        self.limits.memory.bytes()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn memory_used(&self) -> ByteCount {
+        ByteCount::from_bytes(self.memory_used.get())
+    }
+
     pub(crate) fn memory_peak_phase(&self) -> Option<ResourcePhase> {
         self.memory_peak_phase.get()
     }
@@ -302,11 +432,19 @@ pub(crate) struct ResourceLease<'a> {
 
 impl ResourceLease<'_> {
     pub(crate) fn try_grow(&mut self, additional: ByteCount) -> Result<(), ResourceLimitError> {
-        let mut extra = self.governor.reserve(self.phase, additional.as_u64())?;
+        self.try_grow_in(self.phase, additional)
+    }
+
+    pub(crate) fn try_grow_in(
+        &mut self,
+        phase: ResourcePhase,
+        additional: ByteCount,
+    ) -> Result<(), ResourceLimitError> {
+        let mut extra = self.governor.reserve(phase, additional.as_u64())?;
         let combined = self.amount.checked_add(extra.amount).ok_or_else(|| {
             ResourceLimitError::new(
                 ResourceKind::Memory,
-                self.phase,
+                phase,
                 self.amount,
                 additional.as_u64(),
                 u64::MAX,
@@ -319,6 +457,11 @@ impl ResourceLease<'_> {
 
     pub(crate) const fn amount(&self) -> ByteCount {
         ByteCount::from_bytes(self.amount)
+    }
+
+    pub(crate) fn release_all(&mut self) {
+        self.governor.release_memory(self.amount);
+        self.amount = 0;
     }
 }
 
@@ -359,22 +502,22 @@ mod tests {
     fn leases_conserve_memory_and_record_peak_phase() {
         let governor = ResourceGovernor::new(limits(100));
         let first = governor
-            .reserve_memory(ResourcePhase::BuildServing, ByteCount::from_bytes(40))
+            .reserve_memory(ResourcePhase::Serving, ByteCount::from_bytes(40))
             .expect("first reservation should fit");
         {
             let second = governor
-                .reserve_memory(ResourcePhase::BuildReplacement, ByteCount::from_bytes(50))
+                .reserve_memory(ResourcePhase::Replacement, ByteCount::from_bytes(50))
                 .expect("second reservation should fit");
             assert_eq!(second.amount().as_u64(), 50);
             assert_eq!(governor.memory_peak().as_u64(), 90);
             assert_eq!(
                 governor.memory_peak_phase(),
-                Some(ResourcePhase::BuildReplacement)
+                Some(ResourcePhase::Replacement)
             );
         }
         drop(first);
         governor
-            .reserve_memory(ResourcePhase::BuildReplacement, ByteCount::from_bytes(100))
+            .reserve_memory(ResourcePhase::Replacement, ByteCount::from_bytes(100))
             .expect("dropped leases should return their reservation");
     }
 
@@ -382,7 +525,7 @@ mod tests {
     fn failed_growth_keeps_existing_reservation() {
         let governor = ResourceGovernor::new(limits(100));
         let mut lease = governor
-            .reserve_memory(ResourcePhase::BuildReplacement, ByteCount::from_bytes(80))
+            .reserve_memory(ResourcePhase::Replacement, ByteCount::from_bytes(80))
             .expect("initial reservation should fit");
         let error = lease
             .try_grow(ByteCount::from_bytes(21))
@@ -397,7 +540,7 @@ mod tests {
         let governor = ResourceGovernor::new(limits(100));
         {
             let mut lease = governor
-                .reserve_memory(ResourcePhase::BuildReplacement, ByteCount::from_bytes(40))
+                .reserve_memory(ResourcePhase::Replacement, ByteCount::from_bytes(40))
                 .expect("initial reservation should fit");
             lease
                 .try_grow(ByteCount::from_bytes(60))
@@ -405,8 +548,80 @@ mod tests {
             assert_eq!(lease.amount().as_u64(), 100);
         }
         governor
-            .reserve_memory(ResourcePhase::BuildServing, ByteCount::from_bytes(100))
+            .reserve_memory(ResourcePhase::Serving, ByteCount::from_bytes(100))
             .expect("grown lease should release its complete reservation");
+    }
+
+    #[test]
+    fn release_all_returns_workspace_without_dropping_the_lease() {
+        let governor = ResourceGovernor::new(limits(100));
+        let mut workspace = governor
+            .reserve_memory(ResourcePhase::NodeBatch, ByteCount::from_bytes(60))
+            .expect("workspace reservation should fit");
+        workspace.release_all();
+        assert_eq!(governor.memory_used(), ByteCount::ZERO);
+        workspace
+            .try_grow(ByteCount::from_bytes(100))
+            .expect("released workspace lease should be reusable");
+    }
+
+    #[test]
+    fn lease_growth_records_the_phase_that_crosses_the_peak() {
+        let governor = ResourceGovernor::new(limits(100));
+        let mut lease = governor
+            .reserve_memory(ResourcePhase::Nodes, ByteCount::from_bytes(40))
+            .expect("initial node reservation should fit");
+        lease
+            .try_grow_in(ResourcePhase::Filters, ByteCount::from_bytes(30))
+            .expect("filter growth should fit");
+
+        assert_eq!(governor.memory_peak().as_u64(), 70);
+        assert_eq!(governor.memory_peak_phase(), Some(ResourcePhase::Filters));
+    }
+
+    #[test]
+    fn adaptive_batch_flushes_on_bytes_or_rows_and_accepts_one_large_row() {
+        let mut batch = AdaptiveBatch::new(ResourcePhase::NodeBatch, 3, ByteCount::from_bytes(10));
+        assert_eq!(
+            batch.before_push(ByteCount::from_bytes(6)),
+            BatchAction::Append
+        );
+        batch
+            .record(ByteCount::from_bytes(6))
+            .expect("batch byte accounting should fit");
+        assert_eq!(
+            batch.before_push(ByteCount::from_bytes(5)),
+            BatchAction::Flush
+        );
+        batch.clear();
+
+        assert_eq!(
+            batch.before_push(ByteCount::from_bytes(20)),
+            BatchAction::Append
+        );
+        batch
+            .record(ByteCount::from_bytes(20))
+            .expect("one large row should still fit u64 accounting");
+        assert!(batch.is_full());
+        assert_eq!(batch.pressure_events(), 1);
+    }
+
+    #[test]
+    fn adaptive_batch_target_is_bounded_by_available_memory() {
+        assert_eq!(
+            adaptive_build_batch_target(ByteCount::from_bytes(32 * 1024)).as_u64(),
+            32 * 1024
+        );
+        assert_eq!(
+            adaptive_build_batch_target(ByteCount::from_mib(64).expect("test MiB should fit"))
+                .as_u64(),
+            4 * 1024 * 1024
+        );
+        assert_eq!(
+            adaptive_build_batch_target(ByteCount::from_mib(1024).expect("test MiB should fit"))
+                .as_u64(),
+            8 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -416,7 +631,7 @@ mod tests {
             ElapsedBudget::new(Duration::ZERO),
         ));
         let error = governor
-            .check_elapsed_duration(ResourcePhase::BuildReplacement, Duration::from_micros(1))
+            .check_elapsed_duration(ResourcePhase::Replacement, Duration::from_micros(1))
             .expect_err("nonzero elapsed time must exceed a zero deadline");
         assert_eq!(error.kind(), ResourceKind::Elapsed);
     }

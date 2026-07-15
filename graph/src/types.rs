@@ -212,6 +212,14 @@ pub struct EngineStatus {
     pub read_only: bool,
     pub read_only_reason: Option<String>,
     pub projection_mode: String,
+    /// Effective replacement budget for the most recent successful build.
+    pub build_resource_budget_bytes: i64,
+    /// Maximum replacement bytes reserved during the most recent successful build.
+    pub build_resource_peak_bytes: i64,
+    /// Build phase that established `build_resource_peak_bytes`.
+    pub build_resource_peak_phase: Option<String>,
+    /// Number of batches flushed early by the adaptive byte ceiling.
+    pub build_resource_pressure_events: i64,
     #[allow(
         dead_code,
         reason = "Rust status carries base manifest metadata before the SQL status tuple is refactored"

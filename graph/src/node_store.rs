@@ -25,6 +25,7 @@
 //! See: `docs/contributor_guide/memory-model.mdx`
 
 use crate::mapped_bytes::MappedBytes;
+use crate::safety::{GraphError, GraphResult};
 use bitvec::prelude::*;
 use std::ops::Range;
 
@@ -264,6 +265,35 @@ impl NodeStore {
         }
     }
 
+    /// Fallibly add a node to owned storage for resource-governed builds.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GraphError::Oom` when an owned array cannot grow, or an
+    /// internal error for index overflow or mmap-backed storage.
+    pub(crate) fn try_add_node(&mut self, table_oid: u32, primary_key: String) -> GraphResult<u32> {
+        match &mut self.backing {
+            ArrayBacking::Owned {
+                is_active,
+                table_oids,
+                primary_keys,
+            } => {
+                table_oids.try_reserve(1).map_err(node_allocation_error)?;
+                primary_keys.try_reserve(1).map_err(node_allocation_error)?;
+                let idx = u32::try_from(table_oids.len()).map_err(|_| {
+                    GraphError::Internal("node count exceeds u32 index space".to_string())
+                })?;
+                is_active.push(true);
+                table_oids.push(table_oid);
+                primary_keys.push(primary_key);
+                Ok(idx)
+            }
+            ArrayBacking::Mmap { .. } => Err(GraphError::Internal(
+                "cannot add nodes to mmap-backed storage during build".to_string(),
+            )),
+        }
+    }
+
     /// Mark a node as deleted (tombstone). Only valid in Owned mode.
     pub fn deactivate(&mut self, node_idx: u32) {
         match &mut self.backing {
@@ -489,6 +519,14 @@ impl NodeStore {
 impl Default for NodeStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn node_allocation_error(_error: std::collections::TryReserveError) -> GraphError {
+    GraphError::Oom {
+        used_mb: 0,
+        need_mb: 1,
+        limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
     }
 }
 

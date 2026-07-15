@@ -282,6 +282,35 @@ impl SortedEdgeStoreBuilder {
         }
     }
 
+    /// Create a streaming CSR builder with fallible initial allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the offset count cannot fit the current
+    /// platform, or `GraphError::Oom` when the initial allocation fails.
+    pub(crate) fn try_new(node_count: u32, has_weights: bool) -> GraphResult<Self> {
+        let mut edge_offsets = Vec::new();
+        let offset_capacity = usize::try_from(node_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| GraphError::Internal("CSR offset count overflowed usize".to_string()))?;
+        edge_offsets
+            .try_reserve(offset_capacity)
+            .map_err(csr_allocation_error)?;
+        edge_offsets.push(0);
+        Ok(Self {
+            node_count,
+            has_weights,
+            edge_offsets,
+            targets: Vec::new(),
+            type_ids: Vec::new(),
+            schema_reversed: Vec::new(),
+            weights: Vec::new(),
+            relationship_ids: Vec::new(),
+            current_node: 0,
+        })
+    }
+
     /// Add one sorted edge, rejecting endpoints outside the node range.
     ///
     /// Every source relationship row is retained, including rows with equal
@@ -303,6 +332,17 @@ impl SortedEdgeStoreBuilder {
     pub(crate) fn try_push_identified(&mut self, identified: IdentifiedRawEdge) -> GraphResult<()> {
         let edge = identified.edge;
         validate_raw_edge(self.node_count, &edge)?;
+        self.targets.try_reserve(1).map_err(csr_allocation_error)?;
+        self.type_ids.try_reserve(1).map_err(csr_allocation_error)?;
+        self.schema_reversed
+            .try_reserve(1)
+            .map_err(csr_allocation_error)?;
+        self.relationship_ids
+            .try_reserve(1)
+            .map_err(csr_allocation_error)?;
+        if self.has_weights {
+            self.weights.try_reserve(1).map_err(csr_allocation_error)?;
+        }
         while self.current_node < edge.source {
             self.current_node += 1;
             self.edge_offsets.push(self.targets.len() as u32);
@@ -334,6 +374,23 @@ impl SortedEdgeStoreBuilder {
             relationship_ids: self.relationship_ids,
         }
     }
+}
+
+fn csr_allocation_error(_error: std::collections::TryReserveError) -> GraphError {
+    GraphError::Oom {
+        used_mb: 0,
+        need_mb: 1,
+        limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+    }
+}
+
+fn try_filled_vec<T: Clone>(len: usize, value: T) -> GraphResult<Vec<T>> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(csr_allocation_error)?;
+    values.resize(len, value);
+    Ok(values)
 }
 
 /// Compressed Sparse Row (CSR) edge storage.
@@ -461,7 +518,7 @@ impl EdgeStore {
     where
         I: IntoIterator<Item = RawEdge>,
     {
-        let mut builder = SortedEdgeStoreBuilder::new(node_count, has_weights);
+        let mut builder = SortedEdgeStoreBuilder::try_new(node_count, has_weights)?;
         for edge in edges {
             builder.try_push(edge)?;
         }
@@ -472,11 +529,19 @@ impl EdgeStore {
     ///
     /// The returned store owns its arrays. This keeps inbound traversal fast
     /// even when the forward graph was loaded from an mmap-backed file.
-    pub fn reversed(&self) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `GraphError::Oom` when a reverse CSR allocation fails, or an
+    /// internal error when a required array length overflows.
+    pub(crate) fn try_reversed(&self) -> GraphResult<Self> {
         let has_weights = self.has_weights();
         let node_count = self.node_count();
         let edge_count = self.edge_count() as usize;
-        let mut edge_offsets = vec![0u32; node_count as usize + 1];
+        let offset_count = (node_count as usize).checked_add(1).ok_or_else(|| {
+            GraphError::Internal("reverse CSR offset count overflowed".to_string())
+        })?;
+        let mut edge_offsets = try_filled_vec(offset_count, 0u32)?;
 
         for source in 0..node_count {
             let (targets, _) = self.neighbors(source);
@@ -489,16 +554,20 @@ impl EdgeStore {
             edge_offsets[idx] += edge_offsets[idx - 1];
         }
 
-        let mut reversed_targets = vec![0u32; edge_count];
-        let mut reversed_type_ids = vec![0u8; edge_count];
-        let mut reversed_schema_reversed = vec![0u8; edge_count];
+        let mut reversed_targets = try_filled_vec(edge_count, 0u32)?;
+        let mut reversed_type_ids = try_filled_vec(edge_count, 0u8)?;
+        let mut reversed_schema_reversed = try_filled_vec(edge_count, 0u8)?;
         let mut reversed_weights = if has_weights {
-            vec![0u32; edge_count]
+            try_filled_vec(edge_count, 0u32)?
         } else {
             Vec::new()
         };
-        let mut reversed_relationship_ids = vec![NO_RELATIONSHIP_ID; edge_count];
-        let mut write_offsets = edge_offsets.clone();
+        let mut reversed_relationship_ids = try_filled_vec(edge_count, NO_RELATIONSHIP_ID)?;
+        let mut write_offsets = Vec::new();
+        write_offsets
+            .try_reserve_exact(edge_offsets.len())
+            .map_err(csr_allocation_error)?;
+        write_offsets.extend_from_slice(&edge_offsets);
 
         for source in 0..self.node_count() {
             let (targets, type_ids, schema_reversed, weights) =
@@ -520,7 +589,7 @@ impl EdgeStore {
             }
         }
 
-        Self {
+        Ok(Self {
             backing: EdgeBacking::Owned {
                 edge_offsets,
                 targets: reversed_targets,
@@ -529,7 +598,14 @@ impl EdgeStore {
                 weights: reversed_weights,
             },
             relationship_ids: reversed_relationship_ids,
-        }
+        })
+    }
+
+    #[cfg(test)]
+    /// Build a reverse CSR for trusted unit-test fixtures.
+    pub fn reversed(&self) -> Self {
+        self.try_reversed()
+            .expect("test reverse CSR allocation should succeed")
     }
 
     /// Get the neighbor slice for a node. This is the BFS hot-loop access.

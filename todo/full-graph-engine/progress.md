@@ -15,7 +15,7 @@ release blocker.
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | KI-020 retired; RUST-00C through RUST-00F supported-major retirement pending | Mapped stores own validated ranges and pass Miri, full Rust ASan, PostgreSQL 14-18 regressions, and a PostgreSQL-process Valgrind gate. Graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. |
 | 1A. Security and identity | Complete | R1 correctness, authorization, durable identity, transaction isolation, DDL identity, and PostgreSQL 14-18 regression evidence is complete. |
-| 1B. Memory containment | In progress | R2A centralizes checked build preflight and rejects every over-budget build; live build reservations and adaptive batches are next. |
+| 1B. Memory containment | In progress | R2A/R2B centralize checked preflight and enforce the effective replacement budget through construction and persistence with adaptive byte batches; R2C extends breakers to load, query, sync, compaction, and analytics. |
 | 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
 | 3. Bounded load/sync/compaction | Not started | mmap inbound/filter data and range compaction. |

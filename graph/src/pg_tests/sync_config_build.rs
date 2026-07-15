@@ -473,6 +473,106 @@ fn low_memory_build_unloads_existing_backend_graph_before_rebuild() {
 }
 
 #[pg_test]
+fn build_resource_status_reports_byte_adaptive_pressure_for_long_rows() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SET graph.memory_limit_mb = 64").expect("set memory limit failed");
+    Spi::run("SET graph.build_batch_size = 10000").expect("set row batch limit failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_long_build_rows_pgtest CASCADE")
+        .expect("drop long-row table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_long_build_rows_pgtest (
+             id text PRIMARY KEY,
+             payload text NOT NULL
+         );
+         INSERT INTO public.graph_test_long_build_rows_pgtest
+         SELECT repeat('k', 1800) || lpad(value::text, 8, '0'),
+                repeat('v', 64) || value::text
+         FROM generate_series(1, 3000) AS value;",
+    )
+    .expect("create long-row fixture failed");
+    Spi::run(
+        "SELECT graph.add_table(
+             'graph_test_long_build_rows_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['payload']
+         );",
+    )
+    .expect("register long-row fixture failed");
+
+    let nodes = Spi::get_one::<i64>("SELECT nodes_loaded FROM graph.build()")
+        .expect("long-row build failed")
+        .unwrap_or(0);
+    let status = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT budget_bytes, peak_bytes, peak_phase, pressure_events
+                   FROM graph.build_resource_status()",
+                None,
+                &[],
+            )?
+            .first();
+        Ok::<_, pgrx::spi::Error>(
+            (
+                row.get::<i64>(1)?.unwrap_or(0),
+                row.get::<i64>(2)?.unwrap_or(0),
+                row.get::<String>(3)?,
+                row.get::<i64>(4)?.unwrap_or(0),
+            ),
+        )
+    })
+    .expect("read build resource status failed");
+
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
+    Spi::run("SET graph.build_batch_size = 10000").expect("restore row batch limit failed");
+    Spi::run("SET graph.persist_on_build = off").expect("restore persistence failed");
+
+    assert_eq!(nodes, 3000);
+    assert_eq!(status.0, 60 * 1_048_576);
+    assert!(status.1 > 0 && status.1 <= status.0);
+    assert!(status.2.is_some());
+    assert!(status.3 > 0, "long rows should trigger byte-pressure flushes");
+}
+
+#[pg_test]
+fn stale_positive_statistics_are_stopped_by_runtime_build_budget() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persistence failed");
+    Spi::run("SET graph.memory_limit_mb = 64").expect("set memory limit failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_stale_build_stats_pgtest CASCADE")
+        .expect("drop stale-statistics table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_stale_build_stats_pgtest (
+             id bigint PRIMARY KEY
+         );
+         INSERT INTO public.graph_test_stale_build_stats_pgtest
+         SELECT value FROM generate_series(1, 450000) AS value;
+         UPDATE pg_catalog.pg_class
+            SET reltuples = 1
+          WHERE oid = 'public.graph_test_stale_build_stats_pgtest'::regclass;
+         SELECT graph.add_table(
+             'graph_test_stale_build_stats_pgtest'::regclass,
+             id_column := 'id'
+         );",
+    )
+    .expect("create stale-statistics fixture failed");
+
+    assert!(sql_raises("SELECT * FROM graph.build()"));
+    let built = crate::ENGINE.with(|engine| engine.borrow().built);
+
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
+    assert!(!built, "runtime rejection must not install a partial engine");
+}
+
+#[pg_test]
 fn catalog_drift_requires_rebuild() {
     reset_and_create_fixtures();
     Spi::run(

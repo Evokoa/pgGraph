@@ -23,7 +23,7 @@ inputs.
 
 <ProcessTree title="build_graph(tables, edges, filters)">
   <ProcessStep title="parse graph.build_scan_mode" />
-  <ProcessStep title="reserve checked build bytes from cached or exact source counts" />
+  <ProcessStep title="resolve serving, safety, and replacement byte budgets" />
   <ProcessStep title="create pg_temp.graph_build_nodes" />
   <ProcessStep title="for each registered table">
     - open SPI cursor
@@ -170,6 +170,14 @@ At the end of `build_graph()`:
 | `engine.last_build` | Current PostgreSQL timestamp |
 
 Persistence is orchestrated outside `builder.rs` by `sql_build.rs`.
+
+The build governor remains alive through optional persistence and reload.
+Persistent engine growth and transient node, edge, endpoint-resolution, and
+serialization work use separate RAII leases. The spool batches retain the
+configured row ceiling but flush earlier when their measured strings and array
+elements reach the adaptive byte target. Major Rust vectors call
+`try_reserve` after the policy lease is accepted so allocator failure is
+reported as `PG001` instead of panicking.
 
 ## Failure Modes
 

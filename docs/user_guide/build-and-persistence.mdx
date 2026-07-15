@@ -150,6 +150,23 @@ reads. Rebuild and vacuum preflight reserves a conservative peak-build estimate
 against the currently loaded engine, so large rebuilds fail before the backend
 allocates the replacement graph.
 
+During construction, pgGraph also holds live reservations for the serving
+engine, a safety reserve, nodes, filter and tenant values, resolution entries,
+endpoint-resolution work, both CSR directions, relationship identities, and
+persistence serialization. The safety reserve is one sixteenth of the
+configured limit, capped at 64 MiB. A stale positive row estimate therefore
+cannot authorize unbounded construction: the build stops with `PG001` when its
+measured phases consume the remaining budget.
+
+`graph.build_batch_size` remains the compatibility row ceiling for cursor and
+spool batches. Batches may flush earlier at a byte target derived from the
+remaining build budget, bounded between 64 KiB and 8 MiB. A single row larger
+than that target is handled alone when it still fits the operation budget.
+`graph.build_resource_status()` reports the effective replacement budget after
+serving residency and the safety reserve are subtracted, the observed
+replacement peak, peak phase, and number of byte-pressure flushes from the most
+recent successful build in the current backend.
+
 Every over-budget build returns SQLSTATE `53200` with diagnostic `PG001`.
 `graph.oom_action = 'readonly'` remains accepted as a deprecated 1.x
 configuration spelling, but it no longer permits construction above the memory

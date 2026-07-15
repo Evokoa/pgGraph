@@ -619,21 +619,32 @@ fn validate_section_layout(
 /// Uses atomic rename: writes to `<path>.tmp`, then renames to `path`.
 #[cfg(test)]
 pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
-    write_graph_file_internal(engine, path, false)
+    write_graph_file_internal(engine, path, false, None)
 }
 
-pub(crate) fn write_graph_file_with_interrupt_checks(
+pub(crate) fn write_graph_file_with_interrupt_checks_and_resources(
     engine: &Engine,
     path: &Path,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
-    write_graph_file_internal(engine, path, true)
+    write_graph_file_internal(engine, path, true, Some(governor))
 }
 
 fn write_graph_file_internal(
     engine: &Engine,
     path: &Path,
     check_interrupts: bool,
+    governor: Option<&crate::resource::ResourceGovernor>,
 ) -> GraphResult<()> {
+    let mut workspace = governor
+        .map(|governor| {
+            governor.reserve_memory(
+                crate::resource::ResourcePhase::Persistence,
+                crate::resource::ByteCount::ZERO,
+            )
+        })
+        .transpose()
+        .map_err(resource_error_to_oom)?;
     let tmp_path = append_path_suffix(path, ".tmp");
 
     // Ensure parent directory exists (handles first-run where $PGDATA/graph/ doesn't exist)
@@ -653,8 +664,14 @@ fn write_graph_file_internal(
     let mut writer = GraphArtifactWriter::new(file, check_interrupts)?;
 
     writer.begin_section(0, None)?;
+    reserve_persistence_workspace(
+        &mut workspace,
+        packed_active_bytes(engine.node_store.node_count())?,
+    )?;
     let is_active_bytes = engine.node_store.is_active_bytes();
     writer.write_body(&is_active_bytes)?;
+    drop(is_active_bytes);
+    release_persistence_workspace(&mut workspace);
 
     writer.begin_section(1, Some(4))?;
     writer.write_u32_values(engine.node_store.table_oids_slice())?;
@@ -675,8 +692,14 @@ fn write_graph_file_internal(
     writer.write_body(engine.edge_store.schema_reversed_slice())?;
 
     writer.begin_section(7, None)?;
+    reserve_persistence_workspace(
+        &mut workspace,
+        resolution_serialization_bytes(engine.node_store.node_count())?,
+    )?;
     let ri_bytes = engine.resolution_to_bytes();
     writer.write_body(&ri_bytes)?;
+    drop(ri_bytes);
+    release_persistence_workspace(&mut workspace);
 
     writer.begin_section(8, Some(8))?;
     let mut pk_offset = 0u64;
@@ -714,11 +737,21 @@ fn write_graph_file_internal(
 
     writer.begin_section(10, None)?;
     let bincode_config = bincode::config::standard();
+    reserve_persistence_workspace(
+        &mut workspace,
+        serialization_workspace_bytes(engine.filter_index.estimated_heap_bytes())?,
+    )?;
     let filter_bytes = bincode::serde::encode_to_vec(&engine.filter_index, bincode_config)
         .map_err(|e| GraphError::Internal(format!("FilterIndex serialization failed: {}", e)))?;
     writer.write_length_prefixed_payload(&filter_bytes, "filter index")?;
+    drop(filter_bytes);
+    release_persistence_workspace(&mut workspace);
 
     writer.begin_section(11, None)?;
+    reserve_persistence_workspace(
+        &mut workspace,
+        serialization_workspace_bytes(edge_metadata_heap_bytes(engine)?)?,
+    )?;
     let edge_metadata = PersistedEdgeMetadata {
         edge_type_registry: engine.edge_type_registry.clone(),
         relationship_ids: engine.edge_store.relationship_ids_slice().to_vec(),
@@ -727,6 +760,9 @@ fn write_graph_file_internal(
     let edge_metadata_bytes = bincode::serde::encode_to_vec(&edge_metadata, bincode_config)
         .map_err(|e| GraphError::Internal(format!("edge metadata serialization failed: {}", e)))?;
     writer.write_length_prefixed_payload(&edge_metadata_bytes, "edge metadata")?;
+    drop(edge_metadata_bytes);
+    drop(edge_metadata);
+    release_persistence_workspace(&mut workspace);
 
     let file = writer.finish(
         engine.node_store.node_count(),
@@ -742,6 +778,94 @@ fn write_graph_file_internal(
     write_projection_mode(path, engine.projection_mode)?;
 
     Ok(())
+}
+
+fn reserve_persistence_workspace(
+    workspace: &mut Option<crate::resource::ResourceLease<'_>>,
+    bytes: crate::resource::ByteCount,
+) -> GraphResult<()> {
+    if let Some(workspace) = workspace {
+        workspace
+            .try_grow_in(crate::resource::ResourcePhase::Persistence, bytes)
+            .map_err(resource_error_to_oom)?;
+    }
+    Ok(())
+}
+
+fn release_persistence_workspace(workspace: &mut Option<crate::resource::ResourceLease<'_>>) {
+    if let Some(workspace) = workspace {
+        workspace.release_all();
+    }
+}
+
+fn packed_active_bytes(node_count: u32) -> GraphResult<crate::resource::ByteCount> {
+    let bytes = u64::from(node_count)
+        .checked_add(7)
+        .map(|bits| bits / 8)
+        .ok_or_else(|| GraphError::Internal("active bitmap size overflowed".to_string()))?;
+    Ok(crate::resource::ByteCount::from_bytes(bytes))
+}
+
+fn resolution_serialization_bytes(node_count: u32) -> GraphResult<crate::resource::ByteCount> {
+    let entry_size = u64::try_from(crate::resolution_index::ENTRY_SIZE)
+        .map_err(|_| GraphError::Internal("resolution entry size does not fit u64".to_string()))?;
+    u64::from(node_count)
+        .checked_mul(entry_size)
+        .and_then(|bytes| bytes.checked_add(4))
+        .map(crate::resource::ByteCount::from_bytes)
+        .ok_or_else(|| GraphError::Internal("resolution serialization size overflowed".to_string()))
+}
+
+fn serialization_workspace_bytes(source_bytes: usize) -> GraphResult<crate::resource::ByteCount> {
+    source_bytes
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(64 * 1024))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("serialization workspace size overflowed".to_string()))
+}
+
+fn edge_metadata_heap_bytes(engine: &Engine) -> GraphResult<usize> {
+    let labels = engine
+        .edge_type_registry
+        .iter()
+        .try_fold(0usize, |bytes, label| {
+            bytes
+                .checked_add(std::mem::size_of::<String>())
+                .and_then(|value| value.checked_add(label.len()))
+                .ok_or(())
+        })
+        .map_err(|()| GraphError::Internal("edge label size overflowed".to_string()))?;
+    let relationship_ids = engine
+        .edge_store
+        .relationship_ids_slice()
+        .len()
+        .checked_mul(std::mem::size_of::<RelationshipId>())
+        .ok_or_else(|| GraphError::Internal("relationship ID size overflowed".to_string()))?;
+    let identities = engine
+        .relationship_identities
+        .iter()
+        .try_fold(0usize, |bytes, identity| {
+            let payload = identity
+                .as_ref()
+                .map_or(0, |identity| identity.source_key.len());
+            bytes
+                .checked_add(std::mem::size_of::<Option<RelationshipIdentity>>())
+                .and_then(|value| value.checked_add(payload))
+                .ok_or(())
+        })
+        .map_err(|()| GraphError::Internal("relationship identity size overflowed".to_string()))?;
+    labels
+        .checked_add(relationship_ids)
+        .and_then(|bytes| bytes.checked_add(identities))
+        .ok_or_else(|| GraphError::Internal("edge metadata size overflowed".to_string()))
+}
+
+fn resource_error_to_oom(error: crate::resource::ResourceLimitError) -> GraphError {
+    GraphError::Oom {
+        used_mb: crate::resource::ByteCount::from_bytes(error.used()).ceil_mib(),
+        need_mb: crate::resource::ByteCount::from_bytes(error.requested()).ceil_mib(),
+        limit_mb: crate::resource::ByteCount::from_bytes(error.limit()).as_u64() / 1_048_576,
+    }
 }
 
 pub fn sync_checkpoint_path(path: &Path) -> PathBuf {
@@ -1042,7 +1166,7 @@ fn load_graph_file_internal(
         relationship_identities: edge_metadata.relationship_identities,
         mmap: artifact.mmap,
         resolution_state: MmapResolutionState::new(ri_start, ri_len),
-    });
+    })?;
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
         engine.record_applied_sync_id(applied_sync_id);
     }
