@@ -32,11 +32,11 @@ capability registry; this work adds correctness evidence without expanding the
 
 ### QA-01C: Isolation And Concurrent Writers
 
-- [ ] Cover READ COMMITTED, REPEATABLE READ, and SERIALIZABLE behavior for each
+- [x] Cover READ COMMITTED, REPEATABLE READ, and SERIALIZABLE behavior for each
       advertised write family, not only node `CREATE` observers.
-- [ ] Add real two-session races for same-key `MERGE`, stale `SET`/`REMOVE`,
+- [x] Add real two-session races for same-key `MERGE`, stale `SET`/`REMOVE`,
       relationship `CREATE`/`DELETE`, and `DETACH DELETE`.
-- [ ] Assert source rows, returned values, transaction-local graph state, and
+- [x] Assert source rows, returned values, transaction-local graph state, and
       client-visible SQLSTATEs after each winner, retry, or rollback path.
 
 ### QA-01D: Supported PostgreSQL Majors

@@ -49,34 +49,104 @@ SELECT * FROM graph.build(mode := 'mutable_overlay');
 SQL
 
 tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
+ACTIVE_PIDS=()
+
+cleanup() {
+  local pid
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    wait "$pid" >/dev/null 2>&1 || true
+  done
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
+
+wait_for_lock() {
+  local lock_key="$1"
+  local description="$2"
+  local count
+
+  for _ in $(seq 1 100); do
+    count="$(psql -X -q -tA -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
+      "SELECT count(*) FROM pg_locks
+       WHERE locktype = 'advisory'
+         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+         AND objid = $lock_key
+         AND granted")"
+    if [[ "$count" != "0" ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  echo "timed out waiting for $description" >&2
+  return 1
+}
 
 set +e
-psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" >"$tmpdir/writer.out" 2>"$tmpdir/writer.err" <<'SQL' &
+PGAPPNAME=pggraph-recheck-set psql -X -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate \
+  -d "$DBNAME" >"$tmpdir/writer.out" 2>"$tmpdir/writer.err" <<'SQL' &
 SET graph.mutable_enabled = on;
 SELECT * FROM graph.build(mode := 'mutable_overlay');
-SELECT pg_sleep(2);
+SELECT pg_advisory_lock(774001);
+DO $$
+BEGIN
+  FOR attempt IN 1..100 LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND objid = 774002
+        AND granted
+    ) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE EXCEPTION 'timed out waiting for SET locker';
+END
+$$;
+\set ON_ERROR_STOP off
 SELECT graph.gql(
     'MATCH (u:graph_gql_write_recheck_nodes {id: ''u2''})
      WHERE u.age = 41
      SET u.age = 101
      RETURN u.age'
 );
+\set ON_ERROR_STOP on
+SELECT 'tx_dirty=' || tx_delta_dirty FROM graph.status();
 SQL
 writer_pid=$!
+ACTIVE_PIDS+=("$writer_pid")
 set -e
 
-sleep 1
+wait_for_lock 774001 "SET writer"
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >"$tmpdir/locker.out" &
 BEGIN;
 UPDATE public.graph_gql_write_recheck_nodes
 SET age = 99
 WHERE id = 'u2';
-SELECT pg_sleep(4);
+SELECT pg_advisory_lock(774002);
+DO $$
+BEGIN
+  FOR attempt IN 1..100 LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND application_name = 'pggraph-recheck-set'
+        AND state = 'active'
+        AND wait_event_type = 'Lock'
+    ) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE EXCEPTION 'timed out waiting for blocked SET writer';
+END
+$$;
 COMMIT;
 SQL
 locker_pid=$!
+ACTIVE_PIDS+=("$locker_pid")
 
 set +e
 wait "$writer_pid"
@@ -85,15 +155,22 @@ set -e
 
 wait "$locker_pid"
 
-if [[ "$writer_status" -eq 0 ]]; then
-  echo "GQL SET stale predicate re-check unexpectedly succeeded" >&2
+if [[ "$writer_status" -ne 0 ]]; then
+  echo "GQL SET stale predicate client could not continue after statement rollback" >&2
   cat "$tmpdir/writer.out" >&2
+  cat "$tmpdir/writer.err" >&2
   exit 1
 fi
 
-if ! grep -q "no longer satisfies the matched predicate" "$tmpdir/writer.err"; then
-  echo "GQL SET stale predicate re-check failed with an unexpected error" >&2
+if [[ "$(grep -c '^ERROR:  ' "$tmpdir/writer.err" || true)" != "1" ]] ||
+   ! grep -qx "ERROR:  22000" "$tmpdir/writer.err"; then
+  echo "GQL SET stale predicate re-check did not expose SQLSTATE 22000" >&2
   cat "$tmpdir/writer.err" >&2
+  exit 1
+fi
+if ! grep -q "tx_dirty=false" "$tmpdir/writer.out"; then
+  echo "GQL SET stale predicate re-check retained transaction-local graph state" >&2
+  cat "$tmpdir/writer.out" >&2
   exit 1
 fi
 
@@ -141,33 +218,69 @@ SET graph.enforce_tenant_scope = off;
 SQL
 
 set +e
-psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" >"$tmpdir/tenant_writer.out" 2>"$tmpdir/tenant_writer.err" <<'SQL' &
+PGAPPNAME=pggraph-recheck-tenant psql -X -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate \
+  -d "$DBNAME" >"$tmpdir/tenant_writer.out" 2>"$tmpdir/tenant_writer.err" <<'SQL' &
 SET graph.mutable_enabled = on;
 SET graph.enforce_tenant_scope = on;
 SET graph.tenant_setting = 'app.graph_gql_write_recheck_tenant';
 SET app.graph_gql_write_recheck_tenant = 'tenant-a';
 SELECT * FROM graph.build(mode := 'mutable_overlay');
-SELECT pg_sleep(2);
+SELECT pg_advisory_lock(774011);
+DO $$
+BEGIN
+  FOR attempt IN 1..100 LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND objid = 774012
+        AND granted
+    ) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE EXCEPTION 'timed out waiting for tenant locker';
+END
+$$;
+\set ON_ERROR_STOP off
 SELECT graph.gql(
     'MATCH (u:graph_gql_write_recheck_tenant_nodes {id: ''u1''})
      SET u.name = ''Updated''
      RETURN u.name'
 );
+\set ON_ERROR_STOP on
+SELECT 'tx_dirty=' || tx_delta_dirty FROM graph.status();
 SQL
 tenant_writer_pid=$!
+ACTIVE_PIDS+=("$tenant_writer_pid")
 set -e
 
-sleep 1
+wait_for_lock 774011 "tenant SET writer"
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >"$tmpdir/tenant_locker.out" &
 BEGIN;
 UPDATE public.graph_gql_write_recheck_tenant_nodes
 SET tenant_id = 'tenant-b'
 WHERE id = 'u1';
-SELECT pg_sleep(4);
+SELECT pg_advisory_lock(774012);
+DO $$
+BEGIN
+  FOR attempt IN 1..100 LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND application_name = 'pggraph-recheck-tenant'
+        AND state = 'active'
+        AND wait_event_type = 'Lock'
+    ) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE EXCEPTION 'timed out waiting for blocked tenant SET writer';
+END
+$$;
 COMMIT;
 SQL
 tenant_locker_pid=$!
+ACTIVE_PIDS+=("$tenant_locker_pid")
 
 set +e
 wait "$tenant_writer_pid"
@@ -176,15 +289,22 @@ set -e
 
 wait "$tenant_locker_pid"
 
-if [[ "$tenant_writer_status" -eq 0 ]]; then
-  echo "GQL SET stale tenant re-check unexpectedly succeeded" >&2
+if [[ "$tenant_writer_status" -ne 0 ]]; then
+  echo "GQL SET stale tenant client could not continue after statement rollback" >&2
   cat "$tmpdir/tenant_writer.out" >&2
+  cat "$tmpdir/tenant_writer.err" >&2
   exit 1
 fi
 
-if ! grep -q "active tenant scope" "$tmpdir/tenant_writer.err"; then
-  echo "GQL SET stale tenant re-check failed with an unexpected error" >&2
+if [[ "$(grep -c '^ERROR:  ' "$tmpdir/tenant_writer.err" || true)" != "1" ]] ||
+   ! grep -qx "ERROR:  22000" "$tmpdir/tenant_writer.err"; then
+  echo "GQL SET stale tenant re-check did not expose SQLSTATE 22000" >&2
   cat "$tmpdir/tenant_writer.err" >&2
+  exit 1
+fi
+if ! grep -q "tx_dirty=false" "$tmpdir/tenant_writer.out"; then
+  echo "GQL SET stale tenant re-check retained transaction-local graph state" >&2
+  cat "$tmpdir/tenant_writer.out" >&2
   exit 1
 fi
 
@@ -229,33 +349,69 @@ SELECT * FROM graph.build(mode := 'mutable_overlay');
 SQL
 
 set +e
-psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" >"$tmpdir/remove_writer.out" 2>"$tmpdir/remove_writer.err" <<'SQL' &
+PGAPPNAME=pggraph-recheck-remove psql -X -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate \
+  -d "$DBNAME" >"$tmpdir/remove_writer.out" 2>"$tmpdir/remove_writer.err" <<'SQL' &
 SET graph.mutable_enabled = on;
 SET graph.enforce_tenant_scope = off;
 RESET graph.tenant_setting;
 SELECT * FROM graph.build(mode := 'mutable_overlay');
-SELECT pg_sleep(2);
+SELECT pg_advisory_lock(774021);
+DO $$
+BEGIN
+  FOR attempt IN 1..100 LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND objid = 774022
+        AND granted
+    ) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE EXCEPTION 'timed out waiting for REMOVE locker';
+END
+$$;
+\set ON_ERROR_STOP off
 SELECT graph.gql(
     'MATCH (u:graph_gql_write_recheck_remove_nodes {id: ''u2''})
      WHERE u.age = 41
      REMOVE u.status
      RETURN u.status'
 );
+\set ON_ERROR_STOP on
+SELECT 'tx_dirty=' || tx_delta_dirty FROM graph.status();
 SQL
 remove_writer_pid=$!
+ACTIVE_PIDS+=("$remove_writer_pid")
 set -e
 
-sleep 1
+wait_for_lock 774021 "REMOVE writer"
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >"$tmpdir/remove_locker.out" &
 BEGIN;
 UPDATE public.graph_gql_write_recheck_remove_nodes
 SET age = 99
 WHERE id = 'u2';
-SELECT pg_sleep(4);
+SELECT pg_advisory_lock(774022);
+DO $$
+BEGIN
+  FOR attempt IN 1..100 LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND application_name = 'pggraph-recheck-remove'
+        AND state = 'active'
+        AND wait_event_type = 'Lock'
+    ) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE EXCEPTION 'timed out waiting for blocked REMOVE writer';
+END
+$$;
 COMMIT;
 SQL
 remove_locker_pid=$!
+ACTIVE_PIDS+=("$remove_locker_pid")
 
 set +e
 wait "$remove_writer_pid"
@@ -264,15 +420,22 @@ set -e
 
 wait "$remove_locker_pid"
 
-if [[ "$remove_writer_status" -eq 0 ]]; then
-  echo "GQL REMOVE stale predicate re-check unexpectedly succeeded" >&2
+if [[ "$remove_writer_status" -ne 0 ]]; then
+  echo "GQL REMOVE stale predicate client could not continue after statement rollback" >&2
   cat "$tmpdir/remove_writer.out" >&2
+  cat "$tmpdir/remove_writer.err" >&2
   exit 1
 fi
 
-if ! grep -q "no longer satisfies the matched predicate" "$tmpdir/remove_writer.err"; then
-  echo "GQL REMOVE stale predicate re-check failed with an unexpected error" >&2
+if [[ "$(grep -c '^ERROR:  ' "$tmpdir/remove_writer.err" || true)" != "1" ]] ||
+   ! grep -qx "ERROR:  22000" "$tmpdir/remove_writer.err"; then
+  echo "GQL REMOVE stale predicate re-check did not expose SQLSTATE 22000" >&2
   cat "$tmpdir/remove_writer.err" >&2
+  exit 1
+fi
+if ! grep -q "tx_dirty=false" "$tmpdir/remove_writer.out"; then
+  echo "GQL REMOVE stale predicate re-check retained transaction-local graph state" >&2
+  cat "$tmpdir/remove_writer.out" >&2
   exit 1
 fi
 
@@ -330,33 +493,69 @@ SELECT * FROM graph.build(mode := 'mutable_overlay');
 SQL
 
 set +e
-psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" >"$tmpdir/detach_writer.out" 2>"$tmpdir/detach_writer.err" <<'SQL' &
+PGAPPNAME=pggraph-recheck-detach psql -X -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate \
+  -d "$DBNAME" >"$tmpdir/detach_writer.out" 2>"$tmpdir/detach_writer.err" <<'SQL' &
 SET graph.mutable_enabled = on;
 SET graph.enforce_tenant_scope = off;
 RESET graph.tenant_setting;
 SELECT * FROM graph.build(mode := 'mutable_overlay');
-SELECT pg_sleep(2);
+SELECT pg_advisory_lock(774031);
+DO $$
+BEGIN
+  FOR attempt IN 1..100 LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND objid = 774032
+        AND granted
+    ) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE EXCEPTION 'timed out waiting for DETACH DELETE locker';
+END
+$$;
+\set ON_ERROR_STOP off
 SELECT graph.gql(
     'MATCH (u:graph_gql_write_recheck_detach_nodes {id: ''u1''})
      WHERE u.name = ''Alice''
      DETACH DELETE u
      RETURN u.name'
 );
+\set ON_ERROR_STOP on
+SELECT 'tx_dirty=' || tx_delta_dirty FROM graph.status();
 SQL
 detach_writer_pid=$!
+ACTIVE_PIDS+=("$detach_writer_pid")
 set -e
 
-sleep 1
+wait_for_lock 774031 "DETACH DELETE writer"
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL' >"$tmpdir/detach_locker.out" &
 BEGIN;
 UPDATE public.graph_gql_write_recheck_detach_nodes
 SET name = 'Moved'
 WHERE id = 'u1';
-SELECT pg_sleep(4);
+SELECT pg_advisory_lock(774032);
+DO $$
+BEGIN
+  FOR attempt IN 1..100 LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND application_name = 'pggraph-recheck-detach'
+        AND state = 'active'
+        AND wait_event_type = 'Lock'
+    ) THEN RETURN; END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  RAISE EXCEPTION 'timed out waiting for blocked DETACH DELETE writer';
+END
+$$;
 COMMIT;
 SQL
 detach_locker_pid=$!
+ACTIVE_PIDS+=("$detach_locker_pid")
 
 set +e
 wait "$detach_writer_pid"
@@ -365,15 +564,22 @@ set -e
 
 wait "$detach_locker_pid"
 
-if [[ "$detach_writer_status" -eq 0 ]]; then
-  echo "GQL DETACH DELETE stale predicate re-check unexpectedly succeeded" >&2
+if [[ "$detach_writer_status" -ne 0 ]]; then
+  echo "GQL DETACH DELETE stale predicate client could not continue after statement rollback" >&2
   cat "$tmpdir/detach_writer.out" >&2
+  cat "$tmpdir/detach_writer.err" >&2
   exit 1
 fi
 
-if ! grep -q "no longer satisfies the matched predicate" "$tmpdir/detach_writer.err"; then
-  echo "GQL DETACH DELETE stale predicate re-check failed with an unexpected error" >&2
+if [[ "$(grep -c '^ERROR:  ' "$tmpdir/detach_writer.err" || true)" != "1" ]] ||
+   ! grep -qx "ERROR:  22000" "$tmpdir/detach_writer.err"; then
+  echo "GQL DETACH DELETE stale predicate re-check did not expose SQLSTATE 22000" >&2
   cat "$tmpdir/detach_writer.err" >&2
+  exit 1
+fi
+if ! grep -q "tx_dirty=false" "$tmpdir/detach_writer.out"; then
+  echo "GQL DETACH DELETE stale predicate re-check retained transaction-local graph state" >&2
+  cat "$tmpdir/detach_writer.out" >&2
   exit 1
 fi
 

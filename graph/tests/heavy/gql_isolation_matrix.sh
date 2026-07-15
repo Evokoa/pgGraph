@@ -9,6 +9,7 @@ PERSIST_ON_BUILD="${PERSIST_ON_BUILD:-off}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRAPH_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/pggraph-gql-isolation.XXXXXX")"
+ACTIVE_PIDS=()
 
 if [[ "$PERSIST_ON_BUILD" != "on" && "$PERSIST_ON_BUILD" != "off" ]]; then
   echo "PERSIST_ON_BUILD must be 'on' or 'off'" >&2
@@ -16,6 +17,13 @@ if [[ "$PERSIST_ON_BUILD" != "on" && "$PERSIST_ON_BUILD" != "off" ]]; then
 fi
 
 cleanup() {
+  local pid
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    wait "$pid" >/dev/null 2>&1 || true
+  done
   rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -39,25 +47,8 @@ cargo pgrx install --pg-config "$PG_CONFIG" \
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 
-psql -X -v ON_ERROR_STOP=1 -v persist_on_build="$PERSIST_ON_BUILD" -d "$DBNAME" <<'SQL' >/dev/null
-CREATE EXTENSION graph;
-SELECT graph.reset();
-SET graph.persist_on_build = :'persist_on_build';
-SET graph.sync_mode = 'trigger';
-SET graph.query_freshness = 'apply_pending_sync';
-SET graph.mutable_enabled = on;
-CREATE TABLE public.graph_gql_isolation_nodes (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL
-);
-SELECT graph.add_table(
-    'public.graph_gql_isolation_nodes'::regclass,
-    id_column := 'id',
-    columns := ARRAY['name']
-);
-SELECT * FROM graph.build(mode := 'mutable_overlay');
-SELECT graph.enable_sync();
-SQL
+psql -X -v ON_ERROR_STOP=1 -v persist_on_build="$PERSIST_ON_BUILD" \
+  -d "$DBNAME" -f "$SCRIPT_DIR/gql_isolation_fixture.sql" >/dev/null
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
   "ALTER DATABASE \"$DBNAME\" SET graph.sync_mode = 'trigger'" >/dev/null
@@ -77,6 +68,7 @@ wait_for_reader() {
     count="$(psql -X -q -tA -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
       "SELECT count(*) FROM pg_locks
        WHERE locktype = 'advisory'
+         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
          AND objid = $lock_key
          AND granted")"
     if [[ "$count" == "1" ]]; then
@@ -97,12 +89,17 @@ run_level() {
   local writer_ready_key="$((lock_key + 100000))"
   local writer_done_key="$((lock_key + 200000))"
   local reader_ack_key="$((lock_key + 300000))"
-  local node_id="node-$slug"
   local reader_out="$WORKDIR/$slug-reader.out"
   local writer_out="$WORKDIR/$slug-writer.out"
+  local full_profile=true
+  if [[ "$PERSIST_ON_BUILD" == "on" ]]; then
+    full_profile=false
+  fi
 
   psql -X -q -v ON_ERROR_STOP=1 -d "$DBNAME" \
-    -v node_id="$node_id" \
+    -v isolation="$isolation" \
+    -v slug="$slug" \
+    -v full_profile="$full_profile" \
     -v writer_ready_key="$writer_ready_key" \
     -v reader_lock_key="$lock_key" \
     -v writer_done_key="$writer_done_key" \
@@ -118,6 +115,7 @@ BEGIN
     IF EXISTS (
       SELECT 1 FROM pg_locks
       WHERE locktype = 'advisory'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
         AND objid = current_setting('pggraph.reader_lock_key')::oid
         AND granted
     ) THEN
@@ -128,13 +126,10 @@ BEGIN
   RAISE EXCEPTION 'timed out waiting for isolation reader';
 END
 $$;
-SELECT * FROM graph.gql(
-  format(
-    'CREATE (u:graph_gql_isolation_nodes {id: %L, name: %L}) RETURN u',
-    :'node_id',
-    :'node_id'
-  )
-);
+BEGIN ISOLATION LEVEL :isolation;
+SELECT public.graph_test_isolation_apply_profile(:'slug', :'full_profile'::boolean);
+SELECT 'writer_tx=ok';
+COMMIT;
 SELECT pg_advisory_lock(:writer_done_key);
 SELECT set_config('pggraph.reader_ack_key', :'reader_ack_key', false);
 DO $$
@@ -145,6 +140,7 @@ BEGIN
     IF EXISTS (
       SELECT 1 FROM pg_locks
       WHERE locktype = 'advisory'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
         AND objid = current_setting('pggraph.reader_ack_key')::oid
         AND granted
     ) THEN
@@ -158,12 +154,15 @@ $$;
 SELECT pg_advisory_unlock(:writer_done_key);
 SQL
   local writer_pid=$!
+  ACTIVE_PIDS+=("$writer_pid")
 
   wait_for_reader "$writer_ready_key" "$isolation writer"
 
   psql -X -q -tA -v ON_ERROR_STOP=1 -d "$DBNAME" \
     -v isolation="$isolation" \
-    -v node_id="$node_id" \
+    -v slug="$slug" \
+    -v expected_after="$expected_after" \
+    -v full_profile="$full_profile" \
     -v lock_key="$lock_key" \
     -v writer_done_key="$writer_done_key" \
     -v reader_ack_key="$reader_ack_key" \
@@ -172,12 +171,8 @@ SQL
 SELECT * FROM graph.build(mode := 'mutable_overlay');
 \o
 BEGIN ISOLATION LEVEL :isolation;
-SELECT 'before_source=' || count(*) FROM public.graph_gql_isolation_nodes WHERE id = :'node_id';
-SELECT 'before_graph=' || count(*)
-FROM graph.gql(
-  format('MATCH (u:graph_gql_isolation_nodes {id: %L}) RETURN u', :'node_id'),
-  hydrate := false
-);
+SELECT public.graph_test_isolation_assert_profile(:'slug', false, :'full_profile'::boolean);
+SELECT 'before=ok';
 SELECT pg_advisory_lock(:lock_key);
 SELECT set_config('pggraph.writer_done_key', :'writer_done_key', false);
 DO $$
@@ -188,6 +183,7 @@ BEGIN
     IF EXISTS (
       SELECT 1 FROM pg_locks
       WHERE locktype = 'advisory'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
         AND objid = current_setting('pggraph.writer_done_key')::oid
         AND granted
     ) THEN
@@ -198,38 +194,35 @@ BEGIN
   RAISE EXCEPTION 'timed out waiting for isolation writer';
 END
 $$;
-SELECT 'after_source=' || count(*) FROM public.graph_gql_isolation_nodes WHERE id = :'node_id';
-SELECT 'after_graph=' || count(*)
-FROM graph.gql(
-  format('MATCH (u:graph_gql_isolation_nodes {id: %L}) RETURN u', :'node_id'),
-  hydrate := false
+SELECT public.graph_test_isolation_assert_profile(
+  :'slug',
+  :expected_after = 1,
+  :'full_profile'::boolean
 );
+SELECT 'after=ok';
 SELECT pg_advisory_lock(:reader_ack_key);
 SELECT pg_advisory_lock(:writer_done_key);
 SELECT pg_advisory_unlock(:writer_done_key);
 SELECT pg_advisory_unlock(:lock_key);
 SELECT pg_advisory_unlock(:reader_ack_key);
 COMMIT;
-SELECT 'post_source=' || count(*) FROM public.graph_gql_isolation_nodes WHERE id = :'node_id';
-SELECT 'post_graph=' || count(*)
-FROM graph.gql(
-  format('MATCH (u:graph_gql_isolation_nodes {id: %L}) RETURN u', :'node_id'),
-  hydrate := false
-);
+SELECT public.graph_test_isolation_assert_profile(:'slug', true, :'full_profile'::boolean);
+SELECT 'post=ok';
 SQL
   local reader_pid=$!
+  ACTIVE_PIDS+=("$reader_pid")
 
   wait_for_reader "$lock_key" "$isolation"
   wait "$writer_pid"
   wait "$reader_pid"
 
-  for expected in \
-    'before_source=0' \
-    'before_graph=0' \
-    "after_source=$expected_after" \
-    "after_graph=$expected_after" \
-    'post_source=1' \
-    'post_graph=1'; do
+  if ! grep -q 'writer_tx=ok' "$writer_out"; then
+    echo "$isolation writer did not verify transaction-local state and returned values:" >&2
+    cat "$writer_out" >&2
+    return 1
+  fi
+
+  for expected in 'before=ok' 'after=ok' 'post=ok'; do
     if ! grep -qx "$expected" "$reader_out"; then
       echo "$isolation reader did not report '$expected':" >&2
       cat "$reader_out" >&2

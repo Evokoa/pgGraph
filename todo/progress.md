@@ -147,6 +147,17 @@ resolution, including a duplicate-key decoy regression. QA-01B passes Clippy,
 rustdoc, release/docs drift, 718 Rust tests (1 ignored), and 981 PostgreSQL 17
 pgrx tests (1 ignored).
 
+2026-07-14 R1 write isolation and concurrency — The PostgreSQL 17 two-session
+matrix now executes every advertised write family under READ COMMITTED,
+REPEATABLE READ, and SERIALIZABLE and verifies writer returns, source rows,
+transaction-local graph state, reader snapshots, and post-commit agreement.
+Advisory/trigger handshakes make same-key MERGE and relationship CREATE/DELETE
+races deterministic; stale SET, REMOVE, tenant, relationship DELETE, and DETACH
+losers expose exactly one expected SQLSTATE and retain no graph delta. All lock
+readiness checks are database-scoped and abort safely on failed orchestration.
+The full and persisted new-node isolation profiles plus all focused race gates
+pass, and the required third-phase independent raw-diff review reports PASS.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

@@ -63,7 +63,8 @@ clusters where the pgrx harness is not representative enough.
 | `gql_delete_tx_lifecycle.sh` | Public GQL edge-row `DELETE` transaction lifecycle proof: rollback restores the source edge row and clears bidirectional tombstones |
 | `gql_write_recheck_race.sh` | Public GQL mapped write predicate recheck proof: stale `SET`, `REMOVE`, and `DETACH DELETE` matches fail after PostgreSQL row locks |
 | `gql_merge_race.sh` | Public GQL `MERGE` concurrency proof: concurrent same-key statements converge on one PostgreSQL source row |
-| `gql_isolation_matrix.sh` | Mapped GQL write visibility under READ COMMITTED, REPEATABLE READ, and SERIALIZABLE, with source/projection agreement before and after commit; `PERSIST_ON_BUILD=on` selects durable new-node, reload, and repeated-build coverage |
+| `gql_relationship_race.sh` | Public GQL relationship concurrency proof: deterministic same-identity `CREATE` and same-row `DELETE` winner/loser outcomes, SQLSTATEs, and clean transaction-local state |
+| `gql_isolation_matrix.sh` | All advertised mapped GQL writes under READ COMMITTED, REPEATABLE READ, and SERIALIZABLE, with writer/read-snapshot source/projection agreement; `PERSIST_ON_BUILD=on` selects durable new-node, reload, and repeated-build coverage |
 | `tx_delta_crash_recovery.sh` | Internal mutable-overlay crash proof: uncommitted transaction overlays disappear after postmaster restart while the persisted base graph reloads |
 | `run_pgbench_sync.sh` and `pgbench_sync.sql` | Concurrent DML, trigger sync, sync apply, and post-sync query checks |
 | `crash_recovery.sh` | Persisted graph reload after postmaster kill and corrupt artifact rejection |

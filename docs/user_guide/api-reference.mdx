@@ -1874,6 +1874,11 @@ Registered partitioned relationship tables use their parent relation as the
 mapping identity while PostgreSQL routes each insert to a child partition.
 Composite relationship primary keys are preserved as the source identity used
 by later hydration and deletion.
+When concurrent relationship `CREATE` statements use the same registered
+source-row primary key, PostgreSQL selects one winner and reports SQLSTATE
+`23505` to the conflicting statement. A concurrent relationship `DELETE` that
+loses its matched source row reports SQLSTATE `22000`. Rejected statements do
+not retain transaction-local graph changes.
 
 `MATCH (n:label {...}) SET n.property = value RETURN ...` is supported for a
 single matched node and one registered non-key, non-tenant property column. It requires a

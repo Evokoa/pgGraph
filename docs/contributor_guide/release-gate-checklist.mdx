@@ -295,6 +295,7 @@ By default, this gate runs:
 - `gql_set_tx_lifecycle.sh`;
 - `gql_delete_tx_lifecycle.sh`;
 - `gql_merge_race.sh`;
+- `gql_relationship_race.sh`;
 - `named_graphs_heavy_gate.sh`;
 - `cross_backend_durable_projection.sh`;
 - `projection_recovery_gate.sh`;
@@ -417,6 +418,7 @@ disposable cluster paths.
 | `gql_set_tx_lifecycle.sh` | Public mapped GQL property `SET` rollback and filter-delta proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_set_tx ./tests/heavy/gql_set_tx_lifecycle.sh` |
 | `gql_delete_tx_lifecycle.sh` | Public mapped GQL edge-row `DELETE` rollback and tombstone proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_delete_tx ./tests/heavy/gql_delete_tx_lifecycle.sh` |
 | `gql_merge_race.sh` | Concurrent mapped `MERGE` same-key convergence proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_merge_race ./tests/heavy/gql_merge_race.sh` |
+| `gql_relationship_race.sh` | Concurrent relationship `CREATE`/`DELETE` winner, SQLSTATE, and rollback proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_relationship_race ./tests/heavy/gql_relationship_race.sh` |
 | `gql_write_recheck_race.sh` | Two-session stale predicate recheck proof for mapped writes | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_gql_write_recheck ./tests/heavy/gql_write_recheck_race.sh` |
 | `tx_delta_lifecycle.sh` | Internal mutable-overlay transaction lifecycle proof | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta ./tests/heavy/tx_delta_lifecycle.sh` |
 | `named_graphs_heavy_gate.sh` | Named-graph behavior and policy guardrails | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_named_graphs bash ./tests/heavy/named_graphs_heavy_gate.sh` |

@@ -435,7 +435,10 @@ transaction-local graph coordinates.
 For backend-local mutable projections, concurrent mapped writes follow
 PostgreSQL isolation rules. READ COMMITTED readers can observe a committed
 write on their next statement; REPEATABLE READ and SERIALIZABLE readers retain
-their transaction snapshot. Durable new-node identity and reload are supported;
+their transaction snapshot. This source/graph agreement applies to node and
+relationship `CREATE`, `SET`, `REMOVE`, relationship `DELETE`, `DETACH DELETE`,
+and `MERGE`, including the values returned inside the writer transaction.
+Durable new-node identity and reload are supported;
 the persisted isolation matrix also covers repeated builds, with each build
 publishing a new base-only projection generation bound to the replacement base
 artifact checksum.
@@ -443,7 +446,12 @@ For `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE`, pgGraph locks
 the matched PostgreSQL source row at the final write boundary and re-checks
 the matched GQL predicate before mutating. If another transaction changes the
 source row so the predicate no longer matches, the statement fails instead of
-overwriting the concurrent change.
+overwriting the concurrent change. The failure uses SQLSTATE `22000` and leaves
+no transaction-local graph delta. Concurrent sessions racing a relationship
+`CREATE` with the same registered source identity follow the PostgreSQL unique
+constraint: one insert commits and the other receives SQLSTATE `23505`.
+Concurrent relationship deletes similarly produce one committed delete; a
+writer whose matched source row has become stale receives SQLSTATE `22000`.
 Within the same transaction, node-only `MATCH`, relationship traversal,
 multi-pattern joins, wildcard path reads, and later relationship `CREATE`
 statements can read newly created nodes through backend-local temporary graph

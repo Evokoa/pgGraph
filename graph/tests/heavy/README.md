@@ -9,10 +9,17 @@ validation, Docker, pg_upgrade, memory evidence, playground query stability, or
 mixed concurrency.
 
 `gql_isolation_matrix.sh` is the two-session backend-local mapped-write
-visibility gate. It proves that READ COMMITTED observes a later committed GQL
-write on its next statement while REPEATABLE READ and SERIALIZABLE retain their
-transaction snapshot; source rows and hydration-disabled graph results must
-agree before and after commit. The persisted variant remains gated by KI-026.
+visibility gate. It applies node and relationship `CREATE`, `SET`, `REMOVE`,
+relationship `DELETE`, `DETACH DELETE`, and `MERGE` under READ COMMITTED,
+REPEATABLE READ, and SERIALIZABLE. Source rows and graph results must agree
+inside the writer, inside the concurrent reader snapshot, and after commit.
+`gql_merge_race.sh` and `gql_relationship_race.sh` use lock-visible handshakes
+for deterministic same-key outcomes. `gql_write_recheck_race.sh` covers stale
+predicate and tenant outcomes with exact SQLSTATE and graph-delta assertions.
+With `PERSIST_ON_BUILD=on`, the isolation script retains its durable new-node
+identity and repeated-build profile. Durable incremental node deletion in a
+graph with standalone relationship mappings remains fail-closed with rebuild
+guidance, so that mode does not claim the full write-family matrix.
 
 Most scripts expect a disposable database and accept variables such as
 `PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and `DBNAME`. Scripts that kill or
