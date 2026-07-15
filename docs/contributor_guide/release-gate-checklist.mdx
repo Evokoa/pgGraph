@@ -432,7 +432,8 @@ disposable cluster paths.
 | `measure_build_rss.sh` | Capture peak backend RSS during graph build | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_rss NODE_COUNT=200000 MAX_RSS_MB=0 ./tests/heavy/measure_build_rss.sh` |
 | `build_memory_stress.sh` | Run baseline, small-batch, repeated-rebuild, and low-memory rebuild profiles | `PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_memstress ./tests/heavy/build_memory_stress.sh` |
 | `measure_mmap_pss.sh` | Linux-only mmap sharing PSS measurement across backends | `DBNAME=graph_test BACKENDS=50 ./tests/heavy/measure_mmap_pss.sh` |
-| `run_memory_sanitizers.sh` | pgrx suite plus optional ASan or Valgrind checks | `DBNAME=pggraph_pgbench ./tests/heavy/run_memory_sanitizers.sh` |
+| `run_memory_sanitizers.sh` | pgrx suite plus optional Rust ASan or disposable PostgreSQL-process Valgrind checks | `DBNAME=pggraph_pgbench ./tests/heavy/run_memory_sanitizers.sh` |
+| `run_postgres_process_sanitizer.sh` | Require zero unsuppressed Valgrind errors across persisted mmap, corruption, callback, guarded-error, and build-job paths | `PG_VERSION_FEATURE=pg17 ./tests/heavy/run_postgres_process_sanitizer.sh` |
 
 `pgbench_sync.sql`, `sqlstate_acl_boundary.sql`, and
 `playground_release_gate.py` are support files used by the shell gates.

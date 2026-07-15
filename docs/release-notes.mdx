@@ -66,6 +66,11 @@ gate evidence through signed tags and package publishing.
   relationship, and stale-write concurrency gates on PostgreSQL 14 through 18.
   This retires the finite write-correctness, stale-recheck, transaction-created
   node, and mutable-write isolation limitations from Known Issues.
+- Verified persisted mmap load, traversal, reload, corruption rejection,
+  build-job execution, transaction callbacks, and guarded error unwinding in a
+  Valgrind-instrumented PostgreSQL process with zero unsuppressed errors. This,
+  together with the PostgreSQL 14 through 18 mapped-layout matrix, retires the
+  mapped-store ownership limitation from Known Issues.
 - Added durable post-build node identities with contiguous allocation, exact
   primary-key and tenant payloads, typed filter restoration, same-batch edge
   endpoints independent of sync-row order, tenant moves that preserve identity,

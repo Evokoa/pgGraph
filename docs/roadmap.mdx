@@ -22,7 +22,7 @@ The current engine already supports the core SQL workflow:
 | Maintenance | Explicit build, persist, load, sync apply, vacuum, stats, and background job entry points. |
 | Sync | Trigger-buffered change capture with explicit foreground or background apply. |
 | Persistence | Atomic `.pggraph` artifacts under PostgreSQL data storage. Immutable forward graph arrays, schema-direction flags, and resolution are read-only mmap-backed on load; reverse CSR and bincode metadata are backend-local heap structures. |
-| Safety | ACL preflight, typed error mapping, selected traversal circuit breakers, mapped-layout validation, and build-memory preflight exist. Graph errors use standard PostgreSQL SQLSTATEs and unwind through pgrx while retaining stable diagnostics. Hard byte budgets are not universal, and supported-major safety evidence remains in progress. |
+| Safety | ACL preflight, typed error mapping, selected traversal circuit breakers, mapped-layout validation, and build-memory preflight exist. Graph errors use standard PostgreSQL SQLSTATEs and unwind through pgrx while retaining stable diagnostics. Mapped-layout regressions pass on PostgreSQL 14 through 18 and process-level Valgrind evidence is green; hard byte budgets and other supported-major safety evidence remain in progress. |
 
 ```text
 current stable core

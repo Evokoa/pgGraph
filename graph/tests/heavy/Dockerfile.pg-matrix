@@ -6,7 +6,13 @@ ARG TARGETARCH
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN apt-get update \
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+        > /etc/apt/apt.conf.d/keep-cache
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -23,6 +29,7 @@ RUN apt-get update \
         pkg-config \
         postgresql-client-common \
         postgresql-common \
+        valgrind \
         postgresql-14 postgresql-server-dev-14 \
         postgresql-15 postgresql-server-dev-15 \
         postgresql-16 postgresql-server-dev-16 \
@@ -72,7 +79,21 @@ ENV CARGO_NET_RETRY=5 \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/tmp/cargo-pgrx-target \
     export CARGO_TARGET_DIR=/tmp/cargo-pgrx-target; \
-    sfw cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
+    installed=0; \
+    for attempt in 1 2 3; do \
+        sfw cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked || true; \
+        if command -v cargo-pgrx >/dev/null 2>&1 \
+            && cargo pgrx --version 2>/dev/null | grep -Fq "${PGRX_VERSION}"; then \
+            installed=1; \
+            break; \
+        fi; \
+        rm -f /usr/local/cargo/bin/cargo-pgrx; \
+        sleep "$((attempt * 2))"; \
+    done; \
+    if [[ "$installed" != "1" ]]; then \
+        echo "sfw did not install verified cargo-pgrx ${PGRX_VERSION}" >&2; \
+        exit 1; \
+    fi
 
 RUN groupadd --gid 1000 pggraph \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash pggraph \
@@ -105,6 +126,7 @@ USER pggraph
 ARG PG_VERSIONS="14 15 16 17 18"
 ARG RUN_PGRX_SQL=1
 ARG RUN_GQL_WRITE_MATRIX=1
+ARG RUN_POSTGRES_SANITIZER=0
 
 RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
@@ -123,4 +145,10 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     if [[ "${RUN_GQL_WRITE_MATRIX}" == "1" ]]; then \
         PG_VERSIONS="${PG_VERSIONS}" ./tests/heavy/run_gql_write_matrix.sh; \
+    fi
+
+RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
+    if [[ "${RUN_POSTGRES_SANITIZER}" == "1" ]]; then \
+        PG_VERSION_FEATURE=pg17 ./tests/heavy/run_postgres_process_sanitizer.sh; \
     fi

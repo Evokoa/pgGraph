@@ -31,6 +31,17 @@ Most scripts expect a disposable database and accept variables such as
 `PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and `DBNAME`. Scripts that kill or
 upgrade PostgreSQL require disposable `PGDATA` directories.
 
+`run_postgres_process_sanitizer.sh` creates its own disposable cluster and
+runs the postmaster plus child processes under Valgrind. It covers persisted
+mmap build/load/traversal/reload, corruption rejection, build-job execution,
+transaction callbacks, and guarded error unwinding. The gate fails if any
+process log reports an unsuppressed error. Use `RUN_VALGRIND=1` with
+`run_memory_sanitizers.sh`, or set `RUN_POSTGRES_SANITIZER=1` on
+`run_pg_matrix_docker.sh` for the containerized release environment. Direct
+execution installs pgGraph into the PostgreSQL installation selected by
+`PG_CONFIG`; prefer the containerized command when that installation must not
+be changed.
+
 For build memory evidence, start with `measure_build_rss.sh`. For opt-in stress
 profiles that cover baseline build, small SPI/spool batches, repeated persisted
 rebuilds, and low-memory rebuilds, use `build_memory_stress.sh` or set

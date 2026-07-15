@@ -166,6 +166,12 @@ and KI-019 are retired; the worktree was revalidated with no accidental source
 deletions, and the independent raw-diff review passes after its cache-resume and
 KI-020 status-consistency findings were fixed.
 
+2026-07-14 R1 PostgreSQL-process sanitizer — KI-020 is retired after PostgreSQL
+17.10 persisted mmap, corruption, build-job, callback, and guarded-error paths
+completed under Valgrind with zero unsuppressed errors; the reusable local and
+Docker release gates and public contributor documentation now describe the
+exact process-level contract.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

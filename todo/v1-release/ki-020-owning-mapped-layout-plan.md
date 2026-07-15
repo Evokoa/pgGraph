@@ -48,7 +48,7 @@ the PostgreSQL source tables remain authoritative.
 - [x] Big-endian native mmap loading is explicitly rejected.
 - [x] Corrupt and out-of-range tests cannot reach unchecked pointer arithmetic.
 - [x] Miri-eligible and Rust ASan gates pass.
-- [ ] PostgreSQL-process sanitizer gate passes.
+- [x] PostgreSQL-process sanitizer gate passes.
 - [x] PostgreSQL 14-18 mapped-load and corruption evidence passes.
 - [x] PostgreSQL 17 release gates and independent Rust review report no blocker.
 
@@ -70,5 +70,5 @@ the PostgreSQL source tables remain authoritative.
 | `RUN_ASAN=1 ... ./tests/heavy/run_memory_sanitizers.sh` | PASS: 718 passed, 1 ignored; macOS runtime setup is automatic |
 | `ASAN_TEST_FILTER=mmap_` focused sanitizer gate | PASS: 14 mapped tests |
 | PostgreSQL 14-18 matrix | PASS: 718 release Rust tests and 981 pgrx tests passed on each supported major; see the [matrix evidence](../measurements/2026-07-14-pg14-18-matrix.md) |
-| PostgreSQL-process ASan/Valgrind | PENDING: the current gate instruments Rust tests; process instrumentation still needs a disposable compatible PostgreSQL build |
+| `PG_VERSIONS=17 RUN_PGRX_SQL=0 RUN_GQL_WRITE_MATRIX=0 RUN_POSTGRES_SANITIZER=1 ./tests/heavy/run_pg_matrix_docker.sh` | PASS: disposable PostgreSQL 17.10 postmaster and child processes completed persisted mmap, corruption, callback, guarded-error, and build-job coverage with zero unsuppressed Valgrind errors; see the [process-sanitizer evidence](../measurements/2026-07-14-postgres-process-sanitizer.md) |
 | Independent Rust review | PASS after fixing source-inode mutability, status accounting, stale lifecycle docs, predicate wording/coverage, and checked PK offset conversion |

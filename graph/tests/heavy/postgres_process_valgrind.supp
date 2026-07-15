@@ -1,0 +1,29 @@
+# PostgreSQL writes tuple-descriptor padding while constructing its relcache
+# initialization file. The bytes are not read as data; suppress only the write
+# path rooted at RelationCacheInitializePhase3.
+{
+   postgresql_relcache_tupledesc_padding
+   Memcheck:Param
+   write(buf)
+   fun:write
+   fun:_IO_file_write*
+   fun:new_do_write
+   fun:_IO_do_write*
+   fun:_IO_new_file_xsputn
+   fun:_IO_file_xsputn*
+   fun:fwrite
+   ...
+   fun:RelationCacheInitializePhase3
+   fun:InitPostgres
+}
+
+# PostgreSQL WAL records can contain allocator padding. Suppress only the
+# pwrite buffer warning that reaches the WAL flush boundary.
+{
+   postgresql_wal_record_padding
+   Memcheck:Param
+   pwrite64(buf)
+   fun:pwrite
+   ...
+   fun:XLogFlush
+}

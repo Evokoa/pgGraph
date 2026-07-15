@@ -281,8 +281,12 @@ PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta_crash \
 ### Memory And FFI Boundary
 
 `run_memory_sanitizers.sh` runs the pgrx SQL suite and a long-lived pgbench sync
-smoke by default. ASan and Valgrind are opt-in because they need compatible
-toolchains and PostgreSQL builds.
+smoke by default. ASan and PostgreSQL-process Valgrind are opt-in because they
+need compatible toolchains. The Valgrind gate creates and removes its own data
+cluster and instruments the postmaster and its child processes. Direct local
+execution installs pgGraph into the PostgreSQL installation selected by
+`PG_CONFIG`; use the Docker command below when that installation must remain
+untouched.
 
 ```bash
 cd graph
@@ -290,8 +294,11 @@ DBNAME=pggraph_pgbench ./tests/heavy/run_memory_sanitizers.sh
 RUN_ASAN=1 ./tests/heavy/run_memory_sanitizers.sh
 RUN_ASAN=1 ASAN_TEST_FILTER=mmap_ RUN_PGRX=0 RUN_PGBENCH=0 \
   ./tests/heavy/run_memory_sanitizers.sh
-RUN_VALGRIND=1 PGDATA=/path/to/pgdata POSTGRES_BIN=/path/to/postgres \
+RUN_VALGRIND=1 PG_VERSION_FEATURE=pg17 \
   ./tests/heavy/run_memory_sanitizers.sh
+# Containerized release environment:
+PG_VERSIONS=17 RUN_PGRX_SQL=0 RUN_GQL_WRITE_MATRIX=0 \
+  RUN_POSTGRES_SANITIZER=1 ./tests/heavy/run_pg_matrix_docker.sh
 ```
 
 On macOS, the script locates and preloads the active nightly toolchain's ASan
@@ -300,6 +307,16 @@ interceptors available to compiler and test subprocesses without requiring a
 machine-specific `DYLD_INSERT_LIBRARIES` value.
 `ASAN_TEST_FILTER` can narrow an investigation to one Rust test name or prefix;
 leave it unset for the release gate's complete Rust suite.
+
+The PostgreSQL-process gate covers persisted mmap build, load, traversal,
+reload, corrupt-artifact rejection, build-job execution, transaction callbacks,
+and guarded error unwinding. Its suppression file contains only
+stack-qualified PostgreSQL padding reads observed outside `graph.so`; every
+remaining Valgrind process log must report zero errors. This is a memory-access
+gate, not a leak-retention measurement. Client connections default to a
+10-second connection timeout, SQL statements to five minutes, and lock waits to
+30 seconds; `PGCONNECT_TIMEOUT`, `STATEMENT_TIMEOUT_MS`, and `LOCK_TIMEOUT_MS`
+can adjust those bounds for slower release hosts.
 
 ### Packaging, Docker, Upgrade, And Workers
 

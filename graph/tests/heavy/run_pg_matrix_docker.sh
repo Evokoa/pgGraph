@@ -5,6 +5,7 @@ IMAGE="${IMAGE:-pggraph:pg-matrix}"
 PG_VERSIONS="${PG_VERSIONS:-14 15 16 17 18}"
 RUN_PGRX_SQL="${RUN_PGRX_SQL:-1}"
 RUN_GQL_WRITE_MATRIX="${RUN_GQL_WRITE_MATRIX:-1}"
+RUN_POSTGRES_SANITIZER="${RUN_POSTGRES_SANITIZER:-0}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DOCKERFILE="$ROOT_DIR/graph/tests/heavy/Dockerfile.pg-matrix"
 
@@ -12,6 +13,7 @@ docker build \
   --build-arg "PG_VERSIONS=${PG_VERSIONS}" \
   --build-arg "RUN_PGRX_SQL=${RUN_PGRX_SQL}" \
   --build-arg "RUN_GQL_WRITE_MATRIX=${RUN_GQL_WRITE_MATRIX}" \
+  --build-arg "RUN_POSTGRES_SANITIZER=${RUN_POSTGRES_SANITIZER}" \
   -f "$DOCKERFILE" \
   -t "$IMAGE" \
   "$ROOT_DIR"

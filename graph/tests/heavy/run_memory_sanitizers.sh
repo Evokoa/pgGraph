@@ -8,6 +8,7 @@ ASAN_TEST_FILTER="${ASAN_TEST_FILTER:-}"
 RUN_PGRX="${RUN_PGRX:-1}"
 RUN_PGBENCH="${RUN_PGBENCH:-1}"
 RUN_VALGRIND="${RUN_VALGRIND:-0}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Memory/FFI boundary runs for $PG_VERSION_FEATURE."
 
@@ -43,11 +44,10 @@ if [[ "$RUN_PGBENCH" == "1" ]]; then
 fi
 
 if [[ "$RUN_VALGRIND" == "1" ]]; then
-  : "${PGDATA:?PGDATA is required when RUN_VALGRIND=1}"
-  : "${POSTGRES_BIN:=postgres}"
-  valgrind --leak-check=full --trace-children=yes "$POSTGRES_BIN" -D "$PGDATA"
+  PG_VERSION_FEATURE="$PG_VERSION_FEATURE" \
+    "$SCRIPT_DIR/run_postgres_process_sanitizer.sh"
 else
-  echo "Skipping Valgrind. Set RUN_VALGRIND=1 with PGDATA and POSTGRES_BIN to run it."
+  echo "Skipping PostgreSQL-process Valgrind. Set RUN_VALGRIND=1 to run it."
 fi
 
 echo "Memory/FFI boundary checks completed."

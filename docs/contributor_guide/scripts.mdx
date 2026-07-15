@@ -255,7 +255,8 @@ playground query stability.
 | `measure_build_rss.sh` | Build memory evidence | Measures peak backend RSS during graph build. |
 | `build_memory_stress.sh` | Build memory stress | Runs baseline, small-batch, repeated-rebuild, and low-memory rebuild RSS profiles through `measure_build_rss.sh`. |
 | `measure_mmap_pss.sh` | mmap sharing evidence | Linux-only proportional set size check for mmap sharing across backends. |
-| `run_memory_sanitizers.sh` | Memory/FFI boundary checks | Runs pgrx tests and optional ASan/Valgrind checks where toolchains support them. |
+| `run_memory_sanitizers.sh` | Memory/FFI boundary checks | Runs pgrx tests and optional Rust ASan or disposable PostgreSQL-process Valgrind checks. |
+| `run_postgres_process_sanitizer.sh` | PostgreSQL-process memory safety | Runs persisted mmap, corruption, callback, guarded-error, and build-job paths under Valgrind and requires zero unsuppressed errors. |
 
 Most heavy scripts accept `PG_VERSION_FEATURE=pg17`. Many also accept `DBNAME`
 or other disposable database names. Scripts that kill, upgrade, or inspect
