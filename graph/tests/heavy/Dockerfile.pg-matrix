@@ -124,17 +124,22 @@ COPY --chown=pggraph:pggraph graph/ /src/graph/
 USER pggraph
 
 ARG PG_VERSIONS="14 15 16 17 18"
+ARG RUN_RUST_TESTS=1
 ARG RUN_PGRX_SQL=1
 ARG RUN_GQL_WRITE_MATRIX=1
 ARG RUN_POSTGRES_SANITIZER=0
+ARG RUN_DURABLE_PROJECTION_MATRIX=0
+ARG PROFILE_TIMEOUT_SECONDS=600
 
 RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     set -euo pipefail; \
     for pg in ${PG_VERSIONS}; do \
         feature="pg${pg}"; \
-        echo "==> cargo test --release --features ${feature} development"; \
-        cargo test --release --no-default-features --features "${feature} development"; \
+        if [[ "${RUN_RUST_TESTS}" == "1" ]]; then \
+            echo "==> cargo test --release --features ${feature} development"; \
+            cargo test --release --no-default-features --features "${feature} development"; \
+        fi; \
         if [[ "${RUN_PGRX_SQL}" == "1" ]]; then \
             echo "==> cargo pgrx test --features development ${feature}"; \
             cargo pgrx test --features development "${feature}"; \
@@ -151,4 +156,12 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     if [[ "${RUN_POSTGRES_SANITIZER}" == "1" ]]; then \
         PG_VERSION_FEATURE=pg17 ./tests/heavy/run_postgres_process_sanitizer.sh; \
+    fi
+
+RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
+    if [[ "${RUN_DURABLE_PROJECTION_MATRIX}" == "1" ]]; then \
+        PG_VERSIONS="${PG_VERSIONS}" \
+        PROFILE_TIMEOUT_SECONDS="${PROFILE_TIMEOUT_SECONDS}" \
+        ./tests/heavy/run_durable_projection_matrix.sh; \
     fi

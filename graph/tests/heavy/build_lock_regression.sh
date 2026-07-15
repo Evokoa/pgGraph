@@ -194,10 +194,16 @@ SET graph.sync_mode = trigger;
 SELECT graph.enable_sync();
 INSERT INTO public.graph_lock_nodes (id, name) VALUES ('c', 'gamma');
 SQL
-graph_path="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
-  -c "SELECT current_setting('data_directory') || '/' || COALESCE(NULLIF(current_setting('graph.data_dir', true), ''), 'graph') || '/main.pggraph'")"
-if [[ ! -f "$graph_path" && -f "/tmp/graph/main.pggraph" ]]; then
-  graph_path="/tmp/graph/main.pggraph"
+data_directory="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT current_setting('data_directory')")"
+graph_data_dir="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT COALESCE(NULLIF(current_setting('graph.data_dir', true), ''), 'graph')")"
+graph_id="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT graph_id FROM graph.current_graph()")"
+if [[ "$graph_data_dir" = /* ]]; then
+  graph_path="$graph_data_dir/$graph_id/main.pggraph"
+else
+  graph_path="$data_directory/$graph_data_dir/$graph_id/main.pggraph"
 fi
 graph_tmp_path="${graph_path}.tmp"
 if [[ ! -f "$graph_path" ]]; then

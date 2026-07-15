@@ -172,6 +172,12 @@ completed under Valgrind with zero unsuppressed errors; the reusable local and
 Docker release gates and public contributor documentation now describe the
 exact process-level contract.
 
+2026-07-14 R1 durable projection matrix — KI-026 is retired after the
+cross-backend lifecycle and publication/writer-lock profiles passed unchanged
+on PostgreSQL 14.23, 15.18, 16.14, 17.10, and 18.4; the reusable Docker matrix
+also corrected the stale pre-named-graph artifact-path assumption in the lock
+gate.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

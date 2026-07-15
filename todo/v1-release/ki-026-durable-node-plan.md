@@ -62,8 +62,9 @@ the persisted base build.
   also proves the owner reaches the maximum sync watermark and a retry is empty.
   The same gate proves active writers fail ingestion closed, committed rows are
   ingested after commit, and rolled-back rows are never published.
-- [ ] Run the lifecycle and lock evidence on PostgreSQL 14-16 and 18 before
+- [x] Run the lifecycle and lock evidence on PostgreSQL 14-16 and 18 before
   retiring KI-026 from the supported-major release matrix.
-- [x] The PostgreSQL 17 persisted isolation gate passes durable new-node
-  ingestion and repeated builds after KI-027 manifest rebasing. PostgreSQL
-  14-16 and 18 evidence remains part of the supported-major release matrix.
+- [x] The persisted isolation gate passes durable new-node ingestion and
+  repeated builds after KI-027 manifest rebasing on PostgreSQL 14 through 18.
+
+Evidence: [PostgreSQL 14-18 durable projection matrix](../measurements/2026-07-14-durable-projection-matrix.md).

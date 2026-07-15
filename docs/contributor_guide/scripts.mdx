@@ -257,6 +257,7 @@ playground query stability.
 | `measure_mmap_pss.sh` | mmap sharing evidence | Linux-only proportional set size check for mmap sharing across backends. |
 | `run_memory_sanitizers.sh` | Memory/FFI boundary checks | Runs pgrx tests and optional Rust ASan or disposable PostgreSQL-process Valgrind checks. |
 | `run_postgres_process_sanitizer.sh` | PostgreSQL-process memory safety | Runs persisted mmap, corruption, callback, guarded-error, and build-job paths under Valgrind and requires zero unsuppressed errors. |
+| `run_durable_projection_matrix.sh` | Supported-major durable projection safety | Runs cross-backend lifecycle plus publication, writer-horizon, competing-publisher, build, and vacuum lock regressions on PostgreSQL 14 through 18. |
 
 Most heavy scripts accept `PG_VERSION_FEATURE=pg17`. Many also accept `DBNAME`
 or other disposable database names. Scripts that kill, upgrade, or inspect

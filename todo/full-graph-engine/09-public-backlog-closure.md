@@ -146,6 +146,7 @@ should not stay indefinitely on the active Known Issues page.
 | KI-023 | RM-01 and RUST-00E | Every security-definer function has the vetted `proconfig` search path and shadow-schema attack tests prove catalog/function/operator resolution cannot be redirected. | IMPLEMENTED ON PG17; MATRIX PENDING |
 | KI-024 | RM-01/RM-06 and RUST-00F | OID-stable relation identity survives rename/search-path change and fails closed on drop/recreate; concurrent-DDL and supported-major matrix evidence remain. | IMPLEMENTED ON PG17; MATRIX PENDING |
 | KI-025 | RM-01/RM-08 and RUST-1 | Failure injection proves background-worker transactions do not commit unintended partial state or leave stuck jobs; intentional progress checkpoints are documented and tested. | OPEN |
+| KI-026 | RM-01/RM-06 | Durable post-build node identity, cross-backend lifecycle, writer horizons, and publication locks remain exact across every supported PostgreSQL major. | RETIRED |
 
 ### KI-013 Subsystem Gates
 

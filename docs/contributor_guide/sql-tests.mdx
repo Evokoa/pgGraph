@@ -70,6 +70,7 @@ clusters where the pgrx harness is not representative enough.
 | `crash_recovery.sh` | Persisted graph reload after postmaster kill and corrupt artifact rejection |
 | `run_memory_sanitizers.sh` | pgrx SQL suite plus optional Rust ASan, disposable PostgreSQL-process Valgrind, and pgbench sync smoke |
 | `run_postgres_process_sanitizer.sh` and `postgres_process_sanitizer.sql` | Valgrind-instrumented persisted mmap, corruption, callback, guarded-error, and build-job process coverage |
+| `run_durable_projection_matrix.sh` | Disposable PostgreSQL 14-18 matrix for cross-backend durable lifecycle and publication/writer-lock behavior |
 | `package_validate.sh` | `cargo pgrx package` output, extension SQL/control/library artifacts, and packaged docs |
 | `fresh_install_smoke.sh` | Fresh local install, extension creation, build, traversal, and search |
 | `function_metadata_audit.sh` | SQL function volatility, parallel-safety, security, cost, and row metadata, including generated sync trigger functions |

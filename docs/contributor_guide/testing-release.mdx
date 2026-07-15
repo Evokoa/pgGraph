@@ -318,6 +318,24 @@ gate, not a leak-retention measurement. Client connections default to a
 30 seconds; `PGCONNECT_TIMEOUT`, `STATEMENT_TIMEOUT_MS`, and `LOCK_TIMEOUT_MS`
 can adjust those bounds for slower release hosts.
 
+The durable projection matrix reuses the cross-backend lifecycle and lock
+regressions on every supported PostgreSQL major:
+
+```bash
+cd graph
+RUN_RUST_TESTS=0 RUN_PGRX_SQL=0 RUN_GQL_WRITE_MATRIX=0 \
+  RUN_DURABLE_PROJECTION_MATRIX=1 ./tests/heavy/run_pg_matrix_docker.sh
+```
+
+The gate covers committed and rolled-back writer horizons, competing
+publishers, legacy trigger preflight, exact watermark advancement, active
+artifact preservation, and build/vacuum exclusion. `RUN_RUST_TESTS=0` is
+appropriate when the full supported-major Rust matrix has already passed in
+the same release evidence set; leave its default value of `1` for a standalone
+matrix run.
+Each profile has a ten-minute outer deadline by default. Set
+`PROFILE_TIMEOUT_SECONDS` when slower builders need a larger explicit bound.
+
 ### Packaging, Docker, Upgrade, And Workers
 
 ```bash

@@ -42,6 +42,14 @@ execution installs pgGraph into the PostgreSQL installation selected by
 `PG_CONFIG`; prefer the containerized command when that installation must not
 be changed.
 
+`run_durable_projection_matrix.sh` creates one disposable cluster per requested
+PostgreSQL major and runs the cross-backend durable lifecycle plus the complete
+publication/writer-lock regression. Set `RUN_DURABLE_PROJECTION_MATRIX=1` on
+`run_pg_matrix_docker.sh` to run it in the maintained PostgreSQL 14-18 image.
+Each child profile is bounded by `PROFILE_TIMEOUT_SECONDS` (600 seconds by
+default), and cluster shutdown is verified before its temporary files are
+removed.
+
 For build memory evidence, start with `measure_build_rss.sh`. For opt-in stress
 profiles that cover baseline build, small SPI/spool batches, repeated persisted
 rebuilds, and low-memory rebuilds, use `build_memory_stress.sh` or set

@@ -83,6 +83,10 @@ gate evidence through signed tags and package publishing.
   durable ingestion cannot skip an active lower sync ID or publish a writer's
   own row before rollback. Exact target endpoints also cannot attach to another
   table with the same primary key.
+- Verified cross-backend durable projection lifecycle, competing publication,
+  writer commit and rollback horizons, artifact preservation, and build/vacuum
+  exclusion on PostgreSQL 14 through 18. This retires the durable post-build
+  node identity limitation from Known Issues.
 - Added a fail-closed trigger-definition preflight for upgrades. Run
   `graph.enable_sync()` or a trigger-mode `graph.build()` to refresh older sync
   triggers before durable ingestion; trigger-mode builds refresh them before
