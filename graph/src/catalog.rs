@@ -25,9 +25,10 @@ pub(crate) use read::{
 #[cfg(feature = "pg_test")]
 pub(crate) use validate::validate_numeric_column;
 pub(crate) use validate::{
-    estimated_table_rows, primary_key_columns, primary_key_expr, regclass_text, relation_name,
-    sql_table_name_from_oid, table_oid_from_name, validate_column_exists,
-    validate_edge_endpoint_columns, validate_filter_column_type, validate_registered_table,
+    estimated_table_rows, foreign_key_target_table_oid, primary_key_columns, primary_key_expr,
+    regclass_text, relation_name, sql_table_name_from_oid, table_oid_from_name,
+    validate_column_exists, validate_edge_endpoint_columns, validate_filter_column_type,
+    validate_registered_table,
 };
 pub(crate) use write::{
     insert_registered_edge, insert_registered_edge_for_graph, insert_registered_table,

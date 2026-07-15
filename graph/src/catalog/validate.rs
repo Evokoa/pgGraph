@@ -202,6 +202,71 @@ pub(crate) fn table_oid_from_name(table_name: &str) -> safety::GraphResult<u32> 
     })
 }
 
+/// Resolve one foreign-key column to its canonical referenced relation.
+///
+/// PostgreSQL creates inherited constraint rows for partitions. Canonicalizing
+/// both sides to their partition roots keeps those physical rows equivalent to
+/// the single logical relationship mapping. Multiple distinct referenced roots
+/// remain ambiguous and return `None` rather than selecting an arbitrary table.
+pub(crate) fn foreign_key_target_table_oid(
+    relation_oid: u32,
+    column: &str,
+) -> safety::GraphResult<Option<u32>> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT pg_catalog.min(
+                            COALESCE(
+                                pg_catalog.pg_partition_root(foreign_key.confrelid),
+                                foreign_key.confrelid
+                            )::oid::integer
+                        ),
+                        pg_catalog.count(DISTINCT COALESCE(
+                            pg_catalog.pg_partition_root(foreign_key.confrelid),
+                            foreign_key.confrelid
+                        ))::bigint
+                   FROM pg_catalog.pg_constraint AS foreign_key
+                   JOIN pg_catalog.unnest(foreign_key.conkey) WITH ORDINALITY
+                        AS source_key(attnum, ordinality) ON true
+                   JOIN pg_catalog.pg_attribute AS source_attribute
+                     ON source_attribute.attrelid = foreign_key.conrelid
+                    AND source_attribute.attnum = source_key.attnum
+                  WHERE foreign_key.contype = 'f'
+                    AND COALESCE(
+                            pg_catalog.pg_partition_root(foreign_key.conrelid),
+                            foreign_key.conrelid
+                        ) = $1::oid
+                    AND source_attribute.attname = $2",
+                None,
+                &[
+                    pgrx::pg_sys::Oid::from_u32(relation_oid).into(),
+                    column.into(),
+                ],
+            )
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "foreign-key target lookup failed for relation OID {relation_oid}: {err}"
+                ))
+            })?;
+        let row = rows.first();
+        let target_count = row.get::<i64>(2).map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "foreign-key target count read failed for relation OID {relation_oid}: {err}"
+            ))
+        })?;
+        if target_count != Some(1) {
+            return Ok(None);
+        }
+        row.get::<i32>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "foreign-key target read failed for relation OID {relation_oid}: {err}"
+                ))
+            })
+            .map(|oid| oid.map(|oid| oid as u32))
+    })
+}
+
 pub(crate) fn estimated_table_rows(table_name: &str) -> safety::GraphResult<i64> {
     let table_oid = table_oid_from_name(table_name)?;
     Spi::connect(|client| {

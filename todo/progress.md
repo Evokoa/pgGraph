@@ -138,6 +138,15 @@ and documentation drift, secret scanning, 718 Rust tests (1 ignored), and 977
 PostgreSQL 17 pgrx tests (1 ignored). An independent raw-diff review found no
 remaining block or request-change findings.
 
+2026-07-14 R1 source-shape matrix — Partitioned node and relationship sources,
+composite relationship identities, PostgreSQL constraints, rejecting and
+value-mutating triggers, authoritative returned/filter values, and rollback of
+transaction-local projection state are covered for the advertised write
+families. Binder and durable replay now share partition-root-aware foreign-key
+resolution, including a duplicate-key decoy regression. QA-01B passes Clippy,
+rustdoc, release/docs drift, 718 Rust tests (1 ignored), and 981 PostgreSQL 17
+pgrx tests (1 ignored).
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

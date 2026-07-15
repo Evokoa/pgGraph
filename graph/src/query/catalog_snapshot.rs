@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builder::{PrimaryKeySpec, RegisteredEdge, RegisteredTable};
-use crate::catalog::{read_catalog, sql_table_name_from_oid};
+use crate::catalog::{foreign_key_target_table_oid, read_catalog, sql_table_name_from_oid};
 use crate::gql::errors::{GqlError, Span};
 use crate::quote::quote_ident;
 use crate::safety::GraphError;
@@ -369,44 +369,7 @@ fn gql_identifier_from_text(text: &str) -> Option<String> {
 }
 
 fn edge_source_fk_table_oid(edge: &RegisteredEdge) -> GraphResult<Option<u32>> {
-    let from_table_oid = edge.from_table_oid;
-    pgrx::Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT c.confrelid::oid::integer
-                 FROM pg_catalog.pg_constraint c
-                 JOIN unnest(c.conkey) WITH ORDINALITY AS fk_from(attnum, n) ON true
-                 JOIN pg_catalog.pg_attribute from_attr
-                   ON from_attr.attrelid = c.conrelid
-                  AND from_attr.attnum = fk_from.attnum
-                 WHERE c.contype = 'f'
-                   AND c.conrelid = $1::oid
-                   AND from_attr.attname = $2
-                 ORDER BY c.oid
-                 LIMIT 2",
-                None,
-                &[
-                    pgrx::pg_sys::Oid::from_u32(from_table_oid).into(),
-                    edge.from_column.clone().into(),
-                ],
-            )
-            .map_err(|err| {
-                crate::safety::GraphError::Internal(format!(
-                    "edge source foreign-key lookup failed: {err}"
-                ))
-            })?;
-        if rows.len() != 1 {
-            return Ok(None);
-        }
-        rows.first()
-            .get::<i32>(1)
-            .map_err(|err| {
-                crate::safety::GraphError::Internal(format!(
-                    "edge source foreign-key target read failed: {err}"
-                ))
-            })
-            .map(|oid| oid.map(|oid| oid as u32))
-    })
+    foreign_key_target_table_oid(edge.from_table_oid, &edge.from_column)
 }
 
 fn gql_label_from_regclass(regclass: &str) -> Option<String> {

@@ -1870,6 +1870,10 @@ either registered endpoint, or the registered dynamic label, pgGraph raises
 SQLSTATE `22000` with diagnostic `PG017` and rolls back the source insert rather
 than recording graph coordinates for different topology. Ordinary property
 changes are returned from the final source row.
+Registered partitioned relationship tables use their parent relation as the
+mapping identity while PostgreSQL routes each insert to a child partition.
+Composite relationship primary keys are preserved as the source identity used
+by later hydration and deletion.
 
 `MATCH (n:label {...}) SET n.property = value RETURN ...` is supported for a
 single matched node and one registered non-key, non-tenant property column. It requires a
@@ -1921,7 +1925,11 @@ relationships must be backed by registered edge row tables. Multi-row graph
 writes are not part of this release's GQL subset.
 Before deleting incident edge rows or the node row, pgGraph locks the matched
 node source row and re-checks the matched GQL predicate against the current
-PostgreSQL row.
+PostgreSQL row. Partitioned node and standalone relationship tables are
+supported; foreign-key endpoints are resolved through the registered partition
+roots. A constraint or trigger failure in any incident-edge or node deletion
+rolls back the complete statement without leaving transaction-local
+tombstones.
 
 `MERGE (n:label {properties}) [ON CREATE SET ...] [ON MATCH SET ...] RETURN ...`
 is supported for a single node whose label maps to a registered source table. It

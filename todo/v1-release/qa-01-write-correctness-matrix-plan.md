@@ -22,12 +22,12 @@ capability registry; this work adds correctness evidence without expanding the
 
 ### QA-01B: Source-Shape Matrix
 
-- [ ] Cover constraint rejection, rejecting and value-mutating triggers,
+- [x] Cover constraint rejection, rejecting and value-mutating triggers,
       partition routing, and composite registered identity for every advertised
       node and relationship write where the source shape applies.
-- [ ] Prove accepted trigger-mutated non-identity values are returned from the
+- [x] Prove accepted trigger-mutated non-identity values are returned from the
       PostgreSQL `RETURNING` row and reflected in any local typed filter state.
-- [ ] Prove every rejected source statement leaves transaction-local projection
+- [x] Prove every rejected source statement leaves transaction-local projection
       status and same-transaction reads unchanged.
 
 ### QA-01C: Isolation And Concurrent Writers

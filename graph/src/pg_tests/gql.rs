@@ -1349,6 +1349,129 @@ fn standalone_relationship_sync_without_fk_uses_registered_endpoint_fallback() {
 }
 
 #[pg_test]
+fn partitioned_relationship_replay_uses_foreign_key_endpoint_root() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persisted build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("disable query auto-sync failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_replay_nodes_pgtest (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL
+         ) PARTITION BY HASH (id);
+         CREATE TABLE public.graph_gql_replay_nodes_p0_pgtest
+           PARTITION OF public.graph_gql_replay_nodes_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE public.graph_gql_replay_nodes_p1_pgtest
+           PARTITION OF public.graph_gql_replay_nodes_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         CREATE TABLE public.graph_gql_replay_decoy_pgtest (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL
+         );
+         CREATE TABLE public.graph_gql_replay_edges_pgtest (
+             edge_id TEXT NOT NULL,
+             bucket INTEGER NOT NULL,
+             source_id TEXT NOT NULL REFERENCES public.graph_gql_replay_nodes_pgtest(id),
+             target_id TEXT NOT NULL REFERENCES public.graph_gql_replay_nodes_pgtest(id),
+             PRIMARY KEY (edge_id, bucket)
+         ) PARTITION BY HASH (bucket);
+         CREATE TABLE public.graph_gql_replay_edges_p0_pgtest
+           PARTITION OF public.graph_gql_replay_edges_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE public.graph_gql_replay_edges_p1_pgtest
+           PARTITION OF public.graph_gql_replay_edges_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         INSERT INTO public.graph_gql_replay_nodes_pgtest VALUES
+           ('duplicate', 'Source'), ('target', 'Target');
+         INSERT INTO public.graph_gql_replay_decoy_pgtest VALUES
+           ('duplicate', 'Decoy');
+         SELECT graph.add_table(
+           'graph_gql_replay_nodes_pgtest'::regclass,
+           id_column := 'id',
+           columns := ARRAY['name']
+         );
+         SELECT graph.add_table(
+           'graph_gql_replay_decoy_pgtest'::regclass,
+           id_column := 'id',
+           columns := ARRAY['name']
+         );
+         SELECT graph.add_edge(
+           'graph_gql_replay_edges_pgtest'::regclass,
+           'source_id',
+           'graph_gql_replay_nodes_pgtest'::regclass,
+           'target_id',
+           'linked',
+           bidirectional := false
+         );
+         SELECT * FROM graph.build(mode := 'mutable_overlay');",
+    )
+    .expect("create partitioned replay fixture failed");
+
+    Spi::run(
+        "INSERT INTO public.graph_gql_replay_edges_pgtest
+           (edge_id, bucket, source_id, target_id)
+         VALUES ('post-build', 1, 'duplicate', 'target')",
+    )
+    .expect("insert partitioned replay relationship failed");
+    let published = Spi::get_one::<i64>(
+        "SELECT segments_published FROM graph.ingest_projection()",
+    )
+    .expect("ingest partitioned replay relationship failed")
+    .unwrap_or_default();
+    assert!(published > 0);
+
+    Spi::run("SET graph.auto_load = on").expect("enable auto-load failed");
+    super::ENGINE.with(|engine| *engine.borrow_mut() = super::engine::Engine::new());
+    let (main_reaches_target, decoy_reaches_target) = Spi::connect(|client| {
+        let main = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM graph.traverse(
+                     'graph_gql_replay_nodes_pgtest'::regclass,
+                     'duplicate',
+                     1,
+                     edge_types := ARRAY['linked'],
+                     hydrate := false
+                   )
+                  WHERE node_id = 'target'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let decoy = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM graph.traverse(
+                     'graph_gql_replay_decoy_pgtest'::regclass,
+                     'duplicate',
+                     1,
+                     edge_types := ARRAY['linked'],
+                     hydrate := false
+                   )
+                  WHERE node_id = 'target'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((main, decoy))
+    })
+    .expect("partitioned replay traversal verification failed");
+    assert_eq!(main_reaches_target, 1);
+    assert_eq!(decoy_reaches_target, 0);
+
+    Spi::run("SET graph.auto_load = off").expect("restore auto-load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("restore persisted build failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+    Spi::run("SET graph.sync_mode = 'manual'").expect("restore sync mode failed");
+}
+
+#[pg_test]
 fn gql_aggregates_match_sql_grouping_and_numeric_results() {
     reset_and_create_fixtures();
     Spi::run(
@@ -2842,6 +2965,522 @@ fn gql_create_respects_partition_routing_constraints_and_user_triggers() {
     .expect("accepted partition write verification failed");
     assert!(partition_name.contains("graph_gql_partitioned_nodes_p"));
     assert_eq!(matched, 1);
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+}
+
+#[pg_test]
+fn gql_partitioned_node_mutations_preserve_source_and_filter_contracts() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+         "CREATE TABLE public.graph_gql_write_nodes_pgtest (
+             id TEXT PRIMARY KEY,
+             score INTEGER NOT NULL CHECK (score <= 100),
+             note TEXT,
+             required_note TEXT NOT NULL
+         ) PARTITION BY HASH (id);
+         CREATE TABLE public.graph_gql_write_nodes_p0_pgtest
+           PARTITION OF public.graph_gql_write_nodes_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE public.graph_gql_write_nodes_p1_pgtest
+           PARTITION OF public.graph_gql_write_nodes_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         CREATE TABLE public.graph_gql_write_edges_pgtest (
+             id TEXT PRIMARY KEY,
+             source_id TEXT NOT NULL REFERENCES public.graph_gql_write_nodes_pgtest(id),
+             target_id TEXT NOT NULL REFERENCES public.graph_gql_write_nodes_pgtest(id)
+         );
+         INSERT INTO public.graph_gql_write_nodes_pgtest (id, score, note, required_note)
+         VALUES ('n1', 1, 'keep', 'required'), ('n2', 2, 'protected', 'required');
+         INSERT INTO public.graph_gql_write_edges_pgtest VALUES ('e1', 'n1', 'n2');
+         CREATE FUNCTION public.graph_gql_write_node_guard_pgtest()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.score = 13 THEN
+             RAISE EXCEPTION 'node write trigger rejected row';
+           ELSIF NEW.score IN (7, 8) THEN
+             NEW.score := NEW.score * 2;
+           END IF;
+           IF TG_OP = 'UPDATE' AND OLD.id = 'n2'
+              AND OLD.note IS NOT NULL AND NEW.note IS NULL THEN
+             RAISE EXCEPTION 'node remove trigger rejected row';
+           END IF;
+           RETURN NEW;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_write_node_guard
+           BEFORE INSERT OR UPDATE ON public.graph_gql_write_nodes_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_write_node_guard_pgtest();
+         SELECT graph.add_table(
+           'graph_gql_write_nodes_pgtest'::regclass,
+           id_column := 'id',
+           columns := ARRAY['score', 'note', 'required_note']
+         );
+         SELECT graph.add_edge(
+           'graph_gql_write_edges_pgtest'::regclass,
+           'source_id',
+           'graph_gql_write_nodes_pgtest'::regclass,
+           'target_id',
+           'linked',
+           bidirectional := false
+         );
+         SELECT graph.add_filter_column('graph_gql_write_nodes_pgtest'::regclass, 'score');
+         SELECT * FROM graph.build(mode := 'mutable_overlay');",
+    )
+    .expect("create partitioned node write fixture failed");
+    create_error_sqlstate_helper();
+
+    for (query, expected_sqlstate) in [
+        (
+            "MATCH (u:graph_gql_write_nodes_pgtest {id: 'n2'}) SET u.score = 101 RETURN u",
+            "23514",
+        ),
+        (
+            "MATCH (u:graph_gql_write_nodes_pgtest {id: 'n2'}) SET u.score = 13 RETURN u",
+            "P0001",
+        ),
+        (
+            "MATCH (u:graph_gql_write_nodes_pgtest {id: 'n2'}) REMOVE u.note RETURN u",
+            "P0001",
+        ),
+        (
+            "MATCH (u:graph_gql_write_nodes_pgtest {id: 'n2'}) REMOVE u.required_note RETURN u",
+            "23502",
+        ),
+        (
+            "MERGE (u:graph_gql_write_nodes_pgtest {id: 'constraint-merge', score: 101, required_note: 'required'}) RETURN u",
+            "23514",
+        ),
+        (
+            "MERGE (u:graph_gql_write_nodes_pgtest {id: 'trigger-merge', score: 13, required_note: 'required'}) RETURN u",
+            "P0001",
+        ),
+        (
+            "MERGE (u:graph_gql_write_nodes_pgtest {id: 'n2'}) ON MATCH SET u.score = 101 RETURN u",
+            "23514",
+        ),
+        (
+            "MERGE (u:graph_gql_write_nodes_pgtest {id: 'n2'}) ON MATCH SET u.score = 13 RETURN u",
+            "P0001",
+        ),
+    ] {
+        let statement = format!("SELECT * FROM graph.gql({})", super::sql_literal(query));
+        let sqlstate = Spi::get_one::<String>(&format!(
+            "SELECT public.graph_test_sqlstate({})",
+            super::sql_literal(&statement)
+        ))
+        .expect("capture rejected partitioned node write failed")
+        .unwrap_or_default();
+        assert_eq!(sqlstate, expected_sqlstate);
+
+        let (source_score, source_note, required_note, rejected_rows, tx_dirty, matched_score) =
+            Spi::connect(|client| {
+                let source = client
+                    .select(
+                        "SELECT score, note, required_note
+                           FROM public.graph_gql_write_nodes_pgtest
+                          WHERE id = 'n2'",
+                        None,
+                        &[],
+                    )?
+                    .first();
+                let rejected_rows = client
+                    .select(
+                        "SELECT count(*)::bigint
+                           FROM public.graph_gql_write_nodes_pgtest
+                          WHERE id IN ('constraint-merge', 'trigger-merge')",
+                        None,
+                        &[],
+                    )?
+                    .first()
+                    .get::<i64>(1)?
+                    .unwrap_or_default();
+                let tx_dirty = client
+                    .select("SELECT tx_delta_dirty FROM graph.status()", None, &[])?
+                    .first()
+                    .get::<bool>(1)?
+                    .unwrap_or(true);
+                let matched_score = client
+                    .select(
+                        "SELECT (row #>> '{u,score}')::int
+                           FROM graph.gql(
+                             'MATCH (u:graph_gql_write_nodes_pgtest {id: ''n2''}) RETURN u'
+                           )",
+                        None,
+                        &[],
+                    )?
+                    .first()
+                    .get::<i32>(1)?
+                    .unwrap_or_default();
+                Ok::<_, pgrx::spi::Error>((
+                    source.get::<i32>(1)?.unwrap_or_default(),
+                    source.get::<String>(2)?.unwrap_or_default(),
+                    source.get::<String>(3)?.unwrap_or_default(),
+                    rejected_rows,
+                    tx_dirty,
+                    matched_score,
+                ))
+            })
+            .expect("verify rejected partitioned node write failed");
+        assert_eq!(source_score, 2);
+        assert_eq!(source_note, "protected");
+        assert_eq!(required_note, "required");
+        assert_eq!(rejected_rows, 0);
+        assert!(!tx_dirty);
+        assert_eq!(matched_score, 2);
+    }
+
+    let (set_score, source_score, filtered_neighbors) = Spi::connect(|client| {
+        let set_score = client
+            .select(
+                "SELECT (row #>> '{score}')::int
+                   FROM graph.gql(
+                     'MATCH (u:graph_gql_write_nodes_pgtest {id: ''n2''}) SET u.score = 7 RETURN u.score AS score'
+                   )",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i32>(1)?
+            .unwrap_or_default();
+        let source_score = client
+            .select(
+                "SELECT score FROM public.graph_gql_write_nodes_pgtest WHERE id = 'n2'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i32>(1)?
+            .unwrap_or_default();
+        let filtered_neighbors = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM graph.traverse(
+                     'graph_gql_write_nodes_pgtest'::regclass,
+                     'n1',
+                     1,
+                     filter := '{\"node\":{\"where\":{\"score\":{\"gt\":10}}}}'::jsonb,
+                     hydrate := false
+                   )
+                  WHERE node_id = 'n2'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((set_score, source_score, filtered_neighbors))
+    })
+    .expect("verify trigger-normalized SET failed");
+    assert_eq!(set_score, 14);
+    assert_eq!(source_score, 14);
+    assert_eq!(filtered_neighbors, 1);
+
+    let (matched_merge_score, filtered_neighbors, inserted_merge_score, merge_partition) =
+        Spi::connect(|client| {
+            let matched_merge_score = client
+                .select(
+                    "SELECT (row #>> '{score}')::int
+                       FROM graph.gql(
+                         'MERGE (u:graph_gql_write_nodes_pgtest {id: ''n2''})
+                          ON MATCH SET u.score = 8
+                          RETURN u.score AS score'
+                       )",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<i32>(1)?
+                .unwrap_or_default();
+            let filtered_neighbors = client
+                .select(
+                    "SELECT count(*)::bigint
+                       FROM graph.traverse(
+                         'graph_gql_write_nodes_pgtest'::regclass,
+                         'n1',
+                         1,
+                         filter := '{\"node\":{\"where\":{\"score\":{\"gt\":15}}}}'::jsonb,
+                         hydrate := false
+                       )
+                      WHERE node_id = 'n2'",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<i64>(1)?
+                .unwrap_or_default();
+            let inserted_merge_score = client
+            .select(
+                "SELECT (row #>> '{score}')::int
+                   FROM graph.gql(
+                         'MERGE (u:graph_gql_write_nodes_pgtest {id: ''accepted-merge'', score: 8, required_note: ''required''}) RETURN u.score AS score'
+                   )",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i32>(1)?
+            .unwrap_or_default();
+            let merge_partition = client
+            .select(
+                "SELECT tableoid::regclass::text
+                   FROM public.graph_gql_write_nodes_pgtest
+                  WHERE id = 'accepted-merge' AND score = 16",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<String>(1)?
+            .unwrap_or_default();
+            Ok::<_, pgrx::spi::Error>((
+                matched_merge_score,
+                filtered_neighbors,
+                inserted_merge_score,
+                merge_partition,
+            ))
+        })
+        .expect("verify trigger-normalized MERGE branches failed");
+    assert_eq!(matched_merge_score, 16);
+    assert_eq!(filtered_neighbors, 1);
+    assert_eq!(inserted_merge_score, 16);
+    assert!(merge_partition.contains("graph_gql_write_nodes_p"));
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
+}
+
+#[pg_test]
+fn gql_partitioned_relationship_writes_preserve_composite_source_identity() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_write_rel_nodes_pgtest (
+             id TEXT PRIMARY KEY
+         );
+         CREATE TABLE public.graph_gql_write_rels_pgtest (
+             edge_id TEXT NOT NULL,
+             revision INTEGER NOT NULL,
+             source_id TEXT NOT NULL REFERENCES public.graph_gql_write_rel_nodes_pgtest(id),
+             target_id TEXT NOT NULL REFERENCES public.graph_gql_write_rel_nodes_pgtest(id),
+             note TEXT NOT NULL CHECK (note <> 'blocked'),
+             PRIMARY KEY (edge_id, revision)
+         ) PARTITION BY HASH (revision);
+         CREATE TABLE public.graph_gql_write_rels_p0_pgtest
+           PARTITION OF public.graph_gql_write_rels_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE public.graph_gql_write_rels_p1_pgtest
+           PARTITION OF public.graph_gql_write_rels_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         INSERT INTO public.graph_gql_write_rel_nodes_pgtest VALUES ('n1'), ('n2'), ('n3');
+         INSERT INTO public.graph_gql_write_rels_pgtest
+         VALUES ('protected', 0, 'n2', 'n1', 'protected');
+         CREATE FUNCTION public.graph_gql_write_rel_guard_pgtest()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF TG_OP = 'INSERT' THEN
+             IF NEW.note = 'reject' THEN
+               RAISE EXCEPTION 'relationship insert trigger rejected row';
+             ELSIF NEW.note = 'mutate' THEN
+               NEW.note := 'normalized';
+             END IF;
+             RETURN NEW;
+           END IF;
+           IF OLD.note = 'protected' THEN
+             RAISE EXCEPTION 'relationship delete trigger rejected row';
+           END IF;
+           RETURN OLD;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_write_rel_insert_guard
+           BEFORE INSERT ON public.graph_gql_write_rels_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_write_rel_guard_pgtest();
+         CREATE TRIGGER graph_gql_write_rel_delete_guard
+           BEFORE DELETE ON public.graph_gql_write_rels_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_write_rel_guard_pgtest();
+         SELECT graph.add_table('graph_gql_write_rel_nodes_pgtest'::regclass, 'id');
+         SELECT graph.add_edge(
+           'graph_gql_write_rels_pgtest'::regclass,
+           'source_id',
+           'graph_gql_write_rel_nodes_pgtest'::regclass,
+           'target_id',
+           'linked',
+           bidirectional := false
+         );
+         SELECT * FROM graph.build(mode := 'mutable_overlay');",
+    )
+    .expect("create partitioned relationship write fixture failed");
+    create_error_sqlstate_helper();
+    create_error_message_helper();
+
+    for (edge_id, revision, note, expected_sqlstate) in [
+        ("constraint", 1, "blocked", "23514"),
+        ("trigger", 2, "reject", "P0001"),
+    ] {
+        let query = format!(
+            "SELECT * FROM graph.gql(
+               'MATCH (a:graph_gql_write_rel_nodes_pgtest {{id: ''n1''}}),
+                      (b:graph_gql_write_rel_nodes_pgtest {{id: ''n2''}})
+                CREATE (a)-[r:linked {{edge_id: ''{edge_id}'', revision: {revision}, note: ''{note}''}}]->(b)
+                RETURN r'
+             )"
+        );
+        let sqlstate = Spi::get_one::<String>(&format!(
+            "SELECT public.graph_test_sqlstate({})",
+            super::sql_literal(&query)
+        ))
+        .expect("capture rejected relationship create failed")
+        .unwrap_or_default();
+        if sqlstate != expected_sqlstate {
+            let message = Spi::get_one::<String>(&format!(
+                "SELECT public.graph_test_sql_error_message({})",
+                super::sql_literal(&query)
+            ))
+            .expect("capture rejected relationship create message failed")
+            .unwrap_or_default();
+            assert_eq!(sqlstate, expected_sqlstate, "{message}");
+        }
+        let rejected_rows = Spi::get_one::<i64>(&format!(
+            "SELECT count(*)::bigint FROM public.graph_gql_write_rels_pgtest WHERE edge_id = {}",
+            super::sql_literal(edge_id)
+        ))
+        .expect("rejected relationship source count failed")
+        .unwrap_or_default();
+        let (tx_dirty, projected_rows) = Spi::connect(|client| {
+            let status = client
+                .select("SELECT tx_delta_dirty FROM graph.status()", None, &[])?
+                .first()
+                .get::<bool>(1)?
+                .unwrap_or(true);
+            let projected = client
+                .select(
+                    "SELECT count(*)::bigint
+                       FROM graph.gql(
+                         'MATCH (a:graph_gql_write_rel_nodes_pgtest {id: ''n1''})-[r:linked]->(b:graph_gql_write_rel_nodes_pgtest {id: ''n2''}) RETURN r',
+                         hydrate := false
+                       )",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<i64>(1)?
+                .unwrap_or_default();
+            Ok::<_, pgrx::spi::Error>((status, projected))
+        })
+        .expect("verify rejected relationship create failed");
+        assert_eq!(rejected_rows, 0);
+        assert!(!tx_dirty);
+        assert_eq!(projected_rows, 0);
+    }
+
+    let (returned_note, first_partition) = Spi::connect(|client| {
+        let created = client
+            .select(
+                "SELECT row #>> '{r,note}'
+                   FROM graph.gql(
+                     'MATCH (a:graph_gql_write_rel_nodes_pgtest {id: ''n1''}),
+                            (b:graph_gql_write_rel_nodes_pgtest {id: ''n2''})
+                      CREATE (a)-[r:linked {edge_id: ''shared'', revision: 1, note: ''mutate''}]->(b)
+                      RETURN r'
+                   )",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<String>(1)?
+            .unwrap_or_default();
+        client.select(
+            "SELECT * FROM graph.gql(
+               'MATCH (a:graph_gql_write_rel_nodes_pgtest {id: ''n1''}),
+                      (b:graph_gql_write_rel_nodes_pgtest {id: ''n3''})
+                CREATE (a)-[r:linked {edge_id: ''shared'', revision: 2, note: ''second''}]->(b)
+                RETURN r'
+             )",
+            None,
+            &[],
+        )?;
+        let partition = client
+            .select(
+                "SELECT tableoid::regclass::text
+                   FROM public.graph_gql_write_rels_pgtest
+                  WHERE edge_id = 'shared' AND revision = 1 AND note = 'normalized'",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<String>(1)?
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((created, partition))
+    })
+    .expect("verify accepted relationship creates failed");
+    assert_eq!(returned_note, "normalized");
+    assert!(first_partition.contains("graph_gql_write_rels_p"));
+    let shared_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+           FROM public.graph_gql_write_rels_pgtest
+          WHERE edge_id = 'shared' AND revision IN (1, 2)",
+    )
+    .expect("composite relationship source count failed")
+    .unwrap_or_default();
+    assert_eq!(shared_rows, 2);
+
+    let protected_delete =
+        "SELECT * FROM graph.gql(
+           'MATCH (a:graph_gql_write_rel_nodes_pgtest {id: ''n2''})-[r:linked]->(b:graph_gql_write_rel_nodes_pgtest {id: ''n1''}) DELETE r RETURN r'
+         )";
+    let sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(protected_delete)
+    ))
+    .expect("capture rejected relationship delete failed")
+    .unwrap_or_default();
+    assert_eq!(sqlstate, "P0001");
+    let (protected_rows, deleted_edges) = Spi::connect(|client| {
+        let protected_rows = client
+            .select(
+                "SELECT count(*)::bigint
+                   FROM public.graph_gql_write_rels_pgtest
+                  WHERE edge_id = 'protected' AND revision = 0",
+                None,
+                &[],
+            )?
+            .first()
+            .get::<i64>(1)?
+            .unwrap_or_default();
+        let deleted_edges = client
+            .select("SELECT tx_delta_deleted_edges FROM graph.status()", None, &[])?
+            .first()
+            .get::<i32>(1)?
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((protected_rows, deleted_edges))
+    })
+    .expect("verify rejected relationship delete failed");
+    assert_eq!(protected_rows, 1);
+    assert_eq!(deleted_edges, 0);
+
+    Spi::run(
+        "SELECT * FROM graph.gql(
+           'MATCH (a:graph_gql_write_rel_nodes_pgtest {id: ''n1''})-[r:linked]->(b:graph_gql_write_rel_nodes_pgtest {id: ''n2''})
+            DELETE r RETURN r'
+         )",
+    )
+    .expect("delete first accepted composite relationship failed");
+    let remaining_revision = Spi::get_one::<i32>(
+        "SELECT revision FROM public.graph_gql_write_rels_pgtest WHERE edge_id = 'shared'",
+    )
+    .expect("remaining composite relationship revision failed")
+    .unwrap_or(-1);
+    assert_eq!(remaining_revision, 2);
+    Spi::run(
+        "SELECT * FROM graph.gql(
+           'MATCH (a:graph_gql_write_rel_nodes_pgtest {id: ''n1''})-[r:linked]->(b:graph_gql_write_rel_nodes_pgtest {id: ''n3''})
+            DELETE r RETURN r'
+         )",
+    )
+    .expect("delete second accepted composite relationship failed");
+    let remaining_shared = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM public.graph_gql_write_rels_pgtest WHERE edge_id = 'shared'",
+    )
+    .expect("remaining composite relationship count failed")
+    .unwrap_or(-1);
+    assert_eq!(remaining_shared, 0);
     Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
 }
 
@@ -5556,6 +6195,217 @@ fn gql_detach_delete_delta_limit_rolls_back_source_rows() {
     assert_eq!(sqlstate.as_deref(), Some("54000"));
     assert_eq!(user_rows, 1);
     assert_eq!(edge_rows, 1);
+}
+
+#[pg_test]
+fn gql_partitioned_detach_delete_rolls_back_source_and_projection_on_trigger_error() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_detach_nodes_pgtest (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL
+         ) PARTITION BY HASH (id);
+         CREATE TABLE public.graph_gql_detach_nodes_p0_pgtest
+           PARTITION OF public.graph_gql_detach_nodes_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE public.graph_gql_detach_nodes_p1_pgtest
+           PARTITION OF public.graph_gql_detach_nodes_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         CREATE TABLE public.graph_gql_detach_edges_pgtest (
+             edge_id TEXT NOT NULL,
+             revision INTEGER NOT NULL,
+             source_id TEXT NOT NULL REFERENCES public.graph_gql_detach_nodes_pgtest(id),
+             target_id TEXT NOT NULL REFERENCES public.graph_gql_detach_nodes_pgtest(id),
+             PRIMARY KEY (edge_id, revision)
+         ) PARTITION BY HASH (revision);
+         CREATE TABLE public.graph_gql_detach_edges_p0_pgtest
+           PARTITION OF public.graph_gql_detach_edges_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE public.graph_gql_detach_edges_p1_pgtest
+           PARTITION OF public.graph_gql_detach_edges_pgtest
+           FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         INSERT INTO public.graph_gql_detach_nodes_pgtest VALUES
+           ('protected', 'Protected'), ('survivor', 'Survivor'), ('deletable', 'Deletable');
+         INSERT INTO public.graph_gql_detach_edges_pgtest VALUES
+           ('protected-edge', 1, 'protected', 'survivor'),
+           ('deletable-edge', 2, 'deletable', 'survivor');
+         CREATE FUNCTION public.graph_gql_detach_guard_pgtest()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF OLD.id = 'protected' THEN
+             RAISE EXCEPTION 'detach trigger rejected row';
+           END IF;
+           RETURN OLD;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_detach_guard
+           BEFORE DELETE ON public.graph_gql_detach_nodes_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_detach_guard_pgtest();
+         SELECT graph.add_table(
+           'graph_gql_detach_nodes_pgtest'::regclass,
+           id_column := 'id',
+           columns := ARRAY['name']
+         );
+         SELECT graph.add_edge(
+           'graph_gql_detach_edges_pgtest'::regclass,
+           'source_id',
+           'graph_gql_detach_nodes_pgtest'::regclass,
+           'target_id',
+           'linked',
+           bidirectional := false
+         );
+         SELECT * FROM graph.build(mode := 'mutable_overlay');",
+    )
+    .expect("create partitioned detach fixture failed");
+    create_error_sqlstate_helper();
+
+    let rejected_detach =
+        "SELECT * FROM graph.gql(
+           'MATCH (u:graph_gql_detach_nodes_pgtest {id: ''protected''}) DETACH DELETE u RETURN u'
+         )";
+    let sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(rejected_detach)
+    ))
+    .expect("capture rejected partitioned detach failed")
+    .unwrap_or_default();
+    assert_eq!(sqlstate, "P0001");
+    let (node_rows, edge_rows, projected_edge, tx_dirty, deleted_nodes, deleted_edges) =
+        Spi::connect(|client| {
+            let node_rows = client
+                .select(
+                    "SELECT count(*)::bigint FROM public.graph_gql_detach_nodes_pgtest",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<i64>(1)?
+                .unwrap_or_default();
+            let edge_rows = client
+                .select(
+                    "SELECT count(*)::bigint FROM public.graph_gql_detach_edges_pgtest",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<i64>(1)?
+                .unwrap_or_default();
+            let projected_edge = client
+                .select(
+                    "SELECT count(*)::bigint
+                       FROM graph.traverse(
+                         'graph_gql_detach_nodes_pgtest'::regclass,
+                         'protected',
+                         1,
+                         edge_types := ARRAY['linked'],
+                         hydrate := false
+                       )
+                      WHERE node_id = 'survivor'",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<i64>(1)?
+                .unwrap_or_default();
+            let status = client
+                .select(
+                    "SELECT tx_delta_dirty, tx_delta_deleted_nodes, tx_delta_deleted_edges
+                       FROM graph.status()",
+                    None,
+                    &[],
+                )?
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                node_rows,
+                edge_rows,
+                projected_edge,
+                status.get::<bool>(1)?.unwrap_or(true),
+                status.get::<i32>(2)?.unwrap_or_default(),
+                status.get::<i32>(3)?.unwrap_or_default(),
+            ))
+        })
+        .expect("verify rejected partitioned detach failed");
+    assert_eq!(node_rows, 3);
+    assert_eq!(edge_rows, 2);
+    assert_eq!(projected_edge, 1);
+    assert!(!tx_dirty);
+    assert_eq!(deleted_nodes, 0);
+    assert_eq!(deleted_edges, 0);
+
+    let (returned_id, remaining_node, remaining_edge, node_partition, edge_partition) =
+        Spi::connect(|client| {
+            let node_partition = client
+                .select(
+                    "SELECT tableoid::regclass::text
+                       FROM public.graph_gql_detach_nodes_pgtest
+                      WHERE id = 'deletable'",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<String>(1)?
+                .unwrap_or_default();
+            let edge_partition = client
+                .select(
+                    "SELECT tableoid::regclass::text
+                       FROM public.graph_gql_detach_edges_pgtest
+                      WHERE edge_id = 'deletable-edge'",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<String>(1)?
+                .unwrap_or_default();
+            let returned_id = client
+                .select(
+                    "SELECT row #>> '{id}'
+                       FROM graph.gql(
+                         'MATCH (u:graph_gql_detach_nodes_pgtest {id: ''deletable''}) DETACH DELETE u RETURN u.id AS id'
+                       )",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<String>(1)?
+                .unwrap_or_default();
+            let remaining_node = client
+                .select(
+                    "SELECT count(*)::bigint
+                       FROM public.graph_gql_detach_nodes_pgtest
+                      WHERE id = 'deletable'",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<i64>(1)?
+                .unwrap_or_default();
+            let remaining_edge = client
+                .select(
+                    "SELECT count(*)::bigint
+                       FROM public.graph_gql_detach_edges_pgtest
+                      WHERE edge_id = 'deletable-edge'",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get::<i64>(1)?
+                .unwrap_or_default();
+            Ok::<_, pgrx::spi::Error>((
+                returned_id,
+                remaining_node,
+                remaining_edge,
+                node_partition,
+                edge_partition,
+            ))
+        })
+        .expect("verify accepted partitioned detach failed");
+    assert_eq!(returned_id, "deletable");
+    assert_eq!(remaining_node, 0);
+    assert_eq!(remaining_edge, 0);
+    assert!(node_partition.contains("graph_gql_detach_nodes_p"));
+    assert!(edge_partition.contains("graph_gql_detach_edges_p"));
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
 }
 
 #[pg_test]

@@ -418,8 +418,12 @@ source row through SPI, PostgreSQL enforces table privileges, constraints,
 RLS, triggers, and MVCC, and the GQL result is built from the affected row or
 matched graph coordinates.
 Writes targeting a registered partitioned table use ordinary PostgreSQL DML,
-so PostgreSQL chooses the child partition. A rejected constraint or user
-trigger aborts before pgGraph records a transaction-local projection delta.
+so PostgreSQL chooses the child partition. This applies to node tables and to
+standalone relationship tables, including relationship tables with composite
+primary keys. pgGraph resolves foreign-key endpoints through their partition
+roots so `CREATE`, relationship `DELETE`, and `DETACH DELETE` retain the
+registered parent-table identity. A rejected constraint or user trigger aborts
+before pgGraph records a transaction-local projection delta.
 After the DML statement and its triggers finish, pgGraph re-reads the affected
 source row. Trigger changes to ordinary returned properties therefore remain
 authoritative. pgGraph rejects and rolls back a write when a trigger side effect
@@ -462,7 +466,8 @@ incident edge-row tables, deletes matching forward and reverse edge rows first,
 then deletes the
 matched node row and tombstones the node and deleted graph edges in the current
 backend. If any step fails, PostgreSQL aborts the statement and the source rows
-remain authoritative. `DETACH DELETE` rejects incident relationships that are
+remain authoritative; pgGraph does not retain partial transaction-local
+tombstones. `DETACH DELETE` rejects incident relationships that are
 not backed by registered edge row tables because pgGraph has no safe generic
 policy for rewriting arbitrary endpoint-table foreign keys. `MERGE` is
 supported for one mapped node. The registered primary key columns are the match
