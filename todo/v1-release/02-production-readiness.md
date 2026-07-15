@@ -15,7 +15,7 @@
       trigger, partition, composite-key, and concurrent-write coverage for the
       advertised write profile. The ordered evidence work is tracked in
       [QA-01](./qa-01-write-correctness-matrix-plan.md).
-- [ ] Complete supported-major evidence for mapped safety, guarded PostgreSQL
+- [x] Complete supported-major evidence for mapped safety, guarded PostgreSQL
       errors, definer search paths, relation identity, and exact durable values.
 - [x] Create the machine-readable 1.0 capability/conformance registry and make
       documentation drift fail CI.

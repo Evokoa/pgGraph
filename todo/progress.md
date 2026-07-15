@@ -178,6 +178,14 @@ on PostgreSQL 14.23, 15.18, 16.14, 17.10, and 18.4; the reusable Docker matrix
 also corrected the stale pre-named-graph artifact-path assumption in the lock
 gate.
 
+2026-07-14 R1 supported-major safety closure — Concurrent rename and
+drop/recreate gates pass on PostgreSQL 14.23 through 18.4, proving relation-lock
+serialization, OID-stable rename, and fail-closed replacement behavior. With
+the existing five-major Rust and pgrx evidence, KI-014 through KI-017 and
+KI-021 through KI-024 are retired and the R1 supported-major evidence row is
+complete. Independent review passed after active-key tracking and bounded
+client cleanup removed a failure-path wait risk from the reusable DDL gate.
+
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific
 tombstones through normal compaction and dirty-range base-chunk replacement.

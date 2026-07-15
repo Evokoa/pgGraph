@@ -87,6 +87,13 @@ gate evidence through signed tags and package publishing.
   writer commit and rollback horizons, artifact preservation, and build/vacuum
   exclusion on PostgreSQL 14 through 18. This retires the durable post-build
   node identity limitation from Known Issues.
+- Verified mapped-store validation, guarded PostgreSQL error unwinding, exact
+  durable values, relationship and filter identity, ACL/RLS visibility, and
+  security-definer metadata on PostgreSQL 14 through 18. Concurrent DDL gates
+  additionally prove that builds serialize with registered-relation changes,
+  renames preserve OID identity, and drop/recreate cannot retarget a
+  registration by name. These completed matrix-only limitations are retired
+  from Known Issues.
 - Added a fail-closed trigger-definition preflight for upgrades. Run
   `graph.enable_sync()` or a trigger-mode `graph.build()` to refresh older sync
   triggers before durable ingestion; trigger-mode builds refresh them before

@@ -335,6 +335,9 @@ the same release evidence set; leave its default value of `1` for a standalone
 matrix run.
 Each profile has a ten-minute outer deadline by default. Set
 `PROFILE_TIMEOUT_SECONDS` when slower builders need a larger explicit bound.
+The matrix also verifies that PostgreSQL relation locks serialize builds with
+concurrent DDL: a rename preserves the registered relation OID, while a
+drop/recreate operation cannot silently retarget the registration by name.
 
 ### Packaging, Docker, Upgrade, And Workers
 

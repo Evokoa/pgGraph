@@ -434,7 +434,7 @@ disposable cluster paths.
 | `measure_mmap_pss.sh` | Linux-only mmap sharing PSS measurement across backends | `DBNAME=graph_test BACKENDS=50 ./tests/heavy/measure_mmap_pss.sh` |
 | `run_memory_sanitizers.sh` | pgrx suite plus optional Rust ASan or disposable PostgreSQL-process Valgrind checks | `DBNAME=pggraph_pgbench ./tests/heavy/run_memory_sanitizers.sh` |
 | `run_postgres_process_sanitizer.sh` | Require zero unsuppressed Valgrind errors across persisted mmap, corruption, callback, guarded-error, and build-job paths | `PG_VERSION_FEATURE=pg17 ./tests/heavy/run_postgres_process_sanitizer.sh` |
-| `run_durable_projection_matrix.sh` | Run cross-backend durable lifecycle and publication/writer-lock evidence on PostgreSQL 14-18 | `RUN_RUST_TESTS=0 RUN_PGRX_SQL=0 RUN_GQL_WRITE_MATRIX=0 RUN_DURABLE_PROJECTION_MATRIX=1 ./tests/heavy/run_pg_matrix_docker.sh` |
+| `run_durable_projection_matrix.sh` | Run cross-backend durable lifecycle, concurrent relation-identity DDL, and publication/writer-lock evidence on PostgreSQL 14-18 | `RUN_RUST_TESTS=0 RUN_PGRX_SQL=0 RUN_GQL_WRITE_MATRIX=0 RUN_DURABLE_PROJECTION_MATRIX=1 ./tests/heavy/run_pg_matrix_docker.sh` |
 
 `pgbench_sync.sql`, `sqlstate_acl_boundary.sql`, and
 `playground_release_gate.py` are support files used by the shell gates.

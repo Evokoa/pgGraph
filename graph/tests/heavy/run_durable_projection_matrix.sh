@@ -145,6 +145,10 @@ for major in $PG_VERSIONS; do
     env DBNAME="pggraph_ki026_${major}_locks" \
     "$SCRIPT_DIR/build_lock_regression.sh"
 
+  run_profile "PostgreSQL $major concurrent relation identity DDL" \
+    env DBNAME="pggraph_ki024_${major}_ddl" \
+    "$SCRIPT_DIR/relation_identity_concurrent_ddl.sh"
+
   stop_postgres
   echo "PostgreSQL $major durable projection matrix passed"
 done

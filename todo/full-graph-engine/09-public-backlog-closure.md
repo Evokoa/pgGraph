@@ -134,17 +134,17 @@ should not stay indefinitely on the active Known Issues page.
 | KI-011 | Retire serializer migration item | Upgrade/rebuild documentation and corrupt/trailing-byte regression remain green; historical migration stays in release notes. | RESOLVED-RETIRE |
 | KI-012 | RM-02/RM-03, memory plan, checkpoints 1B/2 | Read-only no longer masks over-budget build; stale/no stats and wide filters spill or fail before OOM under enforced RSS thresholds. | OPEN |
 | KI-013 | RM-02/RM-05/RM-06, checkpoints 1B/3/5 | mmap load, paths, GQL, sync, projection reads, compaction, and analytics all use hard byte/work budgets and pathological stress gates. | OPEN |
-| KI-014 | RM-01 checkpoint 1A | Two-role tests prove hidden nodes/relationships cannot affect coordinates, topology, counts, paths, existence, hydration, or error side channels. | OPEN |
-| KI-015 | RM-01/RM-06 checkpoints 1A/2 | Stable source relationship identity preserves parallel edges through artifact, overlays, paths, writes, rollback, sync, hydration, and compaction. | OPEN |
-| KI-016 | RM-01 checkpoint 1A | Same-named filter columns on different graph/table/attributes remain distinct through build, pushdown, persistence, sync, and load. | OPEN |
-| KI-017 | RM-01/RM-06 checkpoint 1C | Two PostgreSQL backends cannot fork/overwrite a generation; lock/reload/CAS/crash tests preserve one current manifest. | OPEN |
+| KI-014 | RM-01 checkpoint 1A | Two-role tests prove hidden nodes/relationships cannot affect coordinates, topology, counts, paths, existence, hydration, or error side channels. | RETIRED |
+| KI-015 | RM-01/RM-06 checkpoints 1A/2 | Stable source relationship identity preserves parallel edges through artifact, overlays, paths, writes, rollback, sync, hydration, and compaction. | RETIRED |
+| KI-016 | RM-01 checkpoint 1A | Same-named filter columns on different graph/table/attributes remain distinct through build, pushdown, persistence, sync, and load. | RETIRED |
+| KI-017 | RM-01/RM-06 checkpoint 1C | Two PostgreSQL backends cannot fork/overwrite a generation; lock/reload/CAS/crash tests preserve one current manifest. | RETIRED |
 | KI-018 | RM-01/RM-06 checkpoints 1C/2 | Injected write/checksum/mmap validation/catch-up failure leaves the old generation current and queryable. | OPEN |
 | KI-019 | RM-01/RF-09 checkpoints 1A/6 and QA-01 | Mutable GQL writes support PostgreSQL savepoint rollback/release through per-subtransaction delta frames, with READ COMMITTED, REPEATABLE READ, and SERIALIZABLE two-session gates. | RETIRED |
 | KI-020 | RM-01 and RUST-00A through RUST-00B | Out-of-range/corrupt mapped-layout tests cannot reach unchecked pointer arithmetic; only an owning validated layout constructs stores; Miri/in-memory backing plus PostgreSQL sanitizer matrix is green. | RETIRED |
-| KI-021 | RM-01 and RUST-00C | Rust destructors unwind through the supported pgrx guard before PostgreSQL ERROR; SQLSTATE/diagnostic behavior is versioned and exact on PG14-PG19; no deep raw `errfinish()` remains. | IMPLEMENTED ON PG17; MATRIX OPEN |
-| KI-022 | RM-01/RM-06 and RUST-00D/RUST-5 | Every filter value domain roundtrips through build, sync, persisted segment, restart, and reload; old/new format behavior is documented and differential results match. | IMPLEMENTED ON PG17; MATRIX PENDING |
-| KI-023 | RM-01 and RUST-00E | Every security-definer function has the vetted `proconfig` search path and shadow-schema attack tests prove catalog/function/operator resolution cannot be redirected. | IMPLEMENTED ON PG17; MATRIX PENDING |
-| KI-024 | RM-01/RM-06 and RUST-00F | OID-stable relation identity survives rename/search-path change and fails closed on drop/recreate; concurrent-DDL and supported-major matrix evidence remain. | IMPLEMENTED ON PG17; MATRIX PENDING |
+| KI-021 | RM-01 and RUST-00C | Rust destructors unwind through the supported pgrx guard before PostgreSQL ERROR; SQLSTATE/diagnostic behavior is versioned and exact on every supported major; no deep raw `errfinish()` remains. | RETIRED |
+| KI-022 | RM-01/RM-06 and RUST-00D/RUST-5 | Every filter value domain roundtrips through build, sync, persisted segment, restart, and reload; old/new format behavior is documented and differential results match. | RETIRED |
+| KI-023 | RM-01 and RUST-00E | Every security-definer function has the vetted `proconfig` search path and shadow-schema attack tests prove catalog/function/operator resolution cannot be redirected. | RETIRED |
+| KI-024 | RM-01/RM-06 and RUST-00F | OID-stable relation identity survives rename/search-path change, serializes with concurrent DDL, and fails closed on drop/recreate across every supported major. | RETIRED |
 | KI-025 | RM-01/RM-08 and RUST-1 | Failure injection proves background-worker transactions do not commit unintended partial state or leave stuck jobs; intentional progress checkpoints are documented and tested. | OPEN |
 | KI-026 | RM-01/RM-06 | Durable post-build node identity, cross-backend lifecycle, writer horizons, and publication locks remain exact across every supported PostgreSQL major. | RETIRED |
 
