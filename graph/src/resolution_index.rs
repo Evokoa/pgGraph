@@ -375,7 +375,8 @@ impl<'a> ResolutionIndex<'a> {
         None
     }
 
-    /// Number of entries.
+    /// Number of entries available to unit-test invariant checks.
+    #[cfg(test)]
     pub fn len(&self) -> u32 {
         self.entry_count
     }

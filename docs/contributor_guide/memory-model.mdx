@@ -4,8 +4,9 @@ The engine is designed around cache-friendly owned arrays during build and
 read-only mapped fixed-width arrays after persistence. PostgreSQL backends do
 not share Rust heap memory or mapped snapshots. After auto-load, each backend
 copies the artifact into an anonymous read-only mapping before typed views are
-created, while derived and variable-size structures remain per-backend heap
-allocations.
+created. Format v5 keeps both CSR directions, filter values and dictionaries,
+and relationship identities in that mapping; mutable changes remain compact
+backend-local overlays.
 This mapping is for rebuildable graph artifacts only; PostgreSQL still owns
 authoritative table storage, WAL, MVCC, durability, and crash recovery.
 
@@ -14,17 +15,19 @@ authoritative table storage, WAL, MVCC, durability, and crash recovery.
 <SharedMemoryDiagram>
   <SharedMemoryBackends title="Engine struct">
     - `node_store` -> Arc-owned mmap ranges
-    - `edge_store` -> Arc-owned mmap ranges
+    - `edge_store` and `reverse_edge_store` -> Arc-owned mmap ranges
     - `resolution_store` -> mmap section
+    - `filter_index` -> mmap base plus sparse deltas
+    - `relationship_identities` -> mmap base plus suffix overlay
     - `_mmap handle`
   </SharedMemoryBackends>
   <SharedMemoryTarget title="Backend-local snapshot">
     - anonymous read-only mapped pages
   </SharedMemoryTarget>
   <SharedMemoryHeap title="Per-backend heap after load">
-    - **FilterIndex** — bincode section deserialized per backend
-    - **edge_type_registry** — bincode section deserialized per backend
-    - **reverse_edge_store** — derived owned CSR for inbound traversal
+    - **FilterIndex deltas** — sparse post-load mutations
+    - **edge_type_registry** — bounded decoded labels
+    - **relationship identity suffix** — identities added after load
     - **resolution_delta** — indexed post-load sync inserts
     - **edge_buffer** — post-load sync edge overlays
     - **tenant_membership** — backend-local state
@@ -33,13 +36,13 @@ authoritative table storage, WAL, MVCC, durability, and crash recovery.
 </SharedMemoryDiagram>
 
 <Callout type="info">
-The forward base graph is copied once into each loading backend's anonymous
+The base graph is copied once into each loading backend's anonymous
 read-only mapping, not expanded into per-field heap collections. Node arrays,
-forward CSR arrays, primary-key bytes, and resolution bytes view that mapping.
-Forward CSR includes the schema-direction
-flag bytes used to identify generated reverse copies of bidirectional edge
-rows. The reverse CSR and bincode sections are currently per-backend heap
-structures.
+forward and inbound CSR arrays, relationship-ID sidecars, primary-key bytes,
+resolution bytes, filter values and dictionaries, and relationship identities
+view that mapping. Each backend still has a private virtual mapping; resident
+pages are accounted as private mapped/page-cache-backed bytes rather than
+described as shared extension memory.
 </Callout>
 
 ## Runtime Resource Governors
@@ -91,7 +94,8 @@ all mmap-backed.
   { name: 'edge_offsets', type: 'Vec<u32> or [u32]', desc: 'length node_count + 1; offsets into target arrays' },
   { name: 'targets', type: 'Vec<u32> or [u32]', desc: 'neighbor node indices' },
   { name: 'type_ids', type: 'Vec<u8> or [u8]', desc: 'parallel edge label IDs' },
-  { name: 'weights', type: 'Vec<u32> or [u32]', desc: 'optional parallel edge weights' }
+  { name: 'weights', type: 'Vec<u32> or [u32]', desc: 'optional parallel edge weights' },
+  { name: 'relationship_ids', type: 'Vec<u32> or [u32]', desc: 'parallel source identity IDs' }
 ]} />
 
 CSR neighbor lookup:
@@ -125,11 +129,12 @@ CSR invariants:
 | Forward `EdgeStore.targets` | mmap-backed |
 | Forward `EdgeStore.type_ids` | mmap-backed |
 | Forward `EdgeStore.weights` | mmap-backed when present |
-| Forward `EdgeStore.relationship_ids` | backend-local heap sidecar validated from persisted edge metadata |
+| Forward `EdgeStore.relationship_ids` | mmap-backed |
+| Inbound `EdgeStore` parallel arrays and relationship IDs | mmap-backed |
 | `ResolutionIndex` | mmap-backed section |
-| `FilterIndex` | bincode payload deserialized into backend heap |
-| `edge_type_registry` and relationship identity dictionary | bincode payload deserialized into backend heap |
-| `reverse_edge_store` | built as owned heap from forward edges, including relationship IDs |
+| `FilterIndex` immutable values and text dictionaries | mmap-backed; sparse mutations stay in heap deltas |
+| `edge_type_registry` | bounded labels decoded into backend heap |
+| Relationship identity descriptors and source keys | mmap-backed; post-load identities use an owned suffix |
 | Sync overlays | backend-local heap |
 
 ## FilterIndex Storage
@@ -174,20 +179,22 @@ Mmap mode performs binary search directly over the persisted bytes.
 ```text
 nodes * (active bit + table_oid + average primary key)
 + forward CSR arrays
++ inbound CSR arrays
 + schema-direction flags
-+ reverse CSR arrays
 + resolution index
-+ FilterIndex heap
++ bounded FilterIndex and relationship-identity overlay heap
 + edge overlay buffer
 ```
 
 `graph.estimate()` and build preflight use a separate conservative estimate
 from PostgreSQL row estimates before allocating the engine.
 
-When the engine is loaded from a `.pggraph` file, the artifact snapshot is
-counted as backend-private memory. Reverse CSR, filter index, registry, and
-overlay structures are also per-backend allocations. The public shared-memory
-profile columns remain for 1.x compatibility and currently report zero.
+When the engine is loaded from a `.pggraph` file, the anonymous artifact
+snapshot and its resident page-cache-backed bytes are counted as
+backend-private mapped memory. Filter and relationship-identity deltas, the
+registry, and other overlays are additional backend-private heap allocations.
+The public shared-memory profile columns remain for 1.x compatibility and
+currently report zero.
 
 ## Mmap Materialization For Sync
 
@@ -213,9 +220,9 @@ handle cannot invalidate a safe store method.
 
 | Type | Validation |
 |---|---|
-| `ValidatedGraphLayout` | section ordering, bounds, sizes, alignment, CRC, CSR content, target bounds, primary-key offsets, UTF-8, and length-prefixed payload framing |
+| `ValidatedGraphLayout` | section descriptors, ordering, bounds, sizes, alignment, both CRCs, both CSR directions, target bounds, primary-key offsets, filters, dictionaries, identities, and UTF-8 |
 | `MmapNodeArrays::new_for_artifact` | owning byte ranges, active byte count, `u32`/`u64` alignment, complete primary-key offsets, terminal byte count, UTF-8 boundaries, and native endian policy |
-| `MmapEdgeArrays::new_for_artifact` | owning byte ranges, optional weights, `u32` alignment, monotonic CSR offsets, terminal edge count, target bounds, schema-direction flags, and native endian policy |
+| `MmapEdgeArrays::new_for_artifact` | owning byte ranges, optional weights, relationship IDs, `u32` alignment, monotonic CSR offsets, terminal edge count, target bounds, schema-direction flags, and native endian policy |
 
 The persisted format is little-endian. Native typed views over the snapshot are
 therefore enabled only on little-endian targets; other targets receive an

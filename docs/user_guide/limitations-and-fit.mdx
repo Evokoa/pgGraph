@@ -14,7 +14,7 @@ data into another system.
 | SQL-first applications | The current public API is PostgreSQL SQL functions in the `graph` schema, including the `graph.gql()` SQL function for the documented GQL subset |
 | Existing relational schemas | Tables, primary keys, unique keys, and foreign keys are enough to model many graphs |
 | Operational Postgres teams | Source tables, ACLs, RLS, backups, and observability remain PostgreSQL concerns |
-| Validated persisted startup | Forward graph arrays and resolution bytes load into one compact immutable mapping per backend |
+| Validated persisted startup | Both graph directions, filters, identities, and resolution bytes load into one compact immutable mapping per backend |
 
 ## Not The Target
 
@@ -40,7 +40,7 @@ data into another system.
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |
-| mmap sharing | Forward graph arrays, schema-direction flags, and resolution bytes are read-only mmap-backed derived artifact sections; reverse CSR and bincode metadata are per-backend heap |
+| mmap residency | Format v5 loads both CSR directions, relationship IDs, filters, dictionaries, identities, and resolution as a backend-local read-only mapped snapshot; sparse mutable deltas remain backend-local heap |
 | Query catch-up | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; set `graph.query_freshness = 'off'` for compatibility/manual catch-up |
 | Search | Search runs against registered source-table columns through PostgreSQL, not against a full-text graph artifact |
 | Hydration | Hydrated rows come from source tables and require source-table privileges; required GQL hydration fails closed with SQLSTATE `22000` and diagnostic `PG017` if a graph coordinate no longer has a readable source row |
@@ -84,10 +84,11 @@ recovery.
 |---|---|
 | Node active bits, table OIDs, primary-key bytes | Backend-local immutable mapped snapshot after load |
 | Forward CSR arrays | Backend-local immutable mapped snapshot after load |
+| Inbound CSR arrays | Backend-local immutable mapped snapshot after load |
 | Resolution index | Backend-local immutable mapped snapshot after load |
-| Reverse CSR | backend-local heap |
-| Filter index | backend-local heap after bincode deserialize |
-| Edge type registry | backend-local heap after bincode deserialize |
+| Filter values and text dictionaries | Backend-local immutable mapped snapshot plus sparse heap deltas |
+| Relationship identities | Backend-local immutable mapped snapshot plus an owned suffix for post-load identities |
+| Edge type registry | Bounded backend-local decoded labels |
 | Durable projection segments | Shared files loaded from the graph artifact directory |
 | Transaction-local and legacy sync overlays | backend-local heap |
 

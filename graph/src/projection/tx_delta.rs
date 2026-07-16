@@ -525,6 +525,7 @@ pub(crate) fn record_relationship_identity(
 }
 
 /// Return transaction-local relationship identities in allocation order.
+#[cfg(test)]
 pub(crate) fn relationship_identities() -> Vec<RelationshipIdentity> {
     TX_DELTA.with(|delta| {
         delta

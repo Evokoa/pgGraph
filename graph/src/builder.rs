@@ -481,15 +481,15 @@ pub(crate) fn build_graph_with_governor(
             .filter_index
             .find_column_for_table(table_oid, &column_name)
         {
-            let value = value.map(|value| match value {
-                PendingFilterValue::Encoded(value) => value,
-                PendingFilterValue::Text(value) => {
-                    let token = engine
+            let value = match value {
+                None => None,
+                Some(PendingFilterValue::Encoded(value)) => Some(value),
+                Some(PendingFilterValue::Text(value)) => Some(EncodedFilterValue::Text(
+                    engine
                         .filter_index
-                        .intern_text_value(global_filter_idx, &value);
-                    EncodedFilterValue::Text(token)
-                }
-            });
+                        .intern_text_value(global_filter_idx, &value)?,
+                )),
+            };
             engine
                 .filter_index
                 .set_encoded_value(global_filter_idx, node_idx, value);
@@ -678,7 +678,10 @@ pub(crate) fn build_graph_with_governor(
         ));
     }
     engine.replace_edge_stores(edge_store)?;
-    engine.relationship_identities = relationship_identities;
+    engine.relationship_identities =
+        crate::relationship_identity_store::RelationshipIdentityStore::try_from_owned(
+            relationship_identities,
+        )?;
 
     // Mark as built
     engine.finish_build(Some(pgrx::datetime::transaction_timestamp()));

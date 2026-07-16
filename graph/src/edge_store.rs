@@ -6,11 +6,11 @@
 //! ## Modes
 //!
 //! - **Owned** (build time): Data in `Vec<T>`, supports construction from raw edges.
-//! - **Mmap** (load time): Forward CSR arrays are read from a backend-local
-//!   immutable artifact snapshot.
+//! - **Mmap** (load time): CSR arrays and their relationship-ID sidecar are
+//!   read from a backend-local immutable artifact snapshot.
 //!
-//! The engine currently derives a separate owned reverse CSR per backend from
-//! the mmap-backed forward CSR so inbound traversal remains direct.
+//! Owned stores can derive a reverse CSR for nonpersisted builds. Persisted
+//! artifacts may instead map independently stored forward and inbound CSRs.
 //!
 //! ## Invariants
 //!
@@ -18,6 +18,7 @@
 //! - `edge_offsets` is monotonically non-decreasing
 //! - `targets.len() == type_ids.len() == total_edge_count`
 //! - `weights.len()` is either 0 (unweighted) or `total_edge_count`
+//! - `relationship_ids.len() == total_edge_count`
 //!
 //! See: `docs/contributor_guide/memory-model.mdx`
 
@@ -49,6 +50,7 @@ pub(crate) struct MmapEdgeArrays {
     type_ids_range: Range<usize>,
     schema_reversed_range: Range<usize>,
     weights_range: Option<Range<usize>>,
+    relationship_ids_range: Range<usize>,
     node_count: u32,
     edge_count: u32,
 }
@@ -68,6 +70,8 @@ pub(crate) struct MmapEdgeArrayParts {
     pub(crate) schema_reversed_range: Range<usize>,
     /// `edge_count` weights when present.
     pub(crate) weights_range: Option<Range<usize>>,
+    /// `edge_count` stable source-row relationship identifiers.
+    pub(crate) relationship_ids_range: Range<usize>,
     /// Number of nodes represented by the CSR offset table.
     pub(crate) node_count: u32,
     /// Number of edges represented by the parallel edge arrays.
@@ -102,6 +106,8 @@ impl MmapEdgeArrays {
         let type_id_bytes = parts.edge_count as usize;
         let schema_reversed_bytes = parts.edge_count as usize;
         let weight_bytes = (parts.edge_count as usize).checked_mul(std::mem::size_of::<u32>())?;
+        let relationship_id_bytes =
+            (parts.edge_count as usize).checked_mul(std::mem::size_of::<RelationshipId>())?;
         if parts.offsets_range.len() != offset_bytes
             || parts.targets_range.len() != target_bytes
             || parts.type_ids_range.len() != type_id_bytes
@@ -110,6 +116,7 @@ impl MmapEdgeArrays {
                 .weights_range
                 .as_ref()
                 .is_some_and(|range| range.len() != weight_bytes)
+            || parts.relationship_ids_range.len() != relationship_id_bytes
             || !range_in_region(&parts.offsets_range, parts.mmap.len())
             || !range_in_region(&parts.targets_range, parts.mmap.len())
             || !range_in_region(&parts.type_ids_range, parts.mmap.len())
@@ -118,6 +125,7 @@ impl MmapEdgeArrays {
                 .weights_range
                 .as_ref()
                 .is_some_and(|range| !range_in_region(range, parts.mmap.len()))
+            || !range_in_region(&parts.relationship_ids_range, parts.mmap.len())
         {
             return None;
         }
@@ -132,6 +140,9 @@ impl MmapEdgeArrays {
                 base.checked_add(range.start)
                     .is_none_or(|address| !address.is_multiple_of(std::mem::align_of::<u32>()))
             })
+            || !base
+                .checked_add(parts.relationship_ids_range.start)?
+                .is_multiple_of(std::mem::align_of::<RelationshipId>())
         {
             return None;
         }
@@ -158,6 +169,7 @@ impl MmapEdgeArrays {
             type_ids_range: parts.type_ids_range,
             schema_reversed_range: parts.schema_reversed_range,
             weights_range: parts.weights_range,
+            relationship_ids_range: parts.relationship_ids_range,
             node_count: parts.node_count,
             edge_count: parts.edge_count,
         })
@@ -183,6 +195,10 @@ impl MmapEdgeArrays {
         self.weights_range
             .as_ref()
             .map_or(&[], |range| u32_slice(&self.mmap, range))
+    }
+
+    fn relationship_ids(&self) -> &[RelationshipId] {
+        u32_slice(&self.mmap, &self.relationship_ids_range)
     }
 
     fn neighbor_range(&self, node_idx: u32) -> Option<Range<usize>> {
@@ -221,6 +237,7 @@ enum EdgeBacking {
         type_ids: Vec<u8>,
         schema_reversed: Vec<u8>,
         weights: Vec<u32>,
+        relationship_ids: Vec<RelationshipId>,
     },
     /// Load-time: validated ranges into an Arc-owned read-only mapping.
     Mmap { arrays: MmapEdgeArrays },
@@ -490,8 +507,8 @@ impl SortedEdgeStoreBuilder {
                 type_ids: self.type_ids,
                 schema_reversed: self.schema_reversed,
                 weights: self.weights,
+                relationship_ids: self.relationship_ids,
             },
-            relationship_ids: self.relationship_ids,
         }
     }
 }
@@ -516,7 +533,6 @@ fn try_filled_vec<T: Clone>(len: usize, value: T) -> GraphResult<Vec<T>> {
 /// Compressed Sparse Row (CSR) edge storage.
 pub struct EdgeStore {
     backing: EdgeBacking,
-    relationship_ids: Vec<RelationshipId>,
 }
 
 impl EdgeStore {
@@ -529,20 +545,15 @@ impl EdgeStore {
                 type_ids: Vec::new(),
                 schema_reversed: Vec::new(),
                 weights: Vec::new(),
+                relationship_ids: Vec::new(),
             },
-            relationship_ids: Vec::new(),
         }
     }
 
-    /// Create an mmap-backed EdgeStore from owning ranges and relationship IDs.
-    pub(crate) fn from_mmap_with_relationship_ids(
-        arrays: MmapEdgeArrays,
-        relationship_ids: Vec<RelationshipId>,
-    ) -> Self {
-        debug_assert_eq!(relationship_ids.len(), arrays.edge_count as usize);
+    /// Create an mmap-backed edge store from validated owning ranges.
+    pub(crate) fn from_mmap(arrays: MmapEdgeArrays) -> Self {
         Self {
             backing: EdgeBacking::Mmap { arrays },
-            relationship_ids,
         }
     }
 
@@ -612,8 +623,8 @@ impl EdgeStore {
                 type_ids,
                 schema_reversed,
                 weights,
+                relationship_ids: vec![NO_RELATIONSHIP_ID; edge_count],
             },
-            relationship_ids: vec![NO_RELATIONSHIP_ID; edge_count],
         }
     }
 
@@ -699,7 +710,7 @@ impl EdgeStore {
                 reversed_type_ids[write_idx] = type_id;
                 reversed_schema_reversed[write_idx] = schema_reversed[idx];
                 reversed_relationship_ids[write_idx] = self
-                    .relationship_ids
+                    .relationship_ids_slice()
                     .get(self.offsets_slice()[source as usize] as usize + idx)
                     .copied()
                     .unwrap_or(NO_RELATIONSHIP_ID);
@@ -716,8 +727,8 @@ impl EdgeStore {
                 type_ids: reversed_type_ids,
                 schema_reversed: reversed_schema_reversed,
                 weights: reversed_weights,
+                relationship_ids: reversed_relationship_ids,
             },
-            relationship_ids: reversed_relationship_ids,
         })
     }
 
@@ -814,7 +825,7 @@ impl EdgeStore {
             .copied()
             .unwrap_or(0) as usize;
         let end = start.saturating_add(targets.len());
-        let relationship_ids = self.relationship_ids.get(start..end).unwrap_or(&[]);
+        let relationship_ids = self.relationship_ids_slice().get(start..end).unwrap_or(&[]);
         (targets, type_ids, schema_reversed, relationship_ids)
     }
 
@@ -832,6 +843,7 @@ impl EdgeStore {
                 type_ids,
                 schema_reversed: _,
                 weights,
+                ..
             } => {
                 let start = edge_offsets[node_idx as usize] as usize;
                 let end = edge_offsets[node_idx as usize + 1] as usize;
@@ -908,12 +920,14 @@ impl EdgeStore {
                 type_ids,
                 schema_reversed,
                 weights,
+                relationship_ids,
             } => {
                 edge_offsets.capacity() * std::mem::size_of::<u32>()
                     + targets.capacity() * std::mem::size_of::<u32>()
                     + type_ids.capacity() * std::mem::size_of::<u8>()
                     + schema_reversed.capacity() * std::mem::size_of::<u8>()
                     + weights.capacity() * std::mem::size_of::<u32>()
+                    + relationship_ids.capacity() * std::mem::size_of::<RelationshipId>()
             }
             EdgeBacking::Mmap { .. } => 0,
         }
@@ -931,6 +945,7 @@ impl EdgeStore {
                     .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u8>())
                     .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u8>())
                     .saturating_add(weight_bytes)
+                    .saturating_add(arrays.relationship_ids_range.len())
             }
         }
     }
@@ -1004,7 +1019,12 @@ impl EdgeStore {
 
     /// Relationship IDs in CSR adjacency order.
     pub(crate) fn relationship_ids_slice(&self) -> &[RelationshipId] {
-        &self.relationship_ids
+        match &self.backing {
+            EdgeBacking::Owned {
+                relationship_ids, ..
+            } => relationship_ids,
+            EdgeBacking::Mmap { arrays } => arrays.relationship_ids(),
+        }
     }
 }
 
@@ -1045,6 +1065,7 @@ mod tests {
         type_ids: [u8; 1],
         schema_reversed: [u8; 1],
         weights: [u32; 1],
+        relationship_ids: [RelationshipId; 1],
     }
 
     impl MappedEdgeFixture {
@@ -1055,6 +1076,7 @@ mod tests {
                 type_ids: [7],
                 schema_reversed: [0],
                 weights: [9],
+                relationship_ids: [41],
             }
         }
 
@@ -1071,7 +1093,12 @@ mod tests {
                 .end
                 .next_multiple_of(std::mem::align_of::<u32>());
             let weights_range = weights_start..weights_start + std::mem::size_of_val(&self.weights);
-            let mut mapping = vec![0u8; weights_range.end];
+            let relationship_ids_start = weights_range
+                .end
+                .next_multiple_of(std::mem::align_of::<RelationshipId>());
+            let relationship_ids_range = relationship_ids_start
+                ..relationship_ids_start + std::mem::size_of_val(&self.relationship_ids);
+            let mut mapping = vec![0u8; relationship_ids_range.end];
             for (chunk, value) in mapping[offsets_range.clone()]
                 .chunks_exact_mut(4)
                 .zip(self.offsets)
@@ -1092,6 +1119,12 @@ mod tests {
             {
                 chunk.copy_from_slice(&value.to_le_bytes());
             }
+            for (chunk, value) in mapping[relationship_ids_range.clone()]
+                .chunks_exact_mut(std::mem::size_of::<RelationshipId>())
+                .zip(self.relationship_ids)
+            {
+                chunk.copy_from_slice(&value.to_le_bytes());
+            }
             MmapEdgeArrayParts {
                 mmap: MappedBytes::from_test_bytes(mapping),
                 offsets_range,
@@ -1099,6 +1132,7 @@ mod tests {
                 type_ids_range,
                 schema_reversed_range,
                 weights_range: Some(weights_range),
+                relationship_ids_range,
                 node_count: 2,
                 edge_count: 1,
             }
@@ -1365,6 +1399,21 @@ mod tests {
         .is_none());
         assert!(MmapEdgeArrays::new(MmapEdgeArrayParts {
             type_ids_range: valid.mmap.len()..valid.mmap.len() + 1,
+            ..valid.clone()
+        })
+        .is_none());
+        assert!(MmapEdgeArrays::new(MmapEdgeArrayParts {
+            relationship_ids_range: 0..0,
+            ..valid.clone()
+        })
+        .is_none());
+        assert!(MmapEdgeArrays::new(MmapEdgeArrayParts {
+            relationship_ids_range: 1..5,
+            ..valid.clone()
+        })
+        .is_none());
+        assert!(MmapEdgeArrays::new(MmapEdgeArrayParts {
+            relationship_ids_range: valid.mmap.len()..valid.mmap.len() + 4,
             ..valid
         })
         .is_none());
@@ -1375,10 +1424,11 @@ mod tests {
         let store = {
             let arrays = MmapEdgeArrays::new(MappedEdgeFixture::valid().parts())
                 .expect("valid mapped edge fixture");
-            EdgeStore::from_mmap_with_relationship_ids(arrays, vec![NO_RELATIONSHIP_ID])
+            EdgeStore::from_mmap(arrays)
         };
         assert_eq!(store.neighbors(0), (&[1][..], &[7][..]));
         assert_eq!(store.weights_slice(), &[9]);
+        assert_eq!(store.relationship_ids_slice(), &[41]);
     }
 
     #[test]
@@ -1421,7 +1471,7 @@ mod tests {
     fn mmap_edge_accessors_use_validated_in_memory_layout() {
         let fixture = MappedEdgeFixture::valid();
         let arrays = MmapEdgeArrays::new(fixture.parts()).expect("valid mapped edge fixture");
-        let store = EdgeStore::from_mmap_with_relationship_ids(arrays, vec![NO_RELATIONSHIP_ID]);
+        let store = EdgeStore::from_mmap(arrays);
 
         assert_eq!(store.node_count(), 2);
         assert_eq!(store.edge_count(), 1);
@@ -1440,6 +1490,7 @@ mod tests {
         assert_eq!(store.type_ids_slice(), &[7]);
         assert_eq!(store.schema_reversed_slice(), &[0]);
         assert_eq!(store.weights_slice(), &[9]);
+        assert_eq!(store.relationship_ids_slice(), &[41]);
     }
 
     #[test]

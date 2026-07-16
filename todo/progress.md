@@ -243,3 +243,10 @@ standalone `scripts/check_secrets.sh` entry point.
 2026-07-11 R0 — Froze the PostgreSQL 14-18 and documented GQL 1.x contract,
 published compatibility/deprecation guidance, added a drift-checked API/GUC/
 diagnostic inventory, release-note template, and versioned migration fixtures.
+
+2026-07-16 R3C artifact v5 and bounded load — The explicit 23-section format
+now maps both CSR directions, filters, dictionaries, and relationship
+identities; exact resolution/CSR/filter/registry validation and governed load
+metadata fail closed. The 817-test Rust suite, Clippy, rustdoc, docs drift, and
+two independent review passes are green; direct run-to-artifact construction
+remains the R3D checkpoint.

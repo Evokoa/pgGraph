@@ -865,22 +865,12 @@ fn matched_edge_ids(
         .ok_or_else(|| safety::GraphError::GqlExecution {
             reason: "GQL DELETE requires a stable source-row relationship identity".to_string(),
         })?;
-    let identities = relationship_identity_snapshot();
-    let identity = identities
-        .get(relationship_id as usize)
-        .and_then(Option::as_ref)
-        .filter(|identity| identity.mapping_id == plan.edge_mapping_id)
-        .ok_or_else(|| safety::GraphError::GqlExecution {
-            reason: format!(
-                "GQL DELETE relationship identity `{relationship_id}` does not belong to mapping {}",
-                plan.edge_mapping_id
-            ),
-        })?;
+    let source_key = relationship_source_key_owned(relationship_id, plan.edge_mapping_id)?;
     Ok(MatchedEdgeIds {
         source_id: rel_start.node_id.clone(),
         target_id: rel_end.node_id.clone(),
         relationship_id,
-        source_key: identity.source_key.clone(),
+        source_key,
     })
 }
 
@@ -3164,7 +3154,7 @@ fn encode_filter_value_from_json(
         }
         crate::filter_index::FilterColumnType::Text => {
             let value = crate::sql_filters::jsonb_filter_text(raw)?;
-            let token = filter_index.intern_text_value(column_idx, &value);
+            let token = filter_index.intern_text_value(column_idx, &value)?;
             Ok(Some(crate::filter_index::EncodedFilterValue::Text(token)))
         }
         crate::filter_index::FilterColumnType::Date => {
@@ -3363,14 +3353,33 @@ fn ensure_gql_relationship_rows_visible(
     ensure_relationship_source_keys_visible(edge_mapping, relationship_ids, governor)
 }
 
-fn relationship_identity_snapshot() -> Vec<Option<crate::edge_store::RelationshipIdentity>> {
-    let mut identities = ENGINE.with(|engine| engine.borrow().relationship_identities.clone());
-    identities.extend(
-        crate::projection::tx_delta::relationship_identities()
-            .into_iter()
-            .map(Some),
-    );
-    identities
+fn relationship_source_key_owned(
+    relationship_id: crate::edge_store::RelationshipId,
+    expected_mapping_id: u64,
+) -> safety::GraphResult<String> {
+    let base_count = ENGINE.with(|engine| engine.borrow().relationship_identities.len());
+    let identity = if (relationship_id as usize) < base_count {
+        ENGINE.with(|engine| {
+            engine
+                .borrow()
+                .relationship_identities
+                .get(relationship_id)
+                .map(|identity| identity.to_owned())
+        })
+    } else {
+        crate::projection::tx_delta::with_relationship_identity(
+            relationship_id as usize - base_count,
+            |identity| identity.cloned(),
+        )
+    };
+    identity
+        .filter(|identity| identity.mapping_id == expected_mapping_id)
+        .map(|identity| identity.source_key)
+        .ok_or_else(|| safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL DELETE relationship identity `{relationship_id}` does not belong to mapping {expected_mapping_id}"
+            ),
+        })
 }
 
 fn reserve_relationship_id_workspace(
@@ -3818,16 +3827,15 @@ fn hydrate_required_relationship(
 
 fn relationship_source_identity<'a>(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
-    relationship_identities: &'a [Option<crate::edge_store::RelationshipIdentity>],
+    relationship_identities: &'a crate::relationship_identity_store::RelationshipIdentityStore,
     relationship_id: Option<crate::edge_store::RelationshipId>,
-) -> safety::GraphResult<&'a crate::edge_store::RelationshipIdentity> {
+) -> safety::GraphResult<crate::relationship_identity_store::RelationshipIdentityRef<'a>> {
     let relationship_id = relationship_id.ok_or_else(|| safety::GraphError::GqlExecution {
         reason: "GQL relationship hydration requires a stable source-row relationship identity"
             .to_string(),
     })?;
     let identity = relationship_identities
-        .get(relationship_id as usize)
-        .and_then(Option::as_ref)
+        .get(relationship_id)
         .ok_or_else(|| safety::GraphError::GqlExecution {
             reason: format!("GQL relationship identity `{relationship_id}` is not available"),
         })?;
@@ -3873,22 +3881,23 @@ fn relationship_identity_owned(
         return ENGINE.with(|engine| {
             let engine = engine.borrow();
             clone_charged_relationship_identity(
-                engine
-                    .relationship_identities
-                    .get(index)
-                    .and_then(Option::as_ref),
+                engine.relationship_identities.get(relationship_id),
                 relationship_id,
                 workspace,
             )
         });
     }
     crate::projection::tx_delta::with_relationship_identity(index - base_count, |identity| {
-        clone_charged_relationship_identity(identity, relationship_id, workspace)
+        clone_charged_relationship_identity(
+            identity.map(crate::relationship_identity_store::RelationshipIdentityRef::from),
+            relationship_id,
+            workspace,
+        )
     })
 }
 
 fn clone_charged_relationship_identity(
-    identity: Option<&crate::edge_store::RelationshipIdentity>,
+    identity: Option<crate::relationship_identity_store::RelationshipIdentityRef<'_>>,
     relationship_id: crate::edge_store::RelationshipId,
     workspace: &mut crate::resource::ResourceLease<'_>,
 ) -> safety::GraphResult<crate::edge_store::RelationshipIdentity> {
@@ -3906,7 +3915,7 @@ fn clone_charged_relationship_identity(
     workspace
         .try_grow(bytes)
         .map_err(crate::safety::resource_limit_error)?;
-    Ok(identity.clone())
+    Ok(identity.to_owned())
 }
 
 fn relationship_source_key_predicate(
@@ -4153,13 +4162,15 @@ mod tests {
     #[test]
     fn relationship_identity_validation_rejects_missing_and_wrong_mapping() {
         let mapping = edge_mapping(7);
-        let identities = vec![
-            None,
-            Some(crate::edge_store::RelationshipIdentity {
-                mapping_id: 8,
-                source_key: "edge-1".to_string(),
-            }),
-        ];
+        let identities =
+            crate::relationship_identity_store::RelationshipIdentityStore::try_from_owned(vec![
+                None,
+                Some(crate::edge_store::RelationshipIdentity {
+                    mapping_id: 8,
+                    source_key: "edge-1".to_string(),
+                }),
+            ])
+            .expect("identity store validates");
 
         assert!(relationship_source_identity(&mapping, &identities, None)
             .unwrap_err()
@@ -4213,13 +4224,19 @@ mod tests {
 
         ENGINE.with(|engine| {
             engine.borrow_mut().relationship_identities =
-                vec![Some(crate::edge_store::RelationshipIdentity {
-                    mapping_id: 8,
-                    source_key: "edge-1".to_string(),
-                })];
+                crate::relationship_identity_store::RelationshipIdentityStore::try_from_owned(
+                    vec![
+                        None,
+                        Some(crate::edge_store::RelationshipIdentity {
+                            mapping_id: 8,
+                            source_key: "edge-1".to_string(),
+                        }),
+                    ],
+                )
+                .expect("identity store validates");
         });
         let wrong_mapping = wildcard_relationship_mapping(
-            &relationship("friend", Some(0)),
+            &relationship("friend", Some(1)),
             &mappings,
             &mapped_types,
             &mut workspace,

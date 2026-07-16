@@ -6,7 +6,7 @@
 //! See: `docs/contributor_guide/engine-internals.mdx`
 
 use crate::bfs;
-use crate::edge_store::{EdgeStore, RelationshipIdentity};
+use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
@@ -18,6 +18,7 @@ use crate::projection::neighbors::{
     CsrNeighbors, EdgeOverlay, OverlayDeletes, OverlayInserts, OverlayNeighbors,
 };
 use crate::projection::tx_delta;
+use crate::relationship_identity_store::RelationshipIdentityStore;
 use crate::resolution_index::{ResolutionDeltaIndex, ResolutionIndex, ResolutionIndexBuilder};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::*;
@@ -63,9 +64,10 @@ impl MmapResolutionState {
 pub(crate) struct MmapBackedGraph {
     pub(crate) node_store: NodeStore,
     pub(crate) edge_store: EdgeStore,
+    pub(crate) reverse_edge_store: EdgeStore,
     pub(crate) filter_index: FilterIndex,
     pub(crate) edge_type_registry: Vec<String>,
-    pub(crate) relationship_identities: Vec<Option<RelationshipIdentity>>,
+    pub(crate) relationship_identities: RelationshipIdentityStore,
     pub(crate) mmap: Arc<memmap2::Mmap>,
     pub(crate) resolution_state: MmapResolutionState,
 }
@@ -77,16 +79,17 @@ pub struct Engine {
     pub(crate) node_store: NodeStore,
     /// Forward CSR adjacency. After `.pggraph` load, this store is mmap-backed.
     pub(crate) edge_store: EdgeStore,
-    /// Reverse CSR adjacency. This is derived into owned heap per backend.
+    /// Inbound CSR adjacency. Persisted artifacts map it directly.
     pub(crate) reverse_edge_store: EdgeStore,
-    /// Traversal filter index. After `.pggraph` load, this is deserialized from a
-    /// bincode section into backend-local heap.
+    /// Traversal filter index. After `.pggraph` load, immutable values and text
+    /// dictionaries remain mapped while transaction deltas use bounded heap.
     pub(crate) filter_index: FilterIndex,
-    /// Edge label registry. After `.pggraph` load, this is deserialized from a
-    /// bincode section into backend-local heap.
+    /// Edge label registry. The bounded artifact section is decoded into
+    /// backend-local heap after validation.
     pub(crate) edge_type_registry: Vec<String>,
-    /// Source-row identities indexed by nonzero CSR relationship IDs.
-    pub(crate) relationship_identities: Vec<Option<RelationshipIdentity>>,
+    /// Source-row identities indexed by nonzero CSR relationship IDs. Persisted
+    /// base descriptors and keys remain mapped; later identities form a suffix.
+    pub(crate) relationship_identities: RelationshipIdentityStore,
     pub(crate) has_unidirectional_edges: bool,
     pub(crate) built: bool,
     pub(crate) sync_status: SyncStatus,
@@ -249,7 +252,7 @@ impl Engine {
             reverse_edge_store: EdgeStore::new(),
             filter_index: FilterIndex::new(),
             edge_type_registry,
-            relationship_identities: vec![None],
+            relationship_identities: RelationshipIdentityStore::default(),
             has_unidirectional_edges: false,
             built: false,
             sync_status: SyncStatus::Idle,
@@ -495,12 +498,7 @@ impl Engine {
                         .filter_map(|edge| edge.relationship_id),
                 )
             {
-                if self
-                    .relationship_identities
-                    .get(relationship_id as usize)
-                    .and_then(Option::as_ref)
-                    .is_none()
-                {
+                if self.relationship_identities.get(relationship_id).is_none() {
                     return Err(GraphError::CorruptFile {
                         reason: format!(
                             "projection segment relationship ID {relationship_id} is outside the active identity dictionary"
@@ -662,10 +660,9 @@ impl Engine {
     }
 
     pub(crate) fn install_mmap_backed_graph(&mut self, graph: MmapBackedGraph) -> GraphResult<()> {
-        let reverse_edge_store = graph.edge_store.try_reversed()?;
         self.node_store = graph.node_store;
         self.edge_store = graph.edge_store;
-        self.reverse_edge_store = reverse_edge_store;
+        self.reverse_edge_store = graph.reverse_edge_store;
         self.filter_index = graph.filter_index;
         self.edge_type_registry = graph.edge_type_registry;
         self.relationship_identities = graph.relationship_identities;
@@ -1734,6 +1731,7 @@ impl Engine {
             + self.edge_store.estimated_heap_bytes()
             + self.reverse_edge_store.estimated_heap_bytes()
             + self.filter_index.estimated_heap_bytes()
+            + self.relationship_identities.estimated_heap_bytes()
             + resolution_bytes
             + registry_bytes
             + edge_buffer_bytes
@@ -1777,6 +1775,7 @@ impl Engine {
         self.node_store
             .estimated_mmap_bytes()
             .saturating_add(self.edge_store.estimated_mmap_bytes())
+            .saturating_add(self.relationship_identities.estimated_mmap_bytes())
             .saturating_add(resolution_bytes)
     }
 

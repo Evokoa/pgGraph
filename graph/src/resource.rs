@@ -150,12 +150,12 @@ fn operation_governor(
 }
 
 #[cfg(not(test))]
-fn configured_memory_limit_mb() -> i32 {
+pub(crate) fn configured_memory_limit_mb() -> i32 {
     crate::config::MEMORY_LIMIT_MB.get()
 }
 
 #[cfg(test)]
-const fn configured_memory_limit_mb() -> i32 {
+pub(crate) const fn configured_memory_limit_mb() -> i32 {
     2_048
 }
 
@@ -305,7 +305,6 @@ pub(crate) enum ResourcePhase {
     BuildRunMerge,
     Persistence,
     LoadMetadata,
-    LoadInbound,
     QueryCandidates,
     QueryExpand,
     QueryFrontier,
@@ -335,7 +334,6 @@ impl ResourcePhase {
             Self::BuildRunMerge => "build.run_merge",
             Self::Persistence => "build.persistence",
             Self::LoadMetadata => "load.metadata",
-            Self::LoadInbound => "load.inbound",
             Self::QueryCandidates => "query.candidates",
             Self::QueryExpand => "query.expand",
             Self::QueryFrontier => "query.frontier",

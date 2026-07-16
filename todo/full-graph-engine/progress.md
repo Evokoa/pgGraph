@@ -606,3 +606,14 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Clippy and Rust documentation | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings`; `cargo clippy --no-default-features --features "pg17 development pg_test" --lib -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --features "pg17 development" --no-deps` | PASS |
 | Contract, docs, secrets, shell, and whitespace | Generated pg17 schema plus `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh`; `scripts/check_secrets.sh all`; runtime/release shell syntax; `git diff --check` | PASS |
 | Independent Rust review | Fresh `rust-reviewing` subagent over the complete raw diff and two follow-up closure batches | PASS: checked token SQL/matcher sizing, borrowed workflow inputs, cumulative fallible output accounting, public low-budget PG007 coverage, compaction/sync closure, evidence, and tree integrity |
+
+### 2026-07-16 R3C Artifact v5 And Bounded Load Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Rust unit suite | `cd graph && cargo test --features "pg17 development" --lib` | PASS: 817 passed, 1 ignored |
+| Focused persistence and identity suites | `cd graph && cargo test --features "pg17 development" persistence:: --lib`; identity/filter focused suites | PASS: v5 round trips and CRC-valid semantic corruption fail closed |
+| Clippy | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings` | PASS |
+| Rust documentation | `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --features "pg17 development" --no-deps`; doctests | PASS |
+| Contract, docs, and whitespace | `scripts/check_docs_drift.sh`; `git diff --check` | PASS |
+| Independent Rust review | Two fresh `rust-reviewing` passes over the complete R3C diff and closure fixes | PASS after exact CSR/resolution validation, canonical filter ranges, duplicate identity/registry checks, fallible governed metadata, and expanded corruption coverage |

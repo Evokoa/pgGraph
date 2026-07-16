@@ -43,6 +43,7 @@ mod persistence;
 mod projection;
 mod query;
 mod quote;
+mod relationship_identity_store;
 mod resolution_index;
 mod resource;
 mod runtime_state;

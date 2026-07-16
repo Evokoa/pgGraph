@@ -722,7 +722,11 @@ fn ingest_projection_until_internal(
         .ok_or_else(|| {
             safety::GraphError::Internal("sync planning residency overflowed".to_string())
         })?;
-    let planning_engine = load_graph_file_with_residency(&graph_path, planning_residency)?;
+    let mut planning_engine = load_graph_file_with_residency(&graph_path, planning_residency)?;
+    // The current projection identity artifact writer still consumes a dense
+    // owned dictionary. Materialize only this planning engine; the serving
+    // engine keeps its mapped base.
+    planning_engine.relationship_identities.materialize()?;
     let planning_engine_bytes =
         crate::resource::ByteCount::from_usize(planning_engine.estimated_memory_used_bytes())
             .ok_or_else(|| {
@@ -751,7 +755,14 @@ fn ingest_projection_until_internal(
             ),
         });
     }
-    let relationship_identities = &planning_engine.relationship_identities;
+    let relationship_identities = planning_engine
+        .relationship_identities
+        .as_owned_slice()
+        .ok_or_else(|| {
+            safety::GraphError::Internal(
+                "materialized relationship identity store was not owned".to_string(),
+            )
+        })?;
     let base_artifact_path = graph_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -2836,7 +2847,7 @@ fn filter_value_from_row_or_properties(
         FilterColumnType::Boolean => Ok(Some(EncodedFilterValue::Boolean(json_value_bool(&raw)?))),
         FilterColumnType::Text => {
             let value = json_value_text(&raw)?;
-            let token = filter_index.intern_text_value(column_idx, &value);
+            let token = filter_index.intern_text_value(column_idx, &value)?;
             Ok(Some(EncodedFilterValue::Text(token)))
         }
         FilterColumnType::Date => Ok(Some(EncodedFilterValue::Date(encode_date_filter_value(
@@ -2955,22 +2966,7 @@ fn intern_sync_relationship_identity(
         mapping_id,
         source_key,
     };
-    if let Some((relationship_id, _)) = eng
-        .relationship_identities
-        .iter()
-        .enumerate()
-        .find(|(_, existing)| existing.as_ref() == Some(&identity))
-    {
-        return crate::edge_store::RelationshipId::try_from(relationship_id).map_err(|_| {
-            safety::GraphError::Internal("relationship identity count exceeds u32".to_string())
-        });
-    }
-    let relationship_id =
-        crate::edge_store::RelationshipId::try_from(eng.relationship_identities.len()).map_err(
-            |_| safety::GraphError::Internal("relationship identity count exceeds u32".to_string()),
-        )?;
-    eng.relationship_identities.push(Some(identity));
-    Ok(relationship_id)
+    eng.relationship_identities.push_or_intern(identity)
 }
 
 pub(crate) fn push_sync_edge_delta(
@@ -3655,11 +3651,13 @@ mod tests {
         assert_eq!(repeated_id, relationship_id);
         assert_eq!(engine.relationship_identities.len(), 2);
         assert_eq!(
-            engine.relationship_identities[1],
-            Some(crate::edge_store::RelationshipIdentity {
-                mapping_id: 9,
-                source_key: "r-1".to_string(),
-            })
+            engine.relationship_identities.get(1),
+            Some(
+                crate::relationship_identity_store::RelationshipIdentityRef {
+                    mapping_id: 9,
+                    source_key: "r-1",
+                }
+            )
         );
     }
 

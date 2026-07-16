@@ -124,10 +124,10 @@ from paths, backend globals, or session state.
 | Loaded graph slot | One PostgreSQL backend process | Tracks the graph id/name for the active `Engine` |
 | `NodeStore` owned mode | `Engine` heap | Mutable build/sync lifetime |
 | `NodeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | The store owns its mapping independently of engine field/drop order |
-| Forward `EdgeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | The store owns its mapping independently of engine field/drop order |
-| `reverse_edge_store` | `Engine` heap | Rebuilt per backend from forward CSR |
-| `FilterIndex` after load | `Engine` heap | Deserialized per backend from bincode |
-| `edge_type_registry` after load | `Engine` heap | Deserialized per backend from bincode |
+| Forward and inbound `EdgeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | Each store owns its mapping independently of engine field/drop order |
+| `FilterIndex` after load | Mapped base plus `Engine` heap deltas | Graph-sized typed values and lexical dictionaries stay mapped; post-load changes are sparse |
+| `edge_type_registry` after load | `Engine` heap | Bounded labels are decoded from their v5 section |
+| Relationship identities after load | Mapped base plus `Engine` heap suffix | Source identity descriptors and keys stay mapped; later identities extend them without copying the base |
 | `ResolutionIndex` mapped mode | Byte range inside the immutable snapshot | The engine retains an `Arc` for resolution lookup and accounting |
 | Durable projection manifests, segments, and chunks | Files beside each graph's `main.pggraph` | Shared through the filesystem and retained by graph-scoped active-generation metadata |
 | `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local compatibility sync overlay state |
@@ -180,19 +180,20 @@ store:
 <PipelineDiagram>
   <PipelineStep title="open .pggraph" />
   <PipelineStep title="mmap read-only" />
-  <PipelineStep title="validate header, version, CRC, sections, CSR, PK offsets, bincode bounds">
+  <PipelineStep title="validate v5 header, both CRCs, 23 descriptors, CSR, PK offsets, filters, and identities">
     - mmap-backed NodeStore arrays
-    - mmap-backed forward EdgeStore arrays
+    - mmap-backed forward and inbound EdgeStore arrays and relationship IDs
     - mmap-backed ResolutionIndex section
-    - heap FilterIndex from bincode
-    - heap edge metadata from bincode
-    - heap reverse_edge_store from forward CSR and relationship IDs
+    - mmap-backed FilterIndex values and lexical dictionaries
+    - mmap-backed relationship identities
+    - bounded decoded column and edge-label metadata
   </PipelineStep>
   <PipelineStep title="Engine owns _mmap and all derived stores" />
 </PipelineDiagram>
 
-The forward graph arrays and resolution section are mmap-backed. The reverse
-CSR and bincode sections are backend-local heap allocations today.
+The graph-sized base representation is mmap-backed in both directions. Sparse
+filter deltas, relationship identity suffixes, and other mutable overlays remain
+backend-local heap allocations.
 
 ## Data Flow: Query
 
@@ -283,7 +284,7 @@ escape hatch. The core unsafe boundary is mmap-backed store construction:
 | Boundary | Required invariant |
 |---|---|
 | `MmapNodeArrays` | Active bytes, OID array, PK offsets, and PK byte ranges are present, aligned, and bounded by the mmap. |
-| `MmapEdgeArrays` | CSR offsets, targets, type IDs, and optional weights are present, aligned, and bounded by the mmap. |
+| `MmapEdgeArrays` | CSR offsets, targets, type IDs, schema flags, optional weights, and relationship IDs are present, aligned, and bounded by the mmap. |
 | `MappedGraphArtifact` | Full-layout validation creates an unforgeable production capability; every mapped store retains shared ownership of the read-only mapping. |
 | `Engine._mmap` | An `Arc<Mmap>` owns the backend-local immutable snapshot for resolution lookup and accounting while node and edge stores retain independent clones. |
 | `GraphError::report()` | A pgrx `ErrorReport` unwinds Rust frames before PostgreSQL emits the standard SQLSTATE and pgGraph diagnostic. |

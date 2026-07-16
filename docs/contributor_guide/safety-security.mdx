@@ -106,25 +106,28 @@ from `load_graph_file()`.
 | Node table OIDs contain `node_count` aligned `u32` values | Section size/alignment validation |
 | Primary-key offsets contain `node_count + 1` aligned `u64` values | Section size/alignment validation |
 | Primary-key offsets start at zero, are monotonic, end at the PK byte length, and select valid UTF-8 | `validate_persisted_contents()` and `MmapNodeArrays::new_for_artifact()` |
-| Forward CSR offsets contain `node_count + 1` aligned `u32` values | Section size/alignment validation |
+| Forward and inbound CSR offsets each contain `node_count + 1` aligned `u32` values | Section size/alignment validation |
 | CSR offsets start at zero, are monotonic, and end at `edge_count` | `validate_persisted_contents()` and `MmapEdgeArrays::new_for_artifact()` |
 | Every target node index is less than `node_count` | `validate_persisted_contents()` and `MmapEdgeArrays::new_for_artifact()` |
 | `type_ids` length equals `edge_count` | Section size validation |
 | `weights` is empty or exactly `edge_count * 4` bytes | Section size validation |
 | `schema_reversed` is exactly `edge_count` bytes of `0` or `1` values | Section validation and `MmapEdgeArrays::new_for_artifact()` |
-| Bincode payload length prefixes stay inside their sections | `validate_length_prefixed_section()` |
+| Relationship-ID sidecars are aligned and match their direction's edge count | Section validation and `MmapEdgeArrays::new_for_artifact()` |
+| Filter descriptors, typed values, presence bytes, and lexical dictionaries stay within their mapped sections | `validate_filter_sections()` and `FilterIndex::from_mapped_sections()` |
+| Relationship identity descriptors select valid UTF-8 key ranges and reserve ID zero | Persistence validation and `MappedRelationshipIdentities` |
 | Edge registry index 0 is the reserved empty label | Loader registry validation |
 | Background worker notify PID is read only while a backend is registering a worker | `launch_build_worker()` and `launch_maintenance_worker()` call PostgreSQL's `MyProcPid` inside an active backend |
 
-The reverse CSR is not mmap-backed. It is rebuilt as an owned `EdgeStore` from
-the forward graph after the forward CSR and schema-direction flags have been
-validated.
+Both CSR directions are mapped from independently validated v5 sections. They
+retain their own relationship IDs and schema-direction flags, so inbound
+traversal does not rebuild graph-sized arrays in backend heap.
 
 ## Loader Hardening
 
 Never construct mmap-backed stores from unvalidated section metadata. The loader
 must validate file size, magic, version, CRC, offsets, section sizes,
-alignment, CSR content, primary-key offsets, and length-prefixed payload bounds
+alignment, both CSR directions, primary-key offsets, filters, dictionaries,
+relationship identities, and bounded registry metadata
 before constructing owning mapped ranges.
 
 Production mapped-array constructors require a private capability created only

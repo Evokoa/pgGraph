@@ -1,57 +1,68 @@
 # Persistence Format
 
-The `.pggraph` file is the launch artifact for fast backend startup. It stores
-fixed-width graph arrays in mmap-friendly sections and variable-size structures
-as length-prefixed bincode payloads.
+The `.pggraph` file is the launch artifact for fast backend startup. Format v5
+stores graph-sized topology, filters, dictionaries, and relationship identities
+in explicitly described mmap-friendly sections. The file is derived state;
+PostgreSQL source tables remain authoritative.
 
 ## File Layout
 
 ```text
-Header, 128 bytes
-  magic              4 bytes   "PGGH"
-  version            u32       current version = 4
-  flags              u32       currently 0
-  node_count         u32
-  edge_count         u32
-  section_offsets    12 * u64
-  crc32              u32       CRC over bytes after header
+Header, 448 bytes, explicitly encoded little endian
+  magic                    4 bytes   "PGGH"
+  version                  u32       current version = 5
+  header_size              u32       448
+  flags                    u32       forward/inbound weight presence
+  node_count               u32
+  forward_edge_count       u32
+  inbound_edge_count       u32
+  section_count            u32       23
+  body_length              u64
+  body_crc32               u32
+  header_crc32             u32
+  reserved                 16 bytes  zero
+  section_descriptors      23 * { offset: u64, length: u64 }
+  reserved                 16 bytes  zero
 
-Section 0   active bits                 ceil(node_count / 8) bytes
-Section 1   table_oids                  node_count * 4
-Section 2   edge_offsets                (node_count + 1) * 4
-Section 3   targets                     edge_count * 4
-Section 4   type_ids                    edge_count
-Section 5   weights                     empty or edge_count * 4
-Section 6   schema_reversed             edge_count
-Section 7   resolution index            4 + entry_count * 16
-Section 8   primary key offsets         (node_count + 1) * 8
-Section 9   primary key bytes           UTF-8
-Section 10  filter index                u32 length + bincode 2 standard payload
-Section 11  edge metadata               u32 length + bincode 2 standard payload
+Section 0    active bits                         ceil(node_count / 8) bytes
+Section 1    table OIDs                          node_count * 4
+Section 2    primary-key offsets                 (node_count + 1) * 8
+Section 3    primary-key UTF-8 bytes
+Sections 4-9 forward CSR                         offsets, targets, type IDs,
+                                                 schema direction, optional
+                                                 weights, relationship IDs
+Sections 10-15 inbound CSR                       same parallel arrays
+Section 16   resolution index
+Section 17   filter catalog                      column descriptors and names
+Section 18   filter values                       canonical typed arrays
+Section 19   filter text dictionaries            lexical offsets and UTF-8 bytes
+Section 20   edge-type registry
+Section 21   relationship identity descriptors   mapping ID and key range
+Section 22   relationship identity key bytes      UTF-8
 ```
 
-Section 11 contains the edge type registry, one relationship-ID sidecar entry
-per persisted adjacency, and the relationship identity dictionary used by those
-sidecar entries. ID `0` is reserved for adjacencies that do not yet have a
-source-row identity.
+Every section begins at a 64-byte boundary and has an explicit offset and
+length, including empty sections. Both CSR directions carry a relationship-ID
+sidecar. ID `0` is reserved for adjacencies without a source-row identity.
 
 ## Write Path
 
 `write_graph_file()`:
 
 1. Creates parent directory.
-2. Reserves a zeroed 128-byte header.
+2. Reserves a zeroed 448-byte header.
 3. Streams sections in order to `<path>.tmp`.
 4. Aligns fixed-width sections as needed.
 5. Streams primary-key offsets and primary-key bytes in separate passes so the
    writer does not stage the full artifact body in memory.
-6. Serializes `FilterIndex` and edge metadata as length-prefixed bincode 2
-   standard metadata sections.
-7. Computes CRC32 incrementally over the payload after the header.
-8. Backpatches header fields and section offsets.
-9. `sync_all()`.
-10. Atomically renames to final path.
-11. Writes the sync checkpoint through a temp file and atomic rename.
+6. Writes both CSR directions and their relationship-ID arrays.
+7. Canonicalizes filters into typed value arrays and lexically ordered text
+   dictionaries, then writes relationship identity descriptors and key bytes.
+8. Computes CRC32 incrementally over the payload after the header.
+9. Backpatches counts, flags, body length, both CRCs, and section descriptors.
+10. `sync_all()`.
+11. Atomically renames to the final path.
+12. Writes the sync checkpoint through a temp file and atomic rename.
 
 SQL build and vacuum orchestration treats requested persistence as required.
 After writing the artifact, it immediately reloads through `load_graph_file()`;
@@ -73,12 +84,12 @@ validate CRC
 validate section layout
 validate CSR and primary-key offset content
 construct snapshot-backed NodeStore arrays
-construct snapshot-backed forward EdgeStore CSR
+construct snapshot-backed forward and inbound EdgeStore CSR arrays
+keep both CSR relationship-ID arrays snapshot-backed
 keep ResolutionIndex section snapshot-backed
-deserialize FilterIndex into backend heap
-deserialize edge metadata into backend heap
-validate relationship identity sidecar and dictionary
-build reverse EdgeStore CSR into backend heap
+construct FilterIndex over mapped typed values and lexical dictionaries
+construct relationship identity store over mapped descriptors and key bytes
+decode only bounded column and edge-label metadata into backend heap
 set resolution mode to MmapBacked
 store snapshot Arc in Engine._mmap
 read sync checkpoint
@@ -86,13 +97,11 @@ return Engine
 ```
 
 <Callout type="info">
-The persisted forward graph arrays and resolution section are views over one
-backend-local immutable mapping after load. Forward edge arrays include the
-`schema_reversed` byte section that marks generated reverse copies of
-bidirectional registered edge rows. The reverse CSR is derived into
-backend-local heap and preserves the same schema-direction flags and
-relationship-ID sidecar values. The bincode 2 standard sections, including
-`FilterIndex` and edge metadata, are also deserialized into backend-local heap.
+The node arrays, both CSR directions, both relationship-ID sidecars, resolution
+index, filter values and dictionaries, and relationship identity data are views
+over one backend-local immutable mapping after load. Mutable filter changes use
+sparse backend-local deltas. Relationship identities added after load use an
+owned suffix overlay without copying the mapped base.
 </Callout>
 
 ## Validation Boundaries
@@ -111,8 +120,6 @@ Loader validation rejects:
 | Weights section wrong size | Parallel arrays would diverge |
 | `schema_reversed` value outside `0..=1` | Edge provenance flag invalid |
 | Resolution section malformed | Lookup index invalid |
-| Length-prefixed payload exceeds section | Bincode would read outside section |
-| Bincode payload leaves trailing bytes | Metadata section has ambiguous payload content |
 | CSR offsets not monotonic | Neighbor slices invalid |
 | Final CSR offset not equal to edge count | Missing or extra edges |
 | Target node index out of range | Traversal could index invalid node |
@@ -120,6 +127,9 @@ Loader validation rejects:
 | First/final primary-key offsets do not span the byte section | Missing or unaddressable key bytes |
 | A primary-key offset pair does not select valid UTF-8 | Invalid persisted node identity |
 | Edge registry index 0 not empty | Root edge type invariant broken |
+| Filter catalog, typed value width, or row count mismatch | Filter reads could cross a column boundary |
+| Text dictionary offsets are invalid or values are not lexical | Token lookup would be ambiguous |
+| Relationship descriptor or UTF-8 key range is invalid | Source-row identity would be ambiguous |
 
 The section-layout validator and the crate-private mapped-array constructors
 both enforce the value invariants used by typed access over the immutable
@@ -140,24 +150,24 @@ cannot change the snapshot.
 Engine
   _mmap shares ownership for resolution and accounting
   node_store owns validated ranges plus Arc<Mmap>
-  forward edge_store owns validated ranges plus Arc<Mmap>
+  forward and inbound edge stores own validated ranges plus Arc<Mmap>
   resolution mode references _mmap section
-  reverse_edge_store owns heap CSR arrays with copied schema flags
-  filter_index owns heap data deserialized from bincode
-  edge_type_registry owns heap strings deserialized from bincode
+  filter_index owns mapped base ranges plus sparse heap deltas
+  relationship identities own mapped base ranges plus an optional heap suffix
+  edge_type_registry owns bounded heap strings decoded from its section
 ```
 
 ## Compatibility Rules
 
-Version 3 added the fixed-width `schema_reversed` edge section so bidirectional
-reverse adjacency rows can be returned in their registered schema direction.
-Version 2 deliberately moved the variable metadata sections from bincode 1 to
-bincode 2 standard encoding. Older artifacts are derived state and are not read
-by this loader; users should run `SELECT graph.build()` to regenerate the
-current artifact after upgrading.
+Version 5 replaced the v4 offset-only header and graph-sized bincode metadata
+with a 448-byte header, 23 explicit section descriptors, mapped inbound CSR,
+mapped filters and dictionaries, and mapped relationship identities. Version 4
+and earlier artifacts are derived state and are not read by this loader; users
+should run `SELECT graph.build()` to regenerate the current artifact after
+upgrading. Future versions also fail closed with the same rebuild guidance.
 
 Any future change to fixed section ordering, binary representation, header
-semantics, or bincode payload interpretation should bump the format version and
+semantics, or persisted value interpretation should bump the format version and
 provide a clear regeneration path. The current loader rejects non-current
 versions with an incompatible-version error instructing users to rebuild.
 

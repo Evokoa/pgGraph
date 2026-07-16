@@ -8,27 +8,19 @@
 //! ## File Format
 //!
 //! ```text
-//! [Header]              — 128 bytes
-//!   magic: "PGGH"       — 4 bytes
-//!   version: u32         — 4 bytes
-//!   flags: u32           — 4 bytes
-//!   node_count: u32      — 4 bytes
-//!   edge_count: u32      — 4 bytes
-//!   section_offsets[12]  — 12 × u64 = 96 bytes
-//!   crc32: u32           — 4 bytes
+//! [Header]              — 448 bytes, encoded explicitly as little endian
+//!   magic/version/header size/flags/counts/checksums
+//!   section_descriptors[23] — 23 × { offset: u64, length: u64 }
 //!
 //! [Section 0: NodeStore.is_active]            — ceil(node_count / 8) bytes
 //! [Section 1: NodeStore.table_oids]           — node_count × 4 bytes
-//! [Section 2: EdgeStore.edge_offsets]         — (node_count + 1) × 4 bytes
-//! [Section 3: EdgeStore.targets]              — edge_count × 4 bytes
-//! [Section 4: EdgeStore.type_ids]             — edge_count × 1 byte
-//! [Section 5: EdgeStore.weights]              — edge_count × 4 bytes (optional)
-//! [Section 6: EdgeStore.schema_reversed]      — edge_count × 1 byte
-//! [Section 7: ResolutionIndex]                — 4 + entry_count × 16 bytes
-//! [Section 8: NodeStore.primary_key_offsets]  — (node_count + 1) × 8 bytes
-//! [Section 9: NodeStore.primary_key_bytes]    — variable length UTF-8
-//! [Section 10: FilterIndex (Bincode)]         — variable length
-//! [Section 11: edge metadata (Bincode)]       — variable length
+//! [Sections 2..4]  primary-key offsets/bytes and forward CSR offsets
+//! [Sections 5..9]  forward targets/types/direction/weights/relationship IDs
+//! [Sections 10..15] inbound CSR with the same parallel arrays
+//! [Section 16] resolution index
+//! [Sections 17..19] filter catalog/data/text dictionaries
+//! [Section 20] edge-type registry
+//! [Sections 21..22] relationship identity descriptors/key bytes
 //! ```
 //!
 //! ## Memory Model
@@ -36,12 +28,11 @@
 //! When loaded via `load_graph_file()`:
 //! - **NodeStore** (`is_active`, `table_oids`, primary-key offsets/bytes):
 //!   backed by a backend-local immutable mapping
-//! - **Forward EdgeStore** (`edge_offsets`, `targets`, `type_ids`, optional
-//!   `weights`): backed by the same backend-local immutable mapping
+//! - **Forward and inbound EdgeStore** arrays are backed by the same
+//!   backend-local immutable mapping
 //! - **ResolutionIndex**: mapped, zero-copy within the backend, binary search
-//! - **FilterIndex**, edge type registry, and relationship identity metadata:
-//!   bincode sections deserialized into backend-local heap
-//! - **Reverse EdgeStore**: derived into an owned CSR per backend
+//! - the bounded edge type registry is decoded into backend-local metadata
+//! - relationship identity descriptors and key bytes remain mapped
 //!
 //! See: `docs/contributor_guide/memory-model.mdx`
 
@@ -53,35 +44,51 @@ use std::sync::Arc;
 use memmap2::{Mmap, MmapMut};
 
 use crate::config;
-use crate::edge_store::{
-    EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays, RelationshipId, RelationshipIdentity,
-};
+use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
 use crate::engine::{Engine, MmapBackedGraph, MmapResolutionState};
 use crate::filter_index::FilterIndex;
 use crate::graph_policy::GraphId;
 use crate::mapped_bytes::MappedBytes;
 use crate::node_store::{MmapNodeArrayParts, MmapNodeArrays, NodeStore};
 use crate::projection::manifest::{ProjectionManifest, ProjectionManifestStore};
-use crate::resolution_index::{ResolutionIndex, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
+use crate::relationship_identity_store::{
+    MappedRelationshipIdentities, MappedRelationshipIdentityParts, RelationshipIdentityStore,
+};
+use crate::resolution_index::{ResolutionIndexBuilder, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
 use crate::safety::{GraphError, GraphResult};
 
 /// Magic bytes for .pggraph files.
 const MAGIC: &[u8; 4] = b"PGGH";
 /// Current file format version.
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// Header size in bytes.
-const HEADER_SIZE: usize = 128;
+const HEADER_SIZE: usize = 448;
 /// Number of sections.
-const NUM_SECTIONS: usize = 12;
-const CRC_OFFSET: usize = 20 + NUM_SECTIONS * 8;
+const NUM_SECTIONS: usize = 23;
+const SECTION_DESCRIPTORS_OFFSET: usize = 64;
+const SECTION_DESCRIPTOR_SIZE: usize = 16;
+const BODY_CRC_OFFSET: usize = 40;
+const HEADER_CRC_OFFSET: usize = 44;
+const SECTION_ALIGNMENT: usize = 64;
+const FLAG_FORWARD_WEIGHTS: u32 = 1 << 0;
+const FLAG_INBOUND_WEIGHTS: u32 = 1 << 1;
 const INTERRUPT_CHECK_INTERVAL: u32 = 4096;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SectionDescriptor {
+    offset: u64,
+    len: u64,
+}
 
 /// Fully validated fixed-width section layout for one graph artifact.
 #[derive(Clone, Debug)]
 struct ValidatedGraphLayout {
     ranges: [(usize, usize); NUM_SECTIONS],
     node_count: u32,
-    edge_count: u32,
+    forward_edge_count: u32,
+    inbound_edge_count: u32,
+    has_forward_weights: bool,
+    has_inbound_weights: bool,
 }
 
 /// Capability proving the full artifact layout passed persistence validation.
@@ -108,10 +115,10 @@ impl MappedGraphArtifact {
                     ..ranges[0].0 + (self.layout.node_count as usize).div_ceil(8),
                 oid_range: ranges[1].0
                     ..ranges[1].0 + self.layout.node_count as usize * std::mem::size_of::<u32>(),
-                pk_offsets_range: ranges[8].0
-                    ..ranges[8].0
+                pk_offsets_range: ranges[2].0
+                    ..ranges[2].0
                         + (self.layout.node_count as usize + 1) * std::mem::size_of::<u64>(),
-                pk_bytes_range: ranges[9].0..ranges[9].1,
+                pk_bytes_range: ranges[3].0..ranges[3].1,
                 node_count: self.layout.node_count,
             },
             &self.token,
@@ -121,24 +128,35 @@ impl MappedGraphArtifact {
         })
     }
 
-    fn edge_arrays(&self) -> GraphResult<MmapEdgeArrays> {
+    fn edge_arrays(&self, inbound: bool) -> GraphResult<MmapEdgeArrays> {
         let ranges = &self.layout.ranges;
-        let weights_range = (ranges[5].0 != ranges[5].1).then(|| {
-            ranges[5].0..ranges[5].0 + self.layout.edge_count as usize * std::mem::size_of::<u32>()
-        });
+        let (base, edge_count, has_weights) = if inbound {
+            (
+                10,
+                self.layout.inbound_edge_count,
+                self.layout.has_inbound_weights,
+            )
+        } else {
+            (
+                4,
+                self.layout.forward_edge_count,
+                self.layout.has_forward_weights,
+            )
+        };
+        let weights_range = has_weights.then(|| ranges[base + 4].0..ranges[base + 4].1);
         MmapEdgeArrays::new_for_artifact(
             MmapEdgeArrayParts {
                 mmap: MappedBytes::from_mmap(Arc::clone(&self.mmap)),
-                offsets_range: ranges[2].0
-                    ..ranges[2].0
+                offsets_range: ranges[base].0
+                    ..ranges[base].0
                         + (self.layout.node_count as usize + 1) * std::mem::size_of::<u32>(),
-                targets_range: ranges[3].0
-                    ..ranges[3].0 + self.layout.edge_count as usize * std::mem::size_of::<u32>(),
-                type_ids_range: ranges[4].0..ranges[4].0 + self.layout.edge_count as usize,
-                schema_reversed_range: ranges[6].0..ranges[6].0 + self.layout.edge_count as usize,
+                targets_range: ranges[base + 1].0..ranges[base + 1].1,
+                type_ids_range: ranges[base + 2].0..ranges[base + 2].1,
+                schema_reversed_range: ranges[base + 3].0..ranges[base + 3].1,
                 weights_range,
+                relationship_ids_range: ranges[base + 5].0..ranges[base + 5].1,
                 node_count: self.layout.node_count,
-                edge_count: self.layout.edge_count,
+                edge_count,
             },
             &self.token,
         )
@@ -159,20 +177,14 @@ fn ensure_native_mapped_layout_supported(little_endian: bool) -> GraphResult<()>
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PersistedEdgeMetadata {
-    edge_type_registry: Vec<String>,
-    relationship_ids: Vec<RelationshipId>,
-    relationship_identities: Vec<Option<RelationshipIdentity>>,
-}
-
 fn check_for_interrupts() {
     crate::resource::check_postgres_interrupts();
 }
 
 struct GraphArtifactWriter {
     writer: BufWriter<fs::File>,
-    section_offsets: [u64; NUM_SECTIONS],
+    sections: [SectionDescriptor; NUM_SECTIONS],
+    active_section: Option<usize>,
     position: u64,
     hasher: crc32fast::Hasher,
     check_interrupts: bool,
@@ -186,18 +198,30 @@ impl GraphArtifactWriter {
             .map_err(|e| GraphError::Internal(format!("Header reservation failed: {}", e)))?;
         Ok(Self {
             writer,
-            section_offsets: [0u64; NUM_SECTIONS],
+            sections: [SectionDescriptor::default(); NUM_SECTIONS],
+            active_section: None,
             position: HEADER_SIZE as u64,
             hasher: crc32fast::Hasher::new(),
             check_interrupts,
         })
     }
 
-    fn begin_section(&mut self, section: usize, alignment: Option<usize>) -> GraphResult<()> {
-        if let Some(alignment) = alignment {
-            self.align(alignment)?;
-        }
-        self.section_offsets[section] = self.position;
+    fn begin_section(&mut self, section: usize) -> GraphResult<()> {
+        self.finish_active_section()?;
+        self.align(SECTION_ALIGNMENT)?;
+        self.sections[section].offset = self.position;
+        self.active_section = Some(section);
+        Ok(())
+    }
+
+    fn finish_active_section(&mut self) -> GraphResult<()> {
+        let Some(section) = self.active_section.take() else {
+            return Ok(());
+        };
+        self.sections[section].len = self
+            .position
+            .checked_sub(self.sections[section].offset)
+            .ok_or_else(|| GraphError::Internal("artifact section length underflow".into()))?;
         Ok(())
     }
 
@@ -206,7 +230,7 @@ impl GraphArtifactWriter {
             .map_err(|_| GraphError::Internal("artifact too large".into()))?;
         let padding = (alignment - (position % alignment)) % alignment;
         if padding > 0 {
-            self.write_body(&[0u8; 8][..padding])?;
+            self.write_body(&[0u8; SECTION_ALIGNMENT][..padding])?;
         }
         Ok(())
     }
@@ -239,30 +263,41 @@ impl GraphArtifactWriter {
         self.write_body(&value.to_le_bytes())
     }
 
-    fn write_length_prefixed_payload(&mut self, payload: &[u8], label: &str) -> GraphResult<()> {
-        let payload_len = u32::try_from(payload.len()).map_err(|_| {
-            GraphError::Internal(format!(
-                "{} section payload exceeds u32 length prefix",
-                label
-            ))
-        })?;
-        self.write_body(&payload_len.to_le_bytes())?;
-        self.write_body(payload)
+    fn write_u32_value(&mut self, value: u32) -> GraphResult<()> {
+        self.write_body(&value.to_le_bytes())
     }
 
-    fn finish(mut self, node_count: u32, edge_count: u32) -> GraphResult<fs::File> {
-        let crc = std::mem::replace(&mut self.hasher, crc32fast::Hasher::new()).finalize();
+    fn finish(
+        mut self,
+        node_count: u32,
+        forward_edge_count: u32,
+        inbound_edge_count: u32,
+        flags: u32,
+    ) -> GraphResult<fs::File> {
+        self.finish_active_section()?;
+        let body_crc = std::mem::replace(&mut self.hasher, crc32fast::Hasher::new()).finalize();
+        let body_len = self
+            .position
+            .checked_sub(HEADER_SIZE as u64)
+            .ok_or_else(|| GraphError::Internal("artifact body length underflow".into()))?;
         let mut header = [0u8; HEADER_SIZE];
         header[0..4].copy_from_slice(MAGIC);
         header[4..8].copy_from_slice(&VERSION.to_le_bytes());
-        header[8..12].copy_from_slice(&0u32.to_le_bytes());
-        header[12..16].copy_from_slice(&node_count.to_le_bytes());
-        header[16..20].copy_from_slice(&edge_count.to_le_bytes());
-        for (i, &offset) in self.section_offsets.iter().enumerate() {
-            let start = 20 + i * 8;
-            header[start..start + 8].copy_from_slice(&offset.to_le_bytes());
+        header[8..12].copy_from_slice(&(HEADER_SIZE as u32).to_le_bytes());
+        header[12..16].copy_from_slice(&flags.to_le_bytes());
+        header[16..20].copy_from_slice(&node_count.to_le_bytes());
+        header[20..24].copy_from_slice(&forward_edge_count.to_le_bytes());
+        header[24..28].copy_from_slice(&inbound_edge_count.to_le_bytes());
+        header[28..32].copy_from_slice(&(NUM_SECTIONS as u32).to_le_bytes());
+        header[32..40].copy_from_slice(&body_len.to_le_bytes());
+        header[BODY_CRC_OFFSET..BODY_CRC_OFFSET + 4].copy_from_slice(&body_crc.to_le_bytes());
+        for (i, descriptor) in self.sections.iter().enumerate() {
+            let start = SECTION_DESCRIPTORS_OFFSET + i * SECTION_DESCRIPTOR_SIZE;
+            header[start..start + 8].copy_from_slice(&descriptor.offset.to_le_bytes());
+            header[start + 8..start + 16].copy_from_slice(&descriptor.len.to_le_bytes());
         }
-        header[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
+        let header_crc = crc32fast::hash(&header);
+        header[HEADER_CRC_OFFSET..HEADER_CRC_OFFSET + 4].copy_from_slice(&header_crc.to_le_bytes());
 
         self.writer
             .seek(SeekFrom::Start(0))
@@ -287,105 +322,6 @@ fn checked_section_size(count: u32, width: usize, label: &str) -> GraphResult<us
         })
 }
 
-fn validate_section_min_len(
-    ranges: &[(usize, usize); NUM_SECTIONS],
-    section: usize,
-    min_len: usize,
-    label: &str,
-) -> GraphResult<()> {
-    let actual = ranges[section].1 - ranges[section].0;
-    if actual < min_len {
-        return Err(GraphError::CorruptFile {
-            reason: format!(
-                "{} section too small: need at least {} bytes, found {}",
-                label, min_len, actual
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn validate_section_alignment(
-    ranges: &[(usize, usize); NUM_SECTIONS],
-    section: usize,
-    alignment: usize,
-    label: &str,
-) -> GraphResult<()> {
-    if !ranges[section].0.is_multiple_of(alignment) {
-        return Err(GraphError::CorruptFile {
-            reason: format!(
-                "{} section offset {} is not {}-byte aligned",
-                label, ranges[section].0, alignment
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn validate_length_prefixed_section(
-    mmap: &[u8],
-    ranges: &[(usize, usize); NUM_SECTIONS],
-    section: usize,
-    label: &str,
-) -> GraphResult<()> {
-    length_prefixed_payload(mmap, ranges, section, label).map(|_| ())
-}
-
-fn length_prefixed_payload<'a>(
-    mmap: &'a [u8],
-    ranges: &[(usize, usize); NUM_SECTIONS],
-    section: usize,
-    label: &str,
-) -> GraphResult<&'a [u8]> {
-    if ranges[section].1 - ranges[section].0 < 4 {
-        return Err(GraphError::CorruptFile {
-            reason: format!("{} section too small for length prefix", label),
-        });
-    }
-    let start = ranges[section].0;
-    let size = read_u32_at(mmap, start) as usize;
-    let payload_start = start + 4;
-    let end = start
-        .checked_add(4)
-        .and_then(|payload_start| payload_start.checked_add(size))
-        .ok_or_else(|| GraphError::CorruptFile {
-            reason: format!("{} size overflow", label),
-        })?;
-    if end > ranges[section].1 {
-        return Err(GraphError::CorruptFile {
-            reason: format!(
-                "{} payload exceeds section: need end {}, section ends {}",
-                label, end, ranges[section].1
-            ),
-        });
-    }
-    Ok(&mmap[payload_start..end])
-}
-
-fn decode_bincode_section<T, C>(
-    data: &[u8],
-    config: C,
-    section_label: &str,
-    error_label: &str,
-) -> GraphResult<T>
-where
-    T: serde::de::DeserializeOwned,
-    C: bincode::config::Config,
-{
-    let (value, bytes_read) = bincode::serde::decode_from_slice(data, config)
-        .map_err(|e| GraphError::Internal(format!("{}: {}", error_label, e)))?;
-    if bytes_read != data.len() {
-        return Err(GraphError::CorruptFile {
-            reason: format!(
-                "{} bincode payload has {} trailing byte(s)",
-                section_label,
-                data.len() - bytes_read
-            ),
-        });
-    }
-    Ok(value)
-}
-
 fn read_le_array<const N: usize>(mmap: &[u8], offset: usize) -> [u8; N] {
     let end = offset + N;
     let mut bytes = [0u8; N];
@@ -405,13 +341,72 @@ fn validate_persisted_contents(
     mmap: &[u8],
     ranges: &[(usize, usize); NUM_SECTIONS],
     node_count: u32,
-    edge_count: u32,
+    forward_edge_count: u32,
+    inbound_edge_count: u32,
 ) -> GraphResult<()> {
-    let edge_offsets_start = ranges[2].0;
+    validate_csr_contents(mmap, ranges, 4, node_count, forward_edge_count, "forward")?;
+    validate_csr_contents(mmap, ranges, 10, node_count, inbound_edge_count, "inbound")?;
+
+    let pk_offsets_start = ranges[2].0;
+    let pk_bytes_len = ranges[3].1 - ranges[3].0;
+    let mut previous_pk = read_u64_at(mmap, pk_offsets_start);
+    if previous_pk != 0 {
+        return Err(GraphError::CorruptFile {
+            reason: format!("primary_key_offsets[0] must be 0, found {previous_pk}"),
+        });
+    }
+    for idx in 1..=node_count as usize {
+        let current_raw = read_u64_at(mmap, pk_offsets_start + idx * 8);
+        if current_raw < previous_pk {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "primary_key_offsets are not monotonic at index {idx}: {current_raw} < {previous_pk}"
+                ),
+            });
+        }
+        let current = persisted_pk_offset_to_usize(current_raw, idx)?;
+        if current > pk_bytes_len {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "primary_key_offsets[{idx}] exceeds primary key bytes: {current} > {pk_bytes_len}"
+                ),
+            });
+        }
+        let start = persisted_pk_offset_to_usize(previous_pk, idx - 1)?;
+        std::str::from_utf8(&mmap[ranges[3].0 + start..ranges[3].0 + current]).map_err(|err| {
+            GraphError::CorruptFile {
+                reason: format!(
+                    "primary key at node index {} is not valid UTF-8: {err}",
+                    idx - 1
+                ),
+            }
+        })?;
+        previous_pk = current_raw;
+    }
+    if persisted_pk_offset_to_usize(previous_pk, node_count as usize)? != pk_bytes_len {
+        return Err(GraphError::CorruptFile {
+            reason: "final primary-key offset does not equal the primary-key byte length".into(),
+        });
+    }
+
+    validate_resolution_contents(mmap, ranges, node_count)?;
+
+    Ok(())
+}
+
+fn validate_csr_contents(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    base: usize,
+    node_count: u32,
+    edge_count: u32,
+    label: &str,
+) -> GraphResult<()> {
+    let edge_offsets_start = ranges[base].0;
     let mut previous = read_u32_at(mmap, edge_offsets_start);
     if previous != 0 {
         return Err(GraphError::CorruptFile {
-            reason: format!("edge_offsets[0] must be 0, found {}", previous),
+            reason: format!("{label} edge_offsets[0] must be 0, found {previous}"),
         });
     }
     for idx in 1..=node_count as usize {
@@ -419,16 +414,14 @@ fn validate_persisted_contents(
         if current < previous {
             return Err(GraphError::CorruptFile {
                 reason: format!(
-                    "edge_offsets are not monotonic at index {}: {} < {}",
-                    idx, current, previous
+                    "{label} edge_offsets are not monotonic at index {idx}: {current} < {previous}"
                 ),
             });
         }
         if current > edge_count {
             return Err(GraphError::CorruptFile {
                 reason: format!(
-                    "edge_offsets[{}] exceeds edge_count: {} > {}",
-                    idx, current, edge_count
+                    "{label} edge_offsets[{idx}] exceeds edge_count: {current} > {edge_count}"
                 ),
             });
         }
@@ -437,66 +430,225 @@ fn validate_persisted_contents(
     if previous != edge_count {
         return Err(GraphError::CorruptFile {
             reason: format!(
-                "final edge offset must equal edge_count: {} != {}",
-                previous, edge_count
+                "final {label} edge offset must equal edge_count: {previous} != {edge_count}"
             ),
         });
     }
 
-    let targets_start = ranges[3].0;
+    let targets_start = ranges[base + 1].0;
     for idx in 0..edge_count as usize {
         let target = read_u32_at(mmap, targets_start + idx * 4);
         if target >= node_count {
             return Err(GraphError::CorruptFile {
                 reason: format!(
-                    "target at index {} exceeds node_count: {} >= {}",
-                    idx, target, node_count
+                    "{label} target at index {idx} exceeds node_count: {target} >= {node_count}"
                 ),
             });
         }
     }
 
-    let pk_offsets_start = ranges[8].0;
-    let pk_bytes_len = ranges[9].1 - ranges[9].0;
-    let mut previous_pk = read_u64_at(mmap, pk_offsets_start);
-    if previous_pk != 0 {
+    for source in 0..node_count as usize {
+        let start = read_u32_at(mmap, edge_offsets_start + source * 4) as usize;
+        let end = read_u32_at(mmap, edge_offsets_start + (source + 1) * 4) as usize;
+        if (start + 1..end).any(|idx| {
+            edge_topology(mmap, ranges, base, idx - 1) > edge_topology(mmap, ranges, base, idx)
+        }) {
+            return Err(GraphError::CorruptFile {
+                reason: format!("{label} adjacency is not in canonical CSR order"),
+            });
+        }
+    }
+
+    for &flag in &mmap[ranges[base + 3].0..ranges[base + 3].1] {
+        if flag > 1 {
+            return Err(GraphError::CorruptFile {
+                reason: format!("{label} schema_reversed flag must be 0 or 1, found {flag}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn edge_topology(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    base: usize,
+    index: usize,
+) -> (u32, u8, u8) {
+    (
+        read_u32_at(mmap, ranges[base + 1].0 + index * 4),
+        mmap[ranges[base + 2].0 + index],
+        mmap[ranges[base + 3].0 + index],
+    )
+}
+
+fn validate_csr_reverse_equivalence(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    node_count: u32,
+    edge_count: u32,
+    has_weights: bool,
+) -> GraphResult<()> {
+    let forward_offsets = ranges[4].0;
+    let inbound_offsets = ranges[10].0;
+    for inbound_source in 0..node_count as usize {
+        let inbound_start = read_u32_at(mmap, inbound_offsets + inbound_source * 4) as usize;
+        let inbound_end = read_u32_at(mmap, inbound_offsets + (inbound_source + 1) * 4) as usize;
+        let mut inbound_index = inbound_start;
+        while inbound_index < inbound_end {
+            let (forward_source, type_id, schema_reversed) =
+                edge_topology(mmap, ranges, 10, inbound_index);
+            let topology = (inbound_source as u32, type_id, schema_reversed);
+            let mut inbound_group_end = inbound_index + 1;
+            while inbound_group_end < inbound_end
+                && edge_topology(mmap, ranges, 10, inbound_group_end)
+                    == (forward_source, type_id, schema_reversed)
+            {
+                inbound_group_end += 1;
+            }
+
+            let forward_start =
+                read_u32_at(mmap, forward_offsets + forward_source as usize * 4) as usize;
+            let forward_end =
+                read_u32_at(mmap, forward_offsets + (forward_source as usize + 1) * 4) as usize;
+            let forward_group_start =
+                lower_bound_topology(mmap, ranges, 4, forward_start, forward_end, topology);
+            let forward_group_end =
+                upper_bound_topology(mmap, ranges, 4, forward_group_start, forward_end, topology);
+            if forward_group_end - forward_group_start != inbound_group_end - inbound_index {
+                return Err(GraphError::CorruptFile {
+                    reason: "forward and inbound CSR topology counts differ".into(),
+                });
+            }
+            for offset in 0..inbound_group_end - inbound_index {
+                let forward_idx = forward_group_start + offset;
+                let inbound_idx = inbound_index + offset;
+                let forward_weight =
+                    has_weights.then(|| read_u32_at(mmap, ranges[8].0 + forward_idx * 4));
+                let inbound_weight =
+                    has_weights.then(|| read_u32_at(mmap, ranges[14].0 + inbound_idx * 4));
+                let forward_id = read_u32_at(mmap, ranges[9].0 + forward_idx * 4);
+                let inbound_id = read_u32_at(mmap, ranges[15].0 + inbound_idx * 4);
+                if forward_weight != inbound_weight || forward_id != inbound_id {
+                    return Err(GraphError::CorruptFile {
+                        reason: "forward and inbound CSR sidecars differ".into(),
+                    });
+                }
+            }
+            inbound_index = inbound_group_end;
+        }
+    }
+    if read_u32_at(mmap, forward_offsets + node_count as usize * 4) != edge_count {
         return Err(GraphError::CorruptFile {
-            reason: format!("primary_key_offsets[0] must be 0, found {}", previous_pk),
+            reason: "forward and inbound CSR counts differ".into(),
         });
     }
-    for idx in 1..=node_count as usize {
-        let current = read_u64_at(mmap, pk_offsets_start + idx * 8);
-        if current < previous_pk {
-            return Err(GraphError::CorruptFile {
-                reason: format!(
-                    "primary_key_offsets are not monotonic at index {}: {} < {}",
-                    idx, current, previous_pk
-                ),
-            });
-        }
-        let current = persisted_pk_offset_to_usize(current, idx)?;
-        if current > pk_bytes_len {
-            return Err(GraphError::CorruptFile {
-                reason: format!(
-                    "primary_key_offsets[{}] exceeds primary key bytes: {} > {}",
-                    idx, current, pk_bytes_len
-                ),
-            });
-        }
-        let start = persisted_pk_offset_to_usize(previous_pk, idx - 1)?;
-        let end = current;
-        std::str::from_utf8(&mmap[ranges[9].0 + start..ranges[9].0 + end]).map_err(|err| {
-            GraphError::CorruptFile {
-                reason: format!(
-                    "primary key at node index {} is not valid UTF-8: {}",
-                    idx - 1,
-                    err
-                ),
-            }
-        })?;
-        previous_pk = current as u64;
-    }
+    Ok(())
+}
 
+fn lower_bound_topology(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    base: usize,
+    mut low: usize,
+    mut high: usize,
+    expected: (u32, u8, u8),
+) -> usize {
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if edge_topology(mmap, ranges, base, middle) < expected {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+fn upper_bound_topology(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    base: usize,
+    mut low: usize,
+    mut high: usize,
+    expected: (u32, u8, u8),
+) -> usize {
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if edge_topology(mmap, ranges, base, middle) <= expected {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+fn validate_resolution_contents(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    node_count: u32,
+) -> GraphResult<()> {
+    let resolution = &mmap[ranges[16].0..ranges[16].1];
+    let entry_count = read_u32_at(resolution, 0) as usize;
+    if entry_count != node_count as usize {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "resolution entry count must equal node count: {entry_count} != {node_count}"
+            ),
+        });
+    }
+    let mut seen_nodes = Vec::new();
+    seen_nodes
+        .try_reserve_exact(node_count as usize)
+        .map_err(|_| GraphError::Oom {
+            used_mb: 0,
+            need_mb: 1,
+            limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+        })?;
+    seen_nodes.resize(node_count as usize, false);
+    let mut previous = None;
+    for index in 0..entry_count {
+        let offset = 4 + index * RESOLUTION_ENTRY_SIZE;
+        let table_oid = read_u32_at(resolution, offset);
+        let pk_hash = read_u64_at(resolution, offset + 4);
+        let node_idx = read_u32_at(resolution, offset + 12);
+        if node_idx >= node_count {
+            return Err(GraphError::CorruptFile {
+                reason: format!("resolution entry {index} has an out-of-range node index"),
+            });
+        }
+        if std::mem::replace(&mut seen_nodes[node_idx as usize], true) {
+            return Err(GraphError::CorruptFile {
+                reason: format!("resolution entry {index} duplicates node index {node_idx}"),
+            });
+        }
+        let key = (table_oid, pk_hash);
+        if previous.is_some_and(|previous| previous > key) {
+            return Err(GraphError::CorruptFile {
+                reason: "resolution entries are not sorted".into(),
+            });
+        }
+        let persisted_oid = read_u32_at(mmap, ranges[1].0 + node_idx as usize * 4);
+        let pk_start = persisted_pk_offset_to_usize(
+            read_u64_at(mmap, ranges[2].0 + node_idx as usize * 8),
+            node_idx as usize,
+        )?;
+        let pk_end = persisted_pk_offset_to_usize(
+            read_u64_at(mmap, ranges[2].0 + (node_idx as usize + 1) * 8),
+            node_idx as usize + 1,
+        )?;
+        let primary_key = std::str::from_utf8(&mmap[ranges[3].0 + pk_start..ranges[3].0 + pk_end])
+            .map_err(|_| GraphError::CorruptFile {
+                reason: format!("resolution entry {index} references invalid UTF-8"),
+            })?;
+        if table_oid != persisted_oid || pk_hash != ResolutionIndexBuilder::hash_pk(primary_key) {
+            return Err(GraphError::CorruptFile {
+                reason: format!("resolution entry {index} does not match its node identity"),
+            });
+        }
+        previous = Some(key);
+    }
     Ok(())
 }
 
@@ -511,39 +663,59 @@ fn persisted_pk_offset_to_usize(offset: u64, index: usize) -> GraphResult<usize>
 
 fn validate_section_layout(
     mmap: &[u8],
-    section_offsets: &[u64; NUM_SECTIONS],
+    sections: &[SectionDescriptor; NUM_SECTIONS],
     node_count: u32,
-    edge_count: u32,
+    forward_edge_count: u32,
+    inbound_edge_count: u32,
+    flags: u32,
 ) -> GraphResult<ValidatedGraphLayout> {
-    let mut starts = [0usize; NUM_SECTIONS];
-    let mut prev_offset = HEADER_SIZE;
-    for (i, &offset) in section_offsets.iter().enumerate() {
-        let offset = usize::try_from(offset).map_err(|_| GraphError::CorruptFile {
+    if flags & !(FLAG_FORWARD_WEIGHTS | FLAG_INBOUND_WEIGHTS) != 0 {
+        return Err(GraphError::CorruptFile {
+            reason: format!("unsupported graph artifact flags {flags:#x}"),
+        });
+    }
+    if forward_edge_count != inbound_edge_count
+        || (flags & FLAG_FORWARD_WEIGHTS != 0) != (flags & FLAG_INBOUND_WEIGHTS != 0)
+    {
+        return Err(GraphError::CorruptFile {
+            reason: "forward and inbound CSR counts or weight modes differ".into(),
+        });
+    }
+    let mut ranges = [(0usize, 0usize); NUM_SECTIONS];
+    let mut previous_end = HEADER_SIZE;
+    for (i, descriptor) in sections.iter().enumerate() {
+        let start = usize::try_from(descriptor.offset).map_err(|_| GraphError::CorruptFile {
             reason: format!("section offset {} does not fit in usize", i),
         })?;
-        if offset < prev_offset || offset > mmap.len() {
+        let len = usize::try_from(descriptor.len).map_err(|_| GraphError::CorruptFile {
+            reason: format!("section length {i} does not fit in usize"),
+        })?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| GraphError::CorruptFile {
+                reason: format!("section {i} end overflows usize"),
+            })?;
+        if !start.is_multiple_of(SECTION_ALIGNMENT) || start < previous_end || end > mmap.len() {
             return Err(GraphError::CorruptFile {
                 reason: format!(
-                    "invalid section offset at index {}: {} (prev: {}, mmap_len: {})",
-                    i,
-                    offset,
-                    prev_offset,
+                    "invalid section {i}: offset={start}, len={len}, previous_end={previous_end}, file_len={}",
                     mmap.len()
                 ),
             });
         }
-        starts[i] = offset;
-        prev_offset = offset;
+        if mmap[previous_end..start].iter().any(|&byte| byte != 0) {
+            return Err(GraphError::CorruptFile {
+                reason: format!("nonzero alignment padding before section {i}"),
+            });
+        }
+        ranges[i] = (start, end);
+        previous_end = end;
     }
-
-    let ranges = std::array::from_fn(|i| {
-        let end = if i + 1 < NUM_SECTIONS {
-            starts[i + 1]
-        } else {
-            mmap.len()
-        };
-        (starts[i], end)
-    });
+    if previous_end != mmap.len() {
+        return Err(GraphError::CorruptFile {
+            reason: "artifact contains trailing bytes after the final section".into(),
+        });
+    }
 
     let active_byte_count = (node_count as usize).div_ceil(8);
     let node_plus_one = node_count
@@ -552,63 +724,129 @@ fn validate_section_layout(
             reason: "node_count overflow in edge offset section".to_string(),
         })?;
     let node_u32_bytes = checked_section_size(node_count, 4, "table_oids")?;
-    let edge_offsets_bytes = checked_section_size(node_plus_one, 4, "edge_offsets")?;
-    let edge_targets_bytes = checked_section_size(edge_count, 4, "targets")?;
-    let edge_type_bytes = checked_section_size(edge_count, 1, "type_ids")?;
-    let edge_weight_bytes = checked_section_size(edge_count, 4, "weights")?;
-    let edge_schema_reversed_bytes = checked_section_size(edge_count, 1, "schema_reversed")?;
     let pk_offsets_bytes = checked_section_size(node_plus_one, 8, "primary_key_offsets")?;
+    require_exact_section_len(&ranges, 0, active_byte_count, "is_active")?;
+    require_exact_section_len(&ranges, 1, node_u32_bytes, "table_oids")?;
+    require_exact_section_len(&ranges, 2, pk_offsets_bytes, "primary_key_offsets")?;
+    validate_csr_section_lengths(
+        &ranges,
+        4,
+        node_plus_one,
+        forward_edge_count,
+        flags & FLAG_FORWARD_WEIGHTS != 0,
+        "forward",
+    )?;
+    validate_csr_section_lengths(
+        &ranges,
+        10,
+        node_plus_one,
+        inbound_edge_count,
+        flags & FLAG_INBOUND_WEIGHTS != 0,
+        "inbound",
+    )?;
 
-    validate_section_alignment(&ranges, 1, 4, "table_oids")?;
-    validate_section_alignment(&ranges, 2, 4, "edge_offsets")?;
-    validate_section_alignment(&ranges, 3, 4, "targets")?;
-    validate_section_alignment(&ranges, 5, 4, "weights")?;
-    validate_section_alignment(&ranges, 8, 8, "primary_key_offsets")?;
-
-    validate_section_min_len(&ranges, 0, active_byte_count, "is_active")?;
-    validate_section_min_len(&ranges, 1, node_u32_bytes, "table_oids")?;
-    validate_section_min_len(&ranges, 2, edge_offsets_bytes, "edge_offsets")?;
-    validate_section_min_len(&ranges, 3, edge_targets_bytes, "targets")?;
-    validate_section_min_len(&ranges, 4, edge_type_bytes, "type_ids")?;
-    validate_section_min_len(&ranges, 6, edge_schema_reversed_bytes, "schema_reversed")?;
-    validate_section_min_len(&ranges, 8, pk_offsets_bytes, "primary_key_offsets")?;
-
-    let weights_len = ranges[5].1 - ranges[5].0;
-    if weights_len != 0 && weights_len != edge_weight_bytes {
+    let resolution = &mmap[ranges[16].0..ranges[16].1];
+    if resolution.len() < 4 {
         return Err(GraphError::CorruptFile {
-            reason: format!(
-                "weights section must be empty or exactly {} bytes, found {}",
-                edge_weight_bytes, weights_len
-            ),
+            reason: "invalid resolution index section".to_string(),
         });
     }
-
-    for &flag in &mmap[ranges[6].0..ranges[6].0 + edge_schema_reversed_bytes] {
-        if flag > 1 {
-            return Err(GraphError::CorruptFile {
-                reason: format!("schema_reversed flag must be 0 or 1, found {flag}"),
-            });
-        }
-    }
-
-    let resolution = &mmap[ranges[7].0..ranges[7].1];
-    let resolution_index =
-        ResolutionIndex::from_bytes(resolution).ok_or_else(|| GraphError::CorruptFile {
-            reason: "invalid resolution index section".to_string(),
+    let resolution_min_len = (read_u32_at(resolution, 0) as usize)
+        .checked_mul(RESOLUTION_ENTRY_SIZE)
+        .and_then(|bytes| bytes.checked_add(4))
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "resolution index length overflowed".into(),
         })?;
-    let resolution_min_len = 4 + resolution_index.len() as usize * RESOLUTION_ENTRY_SIZE;
-    validate_section_min_len(&ranges, 7, resolution_min_len, "resolution_index")?;
+    require_exact_section_len(&ranges, 16, resolution_min_len, "resolution_index")?;
 
-    validate_length_prefixed_section(mmap, &ranges, 10, "filter index")?;
-    validate_length_prefixed_section(mmap, &ranges, 11, "edge metadata")?;
-
-    validate_persisted_contents(mmap, &ranges, node_count, edge_count)?;
+    validate_filter_sections(mmap, &ranges)?;
+    validate_persisted_contents(
+        mmap,
+        &ranges,
+        node_count,
+        forward_edge_count,
+        inbound_edge_count,
+    )?;
+    validate_csr_reverse_equivalence(
+        mmap,
+        &ranges,
+        node_count,
+        forward_edge_count,
+        flags & FLAG_FORWARD_WEIGHTS != 0,
+    )?;
 
     Ok(ValidatedGraphLayout {
         ranges,
         node_count,
-        edge_count,
+        forward_edge_count,
+        inbound_edge_count,
+        has_forward_weights: flags & FLAG_FORWARD_WEIGHTS != 0,
+        has_inbound_weights: flags & FLAG_INBOUND_WEIGHTS != 0,
     })
+}
+
+fn require_exact_section_len(
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    section: usize,
+    expected: usize,
+    label: &str,
+) -> GraphResult<()> {
+    let actual = ranges[section].1 - ranges[section].0;
+    if actual != expected {
+        return Err(GraphError::CorruptFile {
+            reason: format!("{label} section length must be {expected}, found {actual}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_csr_section_lengths(
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    base: usize,
+    node_plus_one: u32,
+    edge_count: u32,
+    has_weights: bool,
+    label: &str,
+) -> GraphResult<()> {
+    require_exact_section_len(
+        ranges,
+        base,
+        checked_section_size(node_plus_one, 4, label)?,
+        label,
+    )?;
+    require_exact_section_len(
+        ranges,
+        base + 1,
+        checked_section_size(edge_count, 4, label)?,
+        label,
+    )?;
+    require_exact_section_len(ranges, base + 2, edge_count as usize, label)?;
+    require_exact_section_len(ranges, base + 3, edge_count as usize, label)?;
+    let weight_len = if has_weights {
+        checked_section_size(edge_count, 4, label)?
+    } else {
+        0
+    };
+    require_exact_section_len(ranges, base + 4, weight_len, label)?;
+    require_exact_section_len(
+        ranges,
+        base + 5,
+        checked_section_size(edge_count, 4, label)?,
+        label,
+    )
+}
+
+fn validate_filter_sections(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+) -> GraphResult<()> {
+    if ranges[17].1 - ranges[17].0 < 16 {
+        return Err(GraphError::CorruptFile {
+            reason: "filter catalog header is truncated".into(),
+        });
+    }
+    let _ = mmap;
+    Ok(())
 }
 
 /// Write the engine state to a .pggraph file.
@@ -660,45 +898,24 @@ fn write_graph_file_internal(
     })?;
     let mut writer = GraphArtifactWriter::new(file, check_interrupts)?;
 
-    writer.begin_section(0, None)?;
+    writer.begin_section(0)?;
     reserve_persistence_workspace(
         &mut workspace,
         packed_active_bytes(engine.node_store.node_count())?,
     )?;
     let is_active_bytes = engine.node_store.is_active_bytes();
-    writer.write_body(&is_active_bytes)?;
+    let packed_active_len = (engine.node_store.node_count() as usize).div_ceil(8);
+    let packed_active = is_active_bytes.get(..packed_active_len).ok_or_else(|| {
+        GraphError::Internal("node active bitmap is shorter than the projected node count".into())
+    })?;
+    writer.write_body(packed_active)?;
     drop(is_active_bytes);
     release_persistence_workspace(&mut workspace);
 
-    writer.begin_section(1, Some(4))?;
+    writer.begin_section(1)?;
     writer.write_u32_values(engine.node_store.table_oids_slice())?;
 
-    writer.begin_section(2, Some(4))?;
-    writer.write_u32_values(engine.edge_store.offsets_slice())?;
-
-    writer.begin_section(3, Some(4))?;
-    writer.write_u32_values(engine.edge_store.targets_slice())?;
-
-    writer.begin_section(4, None)?;
-    writer.write_body(engine.edge_store.type_ids_slice())?;
-
-    writer.begin_section(5, Some(4))?;
-    writer.write_u32_values(engine.edge_store.weights_slice())?;
-
-    writer.begin_section(6, None)?;
-    writer.write_body(engine.edge_store.schema_reversed_slice())?;
-
-    writer.begin_section(7, None)?;
-    reserve_persistence_workspace(
-        &mut workspace,
-        resolution_serialization_bytes(engine.node_store.node_count())?,
-    )?;
-    let ri_bytes = engine.resolution_to_bytes();
-    writer.write_body(&ri_bytes)?;
-    drop(ri_bytes);
-    release_persistence_workspace(&mut workspace);
-
-    writer.begin_section(8, Some(8))?;
+    writer.begin_section(2)?;
     let mut pk_offset = 0u64;
     writer.write_u64_value(pk_offset)?;
     for node_idx in 0..engine.node_store.node_count() {
@@ -719,7 +936,7 @@ fn write_graph_file_internal(
         writer.write_u64_value(pk_offset)?;
     }
 
-    writer.begin_section(9, None)?;
+    writer.begin_section(3)?;
     for node_idx in 0..engine.node_store.node_count() {
         if check_interrupts && node_idx.is_multiple_of(INTERRUPT_CHECK_INTERVAL) {
             check_for_interrupts();
@@ -732,38 +949,70 @@ fn write_graph_file_internal(
         writer.write_body(pk.as_bytes())?;
     }
 
-    writer.begin_section(10, None)?;
-    let bincode_config = bincode::config::standard();
+    write_edge_sections(&mut writer, 4, &engine.edge_store)?;
+    let derived_inbound;
+    let inbound_store = if engine.reverse_edge_store.node_count() == engine.node_store.node_count()
+        && engine.reverse_edge_store.edge_count() == engine.edge_store.edge_count()
+    {
+        &engine.reverse_edge_store
+    } else {
+        derived_inbound = engine.edge_store.try_reversed()?;
+        &derived_inbound
+    };
+    write_edge_sections(&mut writer, 10, inbound_store)?;
+
+    writer.begin_section(16)?;
     reserve_persistence_workspace(
         &mut workspace,
-        serialization_workspace_bytes(engine.filter_index.estimated_heap_bytes())?,
+        resolution_serialization_bytes(engine.node_store.node_count())?,
     )?;
-    let filter_bytes = bincode::serde::encode_to_vec(&engine.filter_index, bincode_config)
-        .map_err(|e| GraphError::Internal(format!("FilterIndex serialization failed: {}", e)))?;
-    writer.write_length_prefixed_payload(&filter_bytes, "filter index")?;
-    drop(filter_bytes);
+    let ri_bytes = engine.resolution_to_bytes();
+    writer.write_body(&ri_bytes)?;
+    drop(ri_bytes);
     release_persistence_workspace(&mut workspace);
 
-    writer.begin_section(11, None)?;
+    let filter_workspace = engine
+        .filter_index
+        .v5_encoding_workspace_upper_bound(engine.node_store.node_count())?;
     reserve_persistence_workspace(
         &mut workspace,
-        serialization_workspace_bytes(edge_metadata_heap_bytes(engine)?)?,
+        crate::resource::ByteCount::from_usize(filter_workspace).ok_or_else(|| {
+            GraphError::Internal("filter encoding workspace exceeds u64 bytes".into())
+        })?,
     )?;
-    let edge_metadata = PersistedEdgeMetadata {
-        edge_type_registry: engine.edge_type_registry.clone(),
-        relationship_ids: engine.edge_store.relationship_ids_slice().to_vec(),
-        relationship_identities: engine.relationship_identities.clone(),
-    };
-    let edge_metadata_bytes = bincode::serde::encode_to_vec(&edge_metadata, bincode_config)
-        .map_err(|e| GraphError::Internal(format!("edge metadata serialization failed: {}", e)))?;
-    writer.write_length_prefixed_payload(&edge_metadata_bytes, "edge metadata")?;
-    drop(edge_metadata_bytes);
-    drop(edge_metadata);
+    let (filter_catalog, filter_data, filter_dictionaries) = engine
+        .filter_index
+        .encode_v5_sections(engine.node_store.node_count())?;
+    writer.begin_section(17)?;
+    writer.write_body(&filter_catalog)?;
+    writer.begin_section(18)?;
+    writer.write_body(&filter_data)?;
+    writer.begin_section(19)?;
+    writer.write_body(&filter_dictionaries)?;
+    drop((filter_catalog, filter_data, filter_dictionaries));
     release_persistence_workspace(&mut workspace);
+
+    writer.begin_section(20)?;
+    write_string_registry(&mut writer, &engine.edge_type_registry)?;
+
+    writer.begin_section(21)?;
+    write_relationship_identity_descriptors(&mut writer, &engine.relationship_identities)?;
+    writer.begin_section(22)?;
+    write_relationship_identity_keys(&mut writer, &engine.relationship_identities)?;
+
+    let mut flags = 0u32;
+    if engine.edge_store.has_weights() {
+        flags |= FLAG_FORWARD_WEIGHTS;
+    }
+    if inbound_store.has_weights() {
+        flags |= FLAG_INBOUND_WEIGHTS;
+    }
 
     let file = writer.finish(
         engine.node_store.node_count(),
         engine.edge_store.edge_count(),
+        inbound_store.edge_count(),
+        flags,
     )?;
     file.sync_all()
         .map_err(|e| GraphError::Internal(format!("Sync failed: {}", e)))?;
@@ -774,6 +1023,168 @@ fn write_graph_file_internal(
     write_sync_checkpoint(path, engine.applied_sync_id)?;
     write_projection_mode(path, engine.projection_mode)?;
 
+    Ok(())
+}
+
+fn write_edge_sections(
+    writer: &mut GraphArtifactWriter,
+    base: usize,
+    store: &EdgeStore,
+) -> GraphResult<()> {
+    writer.begin_section(base)?;
+    writer.write_u32_values(store.offsets_slice())?;
+    writer.begin_section(base + 1)?;
+    writer.write_u32_values(store.targets_slice())?;
+    writer.begin_section(base + 2)?;
+    writer.write_body(store.type_ids_slice())?;
+    writer.begin_section(base + 3)?;
+    writer.write_body(store.schema_reversed_slice())?;
+    writer.begin_section(base + 4)?;
+    writer.write_u32_values(store.weights_slice())?;
+    writer.begin_section(base + 5)?;
+    writer.write_u32_values(store.relationship_ids_slice())
+}
+
+fn write_string_registry(writer: &mut GraphArtifactWriter, values: &[String]) -> GraphResult<()> {
+    let count = u32::try_from(values.len())
+        .map_err(|_| GraphError::Internal("edge type registry exceeds u32 entries".into()))?;
+    writer.write_u32_value(count)?;
+    let mut offset = 0u64;
+    writer.write_u64_value(offset)?;
+    for value in values {
+        offset = offset
+            .checked_add(u64::try_from(value.len()).map_err(|_| {
+                GraphError::Internal("edge type registry payload exceeds u64".into())
+            })?)
+            .ok_or_else(|| GraphError::Internal("edge type registry payload exceeds u64".into()))?;
+        writer.write_u64_value(offset)?;
+    }
+    for value in values {
+        writer.write_body(value.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn write_relationship_identity_descriptors(
+    writer: &mut GraphArtifactWriter,
+    identities: &RelationshipIdentityStore,
+) -> GraphResult<()> {
+    let mut key_end = 0u64;
+    for (idx, identity) in identities.iter().enumerate() {
+        let (mapping_id, key_len) = match identity {
+            None if idx == 0 => (0, 0u32),
+            None => {
+                return Err(GraphError::Internal(format!(
+                    "relationship identity dictionary slot {idx} is empty"
+                )));
+            }
+            Some(identity) if identity.mapping_id != 0 => {
+                let len = u32::try_from(identity.source_key.len()).map_err(|_| {
+                    GraphError::Internal("relationship identity key exceeds u32".into())
+                })?;
+                (identity.mapping_id, len)
+            }
+            Some(_) => {
+                return Err(GraphError::Internal(format!(
+                    "relationship identity dictionary slot {idx} has mapping ID 0"
+                )));
+            }
+        };
+        writer.write_body(&mapping_id.to_le_bytes())?;
+        key_end = key_end
+            .checked_add(u64::from(key_len))
+            .ok_or_else(|| GraphError::Internal("relationship key bytes exceed u64".into()))?;
+        writer.write_u64_value(key_end)?;
+    }
+    Ok(())
+}
+
+fn write_relationship_identity_keys(
+    writer: &mut GraphArtifactWriter,
+    identities: &RelationshipIdentityStore,
+) -> GraphResult<()> {
+    for identity in identities.iter().flatten() {
+        writer.write_body(identity.source_key.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn decode_string_registry(mmap: &[u8], range: (usize, usize)) -> GraphResult<Vec<String>> {
+    let bytes = &mmap[range.0..range.1];
+    if bytes.len() < 12 {
+        return Err(GraphError::CorruptFile {
+            reason: "edge type registry is too short".into(),
+        });
+    }
+    let count = read_u32_at(bytes, 0) as usize;
+    let offsets_len = count
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(8))
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "edge type registry offset table overflows".into(),
+        })?;
+    let payload_start = 4usize
+        .checked_add(offsets_len)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "edge type registry header overflows".into(),
+        })?;
+    if payload_start > bytes.len() || read_u64_at(bytes, 4) != 0 {
+        return Err(GraphError::CorruptFile {
+            reason: "edge type registry has an invalid offset table".into(),
+        });
+    }
+    let payload = &bytes[payload_start..];
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| GraphError::Oom {
+            used_mb: 0,
+            need_mb: (bytes.len() as u64).div_ceil(1_048_576),
+            limit_mb: 0,
+        })?;
+    let mut previous = 0usize;
+    for idx in 0..count {
+        let end = usize::try_from(read_u64_at(bytes, 4 + (idx + 1) * 8)).map_err(|_| {
+            GraphError::CorruptFile {
+                reason: "edge type registry offset exceeds usize".into(),
+            }
+        })?;
+        if end < previous || end > payload.len() {
+            return Err(GraphError::CorruptFile {
+                reason: format!("edge type registry offset {idx} is invalid"),
+            });
+        }
+        let value = std::str::from_utf8(&payload[previous..end]).map_err(|err| {
+            GraphError::CorruptFile {
+                reason: format!("edge type registry entry {idx} is not UTF-8: {err}"),
+            }
+        })?;
+        values.push(value.to_owned());
+        previous = end;
+    }
+    if previous != payload.len() {
+        return Err(GraphError::CorruptFile {
+            reason: "edge type registry has trailing bytes".into(),
+        });
+    }
+    Ok(values)
+}
+
+fn validate_relationship_ids(
+    store: &EdgeStore,
+    identities: &RelationshipIdentityStore,
+    label: &str,
+) -> GraphResult<()> {
+    for &id in store.relationship_ids_slice() {
+        if id == 0 {
+            continue;
+        }
+        if identities.get(id).is_none() {
+            return Err(GraphError::CorruptFile {
+                reason: format!("{label} relationship ID {id} is outside the identity dictionary"),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -811,50 +1222,6 @@ fn resolution_serialization_bytes(node_count: u32) -> GraphResult<crate::resourc
         .and_then(|bytes| bytes.checked_add(4))
         .map(crate::resource::ByteCount::from_bytes)
         .ok_or_else(|| GraphError::Internal("resolution serialization size overflowed".to_string()))
-}
-
-fn serialization_workspace_bytes(source_bytes: usize) -> GraphResult<crate::resource::ByteCount> {
-    source_bytes
-        .checked_mul(2)
-        .and_then(|bytes| bytes.checked_add(64 * 1024))
-        .and_then(crate::resource::ByteCount::from_usize)
-        .ok_or_else(|| GraphError::Internal("serialization workspace size overflowed".to_string()))
-}
-
-fn edge_metadata_heap_bytes(engine: &Engine) -> GraphResult<usize> {
-    let labels = engine
-        .edge_type_registry
-        .iter()
-        .try_fold(0usize, |bytes, label| {
-            bytes
-                .checked_add(std::mem::size_of::<String>())
-                .and_then(|value| value.checked_add(label.len()))
-                .ok_or(())
-        })
-        .map_err(|()| GraphError::Internal("edge label size overflowed".to_string()))?;
-    let relationship_ids = engine
-        .edge_store
-        .relationship_ids_slice()
-        .len()
-        .checked_mul(std::mem::size_of::<RelationshipId>())
-        .ok_or_else(|| GraphError::Internal("relationship ID size overflowed".to_string()))?;
-    let identities = engine
-        .relationship_identities
-        .iter()
-        .try_fold(0usize, |bytes, identity| {
-            let payload = identity
-                .as_ref()
-                .map_or(0, |identity| identity.source_key.len());
-            bytes
-                .checked_add(std::mem::size_of::<Option<RelationshipIdentity>>())
-                .and_then(|value| value.checked_add(payload))
-                .ok_or(())
-        })
-        .map_err(|()| GraphError::Internal("relationship identity size overflowed".to_string()))?;
-    labels
-        .checked_add(relationship_ids)
-        .and_then(|bytes| bytes.checked_add(identities))
-        .ok_or_else(|| GraphError::Internal("edge metadata size overflowed".to_string()))
 }
 
 fn resource_error_to_oom(error: crate::resource::ResourceLimitError) -> GraphError {
@@ -962,17 +1329,15 @@ pub fn read_projection_mode(path: &Path) -> GraphResult<Option<config::Projectio
 /// After load:
 /// - NodeStore active bits, table OIDs, primary-key offsets, and primary-key
 ///   bytes are mmap-backed.
-/// - The forward EdgeStore CSR arrays are mmap-backed.
+/// - Both forward and inbound EdgeStore CSR arrays are mmap-backed.
 /// - ResolutionIndex lookups read the mmap-backed resolution section.
-/// - FilterIndex, the edge type registry, and relationship identity metadata
-///   are bincode-deserialized into backend-local heap.
-/// - The reverse EdgeStore CSR is rebuilt into backend-local heap for inbound
-///   traversal.
+/// - Immutable filter values, text dictionaries, and relationship identities
+///   stay mapped; only bounded filter and edge-label metadata is decoded.
 ///
 /// Each backend copies the artifact into an anonymous read-only mapping before
 /// creating typed views. This prevents same-inode writes or truncation by
-/// another process from invalidating Rust references. Derived and
-/// bincode-backed structures also remain per-backend allocations.
+/// another process from invalidating Rust references. Derived metadata and
+/// mutable overlays remain per-backend allocations.
 pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     load_graph_file_internal(path, None, crate::resource::ByteCount::ZERO)
 }
@@ -1019,9 +1384,9 @@ fn load_graph_file_internal(
             .len(),
     )
     .map_err(|_| GraphError::Internal("graph artifact is too large for this platform".into()))?;
-    if file_len < HEADER_SIZE {
+    if file_len < 8 {
         return Err(GraphError::CorruptFile {
-            reason: "file too small for header".to_string(),
+            reason: "file too small for graph artifact preamble".to_string(),
         });
     }
     let load_governor = crate::resource::load_governor(resident);
@@ -1048,49 +1413,108 @@ fn load_graph_file_internal(
     }
     let version = read_u32_at(&mmap, 4);
     if version != VERSION {
-        return Err(GraphError::IncompatibleVersion(
-            "Graph file format is outdated. Please run SELECT graph.build() to regenerate it."
-                .to_string(),
-        ));
+        return Err(GraphError::IncompatibleVersion(format!(
+            "graph artifact version {version} is unsupported; run SELECT graph.build() to create version {VERSION}"
+        )));
     }
-
-    let node_count = read_u32_at(&mmap, 12);
-    let edge_count = read_u32_at(&mmap, 16);
-
-    // Read section offsets
-    let mut section_offsets = [0u64; NUM_SECTIONS];
-    for (i, offset) in section_offsets.iter_mut().enumerate().take(NUM_SECTIONS) {
-        let start = 20 + i * 8;
-        *offset = read_u64_at(&mmap, start);
+    if file_len < HEADER_SIZE {
+        return Err(GraphError::CorruptFile {
+            reason: "file too small for v5 graph artifact header".to_string(),
+        });
     }
-
-    // Validate CRC32
-    let stored_crc = read_u32_at(&mmap, CRC_OFFSET);
+    if read_u32_at(&mmap, 8) as usize != HEADER_SIZE
+        || read_u32_at(&mmap, 28) as usize != NUM_SECTIONS
+    {
+        return Err(GraphError::CorruptFile {
+            reason: "invalid v5 header or section count".into(),
+        });
+    }
+    if mmap[48..64].iter().any(|&byte| byte != 0)
+        || mmap[432..HEADER_SIZE].iter().any(|&byte| byte != 0)
+    {
+        return Err(GraphError::CorruptFile {
+            reason: "v5 header reserved bytes must be zero".into(),
+        });
+    }
+    let stored_header_crc = read_u32_at(&mmap, HEADER_CRC_OFFSET);
+    let mut header = [0u8; HEADER_SIZE];
+    header.copy_from_slice(&mmap[..HEADER_SIZE]);
+    header[HEADER_CRC_OFFSET..HEADER_CRC_OFFSET + 4].fill(0);
+    let computed_header_crc = crc32fast::hash(&header);
+    if stored_header_crc != computed_header_crc {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "header CRC32 mismatch: stored={stored_header_crc:#x}, computed={computed_header_crc:#x}"
+            ),
+        });
+    }
+    let body_len =
+        usize::try_from(read_u64_at(&mmap, 32)).map_err(|_| GraphError::CorruptFile {
+            reason: "v5 body length exceeds usize".into(),
+        })?;
+    if body_len != file_len - HEADER_SIZE {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "v5 body length mismatch: header={body_len}, actual={}",
+                file_len - HEADER_SIZE
+            ),
+        });
+    }
+    let stored_crc = read_u32_at(&mmap, BODY_CRC_OFFSET);
     let computed_crc = crc32fast::hash(&mmap[HEADER_SIZE..]);
     if stored_crc != computed_crc {
         return Err(GraphError::CorruptFile {
             reason: format!(
-                "CRC32 mismatch: stored={:#x}, computed={:#x}",
-                stored_crc, computed_crc
+                "body CRC32 mismatch: stored={stored_crc:#x}, computed={computed_crc:#x}"
             ),
         });
     }
 
-    let layout = validate_section_layout(&mmap, &section_offsets, node_count, edge_count)?;
-    let reverse_bytes = reverse_csr_workspace_bytes(node_count, edge_count)?;
-    let _reverse_memory = load_governor
-        .reserve_memory(crate::resource::ResourcePhase::LoadInbound, reverse_bytes)
+    let flags = read_u32_at(&mmap, 12);
+    let node_count = read_u32_at(&mmap, 16);
+    let forward_edge_count = read_u32_at(&mmap, 20);
+    let inbound_edge_count = read_u32_at(&mmap, 24);
+    let mut sections = [SectionDescriptor::default(); NUM_SECTIONS];
+    for (idx, descriptor) in sections.iter_mut().enumerate() {
+        let start = SECTION_DESCRIPTORS_OFFSET + idx * SECTION_DESCRIPTOR_SIZE;
+        descriptor.offset = read_u64_at(&mmap, start);
+        descriptor.len = read_u64_at(&mmap, start + 8);
+    }
+
+    let resolution_validation_bytes =
+        crate::resource::ByteCount::from_usize(node_count as usize)
+            .ok_or_else(|| GraphError::Internal("resolution validation size overflowed".into()))?;
+    let resolution_validation = load_governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::LoadMetadata,
+            resolution_validation_bytes,
+        )
         .map_err(crate::safety::resource_limit_error)?;
-    let variable_metadata_bytes = layout.ranges[10]
-        .1
-        .checked_sub(layout.ranges[10].0)
-        .and_then(|filter| {
-            layout.ranges[11]
-                .1
-                .checked_sub(layout.ranges[11].0)
-                .and_then(|metadata| filter.checked_add(metadata))
-        })
-        .and_then(|bytes| bytes.checked_mul(2))
+    let layout = validate_section_layout(
+        &mmap,
+        &sections,
+        node_count,
+        forward_edge_count,
+        inbound_edge_count,
+        flags,
+    )?;
+    drop(resolution_validation);
+    // Mapped value/key bytes are already covered by the full anonymous
+    // snapshot reservation. This additional lease covers bounded descriptors,
+    // copied names/labels, empty per-column delta containers, and temporary
+    // uniqueness validation indexes.
+    let filter_metadata_bytes = FilterIndex::mapped_load_metadata_upper_bound(
+        &mmap[layout.ranges[17].0..layout.ranges[17].1],
+    )?;
+    let registry_metadata_bytes = (layout.ranges[20].1 - layout.ranges[20].0)
+        .checked_mul(4)
+        .ok_or_else(|| GraphError::Internal("registry metadata estimate overflowed".into()))?;
+    let identity_validation_bytes = (layout.ranges[21].1 - layout.ranges[21].0)
+        .checked_mul(4)
+        .ok_or_else(|| GraphError::Internal("identity metadata estimate overflowed".into()))?;
+    let variable_metadata_bytes = filter_metadata_bytes
+        .checked_add(registry_metadata_bytes)
+        .and_then(|bytes| bytes.checked_add(identity_validation_bytes))
         .and_then(crate::resource::ByteCount::from_usize)
         .ok_or_else(|| GraphError::Internal("load metadata estimate overflowed".to_string()))?;
     let _variable_metadata = load_governor
@@ -1109,35 +1533,23 @@ fn load_graph_file_internal(
     // The artifact is the only production construction boundary for mapped
     // stores. Each store retains its own Arc to the immutable mapping.
     let node_store = NodeStore::from_mmap(artifact.node_arrays()?);
-    let edge_arrays = artifact.edge_arrays()?;
+    let edge_store = EdgeStore::from_mmap(artifact.edge_arrays(false)?);
+    let reverse_edge_store = EdgeStore::from_mmap(artifact.edge_arrays(true)?);
     // ── ResolutionIndex: mmap'd, zero-copy (handled by Engine) ──
-    let ri_start = section_ranges[7].0;
-    let ri_end = section_ranges[7].1;
+    let ri_start = section_ranges[16].0;
+    let ri_end = section_ranges[16].1;
     let ri_len = ri_end - ri_start;
 
-    // FilterIndex and edge metadata are variable-size bincode sections. They
-    // are deserialized into backend-local heap rather than kept as mmap-backed
-    // stores.
-    let bincode_config = bincode::config::standard();
-    let filter_data = length_prefixed_payload(&artifact.mmap, section_ranges, 10, "filter index")?;
-    let filter_index: FilterIndex = decode_bincode_section(
-        filter_data,
-        bincode_config,
-        "filter index",
-        "FilterIndex deserialization failed",
+    let filter_index = FilterIndex::from_mapped_sections(
+        MappedBytes::from_mmap(Arc::clone(&artifact.mmap)),
+        section_ranges[17].0..section_ranges[17].1,
+        section_ranges[18].0..section_ranges[18].1,
+        section_ranges[19].0..section_ranges[19].1,
+        node_count,
     )?;
-    filter_index.validate_persisted_layout(node_count)?;
 
-    let registry_data =
-        length_prefixed_payload(&artifact.mmap, section_ranges, 11, "edge metadata")?;
-    let edge_metadata: PersistedEdgeMetadata = decode_bincode_section(
-        registry_data,
-        bincode_config,
-        "edge metadata",
-        "edge metadata deserialization failed",
-    )?;
-    if edge_metadata
-        .edge_type_registry
+    let edge_type_registry = decode_string_registry(&artifact.mmap, section_ranges[20])?;
+    if edge_type_registry
         .first()
         .is_none_or(|label| !label.is_empty())
     {
@@ -1145,65 +1557,46 @@ fn load_graph_file_internal(
             reason: "edge type registry must reserve empty label at index 0".to_string(),
         });
     }
-    if edge_metadata.relationship_ids.len() != edge_count as usize {
-        return Err(GraphError::CorruptFile {
-            reason: "relationship identity sidecar length does not match edge count".to_string(),
-        });
-    }
-    if edge_metadata
-        .relationship_identities
-        .first()
-        .is_none_or(Option::is_some)
+    if edge_type_registry.len() > 255
+        || edge_type_registry.iter().skip(1).any(String::is_empty)
+        || edge_type_registry
+            .iter()
+            .enumerate()
+            .any(|(index, label)| edge_type_registry[..index].contains(label))
     {
         return Err(GraphError::CorruptFile {
-            reason: "relationship identity dictionary must reserve ID 0".to_string(),
+            reason: "edge type registry contains invalid or duplicate labels".into(),
         });
     }
-    for (idx, identity) in edge_metadata
-        .relationship_identities
+    let registry_len = edge_type_registry.len();
+    if edge_store
+        .type_ids_slice()
         .iter()
-        .enumerate()
-        .skip(1)
+        .chain(reverse_edge_store.type_ids_slice())
+        .any(|type_id| *type_id as usize >= registry_len)
     {
-        if let Some(identity) = identity {
-            if identity.mapping_id == 0 {
-                return Err(GraphError::CorruptFile {
-                    reason: format!("relationship identity dictionary slot {idx} is invalid"),
-                });
-            }
-        }
+        return Err(GraphError::CorruptFile {
+            reason: "CSR edge type ID is outside the edge type registry".into(),
+        });
     }
-    for &id in &edge_metadata.relationship_ids {
-        if id == 0 {
-            continue;
-        }
-        match edge_metadata.relationship_identities.get(id as usize) {
-            Some(Some(identity)) => {
-                debug_assert!(identity.mapping_id != 0);
-            }
-            Some(None) => {
-                return Err(GraphError::CorruptFile {
-                    reason: format!("relationship ID {id} points to an empty dictionary slot"),
-                });
-            }
-            None => {
-                return Err(GraphError::CorruptFile {
-                    reason: format!("relationship ID {id} is outside dictionary"),
-                });
-            }
-        }
-    }
-
-    let edge_store =
-        EdgeStore::from_mmap_with_relationship_ids(edge_arrays, edge_metadata.relationship_ids);
+    let relationship_identities = RelationshipIdentityStore::Mapped(
+        MappedRelationshipIdentities::new(MappedRelationshipIdentityParts {
+            mmap: MappedBytes::from_mmap(Arc::clone(&artifact.mmap)),
+            descriptors_range: section_ranges[21].0..section_ranges[21].1,
+            key_bytes_range: section_ranges[22].0..section_ranges[22].1,
+        })?,
+    );
+    validate_relationship_ids(&edge_store, &relationship_identities, "forward")?;
+    validate_relationship_ids(&reverse_edge_store, &relationship_identities, "inbound")?;
 
     let mut engine = Engine::new();
     engine.install_mmap_backed_graph(MmapBackedGraph {
         node_store,
         edge_store,
+        reverse_edge_store,
         filter_index,
-        edge_type_registry: edge_metadata.edge_type_registry,
-        relationship_identities: edge_metadata.relationship_identities,
+        edge_type_registry,
+        relationship_identities,
         mmap: artifact.mmap,
         resolution_state: MmapResolutionState::new(ri_start, ri_len),
     })?;
@@ -1255,16 +1648,9 @@ fn load_graph_file_internal(
                     reason: "relationship identity manifest entry count mismatch".to_string(),
                 });
             }
-            if !dictionary
-                .identities()
-                .starts_with(&engine.relationship_identities)
-            {
-                return Err(GraphError::CorruptFile {
-                    reason: "relationship identity artifact does not extend the base dictionary"
-                        .to_string(),
-                });
-            }
-            engine.relationship_identities = dictionary.identities().to_vec();
+            engine
+                .relationship_identities
+                .install_cumulative_owned(dictionary.identities())?;
         }
         if !manifest.segments.is_empty() {
             engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
@@ -1327,20 +1713,6 @@ fn projection_workspace_bytes(
         .ok_or_else(|| GraphError::CorruptFile {
             reason: "projection load workspace estimate overflowed".to_string(),
         })
-}
-
-fn reverse_csr_workspace_bytes(
-    node_count: u32,
-    edge_count: u32,
-) -> GraphResult<crate::resource::ByteCount> {
-    let offsets = u64::from(node_count)
-        .checked_add(1)
-        .and_then(|count| count.checked_mul(8));
-    let edges = u64::from(edge_count).checked_mul(24);
-    offsets
-        .and_then(|offsets| edges.and_then(|edges| offsets.checked_add(edges)))
-        .map(crate::resource::ByteCount::from_bytes)
-        .ok_or_else(|| GraphError::Internal("reverse CSR load estimate overflowed".to_string()))
 }
 
 fn load_projection_manifest(
@@ -1412,7 +1784,7 @@ pub(crate) fn graph_artifact_checksum_for_path(path: &Path) -> GraphResult<Strin
             reason: "invalid magic bytes".to_string(),
         });
     }
-    let stored_crc = read_u32_at(&bytes, CRC_OFFSET);
+    let stored_crc = read_u32_at(&bytes, BODY_CRC_OFFSET);
     let computed_crc = crc32fast::hash(&bytes[HEADER_SIZE..]);
     if stored_crc != computed_crc {
         return Err(GraphError::CorruptFile {
@@ -1595,8 +1967,12 @@ mod tests {
     //! section metadata cannot reach mmap-backed stores unchecked.
 
     use super::*;
-    use crate::edge_store::{IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder};
-    use crate::filter_index::{FilterColumnType, PersistedFilterValue};
+    use crate::edge_store::{
+        IdentifiedRawEdge, RawEdge, RelationshipIdentity, SortedEdgeStoreBuilder,
+    };
+    use crate::filter_index::{
+        FilterColumnType, PersistedFilterValue, FILTER_CATALOG_HEADER_SIZE, FILTER_DESCRIPTOR_SIZE,
+    };
     use crate::projection::manifest::{
         ManifestSegmentRef, ProjectionManifest, ProjectionManifestStore,
     };
@@ -1862,6 +2238,40 @@ mod tests {
     }
 
     #[test]
+    fn mapped_filter_metadata_is_charged_before_many_empty_columns_load() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(10, "A".to_string());
+        engine.resolution_insert(10, "A", 0);
+        engine.edge_store = EdgeStore::from_edges(1, vec![], false);
+        for column in 0..512 {
+            engine
+                .filter_index
+                .register_column(10, format!("empty_{column}"), 1);
+        }
+        engine.built = true;
+        let path = temp_graph_path("many-empty-filter-columns");
+        write_graph_file(&engine, &path).expect("fixture writes");
+
+        let artifact = std::fs::read(&path).expect("artifact reads");
+        let catalog_start = read_section_offset(&path, 17) as usize;
+        let catalog_end = catalog_start + read_section_len(&path, 17) as usize;
+        let filter_metadata =
+            FilterIndex::mapped_load_metadata_upper_bound(&artifact[catalog_start..catalog_end])
+                .expect("metadata bound computes");
+        let registry_metadata = (read_section_len(&path, 20) as usize) * 4;
+        let identity_metadata = (read_section_len(&path, 21) as usize) * 4;
+        let metadata = filter_metadata + registry_metadata + identity_metadata;
+        let hard = crate::resource::configured_memory_limit_mb().max(1) as u64 * 1_048_576;
+        let admitted = artifact.len() as u64 + metadata as u64;
+        let resident = crate::resource::ByteCount::from_bytes(hard - admitted + 1);
+
+        let result = load_graph_file_with_residency(&path, resident);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::ResourceLimit { .. })));
+    }
+
+    #[test]
     fn persisted_mmap_load_preserves_schema_reversed_edges() {
         let mut engine = Engine::new();
         let a = engine.node_store.add_node(10, "A-1".to_string());
@@ -1928,44 +2338,36 @@ mod tests {
 
         assert_eq!(loaded.edge_store.relationship_ids_slice(), &[1]);
         assert_eq!(loaded.reverse_edge_store.relationship_ids_slice(), &[1]);
-        assert_eq!(loaded.relationship_identities[0], None);
-        assert_eq!(
-            loaded.relationship_identities[1],
-            Some(RelationshipIdentity {
-                mapping_id: 42,
-                source_key: "edge:100".to_string(),
-            })
-        );
+        assert!(loaded.relationship_identities.get(0).is_none());
+        let loaded_identity = loaded.relationship_identities.get(1).unwrap();
+        assert_eq!(loaded_identity.mapping_id, 42);
+        assert_eq!(loaded_identity.source_key, "edge:100");
         assert_eq!(reloaded.edge_store.relationship_ids_slice(), &[1]);
-        assert_eq!(
-            reloaded.relationship_identities[1],
-            Some(RelationshipIdentity {
-                mapping_id: 42,
-                source_key: "edge:100".to_string(),
-            })
-        );
+        let reloaded_identity = reloaded.relationship_identities.get(1).unwrap();
+        assert_eq!(reloaded_identity.mapping_id, 42);
+        assert_eq!(reloaded_identity.source_key, "edge:100");
     }
 
     #[test]
     fn persisted_relationship_identity_allows_empty_source_key() {
         let mut engine = graph_with_identified_relationship();
-        engine.relationship_identities[1] = Some(RelationshipIdentity {
-            mapping_id: 42,
-            source_key: String::new(),
-        });
+        engine.relationship_identities = RelationshipIdentityStore::try_from_owned(vec![
+            None,
+            Some(RelationshipIdentity {
+                mapping_id: 42,
+                source_key: String::new(),
+            }),
+        ])
+        .unwrap();
         let path = temp_graph_path("relationship-identity-empty-source-key");
         write_graph_file(&engine, &path).unwrap();
 
         let loaded = load_graph_file(&path).unwrap();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
-        assert_eq!(
-            loaded.relationship_identities[1],
-            Some(RelationshipIdentity {
-                mapping_id: 42,
-                source_key: String::new(),
-            })
-        );
+        let identity = loaded.relationship_identities.get(1).unwrap();
+        assert_eq!(identity.mapping_id, 42);
+        assert_eq!(identity.source_key, "");
     }
 
     #[test]
@@ -1973,14 +2375,9 @@ mod tests {
         let engine = graph_with_identified_relationship();
         let path = temp_graph_path("relationship-identity-empty-slot");
         write_graph_file(&engine, &path).unwrap();
-        rewrite_edge_metadata_section(
-            &path,
-            &PersistedEdgeMetadata {
-                edge_type_registry: engine.edge_type_registry.clone(),
-                relationship_ids: vec![1],
-                relationship_identities: vec![None, None],
-            },
-        );
+        let descriptors = read_section_offset(&path, 21);
+        write_u64_at(&path, descriptors + 16, 0);
+        rewrite_crc(&path);
 
         let err = match load_graph_file(&path) {
             Ok(_) => panic!("malformed relationship dictionary must fail closed"),
@@ -1989,7 +2386,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
         assert!(
-            matches!(err, GraphError::CorruptFile { reason } if reason.contains("empty dictionary slot"))
+            matches!(err, GraphError::CorruptFile { reason } if reason.contains("mapping ID 0"))
         );
     }
 
@@ -2036,7 +2433,10 @@ mod tests {
                 100,
                 2,
             );
-        let open = engine.filter_index.intern_text_value(status, "open");
+        let open = engine
+            .filter_index
+            .intern_text_value(status, "open")
+            .unwrap();
         engine.filter_index.set_encoded_value(
             status,
             a,
@@ -2075,13 +2475,21 @@ mod tests {
             FilterColumnType::Text,
             engine.node_store.node_count() as usize,
         );
-        engine.filter_index.intern_text_value(column, "open");
-        engine
+        let open = engine
             .filter_index
-            .corrupt_reverse_text_dictionary_for_test();
+            .intern_text_value(column, "open")
+            .unwrap();
+        engine.filter_index.set_encoded_value(
+            column,
+            0,
+            Some(crate::filter_index::EncodedFilterValue::Text(open)),
+        );
 
         let path = temp_graph_path("malformed-filter-dictionary");
-        write_graph_file(&engine, &path).expect("malformed fixture writes with a valid checksum");
+        write_graph_file(&engine, &path).expect("filter fixture writes");
+        let dictionary = read_section_offset(&path, 19);
+        write_u64_at(&path, dictionary, 1);
+        rewrite_crc(&path);
         let err = match load_graph_file(&path) {
             Ok(_) => panic!("malformed filter dictionary must fail closed"),
             Err(err) => err,
@@ -2384,17 +2792,17 @@ mod tests {
         write_graph_file(&engine, &path).unwrap();
         let active_offset = read_section_offset(&path, 0);
         let table_oids_offset = read_section_offset(&path, 1);
-        let filter_offset = read_section_offset(&path, 10);
-        let registry_offset = read_section_offset(&path, 11);
+        let filter_offset = read_section_offset(&path, 17);
+        let registry_offset = read_section_offset(&path, 20);
         let file_len = std::fs::metadata(&path).unwrap().len();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
-        assert_eq!(NUM_SECTIONS, 12);
+        assert_eq!(NUM_SECTIONS, 23);
         assert_eq!(active_offset, HEADER_SIZE as u64);
         assert_eq!(table_oids_offset, HEADER_SIZE as u64);
         assert!(filter_offset >= HEADER_SIZE as u64);
         assert!(registry_offset > filter_offset);
-        assert!(file_len > registry_offset);
+        assert!(file_len >= registry_offset);
     }
 
     #[test]
@@ -2412,7 +2820,10 @@ mod tests {
                 1,
                 1,
             );
-        let open = engine.filter_index.intern_text_value(status, "open");
+        let open = engine
+            .filter_index
+            .intern_text_value(status, "open")
+            .unwrap();
         engine.filter_index.set_encoded_value(
             status,
             node_idx,
@@ -2423,18 +2834,21 @@ mod tests {
         let path = temp_graph_path("launch-artifact-section-sizes");
         write_graph_file(&engine, &path).unwrap();
         let header_version = read_u32_from_file(&path, 4);
-        let filter_offset = read_section_offset(&path, 10);
-        let registry_offset = read_section_offset(&path, 11);
-        let filter_payload_len = read_u32_from_file(&path, filter_offset) as u64;
+        let filter_offset = read_section_offset(&path, 17);
+        let filter_len = read_section_len(&path, 17);
+        let filter_data_len = read_section_len(&path, 18);
+        let filter_dictionary_len = read_section_len(&path, 19);
+        let registry_offset = read_section_offset(&path, 20);
         let file_len = std::fs::metadata(&path).unwrap().len();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
         assert_eq!(header_version, VERSION);
-        assert_eq!(NUM_SECTIONS, 12);
+        assert_eq!(NUM_SECTIONS, 23);
         assert!(filter_offset >= HEADER_SIZE as u64);
         assert!(registry_offset > filter_offset);
-        assert_eq!(registry_offset - filter_offset, 4 + filter_payload_len);
-        assert!(filter_payload_len > 0);
+        assert_eq!(filter_len, 16 + 64 + "status".len() as u64);
+        assert_eq!(filter_data_len, 1 + 4);
+        assert_eq!(filter_dictionary_len, 16 + "open".len() as u64);
         assert!(file_len > registry_offset);
     }
 
@@ -2468,8 +2882,10 @@ mod tests {
     fn truncated_file_returns_error() {
         let path =
             std::env::temp_dir().join(format!("graph-truncated-{}.pggraph", std::process::id()));
-        // Write file smaller than HEADER_SIZE (128 bytes)
-        std::fs::write(&path, b"PGGH_tiny").unwrap();
+        // Write a v5 preamble smaller than the 448-byte header.
+        let mut preamble = Vec::from(*MAGIC);
+        preamble.extend_from_slice(&VERSION.to_le_bytes());
+        std::fs::write(&path, preamble).unwrap();
 
         let result = load_graph_file(&path);
         let _ = std::fs::remove_file(&path);
@@ -2520,13 +2936,14 @@ mod tests {
         engine.resolution_insert(10, "X", 0);
         engine.resolution_insert(10, "Y", 1);
 
+        let edge_type = engine.register_edge_type("connected_to").unwrap();
         // No weights
         engine.edge_store = EdgeStore::from_edges(
             2,
             vec![RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: edge_type,
                 weight: None,
                 schema_reversed: false,
             }],
@@ -2693,10 +3110,10 @@ mod tests {
 
         let result = load_graph_file(&path);
         match result {
-            Err(GraphError::IncompatibleVersion(message)) => assert_eq!(
-                message,
-                "Graph file format is outdated. Please run SELECT graph.build() to regenerate it."
-            ),
+            Err(GraphError::IncompatibleVersion(message)) => {
+                assert!(message.contains("unsupported"));
+                assert!(message.contains("graph.build()"));
+            }
             Err(other) => panic!("expected IncompatibleVersion, got {:?}", other),
             Ok(_) => panic!("expected version mismatch to fail"),
         }
@@ -2708,8 +3125,23 @@ mod tests {
         use std::io::{Read, Seek};
 
         let mut file = std::fs::OpenOptions::new().read(true).open(path).unwrap();
-        file.seek(std::io::SeekFrom::Start((20 + section * 8) as u64))
-            .unwrap();
+        file.seek(std::io::SeekFrom::Start(
+            (SECTION_DESCRIPTORS_OFFSET + section * SECTION_DESCRIPTOR_SIZE) as u64,
+        ))
+        .unwrap();
+        let mut bytes = [0u8; 8];
+        file.read_exact(&mut bytes).unwrap();
+        u64::from_le_bytes(bytes)
+    }
+
+    fn read_section_len(path: &Path, section: usize) -> u64 {
+        use std::io::{Read, Seek};
+
+        let mut file = std::fs::OpenOptions::new().read(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(
+            (SECTION_DESCRIPTORS_OFFSET + section * SECTION_DESCRIPTOR_SIZE + 8) as u64,
+        ))
+        .unwrap();
         let mut bytes = [0u8; 8];
         file.read_exact(&mut bytes).unwrap();
         u64::from_le_bytes(bytes)
@@ -2729,8 +3161,10 @@ mod tests {
         use std::io::{Seek, Write};
 
         let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        file.seek(std::io::SeekFrom::Start((20 + section * 8) as u64))
-            .unwrap();
+        file.seek(std::io::SeekFrom::Start(
+            (SECTION_DESCRIPTORS_OFFSET + section * SECTION_DESCRIPTOR_SIZE) as u64,
+        ))
+        .unwrap();
         file.write_all(&offset.to_le_bytes()).unwrap();
         file.flush().unwrap();
     }
@@ -2744,12 +3178,35 @@ mod tests {
         file.flush().unwrap();
     }
 
+    fn write_u8_at(path: &Path, offset: u64, value: u8) {
+        use std::io::{Seek, Write};
+
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+        file.write_all(&[value]).unwrap();
+        file.flush().unwrap();
+    }
+
     fn write_u64_at(path: &Path, offset: u64, value: u64) {
         use std::io::{Seek, Write};
 
         let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         file.seek(std::io::SeekFrom::Start(offset)).unwrap();
         file.write_all(&value.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+    }
+
+    fn copy_file_bytes(path: &Path, source: u64, target: u64, len: usize) {
+        use std::io::{Read, Seek, Write};
+
+        let mut bytes = vec![0u8; len];
+        let mut file = std::fs::OpenOptions::new().read(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(source)).unwrap();
+        file.read_exact(&mut bytes).unwrap();
+        drop(file);
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(target)).unwrap();
+        file.write_all(&bytes).unwrap();
         file.flush().unwrap();
     }
 
@@ -2763,37 +3220,23 @@ mod tests {
             .unwrap();
         let crc = crc32fast::hash(&data[HEADER_SIZE..]);
         let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        file.seek(std::io::SeekFrom::Start(CRC_OFFSET as u64))
+        file.seek(std::io::SeekFrom::Start(BODY_CRC_OFFSET as u64))
             .unwrap();
         file.write_all(&crc.to_le_bytes()).unwrap();
         file.flush().unwrap();
-    }
-
-    fn rewrite_edge_metadata_section(path: &Path, edge_metadata: &PersistedEdgeMetadata) {
-        use std::io::{Read, Seek, Write};
-
-        let section_start = read_section_offset(path, 11);
-        let mut data = Vec::new();
+        drop(file);
+        let mut header = [0u8; HEADER_SIZE];
         std::fs::File::open(path)
             .unwrap()
-            .read_to_end(&mut data)
+            .read_exact(&mut header)
             .unwrap();
-        let section_end = data.len();
-        let payload = bincode::serde::encode_to_vec(edge_metadata, bincode::config::standard())
-            .expect("test metadata serializes");
-        let replacement_len = 4 + payload.len();
-        assert!(
-            section_start as usize + replacement_len <= section_end,
-            "replacement metadata must fit in the existing section"
-        );
-
+        header[HEADER_CRC_OFFSET..HEADER_CRC_OFFSET + 4].fill(0);
+        let header_crc = crc32fast::hash(&header);
         let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        file.seek(std::io::SeekFrom::Start(section_start)).unwrap();
-        file.write_all(&(payload.len() as u32).to_le_bytes())
+        file.seek(std::io::SeekFrom::Start(HEADER_CRC_OFFSET as u64))
             .unwrap();
-        file.write_all(&payload).unwrap();
+        file.write_all(&header_crc.to_le_bytes()).unwrap();
         file.flush().unwrap();
-        rewrite_crc(path);
     }
 
     fn graph_with_relationship() -> Engine {
@@ -2802,12 +3245,13 @@ mod tests {
         let b = engine.node_store.add_node(10, "B".to_string());
         engine.resolution_insert(10, "A", a);
         engine.resolution_insert(10, "B", b);
+        let edge_type = engine.register_edge_type("related_to").unwrap();
         engine.edge_store = EdgeStore::from_edges(
             2,
             vec![RawEdge {
                 source: a,
                 target: b,
-                type_id: 1,
+                type_id: edge_type,
                 weight: Some(7),
                 schema_reversed: false,
             }],
@@ -2838,13 +3282,14 @@ mod tests {
             })
             .unwrap();
         engine.edge_store = builder.finish();
-        engine.relationship_identities = vec![
+        engine.relationship_identities = RelationshipIdentityStore::try_from_owned(vec![
             None,
             Some(RelationshipIdentity {
                 mapping_id: 42,
                 source_key: "edge:100".to_string(),
             }),
-        ];
+        ])
+        .unwrap();
         engine.built = true;
         engine
     }
@@ -2925,8 +3370,8 @@ mod tests {
         let path = dir.join("test_short_filter.pggraph");
         write_graph_file(&engine, &path).unwrap();
 
-        let filter_offset = read_section_offset(&path, 10);
-        write_section_offset(&path, 11, filter_offset);
+        let filter_offset = read_section_offset(&path, 17);
+        write_section_offset(&path, 18, filter_offset);
 
         let result = load_graph_file(&path);
         assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
@@ -2940,7 +3385,7 @@ mod tests {
         let path = temp_graph_path("bad-edge-offsets");
         write_graph_file(&engine, &path).unwrap();
 
-        let edge_offsets = read_section_offset(&path, 2);
+        let edge_offsets = read_section_offset(&path, 4);
         write_u32_at(&path, edge_offsets + 4, 2);
         rewrite_crc(&path);
 
@@ -2956,7 +3401,7 @@ mod tests {
         let path = temp_graph_path("bad-final-edge-offset");
         write_graph_file(&engine, &path).unwrap();
 
-        let edge_offsets = read_section_offset(&path, 2);
+        let edge_offsets = read_section_offset(&path, 4);
         write_u32_at(&path, edge_offsets + 8, 0);
         rewrite_crc(&path);
 
@@ -2972,7 +3417,7 @@ mod tests {
         let path = temp_graph_path("bad-target");
         write_graph_file(&engine, &path).unwrap();
 
-        let targets = read_section_offset(&path, 3);
+        let targets = read_section_offset(&path, 5);
         write_u32_at(&path, targets, 2);
         rewrite_crc(&path);
 
@@ -2988,8 +3433,8 @@ mod tests {
         let path = temp_graph_path("bad-weights");
         write_graph_file(&engine, &path).unwrap();
 
-        let weights = read_section_offset(&path, 5);
-        write_section_offset(&path, 6, weights + 1);
+        let weights = read_section_offset(&path, 8);
+        write_section_offset(&path, 9, weights + 1);
         rewrite_crc(&path);
 
         let result = load_graph_file(&path);
@@ -2999,12 +3444,192 @@ mod tests {
     }
 
     #[test]
+    fn load_graph_file_rejects_crc_valid_inbound_sidecar_mismatch() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-inbound-sidecar");
+        write_graph_file(&engine, &path).unwrap();
+
+        let inbound_relationship_ids = read_section_offset(&path, 15);
+        write_u32_at(&path, inbound_relationship_ids, 99);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("sidecars differ")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_inbound_topology_mismatch() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-inbound-topology");
+        write_graph_file(&engine, &path).unwrap();
+
+        write_u32_at(&path, read_section_offset(&path, 11), 1);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("topology counts differ")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_forward_inbound_count_mismatch() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-csr-count-mode");
+        write_graph_file(&engine, &path).unwrap();
+
+        write_u32_at(&path, 20, 0);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("counts or weight modes differ")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_forward_inbound_weight_mode_mismatch() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-csr-weight-mode");
+        write_graph_file(&engine, &path).unwrap();
+
+        write_u32_at(&path, 12, FLAG_FORWARD_WEIGHTS);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("counts or weight modes differ")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_inbound_weight_mismatch() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-inbound-weight");
+        write_graph_file(&engine, &path).unwrap();
+
+        write_u32_at(&path, read_section_offset(&path, 14), 8);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("sidecars differ")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_resolution_identity_mismatch() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-resolution-identity");
+        write_graph_file(&engine, &path).unwrap();
+
+        let resolution = read_section_offset(&path, 16);
+        write_u64_at(&path, resolution + 8, u64::MAX);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("does not match")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_duplicate_resolution_node() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("duplicate-resolution-node");
+        write_graph_file(&engine, &path).unwrap();
+
+        let resolution = read_section_offset(&path, 16);
+        copy_file_bytes(
+            &path,
+            resolution + 4,
+            resolution + 4 + RESOLUTION_ENTRY_SIZE as u64,
+            RESOLUTION_ENTRY_SIZE,
+        );
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("duplicates node index")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_unknown_edge_type() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-edge-type");
+        write_graph_file(&engine, &path).unwrap();
+
+        write_u8_at(&path, read_section_offset(&path, 6), 254);
+        write_u8_at(&path, read_section_offset(&path, 12), 254);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("edge type registry")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_overlapping_filter_ranges() {
+        let mut engine = graph_with_relationship();
+        engine
+            .filter_index
+            .register_column(10, "first".to_string(), 2);
+        engine
+            .filter_index
+            .register_column(10, "second".to_string(), 2);
+        let path = temp_graph_path("overlapping-filter-ranges");
+        write_graph_file(&engine, &path).unwrap();
+
+        let catalog = read_section_offset(&path, 17);
+        let second_descriptor_data_offset =
+            catalog + FILTER_CATALOG_HEADER_SIZE as u64 + FILTER_DESCRIPTOR_SIZE as u64 + 24;
+        write_u64_at(&path, second_descriptor_data_offset, 0);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(GraphError::CorruptFile { reason }) if reason.contains("canonical")
+        ));
+    }
+
+    #[test]
     fn load_graph_file_rejects_crc_valid_nonmonotonic_pk_offsets() {
         let engine = graph_with_relationship();
         let path = temp_graph_path("bad-pk-offsets");
         write_graph_file(&engine, &path).unwrap();
 
-        let pk_offsets = read_section_offset(&path, 8);
+        let pk_offsets = read_section_offset(&path, 2);
         write_u64_at(&path, pk_offsets + 16, 0);
         rewrite_crc(&path);
 
@@ -3020,7 +3645,7 @@ mod tests {
         let path = temp_graph_path("bad-pk-offset-bounds");
         write_graph_file(&engine, &path).unwrap();
 
-        let pk_offsets = read_section_offset(&path, 8);
+        let pk_offsets = read_section_offset(&path, 2);
         write_u64_at(&path, pk_offsets + 16, 999);
         rewrite_crc(&path);
 
@@ -3036,7 +3661,7 @@ mod tests {
         let path = temp_graph_path("bad-pk-offset-width");
         write_graph_file(&engine, &path).unwrap();
 
-        let pk_offsets = read_section_offset(&path, 8);
+        let pk_offsets = read_section_offset(&path, 2);
         write_u64_at(&path, pk_offsets + 8, u64::MAX);
         rewrite_crc(&path);
 
@@ -3063,7 +3688,7 @@ mod tests {
         let path = temp_graph_path("bad-pk-utf8");
         write_graph_file(&engine, &path).unwrap();
 
-        let pk_bytes = read_section_offset(&path, 9);
+        let pk_bytes = read_section_offset(&path, 3);
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         use std::io::{Seek, Write};
         file.seek(std::io::SeekFrom::Start(pk_bytes)).unwrap();

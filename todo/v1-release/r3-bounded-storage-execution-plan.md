@@ -41,16 +41,17 @@ durable delta coordinator and are not used by the 1.0 build path.
   partial files on failure and abandoned workspaces only while holding the
   graph build lock.
 
-## R3C: Artifact v5 And Bounded Load
+## R3C: Artifact v5 And Bounded Load — Complete
 
 - Replace artifact v4 with a 448-byte, 64-byte-aligned v5 header containing 23
   explicitly sized sections: node metadata; forward CSR; inbound CSR;
   resolution; filter catalog/data/dictionaries; edge-type registry; and
   relationship-identity descriptors/key bytes.
-- Pre-compute the checked layout from merged-run summaries, preallocate one
-  generation-specific staging artifact, and stream each run directly into its
-  final section. Do not construct or retain a complete owned `Engine` on the
-  persisted path.
+- Encode the header manually in little-endian form. It records the exact body
+  length, body checksum, header checksum, forward and inbound counts and
+  weights, and 23 `{offset, length}` descriptors. Reject nonzero padding,
+  overlapping or unaligned ranges, reserved bits, and any exact-length
+  mismatch before constructing typed mapped views.
 - Validate header/body checksums, gaps, alignments, exact cardinalities, both
   CSR orientations, node and resolution ranges, filter layouts, dictionary
   ordering, UTF-8, and relationship identity before creating mapped stores.
@@ -60,6 +61,13 @@ durable delta coordinator and are not used by the 1.0 build path.
 - Represent filters as an owned or mapped immutable base plus a sparse delta.
   Projection generations clone only mapping metadata and the delta, never the
   complete base index.
+- Encode filter catalog descriptors, dense or sorted-sparse values, and
+  lexically ordered UTF-8 dictionaries without bincode. Mapped dictionary
+  tokens remain stable; later projection values use overlay tokens after the
+  immutable base dictionary.
+- Store forward and inbound relationship IDs beside each mapped CSR. Store the
+  identity dictionary as checked fixed-width descriptors plus UTF-8 key bytes,
+  with slot zero reserved and every referenced ID validated before install.
 - Continue using the governed anonymous read-only snapshot for 1.0 so another
   process cannot invalidate Rust references by modifying an inode. Report the
   snapshot as private mapped residency and report expected filesystem
@@ -74,6 +82,10 @@ or migrated in place.
 - Make persisted build and vacuum scan bounded source batches directly into
   the run collectors. The legacy owned build remains only as the nonpersisted
   path and equivalence oracle until the differential gate is green.
+- Pre-compute the checked layout from merged-run summaries, preallocate one
+  generation-specific staging artifact, and stream each run directly into its
+  final section. Do not construct or retain a complete owned `Engine` on the
+  persisted path.
 - Stream and fsync a generation-specific v5 candidate, validate it through the
   production loader, repeat the R3A final checks, and publish through the R2D
   graph-scoped compare-and-swap pointer.
