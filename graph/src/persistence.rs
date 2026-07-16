@@ -1004,6 +1004,11 @@ fn load_graph_file_internal(
     resident: crate::resource::ByteCount,
 ) -> GraphResult<Engine> {
     ensure_native_mapped_layout_supported(cfg!(target_endian = "little"))?;
+    let manifest_root = projection_manifest_root(path);
+    let _generation_reader_lock = projection_candidate
+        .is_none()
+        .then(|| ProjectionManifestStore::new(&manifest_root).acquire_reader_lock())
+        .transpose()?;
 
     let mut file = fs::File::open(path)
         .map_err(|e| GraphError::Internal(format!("Cannot open {}: {}", path.display(), e)))?;
@@ -1208,7 +1213,6 @@ fn load_graph_file_internal(
     if let Some(projection_mode) = read_projection_mode(path)? {
         engine.set_projection_mode(projection_mode);
     }
-    let manifest_root = projection_manifest_root(path);
     let manifest = match projection_candidate {
         Some(candidate) => {
             validate_projection_manifest_base(path, computed_crc, candidate)?;

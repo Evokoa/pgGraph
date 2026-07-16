@@ -31,7 +31,25 @@ pub(crate) const MANIFEST_DECODED_MEMORY_BYTES_PER_JSON_BYTE: usize = 128;
 
 const MANIFEST_FILE_PREFIX: &str = "projection-generation-";
 const MANIFEST_FILE_SUFFIX: &str = ".json";
+const CURRENT_POINTER_FILE: &str = "projection-current.json";
+const PUBLICATION_LOCK_FILE: &str = ".projection-publication.lock";
+const CURRENT_POINTER_VERSION: u32 = 1;
+const MAX_CURRENT_POINTER_BYTES: usize = 4 * 1024;
 const GOVERNED_MANIFEST_IO_WORKSPACE_BYTES: usize = 16 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_AFTER_POINTER_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Durable pointer to the one projection generation readers should serve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionCurrentPointer {
+    version: u32,
+    generation_id: u64,
+    manifest_checksum: String,
+}
 
 /// Human-readable manifest for one durable projection generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +328,10 @@ impl ProjectionManifestStore {
         self.root.join(manifest_file_name(generation_id))
     }
 
+    fn current_pointer_path(&self) -> PathBuf {
+        self.root.join(CURRENT_POINTER_FILE)
+    }
+
     /// Atomically publish a validated manifest to its generation path.
     ///
     /// # Errors
@@ -318,12 +340,75 @@ impl ProjectionManifestStore {
     /// missing active artifacts. Returns [`GraphError::Internal`] when durable
     /// filesystem operations fail.
     pub(crate) fn publish(&self, manifest: &ProjectionManifest) -> GraphResult<PathBuf> {
+        let expected_current = self.current_generation_id()?;
+        self.publish_if_current(manifest, expected_current)
+    }
+
+    /// Publish `manifest` only when `expected_current` still serves readers.
+    ///
+    /// The generation manifest is immutable and durable before the current
+    /// pointer changes. A failed comparison leaves the serving pointer and all
+    /// prior generations unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::BuildLocked`] when another publisher changed the
+    /// current generation after the caller planned its candidate. Returns the
+    /// validation and filesystem errors documented by
+    /// [`ProjectionManifestStore::publish`].
+    pub(crate) fn publish_if_current(
+        &self,
+        manifest: &ProjectionManifest,
+        expected_current: Option<u64>,
+    ) -> GraphResult<PathBuf> {
         manifest.validate()?;
         self.validate_active_references(manifest)?;
 
         fs::create_dir_all(&self.root)
             .map_err(|err| manifest_io("create manifest directory", &self.root, err))?;
+        let _publication_lock = self.acquire_publication_lock()?;
+        self.prepare_current_pointer(expected_current)?;
         let json = manifest.to_pretty_json()?;
+        let final_path = self.stage_manifest_file(manifest, json.as_bytes())?;
+        if let Err(err) = self.switch_current_generation(manifest.generation_id, expected_current) {
+            self.remove_uncommitted_manifest(&final_path, manifest.generation_id);
+            return Err(err);
+        }
+
+        Ok(final_path)
+    }
+
+    /// Publish an authoritative rebuild over a damaged current pointer.
+    ///
+    /// Recovery compares the raw pointer bytes instead of decoding the pointer,
+    /// so corrupt metadata stays in place until a validated replacement is
+    /// durable. The caller must hold the graph publication lock.
+    pub(crate) fn publish_for_recovery(
+        &self,
+        manifest: &ProjectionManifest,
+    ) -> GraphResult<PathBuf> {
+        manifest.validate()?;
+        self.validate_active_references(manifest)?;
+        fs::create_dir_all(&self.root)
+            .map_err(|err| manifest_io("create manifest directory", &self.root, err))?;
+        let _publication_lock = self.acquire_publication_lock()?;
+        let expected_pointer_token = self.current_pointer_token()?;
+        let json = manifest.to_pretty_json()?;
+        let final_path = self.stage_manifest_file(manifest, json.as_bytes())?;
+        if let Err(err) =
+            self.switch_recovery_generation(manifest.generation_id, expected_pointer_token)
+        {
+            self.remove_uncommitted_manifest(&final_path, manifest.generation_id);
+            return Err(err);
+        }
+        Ok(final_path)
+    }
+
+    fn stage_manifest_file(
+        &self,
+        manifest: &ProjectionManifest,
+        encoded: &[u8],
+    ) -> GraphResult<PathBuf> {
         let final_path = self.manifest_path(manifest.generation_id);
         if final_path.exists() {
             return Err(manifest_corrupt(format!(
@@ -333,7 +418,7 @@ impl ProjectionManifestStore {
         }
         let (tmp_path, mut file) = self.create_temp_manifest_file(manifest.generation_id)?;
 
-        file.write_all(json.as_bytes())
+        file.write_all(encoded)
             .map_err(|err| manifest_io("write temp manifest", &tmp_path, err))?;
         file.sync_all()
             .map_err(|err| manifest_io("fsync temp manifest", &tmp_path, err))?;
@@ -352,7 +437,6 @@ impl ProjectionManifestStore {
             )));
         }
         self.validate_active_references(&published)?;
-
         Ok(final_path)
     }
 
@@ -371,6 +455,25 @@ impl ProjectionManifestStore {
     pub(crate) fn publish_governed(
         &self,
         manifest: &ProjectionManifest,
+        governor: &crate::resource::ResourceGovernor,
+        phase: crate::resource::ResourcePhase,
+        max_memory_bytes: usize,
+    ) -> GraphResult<PathBuf> {
+        let expected_current = self.current_generation_id()?;
+        self.publish_governed_if_current(
+            manifest,
+            expected_current,
+            governor,
+            phase,
+            max_memory_bytes,
+        )
+    }
+
+    /// Governed form of [`ProjectionManifestStore::publish_if_current`].
+    pub(crate) fn publish_governed_if_current(
+        &self,
+        manifest: &ProjectionManifest,
+        expected_current: Option<u64>,
         governor: &crate::resource::ResourceGovernor,
         phase: crate::resource::ResourcePhase,
         max_memory_bytes: usize,
@@ -406,6 +509,8 @@ impl ProjectionManifestStore {
         self.validate_active_references(manifest)?;
         fs::create_dir_all(&self.root)
             .map_err(|err| manifest_io("create manifest directory", &self.root, err))?;
+        let _publication_lock = self.acquire_publication_lock()?;
+        self.prepare_current_pointer(expected_current)?;
         let final_path = self.manifest_path(manifest.generation_id);
         if final_path.exists() {
             return Err(manifest_corrupt(format!(
@@ -427,13 +532,13 @@ impl ProjectionManifestStore {
             renamed = true;
             sync_directory(&self.root)?;
             verify_manifest_file_matches(&final_path, manifest, encoded_len)?;
-            self.validate_active_references(manifest)
+            self.validate_active_references(manifest)?;
+            self.switch_current_generation(manifest.generation_id, expected_current)
         })();
         if publication.is_err() {
             let _ = fs::remove_file(&tmp_path);
             if renamed {
-                let _ = fs::remove_file(&final_path);
-                let _ = sync_directory(&self.root);
+                self.remove_uncommitted_manifest(&final_path, manifest.generation_id);
             }
         }
         publication?;
@@ -451,7 +556,7 @@ impl ProjectionManifestStore {
     /// missing active references. Returns [`GraphError::Internal`] for
     /// directory read failures other than a missing store directory.
     pub(crate) fn load_latest_current(&self) -> GraphResult<Option<ProjectionManifest>> {
-        let Some((generation_id, path)) = self.latest_manifest_path()? else {
+        let Some((generation_id, path)) = self.current_manifest_path()? else {
             return Ok(None);
         };
         let manifest = self.load_manifest_file(&path)?;
@@ -472,7 +577,7 @@ impl ProjectionManifestStore {
     pub(crate) fn load_latest_current_for_recovery(
         &self,
     ) -> GraphResult<Option<ProjectionManifest>> {
-        let Some((generation_id, path)) = self.latest_manifest_path()? else {
+        let Some((generation_id, path)) = self.current_manifest_path()? else {
             return Ok(None);
         };
         let manifest = self.load_manifest_file(&path)?;
@@ -492,7 +597,7 @@ impl ProjectionManifestStore {
     /// obsolete-file accounting even when a referenced segment or chunk is the
     /// reason the current generation must be replaced.
     pub(crate) fn load_latest_metadata(&self) -> GraphResult<Option<ProjectionManifest>> {
-        let Some((generation_id, path)) = self.latest_manifest_path()? else {
+        let Some((generation_id, path)) = self.current_manifest_path()? else {
             return Ok(None);
         };
         let manifest = self.load_manifest_file(&path)?;
@@ -509,6 +614,197 @@ impl ProjectionManifestStore {
         let raw =
             fs::read_to_string(path).map_err(|err| manifest_io("read manifest", path, err))?;
         ProjectionManifest::from_json(&raw)
+    }
+
+    pub(crate) fn current_generation_id(&self) -> GraphResult<Option<u64>> {
+        if let Some(pointer) = self.load_current_pointer()? {
+            return Ok(Some(pointer.generation_id));
+        }
+        self.latest_manifest_path()
+            .map(|latest| latest.map(|(generation_id, _)| generation_id))
+    }
+
+    fn current_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {
+        let Some(generation_id) = self.current_generation_id()? else {
+            return Ok(None);
+        };
+        Ok(Some((generation_id, self.manifest_path(generation_id))))
+    }
+
+    fn load_current_pointer(&self) -> GraphResult<Option<ProjectionCurrentPointer>> {
+        let path = self.current_pointer_path();
+        let Some(raw) =
+            read_bounded_optional_file(&path, MAX_CURRENT_POINTER_BYTES, "read current pointer")?
+        else {
+            return Ok(None);
+        };
+        let pointer = serde_json::from_slice::<ProjectionCurrentPointer>(&raw)
+            .map_err(|err| manifest_corrupt(format!("current pointer decoding failed: {err}")))?;
+        if pointer.version != CURRENT_POINTER_VERSION || pointer.generation_id == 0 {
+            return Err(manifest_corrupt(format!(
+                "current pointer is invalid: version={}, generation_id={}",
+                pointer.version, pointer.generation_id
+            )));
+        }
+        if !self.manifest_path(pointer.generation_id).is_file() {
+            return Err(manifest_corrupt(format!(
+                "current pointer references missing generation {}",
+                pointer.generation_id
+            )));
+        }
+        let manifest_path = self.manifest_path(pointer.generation_id);
+        let actual_checksum = manifest_checksum_for_path(&manifest_path)?;
+        if pointer.manifest_checksum != actual_checksum {
+            return Err(manifest_corrupt(format!(
+                "current pointer checksum mismatch for generation {}",
+                pointer.generation_id
+            )));
+        }
+        Ok(Some(pointer))
+    }
+
+    fn prepare_current_pointer(&self, expected_current: Option<u64>) -> GraphResult<()> {
+        let direct_current = self
+            .load_current_pointer()?
+            .map(|pointer| pointer.generation_id);
+        if direct_current.is_none() {
+            if let Some(generation_id) = expected_current {
+                self.write_current_pointer(generation_id)?;
+            }
+        }
+        let actual = self
+            .load_current_pointer()?
+            .map(|pointer| pointer.generation_id);
+        if actual == expected_current {
+            Ok(())
+        } else {
+            Err(GraphError::BuildLocked)
+        }
+    }
+
+    fn switch_current_generation(
+        &self,
+        generation_id: u64,
+        expected_current: Option<u64>,
+    ) -> GraphResult<()> {
+        let actual = self
+            .load_current_pointer()?
+            .map(|pointer| pointer.generation_id);
+        if actual != expected_current {
+            return Err(GraphError::BuildLocked);
+        }
+        self.write_current_pointer(generation_id)
+    }
+
+    fn current_pointer_token(&self) -> GraphResult<Option<u32>> {
+        let path = self.current_pointer_path();
+        read_bounded_optional_file(
+            &path,
+            MAX_CURRENT_POINTER_BYTES,
+            "read current pointer token",
+        )
+        .map(|raw| raw.map(|bytes| crc32fast::hash(&bytes)))
+    }
+
+    fn switch_recovery_generation(
+        &self,
+        generation_id: u64,
+        expected_pointer_token: Option<u32>,
+    ) -> GraphResult<()> {
+        if self.current_pointer_token()? != expected_pointer_token {
+            return Err(GraphError::BuildLocked);
+        }
+        self.write_current_pointer(generation_id)
+    }
+
+    /// Hold the cross-process exclusive artifact publication lock.
+    pub(crate) fn acquire_publication_lock(&self) -> GraphResult<File> {
+        self.acquire_file_lock(false)
+    }
+
+    /// Hold a shared artifact-generation lock while loading referenced files.
+    pub(crate) fn acquire_reader_lock(&self) -> GraphResult<File> {
+        self.acquire_file_lock(true)
+    }
+
+    fn acquire_file_lock(&self, shared: bool) -> GraphResult<File> {
+        fs::create_dir_all(&self.root)
+            .map_err(|err| manifest_io("create manifest directory", &self.root, err))?;
+        let path = self.root.join(PUBLICATION_LOCK_FILE);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|err| manifest_io("open publication lock", &path, err))?;
+        if shared {
+            file.lock_shared()
+                .map_err(|err| manifest_io("acquire generation reader lock", &path, err))?;
+        } else {
+            file.lock()
+                .map_err(|err| manifest_io("acquire publication lock", &path, err))?;
+        }
+        Ok(file)
+    }
+
+    fn remove_uncommitted_manifest(&self, path: &Path, generation_id: u64) {
+        let candidate_is_proven_not_current = match self.load_current_pointer() {
+            Ok(None) => true,
+            Ok(Some(pointer)) => pointer.generation_id != generation_id,
+            Err(_) => false,
+        };
+        if candidate_is_proven_not_current {
+            let _ = fs::remove_file(path);
+            let _ = sync_directory(&self.root);
+        }
+    }
+
+    fn write_current_pointer(&self, generation_id: u64) -> GraphResult<()> {
+        let manifest_path = self.manifest_path(generation_id);
+        let pointer = ProjectionCurrentPointer {
+            version: CURRENT_POINTER_VERSION,
+            generation_id,
+            manifest_checksum: manifest_checksum_for_path(&manifest_path)?,
+        };
+        let encoded = serde_json::to_vec_pretty(&pointer).map_err(|err| {
+            GraphError::Internal(format!("current pointer encoding failed: {err}"))
+        })?;
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| GraphError::Internal(format!("system clock before Unix epoch: {err}")))?
+            .as_nanos();
+        let tmp_path = self.root.join(format!(
+            "{CURRENT_POINTER_FILE}.tmp-{}-{created_at}",
+            std::process::id()
+        ));
+        let final_path = self.current_pointer_path();
+        let publication = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+                .map_err(|err| manifest_io("create current pointer", &tmp_path, err))?;
+            file.write_all(&encoded)
+                .map_err(|err| manifest_io("write current pointer", &tmp_path, err))?;
+            file.sync_all()
+                .map_err(|err| manifest_io("fsync current pointer", &tmp_path, err))?;
+            drop(file);
+            sync_directory(&self.root)?;
+            fs::rename(&tmp_path, &final_path)
+                .map_err(|err| manifest_io("switch current pointer", &final_path, err))?;
+            #[cfg(test)]
+            if FAIL_AFTER_POINTER_RENAME.with(|fail| fail.replace(false)) {
+                return Err(GraphError::Internal(
+                    "injected current-pointer failure after rename".into(),
+                ));
+            }
+            sync_directory(&self.root)
+        })();
+        if publication.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        publication
     }
 
     fn latest_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {
@@ -601,6 +897,50 @@ impl ProjectionManifestStore {
             "projection manifest temp path kept colliding".into(),
         ))
     }
+}
+
+fn manifest_checksum_for_path(path: &Path) -> GraphResult<String> {
+    let mut file =
+        File::open(path).map_err(|err| manifest_io("open current manifest checksum", path, err))?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = [0u8; GOVERNED_MANIFEST_IO_WORKSPACE_BYTES];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|err| manifest_io("read current manifest checksum", path, err))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("crc32:{:08x}", hasher.finalize()))
+}
+
+fn read_bounded_optional_file(
+    path: &Path,
+    max_bytes: usize,
+    operation: &str,
+) -> GraphResult<Option<Vec<u8>>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(manifest_io(operation, path, err)),
+    };
+    let read_limit = u64::try_from(max_bytes)
+        .ok()
+        .and_then(|limit| limit.checked_add(1))
+        .ok_or_else(|| GraphError::Internal("current pointer byte limit overflowed".into()))?;
+    let mut bytes = Vec::with_capacity(max_bytes.min(256));
+    Read::by_ref(&mut file)
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|err| manifest_io(operation, path, err))?;
+    if bytes.len() > max_bytes {
+        return Err(manifest_corrupt(format!(
+            "current pointer exceeds {max_bytes} bytes"
+        )));
+    }
+    Ok(Some(bytes))
 }
 
 /// Segment file reference stored in a projection manifest.
@@ -1111,6 +1451,7 @@ pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
 mod tests {
     use super::*;
     use crate::projection::test_fixtures::ProjectionArtifactDir;
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn projection_manifest_roundtrips_base_only_generation() {
@@ -1277,8 +1618,9 @@ mod tests {
     }
 
     #[test]
-    fn projection_manifest_latest_current_generation_wins() {
-        let dir = ProjectionArtifactDir::new("projection_manifest_latest_current_generation_wins");
+    fn projection_manifest_published_current_generation_wins() {
+        let dir =
+            ProjectionArtifactDir::new("projection_manifest_published_current_generation_wins");
         let store = ProjectionManifestStore::new(dir.path());
         write_artifact(dir.path().join("base.pggraph"), b"base");
         let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
@@ -1292,6 +1634,227 @@ mod tests {
             .expect("current manifest exists");
 
         assert_eq!(loaded, second);
+    }
+
+    #[test]
+    fn projection_manifest_unpublished_generation_cannot_become_current() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_unpublished_generation_cannot_become_current",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let current = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        let orphan = ProjectionManifest::base_only(99, "base.pggraph", "xxh3:orphan", 2, 99, 99);
+        store.publish(&current).expect("current manifest publishes");
+        write_artifact(
+            store.manifest_path(orphan.generation_id),
+            orphan
+                .to_pretty_json()
+                .expect("orphan manifest encodes")
+                .as_bytes(),
+        );
+
+        let loaded = store
+            .load_latest_current()
+            .expect("current manifest loads")
+            .expect("current manifest exists");
+
+        assert_eq!(loaded, current);
+    }
+
+    #[test]
+    fn projection_manifest_stale_publisher_loses_compare_and_swap() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_stale_publisher_loses_compare_and_swap",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        let winner = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:winner", 2, 20, 2);
+        let stale = ProjectionManifest::base_only(3, "base.pggraph", "xxh3:stale", 2, 30, 3);
+        store.publish(&first).expect("first manifest publishes");
+        store
+            .publish_if_current(&winner, Some(first.generation_id))
+            .expect("winning candidate publishes");
+
+        let err = store
+            .publish_if_current(&stale, Some(first.generation_id))
+            .expect_err("stale candidate must lose CAS");
+        let loaded = store
+            .load_latest_current()
+            .expect("current manifest loads")
+            .expect("current manifest exists");
+
+        assert!(matches!(err, GraphError::BuildLocked));
+        assert_eq!(loaded, winner);
+        assert!(!store.manifest_path(stale.generation_id).exists());
+    }
+
+    #[test]
+    fn projection_manifest_concurrent_publishers_commit_exactly_one_candidate() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_concurrent_publishers_commit_exactly_one_candidate",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        store.publish(&first).expect("first manifest publishes");
+        let barrier = Arc::new(Barrier::new(3));
+        let candidates = [
+            ProjectionManifest::base_only(2, "base.pggraph", "xxh3:second", 2, 20, 2),
+            ProjectionManifest::base_only(3, "base.pggraph", "xxh3:third", 2, 30, 3),
+        ];
+        let handles = candidates.map(|candidate| {
+            let store = store.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let generation_id = candidate.generation_id;
+                (generation_id, store.publish_if_current(&candidate, Some(1)))
+            })
+        });
+        barrier.wait();
+        let results = handles.map(|handle| handle.join().expect("publisher thread joins"));
+
+        assert_eq!(
+            results.iter().filter(|(_, result)| result.is_ok()).count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, result)| matches!(result, Err(GraphError::BuildLocked)))
+                .count(),
+            1
+        );
+        let winner = results
+            .iter()
+            .find_map(|(generation_id, result)| result.is_ok().then_some(*generation_id))
+            .expect("one publisher wins");
+        let loser = results
+            .iter()
+            .find_map(|(generation_id, result)| result.is_err().then_some(*generation_id))
+            .expect("one publisher loses");
+        let loaded = store
+            .load_latest_current()
+            .expect("current loads")
+            .expect("current exists");
+
+        assert_eq!(loaded.generation_id, winner);
+        assert!(store.manifest_path(winner).exists());
+        assert!(!store.manifest_path(loser).exists());
+    }
+
+    #[test]
+    fn projection_manifest_corrupt_current_pointer_fails_closed() {
+        let dir =
+            ProjectionArtifactDir::new("projection_manifest_corrupt_current_pointer_fails_closed");
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let manifest = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        store.publish(&manifest).expect("manifest publishes");
+        write_artifact(store.current_pointer_path(), b"{\"version\":1");
+
+        let err = store
+            .load_latest_current()
+            .expect_err("partial current pointer must fail closed");
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
+    fn projection_manifest_oversized_current_pointer_fails_bounded() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_oversized_current_pointer_fails_bounded",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(
+            store.current_pointer_path(),
+            &vec![b'x'; MAX_CURRENT_POINTER_BYTES + 1],
+        );
+
+        let err = store
+            .load_latest_current()
+            .expect_err("oversized current pointer must fail closed");
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
+    fn projection_manifest_pointer_rejects_rewritten_current_manifest() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_pointer_rejects_rewritten_current_manifest",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let manifest = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        store.publish(&manifest).expect("manifest publishes");
+        let rewritten = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:changed", 2, 10, 1);
+        write_artifact(
+            store.manifest_path(rewritten.generation_id),
+            rewritten
+                .to_pretty_json()
+                .expect("rewritten manifest encodes")
+                .as_bytes(),
+        );
+
+        let err = store
+            .load_latest_current()
+            .expect_err("rewritten current manifest must fail checksum validation");
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
+    fn projection_manifest_recovery_replaces_corrupt_pointer_after_staging() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_recovery_replaces_corrupt_pointer_after_staging",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        let recovered =
+            ProjectionManifest::base_only(2, "base.pggraph", "xxh3:recovered", 2, 20, 2);
+        store.publish(&first).expect("first manifest publishes");
+        write_artifact(store.current_pointer_path(), b"partial-current-pointer");
+
+        store
+            .publish_for_recovery(&recovered)
+            .expect("recovery manifest publishes");
+        let loaded = store
+            .load_latest_current()
+            .expect("recovered current loads")
+            .expect("recovered current exists");
+
+        assert_eq!(loaded, recovered);
+        assert!(store.manifest_path(first.generation_id).exists());
+    }
+
+    #[test]
+    fn projection_manifest_post_rename_failure_never_deletes_current_candidate() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_post_rename_failure_never_deletes_current_candidate",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        let candidate =
+            ProjectionManifest::base_only(2, "base.pggraph", "xxh3:candidate", 2, 20, 2);
+        store.publish(&first).expect("first manifest publishes");
+        FAIL_AFTER_POINTER_RENAME.with(|fail| fail.set(true));
+
+        let err = store
+            .publish_if_current(&candidate, Some(first.generation_id))
+            .expect_err("injected post-rename sync boundary fails");
+        let loaded = store
+            .load_latest_current()
+            .expect("current remains structurally valid")
+            .expect("one current generation exists");
+
+        assert!(matches!(err, GraphError::Internal(_)));
+        assert_eq!(loaded, candidate);
+        assert!(store.manifest_path(candidate.generation_id).exists());
+        assert!(store.manifest_path(first.generation_id).exists());
     }
 
     #[test]

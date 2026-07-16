@@ -4,19 +4,33 @@ The active phased program is tracked in
 [`full-graph-engine/progress.md`](./full-graph-engine/progress.md). That file is
 the authoritative checkpoint handoff, measurement log, and next-action record.
 
-Last synchronized: 2026-07-15
+Last synchronized: 2026-07-16
 
-Current phase: R2D generation-safe publication. R2A-R2C enforce checked build
-policy, live replacement reservations, and adaptive batches. R2C extends typed
-memory/work/row/disk/elapsed limits and PostgreSQL interrupts through persisted
-load, query/path execution, hydration, sync ingestion, range compaction, and
-analytics, with a reusable RSS/Linux-PSS profile.
+Current phase: R3 bounded storage and artifact v5. The R2D manifest subphase
+adds a checksummed current-generation pointer, cross-backend compare-and-swap,
+reader pins, rollback retention, and bounded garbage collection. The remaining
+R2D generation-specific base-artifact switch is intentionally completed by the
+direct persisted R3C/R3D path so the serving base is never renamed before
+validation.
 
 Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
-and dynamic graphs are post-1.0 roadmap work. R1 and R2A-R2C are complete; R2D
-safe publication is the active release checkpoint.
+and dynamic graphs are post-1.0 roadmap work. R1 and R2A-R2C are complete; the
+R2D manifest checkpoint is implemented and R3 is the active release checkpoint.
+
+2026-07-16 R2D manifest publication — Projection publishers now stage and
+validate immutable manifests, compare-and-swap a bounded checksummed current
+pointer under graph-scoped cross-process exclusion, retain reader-protected
+ancestors, and collect only unprotected artifacts/manifests/temp files. The
+generation-specific base switch remains paired with R3 artifact v5. The full
+release gate is green except for the unchanged cold auto-load latency gate;
+the complete post-pgbench tail passes and the measured blocker is owned by R3.
+
+2026-07-16 R3 planning — The ordered execution contract is source/catalog
+fencing and W0/W1 verification, governed checksummed fixed-fanout runs, streamed
+artifact v5 with both CSR directions and mapped filters/dictionaries, then the
+direct persisted spill path and equivalence/leak/fault gates.
 
 2026-07-11 R1 savepoints — Transaction-local graph overlays now follow nested
 PostgreSQL savepoint and PL subtransaction release/rollback semantics, including

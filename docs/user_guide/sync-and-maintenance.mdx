@@ -457,18 +457,22 @@ at those chunks. Existing mmap'd base CSR bytes are not overwritten, and older
 generations remain available until retention and active-generation heartbeat
 rules allow cleanup.
 
-Run `graph.projection_gc()` to delete manifest-declared obsolete projection
-files after the configured generation retention floor and active-generation
-heartbeats no longer protect them:
+Run `graph.projection_gc()` to delete obsolete projection files after the
+configured generation retention floor and active-generation heartbeats no
+longer protect them. The same pass bounds crash leftovers by removing abandoned
+generation manifests, their unshared artifacts, and abandoned manifest or
+pointer temp files while holding the exclusive generation lock:
 
 ```sql
 SELECT *
 FROM graph.projection_gc();
 ```
 
-`protected_candidates` counts obsolete files that were still referenced by a
-retained valid manifest or active backend generation. `deleted_files` and
-`deleted_bytes` report files actually removed during that call.
+`protected_candidates` counts artifact candidates that were still referenced
+by retained current-generation ancestry or an active backend generation.
+`deleted_files` and `deleted_bytes` include obsolete artifacts, abandoned
+manifests and unique artifacts, and abandoned temp files removed during that
+call.
 
 Run `graph.projection_repair()` when load or maintenance diagnostics indicate
 corrupt durable projection metadata:

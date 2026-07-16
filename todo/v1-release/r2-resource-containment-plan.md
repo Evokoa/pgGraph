@@ -47,7 +47,7 @@ profiles fail before allocation or stay within the declared envelope.
 Exit evidence: production-shaped RSS/PSS and pathological workload gates cover
 all advertised operations and return stable typed resource diagnostics.
 
-## R2D: Generation-Safe Publication
+## R2D: Generation-Safe Publication — Manifest Subphase Complete
 
 - Publish generation-specific staged artifacts under graph-scoped
   cross-backend exclusion and compare-and-swap the current generation.
@@ -55,6 +55,11 @@ all advertised operations and return stable typed resource diagnostics.
   current-manifest switch.
 - Retain the previous serving generation through reader pins and rollback
   retention; garbage collection removes only unpinned obsolete generations.
+
+The durable manifest pointer, cross-backend compare-and-swap, reader pins, and
+bounded generation garbage collection are complete. The generation-specific
+base-artifact switch remains coupled to the direct v5 artifact build in R3C/R3D
+and must land before R2D and KI-018 close.
 
 Exit evidence: competing publisher, injected write/checksum/load/catch-up
 failure, crash, old-reader, rollback, and bounded-GC tests preserve exactly one

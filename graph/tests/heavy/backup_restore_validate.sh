@@ -65,6 +65,11 @@ pg_restore --dbname="$RESTORE_DB" --clean --if-exists "$WORKDIR/graph.dump"
 
 psql -X -v ON_ERROR_STOP=1 "$RESTORE_DB" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS graph;
+-- Relation OIDs are database-local and intentionally fail closed after a
+-- logical restore. Re-register the restored source relations before rebuilding.
+SELECT graph.reset();
+SELECT graph.add_table('public.graph_backup_nodes'::regclass, 'id', ARRAY['tenant', 'name']);
+SELECT graph.add_edge('public.graph_backup_edges'::regclass, 'from_id', 'public.graph_backup_nodes'::regclass, 'id', 'linked', false);
 SELECT * FROM graph.build();
 SELECT graph.enable_sync();
 INSERT INTO public.graph_backup_nodes VALUES ('202', 'even', 'node-202');

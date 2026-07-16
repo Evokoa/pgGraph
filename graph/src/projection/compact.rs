@@ -467,8 +467,9 @@ pub(crate) fn compact_generation(
             bytes: 0,
         }));
     let store = ProjectionManifestStore::new(root);
-    if let Err(err) = store.publish_governed(
+    if let Err(err) = store.publish_governed_if_current(
         &manifest,
+        Some(previous.generation_id),
         &governor,
         crate::resource::ResourcePhase::CompactionMerge,
         budgets.max_bytes,

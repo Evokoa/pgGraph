@@ -3973,7 +3973,7 @@ fn test_record_tx_edge(
         super::admin::require_graph_admin_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let (source_idx, target_idx, type_id) = ENGINE
+        let (source_idx, target_idx, type_id, base_identity_count) = ENGINE
             .with(|engine| {
                 let engine = engine.borrow();
                 let source_idx = engine
@@ -3996,21 +3996,50 @@ fn test_record_tx_edge(
                     .ok_or_else(|| safety::GraphError::InvalidFilter {
                         reason: format!("unknown edge type '{edge_label}'"),
                     })?;
-                Ok::<_, safety::GraphError>((source_idx, target_idx, type_id))
+                Ok::<_, safety::GraphError>((
+                    source_idx,
+                    target_idx,
+                    type_id,
+                    engine.relationship_identities.len(),
+                ))
             })
             .unwrap_or_else(|err| err.report());
 
         match mutation {
-            "insert" => crate::projection::tx_delta::record_added_edge(
-                source_idx,
-                crate::projection::tx_delta::DeltaEdge {
-                    target: target_idx,
-                    type_id,
-                    weight: None,
-                    schema_reversed: false,
-                    relationship_id: None,
-                },
-            ),
+            "insert" => {
+                let (_tables, edges, _filter_columns) =
+                    read_catalog().unwrap_or_else(|err| err.report());
+                let mapping_id = edges
+                    .iter()
+                    .find(|edge| {
+                        edge.from_table_oid == source_table.to_u32()
+                            && edge.to_table_oid == target_table.to_u32()
+                            && edge.label == edge_label
+                    })
+                    .map(|edge| edge.mapping_id)
+                    .ok_or_else(|| safety::GraphError::InvalidFilter {
+                        reason: format!("unknown source-row mapping for edge type '{edge_label}'"),
+                    })
+                    .unwrap_or_else(|err| err.report());
+                let relationship_id = crate::projection::tx_delta::record_relationship_identity(
+                    base_identity_count,
+                    crate::edge_store::RelationshipIdentity {
+                        mapping_id,
+                        source_key: source_id.to_string(),
+                    },
+                )
+                .unwrap_or_else(|err| err.report());
+                crate::projection::tx_delta::record_added_edge(
+                    source_idx,
+                    crate::projection::tx_delta::DeltaEdge {
+                        target: target_idx,
+                        type_id,
+                        weight: None,
+                        schema_reversed: false,
+                        relationship_id: Some(relationship_id),
+                    },
+                )
+            }
             "delete" => {
                 crate::projection::tx_delta::record_deleted_edge(source_idx, target_idx, type_id)
             }

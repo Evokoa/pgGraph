@@ -3764,6 +3764,55 @@ fn executor_propagates_relationship_ids_into_rows_and_paths() {
 }
 
 #[test]
+fn executor_deduplicates_bidirectional_orientation_but_preserves_parallel_rows() {
+    let logical = bind_query("MATCH (u:users)-[r:works_at]-(c:companies) RETURN u, r, c");
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = identified_edge_store(
+        engine.node_store.node_count(),
+        [41, 42].into_iter().flat_map(|relationship_id| {
+            [
+                (
+                    RawEdge {
+                        source: 0,
+                        target: 2,
+                        type_id: works_at,
+                        weight: None,
+                        schema_reversed: false,
+                    },
+                    relationship_id,
+                ),
+                (
+                    RawEdge {
+                        source: 2,
+                        target: 0,
+                        type_id: works_at,
+                        weight: None,
+                        schema_reversed: true,
+                    },
+                    relationship_id,
+                ),
+            ]
+        }),
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute(&engine, &physical, None).expect("undirected query executes");
+    let mut relationship_ids = rows
+        .iter()
+        .map(|row| row.relationship_id)
+        .collect::<Vec<_>>();
+    relationship_ids.sort_unstable();
+
+    assert_eq!(relationship_ids, vec![Some(41), Some(42)]);
+}
+
+#[test]
 fn wildcard_path_executor_preserves_parallel_relationship_ids() {
     let statement = bind_statement_query("MATCH p=()-[:works_at]->() RETURN length(p) AS len");
     let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {

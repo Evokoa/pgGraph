@@ -28,14 +28,14 @@
       compaction, and advertised analytics.
 - [x] Prefer bounded adaptive batches and spill; return a stable typed resource
       error before backend or container OOM.
-- [ ] Add production-shaped RSS/PSS gates for stale statistics, many filters,
+- [x] Add production-shaped RSS/PSS gates for stale statistics, many filters,
       high-cardinality values, parallel edges, supernodes, `LIMIT 1`, concurrent
       backends, auto-load, and compaction.
-- [ ] Replace process-local publication protection with graph-scoped
+- [x] Replace process-local publication protection with graph-scoped
       cross-backend locking and generation compare-and-swap.
 - [ ] Stage, fsync, validate, catch up, and atomically switch generations while
       retaining the previous serving generation on every failure.
-- [ ] Add reader pins, rollback retention, bounded garbage collection, and
+- [x] Add reader pins, rollback retention, bounded garbage collection, and
       competing-publisher/crash/fault-injection tests.
 
 ## R3: Bounded Storage, Build, Sync, And Compaction

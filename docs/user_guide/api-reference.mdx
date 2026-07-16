@@ -266,10 +266,14 @@ RETURNS TABLE (
 )
 ```
 
-Admin-only. Deletes manifest-declared obsolete projection files only after they
-are no longer referenced by retained valid generations or unexpired active
-generation heartbeats. Missing obsolete files are ignored so repeated calls are
-idempotent. Retention uses `graph.projection_retention_generations`.
+Admin-only. Deletes manifest-declared obsolete files, abandoned generation
+manifests and their unshared artifacts, and abandoned manifest/pointer temp
+files. Retained current-generation ancestry and unexpired active-generation
+heartbeats protect every referenced artifact. `deleted_files` and
+`deleted_bytes` include all removed categories; `obsolete_candidates` and
+`protected_candidates` describe artifact candidates, not manifest or temp-file
+counts. Missing candidates are ignored so repeated calls are idempotent.
+Retention uses `graph.projection_retention_generations`.
 
 ### `graph.projection_repair()`
 

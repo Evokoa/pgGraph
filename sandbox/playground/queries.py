@@ -389,7 +389,7 @@ FROM graph.traverse(
   max_nodes := 10000,
   max_frontier := 5000
 )
-ORDER BY depth, node_table_name, node_id;""",
+ORDER BY depth, node_table_name, node_id, readable_path;""",
         },
     ),
     (

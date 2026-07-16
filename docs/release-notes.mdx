@@ -47,6 +47,11 @@ gate evidence through signed tags and package publishing.
   analytics. `graph.resource_status()` exposes backend-local peak telemetry;
   limit failures use SQLSTATE `54000` with diagnostic `PG007` and do not publish
   an unvalidated replacement.
+- Added checksummed current-generation pointers and compare-and-swap publication
+  for persisted projections. Candidate manifests are fsynced and validated
+  before the serving pointer changes; stale publishers return `PG006`, active
+  reader heartbeats protect old generations, and generation-aware GC removes
+  abandoned manifests without inferring current state from file-name order.
 - Decode durable projection segments once when a generation is installed and
   pin the derived layered snapshot in the serving engine, removing per-query
   projection-file reads and durable-map reconstruction.

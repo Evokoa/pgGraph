@@ -424,11 +424,13 @@ impl ProjectionIngester {
                 return Err(err);
             }
         };
+        let expected_current = previous.as_ref().map(|manifest| manifest.generation_id);
         let publish_result = governor.map_or_else(
-            || self.store.publish(&manifest),
+            || self.store.publish_if_current(&manifest, expected_current),
             |governor| {
-                self.store.publish_governed(
+                self.store.publish_governed_if_current(
                     &manifest,
+                    expected_current,
                     governor,
                     ResourcePhase::SyncIngest,
                     usize::try_from(governor.memory_limit().as_u64()).unwrap_or(usize::MAX),

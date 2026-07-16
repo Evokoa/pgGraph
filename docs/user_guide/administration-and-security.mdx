@@ -176,6 +176,31 @@ functions such as `graph.list_graphs()`, `graph.graph_privileges(...)`,
 Extension owners and superusers can still inspect internals for maintenance
 when needed.
 
+## Durable Generation Publication
+
+Persisted projections publish as immutable generation manifests. pgGraph writes
+and fsyncs each candidate manifest, validates every active artifact reference,
+and then atomically replaces a checksummed current-generation pointer. Sync,
+compaction, repair, and rebuild publishers compare that pointer with the
+generation they planned from; a competing publisher returns SQLSTATE `55P03`
+with diagnostic `PG006` instead of replacing newer state.
+
+Readers continue using the immutable generation already installed in their
+backend while a replacement is prepared. Backend generation heartbeats and
+`graph.projection_retention_generations` protect active and rollback
+generations. `graph.projection_gc()` follows the current generation's ancestry,
+removes unreferenced obsolete artifacts, and bounds old or abandoned manifest
+files without moving the serving pointer. The default retention of two keeps
+the current and previous valid generation when no older reader pin requires
+more.
+
+An interrupted or failed publication can leave an unreferenced staging file or
+generation manifest, but it cannot make that candidate current. The next GC
+pass removes abandoned manifests that are neither retained nor pinned. If the
+current pointer or its referenced manifest fails checksum validation, pgGraph
+fails closed; rebuild or use `graph.projection_repair()` from authoritative
+PostgreSQL source tables.
+
 ## Error Codes
 
 The extension emits standard PostgreSQL SQLSTATEs. Its stable diagnostic code
@@ -222,15 +247,31 @@ The bootstrap SQL marks extension-owned operational tables for config dump with
 `pg_extension_config_dump`. This preserves registration, jobs, and unapplied
 sync rows across dump/restore.
 
-Source tables remain authoritative for graph contents. After restore:
+Source tables remain authoritative for graph contents. PostgreSQL relation OIDs
+are local to a database, so a logical restore into a new database does not
+automatically rebind restored graph registrations to relations that happen to
+have the same names. This fail-closed behavior prevents a dropped and recreated
+relation from silently taking over an existing registration.
+
+After a logical restore into a new database, reset the restored derived graph
+state, reapply the reviewed table, edge, and filter registrations against the
+restored relations, then rebuild and re-enable synchronization. Re-enabling
+synchronization replaces any logically restored triggers whose function names
+refer to relation OIDs from the source database:
 
 ```sql
-SELECT * FROM graph.status();
+SELECT graph.reset();
+-- Reapply graph.add_table(...), graph.add_edge(...), and
+-- graph.add_filter_column(...) calls for the restored source schema.
 SELECT * FROM graph.build();
+SELECT graph.enable_sync();
 ```
 
-If the persisted file was not restored with `$PGDATA`, rebuild from source
-tables.
+Keep the registration SQL with your schema migrations so this procedure is
+repeatable. A physical recovery that preserves the PostgreSQL data directory
+and relation OIDs may retain registrations, but derived persisted graph files
+still require validation; rebuild from the source tables whenever those files
+were not restored or cannot be validated.
 
 ## Admin SQL Examples
 

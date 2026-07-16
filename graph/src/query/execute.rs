@@ -1281,14 +1281,18 @@ impl<'a> GqlNeighbors<'a> {
                 &mut neighbors,
             );
         }
-        neighbors.sort_by_key(|target| {
-            (
-                target.node_idx,
-                target.orientation,
-                target.schema_reversed,
-                target.relationship_id,
-            )
-        });
+        if direction == BoundDirection::Undirected {
+            sort_and_deduplicate_undirected(&mut neighbors);
+        } else {
+            neighbors.sort_by_key(|target| {
+                (
+                    target.node_idx,
+                    target.orientation,
+                    target.schema_reversed,
+                    target.relationship_id,
+                )
+            });
+        }
         neighbors
     }
 
@@ -1310,15 +1314,19 @@ impl<'a> GqlNeighbors<'a> {
                 &mut neighbors,
             );
         }
-        neighbors.sort_by_key(|target| {
-            (
-                target.node_idx,
-                target.orientation,
-                target.type_id,
-                target.schema_reversed,
-                target.relationship_id,
-            )
-        });
+        if direction == BoundDirection::Undirected {
+            sort_and_deduplicate_undirected(&mut neighbors);
+        } else {
+            neighbors.sort_by_key(|target| {
+                (
+                    target.node_idx,
+                    target.orientation,
+                    target.type_id,
+                    target.schema_reversed,
+                    target.relationship_id,
+                )
+            });
+        }
         neighbors
     }
 
@@ -1396,6 +1404,24 @@ struct GqlStepTarget {
     type_id: u8,
     schema_reversed: bool,
     relationship_id: Option<RelationshipId>,
+}
+
+fn sort_and_deduplicate_undirected(neighbors: &mut Vec<GqlStepTarget>) {
+    neighbors.sort_by_key(|target| {
+        (
+            target.node_idx,
+            target.type_id,
+            target.relationship_id,
+            target.orientation,
+            target.schema_reversed,
+        )
+    });
+    neighbors.dedup_by(|right, left| {
+        left.node_idx == right.node_idx
+            && left.type_id == right.type_id
+            && left.relationship_id.is_some()
+            && left.relationship_id == right.relationship_id
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

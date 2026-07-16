@@ -2141,8 +2141,8 @@ fn projection_gc_sql_deletes_obsolete_files_after_retention() {
                 AND active_generations = ARRAY[]::bigint[]
                 AND obsolete_candidates = 1
                 AND protected_candidates = 0
-                AND deleted_files = 1
-                AND deleted_bytes = 3
+                AND deleted_files = 2
+                AND deleted_bytes > 3
          FROM graph.projection_gc()",
     )
     .expect("projection_gc SQL call failed")

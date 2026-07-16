@@ -1984,6 +1984,7 @@ fn build_async_graph(
 }
 
 #[pg_guard]
+#[unsafe(no_mangle)]
 /// Background worker entrypoint for asynchronous graph builds.
 ///
 /// PostgreSQL invokes this function by name after `graph.build(concurrently :=
@@ -2043,6 +2044,7 @@ pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
 }
 
 #[pg_guard]
+#[unsafe(no_mangle)]
 /// Background worker entrypoint for asynchronous graph maintenance.
 ///
 /// PostgreSQL invokes this function by name after
@@ -2099,6 +2101,7 @@ pub extern "C-unwind" fn graph_maintenance_worker_main(_arg: pgrx::pg_sys::Datum
 }
 
 #[pg_guard]
+#[unsafe(no_mangle)]
 /// Background worker entrypoint for one-shot due-job execution.
 ///
 /// PostgreSQL invokes this function by name after `graph.run_due_jobs_async()`

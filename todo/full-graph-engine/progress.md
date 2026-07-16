@@ -1,6 +1,6 @@
 # Full Graph Engine Progress
 
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 The authoritative 1.0 scope now lives in
 [`../v1-release/README.md`](../v1-release/README.md). This file continues to
@@ -16,8 +16,8 @@ release blocker.
 | Rust type/unsafe/pgrx boundary | KI-020 retired; RUST-00C through RUST-00F supported-major retirement pending | Mapped stores own validated ranges and pass Miri, full Rust ASan, PostgreSQL 14-18 regressions, and a PostgreSQL-process Valgrind gate. Graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. |
 | 1A. Security and identity | Complete | R1 correctness, authorization, durable identity, transaction isolation, DDL identity, and PostgreSQL 14-18 regression evidence is complete. |
 | 1B. Memory containment | Complete | R2A-R2C enforce checked build policy, live construction reservations, load/query/sync/compaction/analytics breakers, pinned projection snapshots, and a repeatable RSS/Linux-PSS runtime gate; inbound/filter mmap and analytics worker isolation remain explicit R3 work. |
-| 1C. Safe publication | In progress | R2D adds cross-backend lock/CAS, validate-before-switch, rollback retention, reader pins, and bounded generation garbage collection. |
-| 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
+| 1C. Safe publication | Manifest subphase complete | Checksummed pointer CAS, cross-process locks, reader pins, rollback ancestry, and bounded GC are implemented; the generation-specific base-artifact switch closes with R3C/R3D. |
+| 2. Artifact vNext/out-of-core | In progress | Execute `../v1-release/r3-bounded-storage-execution-plan.md`: source fence, governed runs, v5 mapped artifact, then direct persisted spill build. |
 | 3. Bounded load/sync/compaction | Not started | mmap inbound/filter data and range compaction. |
 | 4. Refactor foundations | Not started | Complete canonical enum/newtype, pgrx-adapter, and unsafe-allowlist work from `10-rust-type-safety-pgrx-boundaries.md` while splitting modules. |
 | 5. Streaming costed runtime | Not started | Canonical IR and resource governor are prerequisites. |
@@ -143,6 +143,16 @@ Do not implement broad syntax until these tests establish the current
 correctness and safety boundary.
 
 ## Phase Updates
+
+- 2026-07-16 — Checkpoint 1C manifest-publication subphase: projection
+  publishers use a checksummed current pointer, cross-backend compare-and-swap,
+  reader locks/heartbeats, retained ancestry, and bounded orphan/temp cleanup;
+  the generation-specific base switch remains coupled to R3 artifact v5.
+
+- 2026-07-16 — Checkpoint 2 planning phase: fixed the R3 execution order and
+  binary boundaries for coherent W0/W1 source fencing, checksummed fixed-fanout
+  runs, streamed v5 sections, mapped inbound/filter/identity data, and the
+  direct persisted build acceptance gates.
 
 - 2026-07-11 — Release planning phase: separated production-critical 1.0 work
   from the long-term engine roadmap and added compatibility, documentation,

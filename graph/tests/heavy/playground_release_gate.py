@@ -22,14 +22,14 @@ from queries import QUERY_QUESTIONS, query_catalog  # noqa: E402
 EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "Status + Catalog": [
         {"hash": "da21ad3278cbf648389f1be32503f1b8", "row_count": 1},
-        {"hash": "181a173a49cdbb4b9100e7b8ec693411", "row_count": 1},
-        {"hash": "1f56018065f8f7688f33d312b976afd9", "row_count": 1},
+        {"hash": "c1741c2f950d88a7f4d9dd218bad9e97", "row_count": 1},
+        {"hash": "1e0dbfdd2e1b70091add7b43b7a892f7", "row_count": 1},
     ],
-    "Search Mossack": [{"hash": "0c8c22baa3ad02b3ae87b782f5b9e107", "row_count": 20}],
-    "Find Mossack": [{"hash": "e5f8e6df0fad12cffba8ddd3df1837b5", "row_count": 20}],
-    "Traverse Neighborhood": [{"hash": "8838da4bf5f4f4741822d8646deafe68", "row_count": 100}],
-    "Expand Neighborhood": [{"hash": "625782ba027f4a5ace8308363816a3ac", "row_count": 100}],
-    "Shortest Path": [{"hash": "0273f33efa04c4ba2bf45e57e703e58d", "row_count": 2}],
+    "Search Mossack": [{"hash": "ccef511d92bf067cffc041afa65a61f5", "row_count": 20}],
+    "Find Mossack": [{"hash": "3428e7010463b2ec9aec7ec27fc3c0c7", "row_count": 20}],
+    "Traverse Neighborhood": [{"hash": "29af2dc578f0318e598dcffaf3af46b0", "row_count": 100}],
+    "Expand Neighborhood": [{"hash": "a4e83cfebb0f9c9dd6b77316b4a67084", "row_count": 100}],
+    "Shortest Path": [{"hash": "8f8ad9f558f842c482d47fbde4e388f2", "row_count": 2}],
     "GQL Parameterized Match": [{"hash": "2d77220992fd54f4cd7150bb9bb984dc", "row_count": 1}],
     "GQL Scalar Projection": [{"hash": "bdb8fabf93f84ef1c80dacef37133512", "row_count": 4}],
     "GQL One-Hop Relationships": [{"hash": "cc43fef5258a696fee573d7ce63d3161", "row_count": 1}],
@@ -54,10 +54,10 @@ EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "Top Connected Officers": [{"hash": "5583732c22f50c857e8bc32c8c52586f", "row_count": 25}],
     "Top Connected Entities": [{"hash": "ac1b4a4f20e4b1733f86a54544ef1375", "row_count": 25}],
     "Entity Direct Relationships": [{"hash": "4338b8f8b7c6815b3a2e5ff86306dbd2", "row_count": 4}],
-    "Officer Context Packet": [{"hash": "8f10047bbfc2e2140767a6a913685a0a", "row_count": 1}],
+    "Officer Context Packet": [{"hash": "2100c2398f60d2229220c5e8e8030b3f", "row_count": 1}],
     "Search Entity Then Expand": [{"hash": "95023cdc9a5d98a05c658ea9b2da522b", "row_count": 450}],
-    "Relationship Filtered Walk": [{"hash": "26233811e6c0e86c99864f42f82ff12f", "row_count": 31}],
-    "Capped 3-Hop Investigation": [{"hash": "aec58be67c8c16f21497f76ebbb05944", "row_count": 300}],
+    "Relationship Filtered Walk": [{"hash": "827a2f4de38d4427a04f64b7a6f3dee3", "row_count": 31}],
+    "Capped 3-Hop Investigation": [{"hash": "a53658db45f2de5d78a0f88cd5682f49", "row_count": 300}],
     "Build Graph": [{"row_count": 1}],
     "Build Graph Concurrently": [{"row_count": 1}],
     "Build Status": [{"row_count": 1}],
@@ -74,8 +74,8 @@ EXPECTED_RESULTS_MUTABLE: dict[str, list[dict[str, object]]] = {
     **EXPECTED_RESULTS_CSR,
     "Status + Catalog": [
         {"hash": "d1427afc6ed07bf69332eea22aa72ac3", "row_count": 1},
-        {"hash": "181a173a49cdbb4b9100e7b8ec693411", "row_count": 1},
-        {"hash": "1f56018065f8f7688f33d312b976afd9", "row_count": 1},
+        {"hash": "c1741c2f950d88a7f4d9dd218bad9e97", "row_count": 1},
+        {"hash": "1e0dbfdd2e1b70091add7b43b7a892f7", "row_count": 1},
     ],
     "Mutable GQL Merge Node": [{"hash": "ec7299e8a08b19f8202d48f113f0c37a", "row_count": 1}],
     "Mutable GQL Merge Update": [{"hash": "90d1e0d59d2c10b8ca6ac1edd9985a9b", "row_count": 1}],
@@ -118,6 +118,7 @@ def setup_sql(mode: str) -> str:
 CREATE EXTENSION IF NOT EXISTS graph;
 SELECT graph.test_enabled();
 {mutable_setup}
+SET graph.query_memory_mb = 512;
 SELECT graph.reset();
 TRUNCATE graph._registered_filter_columns,
          graph._registered_edges,
@@ -158,9 +159,23 @@ def default_dsn() -> str:
     return f"postgresql://postgres:postgres@localhost:{port}/postgres"
 
 
-def run_psql(dsn: str, sql: str, timeout: int) -> str:
+def run_psql(
+    dsn: str,
+    sql: str,
+    timeout: int,
+    *,
+    stop_on_error: bool = True,
+) -> str:
     proc = subprocess.run(
-        ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-tA", dsn],
+        [
+            "psql",
+            "-X",
+            "-q",
+            "-v",
+            f"ON_ERROR_STOP={1 if stop_on_error else 0}",
+            "-tA",
+            dsn,
+        ],
         input=sql,
         text=True,
         stdout=subprocess.PIPE,
@@ -170,6 +185,12 @@ def run_psql(dsn: str, sql: str, timeout: int) -> str:
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
+    if not stop_on_error and proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr)
+        if any("ERROR:" in line for line in proc.stderr.splitlines()):
+            raise RuntimeError(
+                "one or more playground SQL statements failed; the complete psql error stream is shown above"
+            )
     return proc.stdout.strip()
 
 
@@ -257,7 +278,10 @@ SELECT jsonb_build_object(
 FROM __pggraph_numbered;
 """
             )
-    raw = run_psql(dsn, "\n".join(chunks), timeout)
+    # Each wrapped query is an independent autocommit statement. Keep running
+    # after SQL errors so one release-gate invocation reports every failing
+    # playground example; missing summaries below still make the gate fail.
+    raw = run_psql(dsn, "\n".join(chunks), timeout, stop_on_error=False)
     actual: dict[str, list[dict[str, object]]] = {}
     for line in raw.splitlines():
         if not line:

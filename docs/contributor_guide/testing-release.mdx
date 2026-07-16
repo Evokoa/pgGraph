@@ -418,7 +418,12 @@ release gate. It prepares the Docker-backed Panama dataset, imports the same
 shared query catalog used by the playground UI, and checks every sidebar example
 against fixed result summaries. Stable examples compare row counts and result
 hashes; operational examples with volatile job IDs or timings compare row
-counts.
+counts. Independent query failures do not stop the catalog sweep, so one run
+reports every example that needs attention.
+
+The gate verifies the 2025-03-31 Panama archive checksum and uses the
+playground's documented 512 MiB query-memory profile. An upstream dataset change
+therefore fails at preparation instead of silently rewriting expected hashes.
 
 ```bash
 cd graph
@@ -432,7 +437,9 @@ By default the script uses the sandbox Docker container and PostgreSQL port
 mutable GQL examples. Set `PREPARE_PLAYGROUND=0` and provide `PGGRAPH_DSN` when
 validating an already-prepared playground database. Set
 `PGGRAPH_PLAYGROUND_YES=1` only when release automation is allowed to approve
-the first Panama dataset download.
+the first Panama dataset download. The aggregate `run_release_gate.sh` is
+non-interactive and sets this approval for its playground stage; run that gate
+only where downloading and unpacking the documented dataset is acceptable.
 
 ## Release Gate
 

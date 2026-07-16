@@ -620,7 +620,8 @@ pub mod bench_support {
                 },
             )
             .expect("projection GC collects");
-            assert_eq!(summary.deleted_files, 1);
+            assert_eq!(summary.deleted_files, 2);
+            assert_eq!(summary.deleted_manifests, 1);
             assert!(!obsolete.exists());
             assert_release_contract_latency(started, "projection garbage collection");
         }

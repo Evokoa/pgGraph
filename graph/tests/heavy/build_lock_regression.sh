@@ -298,7 +298,7 @@ SELECT 'publisher-' || i::text, 'publisher node ' || i::text
 FROM generate_series(1, 20000) AS i;
 SQL
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" \
-  -c "SELECT * FROM graph.ingest_projection(50000, 1073741824);" \
+  -c "SET graph.maintenance_memory_mb = 2048; SELECT * FROM graph.ingest_projection(50000, 1073741824);" \
   >"$WORKDIR/publisher-owner.log" 2>&1 &
 PUBLISH_PID=$!
 
@@ -338,7 +338,7 @@ fi
 
 set +e
 psql -X --set=VERBOSITY=verbose -v ON_ERROR_STOP=1 "$DBNAME" \
-  -c "SELECT * FROM graph.ingest_projection(50000, 1073741824);" \
+  -c "SET graph.maintenance_memory_mb = 2048; SELECT * FROM graph.ingest_projection(50000, 1073741824);" \
   >"$WORKDIR/publisher-contender.log" 2>&1
 publisher_contender_status=$?
 set -e
@@ -364,7 +364,7 @@ if [[ "$publisher_owner_status" -ne 0 ]]; then
   exit 1
 fi
 retry_rows="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
-  -c "SELECT rows_ingested FROM graph.ingest_projection(50000, 1073741824)")"
+  -c "SET graph.maintenance_memory_mb = 2048; SELECT rows_ingested FROM graph.ingest_projection(50000, 1073741824)" | tail -n 1)"
 if [[ "$retry_rows" != "0" ]]; then
   echo "publisher retry unexpectedly found $retry_rows rows after owner completion"
   exit 1

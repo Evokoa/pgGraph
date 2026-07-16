@@ -36,6 +36,7 @@ class DatasetSpec:
     archive_name: str
     compressed_size: str
     uncompressed_size: str
+    expected_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ DATASETS = {
         archive_name="full-oldb.LATEST.zip",
         compressed_size="73 MB",
         uncompressed_size="626 MB",
+        expected_sha256="a2e37e8b878c12fb8f946d4e85026a4ae9026dc866b1aa925730bc1b50e52914",
     ),
     "ldbc": DatasetSpec(
         key="ldbc",
@@ -229,6 +231,7 @@ def download(spec: DatasetSpec, dataset_dir: Path, yes: bool) -> Path:
     archive_path = dataset_dir / spec.archive_name
     prompt_download(spec, archive_path, yes)
     if archive_path.exists():
+        verify_archive_checksum(spec, archive_path)
         return archive_path
 
     tmp_path = archive_path.with_suffix(archive_path.suffix + ".part")
@@ -247,6 +250,7 @@ def download(spec: DatasetSpec, dataset_dir: Path, yes: bool) -> Path:
         if tmp_path.exists():
             tmp_path.unlink()
         raise
+    verify_archive_checksum(spec, tmp_path)
     tmp_path.replace(archive_path)
     return archive_path
 
@@ -257,6 +261,18 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def verify_archive_checksum(spec: DatasetSpec, path: Path) -> None:
+    if spec.expected_sha256 is None:
+        return
+    actual = sha256(path)
+    if actual != spec.expected_sha256:
+        raise RuntimeError(
+            f"{spec.name} archive checksum mismatch: expected "
+            f"{spec.expected_sha256}, got {actual}. Review the upstream dataset "
+            "change before updating the pinned sandbox snapshot."
+        )
 
 
 def norm_name(value: str) -> str:
@@ -682,6 +698,7 @@ def load_panama(container: str, normalized_dir: Path) -> None:
         CREATE INDEX panama_edges_start_idx ON panama.edges(start_id);
         CREATE INDEX panama_edges_end_idx ON panama.edges(end_id);
         CREATE INDEX panama_nodes_name_idx ON panama.nodes(name);
+        ALTER DATABASE postgres SET graph.query_memory_mb = 512;
         SELECT graph.add_table('panama.nodes'::regclass, 'node_id', ARRAY['name', 'countries', 'country_codes', 'label']);
         SELECT graph.add_edge(
           from_table := 'panama.edges'::regclass,

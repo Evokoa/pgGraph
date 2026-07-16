@@ -39,6 +39,7 @@ pub(crate) struct ProjectionGcSummary {
     pub(crate) protected_candidates: usize,
     pub(crate) deleted_files: usize,
     pub(crate) deleted_bytes: u64,
+    pub(crate) deleted_manifests: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -69,8 +70,11 @@ fn collect_projection_garbage_with_active_generation_ids(
     config: ProjectionGcConfig,
     active_generation_ids: Vec<u64>,
 ) -> GraphResult<ProjectionGcSummary> {
+    let store = crate::projection::manifest::ProjectionManifestStore::new(root);
+    let _publication_lock = store.acquire_publication_lock()?;
     let manifests = load_valid_manifests(root)?;
-    let retained_generations = retained_generation_ids(&manifests, config);
+    let current_generation = store.current_generation_id()?;
+    let retained_generations = retained_generation_ids(&manifests, config, current_generation);
     let valid_generation_ids = manifests
         .iter()
         .map(|loaded| loaded.generation_id)
@@ -93,10 +97,21 @@ fn collect_projection_garbage_with_active_generation_ids(
         .copied()
         .collect::<BTreeSet<_>>();
     let protected_paths = protected_manifest_references(root, &manifests, &protected_generations)?;
+    let cleanup_intent_generations =
+        cleanup_intent_generation_ids(root, &manifests, &protected_generations, &protected_paths)?;
     let mut obsolete_candidates = BTreeSet::new();
     for loaded in &manifests {
         for obsolete in &loaded.manifest.obsolete_files {
             obsolete_candidates.insert(resolve_manifest_reference(root, &obsolete.path)?);
+        }
+        if !protected_generations.contains(&loaded.generation_id) {
+            let mut abandoned_references = BTreeSet::new();
+            insert_manifest_references(root, &loaded.manifest, &mut abandoned_references)?;
+            obsolete_candidates.extend(
+                abandoned_references
+                    .into_iter()
+                    .filter(|path| !protected_paths.contains(path)),
+            );
         }
     }
     let obsolete_candidate_count = obsolete_candidates.len();
@@ -124,6 +139,20 @@ fn collect_projection_garbage_with_active_generation_ids(
         deleted_files += 1;
         deleted_bytes = deleted_bytes.saturating_add(bytes);
     }
+    let manifest_protected_generations = protected_generations
+        .iter()
+        .chain(cleanup_intent_generations.iter())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let (deleted_manifests, deleted_manifest_bytes) =
+        delete_unprotected_manifest_files(root, &manifest_protected_generations)?;
+    let (deleted_temps, deleted_temp_bytes) = delete_abandoned_temp_files(root)?;
+    deleted_files = deleted_files
+        .saturating_add(deleted_manifests)
+        .saturating_add(deleted_temps);
+    deleted_bytes = deleted_bytes
+        .saturating_add(deleted_manifest_bytes)
+        .saturating_add(deleted_temp_bytes);
 
     crate::projection::status::record_projection_gc(root)?;
 
@@ -135,6 +164,7 @@ fn collect_projection_garbage_with_active_generation_ids(
         protected_candidates,
         deleted_files,
         deleted_bytes,
+        deleted_manifests,
     })
 }
 
@@ -180,16 +210,128 @@ fn load_valid_manifests(root: &Path) -> GraphResult<Vec<LoadedManifest>> {
     Ok(manifests)
 }
 
-fn retained_generation_ids(manifests: &[LoadedManifest], config: ProjectionGcConfig) -> Vec<u64> {
-    let retained = config.retained_generation_floor.max(1).min(manifests.len());
-    manifests
+fn retained_generation_ids(
+    manifests: &[LoadedManifest],
+    config: ProjectionGcConfig,
+    current_generation: Option<u64>,
+) -> Vec<u64> {
+    let by_generation = manifests
         .iter()
-        .rev()
-        .take(retained)
-        .map(|loaded| loaded.generation_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+        .map(|loaded| (loaded.generation_id, &loaded.manifest))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut retained = BTreeSet::new();
+    let mut next = current_generation;
+    while retained.len() < config.retained_generation_floor.max(1) {
+        let Some(generation_id) = next else {
+            break;
+        };
+        let Some(manifest) = by_generation.get(&generation_id) else {
+            break;
+        };
+        if !retained.insert(generation_id) {
+            break;
+        }
+        next = manifest.previous_generation_id;
+    }
+    retained.into_iter().collect()
+}
+
+fn cleanup_intent_generation_ids(
+    root: &Path,
+    manifests: &[LoadedManifest],
+    protected_generations: &BTreeSet<u64>,
+    protected_paths: &BTreeSet<PathBuf>,
+) -> GraphResult<BTreeSet<u64>> {
+    let mut cleanup_intents = BTreeSet::new();
+    for loaded in manifests {
+        if protected_generations.contains(&loaded.generation_id) {
+            continue;
+        }
+        for obsolete in &loaded.manifest.obsolete_files {
+            let path = resolve_manifest_reference(root, &obsolete.path)?;
+            if protected_paths.contains(&path) && path.exists() {
+                cleanup_intents.insert(loaded.generation_id);
+                break;
+            }
+        }
+    }
+    Ok(cleanup_intents)
+}
+
+fn delete_unprotected_manifest_files(
+    root: &Path,
+    protected_generations: &BTreeSet<u64>,
+) -> GraphResult<(usize, u64)> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(err) => return Err(gc_io("read projection artifact directory", root, err)),
+    };
+    let mut deleted = 0usize;
+    let mut deleted_bytes = 0u64;
+    for entry in entries {
+        let entry = entry.map_err(|err| gc_io("read projection artifact entry", root, err))?;
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(generation_id) = parse_manifest_file_name(&file_name) else {
+            continue;
+        };
+        if protected_generations.contains(&generation_id) {
+            continue;
+        }
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .map_err(|err| gc_io("read projection artifact file type", &path, err))?
+            .is_file()
+        {
+            continue;
+        }
+        let bytes = entry
+            .metadata()
+            .map_err(|err| gc_io("stat obsolete projection manifest", &path, err))?
+            .len();
+        fs::remove_file(&path)
+            .map_err(|err| gc_io("delete obsolete projection manifest", &path, err))?;
+        deleted += 1;
+        deleted_bytes = deleted_bytes.saturating_add(bytes);
+    }
+    Ok((deleted, deleted_bytes))
+}
+
+fn delete_abandoned_temp_files(root: &Path) -> GraphResult<(usize, u64)> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(err) => return Err(gc_io("read projection artifact directory", root, err)),
+    };
+    let mut deleted = 0usize;
+    let mut deleted_bytes = 0u64;
+    for entry in entries {
+        let entry = entry.map_err(|err| gc_io("read projection artifact entry", root, err))?;
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let is_manifest_temp =
+            file_name.starts_with("projection-generation-") && file_name.contains(".tmp-");
+        let is_pointer_temp = file_name.starts_with("projection-current.json.tmp-");
+        if !is_manifest_temp && !is_pointer_temp {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|err| gc_io("stat abandoned projection temp file", &path, err))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        fs::remove_file(&path)
+            .map_err(|err| gc_io("delete abandoned projection temp file", &path, err))?;
+        deleted += 1;
+        deleted_bytes = deleted_bytes.saturating_add(metadata.len());
+    }
+    Ok((deleted, deleted_bytes))
 }
 
 fn protected_manifest_references(
@@ -239,9 +381,12 @@ fn gc_io(operation: &str, path: &Path, err: std::io::Error) -> GraphError {
 mod tests {
     use super::*;
     use crate::projection::manifest::{
-        ManifestFileRef, ManifestSegmentRef, ProjectionManifestStore,
+        ManifestChunkRef, ManifestFileRef, ManifestIdentityRef, ManifestSegmentRef,
+        ProjectionManifestStore,
     };
     use crate::projection::test_fixtures::ProjectionArtifactDir;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn projection_gc_refuses_referenced_files() {
@@ -317,6 +462,7 @@ mod tests {
         assert_eq!(summary.active_generations, vec![1]);
         assert_eq!(summary.deleted_files, 1);
         assert_eq!(summary.protected_candidates, 1);
+        assert!(dir.manifest_path(2).exists());
     }
 
     #[test]
@@ -351,8 +497,9 @@ mod tests {
 
         assert!(!old_segment.exists());
         assert!(current_segment.exists());
-        assert_eq!(summary.deleted_files, 1);
-        assert_eq!(summary.deleted_bytes, b"obsolete".len() as u64);
+        assert_eq!(summary.deleted_files, 2);
+        assert!(summary.deleted_bytes > b"obsolete".len() as u64);
+        assert_eq!(summary.deleted_manifests, 1);
         assert_eq!(summary.retained_generations, vec![2]);
 
         let second = collect_projection_garbage_with_active_generation_ids(
@@ -364,6 +511,160 @@ mod tests {
         )
         .expect("gc is idempotent");
         assert_eq!(second.deleted_files, 0);
+        assert_eq!(second.deleted_manifests, 0);
+    }
+
+    #[test]
+    fn projection_gc_removes_unpublished_manifest_without_moving_current() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_gc_removes_unpublished_manifest_without_moving_current",
+        );
+        let current_segment = write_file(dir.path().join("current.pggraph-delta"), b"current");
+        let current = manifest_with_segment(dir.path(), 1, &current_segment, Vec::new());
+        publish(dir.path(), &current);
+        let orphan_segment = write_file(dir.path().join("orphan.pggraph-delta"), b"orphan-segment");
+        let orphan_chunk = write_file(dir.path().join("orphan.pggraph-chunk"), b"orphan-chunk");
+        let orphan_identity = write_file(
+            dir.path().join("orphan.pggraph-identities"),
+            b"orphan-identities",
+        );
+        let mut orphan = manifest_with_segment(dir.path(), 99, &orphan_segment, Vec::new());
+        orphan.base_chunks.push(ManifestChunkRef {
+            path: relative_path(dir.path(), &orphan_chunk),
+            checksum: "crc32:orphan-chunk".to_string(),
+            source_start: 0,
+            source_end: 1,
+            dirty_source_count: 1,
+            dirty_edge_count: 1,
+        });
+        orphan.relationship_identities = Some(ManifestIdentityRef {
+            path: relative_path(dir.path(), &orphan_identity),
+            checksum: "crc32:orphan-identities".to_string(),
+            entry_count: 1,
+            bytes: orphan_identity
+                .metadata()
+                .expect("orphan identity metadata reads")
+                .len(),
+        });
+        fs::write(
+            dir.manifest_path(orphan.generation_id),
+            orphan.to_pretty_json().expect("orphan encodes"),
+        )
+        .expect("orphan manifest writes");
+
+        let summary = collect_projection_garbage_with_active_generation_ids(
+            dir.path(),
+            ProjectionGcConfig {
+                retained_generation_floor: 1,
+            },
+            Vec::new(),
+        )
+        .expect("gc runs");
+        let loaded = ProjectionManifestStore::new(dir.path())
+            .load_latest_current()
+            .expect("current loads")
+            .expect("current exists");
+
+        assert_eq!(loaded.generation_id, current.generation_id);
+        assert_eq!(summary.retained_generations, vec![current.generation_id]);
+        assert_eq!(summary.deleted_manifests, 1);
+        assert!(!dir.manifest_path(orphan.generation_id).exists());
+        assert!(!orphan_segment.exists());
+        assert!(!orphan_chunk.exists());
+        assert!(!orphan_identity.exists());
+        assert!(current_segment.exists());
+    }
+
+    #[test]
+    fn projection_gc_keeps_cleanup_intent_until_reader_protection_expires() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_gc_keeps_cleanup_intent_until_reader_protection_expires",
+        );
+        let first_segment = write_file(dir.path().join("first.pggraph-delta"), b"first");
+        let reader_segment = write_file(dir.path().join("reader.pggraph-delta"), b"reader");
+        let current_segment = write_file(dir.path().join("current.pggraph-delta"), b"current");
+        publish(
+            dir.path(),
+            &manifest_with_segment(
+                dir.path(),
+                1,
+                &first_segment,
+                vec![obsolete_ref(dir.path(), &reader_segment)],
+            ),
+        );
+        publish(
+            dir.path(),
+            &manifest_with_segment(dir.path(), 2, &reader_segment, Vec::new()),
+        );
+        publish(
+            dir.path(),
+            &manifest_with_segment(dir.path(), 3, &current_segment, Vec::new()),
+        );
+
+        let pinned = collect_projection_garbage_with_active_generation_ids(
+            dir.path(),
+            ProjectionGcConfig {
+                retained_generation_floor: 1,
+            },
+            vec![2],
+        )
+        .expect("pinned GC runs");
+        assert!(reader_segment.exists());
+        assert!(dir.manifest_path(1).exists());
+        assert_eq!(pinned.deleted_manifests, 0);
+
+        let released = collect_projection_garbage_with_active_generation_ids(
+            dir.path(),
+            ProjectionGcConfig {
+                retained_generation_floor: 1,
+            },
+            Vec::new(),
+        )
+        .expect("released GC runs");
+        assert!(!reader_segment.exists());
+        assert!(!dir.manifest_path(1).exists());
+        assert!(!dir.manifest_path(2).exists());
+        assert_eq!(released.deleted_manifests, 2);
+        assert!(current_segment.exists());
+    }
+
+    #[test]
+    fn projection_gc_waits_for_generation_reader_lock() {
+        let dir = ProjectionArtifactDir::new("projection_gc_waits_for_generation_reader_lock");
+        let current_segment = write_file(dir.path().join("current.pggraph-delta"), b"current");
+        publish(
+            dir.path(),
+            &manifest_with_segment(dir.path(), 1, &current_segment, Vec::new()),
+        );
+        let reader_lock = ProjectionManifestStore::new(dir.path())
+            .acquire_reader_lock()
+            .expect("reader lock acquired");
+        let root = dir.path().to_path_buf();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).expect("start signal sends");
+            let result = collect_projection_garbage_with_active_generation_ids(
+                &root,
+                ProjectionGcConfig {
+                    retained_generation_floor: 1,
+                },
+                Vec::new(),
+            );
+            done_tx.send(result).expect("GC result sends");
+        });
+        started_rx.recv().expect("GC thread starts");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "exclusive GC lock must wait for an active generation reader"
+        );
+
+        drop(reader_lock);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("GC completes after reader release")
+            .expect("GC succeeds");
+        handle.join().expect("GC thread joins");
     }
 
     #[test]
@@ -401,7 +702,7 @@ mod tests {
             .expect("current loads")
             .expect("current exists");
 
-        assert_eq!(summary.deleted_files, 1);
+        assert_eq!(summary.deleted_files, 2);
         assert_eq!(current.generation_id, 2);
         assert!(current_segment.exists());
         assert!(!old_segment.exists());

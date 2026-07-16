@@ -1185,6 +1185,10 @@ fn sync_writer_barrier_trigger_gap_count() -> safety::GraphResult<i64> {
                        'graph_sync_delete',
                        'graph_sync_truncate'
                    )
+                   AND function.proname = CASE trigger.tgname
+                       WHEN 'graph_sync_truncate' THEN '_sync_' || expected.table_oid::text || '_truncate'
+                       ELSE '_sync_' || expected.table_oid::text
+                   END
                  GROUP BY trigger.tgrelid
                 HAVING count(DISTINCT trigger.tgname) = 4
                    AND bool_and(position($2 IN pg_get_functiondef(function.oid)) > 0)
@@ -1221,6 +1225,10 @@ fn sync_writer_barrier_trigger_current_for_oid(table_oid: u32) -> safety::GraphR
                     'graph_sync_delete',
                     'graph_sync_truncate'
                 )
+                AND function.proname = CASE trigger.tgname
+                    WHEN 'graph_sync_truncate' THEN '_sync_' || $1::text || '_truncate'
+                    ELSE '_sync_' || $1::text
+                END
          ), false)",
         &[(table_oid as i32).into(), expected_lock.into()],
     )

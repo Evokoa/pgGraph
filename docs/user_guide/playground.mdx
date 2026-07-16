@@ -54,7 +54,15 @@ installation links for macOS, Windows, and Linux.
 
 The playground currently loads Panama Papers / ICIJ Offshore Leaks data. It is
 intended as a quick inspector and SQL demo environment, not a full benchmark
-runner.
+runner. The prepared snapshot is the upstream export generated on 2025-03-31;
+the loader verifies its SHA-256 checksum before import so an upstream `LATEST`
+change cannot silently alter examples or release-gate expectations.
+
+The sandbox sets `graph.query_memory_mb = 512` for this database. The Panama
+projection contains about two million nodes, and the built-in hydrated path and
+GQL examples intentionally use a larger workspace than pgGraph's generic
+64 MiB default. This setting applies only to the disposable playground database
+and is not a recommended production default.
 
 For LDBC and benchmark reports, use:
 

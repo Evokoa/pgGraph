@@ -77,7 +77,9 @@ impl ProjectionRecoveryPlan {
 
 /// Validate the latest active manifest and every referenced segment/chunk.
 pub(crate) fn validate_active_projection(root: &Path) -> GraphResult<Option<ProjectionManifest>> {
-    let Some(manifest) = ProjectionManifestStore::new(root).load_latest_current()? else {
+    let store = ProjectionManifestStore::new(root);
+    let _reader_lock = store.acquire_reader_lock()?;
+    let Some(manifest) = store.load_latest_current()? else {
         return Ok(None);
     };
     let provider = ManifestSegmentProvider::new(root, &manifest);
@@ -96,8 +98,10 @@ pub(crate) fn plan_projection_recovery_for_artifact(
     root: &Path,
     graph_path: Option<&Path>,
 ) -> GraphResult<ProjectionRecoveryPlan> {
+    let store = ProjectionManifestStore::new(root);
+    let _reader_lock = store.acquire_reader_lock()?;
     let latest_generation = latest_manifest_generation(root)?;
-    let manifest = match ProjectionManifestStore::new(root).load_latest_current_for_recovery() {
+    let manifest = match store.load_latest_current_for_recovery() {
         Ok(Some(manifest)) => manifest,
         Ok(None) => return Ok(ProjectionRecoveryPlan::no_projection()),
         Err(err) => {
@@ -181,7 +185,7 @@ pub(crate) fn publish_rebuilt_base_manifest(
     } else {
         manifest.previous_generation_id = previous_generation_id;
     }
-    store.publish(&manifest)?;
+    store.publish_for_recovery(&manifest)?;
     Ok(manifest)
 }
 

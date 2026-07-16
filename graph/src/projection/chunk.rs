@@ -368,13 +368,14 @@ fn publish_base_chunk_rewrite_inner(
     manifest.obsolete_files = obsolete_files;
     let store = ProjectionManifestStore::new(root);
     let publication = match resources {
-        Some((governor, max_memory_bytes)) => store.publish_governed(
+        Some((governor, max_memory_bytes)) => store.publish_governed_if_current(
             &manifest,
+            Some(previous.generation_id),
             governor,
             crate::resource::ResourcePhase::CompactionMerge,
             max_memory_bytes,
         ),
-        None => store.publish(&manifest),
+        None => store.publish_if_current(&manifest, Some(previous.generation_id)),
     };
     if let Err(err) = publication {
         if !store.manifest_path(generation_id).exists() {
