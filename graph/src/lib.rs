@@ -19,6 +19,11 @@ use std::cell::RefCell;
 mod acl;
 mod api_types;
 mod bfs;
+#[allow(
+    dead_code,
+    reason = "R3B run files are integrated into production persisted builds in R3D"
+)]
+mod build_runs;
 mod build_snapshot;
 mod builder;
 mod catalog;

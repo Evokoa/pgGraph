@@ -92,6 +92,22 @@ inputs.
   </TreeNode>
 </TreeDiagram>
 
+## Governed Build Runs
+
+The persisted-build run layer uses a manual little-endian record format with a
+128-byte checksummed header. Every run is bound to one graph ID, build ID,
+catalog fingerprint, and data kind: nodes, outbound relationships, inbound
+relationships, filters, filter dictionaries, or resolution entries. Readers
+verify the header, exact file length, complete payload checksum, record bounds,
+and sorted order before returning the first record.
+
+Collectors charge rows, bytes, disk, files, elapsed time, and interrupt checks.
+Runs are merged with a fixed fanout and one decoded record per input. Merge
+outputs are validated and fsynced before inputs are released. Workspaces use
+mode `0700`, run files use `0600`, partial files are removed on failure, and
+abandoned workspace cleanup accepts only a well-formed build directory name
+while the graph build lock is held.
+
 ## Build Scan Mode
 
 `graph.build_scan_mode` supports:

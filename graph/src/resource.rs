@@ -299,6 +299,10 @@ pub(crate) enum ResourcePhase {
     EdgeBatch,
     EdgeResolve,
     Csr,
+    #[allow(dead_code, reason = "used by the R3B run pipeline integrated in R3D")]
+    BuildRunWrite,
+    #[allow(dead_code, reason = "used by the R3B run pipeline integrated in R3D")]
+    BuildRunMerge,
     Persistence,
     LoadMetadata,
     LoadInbound,
@@ -327,6 +331,8 @@ impl ResourcePhase {
             Self::EdgeBatch => "build.edge_batch",
             Self::EdgeResolve => "build.edge_resolve",
             Self::Csr => "build.csr",
+            Self::BuildRunWrite => "build.run_write",
+            Self::BuildRunMerge => "build.run_merge",
             Self::Persistence => "build.persistence",
             Self::LoadMetadata => "load.metadata",
             Self::LoadInbound => "load.inbound",
@@ -830,6 +836,40 @@ pub(crate) struct DiskLease<'a> {
     amount: u64,
 }
 
+#[allow(
+    dead_code,
+    reason = "disk lease resizing supports the R3B run pipeline integrated in R3D"
+)]
+impl DiskLease<'_> {
+    pub(crate) fn try_grow(
+        &mut self,
+        phase: ResourcePhase,
+        additional: ByteCount,
+    ) -> Result<(), ResourceLimitError> {
+        let mut extra = self.governor.reserve_disk(phase, additional)?;
+        self.amount = self.amount.checked_add(extra.amount).ok_or_else(|| {
+            ResourceLimitError::new(
+                ResourceKind::Disk,
+                phase,
+                self.amount,
+                additional.as_u64(),
+                u64::MAX,
+            )
+        })?;
+        extra.amount = 0;
+        Ok(())
+    }
+
+    pub(crate) const fn amount(&self) -> ByteCount {
+        ByteCount::from_bytes(self.amount)
+    }
+
+    pub(crate) fn release_all(&mut self) {
+        self.governor.release_disk(self.amount);
+        self.amount = 0;
+    }
+}
+
 impl Drop for DiskLease<'_> {
     fn drop(&mut self) {
         self.governor.release_disk(self.amount);
@@ -1190,5 +1230,29 @@ mod tests {
         governor
             .reserve_disk(ResourcePhase::SyncIngest, ByteCount::from_bytes(10))
             .expect("dropped disk lease should release capacity");
+    }
+
+    #[test]
+    fn disk_lease_growth_and_explicit_release_preserve_accounting() {
+        let governor = ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(10)),
+            DiskBudget::new(ByteCount::from_bytes(20)),
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
+            ElapsedBudget::new(Duration::MAX),
+        ));
+        let mut lease = governor
+            .reserve_disk(ResourcePhase::BuildRunWrite, ByteCount::from_bytes(5))
+            .unwrap();
+        lease
+            .try_grow(ResourcePhase::BuildRunMerge, ByteCount::from_bytes(7))
+            .unwrap();
+        assert_eq!(lease.amount(), ByteCount::from_bytes(12));
+        assert_eq!(governor.disk_peak(), ByteCount::from_bytes(12));
+        lease.release_all();
+        let replacement = governor
+            .reserve_disk(ResourcePhase::BuildRunWrite, ByteCount::from_bytes(20))
+            .unwrap();
+        assert_eq!(replacement.amount(), ByteCount::from_bytes(20));
     }
 }

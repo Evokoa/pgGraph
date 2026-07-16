@@ -24,7 +24,7 @@ The 1.0 strategy deliberately fences writers for the transaction, so bounded
 catch-up contains zero rows. Cross-transaction or resumable snapshots require a
 durable delta coordinator and are not used by the 1.0 build path.
 
-## R3B: Governed Build Runs
+## R3B: Governed Build Runs — Complete
 
 - Add versioned node, relationship-outbound, relationship-inbound, filter,
   filter-dictionary, and resolution run records with manual little-endian

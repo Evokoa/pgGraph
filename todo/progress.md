@@ -40,6 +40,12 @@ before persistence and serving-state installation. The production PostgreSQL
 17 gate passes caller-owned catalog/source locks, partition-leaf locks,
 concurrent writers, rollback/commit horizons, and competing publication.
 
+2026-07-16 R3B governed runs — Versioned checksummed run files now cover nodes,
+both relationship orientations, filters and dictionaries, and resolution.
+Collectors and fixed-fanout merge enforce memory, disk, row, work, file, time,
+and record bounds; private permissions, corruption, quota, duplicate, abandoned
+cleanup, and four-pass merge tests pass. Production integration remains R3D.
+
 2026-07-11 R1 savepoints — Transaction-local graph overlays now follow nested
 PostgreSQL savepoint and PL subtransaction release/rollback semantics, including
 when the extension is first loaded from inside an existing savepoint.
