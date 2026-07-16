@@ -190,6 +190,36 @@ def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def concurrent_build_completion_sql(target_table: str) -> str:
+    return f"""
+DO $$
+DECLARE
+  job_status text;
+  job_error text;
+  attempt integer;
+BEGIN
+  FOR attempt IN 1..300 LOOP
+    SELECT jobs.status, jobs.error
+      INTO job_status, job_error
+      FROM graph._build_jobs AS jobs
+      JOIN pg_temp.{target_table} AS target ON target.build_id = jobs.build_id;
+
+    IF job_status = 'completed' THEN
+      RETURN;
+    END IF;
+    IF job_status = 'failed' THEN
+      RAISE EXCEPTION 'playground concurrent build failed: %', coalesce(job_error, 'unknown error');
+    END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+
+  RAISE EXCEPTION 'playground concurrent build did not complete within 30 seconds (last status: %)',
+    coalesce(job_status, 'missing');
+END
+$$;
+"""
+
+
 def summarize_catalog_session(
     dsn: str,
     mode: str,
@@ -203,10 +233,20 @@ def summarize_catalog_session(
             chunks.append(quiet_setup)
         for index, statement in enumerate(example.statements):
             chunks.append(f"\\warn pggraph playground gate: {label} [{index}]")
+            query_sql = statement
+            concurrent_target = "__pggraph_concurrent_build_target"
+            if label == "Build Graph Concurrently":
+                statement_sql = statement.rstrip().rstrip(";")
+                chunks.append(f"DROP TABLE IF EXISTS pg_temp.{concurrent_target};")
+                chunks.append(
+                    f"CREATE TEMP TABLE {concurrent_target} ON COMMIT PRESERVE ROWS AS\n"
+                    f"{statement_sql};"
+                )
+                query_sql = f"SELECT * FROM pg_temp.{concurrent_target}"
             chunks.append(
                 f"""
 WITH __pggraph_playground_query AS (
-{textwrap.indent(statement, "  ")}
+{textwrap.indent(query_sql, "  ")}
 ),
 __pggraph_numbered AS (
   SELECT row_number() OVER () AS row_number,
@@ -222,6 +262,8 @@ SELECT jsonb_build_object(
 FROM __pggraph_numbered;
 """
             )
+            if label == "Build Graph Concurrently":
+                chunks.append(concurrent_build_completion_sql(concurrent_target))
     # Each wrapped query is an independent autocommit statement. Keep running
     # after SQL errors so one release-gate invocation reports every failing
     # playground example; missing summaries below still make the gate fail.

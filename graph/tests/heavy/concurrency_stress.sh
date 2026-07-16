@@ -9,9 +9,80 @@ CLIENTS="${CLIENTS:-6}"
 ROUNDS="${ROUNDS:-8}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
 WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-concurrency.XXXXXX")"
+PROBE_ROLE="graph_worker_probe_${$}_${RANDOM}"
+PROBE_ROLE_CREATED=0
+
+cleanup_probe_role() {
+  psql -X -v ON_ERROR_STOP=1 -v probe_role="$PROBE_ROLE" "$DBNAME" <<'SQL'
+SELECT set_config('pggraph.cleanup_probe_role', :'probe_role', false);
+DO $$
+DECLARE
+    attempt INTEGER;
+BEGIN
+    FOR attempt IN 1..300 LOOP
+        EXIT WHEN NOT EXISTS (
+            SELECT 1
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND usename = current_setting('pggraph.cleanup_probe_role')
+              AND backend_type = 'graph concurrent build'
+        );
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+
+    -- The dynamic worker belongs exclusively to this disposable probe. Stop
+    -- it after the bounded wait so failure-path cleanup cannot leak the role.
+    PERFORM pg_terminate_backend(pid)
+    FROM pg_stat_activity
+    WHERE datname = current_database()
+      AND usename = current_setting('pggraph.cleanup_probe_role')
+      AND backend_type = 'graph concurrent build';
+
+    FOR attempt IN 1..100 LOOP
+        EXIT WHEN NOT EXISTS (
+            SELECT 1
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND usename = current_setting('pggraph.cleanup_probe_role')
+              AND backend_type = 'graph concurrent build'
+        );
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+END
+$$;
+
+ALTER TABLE public.graph_concurrency_nodes OWNER TO CURRENT_USER;
+ALTER TABLE public.graph_concurrency_edges OWNER TO CURRENT_USER;
+ALTER TABLE graph._graphs OWNER TO CURRENT_USER;
+ALTER TABLE graph._registered_tables OWNER TO CURRENT_USER;
+ALTER TABLE graph._registered_edges OWNER TO CURRENT_USER;
+ALTER TABLE graph._registered_filter_columns OWNER TO CURRENT_USER;
+ALTER TABLE public.graph_concurrency_nodes NO FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS graph_worker_role_probe_nodes
+    ON public.graph_concurrency_nodes;
+DROP OWNED BY :"probe_role";
+DROP ROLE :"probe_role";
+SELECT format(
+    'ALTER DATABASE %I SET graph.sync_mode = %L',
+    current_database(),
+    'trigger'
+) \gexec
+SQL
+}
 
 cleanup() {
+  status=$?
+  trap - EXIT
+  set +e
+  if [[ "$PROBE_ROLE_CREATED" -eq 1 ]]; then
+    cleanup_probe_role
+    cleanup_status=$?
+    if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+      status=$cleanup_status
+    fi
+  fi
   rm -rf "$WORKDIR"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -82,11 +153,26 @@ wait "$build_pid" || { cat "$WORKDIR/concurrent-build.log"; exit 1; }
 wait "$maintenance_pid" || { cat "$WORKDIR/concurrent-maintenance.log"; exit 1; }
 wait
 
-psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
+if psql -X -A -t -c \
+    "SELECT 1 FROM pg_roles WHERE rolname = '$PROBE_ROLE'" postgres | grep -qx 1; then
+  echo "refusing to replace pre-existing probe role: $PROBE_ROLE" >&2
+  exit 1
+fi
+psql -X -v ON_ERROR_STOP=1 -v probe_role="$PROBE_ROLE" postgres <<'SQL'
+-- A LOGIN attribute is required because PostgreSQL initializes the dynamic
+-- worker connection as this effective role. The role is unique to this run.
+CREATE ROLE :"probe_role" LOGIN;
+SQL
+PROBE_ROLE_CREATED=1
+
+psql -X -v ON_ERROR_STOP=1 -v probe_role="$PROBE_ROLE" "$DBNAME" <<'SQL'
 DO $$
 DECLARE
     saw_build_job BOOLEAN;
     saw_maintenance_job BOOLEAN;
+    jobs_terminal BOOLEAN;
+    pending_jobs TEXT;
+    unexpected_failures TEXT;
     traversed BIGINT;
     attempt INTEGER;
 BEGIN
@@ -102,6 +188,45 @@ BEGIN
     WHERE status IN ('queued', 'running', 'completed', 'failed');
     IF NOT saw_maintenance_job THEN
         RAISE EXCEPTION 'concurrent maintenance did not leave a durable job row';
+    END IF;
+
+    -- A worker that fails before decoding its launch metadata leaves the job
+    -- queued forever. Require both asynchronous operations to reach a durable
+    -- terminal state before exercising the post-stress maintenance paths.
+    FOR attempt IN 1..120 LOOP
+        SELECT NOT EXISTS (
+            SELECT 1 FROM graph._build_jobs WHERE status IN ('queued', 'running')
+        ) AND NOT EXISTS (
+            SELECT 1 FROM graph._maintenance_jobs WHERE status IN ('queued', 'running')
+        ) INTO jobs_terminal;
+        EXIT WHEN jobs_terminal;
+        IF attempt = 120 THEN
+            SELECT string_agg(kind || '=' || status, ', ' ORDER BY kind, status)
+              INTO pending_jobs
+              FROM (
+                  SELECT 'build' AS kind, status FROM graph._build_jobs
+                  UNION ALL
+                  SELECT 'maintenance' AS kind, status FROM graph._maintenance_jobs
+              ) jobs
+             WHERE status IN ('queued', 'running');
+            RAISE EXCEPTION 'asynchronous graph jobs did not reach a terminal state: %',
+                coalesce(pending_jobs, 'unknown');
+        END IF;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+
+    SELECT string_agg(kind || '=' || coalesce(error, '<missing>'), '; ' ORDER BY kind)
+      INTO unexpected_failures
+      FROM (
+          SELECT 'build' AS kind, status, error FROM graph._build_jobs
+          UNION ALL
+          SELECT 'maintenance' AS kind, status, error FROM graph._maintenance_jobs
+      ) jobs
+     WHERE status = 'failed'
+       AND error IS DISTINCT FROM
+           'Another graph maintenance operation or registered source transaction is active';
+    IF unexpected_failures IS NOT NULL THEN
+        RAISE EXCEPTION 'asynchronous graph jobs failed unexpectedly: %', unexpected_failures;
     END IF;
 
     -- The enqueueing sessions can exit before their dynamic workers acquire
@@ -147,6 +272,223 @@ BEGIN
     END IF;
 END
 $$;
+
+CREATE TEMP TABLE graph_worker_target (
+    kind TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL
+) ON COMMIT PRESERVE ROWS;
+
+INSERT INTO graph_worker_target (kind, job_id)
+SELECT 'build', build_id
+FROM graph.build(concurrently := true);
+
+DO $$
+DECLARE
+    job_status TEXT;
+    job_error TEXT;
+    attempt INTEGER;
+BEGIN
+    FOR attempt IN 1..300 LOOP
+        SELECT jobs.status, jobs.error
+          INTO job_status, job_error
+          FROM graph._build_jobs jobs
+          JOIN graph_worker_target target ON target.job_id = jobs.build_id
+         WHERE target.kind = 'build';
+        EXIT WHEN job_status = 'completed';
+        IF job_status = 'failed' THEN
+            RAISE EXCEPTION 'standalone asynchronous build failed: %',
+                coalesce(job_error, 'unknown error');
+        END IF;
+        IF attempt = 300 THEN
+            RAISE EXCEPTION 'standalone asynchronous build did not complete: %',
+                coalesce(job_status, 'missing');
+        END IF;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+END
+$$;
+
+-- A job's terminal row can become visible immediately before its dynamic
+-- worker backend exits. Wait for that backend to release any remaining
+-- process-scoped state before starting the next isolated worker probe.
+DO $$
+DECLARE
+    worker_running BOOLEAN;
+    attempt INTEGER;
+BEGIN
+    FOR attempt IN 1..300 LOOP
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND backend_type = 'graph concurrent build'
+        ) INTO worker_running;
+        EXIT WHEN NOT worker_running;
+        IF attempt = 300 THEN
+            RAISE EXCEPTION 'standalone asynchronous build worker did not exit';
+        END IF;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+END
+$$;
+
+INSERT INTO graph_worker_target (kind, job_id)
+SELECT 'maintenance', job_id
+FROM graph.maintenance(concurrently := true);
+
+DO $$
+DECLARE
+    job_status TEXT;
+    job_error TEXT;
+    attempt INTEGER;
+BEGIN
+    FOR attempt IN 1..300 LOOP
+        SELECT jobs.status, jobs.error
+          INTO job_status, job_error
+          FROM graph._maintenance_jobs jobs
+          JOIN graph_worker_target target ON target.job_id = jobs.job_id
+         WHERE target.kind = 'maintenance';
+        EXIT WHEN job_status = 'completed';
+        IF job_status = 'failed' THEN
+            RAISE EXCEPTION 'standalone asynchronous maintenance failed: %',
+                coalesce(job_error, 'unknown error');
+        END IF;
+        IF attempt = 300 THEN
+            RAISE EXCEPTION 'standalone asynchronous maintenance did not complete: %',
+                coalesce(job_status, 'missing');
+        END IF;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+END
+$$;
+
+INSERT INTO graph_worker_target (kind, job_id)
+SELECT 'scheduler', job_id
+FROM graph.add_sync_policy('default', schedule_interval_secs := 60);
+
+UPDATE graph._jobs jobs
+   SET next_run_at = now() - interval '1 second'
+  FROM graph_worker_target target
+ WHERE target.kind = 'scheduler'
+   AND target.job_id = jobs.job_id::text;
+
+UPDATE graph._sync_policies policies
+   SET next_run_at = now() - interval '1 second'
+  FROM graph_worker_target target
+ WHERE target.kind = 'scheduler'
+   AND target.job_id = policies.job_id::text;
+
+SELECT graph.run_due_jobs_async(1);
+
+DO $$
+DECLARE
+    run_status TEXT;
+    run_error TEXT;
+    attempt INTEGER;
+BEGIN
+    FOR attempt IN 1..300 LOOP
+        SELECT runs.status, runs.error
+          INTO run_status, run_error
+          FROM graph._job_runs runs
+          JOIN graph_worker_target target ON target.job_id = runs.job_id::text
+         WHERE target.kind = 'scheduler'
+           AND runs.execution_mode = 'internal'
+         ORDER BY runs.started_at DESC
+         LIMIT 1;
+        EXIT WHEN run_status = 'completed';
+        IF run_status IS NOT NULL AND run_status <> 'running' THEN
+            RAISE EXCEPTION 'asynchronous due-job scheduler failed with status %: %',
+                run_status, coalesce(run_error, 'unknown error');
+        END IF;
+        IF attempt = 300 THEN
+            RAISE EXCEPTION 'asynchronous due-job scheduler did not complete: %',
+                coalesce(run_status, 'missing');
+        END IF;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+END
+$$;
+
+-- Exercise the OID-based worker connection as a non-superuser. Internal
+-- catalog DML is granted only in this disposable test database so the probe
+-- isolates worker identity from the public catalog-mutation boundary. RLS
+-- then makes an elevated or missing worker role observable in nodes_loaded.
+GRANT USAGE, CREATE ON SCHEMA graph TO :"probe_role";
+GRANT ALL PRIVILEGES ON public.graph_concurrency_nodes, public.graph_concurrency_edges
+    TO :"probe_role";
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA graph TO :"probe_role";
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA graph
+    TO :"probe_role";
+ALTER TABLE graph._graphs OWNER TO :"probe_role";
+ALTER TABLE graph._registered_tables OWNER TO :"probe_role";
+ALTER TABLE graph._registered_edges OWNER TO :"probe_role";
+ALTER TABLE graph._registered_filter_columns OWNER TO :"probe_role";
+ALTER TABLE public.graph_concurrency_nodes OWNER TO :"probe_role";
+ALTER TABLE public.graph_concurrency_edges OWNER TO :"probe_role";
+ALTER TABLE public.graph_concurrency_nodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.graph_concurrency_nodes FORCE ROW LEVEL SECURITY;
+CREATE POLICY graph_worker_role_probe_nodes
+    ON public.graph_concurrency_nodes
+    FOR SELECT TO :"probe_role"
+    USING (tenant = 'tenant-1');
+
+-- Dynamic workers start a fresh session, so make the test's manual-sync mode
+-- a database default as well as a setting on the enqueueing session. This
+-- keeps the role-identity probe focused on source reads instead of requiring
+-- the disposable role to own the existing trigger functions.
+SELECT format(
+    'ALTER DATABASE %I SET graph.sync_mode = %L',
+    current_database(),
+    'manual'
+) \gexec
+SET graph.sync_mode = 'manual';
+SET ROLE :"probe_role";
+CREATE TEMP TABLE graph_role_worker_target ON COMMIT PRESERVE ROWS AS
+SELECT build_job.build_id,
+       visible.expected_nodes
+FROM graph.build(concurrently := true) build_job
+CROSS JOIN (
+    SELECT count(*)::bigint AS expected_nodes
+    FROM public.graph_concurrency_nodes
+) visible;
+RESET ROLE;
+
+DO $$
+DECLARE
+    job_status TEXT;
+    job_error TEXT;
+    loaded_nodes BIGINT;
+    expected_nodes BIGINT;
+    total_nodes BIGINT;
+    attempt INTEGER;
+BEGIN
+    FOR attempt IN 1..300 LOOP
+        SELECT jobs.status, jobs.error, jobs.nodes_loaded, target.expected_nodes
+          INTO job_status, job_error, loaded_nodes, expected_nodes
+          FROM graph._build_jobs jobs
+          JOIN graph_role_worker_target target ON target.build_id = jobs.build_id;
+        EXIT WHEN job_status = 'completed';
+        IF job_status = 'failed' THEN
+            RAISE EXCEPTION 'non-superuser asynchronous build failed: %',
+                coalesce(job_error, 'unknown error');
+        END IF;
+        IF attempt = 300 THEN
+            RAISE EXCEPTION 'non-superuser asynchronous build did not complete: %',
+                coalesce(job_status, 'missing');
+        END IF;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+
+    SELECT count(*) INTO total_nodes FROM public.graph_concurrency_nodes;
+    IF loaded_nodes <> expected_nodes OR loaded_nodes >= total_nodes THEN
+        RAISE EXCEPTION
+            'background worker did not preserve effective-role RLS (loaded %, expected %, total %)',
+            loaded_nodes, expected_nodes, total_nodes;
+    END IF;
+END
+$$;
 SQL
 
+cleanup_probe_role
+PROBE_ROLE_CREATED=0
 echo "Concurrency stress passed for $DBNAME"

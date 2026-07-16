@@ -2013,8 +2013,9 @@ fn build_async_graph(
 /// Background worker entrypoint for asynchronous graph builds.
 ///
 /// PostgreSQL invokes this function by name after `graph.build(concurrently :=
-/// true)` registers a dynamic background worker. Worker metadata is read from
-/// pgrx's background-worker `extra` field as typed JSON metadata.
+/// true)` registers a dynamic background worker. The bounded worker payload
+/// carries the durable job identifier and effective database and role OIDs;
+/// the durable job row remains authoritative for graph selection and status.
 pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     let extra = BackgroundWorker::get_extra();
@@ -2029,7 +2030,10 @@ pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
         }
     };
 
-    BackgroundWorker::connect_worker_to_spi(Some(&metadata.database), Some(&metadata.username));
+    BackgroundWorker::connect_worker_to_spi_by_oid(
+        Some(pgrx::pg_sys::Oid::from_u32(metadata.database_oid)),
+        Some(pgrx::pg_sys::Oid::from_u32(metadata.user_oid)),
+    );
 
     for _ in 0..50 {
         let job_visible = BackgroundWorker::transaction(|| {
@@ -2074,8 +2078,8 @@ pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
 ///
 /// PostgreSQL invokes this function by name after
 /// `graph.maintenance(concurrently := true)` registers a dynamic background
-/// worker. Worker metadata is read from pgrx's background-worker `extra` field
-/// as typed JSON metadata.
+/// worker. The bounded worker payload carries the durable job identifier and
+/// effective database and role OIDs used by the security-definer overload.
 pub extern "C-unwind" fn graph_maintenance_worker_main(_arg: pgrx::pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     let extra = BackgroundWorker::get_extra();
@@ -2090,7 +2094,10 @@ pub extern "C-unwind" fn graph_maintenance_worker_main(_arg: pgrx::pg_sys::Datum
         }
     };
 
-    BackgroundWorker::connect_worker_to_spi(Some(&metadata.database), Some(&metadata.username));
+    BackgroundWorker::connect_worker_to_spi_by_oid(
+        Some(pgrx::pg_sys::Oid::from_u32(metadata.database_oid)),
+        Some(pgrx::pg_sys::Oid::from_u32(metadata.user_oid)),
+    );
 
     for _ in 0..50 {
         let job_visible = BackgroundWorker::transaction(|| {
@@ -2130,8 +2137,8 @@ pub extern "C-unwind" fn graph_maintenance_worker_main(_arg: pgrx::pg_sys::Datum
 /// Background worker entrypoint for one-shot due-job execution.
 ///
 /// PostgreSQL invokes this function by name after `graph.run_due_jobs_async()`
-/// registers a dynamic background worker. Worker metadata is read from pgrx's
-/// background-worker `extra` field as typed JSON metadata.
+/// registers a dynamic background worker. The bounded worker payload carries
+/// the job limit and effective database and role OIDs.
 pub extern "C-unwind" fn graph_due_jobs_worker_main(_arg: pgrx::pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     let extra = BackgroundWorker::get_extra();
@@ -2146,7 +2153,10 @@ pub extern "C-unwind" fn graph_due_jobs_worker_main(_arg: pgrx::pg_sys::Datum) {
         }
     };
 
-    BackgroundWorker::connect_worker_to_spi(Some(&metadata.database), Some(&metadata.username));
+    BackgroundWorker::connect_worker_to_spi_by_oid(
+        Some(pgrx::pg_sys::Oid::from_u32(metadata.database_oid)),
+        Some(pgrx::pg_sys::Oid::from_u32(metadata.user_oid)),
+    );
     let result =
         BackgroundWorker::transaction(|| run_due_jobs_result(metadata.max_jobs, "internal"));
     if let Err(err) = result {
@@ -4331,8 +4341,8 @@ fn generic_job_rows(
 fn due_generic_job_rows(limit: i32) -> safety::GraphResult<Vec<GenericJobRow>> {
     let limit = limit.clamp(1, 500);
     let visible_graph_ids = visible_graph_ids()?;
-    Spi::connect(|client| {
-        let selected = client.select(
+    Spi::connect_mut(|client| {
+        let selected = client.update(
             "SELECT j.job_id::text, j.graph_id::text, g.graph_name, j.policy_kind,
                     j.enabled, j.schedule_interval_secs, j.max_runtime_secs,
                     j.max_retries, j.next_run_at, j.last_run_at, j.last_status,

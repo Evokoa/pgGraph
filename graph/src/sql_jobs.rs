@@ -50,36 +50,35 @@ impl JobStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkerMetadata {
+    #[serde(rename = "j")]
     pub(crate) job_id: String,
-    pub(crate) graph_id: String,
-    pub(crate) graph_name: String,
-    pub(crate) database: String,
-    pub(crate) username: String,
+    #[serde(rename = "d")]
+    pub(crate) database_oid: u32,
+    #[serde(rename = "u")]
+    pub(crate) user_oid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SchedulerWorkerMetadata {
+    #[serde(rename = "m")]
     pub(crate) max_jobs: i32,
-    pub(crate) database: String,
-    pub(crate) username: String,
+    #[serde(rename = "d")]
+    pub(crate) database_oid: u32,
+    #[serde(rename = "u")]
+    pub(crate) user_oid: u32,
 }
 
 impl SchedulerWorkerMetadata {
-    pub(crate) fn new(max_jobs: i32, database: String, username: String) -> Self {
+    pub(crate) fn new(max_jobs: i32, database_oid: u32, user_oid: u32) -> Self {
         Self {
             max_jobs,
-            database,
-            username,
+            database_oid,
+            user_oid,
         }
     }
 
     pub(crate) fn encode(&self) -> safety::GraphResult<String> {
-        serde_json::to_string(self).map_err(|err| {
-            safety::GraphError::Internal(format!(
-                "scheduler worker metadata encoding failed: {}",
-                err
-            ))
-        })
+        encode_background_worker_metadata(self, "scheduler worker")
     }
 
     pub(crate) fn decode(raw: &str) -> safety::GraphResult<Self> {
@@ -93,26 +92,16 @@ impl SchedulerWorkerMetadata {
 }
 
 impl WorkerMetadata {
-    pub(crate) fn new(
-        job_id: &str,
-        graph_id: &str,
-        graph_name: &str,
-        database: String,
-        username: String,
-    ) -> Self {
+    pub(crate) fn new(job_id: &str, database_oid: u32, user_oid: u32) -> Self {
         Self {
             job_id: job_id.to_string(),
-            graph_id: graph_id.to_string(),
-            graph_name: graph_name.to_string(),
-            database,
-            username,
+            database_oid,
+            user_oid,
         }
     }
 
     pub(crate) fn encode(&self) -> safety::GraphResult<String> {
-        serde_json::to_string(self).map_err(|err| {
-            safety::GraphError::Internal(format!("worker metadata encoding failed: {}", err))
-        })
+        encode_background_worker_metadata(self, "worker")
     }
 
     pub(crate) fn decode(raw: &str) -> safety::GraphResult<Self> {
@@ -120,6 +109,35 @@ impl WorkerMetadata {
             safety::GraphError::Internal(format!("worker metadata decoding failed: {}", err))
         })
     }
+}
+
+const MAX_BACKGROUND_WORKER_EXTRA_BYTES: usize = pgrx::pg_sys::BGW_EXTRALEN as usize - 1;
+
+fn validate_background_worker_extra(raw: &str, kind: &str) -> safety::GraphResult<()> {
+    if raw.as_bytes().contains(&0) {
+        return Err(safety::GraphError::Internal(format!(
+            "{kind} metadata contains an embedded NUL byte"
+        )));
+    }
+    if raw.len() > MAX_BACKGROUND_WORKER_EXTRA_BYTES {
+        return Err(safety::GraphError::Internal(format!(
+            "{kind} metadata is {} bytes; PostgreSQL background-worker metadata allows at most {} bytes",
+            raw.len(),
+            MAX_BACKGROUND_WORKER_EXTRA_BYTES
+        )));
+    }
+    Ok(())
+}
+
+fn encode_background_worker_metadata<T: Serialize>(
+    metadata: &T,
+    kind: &str,
+) -> safety::GraphResult<String> {
+    let encoded = serde_json::to_string(metadata).map_err(|err| {
+        safety::GraphError::Internal(format!("{kind} metadata encoding failed: {err}"))
+    })?;
+    validate_background_worker_extra(&encoded, kind)?;
+    Ok(encoded)
 }
 
 fn current_backend_pid() -> i32 {
@@ -481,35 +499,23 @@ pub(crate) fn run_maintenance_job(job_id: &str) -> safety::GraphResult<()> {
     update_maintenance_job_completed(job_id, &result)
 }
 
-pub(crate) fn current_database_and_user() -> safety::GraphResult<(String, String)> {
-    Spi::connect(|client| {
-        let rows = client.select(
-            "SELECT current_database()::text, current_user::text",
-            None,
-            &[],
-        )?;
-        let row = rows.first();
-        Ok::<_, pgrx::spi::SpiError>((
-            row.get::<String>(1)?.unwrap_or_default(),
-            row.get::<String>(2)?.unwrap_or_default(),
-        ))
-    })
-    .map_err(|err| {
-        safety::GraphError::Internal(format!("current database/user lookup failed: {}", err))
-    })
+fn current_database_and_user_oids() -> safety::GraphResult<(u32, u32)> {
+    // SAFETY: launch helpers run inside a connected PostgreSQL backend.
+    // MyDatabaseId identifies that backend's database, and GetUserId returns
+    // the effective current_user, including SET ROLE and SECURITY DEFINER.
+    let (database_oid, user_oid) =
+        unsafe { (pgrx::pg_sys::MyDatabaseId, pgrx::pg_sys::GetUserId()) };
+    if database_oid == pgrx::pg_sys::Oid::INVALID || user_oid == pgrx::pg_sys::Oid::INVALID {
+        return Err(safety::GraphError::Internal(
+            "background worker launch requires a connected database and effective role".to_string(),
+        ));
+    }
+    Ok((database_oid.to_u32(), user_oid.to_u32()))
 }
 
 pub(crate) fn launch_build_worker(build_id: &str) -> safety::GraphResult<()> {
-    let (database, username) = current_database_and_user()?;
-    let graph = catalog::selected_or_default_graph_metadata()?;
-    let extra = WorkerMetadata::new(
-        build_id,
-        &graph.graph_id,
-        &graph.graph_name,
-        database,
-        username,
-    )
-    .encode()?;
+    let (database_oid, user_oid) = current_database_and_user_oids()?;
+    let extra = WorkerMetadata::new(build_id, database_oid, user_oid).encode()?;
     BackgroundWorkerBuilder::new("graph concurrent build")
         .set_function("graph_build_worker_main")
         .set_library("graph")
@@ -529,16 +535,8 @@ pub(crate) fn launch_build_worker(build_id: &str) -> safety::GraphResult<()> {
 }
 
 pub(crate) fn launch_maintenance_worker(job_id: &str) -> safety::GraphResult<()> {
-    let (database, username) = current_database_and_user()?;
-    let graph = catalog::selected_or_default_graph_metadata()?;
-    let extra = WorkerMetadata::new(
-        job_id,
-        &graph.graph_id,
-        &graph.graph_name,
-        database,
-        username,
-    )
-    .encode()?;
+    let (database_oid, user_oid) = current_database_and_user_oids()?;
+    let extra = WorkerMetadata::new(job_id, database_oid, user_oid).encode()?;
     BackgroundWorkerBuilder::new("graph maintenance")
         .set_function("graph_maintenance_worker_main")
         .set_library("graph")
@@ -557,8 +555,8 @@ pub(crate) fn launch_maintenance_worker(job_id: &str) -> safety::GraphResult<()>
 }
 
 pub(crate) fn launch_due_jobs_worker(max_jobs: i32) -> safety::GraphResult<()> {
-    let (database, username) = current_database_and_user()?;
-    let extra = SchedulerWorkerMetadata::new(max_jobs, database, username).encode()?;
+    let (database_oid, user_oid) = current_database_and_user_oids()?;
+    let extra = SchedulerWorkerMetadata::new(max_jobs, database_oid, user_oid).encode()?;
     BackgroundWorkerBuilder::new("graph due jobs")
         .set_function("graph_due_jobs_worker_main")
         .set_library("graph")
@@ -578,7 +576,10 @@ pub(crate) fn launch_due_jobs_worker(max_jobs: i32) -> safety::GraphResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{JobStatus, SchedulerWorkerMetadata, WorkerMetadata};
+    use super::{
+        validate_background_worker_extra, JobStatus, SchedulerWorkerMetadata, WorkerMetadata,
+        MAX_BACKGROUND_WORKER_EXTRA_BYTES,
+    };
 
     #[test]
     fn job_status_as_str_matches_sql_contract_values() {
@@ -594,15 +595,11 @@ mod tests {
     }
 
     #[test]
-    fn worker_metadata_round_trips_json_with_delimiters() {
-        let metadata = WorkerMetadata::new(
-            "job|1",
-            "00000000-0000-0000-0000-000000000001",
-            "default",
-            "db|name".to_string(),
-            "user|name".to_string(),
-        );
+    fn worker_metadata_round_trips_with_worst_case_oids() {
+        let metadata =
+            WorkerMetadata::new("00000000-0000-0000-0000-000000000001", u32::MAX, u32::MAX);
         let encoded = metadata.encode().expect("metadata encodes");
+        assert!(encoded.len() <= MAX_BACKGROUND_WORKER_EXTRA_BYTES);
         assert_eq!(
             WorkerMetadata::decode(&encoded).expect("metadata decodes"),
             metadata
@@ -611,12 +608,40 @@ mod tests {
 
     #[test]
     fn scheduler_worker_metadata_round_trips_json() {
-        let metadata =
-            SchedulerWorkerMetadata::new(32, "graph/db".to_string(), "worker role".to_string());
+        let metadata = SchedulerWorkerMetadata::new(i32::MAX, u32::MAX, u32::MAX);
         let encoded = metadata.encode().expect("metadata encodes");
+        assert!(encoded.len() <= MAX_BACKGROUND_WORKER_EXTRA_BYTES);
         assert_eq!(
             SchedulerWorkerMetadata::decode(&encoded).expect("metadata decodes"),
             metadata
         );
+    }
+
+    #[test]
+    fn background_worker_extra_enforces_postgresql_byte_limit() {
+        let exact_limit = "x".repeat(MAX_BACKGROUND_WORKER_EXTRA_BYTES);
+        validate_background_worker_extra(&exact_limit, "test").expect("127 bytes fit");
+
+        let oversized = "x".repeat(MAX_BACKGROUND_WORKER_EXTRA_BYTES + 1);
+        assert!(validate_background_worker_extra(&oversized, "test").is_err());
+
+        let utf8_at_limit = format!(
+            "{}x",
+            "é".repeat((MAX_BACKGROUND_WORKER_EXTRA_BYTES - 1) / 2)
+        );
+        assert_eq!(utf8_at_limit.len(), MAX_BACKGROUND_WORKER_EXTRA_BYTES);
+        validate_background_worker_extra(&utf8_at_limit, "test").expect("UTF-8 bytes fit");
+        assert!(validate_background_worker_extra(&format!("{utf8_at_limit}é"), "test").is_err());
+        assert!(validate_background_worker_extra("metadata\0tail", "test").is_err());
+    }
+
+    #[test]
+    fn worker_metadata_rejects_oversized_job_identifier() {
+        let metadata = WorkerMetadata::new(
+            &"x".repeat(MAX_BACKGROUND_WORKER_EXTRA_BYTES),
+            u32::MAX,
+            u32::MAX,
+        );
+        assert!(metadata.encode().is_err());
     }
 }
