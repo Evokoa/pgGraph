@@ -8,9 +8,9 @@
 //! ## File Format
 //!
 //! ```text
-//! [Header]              — 448 bytes, encoded explicitly as little endian
+//! [Header]              — 512 bytes, encoded explicitly as little endian
 //!   magic/version/header size/flags/counts/checksums
-//!   section_descriptors[23] — 23 × { offset: u64, length: u64 }
+//!   section_descriptors[26] — 26 × { offset: u64, length: u64 }
 //!
 //! [Section 0: NodeStore.is_active]            — ceil(node_count / 8) bytes
 //! [Section 1: NodeStore.table_oids]           — node_count × 4 bytes
@@ -21,6 +21,9 @@
 //! [Sections 17..19] filter catalog/data/text dictionaries
 //! [Section 20] edge-type registry
 //! [Sections 21..22] relationship identity descriptors/key bytes
+//! [Section 23] sorted tenanted table OIDs
+//! [Section 24] lexical tenant dictionary
+//! [Section 25] dense per-node tenant tokens
 //! ```
 //!
 //! ## Memory Model
@@ -41,6 +44,9 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+
 use memmap2::{Mmap, MmapMut};
 
 use crate::config;
@@ -56,15 +62,16 @@ use crate::relationship_identity_store::{
 };
 use crate::resolution_index::{ResolutionIndexBuilder, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
 use crate::safety::{GraphError, GraphResult};
+use crate::tenant_store::{MappedTenantIndex, MappedTenantIndexParts};
 
 /// Magic bytes for .pggraph files.
 const MAGIC: &[u8; 4] = b"PGGH";
 /// Current file format version.
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 /// Header size in bytes.
-const HEADER_SIZE: usize = 448;
+const HEADER_SIZE: usize = 512;
 /// Number of sections.
-const NUM_SECTIONS: usize = 23;
+const NUM_SECTIONS: usize = 26;
 const SECTION_DESCRIPTORS_OFFSET: usize = 64;
 const SECTION_DESCRIPTOR_SIZE: usize = 16;
 const BODY_CRC_OFFSET: usize = 40;
@@ -72,6 +79,9 @@ const HEADER_CRC_OFFSET: usize = 44;
 const SECTION_ALIGNMENT: usize = 64;
 const FLAG_FORWARD_WEIGHTS: u32 = 1 << 0;
 const FLAG_INBOUND_WEIGHTS: u32 = 1 << 1;
+const FLAG_HAS_UNIDIRECTIONAL: u32 = 1 << 2;
+const KNOWN_FLAGS: u32 = FLAG_FORWARD_WEIGHTS | FLAG_INBOUND_WEIGHTS | FLAG_HAS_UNIDIRECTIONAL;
+#[cfg(test)]
 const INTERRUPT_CHECK_INTERVAL: u32 = 4096;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -177,6 +187,7 @@ fn ensure_native_mapped_layout_supported(little_endian: bool) -> GraphResult<()>
     }
 }
 
+#[cfg(test)]
 fn check_for_interrupts() {
     crate::resource::check_postgres_interrupts();
 }
@@ -187,11 +198,172 @@ struct GraphArtifactWriter {
     active_section: Option<usize>,
     position: u64,
     hasher: crc32fast::Hasher,
+    #[cfg(test)]
     check_interrupts: bool,
 }
 
+/// Header metadata for an artifact assembled from bounded build streams.
+///
+/// The direct build path supplies only graph counts and feature flags. The
+/// persistence module remains the single owner of the v6 header, alignment,
+/// checksum, and atomic-publication format.
+pub(crate) struct DirectArtifactMetadata {
+    pub(crate) node_count: u32,
+    pub(crate) forward_edge_count: u32,
+    pub(crate) inbound_edge_count: u32,
+    pub(crate) has_forward_weights: bool,
+    pub(crate) has_inbound_weights: bool,
+    pub(crate) has_unidirectional_edges: bool,
+    pub(crate) applied_sync_id: i64,
+    pub(crate) projection_mode: config::ProjectionMode,
+}
+
+/// Section-oriented sink used by the bounded persisted builder.
+///
+/// Section payloads are written incrementally; this type deliberately does
+/// not expose the underlying file or header representation.
+pub(crate) struct DirectArtifactWriter {
+    inner: GraphArtifactWriter,
+    next_section: usize,
+    expected_lengths: [u64; NUM_SECTIONS],
+    active_written: u64,
+    positioned_section: bool,
+}
+
+struct DirectCandidateGuard<'a> {
+    path: &'a Path,
+    keep: bool,
+}
+
+impl Drop for DirectCandidateGuard<'_> {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let _ = fs::remove_file(self.path);
+        let sync = sync_checkpoint_path(self.path);
+        let mode = projection_mode_path(self.path);
+        let _ = fs::remove_file(&sync);
+        let _ = fs::remove_file(append_path_suffix(&sync, ".tmp"));
+        let _ = fs::remove_file(&mode);
+        let _ = fs::remove_file(append_path_suffix(&mode, ".tmp"));
+    }
+}
+
+impl DirectArtifactWriter {
+    /// Begin the next v6 section in canonical numeric order.
+    pub(crate) fn begin_section(&mut self, section: usize) -> GraphResult<()> {
+        self.validate_active_length()?;
+        if section != self.next_section || section >= NUM_SECTIONS {
+            return Err(GraphError::Internal(format!(
+                "direct artifact sections must be emitted in order: expected {}, found {section}",
+                self.next_section
+            )));
+        }
+        self.inner.begin_section(section)?;
+        self.next_section += 1;
+        self.active_written = 0;
+        self.positioned_section = false;
+        Ok(())
+    }
+
+    /// Append raw bytes to the active section.
+    pub(crate) fn write_bytes(&mut self, bytes: &[u8]) -> GraphResult<()> {
+        if self.next_section == 0 {
+            return Err(GraphError::Internal(
+                "direct artifact write has no active section".into(),
+            ));
+        }
+        if self.positioned_section {
+            return Err(GraphError::Internal(
+                "cannot append sequential bytes after positioned section writes".into(),
+            ));
+        }
+        let written = self
+            .active_written
+            .checked_add(u64::try_from(bytes.len()).map_err(|_| {
+                GraphError::Internal("direct artifact section length exceeds u64".into())
+            })?)
+            .ok_or_else(|| {
+                GraphError::Internal("direct artifact section length overflowed".into())
+            })?;
+        let active = self.next_section - 1;
+        if written > self.expected_lengths[active] {
+            return Err(GraphError::Internal(format!(
+                "direct artifact section {active} exceeded planned length {}",
+                self.expected_lengths[active]
+            )));
+        }
+        self.inner.write_body(bytes)?;
+        self.active_written = written;
+        Ok(())
+    }
+
+    /// Write bytes at a checked relative offset in the active preplanned
+    /// section. The candidate is already fully zero-filled, so omitted ranges
+    /// retain their canonical zero/default representation.
+    #[cfg(unix)]
+    pub(crate) fn write_at(&mut self, relative_offset: u64, bytes: &[u8]) -> GraphResult<()> {
+        let active = self
+            .next_section
+            .checked_sub(1)
+            .ok_or_else(|| GraphError::Internal("positioned write has no active section".into()))?;
+        let len = u64::try_from(bytes.len())
+            .map_err(|_| GraphError::Internal("positioned write length exceeds u64".into()))?;
+        let end = relative_offset
+            .checked_add(len)
+            .ok_or_else(|| GraphError::Internal("positioned write range overflowed".into()))?;
+        if end > self.expected_lengths[active] {
+            return Err(GraphError::Internal(format!(
+                "positioned write exceeds section {active} planned length {}",
+                self.expected_lengths[active]
+            )));
+        }
+        if !self.positioned_section {
+            self.inner.writer.flush().map_err(|error| {
+                GraphError::Internal(format!("Positioned section flush failed: {error}"))
+            })?;
+            let section_end = self.inner.sections[active]
+                .offset
+                .checked_add(self.expected_lengths[active])
+                .ok_or_else(|| GraphError::Internal("positioned section end overflowed".into()))?;
+            self.inner
+                .writer
+                .seek(SeekFrom::Start(section_end))
+                .map_err(|error| {
+                    GraphError::Internal(format!("Positioned section seek failed: {error}"))
+                })?;
+            self.inner.position = section_end;
+            self.active_written = self.expected_lengths[active];
+            self.positioned_section = true;
+        }
+        let absolute = self.inner.sections[active]
+            .offset
+            .checked_add(relative_offset)
+            .ok_or_else(|| GraphError::Internal("positioned write offset overflowed".into()))?;
+        self.inner
+            .writer
+            .get_ref()
+            .write_all_at(bytes, absolute)
+            .map_err(|error| GraphError::Internal(format!("Positioned write failed: {error}")))
+    }
+
+    fn validate_active_length(&self) -> GraphResult<()> {
+        let Some(active) = self.next_section.checked_sub(1) else {
+            return Ok(());
+        };
+        if self.active_written != self.expected_lengths[active] {
+            return Err(GraphError::Internal(format!(
+                "direct artifact section {active} wrote {} bytes, expected {}",
+                self.active_written, self.expected_lengths[active]
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl GraphArtifactWriter {
-    fn new(file: fs::File, check_interrupts: bool) -> GraphResult<Self> {
+    fn new(file: fs::File, _check_interrupts: bool) -> GraphResult<Self> {
         let mut writer = BufWriter::new(file);
         writer
             .write_all(&[0u8; HEADER_SIZE])
@@ -202,7 +374,8 @@ impl GraphArtifactWriter {
             active_section: None,
             position: HEADER_SIZE as u64,
             hasher: crc32fast::Hasher::new(),
-            check_interrupts,
+            #[cfg(test)]
+            check_interrupts: _check_interrupts,
         })
     }
 
@@ -249,6 +422,7 @@ impl GraphArtifactWriter {
         Ok(())
     }
 
+    #[cfg(test)]
     fn write_u32_values(&mut self, values: &[u32]) -> GraphResult<()> {
         for (idx, &value) in values.iter().enumerate() {
             if self.check_interrupts && (idx as u32).is_multiple_of(INTERRUPT_CHECK_INTERVAL) {
@@ -259,27 +433,94 @@ impl GraphArtifactWriter {
         Ok(())
     }
 
+    #[cfg(test)]
     fn write_u64_value(&mut self, value: u64) -> GraphResult<()> {
         self.write_body(&value.to_le_bytes())
     }
 
+    #[cfg(test)]
     fn write_u32_value(&mut self, value: u32) -> GraphResult<()> {
         self.write_body(&value.to_le_bytes())
     }
 
+    #[cfg(test)]
     fn finish(
-        mut self,
+        self,
         node_count: u32,
         forward_edge_count: u32,
         inbound_edge_count: u32,
         flags: u32,
     ) -> GraphResult<fs::File> {
+        self.finish_internal(
+            node_count,
+            forward_edge_count,
+            inbound_edge_count,
+            flags,
+            None,
+        )
+    }
+
+    fn finish_recomputed(
+        self,
+        node_count: u32,
+        forward_edge_count: u32,
+        inbound_edge_count: u32,
+        flags: u32,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<fs::File> {
+        self.finish_internal(
+            node_count,
+            forward_edge_count,
+            inbound_edge_count,
+            flags,
+            Some(governor),
+        )
+    }
+
+    fn finish_internal(
+        mut self,
+        node_count: u32,
+        forward_edge_count: u32,
+        inbound_edge_count: u32,
+        flags: u32,
+        recompute: Option<&crate::resource::ResourceGovernor>,
+    ) -> GraphResult<fs::File> {
         self.finish_active_section()?;
-        let body_crc = std::mem::replace(&mut self.hasher, crc32fast::Hasher::new()).finalize();
         let body_len = self
             .position
             .checked_sub(HEADER_SIZE as u64)
             .ok_or_else(|| GraphError::Internal("artifact body length underflow".into()))?;
+        let body_crc = if let Some(governor) = recompute {
+            self.writer.flush().map_err(|error| {
+                GraphError::Internal(format!("Artifact flush before checksum failed: {error}"))
+            })?;
+            let file = self.writer.get_mut();
+            file.seek(SeekFrom::Start(HEADER_SIZE as u64))
+                .map_err(|error| {
+                    GraphError::Internal(format!("Artifact checksum seek failed: {error}"))
+                })?;
+            let mut remaining = body_len;
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut hasher = crc32fast::Hasher::new();
+            while remaining > 0 {
+                let requested =
+                    usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
+                        GraphError::Internal("Artifact checksum size overflowed".into())
+                    })?;
+                file.read_exact(&mut buffer[..requested]).map_err(|error| {
+                    GraphError::Internal(format!("Artifact checksum read failed: {error}"))
+                })?;
+                hasher.update(&buffer[..requested]);
+                remaining -= requested as u64;
+                governor
+                    .check_elapsed(crate::resource::ResourcePhase::Persistence)
+                    .map_err(crate::safety::resource_limit_error)?;
+                crate::resource::check_postgres_interrupts();
+            }
+            hasher.finalize()
+        } else {
+            std::mem::replace(&mut self.hasher, crc32fast::Hasher::new()).finalize()
+        };
         let mut header = [0u8; HEADER_SIZE];
         header[0..4].copy_from_slice(MAGIC);
         header[4..8].copy_from_slice(&VERSION.to_le_bytes());
@@ -669,7 +910,7 @@ fn validate_section_layout(
     inbound_edge_count: u32,
     flags: u32,
 ) -> GraphResult<ValidatedGraphLayout> {
-    if flags & !(FLAG_FORWARD_WEIGHTS | FLAG_INBOUND_WEIGHTS) != 0 {
+    if flags & !KNOWN_FLAGS != 0 {
         return Err(GraphError::CorruptFile {
             reason: format!("unsupported graph artifact flags {flags:#x}"),
         });
@@ -760,6 +1001,7 @@ fn validate_section_layout(
     require_exact_section_len(&ranges, 16, resolution_min_len, "resolution_index")?;
 
     validate_filter_sections(mmap, &ranges)?;
+    validate_tenant_sections(mmap, &ranges, node_count)?;
     validate_persisted_contents(
         mmap,
         &ranges,
@@ -783,6 +1025,128 @@ fn validate_section_layout(
         has_forward_weights: flags & FLAG_FORWARD_WEIGHTS != 0,
         has_inbound_weights: flags & FLAG_INBOUND_WEIGHTS != 0,
     })
+}
+
+fn validate_tenant_sections(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    node_count: u32,
+) -> GraphResult<()> {
+    let oid_bytes = &mmap[ranges[23].0..ranges[23].1];
+    if !oid_bytes.len().is_multiple_of(std::mem::size_of::<u32>()) {
+        return Err(GraphError::CorruptFile {
+            reason: "tenanted table OID section length is not a multiple of four".into(),
+        });
+    }
+    let mut previous_oid = None;
+    for index in 0..oid_bytes.len() / std::mem::size_of::<u32>() {
+        let oid = read_u32_at(oid_bytes, index * std::mem::size_of::<u32>());
+        if previous_oid.is_some_and(|previous| previous >= oid) {
+            return Err(GraphError::CorruptFile {
+                reason: "tenanted table OIDs are not strictly sorted".into(),
+            });
+        }
+        previous_oid = Some(oid);
+    }
+
+    let dictionary = &mmap[ranges[24].0..ranges[24].1];
+    if dictionary.len() < 12 {
+        return Err(GraphError::CorruptFile {
+            reason: "tenant dictionary header is truncated".into(),
+        });
+    }
+    let tenant_count = read_u32_at(dictionary, 0);
+    let offset_count = tenant_count
+        .checked_add(1)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "tenant dictionary offset count overflowed".into(),
+        })?;
+    let payload_start = checked_section_size(offset_count, 8, "tenant dictionary offsets")?
+        .checked_add(4)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "tenant dictionary header length overflowed".into(),
+        })?;
+    if payload_start > dictionary.len() || read_u64_at(dictionary, 4) != 0 {
+        return Err(GraphError::CorruptFile {
+            reason: "tenant dictionary has an invalid initial offset".into(),
+        });
+    }
+    let payload = &dictionary[payload_start..];
+    let mut previous_value: Option<&str> = None;
+    let mut previous_end = 0usize;
+    for index in 0..tenant_count as usize {
+        let end = usize::try_from(read_u64_at(dictionary, 4 + (index + 1) * 8)).map_err(|_| {
+            GraphError::CorruptFile {
+                reason: "tenant dictionary offset exceeds usize".into(),
+            }
+        })?;
+        if end < previous_end || end > payload.len() {
+            return Err(GraphError::CorruptFile {
+                reason: "tenant dictionary offsets are not monotonic and in bounds".into(),
+            });
+        }
+        let value = std::str::from_utf8(&payload[previous_end..end]).map_err(|_| {
+            GraphError::CorruptFile {
+                reason: "tenant dictionary value is not valid UTF-8".into(),
+            }
+        })?;
+        if previous_value.is_some_and(|previous| previous >= value) {
+            return Err(GraphError::CorruptFile {
+                reason: "tenant dictionary is not strictly lexical".into(),
+            });
+        }
+        previous_value = Some(value);
+        previous_end = end;
+    }
+    if previous_end != payload.len() {
+        return Err(GraphError::CorruptFile {
+            reason: "tenant dictionary contains unreferenced trailing bytes".into(),
+        });
+    }
+
+    require_exact_section_len(
+        ranges,
+        25,
+        checked_section_size(node_count, 4, "node tenant tokens")?,
+        "node_tenant_tokens",
+    )?;
+    let table_oids = &mmap[ranges[1].0..ranges[1].1];
+    let tokens = &mmap[ranges[25].0..ranges[25].1];
+    for node_idx in 0..node_count as usize {
+        let token = read_u32_at(tokens, node_idx * 4);
+        if token > tenant_count {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "tenant token {token} at node {node_idx} exceeds dictionary count {tenant_count}"
+                ),
+            });
+        }
+        if token != 0 {
+            let table_oid = read_u32_at(table_oids, node_idx * 4);
+            if !sorted_u32_bytes_contains(oid_bytes, table_oid) {
+                return Err(GraphError::CorruptFile {
+                    reason: format!(
+                        "tenant-scoped node {node_idx} belongs to unregistered table OID {table_oid}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sorted_u32_bytes_contains(bytes: &[u8], expected: u32) -> bool {
+    let mut left = 0usize;
+    let mut right = bytes.len() / 4;
+    while left < right {
+        let middle = left + (right - left) / 2;
+        match read_u32_at(bytes, middle * 4).cmp(&expected) {
+            std::cmp::Ordering::Less => left = middle + 1,
+            std::cmp::Ordering::Equal => return true,
+            std::cmp::Ordering::Greater => right = middle,
+        }
+    }
+    false
 }
 
 fn require_exact_section_len(
@@ -857,14 +1221,137 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
     write_graph_file_internal(engine, path, false, None)
 }
 
-pub(crate) fn write_graph_file_with_interrupt_checks_and_resources(
-    engine: &Engine,
+/// Assemble one unpublished v6 candidate from bounded section streams without
+/// constructing an owned [`Engine`].
+///
+/// The destination is created exclusively and is never overwritten. The
+/// callback must emit all 26 sections in numeric order. A failed callback
+/// removes only the candidate created by this invocation.
+pub(crate) fn write_direct_graph_file(
     path: &Path,
+    metadata: &DirectArtifactMetadata,
+    section_lengths: [u64; NUM_SECTIONS],
     governor: &crate::resource::ResourceGovernor,
+    emit: impl FnOnce(&mut DirectArtifactWriter) -> GraphResult<()>,
 ) -> GraphResult<()> {
-    write_graph_file_internal(engine, path, true, Some(governor))
+    let planned_len = planned_direct_artifact_len(&section_lengths)?;
+    let _candidate_disk = governor
+        .reserve_disk(
+            crate::resource::ResourcePhase::Persistence,
+            crate::resource::ByteCount::from_bytes(planned_len),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            GraphError::Internal(format!(
+                "Cannot create directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            GraphError::Internal(format!(
+                "Cannot exclusively create {}: {error}",
+                path.display()
+            ))
+        })?;
+    let mut candidate = DirectCandidateGuard { path, keep: false };
+    zero_fill_candidate(&mut file, planned_len, governor)?;
+    file.sync_all().map_err(|error| {
+        GraphError::Internal(format!("Candidate preallocation sync failed: {error}"))
+    })?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| GraphError::Internal(format!("Candidate rewind failed: {error}")))?;
+    let mut writer = DirectArtifactWriter {
+        inner: GraphArtifactWriter::new(file, true)?,
+        next_section: 0,
+        expected_lengths: section_lengths,
+        active_written: 0,
+        positioned_section: false,
+    };
+    if let Err(error) = emit(&mut writer) {
+        drop(writer);
+        return Err(error);
+    }
+    if writer.next_section != NUM_SECTIONS {
+        let emitted = writer.next_section;
+        drop(writer);
+        return Err(GraphError::Internal(format!(
+            "direct artifact emitted {emitted} of {NUM_SECTIONS} sections"
+        )));
+    }
+    writer.validate_active_length()?;
+    let mut flags = 0;
+    if metadata.has_forward_weights {
+        flags |= FLAG_FORWARD_WEIGHTS;
+    }
+    if metadata.has_inbound_weights {
+        flags |= FLAG_INBOUND_WEIGHTS;
+    }
+    if metadata.has_unidirectional_edges {
+        flags |= FLAG_HAS_UNIDIRECTIONAL;
+    }
+    let file = writer.inner.finish_recomputed(
+        metadata.node_count,
+        metadata.forward_edge_count,
+        metadata.inbound_edge_count,
+        flags,
+        governor,
+    )?;
+    file.sync_all()
+        .map_err(|error| GraphError::Internal(format!("Sync failed: {error}")))?;
+    write_sync_checkpoint(path, metadata.applied_sync_id)?;
+    write_projection_mode(path, metadata.projection_mode)?;
+    candidate.keep = true;
+    Ok(())
 }
 
+fn planned_direct_artifact_len(lengths: &[u64; NUM_SECTIONS]) -> GraphResult<u64> {
+    lengths
+        .iter()
+        .try_fold(HEADER_SIZE as u64, |position, length| {
+            let remainder = position % SECTION_ALIGNMENT as u64;
+            let padding = if remainder == 0 {
+                0
+            } else {
+                SECTION_ALIGNMENT as u64 - remainder
+            };
+            position
+                .checked_add(padding)
+                .and_then(|position| position.checked_add(*length))
+                .ok_or_else(|| GraphError::Internal("direct artifact layout exceeds u64".into()))
+        })
+}
+
+fn zero_fill_candidate(
+    file: &mut fs::File,
+    len: u64,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<()> {
+    static ZERO_CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
+    let mut remaining = len;
+    while remaining > 0 {
+        let chunk = usize::try_from(remaining.min(ZERO_CHUNK.len() as u64))
+            .map_err(|_| GraphError::Internal("candidate preallocation chunk overflowed".into()))?;
+        file.write_all(&ZERO_CHUNK[..chunk]).map_err(|error| {
+            GraphError::Internal(format!("Candidate preallocation failed: {error}"))
+        })?;
+        remaining -= chunk as u64;
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::Persistence)
+            .map_err(crate::safety::resource_limit_error)?;
+        crate::resource::check_postgres_interrupts();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[cfg(test)]
 fn write_graph_file_internal(
     engine: &Engine,
     path: &Path,
@@ -1000,12 +1487,19 @@ fn write_graph_file_internal(
     writer.begin_section(22)?;
     write_relationship_identity_keys(&mut writer, &engine.relationship_identities)?;
 
+    reserve_persistence_workspace(&mut workspace, tenant_encoding_workspace(engine)?)?;
+    write_tenant_sections(&mut writer, engine)?;
+    release_persistence_workspace(&mut workspace);
+
     let mut flags = 0u32;
     if engine.edge_store.has_weights() {
         flags |= FLAG_FORWARD_WEIGHTS;
     }
     if inbound_store.has_weights() {
         flags |= FLAG_INBOUND_WEIGHTS;
+    }
+    if engine.has_unidirectional_edges {
+        flags |= FLAG_HAS_UNIDIRECTIONAL;
     }
 
     let file = writer.finish(
@@ -1026,6 +1520,8 @@ fn write_graph_file_internal(
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn write_edge_sections(
     writer: &mut GraphArtifactWriter,
     base: usize,
@@ -1045,6 +1541,8 @@ fn write_edge_sections(
     writer.write_u32_values(store.relationship_ids_slice())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn write_string_registry(writer: &mut GraphArtifactWriter, values: &[String]) -> GraphResult<()> {
     let count = u32::try_from(values.len())
         .map_err(|_| GraphError::Internal("edge type registry exceeds u32 entries".into()))?;
@@ -1065,6 +1563,8 @@ fn write_string_registry(writer: &mut GraphArtifactWriter, values: &[String]) ->
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn write_relationship_identity_descriptors(
     writer: &mut GraphArtifactWriter,
     identities: &RelationshipIdentityStore,
@@ -1099,6 +1599,8 @@ fn write_relationship_identity_descriptors(
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn write_relationship_identity_keys(
     writer: &mut GraphArtifactWriter,
     identities: &RelationshipIdentityStore,
@@ -1107,6 +1609,148 @@ fn write_relationship_identity_keys(
         writer.write_body(identity.source_key.as_bytes())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg(test)]
+fn tenant_encoding_workspace(engine: &Engine) -> GraphResult<crate::resource::ByteCount> {
+    let node_count = engine.node_store.node_count() as usize;
+    let bytes = engine
+        .tenanted_table_oids
+        .len()
+        .checked_mul(std::mem::size_of::<u32>())
+        .and_then(|bytes| {
+            node_count
+                .checked_mul(std::mem::size_of::<Option<&str>>())
+                .and_then(|membership_bytes| bytes.checked_add(membership_bytes))
+        })
+        .and_then(|bytes| {
+            node_count
+                .checked_mul(std::mem::size_of::<&str>())
+                .and_then(|dictionary_bytes| bytes.checked_add(dictionary_bytes))
+        })
+        .and_then(|bytes| {
+            node_count
+                .checked_mul(std::mem::size_of::<u32>())
+                .and_then(|token_bytes| bytes.checked_add(token_bytes))
+        })
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("tenant encoding workspace overflowed".into()))?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+#[cfg(test)]
+fn write_tenant_sections(writer: &mut GraphArtifactWriter, engine: &Engine) -> GraphResult<()> {
+    let mut tenanted_oids = Vec::new();
+    tenanted_oids
+        .try_reserve_exact(engine.tenanted_table_oids.len())
+        .map_err(|error| {
+            GraphError::Internal(format!("tenanted table OID allocation failed: {error}"))
+        })?;
+    tenanted_oids.extend(engine.tenanted_table_oids.iter().copied());
+    tenanted_oids.sort_unstable();
+
+    let node_count = engine.node_store.node_count() as usize;
+    let mut tenant_by_node = Vec::new();
+    tenant_by_node
+        .try_reserve_exact(node_count)
+        .map_err(|error| {
+            GraphError::Internal(format!("node tenant assignment allocation failed: {error}"))
+        })?;
+    tenant_by_node.resize(node_count, None::<&str>);
+    for (tenant, membership) in &engine.tenant_membership {
+        for node_idx in membership.iter() {
+            let slot = tenant_by_node.get_mut(node_idx as usize).ok_or_else(|| {
+                GraphError::Internal(format!(
+                    "tenant membership references out-of-range node {node_idx}"
+                ))
+            })?;
+            if slot.replace(tenant.as_str()).is_some() {
+                return Err(GraphError::Internal(format!(
+                    "node {node_idx} belongs to multiple tenant memberships"
+                )));
+            }
+        }
+    }
+    for (node_idx, slot) in tenant_by_node.iter_mut().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let node_idx = node_idx as u32;
+        let Some(mapped) = engine.filter_index.mapped_tenant_for_node(node_idx) else {
+            continue;
+        };
+        if !engine
+            .tenant_membership_removals
+            .get(mapped)
+            .is_some_and(|removed| removed.contains(node_idx))
+        {
+            *slot = Some(mapped);
+        }
+    }
+
+    let mut tenants = Vec::new();
+    tenants.try_reserve_exact(node_count).map_err(|error| {
+        GraphError::Internal(format!("tenant dictionary allocation failed: {error}"))
+    })?;
+    tenants.extend(tenant_by_node.iter().flatten().copied());
+    tenants.sort_unstable();
+    tenants.dedup();
+    let tenant_count = u32::try_from(tenants.len())
+        .map_err(|_| GraphError::Internal("tenant dictionary exceeds u32 entries".into()))?;
+
+    let mut tokens = Vec::new();
+    tokens.try_reserve_exact(node_count).map_err(|error| {
+        GraphError::Internal(format!("node tenant token allocation failed: {error}"))
+    })?;
+    tokens.resize(node_count, 0u32);
+    for (node_idx, tenant) in tenant_by_node.into_iter().enumerate() {
+        let Some(tenant) = tenant else {
+            continue;
+        };
+        let table_oid = engine
+            .node_store
+            .table_oid(node_idx as u32)
+            .ok_or_else(|| {
+                GraphError::Internal(format!(
+                    "tenant membership node {node_idx} has no table OID"
+                ))
+            })?;
+        if tenanted_oids.binary_search(&table_oid).is_err() {
+            return Err(GraphError::Internal(format!(
+                "tenant membership node {node_idx} belongs to unregistered table OID {table_oid}"
+            )));
+        }
+        let dictionary_index = tenants
+            .binary_search(&tenant)
+            .map_err(|_| GraphError::Internal("tenant dictionary lost a node assignment".into()))?;
+        tokens[node_idx] = u32::try_from(dictionary_index + 1)
+            .map_err(|_| GraphError::Internal("tenant token exceeds u32".into()))?;
+    }
+
+    writer.begin_section(23)?;
+    writer.write_u32_values(&tenanted_oids)?;
+
+    writer.begin_section(24)?;
+    writer.write_u32_value(tenant_count)?;
+    let mut offset = 0u64;
+    writer.write_u64_value(offset)?;
+    for tenant in &tenants {
+        offset =
+            offset
+                .checked_add(u64::try_from(tenant.len()).map_err(|_| {
+                    GraphError::Internal("tenant dictionary value exceeds u64".into())
+                })?)
+                .ok_or_else(|| GraphError::Internal("tenant dictionary bytes exceed u64".into()))?;
+        writer.write_u64_value(offset)?;
+    }
+    for tenant in tenants {
+        writer.write_body(tenant.as_bytes())?;
+    }
+
+    writer.begin_section(25)?;
+    writer.write_u32_values(&tokens)
 }
 
 fn decode_string_registry(mmap: &[u8], range: (usize, usize)) -> GraphResult<Vec<String>> {
@@ -1188,6 +1832,8 @@ fn validate_relationship_ids(
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn reserve_persistence_workspace(
     workspace: &mut Option<crate::resource::ResourceLease<'_>>,
     bytes: crate::resource::ByteCount,
@@ -1200,12 +1846,16 @@ fn reserve_persistence_workspace(
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn release_persistence_workspace(workspace: &mut Option<crate::resource::ResourceLease<'_>>) {
     if let Some(workspace) = workspace {
         workspace.release_all();
     }
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn packed_active_bytes(node_count: u32) -> GraphResult<crate::resource::ByteCount> {
     let bytes = u64::from(node_count)
         .checked_add(7)
@@ -1214,6 +1864,8 @@ fn packed_active_bytes(node_count: u32) -> GraphResult<crate::resource::ByteCoun
     Ok(crate::resource::ByteCount::from_bytes(bytes))
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn resolution_serialization_bytes(node_count: u32) -> GraphResult<crate::resource::ByteCount> {
     let entry_size = u64::try_from(crate::resolution_index::ENTRY_SIZE)
         .map_err(|_| GraphError::Internal("resolution entry size does not fit u64".to_string()))?;
@@ -1224,6 +1876,8 @@ fn resolution_serialization_bytes(node_count: u32) -> GraphResult<crate::resourc
         .ok_or_else(|| GraphError::Internal("resolution serialization size overflowed".to_string()))
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn resource_error_to_oom(error: crate::resource::ResourceLimitError) -> GraphError {
     GraphError::Oom {
         used_mb: crate::resource::ByteCount::from_bytes(error.used()).ceil_mib(),
@@ -1370,10 +2024,20 @@ fn load_graph_file_internal(
 ) -> GraphResult<Engine> {
     ensure_native_mapped_layout_supported(cfg!(target_endian = "little"))?;
     let manifest_root = projection_manifest_root(path);
+    let manifest_store = ProjectionManifestStore::new(&manifest_root);
     let _generation_reader_lock = projection_candidate
         .is_none()
-        .then(|| ProjectionManifestStore::new(&manifest_root).acquire_reader_lock())
+        .then(|| manifest_store.acquire_reader_lock())
         .transpose()?;
+    let pinned_manifest = match projection_candidate {
+        Some(candidate) => Some(candidate.clone()),
+        None => manifest_store.load_latest_current()?,
+    };
+    let artifact_path = match (projection_candidate, pinned_manifest.as_ref()) {
+        (None, Some(manifest)) => manifest_root.join(&manifest.base_artifact_path),
+        _ => path.to_path_buf(),
+    };
+    let path = artifact_path.as_path();
 
     let mut file = fs::File::open(path)
         .map_err(|e| GraphError::Internal(format!("Cannot open {}: {}", path.display(), e)))?;
@@ -1419,21 +2083,21 @@ fn load_graph_file_internal(
     }
     if file_len < HEADER_SIZE {
         return Err(GraphError::CorruptFile {
-            reason: "file too small for v5 graph artifact header".to_string(),
+            reason: "file too small for v6 graph artifact header".to_string(),
         });
     }
     if read_u32_at(&mmap, 8) as usize != HEADER_SIZE
         || read_u32_at(&mmap, 28) as usize != NUM_SECTIONS
     {
         return Err(GraphError::CorruptFile {
-            reason: "invalid v5 header or section count".into(),
+            reason: "invalid v6 header or section count".into(),
         });
     }
     if mmap[48..64].iter().any(|&byte| byte != 0)
-        || mmap[432..HEADER_SIZE].iter().any(|&byte| byte != 0)
+        || mmap[480..HEADER_SIZE].iter().any(|&byte| byte != 0)
     {
         return Err(GraphError::CorruptFile {
-            reason: "v5 header reserved bytes must be zero".into(),
+            reason: "v6 header reserved bytes must be zero".into(),
         });
     }
     let stored_header_crc = read_u32_at(&mmap, HEADER_CRC_OFFSET);
@@ -1450,12 +2114,12 @@ fn load_graph_file_internal(
     }
     let body_len =
         usize::try_from(read_u64_at(&mmap, 32)).map_err(|_| GraphError::CorruptFile {
-            reason: "v5 body length exceeds usize".into(),
+            reason: "v6 body length exceeds usize".into(),
         })?;
     if body_len != file_len - HEADER_SIZE {
         return Err(GraphError::CorruptFile {
             reason: format!(
-                "v5 body length mismatch: header={body_len}, actual={}",
+                "v6 body length mismatch: header={body_len}, actual={}",
                 file_len - HEADER_SIZE
             ),
         });
@@ -1512,9 +2176,21 @@ fn load_graph_file_internal(
     let identity_validation_bytes = (layout.ranges[21].1 - layout.ranges[21].0)
         .checked_mul(4)
         .ok_or_else(|| GraphError::Internal("identity metadata estimate overflowed".into()))?;
+    let tenant_oid_metadata_bytes = (layout.ranges[23].1 - layout.ranges[23].0)
+        .checked_mul(4)
+        .ok_or_else(|| GraphError::Internal("tenant metadata estimate overflowed".into()))?;
+    let tenant_dictionary_count = read_u32_at(&mmap, layout.ranges[24].0) as usize;
+    let tenant_dictionary_metadata_bytes = tenant_dictionary_count
+        .checked_mul(std::mem::size_of::<std::ops::Range<usize>>())
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| GraphError::Internal("tenant dictionary metadata overflowed".into()))?;
+    let tenant_metadata_bytes = tenant_oid_metadata_bytes
+        .checked_add(tenant_dictionary_metadata_bytes)
+        .ok_or_else(|| GraphError::Internal("tenant metadata estimate overflowed".into()))?;
     let variable_metadata_bytes = filter_metadata_bytes
         .checked_add(registry_metadata_bytes)
         .and_then(|bytes| bytes.checked_add(identity_validation_bytes))
+        .and_then(|bytes| bytes.checked_add(tenant_metadata_bytes))
         .and_then(crate::resource::ByteCount::from_usize)
         .ok_or_else(|| GraphError::Internal("load metadata estimate overflowed".to_string()))?;
     let _variable_metadata = load_governor
@@ -1540,13 +2216,34 @@ fn load_graph_file_internal(
     let ri_end = section_ranges[16].1;
     let ri_len = ri_end - ri_start;
 
-    let filter_index = FilterIndex::from_mapped_sections(
+    let mut filter_index = FilterIndex::from_mapped_sections(
         MappedBytes::from_mmap(Arc::clone(&artifact.mmap)),
         section_ranges[17].0..section_ranges[17].1,
         section_ranges[18].0..section_ranges[18].1,
         section_ranges[19].0..section_ranges[19].1,
         node_count,
     )?;
+    filter_index.install_mapped_tenant_base(MappedTenantIndex::new(
+        MappedTenantIndexParts {
+            bytes: MappedBytes::from_mmap(Arc::clone(&artifact.mmap)),
+            dictionary_range: section_ranges[24].0..section_ranges[24].1,
+            tokens_range: section_ranges[25].0..section_ranges[25].1,
+        },
+        node_count,
+    )?);
+
+    let tenanted_oid_bytes = &artifact.mmap[section_ranges[23].0..section_ranges[23].1];
+    let mut tenanted_table_oids = std::collections::HashSet::new();
+    tenanted_table_oids
+        .try_reserve(tenanted_oid_bytes.len() / 4)
+        .map_err(|error| {
+            GraphError::Internal(format!(
+                "tenanted table metadata allocation failed: {error}"
+            ))
+        })?;
+    for index in 0..tenanted_oid_bytes.len() / 4 {
+        tenanted_table_oids.insert(read_u32_at(tenanted_oid_bytes, index * 4));
+    }
 
     let edge_type_registry = decode_string_registry(&artifact.mmap, section_ranges[20])?;
     if edge_type_registry
@@ -1600,19 +2297,18 @@ fn load_graph_file_internal(
         mmap: artifact.mmap,
         resolution_state: MmapResolutionState::new(ri_start, ri_len),
     })?;
+    engine.tenanted_table_oids = tenanted_table_oids;
+    engine.has_unidirectional_edges = flags & FLAG_HAS_UNIDIRECTIONAL != 0;
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
         engine.record_applied_sync_id(applied_sync_id);
     }
     if let Some(projection_mode) = read_projection_mode(path)? {
         engine.set_projection_mode(projection_mode);
     }
-    let manifest = match projection_candidate {
-        Some(candidate) => {
-            validate_projection_manifest_base(path, computed_crc, candidate)?;
-            Some(candidate.clone())
-        }
-        None => load_projection_manifest(path, computed_crc, &manifest_root)?,
-    };
+    if let Some(manifest) = pinned_manifest.as_ref() {
+        validate_projection_manifest_base(path, computed_crc, manifest)?;
+    }
+    let manifest = pinned_manifest;
     let projection_workspace = manifest
         .as_ref()
         .map(|manifest| projection_workspace_bytes(&manifest_root, manifest))
@@ -1715,19 +2411,6 @@ fn projection_workspace_bytes(
         })
 }
 
-fn load_projection_manifest(
-    path: &Path,
-    artifact_crc: u32,
-    manifest_root: &Path,
-) -> GraphResult<Option<ProjectionManifest>> {
-    let store = ProjectionManifestStore::new(manifest_root);
-    let Some(manifest) = store.load_latest_current()? else {
-        return Ok(None);
-    };
-    validate_projection_manifest_base(path, artifact_crc, &manifest)?;
-    Ok(Some(manifest))
-}
-
 fn validate_projection_manifest_base(
     path: &Path,
     artifact_crc: u32,
@@ -1772,20 +2455,38 @@ pub(crate) fn graph_artifact_version() -> u32 {
 }
 
 pub(crate) fn graph_artifact_checksum_for_path(path: &Path) -> GraphResult<String> {
-    let bytes = fs::read(path)
-        .map_err(|err| GraphError::Internal(format!("read graph artifact checksum: {err}")))?;
-    if bytes.len() < HEADER_SIZE {
+    let mut file = fs::File::open(path)
+        .map_err(|err| GraphError::Internal(format!("open graph artifact checksum: {err}")))?;
+    let file_len = file
+        .metadata()
+        .map_err(|err| GraphError::Internal(format!("stat graph artifact checksum: {err}")))?
+        .len();
+    if file_len < HEADER_SIZE as u64 {
         return Err(GraphError::CorruptFile {
             reason: "file too small for header".to_string(),
         });
     }
-    if &bytes[0..4] != MAGIC {
+    let mut header = [0_u8; HEADER_SIZE];
+    file.read_exact(&mut header)
+        .map_err(|err| GraphError::Internal(format!("read graph artifact header: {err}")))?;
+    if &header[0..4] != MAGIC {
         return Err(GraphError::CorruptFile {
             reason: "invalid magic bytes".to_string(),
         });
     }
-    let stored_crc = read_u32_at(&bytes, BODY_CRC_OFFSET);
-    let computed_crc = crc32fast::hash(&bytes[HEADER_SIZE..]);
+    let stored_crc = read_u32_at(&header, BODY_CRC_OFFSET);
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|err| GraphError::Internal(format!("read graph artifact body: {err}")))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let computed_crc = hasher.finalize();
     if stored_crc != computed_crc {
         return Err(GraphError::CorruptFile {
             reason: format!(
@@ -1908,6 +2609,23 @@ pub fn projection_manifest_root(path: &Path) -> PathBuf {
     path.parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Resolve the immutable base artifact currently serving a logical graph path.
+///
+/// A generation manifest takes precedence over the compatibility base path.
+/// The returned path is not opened or validated by this helper.
+pub(crate) fn current_base_artifact_path(path: &Path) -> GraphResult<Option<PathBuf>> {
+    let root = projection_manifest_root(path);
+    if let Some(manifest) = ProjectionManifestStore::new(&root).load_latest_current()? {
+        return Ok(Some(root.join(manifest.base_artifact_path)));
+    }
+    Ok(path.is_file().then(|| path.to_path_buf()))
+}
+
+/// Return whether a complete persisted base is available for loading.
+pub(crate) fn persisted_graph_exists(path: &Path) -> GraphResult<bool> {
+    Ok(current_base_artifact_path(path)?.is_some_and(|base| base.is_file()))
 }
 
 #[cfg(any(not(test), feature = "pg_test"))]
@@ -2195,6 +2913,143 @@ mod tests {
         assert_eq!(reloaded.node_store.primary_key(b), Some("B-2"));
         assert_eq!(reloaded.edge_type_registry, vec!["", "officer_of"]);
         assert_eq!(reloaded.edge_store.neighbors_weighted(a).2, &[7]);
+    }
+
+    #[test]
+    fn persisted_mmap_load_preserves_tenant_tokens_and_direction_flag() {
+        let mut engine = tenant_fixture();
+        engine.mark_has_unidirectional_edges();
+        let path = temp_graph_path("tenant-roundtrip");
+
+        write_graph_file(&engine, &path).expect("tenant fixture writes");
+        let mut loaded = load_graph_file(&path).expect("tenant fixture reloads");
+
+        assert!(loaded.has_unidirectional_edges);
+        assert_eq!(loaded.tenanted_table_oids.len(), 2);
+        assert!(loaded.tenanted_table_oids.contains(&10));
+        assert!(loaded.tenanted_table_oids.contains(&20));
+        assert!(loaded.filter_index.mapped_tenant_contains("alpha", 1));
+        assert!(loaded.filter_index.mapped_tenant_contains("tenant-ζ", 0));
+        assert!(!loaded.filter_index.mapped_tenant_contains("alpha", 0));
+        assert_eq!(loaded.filter_index.mapped_tenant_for_node(2), None);
+        loaded.remove_tenant_membership("alpha", 1);
+        assert!(!loaded.tenant_contains("alpha", 1));
+        loaded.insert_tenant_membership("alpha", 1);
+        assert!(loaded.tenant_contains("alpha", 1));
+        loaded.remove_all_tenant_memberships(0);
+        assert!(!loaded.tenant_contains("tenant-ζ", 0));
+        loaded.insert_tenant_membership("tenant-ζ", 0);
+
+        write_graph_file(&loaded, &path).expect("mapped tenant fixture rewrites");
+        let reloaded = load_graph_file(&path).expect("rewritten tenant fixture reloads");
+        assert!(reloaded.filter_index.mapped_tenant_contains("alpha", 1));
+        assert!(reloaded.filter_index.mapped_tenant_contains("tenant-ζ", 0));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_graph_file_rejects_nonlexical_tenant_dictionary() {
+        let engine = tenant_fixture();
+        let path = temp_graph_path("tenant-dictionary-order");
+        write_graph_file(&engine, &path).expect("tenant fixture writes");
+        let dictionary = read_section_offset(&path, 24);
+        let count = read_u32_from_file(&path, dictionary);
+        let payload = dictionary + 4 + u64::from(count + 1) * 8;
+        write_u8_at(&path, payload, b'z');
+        rewrite_crc(&path);
+
+        let error = match load_graph_file(&path) {
+            Ok(_) => panic!("nonlexical tenant dictionary was accepted"),
+            Err(error) => error,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert!(matches!(
+            error,
+            GraphError::CorruptFile { reason } if reason.contains("strictly lexical")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_unsorted_tenanted_table_oids() {
+        let engine = tenant_fixture();
+        let path = temp_graph_path("tenant-oid-order");
+        write_graph_file(&engine, &path).expect("tenant fixture writes");
+        let oids = read_section_offset(&path, 23);
+        write_u32_at(&path, oids, 20);
+        write_u32_at(&path, oids + 4, 10);
+        rewrite_crc(&path);
+
+        let error = match load_graph_file(&path) {
+            Ok(_) => panic!("unsorted tenanted table OIDs were accepted"),
+            Err(error) => error,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert!(matches!(
+            error,
+            GraphError::CorruptFile { reason } if reason.contains("strictly sorted")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_out_of_range_tenant_token() {
+        let engine = tenant_fixture();
+        let path = temp_graph_path("tenant-token-range");
+        write_graph_file(&engine, &path).expect("tenant fixture writes");
+        let dictionary = read_section_offset(&path, 24);
+        let tenant_count = read_u32_from_file(&path, dictionary);
+        let tokens = read_section_offset(&path, 25);
+        write_u32_at(&path, tokens, tenant_count + 1);
+        rewrite_crc(&path);
+
+        let error = match load_graph_file(&path) {
+            Ok(_) => panic!("out-of-range tenant token was accepted"),
+            Err(error) => error,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert!(matches!(
+            error,
+            GraphError::CorruptFile { reason } if reason.contains("exceeds dictionary count")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_unknown_v6_flag() {
+        let engine = tenant_fixture();
+        let path = temp_graph_path("unknown-v6-flag");
+        write_graph_file(&engine, &path).expect("tenant fixture writes");
+        write_u32_at(&path, 12, 1 << 31);
+        rewrite_crc(&path);
+
+        let error = match load_graph_file(&path) {
+            Ok(_) => panic!("unknown v6 flag was accepted"),
+            Err(error) => error,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert!(matches!(
+            error,
+            GraphError::CorruptFile { reason } if reason.contains("unsupported graph artifact flags")
+        ));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_tenant_token_for_unregistered_table() {
+        let mut engine = tenant_fixture();
+        engine.tenanted_table_oids.remove(&20);
+        let path = temp_graph_path("tenant-token-table");
+        write_graph_file(&engine, &path).expect("tenant fixture writes");
+        let tokens = read_section_offset(&path, 25);
+        write_u32_at(&path, tokens + 2 * 4, 1);
+        rewrite_crc(&path);
+
+        let error = match load_graph_file(&path) {
+            Ok(_) => panic!("tenant token for an unregistered table was accepted"),
+            Err(error) => error,
+        };
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert!(matches!(
+            error,
+            GraphError::CorruptFile { reason } if reason.contains("unregistered table OID")
+        ));
     }
 
     #[test]
@@ -2653,23 +3508,25 @@ mod tests {
     }
 
     #[test]
-    fn engine_rejects_base_manifest_for_different_graph_artifact() {
+    fn engine_resolves_current_generation_base_artifact() {
         let engine = graph_with_relationship();
         let path = temp_graph_path("base-manifest-wrong-base");
         write_graph_file(&engine, &path).unwrap();
         let other_path = path.with_file_name("other.pggraph");
-        write_graph_file(&engine, &other_path).unwrap();
+        let mut generation = Engine::new();
+        let node = generation.node_store.add_node(20, "generation".to_string());
+        generation.resolution_insert(20, "generation", node);
+        generation.edge_store = EdgeStore::from_edges(1, vec![], false);
+        generation.reverse_edge_store = generation.edge_store.reversed();
+        generation.built = true;
+        write_graph_file(&generation, &other_path).unwrap();
         publish_base_manifest(&other_path, 9, 0);
 
-        let err = match load_graph_file(&path) {
-            Ok(_) => panic!("wrong base manifest was accepted"),
-            Err(err) => err,
-        };
+        let loaded = load_graph_file(&path).expect("current generation base loads");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
-        assert!(
-            matches!(err, GraphError::CorruptFile { reason } if reason.contains("does not match loaded artifact"))
-        );
+        assert_eq!(loaded.node_store.node_count(), 1);
+        assert_eq!(loaded.node_store.primary_key(0), Some("generation"));
     }
 
     #[test]
@@ -2797,7 +3654,7 @@ mod tests {
         let file_len = std::fs::metadata(&path).unwrap().len();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
-        assert_eq!(NUM_SECTIONS, 23);
+        assert_eq!(NUM_SECTIONS, 26);
         assert_eq!(active_offset, HEADER_SIZE as u64);
         assert_eq!(table_oids_offset, HEADER_SIZE as u64);
         assert!(filter_offset >= HEADER_SIZE as u64);
@@ -2843,7 +3700,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
         assert_eq!(header_version, VERSION);
-        assert_eq!(NUM_SECTIONS, 23);
+        assert_eq!(NUM_SECTIONS, 26);
         assert!(filter_offset >= HEADER_SIZE as u64);
         assert!(registry_offset > filter_offset);
         assert_eq!(filter_len, 16 + 64 + "status".len() as u64);
@@ -2882,7 +3739,7 @@ mod tests {
     fn truncated_file_returns_error() {
         let path =
             std::env::temp_dir().join(format!("graph-truncated-{}.pggraph", std::process::id()));
-        // Write a v5 preamble smaller than the 448-byte header.
+        // Write a v6 preamble smaller than the 512-byte header.
         let mut preamble = Vec::from(*MAGIC);
         preamble.extend_from_slice(&VERSION.to_le_bytes());
         std::fs::write(&path, preamble).unwrap();
@@ -3119,6 +3976,23 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn tenant_fixture() -> Engine {
+        let mut engine = Engine::new();
+        let first = engine.node_store.add_node(10, "A-1".to_string());
+        let second = engine.node_store.add_node(10, "A-2".to_string());
+        let unscoped = engine.node_store.add_node(20, "B-1".to_string());
+        engine.resolution_insert(10, "A-1", first);
+        engine.resolution_insert(10, "A-2", second);
+        engine.resolution_insert(20, "B-1", unscoped);
+        engine.tenanted_table_oids.insert(20);
+        engine.tenanted_table_oids.insert(10);
+        engine.insert_tenant_membership("tenant-ζ", first);
+        engine.insert_tenant_membership("alpha", second);
+        engine.edge_store = EdgeStore::from_edges(3, Vec::new(), false);
+        engine.built = true;
+        engine
     }
 
     fn read_section_offset(path: &Path, section: usize) -> u64 {
@@ -3703,5 +4577,83 @@ mod tests {
             result,
             Err(GraphError::CorruptFile { reason }) if reason.contains("valid UTF-8")
         ));
+    }
+
+    fn direct_test_metadata() -> DirectArtifactMetadata {
+        DirectArtifactMetadata {
+            node_count: 0,
+            forward_edge_count: 0,
+            inbound_edge_count: 0,
+            has_forward_weights: false,
+            has_inbound_weights: false,
+            has_unidirectional_edges: false,
+            applied_sync_id: 0,
+            projection_mode: config::ProjectionMode::CsrReadonly,
+        }
+    }
+
+    fn direct_test_governor(disk_bytes: u64) -> crate::resource::ResourceGovernor {
+        crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::bounded(
+            crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(4096)),
+            crate::resource::DiskBudget::new(crate::resource::ByteCount::from_bytes(disk_bytes)),
+            crate::resource::RowCount::UNLIMITED,
+            crate::resource::WorkUnits::UNLIMITED,
+            crate::resource::ElapsedBudget::new(std::time::Duration::MAX),
+        ))
+    }
+
+    #[test]
+    fn direct_candidate_failure_removes_only_owned_staging_files() {
+        let path = temp_graph_path("direct-candidate-cleanup");
+        let governor = direct_test_governor(4096);
+        let error = write_direct_graph_file(
+            &path,
+            &direct_test_metadata(),
+            [0; NUM_SECTIONS],
+            &governor,
+            |_writer| Err(GraphError::Internal("injected direct write failure".into())),
+        )
+        .expect_err("injected failure must escape");
+        assert!(error.to_string().contains("injected direct write failure"));
+        assert!(!path.exists());
+        assert!(!sync_checkpoint_path(&path).exists());
+        assert!(!projection_mode_path(&path).exists());
+        let _ = std::fs::remove_dir_all(path.parent().expect("candidate parent"));
+    }
+
+    #[test]
+    fn direct_candidate_disk_limit_fails_before_file_creation() {
+        let path = temp_graph_path("direct-candidate-disk-limit");
+        let governor = direct_test_governor(100);
+        assert!(write_direct_graph_file(
+            &path,
+            &direct_test_metadata(),
+            [0; NUM_SECTIONS],
+            &governor,
+            |_writer| Ok(()),
+        )
+        .is_err());
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(path.parent().expect("candidate parent"));
+    }
+
+    #[test]
+    fn direct_candidate_never_overwrites_an_existing_path() {
+        let path = temp_graph_path("direct-candidate-create-new");
+        std::fs::write(&path, b"previous-generation").expect("write sentinel candidate");
+        let governor = direct_test_governor(4096);
+        assert!(write_direct_graph_file(
+            &path,
+            &direct_test_metadata(),
+            [0; NUM_SECTIONS],
+            &governor,
+            |_writer| Ok(()),
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("read sentinel candidate"),
+            b"previous-generation"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().expect("candidate parent"));
     }
 }

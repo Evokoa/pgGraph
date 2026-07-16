@@ -25,6 +25,7 @@ mod bfs;
 )]
 mod build_runs;
 mod build_snapshot;
+mod build_spool;
 mod builder;
 mod catalog;
 mod config;
@@ -39,6 +40,10 @@ mod graph_policy;
 mod mapped_bytes;
 mod node_store;
 mod path_finder;
+mod persisted_build;
+mod persisted_build_pipeline;
+mod persisted_build_scanner;
+mod persisted_edge_scanner;
 mod persistence;
 mod projection;
 mod query;
@@ -62,6 +67,7 @@ mod sql_search;
 mod sql_sync;
 mod sql_traversal;
 mod sync;
+mod tenant_store;
 mod types;
 
 use engine::Engine;
@@ -505,6 +511,7 @@ pub mod bench_support {
                 tenant: None,
                 tenanted_table_oids: HashSet::new(),
                 tenant_membership: HashMap::new(),
+                tenant_membership_removals: HashMap::new(),
                 overlay_insert_edges: HashMap::new(),
                 overlay_deleted_edges: HashMap::new(),
             }
@@ -793,8 +800,8 @@ pub extern "C-unwind" fn _PG_init() {
     let Ok(path) = persistence::graph_file_path_for(graph_policy::DEFAULT_GRAPH_ID_TEXT) else {
         return;
     };
-    if path.exists() {
-        match std::fs::File::open(&path) {
+    if let Ok(Some(base_path)) = persistence::current_base_artifact_path(&path) {
+        match std::fs::File::open(&base_path) {
             Ok(file) => {
                 // SAFETY: The file descriptor stays alive for the duration of
                 // this temporary mapping, and the mapping is only used for
@@ -809,7 +816,7 @@ pub extern "C-unwind" fn _PG_init() {
                     }
                     pgrx::log!(
                         "graph: pre-warmed page cache for {} ({:.1} MB)",
-                        path.display(),
+                        base_path.display(),
                         mmap.len() as f64 / 1_048_576.0
                     );
                     // mmap is dropped here — that's fine. The kernel keeps the

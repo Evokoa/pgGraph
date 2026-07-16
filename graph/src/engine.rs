@@ -153,6 +153,8 @@ pub struct Engine {
     pub(crate) table_membership: HashMap<u32, RoaringBitmap>,
     /// Tenant membership by tenant value for tenanted table rows.
     pub(crate) tenant_membership: HashMap<String, RoaringBitmap>,
+    /// Nodes removed from immutable mapped tenant membership by later deltas.
+    pub(crate) tenant_membership_removals: HashMap<String, RoaringBitmap>,
     /// Table OIDs that require tenant scoping.
     pub(crate) tenanted_table_oids: HashSet<u32>,
 }
@@ -283,6 +285,7 @@ impl Engine {
             pending_sync_rows: 0,
             table_membership: HashMap::new(),
             tenant_membership: HashMap::new(),
+            tenant_membership_removals: HashMap::new(),
             tenanted_table_oids: HashSet::new(),
         }
     }
@@ -395,11 +398,26 @@ impl Engine {
         let provider = ManifestSegmentProvider::new(&root, manifest);
         let segments = provider.load_segments()?;
         let base_chunks = provider.load_base_chunks()?;
+        if segments.is_empty() && base_chunks.is_empty() {
+            if record_heartbeat {
+                crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;
+            }
+            self.projection_manifest = Some(ProjectionManifestSnapshot::from(manifest));
+            self.projection_manifest_full = Some(manifest.clone());
+            self.projection_manifest_root = Some(root);
+            self.projection_snapshot = Some(LayeredSnapshot::build(
+                &self.edge_store,
+                &base_chunks,
+                &segments,
+            ));
+            return Ok(());
+        }
         let mut node_store = self.node_store.to_owned_store();
         let mut resolution_delta = ResolutionDeltaIndex::new();
         let mut filter_index = self.filter_index.clone();
         let mut table_membership = self.table_membership.clone();
         let mut tenant_membership = self.tenant_membership.clone();
+        let mut tenant_membership_removals = self.tenant_membership_removals.clone();
         let mut tenanted_table_oids = self.tenanted_table_oids.clone();
 
         for segment in &segments {
@@ -544,8 +562,15 @@ impl Engine {
                     .or_default();
                 if tenant.tombstone {
                     membership.remove(tenant.node_idx);
+                    tenant_membership_removals
+                        .entry(exact_tenant.to_string())
+                        .or_default()
+                        .insert(tenant.node_idx);
                 } else {
                     membership.insert(tenant.node_idx);
+                    if let Some(removals) = tenant_membership_removals.get_mut(exact_tenant) {
+                        removals.remove(tenant.node_idx);
+                    }
                 }
             }
             for filter in &segment.filters {
@@ -571,6 +596,7 @@ impl Engine {
         self.filter_index = filter_index;
         self.table_membership = table_membership;
         self.tenant_membership = tenant_membership;
+        self.tenant_membership_removals = tenant_membership_removals;
         self.tenanted_table_oids = tenanted_table_oids;
         self.projection_manifest = Some(ProjectionManifestSnapshot::from(manifest));
         self.projection_manifest_full = Some(manifest.clone());
@@ -780,6 +806,9 @@ impl Engine {
     }
 
     pub fn insert_tenant_membership(&mut self, tenant: &str, node_idx: u32) {
+        if let Some(removals) = self.tenant_membership_removals.get_mut(tenant) {
+            removals.remove(node_idx);
+        }
         self.tenant_membership
             .entry(tenant.to_string())
             .or_default()
@@ -842,15 +871,41 @@ impl Engine {
         }
     }
 
-    #[cfg(feature = "development")]
-    #[allow(
-        dead_code,
-        reason = "development SQL helpers keep tenant-removal behavior available for targeted replay checks"
-    )]
-    pub fn remove_tenant_membership(&mut self, tenant: &str, node_idx: u32) {
+    pub(crate) fn remove_tenant_membership(&mut self, tenant: &str, node_idx: u32) {
         if let Some(bitmap) = self.tenant_membership.get_mut(tenant) {
             bitmap.remove(node_idx);
         }
+        if self.filter_index.mapped_tenant_contains(tenant, node_idx) {
+            self.tenant_membership_removals
+                .entry(tenant.to_string())
+                .or_default()
+                .insert(node_idx);
+        }
+    }
+
+    pub(crate) fn remove_all_tenant_memberships(&mut self, node_idx: u32) {
+        let mapped_tenant = self
+            .filter_index
+            .mapped_tenant_for_node(node_idx)
+            .map(str::to_owned);
+        if let Some(tenant) = mapped_tenant.as_deref() {
+            self.remove_tenant_membership(tenant, node_idx);
+        }
+        for bitmap in self.tenant_membership.values_mut() {
+            bitmap.remove(node_idx);
+        }
+    }
+
+    /// Return whether one tenant can see a base or delta node membership.
+    pub(crate) fn tenant_contains(&self, tenant: &str, node_idx: u32) -> bool {
+        self.tenant_membership
+            .get(tenant)
+            .is_some_and(|nodes| nodes.contains(node_idx))
+            || (self.filter_index.mapped_tenant_contains(tenant, node_idx)
+                && !self
+                    .tenant_membership_removals
+                    .get(tenant)
+                    .is_some_and(|nodes| nodes.contains(node_idx)))
     }
 
     pub fn materialize_mmap_node_store_for_sync(&mut self) {
@@ -904,6 +959,8 @@ impl Engine {
     }
 
     /// Serialize resolution index to bytes (for persistence).
+    #[cfg(test)]
+    #[cfg(test)]
     pub fn resolution_to_bytes(&self) -> Vec<u8> {
         match &self.resolution_store {
             ResolutionStore::Builder(builder) => builder.to_bytes(),
@@ -1069,6 +1126,7 @@ impl Engine {
             tenant: tenant.map(ToString::to_string),
             tenanted_table_oids: self.tenanted_table_oids.clone(),
             tenant_membership: self.tenant_membership.clone(),
+            tenant_membership_removals: self.tenant_membership_removals.clone(),
             overlay_insert_edges,
             overlay_deleted_edges,
         };
@@ -1721,6 +1779,13 @@ impl Engine {
                 .keys()
                 .map(String::capacity)
                 .sum::<usize>();
+        let tenant_removal_bytes = self.tenant_membership_removals.capacity()
+            * (std::mem::size_of::<String>() + std::mem::size_of::<RoaringBitmap>())
+            + self
+                .tenant_membership_removals
+                .keys()
+                .map(String::capacity)
+                .sum::<usize>();
         let tenanted_oid_bytes = self.tenanted_table_oids.capacity() * std::mem::size_of::<u32>();
         let projection_snapshot_bytes = self
             .projection_snapshot
@@ -1737,6 +1802,7 @@ impl Engine {
             + edge_buffer_bytes
             + table_membership_bytes
             + tenant_bytes
+            + tenant_removal_bytes
             + tenanted_oid_bytes
             + projection_snapshot_bytes
     }

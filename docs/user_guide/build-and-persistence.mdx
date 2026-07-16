@@ -5,12 +5,12 @@ edges, and filter columns. When `graph.persist_on_build = true`, the base graph
 is written atomically under the selected graph's UUID directory and later
 backends can load it through read-only mmap.
 
-The current artifact format is v5. Its 448-byte header describes 23 aligned
+The current artifact format is v6. Its 512-byte header describes 26 aligned
 sections explicitly. Loaded node arrays, forward and inbound CSR arrays,
 relationship-ID sidecars, resolution data, filter values and text dictionaries,
-and relationship identities remain in the immutable snapshot. Post-load filter
-changes use sparse deltas, and newly observed relationship identities use an
-owned suffix overlay.
+relationship identities, tenant metadata, and per-node tenant tokens remain in
+the immutable snapshot. Post-load filter changes use sparse deltas, and newly
+observed relationship identities use an owned suffix overlay.
 
 Persisted fixed-width arrays use little-endian encoding. Zero-copy mmap loading
 is supported on little-endian targets; an unsupported big-endian target fails
@@ -134,12 +134,12 @@ joining internal catalog tables.
       description: "Read edge source rows, resolve endpoints through the temp lookup spool, and batch unresolved edges into a temp edge spool."
     },
     {
-      title: "Build CSR stores",
-      description: "Stream sorted temp edges and schema-direction flags into forward and inbound CSR stores."
+      title: "Merge bounded runs",
+      description: "When persistence is enabled, merge checksummed node, edge, filter, dictionary, tenant, identity, and resolution runs with a fixed fanout."
     },
     {
       title: "Persist when enabled",
-      description: "Write main.pggraph.tmp, fsync, atomic rename, and write main.pggraph.sync.",
+      description: "Stream a generation-specific v6 candidate, fsync it, validate it through the production loader, and switch the current generation with compare-and-swap.",
       isResult: true
     }
   ]}
@@ -196,10 +196,10 @@ SELECT * FROM graph.estimate();
 to see estimated nodes, edges, memory, configured limit, and whether the graph
 fits the current limit.
 
-When persistence is enabled, pgGraph writes the owned build result, drops that
-owned graph, and then reloads the persisted artifact through mmap validation.
-This avoids holding both the owned replacement and the loaded mmap projection
-at the same time.
+When persistence is enabled, pgGraph scans directly into bounded external-sort
+runs and streams the mmap-ready artifact without constructing a complete owned
+replacement. It drops run and scanner workspace before loading the validated
+snapshot. Nonpersisted builds continue to use the backend-local owned builder.
 
 ## Build Locking
 
@@ -214,15 +214,21 @@ session C: graph.vacuum() -> 55P03 / PG006
 
 ## Persistence Files
 
-Default paths:
+Default artifact-root layout:
 
 ```text
 $PGDATA/graph/<graph_id>/main.pggraph
 $PGDATA/graph/<graph_id>/main.pggraph.sync
+$PGDATA/graph/<graph_id>/projection-generation-<generation>-base.pggraph
+$PGDATA/graph/<graph_id>/projection-generation-<generation>.json
+$PGDATA/graph/<graph_id>/projection-current.json
 ```
 
 `graph.data_dir` changes the top-level subdirectory under `$PGDATA`. The graph
 directory name is always the catalog `graph_id`, not `graph_name`.
+`main.pggraph` is the logical compatibility path and the fallback when no
+projection manifest exists. A current manifest takes precedence and selects
+the immutable generation-specific base used for serving.
 
 ```sql
 ALTER SYSTEM SET graph.data_dir = 'graph';
@@ -233,22 +239,24 @@ SELECT pg_reload_conf();
 
 ## Atomic Write Contract
 
-The current code writes the artifact as:
+Persisted build and vacuum publish a generation as:
 
 ```text
-main.pggraph.tmp
-  stream graph sections
-  backpatch header and CRC
-  fsync file
-  rename to main.pggraph
-main.pggraph.sync.tmp
-  write applied_sync_id
-  fsync file
-  rename to main.pggraph.sync
+projection-generation-<generation>-base.pggraph
+  create exclusively
+  reserve and zero-fill exact length
+  stream graph sections at checked offsets
+  recompute and backpatch CRC/header
+  fsync artifact and sidecars
+projection-generation-<generation>.json
+  record candidate checksum, source watermark, and predecessor
+projection-current.json
+  switch only if the previously observed generation is still current
 ```
 
-This means a backend should either see the old complete graph file or the new
-complete graph file, not a partial file under the final name.
+Readers pin and resolve one immutable current manifest. They therefore see the
+old complete generation or the validated new generation, never a partial
+candidate. Failed publication preserves the old pointer and previous artifact.
 
 Background build and maintenance jobs expose persistence phases through
 `progress_phase` and `progress_message`: `persisting` covers artifact write and
@@ -262,8 +270,8 @@ When a query needs the selected graph and the backend-local engine is empty:
 2. If `graph.auto_load = false`, it does nothing.
 3. If the selected graph has `cold` residency, it does nothing.
 4. If the artifact does not exist, it does nothing.
-5. If the artifact exists, `load_graph_file()` validates the v5 header, both
-   CRCs, all 23 descriptors, and section contents before exposing immutable
+5. If the artifact exists, `load_graph_file()` pins the current generation and
+   validates the v6 header, both CRCs, all 26 descriptors, and section contents before exposing immutable
    sections read-only.
 6. The engine is marked built and can answer queries.
 
@@ -321,7 +329,7 @@ Rebuild with `graph.build()` when:
 | Registered tables or edges changed | Catalog fingerprint no longer matches the built base graph |
 | Source topology changed without sync maintenance | CSR edges are immutable in the base graph |
 | Table schema changed | Validation may mark schema state invalid |
-| `.pggraph` format version changed | Version 4, earlier, and future artifacts fail closed and must be rebuilt |
+| `.pggraph` format version changed | Version 5, earlier, and future artifacts fail closed and must be rebuilt |
 | Corruption is detected | Loader rejects bad magic, CRC, offset, bounds, or section content |
 
 ## Reset

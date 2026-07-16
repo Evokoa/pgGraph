@@ -242,9 +242,10 @@ The admin-only `graph.ingest_projection(max_rows bigint DEFAULT NULL,
 max_bytes bigint DEFAULT NULL)` entrypoint reads committed `graph._sync_log`
 rows after the current projection manifest watermark, converts rows through the
 same registered table, edge, filter, and tenant catalog semantics as
-`graph.apply_sync()`, and publishes the resulting L0 generation beside the
-persisted `main.pggraph` artifact. The base graph must be persisted, such as by
-building with `graph.persist_on_build = on`; scheduled maintenance treats a
+`graph.apply_sync()`, and publishes the resulting L0 generation in the selected
+graph's artifact root. The base graph must be persisted, such as by building
+with `graph.persist_on_build = on`; its current manifest identifies the exact
+immutable base used by the new generation. Scheduled maintenance treats a
 missing persisted artifact as a no-op so existing in-memory sync maintenance
 keeps its behavior.
 
@@ -301,12 +302,14 @@ segments. The admin-facing `graph.projection_compact()` function runs one
 bounded compaction pass. Budget failures abort before manifest publication,
 leaving the previous generation current and readable.
 
-When a `.pggraph` artifact is loaded, the loader scans the artifact directory
-for the latest `projection-generation-*.json` manifest. In the base-only phase,
-the engine installs only manifests that reference the loaded `.pggraph` file,
-match the current artifact format version and CRC32 checksum, and have no
-segment or chunk references. The active read path remains CSR for those
-manifests unless the persisted build-mode sidecar says the graph was built as
+When a logical `.pggraph` path is loaded, the loader takes the generation reader
+lock and follows the checksummed `projection-current.json` pointer to one
+immutable manifest. That manifest selects the exact generation-specific base;
+the logical path is used only as a compatibility fallback when projection
+metadata is absent. The engine installs only a manifest whose referenced base
+matches the current artifact format version and CRC32 checksum. The active read
+path remains CSR for base-only manifests unless the persisted build-mode
+sidecar says the graph was built as
 `mutable_overlay`. Segment-backed manifests are installed with mutable-overlay
 read mode so public read APIs consume durable L0/L1/L2 segment deltas after
 reload. Segment format v3 stores registered filter deltas as tagged,

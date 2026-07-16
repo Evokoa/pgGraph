@@ -57,7 +57,7 @@ EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "Officer Context Packet": [{"hash": "2100c2398f60d2229220c5e8e8030b3f", "row_count": 1}],
     "Search Entity Then Expand": [{"hash": "95023cdc9a5d98a05c658ea9b2da522b", "row_count": 450}],
     "Relationship Filtered Walk": [{"hash": "827a2f4de38d4427a04f64b7a6f3dee3", "row_count": 31}],
-    "Capped 3-Hop Investigation": [{"hash": "a53658db45f2de5d78a0f88cd5682f49", "row_count": 300}],
+    "Capped 3-Hop Investigation": [{"hash": "f10295f757fde99ccc95052fbd2ca05c", "row_count": 300}],
     "Build Graph": [{"row_count": 1}],
     "Build Graph Concurrently": [{"row_count": 1}],
     "Build Status": [{"row_count": 1}],

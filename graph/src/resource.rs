@@ -117,6 +117,29 @@ pub(crate) fn analytics_governor(resident: ByteCount) -> ResourceGovernor {
     )
 }
 
+/// Resolve a build governor with the planned memory ceiling and configured
+/// spill-disk and elapsed-time limits.
+pub(crate) fn build_governor(memory: MemoryBudget) -> ResourceGovernor {
+    let disk = ByteCount::from_mib(configured_spill_disk_limit_mb().max(1) as u64)
+        .unwrap_or(ByteCount::ZERO);
+    let timeout_ms = configured_operation_timeout_ms();
+    let elapsed = if timeout_ms == 0 {
+        Duration::MAX
+    } else {
+        Duration::from_millis(timeout_ms)
+    };
+    ResourceGovernor::new_named(
+        "build",
+        ResourceLimits::bounded(
+            memory,
+            DiskBudget::new(disk),
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
+            ElapsedBudget::new(elapsed),
+        ),
+    )
+}
+
 fn operation_governor(
     operation: &'static str,
     resident: ByteCount,
@@ -974,6 +997,28 @@ mod tests {
             ByteCount::from_bytes(u64::MAX).ceil_mib(),
             17_592_186_044_416
         );
+    }
+
+    #[test]
+    fn build_governor_enforces_memory_and_spill_disk_limits() {
+        let governor = build_governor(MemoryBudget::new(ByteCount::from_bytes(100)));
+        let memory_error = governor
+            .reserve_memory(ResourcePhase::Replacement, ByteCount::from_bytes(101))
+            .err()
+            .expect("build memory ceiling must be active");
+        assert_eq!(memory_error.kind, ResourceKind::Memory);
+
+        let configured_disk = ByteCount::from_mib(4_096).expect("test disk limit fits");
+        let disk_error = governor
+            .reserve_disk(
+                ResourcePhase::BuildRunWrite,
+                configured_disk
+                    .checked_add(ByteCount::from_bytes(1))
+                    .expect("disk request fits"),
+            )
+            .err()
+            .expect("configured build spill ceiling must be active");
+        assert_eq!(disk_error.kind, ResourceKind::Disk);
     }
 
     #[test]

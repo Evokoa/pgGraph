@@ -358,6 +358,12 @@ fn insert_manifest_references(
         root,
         &manifest.base_artifact_path,
     )?);
+    for sidecar in [".sync", ".projection_mode"] {
+        protected.insert(resolve_manifest_reference(
+            root,
+            &format!("{}{sidecar}", manifest.base_artifact_path),
+        )?);
+    }
     if let Some(identities) = &manifest.relationship_identities {
         protected.insert(resolve_manifest_reference(root, &identities.path)?);
     }

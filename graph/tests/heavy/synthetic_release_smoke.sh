@@ -22,6 +22,8 @@ HUB_FANOUT="${HUB_FANOUT:-1000}"
 MAX_BUILD_MS="${MAX_BUILD_MS:-60000}"
 MAX_QUERY_MS="${MAX_QUERY_MS:-1000}"
 CREATE_DB="${CREATE_DB:-1}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSPECTOR="$SCRIPT_DIR/../../../scripts/inspect_pggraph_artifact.py"
 
 for value_name in NODE_COUNT HUB_FANOUT MAX_BUILD_MS MAX_QUERY_MS; do
   value="${!value_name}"
@@ -95,8 +97,7 @@ FROM generate_series(1, $((NODE_COUNT - 10))) AS i;
 
 INSERT INTO public.graph_synth_edges (from_id, to_id, weight)
 SELECT '1', i::text, 3
-FROM generate_series(100, $HUB_FANOUT) AS i
-WHERE i <= $NODE_COUNT;
+FROM generate_series(100, LEAST($NODE_COUNT, 99 + $HUB_FANOUT)) AS i;
 
 SELECT graph.add_table(
     'public.graph_synth_nodes'::regclass,
@@ -146,19 +147,15 @@ if (( build_ms > MAX_BUILD_MS )); then
   exit 1
 fi
 
-artifact_path="$(
-  psql -X -q -v ON_ERROR_STOP=1 -tA "$DBNAME" \
-    -c "SELECT current_setting('data_directory') || '/' || COALESCE(NULLIF(current_setting('graph.data_dir', true), ''), 'graph') || '/main.pggraph'"
-)"
-
-if [[ ! -f "$artifact_path" && -f "/tmp/graph/main.pggraph" ]]; then
-  artifact_path="/tmp/graph/main.pggraph"
+data_directory="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT current_setting('data_directory')")"
+graph_data_dir="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT COALESCE(NULLIF(current_setting('graph.data_dir', true), ''), 'graph')")"
+graph_id="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT graph_id FROM graph.current_graph()")"
+if [[ "$graph_data_dir" = /* ]]; then
+  graph_logical_path="$graph_data_dir/$graph_id/main.pggraph"
+else
+  graph_logical_path="$data_directory/$graph_data_dir/$graph_id/main.pggraph"
 fi
-
-if [[ ! -f "$artifact_path" ]]; then
-  echo "Expected persisted artifact at $artifact_path"
-  exit 1
-fi
+artifact_path="$(python3 "$INSPECTOR" --resolve-only "$graph_logical_path")"
 
 target_id="$(( NODE_COUNT < 250 ? NODE_COUNT : 250 ))"
 

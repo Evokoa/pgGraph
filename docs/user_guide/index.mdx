@@ -110,12 +110,18 @@ backend-local Engine
       |
       | graph.persist_on_build = true
       v
-$PGDATA/<graph.data_dir>/main.pggraph
+$PGDATA/<graph.data_dir>/<graph_id>/
       |
       | graph.auto_load = true
       v
 mmap-backed base graph in later backends
 ```
+
+Within that graph-specific artifact root, `main.pggraph` is the logical
+compatibility path. Current persisted builds publish immutable generation base
+files and select one through `projection-current.json` plus its checksummed
+manifest. Loaders follow that selected generation, while stores without
+projection metadata can still use the compatibility path.
 
 For day-to-day SQL use, that is the whole model: source tables, graph catalog,
 active engine, SQL results.

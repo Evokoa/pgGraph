@@ -33,7 +33,7 @@
       backends, auto-load, and compaction.
 - [x] Replace process-local publication protection with graph-scoped
       cross-backend locking and generation compare-and-swap.
-- [ ] Stage, fsync, validate, catch up, and atomically switch generations while
+- [x] Stage, fsync, validate, catch up, and atomically switch generations while
       retaining the previous serving generation on every failure.
 - [x] Add reader pins, rollback retention, bounded garbage collection, and
       competing-publisher/crash/fault-injection tests.
@@ -45,18 +45,18 @@ Detailed design and acceptance gates are owned by
 the earlier [focused out-of-core build sketch](../out-of-core-build-plan.md) is
 supporting context where it does not conflict with that authoritative plan.
 
-- [ ] Build from one coherent PostgreSQL snapshot and publish a declared source
+- [x] Build from one coherent PostgreSQL snapshot and publish a declared source
       watermark after bounded catch-up.
-- [ ] Use bounded runs and fixed-fanout external merge for nodes,
+- [x] Use bounded runs and fixed-fanout external merge for nodes,
       relationships, filters, resolution, inbound, and outbound data.
-- [ ] Stream validated mmap-ready artifact sections without retaining a second
+- [x] Stream validated mmap-ready artifact sections without retaining a second
       complete owned graph.
-- [ ] mmap inbound CSR and supported filter/dictionary sections while charging
+- [x] mmap inbound CSR and supported filter/dictionary sections while charging
       private metadata and page-cache-sensitive residency separately.
-- [ ] Pin one immutable projection snapshot per query/generation.
-- [ ] Keep sync ingestion, normalization, manifest publication, and range
+- [x] Pin one immutable projection snapshot per query/generation.
+- [x] Keep sync ingestion, normalization, manifest publication, and range
       compaction within enforced byte/row/disk limits.
-- [ ] Prove in-memory and spill builds are equivalent and repeated
+- [x] Prove in-memory and spill builds are equivalent and repeated
       build/load/sync/compact cycles do not leak memory or files.
 
 ## R4: Release-Risk Refactoring

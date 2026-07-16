@@ -6,30 +6,28 @@ the authoritative checkpoint handoff, measurement log, and next-action record.
 
 Last synchronized: 2026-07-16
 
-Current phase: R3 bounded storage and artifact v5. The R2D manifest subphase
-adds a checksummed current-generation pointer, cross-backend compare-and-swap,
-reader pins, rollback retention, and bounded garbage collection. The remaining
-R2D generation-specific base-artifact switch is intentionally completed by the
-direct persisted R3C/R3D path so the serving base is never renamed before
-validation.
+Current phase: R4 release-risk refactoring. R1 through R3 are complete: the
+bounded persisted build streams a fenced PostgreSQL snapshot through governed
+runs into a validated generation-specific artifact, then publishes it with
+generation compare-and-swap without exposing an unvalidated serving base.
 
 Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
-and dynamic graphs are post-1.0 roadmap work. R1 and R2A-R2C are complete; the
-R2D manifest checkpoint is implemented and R3 is the active release checkpoint.
+and dynamic graphs are post-1.0 roadmap work. R1 through R3 are complete; R4 is
+the active release checkpoint.
 
 2026-07-16 R2D manifest publication — Projection publishers now stage and
 validate immutable manifests, compare-and-swap a bounded checksummed current
 pointer under graph-scoped cross-process exclusion, retain reader-protected
 ancestors, and collect only unprotected artifacts/manifests/temp files. The
-generation-specific base switch remains paired with R3 artifact v5. The full
+generation-specific base switch remains paired with R3 artifact v6. The full
 release gate is green except for the unchanged cold auto-load latency gate;
 the complete post-pgbench tail passes and the measured blocker is owned by R3.
 
 2026-07-16 R3 planning — The ordered execution contract is source/catalog
 fencing and W0/W1 verification, governed checksummed fixed-fanout runs, streamed
-artifact v5 with both CSR directions and mapped filters/dictionaries, then the
+artifact v6 with both CSR directions and mapped filters/dictionaries, then the
 direct persisted spill path and equivalence/leak/fault gates.
 
 2026-07-16 R3A source boundary — Build and vacuum now lock mapping catalogs,
@@ -244,9 +242,17 @@ standalone `scripts/check_secrets.sh` entry point.
 published compatibility/deprecation guidance, added a drift-checked API/GUC/
 diagnostic inventory, release-note template, and versioned migration fixtures.
 
-2026-07-16 R3C artifact v5 and bounded load — The explicit 23-section format
-now maps both CSR directions, filters, dictionaries, and relationship
-identities; exact resolution/CSR/filter/registry validation and governed load
-metadata fail closed. The 817-test Rust suite, Clippy, rustdoc, docs drift, and
-two independent review passes are green; direct run-to-artifact construction
-remains the R3D checkpoint.
+2026-07-16 R3C artifact v6 follow-up — The 26-section format now also persists
+sorted tenanted-table OIDs, a lexical tenant dictionary, dense per-node tenant
+tokens, and the unidirectional-edge capability flag. Current-manifest readers
+pin and resolve generation-specific bases; checksum verification is bounded,
+and focused persistence, recovery, tenant, run, and resource suites pass.
+Direct source-to-run artifact construction remains the R3D checkpoint.
+
+2026-07-16 R3 bounded persisted build — Persisted build and vacuum now stream a
+coherent fenced PostgreSQL snapshot through governed external runs into a
+validated generation-specific artifact v6, publish by generation CAS, retain
+the prior serving generation on every tested fault, and pass the complete
+release gate plus independent review. The final PostgreSQL 14–18 Docker matrix
+passes 860 Rust and 1,132 serialized pgrx tests per major, the GQL write and
+isolation profiles, and every durable projection profile.

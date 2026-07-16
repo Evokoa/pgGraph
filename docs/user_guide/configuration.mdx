@@ -180,12 +180,21 @@ artifacts available for explicit `graph.load_graph()` calls but do not
 auto-load during query execution. `graph.hot_eager_load` is an opt-in selection
 policy for `hot` graphs that already have persisted artifacts.
 
-Default graph artifact path:
+Default graph artifact root and compatibility path:
 
 ```text
-$PGDATA/graph/00000000-0000-0000-0000-000000000001/main.pggraph
-$PGDATA/graph/00000000-0000-0000-0000-000000000001/main.pggraph.sync
+$PGDATA/graph/00000000-0000-0000-0000-000000000001/
+  main.pggraph                                      logical compatibility path
+  projection-current.json                          current-generation pointer
+  projection-generation-<generation>.json          immutable manifest
+  projection-generation-<generation>-base.pggraph  immutable base artifact
 ```
+
+When a valid current pointer and manifest exist, the manifest's base artifact
+takes precedence over `main.pggraph`. A store without projection metadata can
+still load `main.pggraph` as a compatibility fallback. Operators should use
+`graph.graph_runtime_status()` and `graph.projection_status()` for presence and
+health checks instead of inferring the serving file from directory names.
 
 ## Sync Settings
 

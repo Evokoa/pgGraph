@@ -648,6 +648,120 @@ fn catalog_drift_requires_rebuild() {
 }
 
 #[pg_test]
+fn persisted_direct_build_matches_owned_build_for_public_queries() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO graph_test_users_pgtest (id, name, age)
+         VALUES ('u4', 'Dana', 29), ('u3', 'Carol', 53);
+         INSERT INTO graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f3', 'u1', 'u4'), ('f2', 'u1', 'u3')",
+    )
+    .expect("add deterministic-order fixtures failed");
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_users_pgtest'::regclass,
+            id_column := 'id',
+            columns := ARRAY['name']
+         )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+            'graph_test_friendships_pgtest'::regclass,
+            'user_id',
+            'graph_test_users_pgtest'::regclass,
+            'friend_id',
+            'friend',
+            bidirectional := false
+         )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT graph.add_filter_column('graph_test_users_pgtest'::regclass, 'age')")
+        .expect("add age filter failed");
+
+    Spi::run("SET graph.persist_on_build = off").expect("disable persistence failed");
+    Spi::run("SELECT * FROM graph.build() ").expect("owned build failed");
+    let owned = direct_build_public_snapshot();
+
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SELECT * FROM graph.build() ").expect("direct persisted build failed");
+    let persisted = direct_build_public_snapshot();
+    let capped_before_rewrite = direct_build_capped_snapshot();
+
+    assert_eq!(persisted, owned);
+
+    Spi::run(
+        "CREATE INDEX graph_test_users_desc_idx
+             ON graph_test_users_pgtest (id DESC);
+         CREATE INDEX graph_test_friendships_desc_idx
+             ON graph_test_friendships_pgtest (id DESC);
+         CLUSTER graph_test_users_pgtest USING graph_test_users_desc_idx;
+         CLUSTER graph_test_friendships_pgtest USING graph_test_friendships_desc_idx",
+    )
+    .expect("rewrite fixture heap order failed");
+    Spi::run("SELECT * FROM graph.build() ").expect("direct rebuild after heap rewrite failed");
+    assert_eq!(direct_build_capped_snapshot(), capped_before_rewrite);
+}
+
+fn direct_build_capped_snapshot() -> String {
+    Spi::get_one::<String>(
+        "SELECT string_agg(node_id || ':' || depth::text, ',' ORDER BY depth, node_id)
+         FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             1,
+             edge_types := ARRAY['friend'],
+             hydrate := false,
+             max_rows := 2
+         )",
+    )
+    .expect("capped traversal snapshot failed")
+    .unwrap_or_default()
+}
+
+fn direct_build_public_snapshot() -> (String, i64, String) {
+    let traversal = Spi::get_one::<String>(
+        "SELECT string_agg(
+             node_id || ':' || depth::text || ':' || edge_path::text,
+             ',' ORDER BY depth, node_id
+         )
+         FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             2,
+             edge_types := ARRAY['friend'],
+             hydrate := false
+         )",
+    )
+    .expect("traversal snapshot failed")
+    .unwrap_or_default();
+    let filtered = Spi::get_one::<i64>(
+        "SELECT count(*)
+         FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             2,
+             filter := graph.all(ARRAY[graph.greater_than('age', 40)]),
+             hydrate := false
+         )",
+    )
+    .expect("filter snapshot failed")
+    .unwrap_or_default();
+    let gql = Spi::get_one::<String>(
+        "SELECT string_agg(
+             (row #>> '{u,_id,id}') || '>' || (row #>> '{v,_id,id}'),
+             ',' ORDER BY row #>> '{u,_id,id}', row #>> '{v,_id,id}'
+         )
+         FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest) RETURN u, v'
+         )",
+    )
+    .expect("GQL snapshot failed")
+    .unwrap_or_default();
+    (traversal, filtered, gql)
+}
+
+#[pg_test]
 fn schema_drift_detects_live_ddl_changes() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");

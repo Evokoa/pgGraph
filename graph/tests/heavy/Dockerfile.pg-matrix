@@ -121,6 +121,7 @@ RUN set -euo pipefail; \
 
 USER root
 COPY --chown=pggraph:pggraph graph/ /src/graph/
+COPY --chown=pggraph:pggraph scripts/inspect_pggraph_artifact.py /src/scripts/inspect_pggraph_artifact.py
 USER pggraph
 
 ARG PG_VERSIONS="14 15 16 17 18"
@@ -131,9 +132,14 @@ ARG RUN_POSTGRES_SANITIZER=0
 ARG RUN_DURABLE_PROJECTION_MATRIX=0
 ARG PROFILE_TIMEOUT_SECONDS=600
 
+# Linux test executables retain PostgreSQL backend references from the extension
+# crate even though unit-test code must not call them directly. The symbols
+# resolve when the packaged shared object is loaded by each PostgreSQL server;
+# allow that same late binding while linking the harness.
 RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     set -euo pipefail; \
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,--unresolved-symbols=ignore-all"; \
     for pg in ${PG_VERSIONS}; do \
         feature="pg${pg}"; \
         if [[ "${RUN_RUST_TESTS}" == "1" ]]; then \
@@ -141,8 +147,8 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
             cargo test --release --no-default-features --features "${feature} development"; \
         fi; \
         if [[ "${RUN_PGRX_SQL}" == "1" ]]; then \
-            echo "==> cargo pgrx test --features development ${feature}"; \
-            cargo pgrx test --features development "${feature}"; \
+            echo "==> cargo pgrx test --features development ${feature} (serial shared cluster)"; \
+            RUST_TEST_THREADS=1 cargo pgrx test --features development "${feature}"; \
         fi; \
     done
 

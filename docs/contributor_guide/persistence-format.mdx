@@ -1,28 +1,28 @@
 # Persistence Format
 
-The `.pggraph` file is the launch artifact for fast backend startup. Format v5
-stores graph-sized topology, filters, dictionaries, and relationship identities
-in explicitly described mmap-friendly sections. The file is derived state;
-PostgreSQL source tables remain authoritative.
+The `.pggraph` file is the launch artifact for fast backend startup. Format v6
+stores graph-sized topology, filters, dictionaries, relationship identities,
+and tenant metadata in explicitly described mmap-friendly sections. The file
+is derived state; PostgreSQL source tables remain authoritative.
 
 ## File Layout
 
 ```text
-Header, 448 bytes, explicitly encoded little endian
+Header, 512 bytes, explicitly encoded little endian
   magic                    4 bytes   "PGGH"
-  version                  u32       current version = 5
-  header_size              u32       448
-  flags                    u32       forward/inbound weight presence
+  version                  u32       current version = 6
+  header_size              u32       512
+  flags                    u32       weights and unidirectional-edge presence
   node_count               u32
   forward_edge_count       u32
   inbound_edge_count       u32
-  section_count            u32       23
+  section_count            u32       26
   body_length              u64
   body_crc32               u32
   header_crc32             u32
   reserved                 16 bytes  zero
-  section_descriptors      23 * { offset: u64, length: u64 }
-  reserved                 16 bytes  zero
+  section_descriptors      26 * { offset: u64, length: u64 }
+  reserved                 32 bytes  zero
 
 Section 0    active bits                         ceil(node_count / 8) bytes
 Section 1    table OIDs                          node_count * 4
@@ -39,34 +39,46 @@ Section 19   filter text dictionaries            lexical offsets and UTF-8 bytes
 Section 20   edge-type registry
 Section 21   relationship identity descriptors   mapping ID and key range
 Section 22   relationship identity key bytes      UTF-8
+Section 23   tenanted table OIDs                  sorted unique u32 values
+Section 24   tenant dictionary                    lexical offsets and UTF-8 bytes
+Section 25   per-node tenant tokens               node_count * 4
 ```
 
 Every section begins at a 64-byte boundary and has an explicit offset and
 length, including empty sections. Both CSR directions carry a relationship-ID
 sidecar. ID `0` is reserved for adjacencies without a source-row identity.
 
-## Write Path
+## Write And Publication Path
 
-`write_graph_file()`:
+Persisted build and vacuum do not construct a complete owned `Engine`. The
+production path:
 
-1. Creates parent directory.
-2. Reserves a zeroed 448-byte header.
-3. Streams sections in order to `<path>.tmp`.
-4. Aligns fixed-width sections as needed.
-5. Streams primary-key offsets and primary-key bytes in separate passes so the
-   writer does not stage the full artifact body in memory.
-6. Writes both CSR directions and their relationship-ID arrays.
-7. Canonicalizes filters into typed value arrays and lexically ordered text
-   dictionaries, then writes relationship identity descriptors and key bytes.
-8. Computes CRC32 incrementally over the payload after the header.
-9. Backpatches counts, flags, body length, both CRCs, and section descriptors.
-10. `sync_all()`.
-11. Atomically renames to the final path.
-12. Writes the sync checkpoint through a temp file and atomic rename.
+1. Reads the fenced PostgreSQL snapshot in bounded SPI batches.
+2. Stages nodes, resolution, filters, dictionaries, tenants, both relationship
+   orientations, and relationship identities in checksummed external-sort runs.
+3. Merges runs with a fixed fanout under memory, disk, file-count, row, work,
+   elapsed-time, and record-size limits.
+4. Computes all 26 section lengths with checked arithmetic.
+5. Reserves the complete candidate size, creates a generation-specific path
+   with `create_new`, zero-fills it, and fsyncs the allocation.
+6. Streams sequential sections and writes dense filter slots at checked final
+   offsets without retaining graph-sized section buffers.
+7. Recomputes the body CRC with a fixed 64 KiB buffer, backpatches the header,
+   fsyncs the artifact, and atomically writes its sync and projection-mode
+   sidecars.
+8. Prepares an immutable generation manifest, loads the unpublished candidate
+   through the production validator, and repeats the catalog, privilege, schema,
+   and source-watermark checks.
+9. Publishes the generation manifest and switches `projection-current.json`
+   only if the generation observed before the build is still current.
 
-SQL build and vacuum orchestration treats requested persistence as required.
-After writing the artifact, it immediately reloads through `load_graph_file()`;
-write or reload failures propagate as build/vacuum errors.
+The previous generation remains available for rollback and pinned readers.
+Scan, run, merge, quota, write, checksum, fsync, load, and source-validation
+failures remove only private staging state. After publication begins, cleanup
+first verifies the current pointer: a candidate that is current, or whose state
+cannot be read conclusively, is preserved so an ambiguous post-rename fsync
+error cannot invalidate the serving generation. The nonpersisted build path
+keeps the owned builder for backend-local use and differential testing.
 
 ## Load Path
 
@@ -89,6 +101,7 @@ keep both CSR relationship-ID arrays snapshot-backed
 keep ResolutionIndex section snapshot-backed
 construct FilterIndex over mapped typed values and lexical dictionaries
 construct relationship identity store over mapped descriptors and key bytes
+construct tenant index over mapped lexical dictionary and dense node tokens
 decode only bounded column and edge-label metadata into backend heap
 set resolution mode to MmapBacked
 store snapshot Arc in Engine._mmap
@@ -130,6 +143,7 @@ Loader validation rejects:
 | Filter catalog, typed value width, or row count mismatch | Filter reads could cross a column boundary |
 | Text dictionary offsets are invalid or values are not lexical | Token lookup would be ambiguous |
 | Relationship descriptor or UTF-8 key range is invalid | Source-row identity would be ambiguous |
+| Tenant OIDs, dictionary offsets/order, or node tokens are invalid | Tenant visibility would be ambiguous |
 
 The section-layout validator and the crate-private mapped-array constructors
 both enforce the value invariants used by typed access over the immutable
@@ -154,17 +168,18 @@ Engine
   resolution mode references _mmap section
   filter_index owns mapped base ranges plus sparse heap deltas
   relationship identities own mapped base ranges plus an optional heap suffix
+  tenant index owns validated mapped dictionary and token ranges
   edge_type_registry owns bounded heap strings decoded from its section
 ```
 
 ## Compatibility Rules
 
-Version 5 replaced the v4 offset-only header and graph-sized bincode metadata
-with a 448-byte header, 23 explicit section descriptors, mapped inbound CSR,
-mapped filters and dictionaries, and mapped relationship identities. Version 4
-and earlier artifacts are derived state and are not read by this loader; users
-should run `SELECT graph.build()` to regenerate the current artifact after
-upgrading. Future versions also fail closed with the same rebuild guidance.
+Version 6 extends the explicit v5 layout with persisted tenant-table metadata,
+a lexical tenant dictionary, dense per-node tenant tokens, and a durable
+unidirectional-edge flag. Version 5 and earlier artifacts are derived state and
+are not read by this loader; users should run `SELECT graph.build()` to
+regenerate the current artifact after upgrading. Future versions also fail
+closed with the same rebuild guidance.
 
 Any future change to fixed section ordering, binary representation, header
 semantics, or persisted value interpretation should bump the format version and

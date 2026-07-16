@@ -74,6 +74,12 @@ repeated bounded traversal workloads. Because Postgres stays the system of
 record, all standard tables, constraints, WAL, MVCC, backups, ACLs, and RLS still
 apply to application writes.
 
+Persisted graphs are published as immutable generations. A small checksummed
+current pointer selects one validated manifest and base artifact, so backends
+load either the previous complete generation or the new complete generation,
+never a partially written replacement. The graph index remains rebuildable
+derived state; PostgreSQL tables remain authoritative.
+
 <HowItWorksSection />
 
 ## Current benchmarks

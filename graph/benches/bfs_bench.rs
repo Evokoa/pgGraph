@@ -44,6 +44,7 @@ fn traversal_config(seed_node: u32, max_depth: i32) -> BfsConfig {
         tenant: None,
         tenanted_table_oids: HashSet::new(),
         tenant_membership: HashMap::new(),
+        tenant_membership_removals: HashMap::new(),
         overlay_insert_edges: HashMap::new(),
         overlay_deleted_edges: HashMap::new(),
     }

@@ -4,6 +4,7 @@
 //! evaluate traversal predicates without routing each neighbor back through SQL.
 
 use crate::mapped_bytes::MappedBytes;
+use crate::tenant_store::MappedTenantIndex;
 use crate::types::{FilterCondition, FilterOp};
 use crate::{safety::GraphError, safety::GraphResult};
 use roaring::RoaringBitmap;
@@ -147,7 +148,7 @@ impl PersistedFilterValue {
 }
 
 impl FilterColumnType {
-    fn persisted_tag(self) -> u8 {
+    pub(crate) fn persisted_tag(self) -> u8 {
         match self {
             Self::Numeric => 0,
             Self::Boolean => 1,
@@ -172,7 +173,7 @@ impl FilterColumnType {
         }
     }
 
-    const fn persisted_width(self) -> usize {
+    pub(crate) const fn persisted_width(self) -> usize {
         match self {
             Self::Boolean => 1,
             Self::Text => 4,
@@ -241,6 +242,8 @@ pub struct FilterIndex {
     #[serde(skip)]
     mapped_base: Option<MappedFilterBase>,
     #[serde(skip)]
+    mapped_tenant_base: Option<MappedTenantIndex>,
+    #[serde(skip)]
     delta: Vec<HashMap<u32, Option<EncodedFilterValue>>>,
     #[serde(skip)]
     text_delta: Vec<TextDelta>,
@@ -255,6 +258,7 @@ impl FilterIndex {
             text_dictionaries: Vec::new(),
             reverse_text_dictionaries: Vec::new(),
             mapped_base: None,
+            mapped_tenant_base: None,
             delta: Vec::new(),
             text_delta: Vec::new(),
         }
@@ -452,10 +456,30 @@ impl FilterIndex {
                 columns: mapped_columns,
                 node_count,
             }),
+            mapped_tenant_base: None,
             delta,
             text_delta,
             columns,
         })
+    }
+
+    /// Install the validated immutable tenant-token base from an artifact.
+    pub(crate) fn install_mapped_tenant_base(&mut self, base: MappedTenantIndex) {
+        self.mapped_tenant_base = Some(base);
+    }
+
+    /// Return whether the mapped base assigns `node_idx` to `tenant`.
+    pub(crate) fn mapped_tenant_contains(&self, tenant: &str, node_idx: u32) -> bool {
+        self.mapped_tenant_base
+            .as_ref()
+            .is_some_and(|base| base.contains(tenant, node_idx))
+    }
+
+    /// Return the mapped base tenant assigned to one node, when present.
+    pub(crate) fn mapped_tenant_for_node(&self, node_idx: u32) -> Option<&str> {
+        self.mapped_tenant_base
+            .as_ref()
+            .and_then(|base| base.tenant_for_node(node_idx))
     }
 
     /// Compute a checked upper bound for mapped-filter metadata and validation
@@ -501,6 +525,8 @@ impl FilterIndex {
     ///
     /// Returns an error if a column contains a value from another domain or a
     /// section length cannot be represented by the v5 descriptor fields.
+    #[cfg(test)]
+    #[cfg(test)]
     pub(crate) fn encode_v5_sections(
         &self,
         node_count: u32,
@@ -685,6 +711,8 @@ impl FilterIndex {
     }
 
     /// Return checked upper bounds for the three v5 filter sections.
+    #[cfg(test)]
+    #[cfg(test)]
     pub(crate) fn v5_section_size_upper_bounds(
         &self,
         node_count: u32,
@@ -742,6 +770,8 @@ impl FilterIndex {
     }
 
     /// Return a checked upper bound for transient v5 filter encoding memory.
+    #[cfg(test)]
+    #[cfg(test)]
     pub(crate) fn v5_encoding_workspace_upper_bound(&self, node_count: u32) -> GraphResult<usize> {
         let (catalog, data, dictionaries) = self.v5_section_size_upper_bounds(node_count)?;
         let names = self.columns.iter().try_fold(0usize, |total, column| {
@@ -1361,6 +1391,10 @@ impl FilterIndex {
                 .capacity()
                 .saturating_mul(std::mem::size_of::<MappedColumn>())
         });
+        let mapped_tenant = self
+            .mapped_tenant_base
+            .as_ref()
+            .map_or(0, MappedTenantIndex::estimated_heap_bytes);
         let delta = self
             .delta
             .capacity()
@@ -1406,6 +1440,7 @@ impl FilterIndex {
             .saturating_add(text_dictionaries)
             .saturating_add(reverse_text_dictionaries)
             .saturating_add(mapped_columns)
+            .saturating_add(mapped_tenant)
             .saturating_add(delta)
             .saturating_add(text_delta)
     }
@@ -1792,6 +1827,8 @@ fn decode_value(
     })
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn encode_v5_value(
     output: &mut [u8],
     value: EncodedFilterValue,
@@ -1898,6 +1935,8 @@ fn hash_map_allocation_upper_bound<K, V>(map: &HashMap<K, V>) -> usize {
         .saturating_add(16)
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn encoded_value_matches(column_type: FilterColumnType, value: EncodedFilterValue) -> bool {
     matches!(
         (column_type, value),

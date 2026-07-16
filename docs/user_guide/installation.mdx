@@ -392,7 +392,19 @@ Earlier versions of pgGraph used a single, global catalog for registration (`gra
 
 ### Artifact Path Migration
 
-The durable `.pggraph` artifact now lives under `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph` for each graph. The `graph_id` is the stable directory key; graph name and namespace stay in PostgreSQL catalogs rather than the filesystem path. If you inspect artifacts directly, point your tooling at the graph id and the configured `graph.data_dir` value.
+Each graph has an artifact root at
+`$PGDATA/<graph.data_dir>/<graph_id>/`. The `graph_id` is the stable directory
+key; graph name and namespace stay in PostgreSQL catalogs rather than the
+filesystem path.
+
+`main.pggraph` remains the logical compatibility path and the fallback for a
+legacy store without projection metadata. Current persisted builds write an
+immutable `projection-generation-<generation>-base.pggraph` file, publish its
+checksummed `projection-generation-<generation>.json` manifest, and then
+atomically switch `projection-current.json`. Loaders follow that current
+pointer and manifest instead of assuming that `main.pggraph` is the serving
+file. If you inspect artifacts directly, inspect the graph-id directory and
+resolve the current manifest rather than selecting the highest-numbered file.
 
 ### Projection Generation Migration
 

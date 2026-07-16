@@ -27,6 +27,7 @@ const RUN_VERSION: u16 = 1;
 const RUN_HEADER_SIZE: usize = 128;
 const RUN_BUFFER_SIZE: usize = 16 * 1024;
 const HEADER_CRC_OFFSET: usize = 76;
+const ONLINE_MERGE_FANOUT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -37,6 +38,10 @@ pub(crate) enum RunKind {
     Filters = 4,
     FilterDictionary = 5,
     Resolution = 6,
+    TenantValues = 7,
+    TenantDictionary = 8,
+    RelationshipIdentities = 9,
+    RelationshipsByIdentity = 10,
 }
 
 impl RunKind {
@@ -48,6 +53,10 @@ impl RunKind {
             4 => Ok(Self::Filters),
             5 => Ok(Self::FilterDictionary),
             6 => Ok(Self::Resolution),
+            7 => Ok(Self::TenantValues),
+            8 => Ok(Self::TenantDictionary),
+            9 => Ok(Self::RelationshipIdentities),
+            10 => Ok(Self::RelationshipsByIdentity),
             _ => Err(corrupt_run(format!("unknown run kind {value}"))),
         }
     }
@@ -60,6 +69,10 @@ impl RunKind {
             Self::Filters => "filters",
             Self::FilterDictionary => "filter-dictionary",
             Self::Resolution => "resolution",
+            Self::TenantValues => "tenant-values",
+            Self::TenantDictionary => "tenant-dictionary",
+            Self::RelationshipIdentities => "relationship-identities",
+            Self::RelationshipsByIdentity => "relationships-by-identity",
         }
     }
 }
@@ -352,13 +365,61 @@ pub(crate) struct StagedRun<'a> {
     _slot: FileSlot,
 }
 
+/// Stable summary of one validated staged run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StagedRunSummary {
+    pub(crate) kind: RunKind,
+    pub(crate) record_count: u64,
+    pub(crate) payload_len: u64,
+}
+
 impl StagedRun<'_> {
+    /// Return the private staged-file path.
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Return the number of encoded records declared by the validated header.
     pub(crate) fn record_count(&self) -> u64 {
         self.header.record_count
+    }
+
+    /// Return the run kind bound into the validated header.
+    pub(crate) fn kind(&self) -> RunKind {
+        self.header.kind
+    }
+
+    /// Return fixed header statistics needed to plan direct artifact sections.
+    pub(crate) fn summary(&self) -> StagedRunSummary {
+        StagedRunSummary {
+            kind: self.header.kind,
+            record_count: self.header.record_count,
+            payload_len: self.header.payload_len,
+        }
+    }
+
+    /// Replay records only after validating the complete file and payload checksum.
+    ///
+    /// The run is reopened on every call so direct artifact writers can make
+    /// bounded passes over parallel output sections without retaining decoded
+    /// records. No callback is invoked unless the header, file length, and full
+    /// payload checksum validate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::CorruptFile`] when the run changed, is truncated,
+    /// has an invalid checksum, contains an oversized record, or is no longer
+    /// sorted. I/O and allocation failures are returned as graph errors.
+    pub(crate) fn replay(
+        &self,
+        max_record_bytes: usize,
+        mut visit: impl FnMut(RunRecord) -> GraphResult<()>,
+    ) -> GraphResult<()> {
+        let mut reader = RunReader::open(&self.path, Some(self.header), max_record_bytes)?;
+        while let Some(record) = reader.next_record()? {
+            visit(record)?;
+        }
+        Ok(())
     }
 }
 
@@ -380,6 +441,7 @@ pub(crate) struct RunCollector<'workspace, 'governor> {
     payload_len: u64,
     memory: ResourceLease<'governor>,
     runs: Vec<StagedRun<'governor>>,
+    online_merge_stats: MergeStats,
 }
 
 impl<'workspace, 'governor> RunCollector<'workspace, 'governor> {
@@ -395,6 +457,9 @@ impl<'workspace, 'governor> RunCollector<'workspace, 'governor> {
                 "run collector limits must be positive".to_string(),
             ));
         }
+        let mut runs = Vec::new();
+        runs.try_reserve(workspace.max_files.min(ONLINE_MERGE_FANOUT))
+            .map_err(|error| allocation_error("run collector file list", error))?;
         Ok(Self {
             workspace,
             governor,
@@ -406,7 +471,8 @@ impl<'workspace, 'governor> RunCollector<'workspace, 'governor> {
             memory: governor
                 .reserve_memory(ResourcePhase::BuildRunWrite, ByteCount::ZERO)
                 .map_err(resource_error)?,
-            runs: Vec::new(),
+            runs,
+            online_merge_stats: MergeStats::default(),
         })
     }
 
@@ -432,9 +498,9 @@ impl<'workspace, 'governor> RunCollector<'workspace, 'governor> {
         self.memory
             .try_grow(ByteCount::from_bytes(memory))
             .map_err(resource_error)?;
-        self.records.try_reserve(1).map_err(|error| {
-            GraphError::Internal(format!("run collector allocation failed: {error}"))
-        })?;
+        self.records
+            .try_reserve(1)
+            .map_err(|error| allocation_error("run collector", error))?;
         self.records.push(record);
         self.payload_len = self
             .payload_len
@@ -447,6 +513,7 @@ impl<'workspace, 'governor> RunCollector<'workspace, 'governor> {
         if self.records.is_empty() {
             return Ok(());
         }
+        self.make_file_room()?;
         self.records.sort_unstable();
         let records = std::mem::take(&mut self.records);
         let count = records.len() as u64;
@@ -463,8 +530,57 @@ impl<'workspace, 'governor> RunCollector<'workspace, 'governor> {
             records.into_iter().map(Ok),
         )?;
         self.memory.release_all();
+        self.runs
+            .try_reserve(1)
+            .map_err(|error| allocation_error("run collector file list", error))?;
         self.runs.push(run);
+        // Compact while the just-flushed record buffer is released. This
+        // preserves one file slot for the merge output and avoids combining a
+        // full collector allocation with merge-reader workspace.
+        self.make_file_room()?;
         Ok(())
+    }
+
+    fn make_file_room(&mut self) -> GraphResult<()> {
+        if self.workspace.max_files < 3 {
+            return Ok(());
+        }
+        let active = self.workspace.active_files.get();
+        if active.saturating_add(1) < self.workspace.max_files || self.runs.len() < 2 {
+            return Ok(());
+        }
+
+        let fanout = ONLINE_MERGE_FANOUT
+            .min(self.workspace.max_files.saturating_sub(1))
+            .max(2);
+        let runs = std::mem::take(&mut self.runs);
+        let (merged, stats) = merge_runs(
+            self.workspace,
+            self.governor,
+            runs,
+            fanout,
+            self.max_record_bytes,
+        )?;
+        self.online_merge_stats.passes =
+            self.online_merge_stats
+                .passes
+                .checked_add(stats.passes)
+                .ok_or_else(|| GraphError::Internal("online merge pass count overflowed".into()))?;
+        self.online_merge_stats.runs_written = self
+            .online_merge_stats
+            .runs_written
+            .checked_add(stats.runs_written)
+            .ok_or_else(|| GraphError::Internal("online merge run count overflowed".into()))?;
+        self.runs
+            .try_reserve(1)
+            .map_err(|error| allocation_error("run collector file list", error))?;
+        self.runs.push(merged);
+        Ok(())
+    }
+
+    /// Return merge work completed to keep the staged file set bounded.
+    pub(crate) fn online_merge_stats(&self) -> MergeStats {
+        self.online_merge_stats
     }
 
     pub(crate) fn finish(mut self) -> GraphResult<Vec<StagedRun<'governor>>> {
@@ -502,11 +618,17 @@ pub(crate) fn merge_runs<'a>(
             .check_elapsed(ResourcePhase::BuildRunMerge)
             .map_err(resource_error)?;
         crate::resource::check_postgres_interrupts();
-        stats.passes += 1;
+        stats.passes = stats
+            .passes
+            .checked_add(1)
+            .ok_or_else(|| GraphError::Internal("merge pass count overflowed".to_string()))?;
+        let next_capacity = runs.len().div_ceil(fanout);
         let mut pending = runs.into_iter();
         let mut next = Vec::new();
+        next.try_reserve_exact(next_capacity)
+            .map_err(|error| allocation_error("merge output run list", error))?;
         loop {
-            let group = pending.by_ref().take(fanout).collect::<Vec<_>>();
+            let group = take_run_group(&mut pending, fanout)?;
             if group.is_empty() {
                 break;
             }
@@ -514,7 +636,9 @@ pub(crate) fn merge_runs<'a>(
                 next.extend(group);
             } else {
                 next.push(merge_group(workspace, governor, group, max_record_bytes)?);
-                stats.runs_written += 1;
+                stats.runs_written = stats.runs_written.checked_add(1).ok_or_else(|| {
+                    GraphError::Internal("merged run count overflowed".to_string())
+                })?;
             }
         }
         runs = next;
@@ -525,13 +649,30 @@ pub(crate) fn merge_runs<'a>(
     Ok((run, stats))
 }
 
+fn take_run_group<'a>(
+    pending: &mut impl Iterator<Item = StagedRun<'a>>,
+    fanout: usize,
+) -> GraphResult<Vec<StagedRun<'a>>> {
+    let mut group = Vec::new();
+    group
+        .try_reserve_exact(fanout)
+        .map_err(|error| allocation_error("merge input group", error))?;
+    for run in pending.take(fanout) {
+        group.push(run);
+    }
+    Ok(group)
+}
+
 fn merge_group<'a>(
     workspace: &RunWorkspace,
     governor: &'a ResourceGovernor,
     inputs: Vec<StagedRun<'a>>,
     max_record_bytes: usize,
 ) -> GraphResult<StagedRun<'a>> {
-    let first = inputs[0].header;
+    let first = inputs
+        .first()
+        .ok_or_else(|| GraphError::Internal("cannot merge an empty run group".to_string()))?
+        .header;
     if inputs.iter().any(|run| !run.header.same_build_as(first)) {
         return Err(corrupt_run("merge input belongs to another build or kind"));
     }
@@ -545,11 +686,21 @@ fn merge_group<'a>(
             .checked_add(run.header.payload_len)
             .ok_or_else(|| GraphError::Internal("merged payload length overflowed".to_string()))
     })?;
-    let per_reader = (RUN_BUFFER_SIZE as u64)
-        .checked_add((max_record_bytes as u64).saturating_mul(2))
+    // Each reader retains its prior record for ordering validation and one
+    // current heap record. Advancing a reader transiently holds the old prior,
+    // the decoded record, its validation clone, and the popped heap record.
+    // Charge the same conservative envelope for the output writer so its
+    // buffer and prior-record ordering check are covered as well.
+    let merge_participant = (RUN_BUFFER_SIZE as u64)
+        .checked_add((max_record_bytes as u64).saturating_mul(4))
         .ok_or_else(|| GraphError::Internal("merge memory estimate overflowed".to_string()))?;
-    let merge_bytes = per_reader
-        .checked_mul(inputs.len() as u64)
+    let participants = inputs
+        .len()
+        .checked_add(1)
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or_else(|| GraphError::Internal("merge participant count overflowed".to_string()))?;
+    let merge_bytes = merge_participant
+        .checked_mul(participants)
         .ok_or_else(|| GraphError::Internal("merge memory estimate overflowed".to_string()))?;
     let _memory = governor
         .reserve_memory(
@@ -589,11 +740,20 @@ struct MergeIterator {
 
 impl MergeIterator {
     fn open(inputs: &[StagedRun<'_>], max_record_bytes: usize) -> GraphResult<Self> {
-        let mut readers = inputs
-            .iter()
-            .map(|run| RunReader::open(&run.path, Some(run.header), max_record_bytes))
-            .collect::<GraphResult<Vec<_>>>()?;
+        let mut readers = Vec::new();
+        readers
+            .try_reserve_exact(inputs.len())
+            .map_err(|error| allocation_error("merge readers", error))?;
+        for run in inputs {
+            readers.push(RunReader::open(
+                &run.path,
+                Some(run.header),
+                max_record_bytes,
+            )?);
+        }
         let mut heap = BinaryHeap::new();
+        heap.try_reserve(inputs.len())
+            .map_err(|error| allocation_error("merge heap", error))?;
         for (source, reader) in readers.iter_mut().enumerate() {
             if let Some(record) = reader.next_record()? {
                 heap.push(Reverse(HeapRecord { record, source }));
@@ -705,8 +865,15 @@ impl RunReader {
         if next_payload > self.header.payload_len {
             return Err(corrupt_run("run record exceeds payload boundary"));
         }
-        let mut key = vec![0_u8; key_len];
-        let mut value = vec![0_u8; value_len];
+        let mut key = Vec::new();
+        key.try_reserve_exact(key_len)
+            .map_err(|error| allocation_error("run record key", error))?;
+        key.resize(key_len, 0);
+        let mut value = Vec::new();
+        value
+            .try_reserve_exact(value_len)
+            .map_err(|error| allocation_error("run record value", error))?;
+        value.resize(value_len, 0);
         self.reader
             .read_exact(&mut key)
             .and_then(|_| self.reader.read_exact(&mut value))
@@ -765,7 +932,9 @@ where
             u32::try_from(record.key.len()).map_err(|_| corrupt_run("run key exceeds u32"))?;
         let value_len =
             u32::try_from(record.value.len()).map_err(|_| corrupt_run("run value exceeds u32"))?;
-        let lengths = [key_len.to_le_bytes(), value_len.to_le_bytes()].concat();
+        let mut lengths = [0_u8; 8];
+        lengths[..4].copy_from_slice(&key_len.to_le_bytes());
+        lengths[4..].copy_from_slice(&value_len.to_le_bytes());
         for bytes in [&lengths[..], &record.key, &record.value] {
             writer.write_all(bytes).map_err(|error| {
                 GraphError::Internal(format!("could not write build run: {error}"))
@@ -836,6 +1005,14 @@ fn is_build_workspace_name(name: &str) -> bool {
 fn corrupt_run(reason: impl Into<String>) -> GraphError {
     GraphError::CorruptFile {
         reason: format!("build run: {}", reason.into()),
+    }
+}
+
+fn allocation_error(_area: &str, _error: std::collections::TryReserveError) -> GraphError {
+    GraphError::Oom {
+        used_mb: 0,
+        need_mb: 1,
+        limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
     }
 }
 
@@ -933,6 +1110,57 @@ mod tests {
     }
 
     #[test]
+    fn empty_collector_finishes_without_creating_a_run() {
+        let root = temp_root("empty");
+        let governor = governor(100_000, 100_000);
+        let workspace = workspace(&root, 3);
+        let collector = RunCollector::new(
+            &workspace,
+            &governor,
+            RunKind::Nodes,
+            ByteCount::from_bytes(1024),
+            64,
+        )
+        .unwrap();
+        assert!(collector.finish().unwrap().is_empty());
+        assert_eq!(workspace.active_files.get(), 0);
+    }
+
+    #[test]
+    fn staged_run_summary_and_replay_match_validated_header() {
+        let root = temp_root("summary");
+        let governor = governor(100_000, 100_000);
+        let workspace = workspace(&root, 3);
+        let mut collector = RunCollector::new(
+            &workspace,
+            &governor,
+            RunKind::Filters,
+            ByteCount::from_bytes(1024),
+            64,
+        )
+        .unwrap();
+        collector
+            .push(RunRecord::new(b"key".to_vec(), b"value".to_vec()))
+            .unwrap();
+        let run = collector.finish().unwrap().pop().unwrap();
+        let summary = run.summary();
+        assert_eq!(run.kind(), RunKind::Filters);
+        assert_eq!(summary.kind, RunKind::Filters);
+        assert_eq!(summary.record_count, 1);
+        assert_eq!(summary.payload_len, 16);
+        let mut replayed = Vec::new();
+        run.replay(64, |record| {
+            replayed.push(record);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            replayed,
+            vec![RunRecord::new(b"key".to_vec(), b"value".to_vec())]
+        );
+    }
+
+    #[test]
     fn payload_corruption_is_rejected_before_records_are_read() {
         let root = temp_root("corrupt");
         let governor = governor(100_000, 100_000);
@@ -957,6 +1185,71 @@ mod tests {
             RunReader::open(run.path(), Some(run.header), 128),
             Err(GraphError::CorruptFile { .. })
         ));
+    }
+
+    #[test]
+    fn validated_replay_rejects_corruption_before_visiting_records() {
+        let root = temp_root("replay-corrupt");
+        let governor = governor(100_000, 100_000);
+        let workspace = workspace(&root, 4);
+        let mut collector = RunCollector::new(
+            &workspace,
+            &governor,
+            RunKind::Resolution,
+            ByteCount::from_bytes(1024),
+            128,
+        )
+        .unwrap();
+        collector
+            .push(RunRecord::new(b"key".to_vec(), b"value".to_vec()))
+            .unwrap();
+        let run = collector.finish().unwrap().pop().unwrap();
+        let mut file = OpenOptions::new().write(true).open(run.path()).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.sync_all().unwrap();
+
+        let mut visited = 0;
+        assert!(matches!(
+            run.replay(128, |_| {
+                visited += 1;
+                Ok(())
+            }),
+            Err(GraphError::CorruptFile { .. })
+        ));
+        assert_eq!(visited, 0);
+    }
+
+    #[test]
+    fn collector_merges_online_before_reaching_the_workspace_file_limit() {
+        let root = temp_root("online-merge");
+        let governor = governor(1_000_000, 10_000_000);
+        let workspace = workspace(&root, 5);
+        let mut collector = RunCollector::new(
+            &workspace,
+            &governor,
+            RunKind::Nodes,
+            ByteCount::from_bytes(9),
+            64,
+        )
+        .unwrap();
+        for value in (0_u8..24).rev() {
+            collector
+                .push(RunRecord::new(vec![value], Vec::new()))
+                .unwrap();
+        }
+        assert!(collector.online_merge_stats().passes >= 3);
+        let runs = collector.finish().unwrap();
+        assert!(runs.len() < workspace.max_files);
+        let (merged, _) = merge_runs(&workspace, &governor, runs, 2, 64).unwrap();
+        let mut values = Vec::new();
+        merged
+            .replay(64, |record| {
+                values.push(record.key[0]);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(values, (0_u8..24).collect::<Vec<_>>());
     }
 
     #[test]

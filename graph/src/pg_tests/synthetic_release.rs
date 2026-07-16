@@ -105,7 +105,8 @@ fn synthetic_fixture_exercises_release_gate_sql_shape() {
 
     let artifact_path = crate::persistence::graph_file_path().expect("graph path failed");
     assert!(
-        artifact_path.exists(),
+        crate::persistence::persisted_graph_exists(&artifact_path)
+            .expect("persisted graph presence failed"),
         "expected synthetic fixture to persist {}",
         artifact_path.display()
     );

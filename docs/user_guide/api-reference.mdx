@@ -642,10 +642,12 @@ RETURNS TABLE (
 )
 ```
 
-Admin-only. Selects the graph, loads its persisted `main.pggraph` artifact into
-the backend-local engine, and returns the loaded engine summary. This explicit
-load path does not depend on `graph.auto_load`; missing or invalid artifacts
-raise an error so operators can rebuild or repair the graph.
+Admin-only. Selects the graph and loads its current persisted generation into
+the backend-local engine. The loader follows `projection-current.json` and its
+checksummed manifest to the immutable base artifact; `main.pggraph` remains the
+logical compatibility fallback for a store without projection metadata. This
+explicit load path does not depend on `graph.auto_load`; missing or invalid
+artifacts raise an error so operators can rebuild or repair the graph.
 
 ### `graph.unload_graph()`
 

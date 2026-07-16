@@ -528,7 +528,10 @@ fn maintenance_rebuilds_persisted_graph_from_source_with_pending_sync() {
         .expect("delete prebuild row failed");
     Spi::run("SELECT * FROM graph.build()").expect("build failed");
     let graph_path = crate::persistence::graph_file_path().expect("graph path failed");
-    let checkpoint = crate::persistence::read_sync_checkpoint(&graph_path)
+    let current_base = crate::persistence::current_base_artifact_path(&graph_path)
+        .expect("current base resolves")
+        .expect("current base exists");
+    let checkpoint = crate::persistence::read_sync_checkpoint(&current_base)
         .expect("checkpoint read failed")
         .unwrap_or(0);
     assert!(checkpoint >= 1);
@@ -2204,13 +2207,31 @@ fn full_rebuild_restores_valid_projection_generation() {
     let root = crate::persistence::projection_manifest_root(&graph_path);
     let corrupt_generation = 9_300_001_u64;
     let repaired_generation = corrupt_generation + 1;
-    let corrupt_manifest = crate::projection::manifest::ProjectionManifestStore::new(&root)
-        .manifest_path(corrupt_generation);
-    let repaired_manifest = crate::projection::manifest::ProjectionManifestStore::new(&root)
-        .manifest_path(repaired_generation);
+    let store = crate::projection::manifest::ProjectionManifestStore::new(&root);
+    let corrupt_manifest = store.manifest_path(corrupt_generation);
+    let repaired_manifest = store.manifest_path(repaired_generation);
     let _ = std::fs::remove_file(&corrupt_manifest);
     let _ = std::fs::remove_file(&repaired_manifest);
-    std::fs::write(&corrupt_manifest, b"{not json").expect("corrupt manifest writes");
+    let current_base = crate::persistence::current_base_artifact_path(&graph_path)
+        .expect("current base resolves")
+        .expect("current base exists");
+    let current_base_name = current_base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("current base name is UTF-8");
+    let corrupt_current = crate::projection::manifest::ProjectionManifest::base_only(
+        corrupt_generation,
+        current_base_name,
+        crate::persistence::graph_artifact_checksum_for_path(&current_base)
+            .expect("current base checksum reads"),
+        crate::persistence::graph_artifact_version(),
+        0,
+        1,
+    );
+    store
+        .publish(&corrupt_current)
+        .expect("corrupt-generation pointer publishes");
+    std::fs::write(&corrupt_manifest, b"{not json").expect("current manifest corruption writes");
 
     let repaired = Spi::get_one::<bool>(
         "SELECT action = 'full_rebuild'
@@ -2307,10 +2328,17 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
         "crc32:{:08x}",
         crc32fast::hash(&std::fs::read(&chunk_path).expect("chunk reads"))
     );
+    let current_base = crate::persistence::current_base_artifact_path(&graph_path)
+        .expect("current base resolves")
+        .expect("current base exists");
+    let current_base_name = current_base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("current base name is UTF-8");
     let mut manifest = crate::projection::manifest::ProjectionManifest::base_only(
         chunk_generation,
-        "main.pggraph",
-        crate::persistence::graph_artifact_checksum_for_path(&graph_path)
+        current_base_name,
+        crate::persistence::graph_artifact_checksum_for_path(&current_base)
             .expect("graph checksum reads"),
         crate::persistence::graph_artifact_version(),
         1,
@@ -2429,10 +2457,17 @@ fn setup_projection_status_pressure_fixture(
     write_projection_status_segment(&segment_b, 1);
     write_projection_status_segment(&chunk, 0);
     std::fs::write(&obsolete, b"old").expect("obsolete projection file writes");
+    let current_base = crate::persistence::current_base_artifact_path(&graph_path)
+        .expect("current base resolves")
+        .expect("current base exists");
+    let current_base_name = current_base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("current base name is UTF-8");
     let mut manifest = crate::projection::manifest::ProjectionManifest::base_only(
         generation_id,
-        "main.pggraph",
-        crate::persistence::graph_artifact_checksum_for_path(&graph_path)
+        current_base_name,
+        crate::persistence::graph_artifact_checksum_for_path(&current_base)
             .expect("graph checksum reads"),
         crate::persistence::graph_artifact_version(),
         0,

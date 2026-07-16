@@ -234,7 +234,11 @@ fn graph_runtime_status() -> TableIterator<
             .unwrap_or_else(|err| err.report())
             .into_iter()
             .map(|graph| {
-                let artifact = persistence::graph_file_path_for_uncreated(&graph.graph_id).ok();
+                let logical_artifact =
+                    persistence::graph_file_path_for_uncreated(&graph.graph_id).ok();
+                let artifact = logical_artifact
+                    .as_ref()
+                    .and_then(|path| persistence::current_base_artifact_path(path).ok().flatten());
                 let artifact_metadata = artifact.as_ref().and_then(|path| path.metadata().ok());
                 let artifact_exists = artifact_metadata.is_some();
                 let artifact_bytes =
@@ -520,7 +524,7 @@ fn load_selected_graph_from_disk(
         // Check if persisted file exists without creating artifact directories
         // during query-time auto-load or operator load inspection.
         let path = persistence::graph_file_path_for_uncreated(&graph.graph_id)?;
-        if !path.exists() {
+        if !persistence::persisted_graph_exists(&path)? {
             if !quiet_missing {
                 return Err(safety::GraphError::NotBuilt);
             }

@@ -112,8 +112,9 @@ pub(crate) fn plan_projection_recovery_for_artifact(
         }
     };
 
-    if let Some(graph_path) = graph_path {
-        if let Err(err) = validate_manifest_base_metadata(graph_path, &manifest) {
+    if graph_path.is_some() {
+        let current_base_path = root.join(&manifest.base_artifact_path);
+        if let Err(err) = validate_manifest_base_metadata(&current_base_path, &manifest) {
             return Ok(ProjectionRecoveryPlan::rebuild(
                 Some(manifest.generation_id),
                 err.to_string(),
@@ -151,6 +152,244 @@ pub(crate) fn repair_active_base_chunks(
     Ok(Some(result))
 }
 
+/// Unpublished generation-specific base planned against one current generation.
+///
+/// The generated path is confined to the projection root and remains invisible
+/// to readers until [`publish_generation_specific_rebuilt_base`] wins the
+/// current-generation compare-and-swap.
+#[derive(Debug, Clone)]
+pub(crate) struct RebuiltBasePublicationPlan {
+    root: PathBuf,
+    expected_current_generation: Option<u64>,
+    predecessor_generation: Option<u64>,
+    recovery_publication: bool,
+    generation_id: u64,
+    candidate_base_name: String,
+    candidate_base_path: PathBuf,
+    previous: Option<ProjectionManifest>,
+}
+
+/// Opaque manifest prepared for one generation-specific rebuilt base.
+///
+/// Callers may inspect the manifest for candidate loading, but only this
+/// module can construct or mutate the value accepted by the publication API.
+#[derive(Debug)]
+pub(crate) struct PreparedRebuiltBaseManifest {
+    manifest: ProjectionManifest,
+}
+
+impl PreparedRebuiltBaseManifest {
+    /// Borrow the exact manifest that must be validated before publication.
+    pub(crate) const fn manifest(&self) -> &ProjectionManifest {
+        &self.manifest
+    }
+}
+
+impl RebuiltBasePublicationPlan {
+    /// Return the generation observed before candidate staging began.
+    pub(crate) const fn expected_current_generation(&self) -> Option<u64> {
+        self.expected_current_generation
+    }
+
+    /// Return the generation reserved by this publication plan.
+    pub(crate) const fn generation_id(&self) -> u64 {
+        self.generation_id
+    }
+
+    /// Return the generated root-relative base artifact name.
+    pub(crate) fn candidate_base_name(&self) -> &str {
+        &self.candidate_base_name
+    }
+
+    /// Return the unpublished candidate path under the projection root.
+    pub(crate) fn candidate_base_path(&self) -> &Path {
+        &self.candidate_base_path
+    }
+
+    /// Return whether the current pointer names this plan's generation.
+    ///
+    /// Callers use this after an ambiguous publication error to avoid deleting
+    /// an immutable base that may already be serving readers.
+    pub(crate) fn candidate_is_current(&self) -> GraphResult<bool> {
+        Ok(
+            ProjectionManifestStore::new(&self.root).current_generation_id()?
+                == Some(self.generation_id),
+        )
+    }
+}
+
+/// Plan a generation-specific base replacement for a healthy projection root.
+///
+/// This captures the expected current generation before the caller creates or
+/// writes the candidate. The caller must create the returned path with
+/// create-new semantics and keep it private until publication succeeds.
+///
+/// # Errors
+///
+/// Returns an error when current-generation metadata is corrupt, changes while
+/// being captured, the generation counter overflows, or the artifact root
+/// cannot be inspected.
+pub(crate) fn plan_generation_specific_rebuilt_base(
+    root: &Path,
+) -> GraphResult<RebuiltBasePublicationPlan> {
+    let store = ProjectionManifestStore::new(root);
+    let expected_current_generation = store.current_generation_id()?;
+    let previous = store.load_latest_metadata()?;
+    if previous.as_ref().map(|manifest| manifest.generation_id) != expected_current_generation {
+        return Err(GraphError::BuildLocked);
+    }
+    let generation_id = next_rebuild_generation_id(root)?;
+    let candidate_base_name = format!("projection-generation-{generation_id:020}-base.pggraph");
+    let candidate_base_path = root.join(&candidate_base_name);
+    Ok(RebuiltBasePublicationPlan {
+        root: root.to_path_buf(),
+        expected_current_generation,
+        predecessor_generation: previous.as_ref().map(|manifest| manifest.generation_id),
+        recovery_publication: false,
+        generation_id,
+        candidate_base_name,
+        candidate_base_path,
+        previous,
+    })
+}
+
+/// Plan a generation replacement when the current pointer or manifest cannot
+/// be decoded safely.
+///
+/// The generation number remains monotonic across readable manifest filenames,
+/// while publication uses the manifest store's raw-pointer recovery switch.
+/// No corrupt metadata is trusted for artifact references or timestamps.
+pub(crate) fn plan_generation_specific_rebuilt_base_for_recovery(
+    root: &Path,
+) -> GraphResult<RebuiltBasePublicationPlan> {
+    let predecessor_generation = latest_manifest_generation(root)?;
+    let generation_id = next_rebuild_generation_id(root)?;
+    let candidate_base_name = format!("projection-generation-{generation_id:020}-base.pggraph");
+    let candidate_base_path = root.join(&candidate_base_name);
+    Ok(RebuiltBasePublicationPlan {
+        root: root.to_path_buf(),
+        expected_current_generation: None,
+        predecessor_generation,
+        recovery_publication: true,
+        generation_id,
+        candidate_base_name,
+        candidate_base_path,
+        previous: None,
+    })
+}
+
+/// Prepare the manifest for a staged generation-specific base.
+///
+/// The candidate must already be complete and fsynced. This function computes
+/// its persisted checksum,
+/// creates the base-only manifest, inherits operation timestamps, and records
+/// all superseded artifacts without changing the current pointer. The caller
+/// can therefore pass the returned manifest to the production candidate loader
+/// before invoking [`publish_prepared_generation_specific_rebuilt_base`].
+///
+/// # Errors
+///
+/// Returns validation or I/O errors when the candidate is missing or invalid,
+/// its checksum cannot be read, or manifest metadata cannot be created.
+pub(crate) fn prepare_generation_specific_rebuilt_base_manifest(
+    plan: &RebuiltBasePublicationPlan,
+    sync_watermark: i64,
+) -> GraphResult<PreparedRebuiltBaseManifest> {
+    if !plan.candidate_base_path.is_file() {
+        return Err(GraphError::Internal(format!(
+            "rebuilt base candidate does not exist: {}",
+            plan.candidate_base_path.display()
+        )));
+    }
+    let mut manifest = ProjectionManifest::base_only(
+        plan.generation_id,
+        plan.candidate_base_name.clone(),
+        graph_artifact_checksum_for_path(&plan.candidate_base_path)?,
+        graph_artifact_version(),
+        sync_watermark,
+        now_unix_micros()?,
+    );
+    manifest.previous_generation_id = plan.predecessor_generation;
+    if let Some(previous) = plan.previous.as_ref() {
+        manifest.inherit_operation_timestamps(previous);
+        manifest.obsolete_files = previous.obsolete_files.clone();
+        append_superseded_projection_files(
+            &plan.root,
+            previous,
+            &manifest.base_artifact_path,
+            &mut manifest.obsolete_files,
+        );
+    }
+    Ok(PreparedRebuiltBaseManifest { manifest })
+}
+
+/// Publish a prepared rebuilt-base manifest through normal manifest CAS.
+///
+/// The manifest must be the exact candidate described by `plan`. Its
+/// generation, base name, artifact version, checksum, predecessor, and current
+/// generation expectation are revalidated immediately before publication.
+///
+/// # Errors
+///
+/// Returns [`GraphError::BuildLocked`] when another publisher changed the
+/// current generation. Returns [`GraphError::CorruptFile`] when the prepared
+/// manifest does not match the plan or the staged candidate bytes. Returns
+/// durable manifest publication errors from
+/// [`ProjectionManifestStore::publish_if_current`].
+pub(crate) fn publish_prepared_generation_specific_rebuilt_base(
+    plan: &RebuiltBasePublicationPlan,
+    prepared: &PreparedRebuiltBaseManifest,
+) -> GraphResult<()> {
+    let manifest = prepared.manifest();
+    let store = ProjectionManifestStore::new(&plan.root);
+    if !plan.recovery_publication
+        && store.current_generation_id()? != plan.expected_current_generation
+    {
+        return Err(GraphError::BuildLocked);
+    }
+    if manifest.generation_id != plan.generation_id
+        || manifest.base_artifact_path != plan.candidate_base_name
+        || manifest.base_artifact_version != graph_artifact_version()
+        || manifest.previous_generation_id != plan.predecessor_generation
+    {
+        return Err(GraphError::CorruptFile {
+            reason: "prepared rebuilt-base manifest does not match its publication plan".into(),
+        });
+    }
+    let checksum = graph_artifact_checksum_for_path(&plan.candidate_base_path)?;
+    if manifest.base_artifact_checksum != checksum {
+        return Err(GraphError::CorruptFile {
+            reason: "prepared rebuilt-base manifest checksum does not match its candidate".into(),
+        });
+    }
+    if plan.recovery_publication {
+        store.publish_for_recovery(manifest)?;
+    } else {
+        store.publish_if_current(manifest, plan.expected_current_generation)?;
+    }
+    Ok(())
+}
+
+/// Prepare and publish a staged generation-specific base through normal CAS.
+///
+/// Callers that must validate the candidate through the production loader
+/// before publication should use
+/// [`prepare_generation_specific_rebuilt_base_manifest`] followed by
+/// [`publish_prepared_generation_specific_rebuilt_base`].
+///
+/// # Errors
+///
+/// Returns the preparation and CAS publication errors documented by those two
+/// functions.
+pub(crate) fn publish_generation_specific_rebuilt_base(
+    plan: &RebuiltBasePublicationPlan,
+    sync_watermark: i64,
+) -> GraphResult<ProjectionManifest> {
+    let prepared = prepare_generation_specific_rebuilt_base_manifest(plan, sync_watermark)?;
+    publish_prepared_generation_specific_rebuilt_base(plan, &prepared)?;
+    Ok(prepared.manifest)
+}
+
 /// Publish a fresh base-only manifest after a successful PostgreSQL rebuild.
 pub(crate) fn publish_rebuilt_base_manifest(
     graph_path: &Path,
@@ -181,7 +420,12 @@ pub(crate) fn publish_rebuilt_base_manifest(
         manifest.previous_generation_id = Some(previous.generation_id);
         manifest.inherit_operation_timestamps(previous);
         manifest.obsolete_files = previous.obsolete_files.clone();
-        append_superseded_projection_files(&root, previous, &mut manifest.obsolete_files);
+        append_superseded_projection_files(
+            &root,
+            previous,
+            &manifest.base_artifact_path,
+            &mut manifest.obsolete_files,
+        );
     } else {
         manifest.previous_generation_id = previous_generation_id;
     }
@@ -192,6 +436,7 @@ pub(crate) fn publish_rebuilt_base_manifest(
 fn append_superseded_projection_files(
     root: &Path,
     previous: &ProjectionManifest,
+    replacement_base_path: &str,
     obsolete: &mut Vec<ManifestFileRef>,
 ) {
     let mut paths = obsolete
@@ -220,6 +465,12 @@ fn append_superseded_projection_files(
     }
     for chunk in &previous.base_chunks {
         push(&chunk.path, None);
+    }
+    if previous.base_artifact_path != replacement_base_path {
+        push(&previous.base_artifact_path, None);
+        for sidecar in [".sync", ".projection_mode"] {
+            push(&format!("{}{sidecar}", previous.base_artifact_path), None);
+        }
     }
 }
 
@@ -258,9 +509,13 @@ fn validate_manifest_base_metadata(
     Ok(())
 }
 
-/// Return the next generation id after every final manifest file in `root`.
+/// Return the next generation id after every reserved generation in `root`.
+///
+/// A generation-specific base or sidecar reserves its identifier even when a
+/// crash occurs before the manifest is created. Skipping that identifier keeps
+/// the next candidate compatible with create-new publication semantics.
 pub(crate) fn next_rebuild_generation_id(root: &Path) -> GraphResult<u64> {
-    latest_known_manifest_generation(root)?
+    latest_known_generation(root)?
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into()))
@@ -269,10 +524,10 @@ pub(crate) fn next_rebuild_generation_id(root: &Path) -> GraphResult<u64> {
 /// Return whether the artifact root contains a published or quarantined
 /// projection generation that a persisted rebuild must supersede.
 pub(crate) fn has_projection_generation(root: &Path) -> GraphResult<bool> {
-    latest_known_manifest_generation(root).map(|generation| generation.is_some())
+    latest_known_generation(root).map(|generation| generation.is_some())
 }
 
-fn latest_known_manifest_generation(root: &Path) -> GraphResult<Option<u64>> {
+fn latest_known_generation(root: &Path) -> GraphResult<Option<u64>> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -306,11 +561,13 @@ fn latest_known_manifest_generation(root: &Path) -> GraphResult<Option<u64>> {
         let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let generation_id = parse_manifest_file_name(&file_name).or_else(|| {
-            file_name
-                .split_once(".invalid-")
-                .and_then(|(original, _)| parse_manifest_file_name(original))
-        });
+        let generation_id = parse_manifest_file_name(&file_name)
+            .or_else(|| parse_rebuilt_base_generation(&file_name))
+            .or_else(|| {
+                file_name
+                    .split_once(".invalid-")
+                    .and_then(|(original, _)| parse_manifest_file_name(original))
+            });
         if let Some(generation_id) = generation_id {
             if latest.is_none_or(|current| generation_id > current) {
                 latest = Some(generation_id);
@@ -318,6 +575,20 @@ fn latest_known_manifest_generation(root: &Path) -> GraphResult<Option<u64>> {
         }
     }
     Ok(latest)
+}
+
+fn parse_rebuilt_base_generation(file_name: &str) -> Option<u64> {
+    const PREFIX: &str = "projection-generation-";
+    const SUFFIX: &str = "-base.pggraph";
+    let base_name = file_name
+        .strip_suffix(".sync")
+        .or_else(|| file_name.strip_suffix(".projection_mode"))
+        .unwrap_or(file_name);
+    let generation = base_name.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
+    if generation.len() != 20 || !generation.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    generation.parse().ok()
 }
 
 /// Move the latest final manifest aside so a full rebuild can reload safely.
@@ -615,6 +886,214 @@ mod tests {
         assert_eq!(loaded.generation_id, 5);
         assert_eq!(loaded.base_artifact_path, "main.pggraph");
         assert_eq!(loaded.sync_watermark, 42);
+    }
+
+    #[test]
+    fn healthy_rebuild_plan_uses_a_generation_specific_private_base_path() {
+        let dir = ProjectionArtifactDir::new(
+            "healthy_rebuild_plan_uses_a_generation_specific_private_base_path",
+        );
+        let plan = plan_generation_specific_rebuilt_base(dir.path())
+            .expect("healthy rebuilt-base generation plans");
+
+        assert_eq!(plan.expected_current_generation(), None);
+        assert_eq!(plan.generation_id(), 1);
+        assert_eq!(
+            plan.candidate_base_name(),
+            "projection-generation-00000000000000000001-base.pggraph"
+        );
+        assert_eq!(
+            plan.candidate_base_path(),
+            dir.path().join(plan.candidate_base_name())
+        );
+    }
+
+    #[test]
+    fn orphan_rebuilt_base_reserves_generation_after_pre_manifest_crash() {
+        let dir = ProjectionArtifactDir::new(
+            "orphan_rebuilt_base_reserves_generation_after_pre_manifest_crash",
+        );
+        let interrupted = plan_generation_specific_rebuilt_base(dir.path())
+            .expect("interrupted generation plans");
+        write_file(interrupted.candidate_base_path(), b"fsynced candidate");
+
+        let resumed = plan_generation_specific_rebuilt_base(dir.path())
+            .expect("post-crash generation replans");
+
+        assert_eq!(interrupted.generation_id(), 1);
+        assert_eq!(resumed.generation_id(), 2);
+        assert_ne!(
+            resumed.candidate_base_path(),
+            interrupted.candidate_base_path()
+        );
+    }
+
+    #[test]
+    fn rebuilt_base_sidecars_also_reserve_generation_ids() {
+        let dir = ProjectionArtifactDir::new("rebuilt_base_sidecars_reserve_generation_ids");
+        write_file(
+            dir.path()
+                .join("projection-generation-00000000000000000008-base.pggraph.projection_mode"),
+            b"csr_readonly",
+        );
+
+        assert_eq!(
+            next_rebuild_generation_id(dir.path()).expect("sidecar generation scans"),
+            9
+        );
+    }
+
+    #[test]
+    fn healthy_rebuild_manifest_retains_previous_base_as_obsolete() {
+        use crate::engine::Engine;
+        use crate::persistence::write_graph_file;
+
+        let dir = ProjectionArtifactDir::new(
+            "healthy_rebuild_manifest_retains_previous_base_as_obsolete",
+        );
+        let old_path = dir
+            .path()
+            .join("projection-generation-00000000000000000001-base.pggraph");
+        let mut engine = Engine::new();
+        engine.finish_build(None);
+        write_graph_file(&engine, &old_path).expect("old base writes");
+        let mut previous = ProjectionManifest::base_only(
+            1,
+            old_path.file_name().unwrap().to_string_lossy(),
+            graph_artifact_checksum_for_path(&old_path).expect("old checksum reads"),
+            graph_artifact_version(),
+            7,
+            1,
+        );
+        previous.last_ingestion_unix_micros = Some(123);
+        ProjectionManifestStore::new(dir.path())
+            .publish(&previous)
+            .expect("previous generation publishes");
+
+        let plan = plan_generation_specific_rebuilt_base(dir.path())
+            .expect("replacement generation plans");
+        write_graph_file(&engine, plan.candidate_base_path()).expect("candidate base writes");
+        let manifest = prepare_generation_specific_rebuilt_base_manifest(&plan, 9)
+            .expect("replacement manifest prepares");
+        assert_eq!(
+            ProjectionManifestStore::new(dir.path())
+                .current_generation_id()
+                .expect("current generation reads"),
+            Some(1)
+        );
+        publish_prepared_generation_specific_rebuilt_base(&plan, &manifest)
+            .expect("replacement generation publishes");
+
+        assert_eq!(manifest.manifest().previous_generation_id, Some(1));
+        assert_eq!(manifest.manifest().last_ingestion_unix_micros, Some(123));
+        assert!(manifest.manifest().obsolete_files.iter().any(|reference| {
+            reference.path == previous.base_artifact_path
+                && reference.bytes == fs::metadata(&old_path).unwrap().len()
+        }));
+    }
+
+    #[test]
+    fn prepared_rebuild_publish_rejects_candidate_changed_after_preparation() {
+        use crate::engine::Engine;
+        use crate::persistence::write_graph_file;
+
+        let dir = ProjectionArtifactDir::new(
+            "prepared_rebuild_publish_rejects_plan_and_checksum_mismatches",
+        );
+        let base_path = dir.path().join("base.pggraph");
+        let mut engine = Engine::new();
+        engine.finish_build(None);
+        write_graph_file(&engine, &base_path).expect("base writes");
+        let first = ProjectionManifest::base_only(
+            1,
+            "base.pggraph",
+            graph_artifact_checksum_for_path(&base_path).expect("base checksum reads"),
+            graph_artifact_version(),
+            1,
+            1,
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        store.publish(&first).expect("first generation publishes");
+        let plan = plan_generation_specific_rebuilt_base(dir.path())
+            .expect("replacement generation plans");
+        write_graph_file(&engine, plan.candidate_base_path()).expect("candidate base writes");
+        let prepared =
+            prepare_generation_specific_rebuilt_base_manifest(&plan, 2).expect("manifest prepares");
+
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(plan.candidate_base_path())
+            .expect("candidate opens")
+            .write_all(&[0])
+            .expect("candidate mutates");
+        assert!(matches!(
+            publish_prepared_generation_specific_rebuilt_base(&plan, &prepared),
+            Err(GraphError::CorruptFile { .. })
+        ));
+        assert_eq!(
+            store
+                .current_generation_id()
+                .expect("current generation reads"),
+            Some(1)
+        );
+        write_graph_file(&engine, plan.candidate_base_path()).expect("candidate rewrites");
+        let prepared = prepare_generation_specific_rebuilt_base_manifest(&plan, 2)
+            .expect("replacement manifest prepares again");
+        publish_prepared_generation_specific_rebuilt_base(&plan, &prepared)
+            .expect("matching manifest publishes");
+    }
+
+    #[test]
+    fn healthy_rebuild_cas_loser_preserves_the_winning_generation() {
+        use crate::engine::Engine;
+        use crate::persistence::write_graph_file;
+
+        let dir = ProjectionArtifactDir::new(
+            "healthy_rebuild_cas_loser_preserves_the_winning_generation",
+        );
+        let base_path = dir.path().join("base.pggraph");
+        let mut engine = Engine::new();
+        engine.finish_build(None);
+        write_graph_file(&engine, &base_path).expect("base writes");
+        let first = ProjectionManifest::base_only(
+            1,
+            "base.pggraph",
+            graph_artifact_checksum_for_path(&base_path).expect("base checksum reads"),
+            graph_artifact_version(),
+            1,
+            1,
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        store.publish(&first).expect("first generation publishes");
+        let loser =
+            plan_generation_specific_rebuilt_base(dir.path()).expect("losing generation plans");
+        write_graph_file(&engine, loser.candidate_base_path()).expect("loser base writes");
+
+        let winner = ProjectionManifest::base_only(
+            3,
+            "base.pggraph",
+            graph_artifact_checksum_for_path(&base_path).expect("winner checksum reads"),
+            graph_artifact_version(),
+            2,
+            2,
+        );
+        store
+            .publish_if_current(&winner, Some(1))
+            .expect("winner publishes");
+
+        assert!(matches!(
+            publish_generation_specific_rebuilt_base(&loser, 3),
+            Err(GraphError::BuildLocked)
+        ));
+        assert_eq!(
+            store
+                .load_latest_current()
+                .expect("current reads")
+                .expect("winner remains")
+                .generation_id,
+            3
+        );
     }
 
     #[test]

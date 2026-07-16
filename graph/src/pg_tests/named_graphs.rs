@@ -1735,8 +1735,8 @@ fn persisted_named_graphs_use_distinct_artifact_roots() {
     let path_a = crate::persistence::graph_file_path_for(&graph_a).expect("persist_a path failed");
     let path_b = crate::persistence::graph_file_path_for(&graph_b).expect("persist_b path failed");
 
-    assert!(path_a.exists());
-    assert!(path_b.exists());
+    assert!(crate::persistence::persisted_graph_exists(&path_a).expect("persist_a presence"));
+    assert!(crate::persistence::persisted_graph_exists(&path_b).expect("persist_b presence"));
     assert_ne!(path_a, path_b);
     assert_eq!(
         path_a

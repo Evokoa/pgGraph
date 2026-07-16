@@ -40,11 +40,17 @@ beside it in the crate tree.
 | `builder.rs` | SPI cursor build pipeline and temp spool loading |
 | `build_snapshot.rs` | Coherent build/vacuum source locking, catalog fingerprinting, and source watermark validation |
 | `build_runs.rs` | Governed checksummed external-sort runs and fixed-fanout multi-pass merge primitives |
+| `build_spool.rs` | Governed PostgreSQL temporary lookup spools shared by owned and persisted builders |
+| `persisted_build_scanner.rs` | Bounded node, resolution, filter, dictionary, and tenant source-to-run scanning |
+| `persisted_edge_scanner.rs` | Bounded endpoint resolution and relationship run normalization |
+| `persisted_build.rs` | Checked v6 layout planning and direct 26-section artifact assembly |
+| `persisted_build_pipeline.rs` | Persisted source scan, run merge, and candidate composition boundary |
 | `catalog.rs` | Catalog module boundary for registration reads, writes, and validation |
 | `catalog/read.rs` | Registered table, edge, and filter-column catalog reads |
 | `catalog/validate.rs` | Source table, key, edge, and filter-column validation |
 | `catalog/write.rs` | Catalog inserts and updates for registered graph metadata |
-| `persistence.rs` | v5 `.pggraph` writer/loader, header and body CRCs, 23-section validation, mmap setup |
+| `persistence.rs` | v6 `.pggraph` writer/loader, header and body CRCs, 26-section validation, mmap setup |
+| `tenant_store.rs` | Owned/mapped tenant dictionaries, dense tokens, and sparse membership removals |
 | `projection/` | Clean CSR and overlay-aware projection read helpers |
 | `bfs.rs` | BFS and DFS traversal hot loops |
 | `path_finder.rs` | Shortest path and weighted shortest path algorithms |
@@ -116,7 +122,7 @@ Default feature: `pg17`.
 | `roaring` | Visited sets, tenant bitmaps, filter bitmaps |
 | `bitvec` | Packed active-node bits |
 | `xxhash-rust` | Hashing support |
-| `bincode` | Durable projection segment and compatibility encodings; base artifact v5 uses explicit sections |
+| `bincode` | Durable projection segment and compatibility encodings; base artifact v6 uses explicit sections |
 | `crc32fast` | `.pggraph` file integrity |
 | `thiserror` | Error type derive |
 | `memmap2` | mmap-backed artifact loading |

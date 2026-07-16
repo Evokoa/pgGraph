@@ -5,6 +5,8 @@ DBNAME="${DBNAME:-postgres}"
 PGDATA="${PGDATA:?PGDATA must point at the test Postgres data directory}"
 POSTGRES_CTL="${POSTGRES_CTL:-pg_ctl}"
 POSTGRES_OPTS="${POSTGRES_OPTS:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSPECTOR="$SCRIPT_DIR/../../../scripts/inspect_pggraph_artifact.py"
 
 start_postgres() {
   if [[ -n "$POSTGRES_OPTS" ]]; then
@@ -88,7 +90,15 @@ END
 $$;
 SQL
 
-graph_file="$PGDATA/graph/main.pggraph"
+data_directory="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT current_setting('data_directory')")"
+graph_data_dir="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT COALESCE(NULLIF(current_setting('graph.data_dir', true), ''), 'graph')")"
+graph_id="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT graph_id FROM graph.current_graph()")"
+if [[ "$graph_data_dir" = /* ]]; then
+  graph_logical_path="$graph_data_dir/$graph_id/main.pggraph"
+else
+  graph_logical_path="$data_directory/$graph_data_dir/$graph_id/main.pggraph"
+fi
+graph_file="$(python3 "$INSPECTOR" --resolve-only "$graph_logical_path")"
 if [[ -f "$graph_file" ]]; then
   printf 'X' | dd of="$graph_file" bs=1 seek=0 count=1 conv=notrunc status=none
   "$POSTGRES_CTL" -D "$PGDATA" -m immediate stop

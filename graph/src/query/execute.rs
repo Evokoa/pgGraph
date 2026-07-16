@@ -1511,10 +1511,7 @@ fn tenant_allows_node(engine: &Engine, node_idx: u32, tenant: Option<&str>) -> b
         return false;
     };
     !engine.tenanted_table_oids.contains(&table_oid)
-        || engine
-            .tenant_membership
-            .get(tenant)
-            .is_some_and(|bitmap| bitmap.contains(node_idx))
+        || engine.tenant_contains(tenant, node_idx)
         || crate::projection::tx_delta::added_node_by_index(node_idx)
             .and_then(|node| node.tenant)
             .is_some_and(|created| created == tenant)

@@ -7,9 +7,10 @@ use crate::catalog::{
 };
 use crate::filter_index::{EncodedFilterValue, FilterColumnType, PersistedFilterValue};
 use crate::persistence::{
-    graph_artifact_checksum_for_path, graph_artifact_version, graph_file_path, load_graph_file,
-    load_graph_file_with_projection_candidate_and_residency, load_graph_file_with_residency,
-    projection_manifest_root, read_sync_checkpoint,
+    current_base_artifact_path, graph_artifact_checksum_for_path, graph_artifact_version,
+    graph_file_path, load_graph_file, load_graph_file_with_projection_candidate_and_residency,
+    load_graph_file_with_residency, persisted_graph_exists, projection_manifest_root,
+    read_sync_checkpoint,
 };
 use crate::projection::ingest::{ProjectionIngestResult, ProjectionIngester, ProjectionSyncRow};
 use crate::projection::manifest::{
@@ -524,7 +525,7 @@ fn ensure_engine_loaded_for_apply_sync() -> safety::GraphResult<()> {
     }
 
     let graph_path = graph_file_path()?;
-    if !graph_path.exists() {
+    if !persisted_graph_exists(&graph_path)? {
         return Err(safety::GraphError::NotBuilt);
     }
 
@@ -537,7 +538,7 @@ fn should_apply_sync_via_durable_projection() -> bool {
         Ok(path) => path,
         Err(_) => return false,
     };
-    graph_path.exists()
+    persisted_graph_exists(&graph_path).unwrap_or(false)
         && ENGINE.with(|e| e.borrow().projection_mode == config::ProjectionMode::MutableOverlay)
 }
 
@@ -603,7 +604,7 @@ fn ingest_projection_until_internal(
     crate::sql_build::acquire_build_lock()?;
     let graph = selected_or_default_graph_metadata()?;
     let graph_path = graph_file_path()?;
-    if !graph_path.exists() {
+    if !persisted_graph_exists(&graph_path)? {
         return Err(safety::GraphError::NotBuilt);
     }
     let root = projection_manifest_root(&graph_path);
@@ -643,10 +644,10 @@ fn ingest_projection_until_internal(
         .map_err(crate::safety::resource_limit_error)?;
     let store = ProjectionManifestStore::new(root.clone());
     let previous = store.load_latest_current()?;
-    let previous_watermark = previous.as_ref().map_or(
-        read_sync_checkpoint(&graph_path)?.unwrap_or(0),
-        |manifest| manifest.sync_watermark,
-    );
+    let previous_watermark = match previous.as_ref() {
+        Some(manifest) => manifest.sync_watermark,
+        None => read_sync_checkpoint(&graph_path)?.unwrap_or(0),
+    };
     ensure_sync_writer_barrier_triggers()?;
     acquire_sync_writer_barrier()?;
     ensure_no_current_transaction_sync_rows(previous_watermark)?;
@@ -763,7 +764,9 @@ fn ingest_projection_until_internal(
                 "materialized relationship identity store was not owned".to_string(),
             )
         })?;
-    let base_artifact_path = graph_path
+    let current_base_path =
+        current_base_artifact_path(&graph_path)?.ok_or(safety::GraphError::NotBuilt)?;
+    let base_artifact_path = current_base_path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
@@ -773,7 +776,7 @@ fn ingest_projection_until_internal(
     let ingester = ProjectionIngester::new(
         root,
         base_artifact_path,
-        graph_artifact_checksum_for_path(&graph_path)?,
+        graph_artifact_checksum_for_path(&current_base_path)?,
         graph_artifact_version(),
     );
     let candidate_residency = planning_residency
@@ -788,7 +791,7 @@ fn ingest_projection_until_internal(
         &governor,
         |candidate| {
             load_graph_file_with_projection_candidate_and_residency(
-                &graph_path,
+                &current_base_path,
                 candidate,
                 candidate_residency,
             )

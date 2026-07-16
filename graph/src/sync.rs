@@ -131,13 +131,9 @@ pub fn sync_update_tenant(
     if old_tenant.is_some() || tenant.is_some() {
         engine.tenanted_table_oids.insert(table_oid);
         if let Some(old_tenant) = old_tenant {
-            if let Some(bitmap) = engine.tenant_membership.get_mut(old_tenant) {
-                bitmap.remove(node_idx);
-            }
+            engine.remove_tenant_membership(old_tenant, node_idx);
         } else {
-            for bitmap in engine.tenant_membership.values_mut() {
-                bitmap.remove(node_idx);
-            }
+            engine.remove_all_tenant_memberships(node_idx);
         }
         if let Some(tenant) = tenant {
             engine.insert_tenant_membership(tenant, node_idx);
@@ -207,13 +203,9 @@ pub fn sync_delete_tenant(
     }
 
     if let Some(old_tenant) = old_tenant {
-        if let Some(bitmap) = engine.tenant_membership.get_mut(old_tenant) {
-            bitmap.remove(node_idx);
-        }
+        engine.remove_tenant_membership(old_tenant, node_idx);
     } else {
-        for bitmap in engine.tenant_membership.values_mut() {
-            bitmap.remove(node_idx);
-        }
+        engine.remove_all_tenant_memberships(node_idx);
     }
 
     Ok(())
@@ -240,10 +232,8 @@ pub fn sync_truncate(engine: &mut Engine, table_oid: u32) -> GraphResult<u64> {
         }
     }
     engine.table_membership.remove(&table_oid);
-    for bitmap in engine.tenant_membership.values_mut() {
-        for node_idx in &truncated_nodes {
-            bitmap.remove(node_idx);
-        }
+    for node_idx in &truncated_nodes {
+        engine.remove_all_tenant_memberships(node_idx);
     }
     engine.mark_vacuum_required();
     Ok(tombstoned)

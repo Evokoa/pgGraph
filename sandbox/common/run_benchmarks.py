@@ -27,6 +27,9 @@ DOCKER_HELP = """If you need to install Docker, see:
   Windows: https://docs.docker.com/desktop/setup/install/windows-install/
   Linux:   https://docs.docker.com/desktop/setup/install/linux/"""
 
+GRAPH_BUSY_DIAGNOSTIC = "pgGraph diagnostic: PG006"
+GRAPH_BUILD_WAIT_SECONDS = 600
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -125,6 +128,32 @@ def psql(
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
     return completed.stdout
+
+
+def build_graph_with_retry(container: str, build_mode: str, dataset: str) -> str:
+    """Build after transient scheduled-maintenance contention clears."""
+    deadline = time.monotonic() + GRAPH_BUILD_WAIT_SECONDS
+    attempt = 0
+    while True:
+        try:
+            return psql(
+                container,
+                build_sql(build_mode),
+                timeout=None,
+                tuples_only=True,
+                progress_label=f"Running graph.build({build_mode}) for {dataset}",
+            ).strip()
+        except RuntimeError as error:
+            if GRAPH_BUSY_DIAGNOSTIC not in str(error) or time.monotonic() >= deadline:
+                raise
+            delay = min(5, 1 + attempt)
+            print(
+                f"graph.build({build_mode}) is waiting for scheduled maintenance; "
+                f"retrying in {delay}s...",
+                flush=True,
+            )
+            time.sleep(delay)
+            attempt += 1
 
 
 def docker_cp(src: Path, container: str, dest: str) -> None:
@@ -910,13 +939,7 @@ def prepare_dataset(args: argparse.Namespace, dataset: str) -> dict[str, object]
     load_seconds = time.perf_counter() - load_started
 
     build_started = time.perf_counter()
-    build_output = psql(
-        args.container,
-        build_sql(args.build_mode),
-        timeout=None,
-        tuples_only=True,
-        progress_label=f"Running graph.build({args.build_mode}) for {dataset}",
-    ).strip()
+    build_output = build_graph_with_retry(args.container, args.build_mode, dataset)
     build_seconds = time.perf_counter() - build_started
     if dataset == "panama":
         seed_table = "panama.nodes"

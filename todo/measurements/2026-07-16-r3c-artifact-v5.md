@@ -1,5 +1,9 @@
 # R3C Artifact v5 And Bounded Load — 2026-07-16
 
+> Superseded before release by artifact v6, which adds exact tenant metadata
+> and the unidirectional-edge capability flag. See
+> `2026-07-16-r3c-artifact-v6.md`.
+
 ## Result
 
 Artifact v5 is complete as the validated mapped-load boundary. Its manual

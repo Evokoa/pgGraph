@@ -10,6 +10,7 @@ STATEMENT_TIMEOUT_MS="${STATEMENT_TIMEOUT_MS:-300000}"
 LOCK_TIMEOUT_MS="${LOCK_TIMEOUT_MS:-30000}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRAPH_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+INSPECTOR="$GRAPH_DIR/../scripts/inspect_pggraph_artifact.py"
 WORKDIR="$(mktemp -d "${PGGRAPH_TEST_TMPDIR:-/tmp}/pggraph-process-sanitizer.XXXXXX")"
 DATA_DIR="$WORKDIR/data"
 SOCKET_DIR="$WORKDIR/socket"
@@ -157,11 +158,10 @@ fi
 
 "$PG_BIN/psql" -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
   "SELECT * FROM graph.unload_graph('default', namespace := 'public')" >/dev/null
-artifact_path="$(find "$DATA_DIR/graph" -name main.pggraph -type f -print -quit)"
-if [[ -z "$artifact_path" ]]; then
-  echo "persisted sanitizer artifact was not created" >&2
-  exit 1
-fi
+graph_id="$("$PG_BIN/psql" -X -qAt -v ON_ERROR_STOP=1 -d "$DBNAME" \
+  -c "SELECT graph_id FROM graph.current_graph()")"
+artifact_path="$(python3 "$INSPECTOR" --resolve-only \
+  "$DATA_DIR/graph/$graph_id/main.pggraph")"
 cp "$artifact_path" "$WORKDIR/main.pggraph.valid"
 printf '\000' | dd of="$artifact_path" bs=1 seek=0 conv=notrunc status=none
 if "$PG_BIN/psql" -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \

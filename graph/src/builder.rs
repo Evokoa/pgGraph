@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use pgrx::prelude::*;
 
+use crate::build_spool::{create_node_lookup_spool, NodeLookupBatch};
 use crate::catalog::{estimated_table_rows, sql_table_name_from_oid};
 use crate::config::BuildScanMode;
 use crate::edge_store::{
@@ -404,7 +405,7 @@ pub(crate) fn build_graph_with_governor(
 
                     let node_idx = engine.node_store.try_add_node(oid, pk.clone())?;
                     engine.try_build_insert_table_membership(oid, node_idx)?;
-                    node_lookup_batch.push(oid, pk.clone(), node_idx)?;
+                    node_lookup_batch.push(oid, &pk, node_idx)?;
 
                     // Index in ResolutionIndex
                     let resolution_bytes = ByteCount::from_usize(
@@ -471,9 +472,8 @@ pub(crate) fn build_graph_with_governor(
             Ok::<(), GraphError>(())
         })?;
     }
-    node_lookup_batch.flush()?;
     let node_batch_pressure_events = node_lookup_batch.pressure_events();
-    index_node_lookup_spool()?;
+    let _node_lookup_guard = node_lookup_batch.finish()?;
 
     register_filter_columns(&mut engine, filter_columns, &filter_populated_counts);
     for ((table_oid, column_name), node_idx, value) in pending_filter_values {
@@ -706,91 +706,6 @@ pub(crate) fn build_graph_with_governor(
     Ok(engine)
 }
 
-struct NodeLookupBatch<'a> {
-    table_oids: Vec<i64>,
-    primary_keys: Vec<String>,
-    node_indices: Vec<i64>,
-    policy: AdaptiveBatch,
-    memory: crate::resource::ResourceLease<'a>,
-}
-
-impl<'a> NodeLookupBatch<'a> {
-    fn with_limits(
-        governor: &'a crate::resource::ResourceGovernor,
-        row_limit: i32,
-        byte_limit: ByteCount,
-    ) -> GraphResult<Self> {
-        Ok(Self {
-            table_oids: Vec::new(),
-            primary_keys: Vec::new(),
-            node_indices: Vec::new(),
-            policy: AdaptiveBatch::new(
-                ResourcePhase::NodeBatch,
-                row_limit.max(1) as usize,
-                byte_limit,
-            ),
-            memory: governor
-                .reserve_memory(ResourcePhase::NodeBatch, ByteCount::ZERO)
-                .map_err(resource_error_to_graph)?,
-        })
-    }
-
-    fn push(&mut self, table_oid: u32, primary_key: String, node_idx: u32) -> GraphResult<()> {
-        let row_bytes = batch_row_bytes::<(i64, i64)>(&primary_key)?;
-        if self.policy.before_push(row_bytes) == BatchAction::Flush {
-            self.flush()?;
-        }
-        self.memory
-            .try_grow_in(ResourcePhase::NodeBatch, row_bytes)
-            .map_err(resource_error_to_graph)?;
-        self.table_oids
-            .try_reserve(1)
-            .map_err(|error| allocation_error("node lookup table OIDs", error))?;
-        self.primary_keys
-            .try_reserve(1)
-            .map_err(|error| allocation_error("node lookup primary keys", error))?;
-        self.node_indices
-            .try_reserve(1)
-            .map_err(|error| allocation_error("node lookup indices", error))?;
-        self.table_oids.push(i64::from(table_oid));
-        self.primary_keys.push(primary_key);
-        self.node_indices.push(i64::from(node_idx));
-        self.policy
-            .record(row_bytes)
-            .map_err(batch_accounting_error)?;
-        if self.policy.is_full() {
-            self.flush()?;
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) -> GraphResult<()> {
-        if self.table_oids.is_empty() {
-            return Ok(());
-        }
-
-        let table_oids = std::mem::take(&mut self.table_oids);
-        let primary_keys = std::mem::take(&mut self.primary_keys);
-        let node_indices = std::mem::take(&mut self.node_indices);
-        self.policy.clear();
-
-        let result = Spi::run_with_args(
-            "INSERT INTO pg_temp.graph_build_nodes (table_oid, primary_key, node_idx)
-             SELECT table_oid, primary_key, node_idx
-             FROM unnest($1::int8[], $2::text[], $3::int8[])
-               AS node(table_oid, primary_key, node_idx)",
-            &[table_oids.into(), primary_keys.into(), node_indices.into()],
-        )
-        .map_err(|err| GraphError::Internal(format!("node lookup batch insert failed: {}", err)));
-        self.memory.release_all();
-        result
-    }
-
-    fn pressure_events(&self) -> u64 {
-        self.policy.pressure_events()
-    }
-}
-
 fn batch_row_bytes<T>(text: &str) -> GraphResult<ByteCount> {
     let fixed = std::mem::size_of::<T>()
         .checked_add(std::mem::size_of::<String>())
@@ -841,29 +756,6 @@ fn resource_error_to_graph(error: crate::resource::ResourceLimitError) -> GraphE
         need_mb: ByteCount::from_bytes(error.requested()).ceil_mib(),
         limit_mb: ByteCount::from_bytes(error.limit()).as_u64() / 1_048_576,
     }
-}
-
-fn create_node_lookup_spool() -> GraphResult<()> {
-    Spi::run(
-        "DROP TABLE IF EXISTS pg_temp.graph_build_nodes;
-         CREATE TEMP TABLE graph_build_nodes (
-            table_oid bigint NOT NULL,
-            primary_key text NOT NULL,
-            node_idx bigint NOT NULL
-         ) ON COMMIT DROP",
-    )
-    .map_err(|err| GraphError::Internal(format!("node lookup spool setup failed: {}", err)))
-}
-
-fn index_node_lookup_spool() -> GraphResult<()> {
-    Spi::run(
-        "CREATE INDEX graph_build_nodes_table_pk_idx
-           ON pg_temp.graph_build_nodes (table_oid, primary_key);
-         CREATE INDEX graph_build_nodes_pk_idx
-           ON pg_temp.graph_build_nodes (primary_key, table_oid);
-         ANALYZE pg_temp.graph_build_nodes",
-    )
-    .map_err(|err| GraphError::Internal(format!("node lookup spool index failed: {}", err)))
 }
 
 fn push_unresolved_edge(

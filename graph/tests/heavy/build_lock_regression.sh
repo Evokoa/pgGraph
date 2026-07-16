@@ -7,6 +7,8 @@ PG_MAJOR="${PG_VERSION_FEATURE#pg}"
 PG_CONFIG="${PG_CONFIG:-}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
 WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-build-lock.XXXXXX")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSPECTOR="$SCRIPT_DIR/../../../scripts/inspect_pggraph_artifact.py"
 
 LOCK_PID=""
 PUBLISH_PID=""
@@ -285,10 +287,11 @@ graph_data_dir="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
 graph_id="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
   -c "SELECT graph_id FROM graph.current_graph()")"
 if [[ "$graph_data_dir" = /* ]]; then
-  graph_path="$graph_data_dir/$graph_id/main.pggraph"
+  graph_logical_path="$graph_data_dir/$graph_id/main.pggraph"
 else
-  graph_path="$data_directory/$graph_data_dir/$graph_id/main.pggraph"
+  graph_logical_path="$data_directory/$graph_data_dir/$graph_id/main.pggraph"
 fi
+graph_path="$(python3 "$INSPECTOR" --resolve-only "$graph_logical_path")"
 graph_tmp_path="${graph_path}.tmp"
 if [[ ! -f "$graph_path" ]]; then
   echo "expected persisted graph artifact at $graph_path"

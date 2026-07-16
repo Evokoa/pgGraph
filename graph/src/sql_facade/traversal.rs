@@ -683,10 +683,7 @@ fn tenant_allows_direct_node(engine: &Engine, node_idx: u32, tenant: Option<&str
                 .table_oid(node_idx)
                 .is_some_and(|table_oid| engine.tenanted_table_oids.contains(&table_oid)) =>
         {
-            engine
-                .tenant_membership
-                .get(tenant)
-                .is_some_and(|nodes| nodes.contains(node_idx))
+            engine.tenant_contains(tenant, node_idx)
         }
         _ => true,
     }

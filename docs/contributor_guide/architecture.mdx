@@ -126,10 +126,10 @@ from paths, backend globals, or session state.
 | `NodeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | The store owns its mapping independently of engine field/drop order |
 | Forward and inbound `EdgeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | Each store owns its mapping independently of engine field/drop order |
 | `FilterIndex` after load | Mapped base plus `Engine` heap deltas | Graph-sized typed values and lexical dictionaries stay mapped; post-load changes are sparse |
-| `edge_type_registry` after load | `Engine` heap | Bounded labels are decoded from their v5 section |
+| `edge_type_registry` after load | `Engine` heap | Bounded labels are decoded from their v6 section |
 | Relationship identities after load | Mapped base plus `Engine` heap suffix | Source identity descriptors and keys stay mapped; later identities extend them without copying the base |
 | `ResolutionIndex` mapped mode | Byte range inside the immutable snapshot | The engine retains an `Arc` for resolution lookup and accounting |
-| Durable projection manifests, segments, and chunks | Files beside each graph's `main.pggraph` | Shared through the filesystem and retained by graph-scoped active-generation metadata |
+| Durable base generations, manifests, segments, and chunks | Files in each graph's artifact root | Shared through the filesystem and retained by graph-scoped active-generation metadata |
 | `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local compatibility sync overlay state |
 | `TxGraphDelta` | Current backend transaction | Transaction-local read-your-own-writes state only |
 
@@ -142,7 +142,7 @@ The system supports multiple isolated named graphs within the same database. Thi
 | Registration catalogs | `graph._registered_tables`, `graph._registered_edges`, and `graph._registered_filter_columns` are keyed by `graph_id`; compatibility SQL resolves the selected or default graph before reading or writing them. |
 | Runtime | `ENGINE` stores one backend-local graph engine tagged by a loaded graph slot. `ensure_current_graph()` validates that the loaded slot matches the selected graph before query execution. |
 | Build and hosted jobs | `graph._build_jobs`, `graph._maintenance_jobs`, `graph._jobs`, `graph._job_runs`, and `graph._sync_policies` are keyed by `graph_id`; workers and hosted schedulers restore database, user, and graph context before running. |
-| Persistence | The graph artifact is stored as `$PGDATA/<graph.data_dir>/<graph_id>/main.pggraph`. |
+| Persistence | Each graph uses `$PGDATA/<graph.data_dir>/<graph_id>/` as its artifact root. `main.pggraph` is the logical compatibility path; current persisted builds serve the generation-specific base selected by `projection-current.json` and its manifest. |
 | Sync | `graph._sync_log` and `graph._sync_buffer` are global source-table streams; replay, status, and query freshness filter `_sync_log` through the selected graph's registered table OIDs. |
 | Projection generations | `graph._projection_generations` is keyed by `graph_id` so active-generation heartbeats and GC protection are graph-local. |
 | Discovery | `graph.auto_discover()` and `graph.auto_discover_tables()` target a named graph or the selected/default graph. |
@@ -155,22 +155,25 @@ Named-graph changes moved each of these components from implicit global state to
 <PipelineDiagram>
   <PipelineStep title="graph catalog" />
   <PipelineStep arrowLabel="read registered tables, edges, filters" title="SPI cursor batches over source tables">
-    - NodeStore rows
-    - ResolutionIndexBuilder entries
-    - FilterIndex values
-    - tenant membership bitmaps
+    - bounded node and edge batches
+    - filter and resolution records
+    - tenant and relationship-identity records
   </PipelineStep>
-  <PipelineStep title="temporary edge rows sorted by source/target/type" />
-  <PipelineStep title="SortedEdgeStoreBuilder">
-    - forward CSR EdgeStore
-    - relationship-ID sidecar
-    - reverse CSR EdgeStore
+  <PipelineStep title="checksummed external-sort runs">
+    - bounded merge fanout
+    - governed memory, disk, work, and elapsed time
   </PipelineStep>
-  <PipelineStep title="active Engine" />
-  <PipelineStep arrowLabel="graph.persist_on_build" title="atomic .pggraph artifact" />
+  <PipelineStep title="streamed immutable v6 base candidate" />
+  <PipelineStep title="production loader and source revalidation" />
+  <PipelineStep title="atomic current-manifest switch" />
+  <PipelineStep title="mmap-backed active Engine" />
 </PipelineDiagram>
 
-The build path is allowed to allocate and sort. Query paths are not.
+This is the persisted build and vacuum path. It does not construct a complete
+owned replacement graph: graph-sized ordering is performed through bounded
+runs, and the candidate is streamed directly into its final mmap-ready layout.
+The nonpersisted build path retains the owned builder for backend-local use.
+Query paths do not allocate or sort graph-sized state.
 
 ## Data Flow: Load
 
@@ -178,9 +181,10 @@ The build path is allowed to allocate and sort. Query paths are not.
 store:
 
 <PipelineDiagram>
-  <PipelineStep title="open .pggraph" />
+  <PipelineStep title="resolve projection-current.json and its manifest" />
+  <PipelineStep title="open the selected generation base, or the compatibility fallback" />
   <PipelineStep title="mmap read-only" />
-  <PipelineStep title="validate v5 header, both CRCs, 23 descriptors, CSR, PK offsets, filters, and identities">
+  <PipelineStep title="validate v6 header, both CRCs, 26 descriptors, CSR, PK offsets, filters, identities, and tenants">
     - mmap-backed NodeStore arrays
     - mmap-backed forward and inbound EdgeStore arrays and relationship IDs
     - mmap-backed ResolutionIndex section
@@ -240,8 +244,9 @@ backends can observe committed topology changes without a full rebuild.
             <TreeNode title="fresh build from source tables">
               <TreeBranch>
                 <TreeNode title="new active Engine" />
-                <TreeNode title="new .pggraph artifact" />
-                <TreeNode title="base-only projection generation" />
+                <TreeNode title="new immutable base artifact" />
+                <TreeNode title="validated base-only projection generation" />
+                <TreeNode title="atomic current-pointer switch" />
               </TreeBranch>
             </TreeNode>
           </TreeNode>

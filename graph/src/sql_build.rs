@@ -31,6 +31,18 @@ fn graph_build_lock_object_id(graph_id: &str) -> i32 {
     i32::from_ne_bytes(hash.to_ne_bytes())
 }
 
+fn plan_rebuilt_base_publication(
+    root: &std::path::Path,
+) -> safety::GraphResult<crate::projection::recovery::RebuiltBasePublicationPlan> {
+    match crate::projection::recovery::plan_generation_specific_rebuilt_base(root) {
+        Ok(plan) => Ok(plan),
+        Err(
+            safety::GraphError::CorruptFile { .. } | safety::GraphError::IncompatibleVersion(_),
+        ) => crate::projection::recovery::plan_generation_specific_rebuilt_base_for_recovery(root),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) type ProgressCallback<'a> =
     dyn FnMut(&'static str, &'static str) -> safety::GraphResult<()> + 'a;
 
@@ -42,114 +54,272 @@ fn report_progress(
     progress(phase, message)
 }
 
-struct EngineRuntimeMetadata {
-    catalog_fingerprint: Option<u64>,
-    is_read_only: bool,
-    read_only_reason: Option<engine::ReadOnlyReason>,
-    sync_status: engine::SyncStatus,
-    last_build: Option<pgrx::prelude::TimestampWithTimeZone>,
-    last_vacuum: Option<pgrx::prelude::TimestampWithTimeZone>,
-    applied_sync_id: i64,
-    needs_vacuum: bool,
+struct PersistedBuildRequest<'a> {
+    operation: &'static str,
+    graph_id: &'a str,
+    tables: &'a [builder::RegisteredTable],
+    edges: &'a [builder::RegisteredEdge],
+    filter_columns: &'a [builder::RegisteredFilterColumn],
     projection_mode: config::ProjectionMode,
-    build_resource_budget_bytes: u64,
-    build_resource_peak_bytes: u64,
-    build_resource_peak_phase: Option<crate::resource::ResourcePhase>,
-    build_resource_pressure_events: u64,
+    publication_plan: &'a crate::projection::recovery::RebuiltBasePublicationPlan,
+    source_boundary: &'a crate::build_snapshot::SourceSnapshotBoundary,
+    vacuum: bool,
 }
 
-impl EngineRuntimeMetadata {
-    fn capture(source: &engine::Engine) -> Self {
-        Self {
-            catalog_fingerprint: source.catalog_fingerprint,
-            is_read_only: source.is_read_only,
-            read_only_reason: source.read_only_reason,
-            sync_status: source.sync_status,
-            last_build: source.last_build,
-            last_vacuum: source.last_vacuum,
-            applied_sync_id: source.applied_sync_id,
-            needs_vacuum: source.needs_vacuum,
-            projection_mode: source.projection_mode,
-            build_resource_budget_bytes: source.build_resource_budget_bytes,
-            build_resource_peak_bytes: source.build_resource_peak_bytes,
-            build_resource_peak_phase: source.build_resource_peak_phase,
-            build_resource_pressure_events: source.build_resource_pressure_events,
-        }
-    }
-
-    fn apply_to(self, target: &mut engine::Engine) {
-        target.catalog_fingerprint = self.catalog_fingerprint;
-        target.is_read_only = self.is_read_only;
-        target.read_only_reason = self.read_only_reason;
-        target.sync_status = self.sync_status;
-        target.last_build = self.last_build;
-        target.last_vacuum = self.last_vacuum;
-        target.applied_sync_id = self.applied_sync_id;
-        target.needs_vacuum = self.needs_vacuum;
-        target.projection_mode = self.projection_mode;
-        target.build_resource_budget_bytes = self.build_resource_budget_bytes;
-        target.build_resource_peak_bytes = self.build_resource_peak_bytes;
-        target.build_resource_peak_phase = self.build_resource_peak_phase;
-        target.build_resource_pressure_events = self.build_resource_pressure_events;
-    }
-}
-
-fn persist_and_reload_engine(
-    operation: &str,
-    source: engine::Engine,
+fn build_persisted_and_publish_engine(
+    request: PersistedBuildRequest<'_>,
     progress: &mut ProgressCallback<'_>,
     governor: &crate::resource::ResourceGovernor,
+    memory_plan: BuildMemoryPlan,
 ) -> safety::GraphResult<engine::Engine> {
-    let path = persistence::graph_file_path()?;
-    report_progress(
-        progress,
-        "persisting",
-        "writing and fsyncing graph artifact",
-    )?;
-    persistence::write_graph_file_with_interrupt_checks_and_resources(&source, &path, governor)
-        .map_err(|error| match error {
-            error @ safety::GraphError::Oom { .. } => error,
-            error => safety::GraphError::Internal(format!(
-                "graph.{operation}(): persistence failed: {error}"
-            )),
+    let path = request.publication_plan.candidate_base_path();
+    let result = (|| {
+        report_progress(
+            progress,
+            "persisting",
+            "scanning, writing, and fsyncing graph artifact",
+        )?;
+        let options = direct_build_options(
+            request.graph_id,
+            request.publication_plan.generation_id(),
+            request.source_boundary,
+            request.projection_mode,
+            memory_plan,
+        )?;
+        let direct = crate::persisted_build_pipeline::build_persisted_candidate(
+            request.tables,
+            request.edges,
+            request.filter_columns,
+            path,
+            governor,
+            &options,
+        )
+        .map_err(|error| {
+            contextualize_internal_candidate_error(
+                request.operation,
+                "direct persisted build",
+                error,
+            )
         })?;
-    let projection_root = persistence::projection_manifest_root(&path);
-    if source.projection_mode == config::ProjectionMode::MutableOverlay
-        || crate::projection::recovery::has_projection_generation(&projection_root)?
-    {
-        crate::projection::recovery::publish_rebuilt_base_manifest(&path, source.applied_sync_id)
-            .map_err(|err| {
+        let manifest =
+            crate::projection::recovery::prepare_generation_specific_rebuilt_base_manifest(
+                request.publication_plan,
+                request.source_boundary.sync_watermark(),
+            )?;
+
+        report_progress(
+            progress,
+            "validating_persistence",
+            "validating persisted graph artifact",
+        )?;
+        let mut loaded = persistence::load_graph_file_with_projection_candidate_and_residency(
+            path,
+            manifest.manifest(),
+            memory_plan.serving_bytes,
+        )
+        .map_err(|error| {
+            contextualize_internal_candidate_error(
+                request.operation,
+                "persisted mmap reload",
+                error,
+            )
+        })?;
+        if loaded.node_store.node_count() != direct.node_count
+            || loaded.edge_store.edge_count() != direct.edge_count
+        {
+            return Err(safety::GraphError::CorruptFile {
+                reason: "direct persisted candidate counts changed during validation".into(),
+            });
+        }
+        loaded.set_catalog_fingerprint(request.source_boundary.catalog_fingerprint());
+        loaded.record_applied_sync_id(request.source_boundary.sync_watermark());
+        loaded.set_projection_mode(request.projection_mode);
+        loaded.build_resource_pressure_events = direct.pressure_events;
+        loaded.finish_build(Some(pgrx::datetime::transaction_timestamp()));
+        if request.vacuum {
+            loaded.mark_vacuum_complete(Some(pgrx::datetime::transaction_timestamp()));
+        }
+
+        request.source_boundary.verify(request.operation)?;
+        crate::projection::recovery::publish_prepared_generation_specific_rebuilt_base(
+            request.publication_plan,
+            &manifest,
+        )
+        .map_err(|err| {
             safety::GraphError::Internal(format!(
-                "graph.{operation}(): projection manifest rebase failed: {err}"
+                "graph.{operation}(): projection manifest publication failed: {err}",
+                operation = request.operation
             ))
         })?;
+
+        let file_size = std::fs::metadata(path)
+            .map(|metadata| metadata.len() as f64 / 1_048_576.0)
+            .unwrap_or(0.0);
+        pgrx::log!(
+            "graph: persisted generation {} to {} ({:.1} MB)",
+            request.publication_plan.generation_id(),
+            path.display(),
+            file_size
+        );
+        Ok(loaded)
+    })();
+    if result.is_err() {
+        cleanup_failed_candidate(request.publication_plan);
     }
+    result
+}
 
-    let file_size = std::fs::metadata(&path)
-        .map(|m| m.len() as f64 / 1_048_576.0)
-        .unwrap_or(0.0);
-    pgrx::log!(
-        "graph: persisted to {} ({:.1} MB)",
-        path.display(),
-        file_size
-    );
+fn contextualize_internal_candidate_error(
+    operation: &str,
+    stage: &str,
+    error: safety::GraphError,
+) -> safety::GraphError {
+    match error {
+        safety::GraphError::Internal(reason) => {
+            safety::GraphError::Internal(format!("graph.{operation}(): {stage} failed: {reason}"))
+        }
+        typed => typed,
+    }
+}
 
-    let metadata = EngineRuntimeMetadata::capture(&source);
-    drop(source);
+fn cleanup_failed_candidate(
+    publication_plan: &crate::projection::recovery::RebuiltBasePublicationPlan,
+) {
+    match publication_plan.candidate_is_current() {
+        Ok(false) => remove_staged_base(publication_plan.candidate_base_path()),
+        Ok(true) => warn_preserved_candidate(publication_plan.generation_id(), None),
+        Err(error) => warn_preserved_candidate(publication_plan.generation_id(), Some(&error)),
+    }
+}
 
-    report_progress(
-        progress,
-        "validating_persistence",
-        "validating persisted graph artifact",
-    )?;
-    let mut loaded = persistence::load_graph_file(&path).map_err(|err| {
-        safety::GraphError::Internal(format!(
-            "graph.{operation}(): persisted mmap reload failed: {err}"
-        ))
-    })?;
-    metadata.apply_to(&mut loaded);
+#[cfg(not(test))]
+fn warn_preserved_candidate(generation_id: u64, error: Option<&safety::GraphError>) {
+    match error {
+        None => pgrx::warning!(
+            "graph: preserving generation {} candidate after publication error because it is current",
+            generation_id
+        ),
+        Some(error) => pgrx::warning!(
+            "graph: preserving generation {} candidate after publication error because current generation could not be verified: {}",
+            generation_id,
+            error
+        ),
+    }
+}
 
-    Ok(loaded)
+#[cfg(test)]
+fn warn_preserved_candidate(_generation_id: u64, _error: Option<&safety::GraphError>) {}
+
+fn direct_build_options(
+    graph_id: &str,
+    generation_id: u64,
+    source_boundary: &crate::build_snapshot::SourceSnapshotBoundary,
+    projection_mode: config::ProjectionMode,
+    memory_plan: BuildMemoryPlan,
+) -> safety::GraphResult<crate::persisted_build_pipeline::DirectBuildOptions> {
+    const MERGE_FANOUT: usize = 4;
+    const MAX_RUN_FILES: usize = 64;
+    const MAX_RECORD_CEILING: u64 = 1024 * 1024;
+    let divisor = u64::try_from((MERGE_FANOUT + 1) * 4)
+        .map_err(|_| safety::GraphError::Internal("merge reservation divisor overflowed".into()))?;
+    let max_record_bytes = usize::try_from(
+        (memory_plan.replacement_budget_bytes.as_u64() / divisor).clamp(32, MAX_RECORD_CEILING),
+    )
+    .map_err(|_| safety::GraphError::Internal("maximum run record size overflowed".into()))?;
+    Ok(crate::persisted_build_pipeline::DirectBuildOptions {
+        graph_id: parse_graph_uuid(graph_id)?,
+        build_id: direct_build_id(generation_id, source_boundary.catalog_fingerprint()),
+        catalog_fingerprint: source_boundary.catalog_fingerprint(),
+        batch_size: config::BUILD_BATCH_SIZE.get().max(1) as usize,
+        run_target: memory_plan.batch_bytes,
+        max_record_bytes,
+        max_run_files: MAX_RUN_FILES,
+        merge_fanout: MERGE_FANOUT,
+        applied_sync_id: source_boundary.sync_watermark(),
+        projection_mode,
+    })
+}
+
+fn parse_graph_uuid(value: &str) -> safety::GraphResult<[u8; 16]> {
+    if value.len() != 36
+        || value
+            .bytes()
+            .enumerate()
+            .any(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) != (byte == b'-'))
+    {
+        return Err(safety::GraphError::Internal(
+            "selected graph ID is not a canonical UUID".into(),
+        ));
+    }
+    let mut output = [0_u8; 16];
+    let mut digits = value.bytes().filter(|byte| *byte != b'-');
+    for byte in &mut output {
+        let high = digits.next().and_then(hex_digit);
+        let low = digits.next().and_then(hex_digit);
+        *byte = match (high, low) {
+            (Some(high), Some(low)) => (high << 4) | low,
+            _ => {
+                return Err(safety::GraphError::Internal(
+                    "selected graph ID is not a canonical UUID".into(),
+                ))
+            }
+        };
+    }
+    if digits.next().is_some() {
+        return Err(safety::GraphError::Internal(
+            "selected graph ID is not a canonical UUID".into(),
+        ));
+    }
+    Ok(output)
+}
+
+const fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn direct_build_id(generation_id: u64, catalog_fingerprint: u64) -> [u8; 16] {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos() as u64);
+    let nonce = time ^ catalog_fingerprint ^ u64::from(std::process::id());
+    let mut build_id = [0_u8; 16];
+    build_id[..8].copy_from_slice(&generation_id.to_le_bytes());
+    build_id[8..].copy_from_slice(&nonce.to_le_bytes());
+    build_id
+}
+
+fn remove_staged_base(path: &std::path::Path) {
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(".tmp");
+    for staged in [
+        path.to_path_buf(),
+        std::path::PathBuf::from(temporary),
+        persistence::sync_checkpoint_path(path),
+        persistence::projection_mode_path(path),
+        append_path_suffix(&persistence::sync_checkpoint_path(path), ".tmp"),
+        append_path_suffix(&persistence::projection_mode_path(path), ".tmp"),
+    ] {
+        match std::fs::remove_file(&staged) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => pgrx::warning!(
+                "graph: could not remove failed staged artifact {}: {}",
+                staged.display(),
+                error
+            ),
+        }
+    }
+}
+
+fn append_path_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    value.into()
 }
 
 pub(crate) fn execute_build(force_persist: bool) -> safety::GraphResult<BuildExecutionResult> {
@@ -243,24 +413,46 @@ fn execute_build_inner(
 
     check_build_acls_result(&tables, &edges)?;
     let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
+    let should_persist = force_persist || config::PERSIST_ON_BUILD.get();
+    let publication_plan = should_persist
+        .then(|| {
+            let path = persistence::graph_file_path()?;
+            plan_rebuilt_base_publication(&persistence::projection_manifest_root(&path))
+        })
+        .transpose()?;
 
     report_progress(progress, build_phase, build_message)?;
     apply_build_memory_plan(memory_plan)?;
     let new_engine = with_build_resources(memory_plan, |governor| {
-        let mut new_engine = build_replacement_engine(
-            &tables,
-            &edges,
-            &filter_columns,
-            governor,
-            memory_plan.batch_bytes,
-            &source_boundary,
-        )?;
-        let _engine_memory = reserve_built_engine_memory(governor, &new_engine)?;
-        new_engine.set_projection_mode(projection_mode);
-        source_boundary.verify("build")?;
-        let mut completed = if force_persist || config::PERSIST_ON_BUILD.get() {
-            persist_and_reload_engine("build", new_engine, progress, governor)
+        let mut completed = if let Some(publication_plan) = publication_plan.as_ref() {
+            build_persisted_and_publish_engine(
+                PersistedBuildRequest {
+                    operation: "build",
+                    graph_id: &graph.graph_id,
+                    tables: &tables,
+                    edges: &edges,
+                    filter_columns: &filter_columns,
+                    projection_mode,
+                    publication_plan,
+                    source_boundary: &source_boundary,
+                    vacuum: false,
+                },
+                progress,
+                governor,
+                memory_plan,
+            )
         } else {
+            let mut new_engine = build_replacement_engine(
+                &tables,
+                &edges,
+                &filter_columns,
+                governor,
+                memory_plan.batch_bytes,
+                &source_boundary,
+            )?;
+            let _engine_memory = reserve_built_engine_memory(governor, &new_engine)?;
+            new_engine.set_projection_mode(projection_mode);
+            source_boundary.verify("build")?;
             new_engine.finalize_resolution();
             Ok(new_engine)
         }?;
@@ -330,18 +522,20 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
 
 pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumExecutionResult> {
     let start = std::time::Instant::now();
+    let graph = selected_or_default_graph_metadata()?;
     acquire_build_lock()?;
     crate::build_snapshot::lock_catalog()?;
     let sync_mode = current_sync_mode()?;
 
-    let (nodes_before, active_before) = ENGINE.with(|e| {
+    let (nodes_before, active_before, vacuum_projection_mode) = ENGINE.with(|e| {
         let eng = e.borrow();
         if !eng.built {
-            return (0i64, 0i64);
+            return (0i64, 0i64, eng.projection_mode);
         }
         (
             eng.node_store.node_count() as i64,
             eng.node_store.active_count() as i64,
+            eng.projection_mode,
         )
     });
 
@@ -366,24 +560,47 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     check_build_acls_result(&tables, &edges)?;
     let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
     apply_build_memory_plan(memory_plan)?;
+    let should_persist = force_persist || config::PERSIST_ON_BUILD.get();
+    let publication_plan = should_persist
+        .then(|| {
+            let path = persistence::graph_file_path()?;
+            plan_rebuilt_base_publication(&persistence::projection_manifest_root(&path))
+        })
+        .transpose()?;
 
     let tombstones_removed = nodes_before - active_before;
     let new_engine = with_build_resources(memory_plan, |governor| {
-        let mut new_engine = build_replacement_engine(
-            &tables,
-            &edges,
-            &filter_columns,
-            governor,
-            memory_plan.batch_bytes,
-            &source_boundary,
-        )?;
-        let _engine_memory = reserve_built_engine_memory(governor, &new_engine)?;
-        new_engine.mark_vacuum_complete(Some(pgrx::datetime::transaction_timestamp()));
-        source_boundary.verify("vacuum")?;
-        let mut completed = if force_persist || config::PERSIST_ON_BUILD.get() {
+        let mut completed = if let Some(publication_plan) = publication_plan.as_ref() {
             let mut progress = |_, _| Ok(());
-            persist_and_reload_engine("vacuum", new_engine, &mut progress, governor)
+            build_persisted_and_publish_engine(
+                PersistedBuildRequest {
+                    operation: "vacuum",
+                    graph_id: &graph.graph_id,
+                    tables: &tables,
+                    edges: &edges,
+                    filter_columns: &filter_columns,
+                    projection_mode: vacuum_projection_mode,
+                    publication_plan,
+                    source_boundary: &source_boundary,
+                    vacuum: true,
+                },
+                &mut progress,
+                governor,
+                memory_plan,
+            )
         } else {
+            let mut new_engine = build_replacement_engine(
+                &tables,
+                &edges,
+                &filter_columns,
+                governor,
+                memory_plan.batch_bytes,
+                &source_boundary,
+            )?;
+            let _engine_memory = reserve_built_engine_memory(governor, &new_engine)?;
+            new_engine.set_projection_mode(vacuum_projection_mode);
+            new_engine.mark_vacuum_complete(Some(pgrx::datetime::transaction_timestamp()));
+            source_boundary.verify("vacuum")?;
             new_engine.finalize_resolution();
             Ok(new_engine)
         }?;
@@ -450,10 +667,9 @@ fn with_build_resources<T>(
     memory_plan: BuildMemoryPlan,
     work: impl FnOnce(&crate::resource::ResourceGovernor) -> safety::GraphResult<T>,
 ) -> safety::GraphResult<T> {
-    let governor =
-        crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
-            crate::resource::MemoryBudget::new(memory_plan.limit_bytes),
-        ));
+    let governor = crate::resource::build_governor(crate::resource::MemoryBudget::new(
+        memory_plan.limit_bytes,
+    ));
     let _serving = governor
         .reserve_memory(
             crate::resource::ResourcePhase::Serving,
@@ -739,11 +955,15 @@ pub(crate) fn check_build_acls_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_lock_query_for_graph, conservative_build_peak_bytes,
-        validate_projection_mode_enabled, BUILD_LOCK_CLASS_ID,
+        build_lock_query_for_graph, cleanup_failed_candidate, conservative_build_peak_bytes,
+        contextualize_internal_candidate_error, parse_graph_uuid, validate_projection_mode_enabled,
+        BUILD_LOCK_CLASS_ID,
     };
     use crate::config::ProjectionMode;
+    use crate::projection::manifest::{ProjectionManifest, ProjectionManifestStore};
+    use crate::projection::recovery::plan_generation_specific_rebuilt_base;
     use crate::resource::ByteCount;
+    use std::fs;
 
     #[test]
     fn build_lock_query_uses_named_advisory_lock_class() {
@@ -767,6 +987,66 @@ mod tests {
             build_lock_query_for_graph(graph_a),
             build_lock_query_for_graph(graph_b)
         );
+    }
+
+    #[test]
+    fn direct_build_graph_id_requires_canonical_uuid_text() {
+        assert_eq!(
+            parse_graph_uuid("00112233-4455-6677-8899-aabbccddeeff")
+                .expect("canonical UUID parses"),
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ]
+        );
+        assert!(parse_graph_uuid("00112233445566778899aabbccddeeff").is_err());
+        assert!(parse_graph_uuid("00112233-4455-6677-8899-aabbccddeezz").is_err());
+    }
+
+    #[test]
+    fn failed_publication_cleanup_preserves_candidate_that_became_current() {
+        let root = std::env::temp_dir().join(format!(
+            "pggraph-build-cleanup-current-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("test root creates");
+        let plan = plan_generation_specific_rebuilt_base(&root).expect("publication plans");
+        fs::write(plan.candidate_base_path(), b"candidate").expect("candidate writes");
+        let manifest = ProjectionManifest::base_only(
+            plan.generation_id(),
+            plan.candidate_base_name(),
+            "crc32:00000000",
+            crate::persistence::graph_artifact_version(),
+            0,
+            1,
+        );
+        ProjectionManifestStore::new(&root)
+            .publish_if_current(&manifest, plan.expected_current_generation())
+            .expect("current pointer publishes");
+
+        cleanup_failed_candidate(&plan);
+
+        assert!(plan.candidate_base_path().is_file());
+        fs::remove_dir_all(&root).expect("test root removes");
+    }
+
+    #[test]
+    fn persisted_candidate_context_preserves_typed_resource_errors() {
+        let error = crate::safety::GraphError::Oom {
+            used_mb: 7,
+            need_mb: 2,
+            limit_mb: 8,
+        };
+        assert!(matches!(
+            contextualize_internal_candidate_error("build", "persisted mmap reload", error),
+            crate::safety::GraphError::Oom {
+                used_mb: 7,
+                need_mb: 2,
+                limit_mb: 8
+            }
+        ));
     }
 
     #[test]

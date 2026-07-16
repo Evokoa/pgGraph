@@ -415,12 +415,12 @@ fn reset_and_create_synthetic_fixture(node_count: i32, hub_fanout: i32, persist:
     ))
     .expect("insert synthetic skip edges failed");
 
+    let hub_end = (99 + hub_fanout).min(node_count);
     Spi::run(&format!(
         "INSERT INTO public.graph_synth_edges_pgtest (from_id, to_id, weight)
          SELECT '1', i::text, 3
-         FROM generate_series(100, {}) AS i
-         WHERE i <= {}",
-        hub_fanout, node_count
+         FROM generate_series(100, {}) AS i",
+        hub_end
     ))
     .expect("insert synthetic hub edges failed");
 

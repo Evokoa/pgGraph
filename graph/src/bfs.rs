@@ -49,6 +49,8 @@ pub struct BfsConfig {
     pub tenanted_table_oids: HashSet<u32>,
     /// Per-tenant bitmap of allowed node indices.
     pub tenant_membership: HashMap<String, RoaringBitmap>,
+    /// Nodes removed from an immutable mapped tenant base by later deltas.
+    pub tenant_membership_removals: HashMap<String, RoaringBitmap>,
     /// Sync overlay edges inserted after the last base build, keyed by source node.
     pub overlay_insert_edges: OverlayInserts,
     /// Sync overlay edges deleted after the last base build, keyed by source node.
@@ -733,10 +735,15 @@ fn candidate_allowed(
     if let Some(tenant) = config.tenant.as_deref() {
         if node_store.table_oid(neighbor).is_some_and(|table_oid| {
             config.tenanted_table_oids.contains(&table_oid)
-                && !config
+                && !(config
                     .tenant_membership
                     .get(tenant)
                     .is_some_and(|bitmap| bitmap.contains(neighbor))
+                    || (filter_index.mapped_tenant_contains(tenant, neighbor)
+                        && !config
+                            .tenant_membership_removals
+                            .get(tenant)
+                            .is_some_and(|bitmap| bitmap.contains(neighbor))))
         }) {
             return false;
         }
@@ -1055,6 +1062,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1078,6 +1086,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1100,6 +1109,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1129,6 +1139,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1158,6 +1169,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges,
             overlay_deleted_edges,
         };
@@ -1226,6 +1238,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges,
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1254,6 +1267,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1277,6 +1291,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1337,6 +1352,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1365,6 +1381,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1389,6 +1406,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1412,6 +1430,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1450,6 +1469,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1491,6 +1511,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1514,6 +1535,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1540,6 +1562,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1621,6 +1644,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };
@@ -1645,6 +1669,7 @@ mod tests {
             tenant: None,
             tenanted_table_oids: HashSet::new(),
             tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
         };

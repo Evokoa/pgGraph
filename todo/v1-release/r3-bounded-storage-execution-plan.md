@@ -41,20 +41,22 @@ durable delta coordinator and are not used by the 1.0 build path.
   partial files on failure and abandoned workspaces only while holding the
   graph build lock.
 
-## R3C: Artifact v5 And Bounded Load — Complete
+## R3C: Artifact v6 And Bounded Load — Complete
 
-- Replace artifact v4 with a 448-byte, 64-byte-aligned v5 header containing 23
-  explicitly sized sections: node metadata; forward CSR; inbound CSR;
+- Replace artifact v4/v5 with a 512-byte, 64-byte-aligned v6 header containing
+  26 explicitly sized sections: node metadata; forward CSR; inbound CSR;
   resolution; filter catalog/data/dictionaries; edge-type registry; and
-  relationship-identity descriptors/key bytes.
+  relationship-identity descriptors/key bytes; tenant table OIDs, dictionary,
+  and node tokens.
 - Encode the header manually in little-endian form. It records the exact body
   length, body checksum, header checksum, forward and inbound counts and
-  weights, and 23 `{offset, length}` descriptors. Reject nonzero padding,
+  weights, and 26 `{offset, length}` descriptors. Reject nonzero padding,
   overlapping or unaligned ranges, reserved bits, and any exact-length
   mismatch before constructing typed mapped views.
 - Validate header/body checksums, gaps, alignments, exact cardinalities, both
   CSR orientations, node and resolution ranges, filter layouts, dictionary
-  ordering, UTF-8, and relationship identity before creating mapped stores.
+  ordering, UTF-8, relationship identity, tenant metadata, and direction
+  capability before creating mapped stores.
 - Map both CSR directions and graph-sized relationship/filter/dictionary data.
   Keep only bounded descriptors and the edge-label registry as private
   metadata.
@@ -73,11 +75,11 @@ durable delta coordinator and are not used by the 1.0 build path.
   snapshot as private mapped residency and report expected filesystem
   page-cache pressure separately.
 
-Artifact v4 and future versions fail closed with rebuild guidance. Derived
-artifacts are rebuilt from PostgreSQL; bytes are never silently reinterpreted
-or migrated in place.
+Artifact v5 and earlier versions, plus future versions, fail closed with rebuild
+guidance. Derived artifacts are rebuilt from PostgreSQL; bytes are never
+silently reinterpreted or migrated in place.
 
-## R3D: Direct Persisted Build And Publication
+## R3D: Direct Persisted Build And Publication — Complete
 
 - Make persisted build and vacuum scan bounded source batches directly into
   the run collectors. The legacy owned build remains only as the nonpersisted
@@ -86,7 +88,7 @@ or migrated in place.
   generation-specific staging artifact, and stream each run directly into its
   final section. Do not construct or retain a complete owned `Engine` on the
   persisted path.
-- Stream and fsync a generation-specific v5 candidate, validate it through the
+- Stream and fsync a generation-specific v6 candidate, validate it through the
   production loader, repeat the R3A final checks, and publish through the R2D
   graph-scoped compare-and-swap pointer.
 - Retain the previous generation for rollback and reader pins. Failed scan,
