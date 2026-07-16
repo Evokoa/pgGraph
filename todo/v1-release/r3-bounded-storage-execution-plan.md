@@ -6,7 +6,7 @@ tables remain authoritative. Every build artifact and intermediate run is
 derived, checksummed, permission-restricted, disposable, and invisible to
 readers until the generation publication boundary accepts it.
 
-## R3A: Coherent Source Boundary
+## R3A: Coherent Source Boundary — Complete
 
 - Acquire the graph build lock, then lock pgGraph registration tables in a
   fixed order before reading the catalog.

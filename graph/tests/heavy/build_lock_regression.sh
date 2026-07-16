@@ -19,6 +19,7 @@ terminate_lock_holder() {
 SELECT pid
 FROM pg_locks
 WHERE locktype = 'advisory'
+  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
   AND classid = 1918928211
   AND objid = -272080206
   AND objsubid = 2
@@ -102,6 +103,89 @@ SELECT graph.add_edge(
     false
 );
 SQL
+
+set +e
+psql -X --set=VERBOSITY=verbose -v ON_ERROR_STOP=1 "$DBNAME" \
+  >"$WORKDIR/current-source-writer.log" 2>&1 <<'SQL'
+BEGIN;
+SET LOCAL graph.sync_mode = manual;
+UPDATE public.graph_lock_nodes SET name = 'uncommitted' WHERE id = 'a';
+SELECT * FROM graph.build();
+COMMIT;
+SQL
+current_source_writer_status=$?
+set -e
+if [[ "$current_source_writer_status" -eq 0 ]]; then
+  echo "graph.build() accepted caller-owned writes on a registered source"
+  cat "$WORKDIR/current-source-writer.log"
+  exit 1
+fi
+if ! grep -q "55P03" "$WORKDIR/current-source-writer.log" ||
+  ! grep -q "Another graph maintenance operation or registered source transaction is active" "$WORKDIR/current-source-writer.log"; then
+  echo "caller-owned source write did not fail with the build-lock contract"
+  cat "$WORKDIR/current-source-writer.log"
+  exit 1
+fi
+if [[ "$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT name FROM public.graph_lock_nodes WHERE id = 'a'")" != "alpha" ]]; then
+  echo "failed caller-owned source build did not roll back its source write"
+  exit 1
+fi
+
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SET graph.sync_mode = manual; SELECT * FROM graph.build();" >/dev/null
+
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
+CREATE TABLE public.graph_lock_partitioned_nodes (
+    id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (id)
+) PARTITION BY RANGE (id);
+CREATE TABLE public.graph_lock_partitioned_nodes_p0
+PARTITION OF public.graph_lock_partitioned_nodes
+FOR VALUES FROM (0) TO (100);
+INSERT INTO public.graph_lock_partitioned_nodes VALUES (1, 'partition node');
+SELECT graph.add_table(
+    'public.graph_lock_partitioned_nodes'::regclass,
+    'id',
+    ARRAY['name']
+);
+SQL
+
+set +e
+psql -X --set=VERBOSITY=verbose -v ON_ERROR_STOP=1 "$DBNAME" \
+  >"$WORKDIR/current-partition-lock.log" 2>&1 <<'SQL'
+BEGIN;
+SET LOCAL graph.sync_mode = manual;
+LOCK TABLE public.graph_lock_partitioned_nodes_p0 IN ROW EXCLUSIVE MODE;
+SELECT * FROM graph.build();
+COMMIT;
+SQL
+current_partition_lock_status=$?
+set -e
+if [[ "$current_partition_lock_status" -eq 0 ]] ||
+  ! grep -q "55P03" "$WORKDIR/current-partition-lock.log"; then
+  echo "caller-owned partition-leaf write lock did not fail with 55P03"
+  cat "$WORKDIR/current-partition-lock.log"
+  exit 1
+fi
+
+set +e
+psql -X --set=VERBOSITY=verbose -v ON_ERROR_STOP=1 "$DBNAME" \
+  >"$WORKDIR/current-catalog-writer.log" 2>&1 <<'SQL'
+BEGIN;
+UPDATE graph._registered_tables SET columns = columns
+WHERE table_oid = 'public.graph_lock_nodes'::regclass::oid;
+SELECT * FROM graph.build();
+COMMIT;
+SQL
+current_catalog_writer_status=$?
+set -e
+if [[ "$current_catalog_writer_status" -eq 0 ]] ||
+  ! grep -q "55P03" "$WORKDIR/current-catalog-writer.log"; then
+  echo "caller-owned mapping-catalog write did not fail with 55P03"
+  cat "$WORKDIR/current-catalog-writer.log"
+  exit 1
+fi
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" >"$WORKDIR/lock-holder.log" 2>&1 <<'SQL' &
 SELECT pg_advisory_lock(1918928211, -272080206);
@@ -430,7 +514,7 @@ SQL
 GATE_PID=$!
 
 for _ in $(seq 1 100); do
-  gate_ready="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = 1918928211 AND objid = 1735552875 AND granted")"
+  gate_ready="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid = 1918928211 AND objid = 1735552875 AND granted")"
   if [[ "$gate_ready" == "1" ]]; then
     break
   fi
@@ -438,6 +522,7 @@ for _ in $(seq 1 100); do
 done
 if [[ "${gate_ready:-0}" != "1" ]]; then
   echo "out-of-order commit gate did not acquire its synchronization lock"
+  cat "$WORKDIR/horizon-commit-gate.log"
   exit 1
 fi
 
@@ -451,7 +536,7 @@ SQL
 WRITER_PID=$!
 
 for _ in $(seq 1 100); do
-  writer_ready="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = 1918928211 AND objid = 1735552873 AND granted")"
+  writer_ready="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid = 1918928211 AND objid = 1735552873 AND granted")"
   if [[ "$writer_ready" == "1" ]]; then
     break
   fi
@@ -516,7 +601,7 @@ if ! grep -q "55P03" "$WORKDIR/writer-barrier-commit.log" ||
   cat "$WORKDIR/writer-barrier-commit.log"
   exit 1
 fi
-gate_backend_pid="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = 1918928211 AND objid = 1735552875 AND granted")"
+gate_backend_pid="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid = 1918928211 AND objid = 1735552875 AND granted")"
 psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
   -c "SELECT pg_terminate_backend($gate_backend_pid)" >/dev/null
 wait "$GATE_PID" >/dev/null 2>&1 || true
@@ -537,7 +622,7 @@ SQL
 GATE_PID=$!
 
 for _ in $(seq 1 100); do
-  gate_ready="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = 1918928211 AND objid = 1735552876 AND granted")"
+  gate_ready="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid = 1918928211 AND objid = 1735552876 AND granted")"
   if [[ "$gate_ready" == "1" ]]; then
     break
   fi
@@ -558,7 +643,7 @@ SQL
 WRITER_PID=$!
 
 for _ in $(seq 1 100); do
-  writer_ready="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = 1918928211 AND objid = 1735552874 AND granted")"
+  writer_ready="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid = 1918928211 AND objid = 1735552874 AND granted")"
   if [[ "$writer_ready" == "1" ]]; then
     break
   fi
@@ -589,7 +674,7 @@ if ! grep -q "55P03" "$WORKDIR/writer-barrier-rollback.log" ||
   cat "$WORKDIR/writer-barrier-rollback.log"
   exit 1
 fi
-gate_backend_pid="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = 1918928211 AND objid = 1735552876 AND granted")"
+gate_backend_pid="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid = 1918928211 AND objid = 1735552876 AND granted")"
 psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
   -c "SELECT pg_terminate_backend($gate_backend_pid)" >/dev/null
 wait "$GATE_PID" >/dev/null 2>&1 || true
@@ -666,24 +751,8 @@ CREATE TABLE public.graph_lock_slow_nodes (
 );
 INSERT INTO public.graph_lock_slow_nodes (id, name)
 SELECT i::text, 'node-' || i::text
-FROM generate_series(1, 200) AS i;
-CREATE OR REPLACE FUNCTION public.graph_lock_pause(value TEXT)
-RETURNS TEXT
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    PERFORM pg_sleep(0.02);
-    RETURN value;
-END
-$$;
-CREATE OR REPLACE VIEW public.graph_lock_slow_nodes_view AS
-SELECT public.graph_lock_pause(id) AS id, name
-FROM public.graph_lock_slow_nodes;
+FROM generate_series(1, 200000) AS i;
 SELECT graph.add_table('public.graph_lock_slow_nodes'::regclass, 'id', ARRAY['name']);
-UPDATE graph._registered_tables
-SET table_oid = 'public.graph_lock_slow_nodes_view'::regclass::oid,
-    table_name = 'public.graph_lock_slow_nodes_view'
-WHERE table_name IN ('graph_lock_slow_nodes', 'public.graph_lock_slow_nodes');
 SQL
 
 psql -X -v ON_ERROR_STOP=1 "$DBNAME" \

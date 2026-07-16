@@ -9,6 +9,15 @@ metadata instead of treating the segment as whole-graph coverage. Vacuum and
 maintenance still rebuild the base graph to fold accumulated changes back into
 the core stores.
 
+Run `graph.build()` or `graph.vacuum()` after committing changes made by the
+calling transaction to graph registrations or registered source tables. Builds
+lock the mapping catalog and every registered source, including current
+partitions, in a stable order and hold the sync-writer fence through
+publication. If the caller already owns a write-capable lock, or another writer
+prevents the source boundary from being acquired immediately, the operation
+fails with SQLSTATE `55P03` and diagnostic `PG006`; the last serving generation
+is left unchanged.
+
 ## Modes
 
 | Mode | Current behavior |

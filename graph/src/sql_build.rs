@@ -1,10 +1,8 @@
 //! SQL-layer build, vacuum, and maintenance execution helpers.
 
 use crate::api_types::{BuildExecutionResult, MaintenanceExecutionResult, VacuumExecutionResult};
-use crate::catalog::{catalog_fingerprint, read_catalog, selected_or_default_graph_metadata};
-use crate::sql_sync::{
-    current_sync_mode, install_sync_triggers, max_sync_log_id, remove_sync_triggers,
-};
+use crate::catalog::{read_catalog, selected_or_default_graph_metadata};
+use crate::sql_sync::{current_sync_mode, max_sync_log_id};
 use crate::{acl, builder, config, engine, persistence, safety, ENGINE};
 use pgrx::prelude::*;
 
@@ -220,6 +218,7 @@ fn execute_build_inner(
     }
 
     acquire_build_lock()?;
+    crate::build_snapshot::lock_catalog()?;
     let (tables, edges, filter_columns) = read_catalog()?;
 
     if tables.is_empty() {
@@ -234,7 +233,13 @@ fn execute_build_inner(
         });
     }
 
-    prepare_source_snapshot_boundary(sync_mode, "build")?;
+    let source_boundary = crate::build_snapshot::SourceSnapshotBoundary::establish(
+        &tables,
+        &edges,
+        &filter_columns,
+        sync_mode,
+        "build",
+    )?;
 
     check_build_acls_result(&tables, &edges)?;
     let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
@@ -248,9 +253,11 @@ fn execute_build_inner(
             &filter_columns,
             governor,
             memory_plan.batch_bytes,
+            &source_boundary,
         )?;
         let _engine_memory = reserve_built_engine_memory(governor, &new_engine)?;
         new_engine.set_projection_mode(projection_mode);
+        source_boundary.verify("build")?;
         let mut completed = if force_persist || config::PERSIST_ON_BUILD.get() {
             persist_and_reload_engine("build", new_engine, progress, governor)
         } else {
@@ -265,6 +272,8 @@ fn execute_build_inner(
         );
         Ok(completed)
     })?;
+
+    source_boundary.verify("build")?;
 
     let nodes_loaded = new_engine.node_store.node_count() as i64;
     let edges_loaded = new_engine.edge_store.edge_count() as i64;
@@ -322,6 +331,7 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
 pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumExecutionResult> {
     let start = std::time::Instant::now();
     acquire_build_lock()?;
+    crate::build_snapshot::lock_catalog()?;
     let sync_mode = current_sync_mode()?;
 
     let (nodes_before, active_before) = ENGINE.with(|e| {
@@ -346,7 +356,13 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     }
 
     let (tables, edges, filter_columns) = read_catalog()?;
-    prepare_source_snapshot_boundary(sync_mode, "vacuum")?;
+    let source_boundary = crate::build_snapshot::SourceSnapshotBoundary::establish(
+        &tables,
+        &edges,
+        &filter_columns,
+        sync_mode,
+        "vacuum",
+    )?;
     check_build_acls_result(&tables, &edges)?;
     let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
     apply_build_memory_plan(memory_plan)?;
@@ -359,9 +375,11 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
             &filter_columns,
             governor,
             memory_plan.batch_bytes,
+            &source_boundary,
         )?;
         let _engine_memory = reserve_built_engine_memory(governor, &new_engine)?;
         new_engine.mark_vacuum_complete(Some(pgrx::datetime::transaction_timestamp()));
+        source_boundary.verify("vacuum")?;
         let mut completed = if force_persist || config::PERSIST_ON_BUILD.get() {
             let mut progress = |_, _| Ok(());
             persist_and_reload_engine("vacuum", new_engine, &mut progress, governor)
@@ -378,6 +396,8 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
         Ok(completed)
     })?;
 
+    source_boundary.verify("vacuum")?;
+
     let nodes_after = new_engine.node_store.node_count() as i64;
     let edges_rebuilt = new_engine.edge_store.edge_count() as i64;
 
@@ -392,41 +412,6 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
         edges_rebuilt,
         vacuum_time_ms: start.elapsed().as_secs_f64() * 1000.0,
     })
-}
-
-fn prepare_source_snapshot_boundary(
-    sync_mode: config::SyncMode,
-    operation: &str,
-) -> safety::GraphResult<()> {
-    // Reconcile sync triggers before taking the source snapshot. Trigger DDL
-    // establishes a clean table-lock boundary for older definitions; current
-    // definitions acquire the writer barrier first and refresh only function
-    // bodies, keeping active-writer contention fail-fast.
-    let writer_barrier_held = match sync_mode {
-        config::SyncMode::Manual => {
-            remove_sync_triggers()?;
-            false
-        }
-        config::SyncMode::Trigger => {
-            let current_barrier = crate::sql_sync::sync_writer_barrier_triggers_current()?;
-            if current_barrier {
-                crate::sql_sync::acquire_sync_writer_barrier()?;
-                crate::sql_sync::ensure_no_current_transaction_sync_rows(0)?;
-            }
-            let installed = install_sync_triggers()?;
-            pgrx::warning!(
-                "graph.{operation}(): graph.sync_mode = 'trigger' installed graph sync triggers on {} registered table(s); set graph.sync_mode = 'manual' before graph.{operation}() to opt out",
-                installed
-            );
-            current_barrier
-        }
-        config::SyncMode::Wal => unreachable!("current_sync_mode rejects reserved wal mode"),
-    };
-    if !writer_barrier_held {
-        crate::sql_sync::acquire_sync_writer_barrier()?;
-        crate::sql_sync::ensure_no_current_transaction_sync_rows(0)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
@@ -452,11 +437,12 @@ fn build_replacement_engine(
     filter_columns: &[builder::RegisteredFilterColumn],
     governor: &crate::resource::ResourceGovernor,
     batch_bytes: crate::resource::ByteCount,
+    source_boundary: &crate::build_snapshot::SourceSnapshotBoundary,
 ) -> safety::GraphResult<engine::Engine> {
     let mut new_engine =
         builder::build_graph_with_governor(tables, edges, filter_columns, governor, batch_bytes)?;
-    new_engine.set_catalog_fingerprint(catalog_fingerprint(tables, edges, filter_columns));
-    new_engine.record_applied_sync_id(max_sync_log_id()?);
+    new_engine.set_catalog_fingerprint(source_boundary.catalog_fingerprint());
+    new_engine.record_applied_sync_id(source_boundary.sync_watermark());
     Ok(new_engine)
 }
 

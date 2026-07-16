@@ -32,6 +32,14 @@ fencing and W0/W1 verification, governed checksummed fixed-fanout runs, streamed
 artifact v5 with both CSR directions and mapped filters/dictionaries, then the
 direct persisted spill path and equivalence/leak/fault gates.
 
+2026-07-16 R3A source boundary — Build and vacuum now lock mapping catalogs,
+partition roots, and descendants in stable order, reject production callers
+that already own source/catalog write locks, capture the sync watermark behind
+the exclusive writer barrier, and recheck catalog, schema, ACL, and watermark
+before persistence and serving-state installation. The production PostgreSQL
+17 gate passes caller-owned catalog/source locks, partition-leaf locks,
+concurrent writers, rollback/commit horizons, and competing publication.
+
 2026-07-11 R1 savepoints — Transaction-local graph overlays now follow nested
 PostgreSQL savepoint and PL subtransaction release/rollback semantics, including
 when the extension is first loaded from inside an existing savepoint.

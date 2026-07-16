@@ -19,6 +19,7 @@ use std::cell::RefCell;
 mod acl;
 mod api_types;
 mod bfs;
+mod build_snapshot;
 mod builder;
 mod catalog;
 mod config;

@@ -5,6 +5,21 @@ registered PostgreSQL tables into an `Engine`. The builder avoids retaining all
 raw edges in Rust memory by using PostgreSQL temporary spool tables and bounded
 SPI cursor batches.
 
+## PostgreSQL Source Boundary
+
+Before reading graph registrations, the build takes `SHARE ... NOWAIT` locks on
+the graph catalog in a fixed order. It then resolves registered relation OIDs
+to partition roots, locks each root, discovers descendants while attachment is
+blocked, and locks descendants in OID order. Caller-owned write locks are
+rejected in production builds so an uncommitted source change cannot escape
+through a filesystem artifact.
+
+After sync-trigger reconciliation, the exclusive writer barrier defines
+watermark `W0`. Catalog identity, source schema, caller privileges, and the
+maximum sync-log ID are checked again before persistence and installation; a
+build is publishable only when the catalog fingerprint is unchanged and
+`W1 == W0`.
+
 ## Inputs
 
 The build receives:
