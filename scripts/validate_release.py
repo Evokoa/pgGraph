@@ -8,7 +8,6 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 
@@ -16,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(
     r"^v(?P<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$"
 )
+CARGO_PACKAGE_RE = re.compile(r"^\[package\]\s*(.*?)(?=^\[|\Z)", re.MULTILINE | re.DOTALL)
+CARGO_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 
 
 def fail(message: str) -> None:
@@ -54,8 +55,11 @@ def main() -> None:
 
     version = match.group("version")
 
-    cargo = tomllib.loads(read_text("graph/Cargo.toml"))
-    cargo_version = cargo["package"]["version"]
+    package_match = CARGO_PACKAGE_RE.search(read_text("graph/Cargo.toml"))
+    cargo_match = CARGO_VERSION_RE.search(package_match.group(1)) if package_match else None
+    if cargo_match is None:
+        fail("graph/Cargo.toml does not declare a package version")
+    cargo_version = cargo_match.group(1)
     if cargo_version != version:
         fail(f"graph/Cargo.toml version {cargo_version!r} does not match {version!r}")
 

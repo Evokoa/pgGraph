@@ -11,11 +11,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/evokoa/pggraph/stargazers">
+  <a href="https://github.com/evokoa/pggraph">
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-0.1.5-2ea44f?style=flat-square" alt="Version 0.1.5">
+    <img src="https://img.shields.io/badge/version-1.0.0-2ea44f?style=flat-square" alt="Version 1.0.0">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -70,6 +70,11 @@ pgGraph 是一个 PostgreSQL 扩展，用于直接针对普通 PostgreSQL 表运
 
 你的表仍然是事实来源。pgGraph 会构建一个派生的图索引，并让你通过 SQL 使用 `graph` schema 中的函数来查询它。
 
+> [!WARNING]
+> 当前发布线是 alpha 软件。完成 pgGraph 1.0 发布后才进入生产支持状态。
+
+<!-- README_SYNC_POLICY: README.md is canonical; version, PostgreSQL support, and shared commands are checked by scripts/check_public_docs.py. -->
+
 > [!TIP]
 > **寻找托管版本？** 我们已经在 [polygres.com](https://polygres.com) 上推出了 pgGraph 的托管版本，为 Postgres 提供完整的高性能 GraphRAG。
 
@@ -92,12 +97,12 @@ pgGraph 在你现有的 PostgreSQL 表之上添加图查询，不需要单独的
 Windows（通过 Docker Desktop）上运行。
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:0.1.5
+docker pull ghcr.io/evokoa/pggraph:1.0.0
 docker run -d --rm \
   --name pggraph \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:0.1.5
+  ghcr.io/evokoa/pggraph:1.0.0
 ```
 
 默认数据库是 `graph`，已预配置 `pg_cron` 和维护定时任务。
@@ -159,7 +164,7 @@ scripts/quickstart.sh playground panama mutable
 
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。
 
-从 v0.1.5 开始，Docker 发布镜像覆盖 PostgreSQL 14 到 18。未带 PostgreSQL 主版本的 tag（例如 `0.1.5` 和 `latest`）使用默认 PostgreSQL 17 镜像。PostgreSQL 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
+Docker 发布镜像覆盖 PostgreSQL 14 到 18。未带 PostgreSQL 主版本的 tag（例如 `1.0.0` 和 `latest`）使用默认 PostgreSQL 17 镜像。PostgreSQL 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
 
 ## PGXN 源码安装
 
@@ -255,7 +260,7 @@ pgGraph 不要求你移动数据或学习 Cypher。你保留现有 schema，并�
 
 SQL:2023 和 PostgreSQL 19 引入了 `CREATE PROPERTY GRAPH`、`GRAPH_TABLE` 和标准图模式匹配，并由 PostgreSQL 的 planner 和 optimizer 支撑——与驱动 PostgreSQL 强大关系查询的引擎相同。
 
-pgGraph 在不同的层级上工作。SQL/PGQ 表达图模式并让 optimizer 选择执行方式。pgGraph 为反复遍历同一拓扑的工作负载预计算 CSR 邻接存储和可重建构件，适合有深度上限、路径限制、过滤器、租户范围和应用分页的遍历。两者可以互补：未来的适配器可以把符合条件的 SQL/PGQ 模式映射到 pgGraph 的预计算运行时，而通用图查询继续使用 PostgreSQL 的关系执行路径。
+pgGraph 在不同的层级上工作。SQL/PGQ 表达图模式并让 optimizer 选择执行方式。pgGraph 为反复遍历同一拓扑的工作负载预计算 CSR 邻接存储和可重建构件，适合有深度上限、路径限制、过滤器、租户范围和应用分页的遍历。pgGraph 1.0 的 PostgreSQL 14–18 合同不公开 SQL/PGQ；PostgreSQL 19 集成在公共路线图中单独跟踪。
 
 ## 社区
 

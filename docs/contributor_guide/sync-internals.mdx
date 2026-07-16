@@ -336,7 +336,7 @@ the graph publication lock; transaction-local serving slots therefore cannot
 change durable allocation order or create gaps after reload.
 The loader can read v5 resolution rows only when they verify an existing base
 node. A v5 tenant delta is rejected with rebuild guidance because its hash is
-not sufficient to reconstruct exact membership. Segment format v5 keys
+not sufficient to reconstruct exact membership. Segment format v6 keys
 topology, tombstone, and weight rows by optional stable
 relationship identity, which preserves equal-endpoint parallel relationships
 through layered reads, compaction, and dirty-range chunk replacement. After an

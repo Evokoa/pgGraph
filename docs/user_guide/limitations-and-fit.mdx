@@ -40,7 +40,7 @@ data into another system.
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |
-| mmap residency | Format v5 loads both CSR directions, relationship IDs, filters, dictionaries, identities, and resolution as a backend-local read-only mapped snapshot; sparse mutable deltas remain backend-local heap |
+| mmap residency | Format v6 loads both CSR directions, relationship IDs, filters, dictionaries, identities, tenant data, and resolution as a backend-local read-only mapped snapshot; sparse mutable deltas remain backend-local heap |
 | Query catch-up | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; set `graph.query_freshness = 'off'` for compatibility/manual catch-up |
 | Search | Search runs against registered source-table columns through PostgreSQL, not against a full-text graph artifact |
 | Hydration | Hydrated rows come from source tables and require source-table privileges; required GQL hydration fails closed with SQLSTATE `22000` and diagnostic `PG017` if a graph coordinate no longer has a readable source row |

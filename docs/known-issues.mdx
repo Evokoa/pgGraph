@@ -1,124 +1,59 @@
 # Known Issues
 
 <Callout type="warning">
-pgGraph is currently alpha software. Do not use it for production workloads
-without your own validation, backup, rollback, and load-testing plan.
+The current published line is alpha software. It becomes production-supported
+only when the pgGraph 1.0 release candidate checklist and final artifact smoke
+tests are complete.
 </Callout>
 
-<Callout type="info">
-pgGraph is built around a simple launch standard: the most critical correctness,
-durability, safety, and operational paths should be solid first. There is always
-another way to optimize a graph engine, especially inside PostgreSQL, so we are
-tracking gaps in those paths explicitly and continuously hardening them in the
-open before recommending production use.
-</Callout>
+This page lists unresolved user-visible limitations in the current release.
+Resolved hardening history belongs in [Release Notes](./release-notes), and
+future product expansion belongs in [Roadmap](./roadmap).
 
-This page documents known alpha limitations, next-update hardening work, and
-lower-priority follow-up items. The list is ranked by expected user impact, not
-by implementation difficulty.
+## Operations
 
-This page is the authoritative register for known limitations and correctness,
-operational, performance, or maintainability risks. Future product direction,
-new APIs, and feature expansion belong in [Roadmap](./roadmap). Completed
-hardening work remains documented in historical release notes and the resolved
-summaries below.
+### External scheduling is required outside the packaged Docker setup
 
-Low-level PostgreSQL extension work involves real tradeoffs. Some optimizations
-make a query faster by keeping more data in memory, while others reduce memory
-pressure by doing more work per request. pgGraph has to weigh those choices
-carefully because it runs inside PostgreSQL backend processes rather than a
-separate service with its own resource envelope.
+pgGraph exposes bounded, concurrency-safe maintenance entry points, but it does
+not run an always-on scheduler inside every PostgreSQL installation. The
+packaged Docker image configures `pg_cron`. Other installations must schedule
+`graph.run_scheduled_maintenance()` with `pg_cron` or an external scheduler.
 
-## Active Next Update Scope
+Without a scheduler, reads remain available, but pending trigger-sync work,
+overlay compaction, and cleanup do not run automatically. Follow the setup,
+health, retry, and failure guidance in
+[Sync And Maintenance](/user_guide/sync-and-maintenance#scheduled-maintenance).
 
-Only unresolved or deliberately pending rows appear in the active sections.
-Resolved work is preserved near the end of this page and in release notes.
+## Query Compatibility
 
-### Sync, Jobs, and Operator Semantics
+### GQL and openCypher support are bounded profiles
 
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-004 | pgGraph has a scheduler-safe `graph.run_scheduled_maintenance()` entry point, but no always-on internal scheduler for trigger-sync apply and overlay compaction in non-Docker installs. | Explicit implementation/policy decision required | Either ship a supervised bounded per-database scheduler with cross-backend/crash tests, or declare `pg_cron`/external scheduling the final supported contract and close the issue with complete setup, health, and failure guidance. |
+`graph.gql()` implements the generated [GQL 1.0 profile](/user_guide/gql-profile),
+not full ISO GQL. `graph.cypher()` accepts only the overlapping compatibility
+profile and does not claim full openCypher support. Unsupported constructs fail
+with a stable SQLSTATE and actionable guidance rather than being interpreted
+with approximate semantics.
 
-## P0: Correctness, Security, Durability, and Resource Bounds
+SQL/PGQ `GRAPH_TABLE` is not part of the PostgreSQL 14–18 contract. PostgreSQL
+19 integration remains on the [Roadmap](./roadmap).
 
-These are the highest-priority public follow-ups because they affect operators
-running larger graphs or higher sync volume, and because some findings can
-change observable graph correctness or PostgreSQL security boundaries.
+## Resource Scope
 
-`graph.memory_profile()` remains useful for capacity planning, but visibility is
-not enforcement. `graph.memory_limit_mb` is not a cluster-wide hard cap, and
-important build, load, query, and maintenance allocations are not yet governed
-by one byte budget.
+### Limits are per operation and backend, not a cluster-wide memory quota
 
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-012 | Build resource accounting does not yet bound PostgreSQL temporary-file and server-side executor memory. | P0 architecture fix | Checked preflight and live Rust reservations now cover stale positive estimates, long keys, filters, resolution, both CSR directions, relationship identity, and persistence buffers. Adaptive byte batches and fallible major-vector growth fail with `PG001`. PostgreSQL temporary storage, allocator/RSS calibration, and out-of-core construction remain before retirement. |
-| KI-013 | Inbound CSR and large filter metadata still deserialize into backend heap, and whole-graph analytics still run in the caller backend. | P0 architecture fix | Persist/mmap inbound CSR and large filter metadata; isolate whole-graph analytics in quota-controlled workers. Runtime load/query/sync/compaction breakers and pinned projection snapshots are already in place. |
-| KI-018 | Persisted replacement is renamed over the serving path before mmap reload validation. | P0 durability fix | Write and validate a generation-specific artifact, catch it up, then atomically switch a small manifest while retaining the previous generation. |
+Build, load, query, synchronization, compaction, and supported analytics enforce
+their documented byte, row, work, disk, and elapsed-time policies. PostgreSQL's
+own buffer cache, executor memory, and other sessions remain governed by
+PostgreSQL configuration and operating-system controls. `graph.memory_limit_mb`
+therefore does not replace cluster-wide capacity planning.
 
-## P1: Transaction And Performance Follow-Ups
+Use `graph.resource_status()`, `graph.build_resource_status()`, PostgreSQL
+`statement_timeout`, and the production-shaped RSS/PSS release evidence when
+sizing concurrent workloads. See [Configuration](/user_guide/configuration)
+and [Troubleshooting](/user_guide/troubleshooting#query-or-maintenance-hits-a-resource-limit).
 
-These items can affect transaction behavior, latency, or memory pressure, but
-do not change the intended public SQL contract.
+## Reporting A New Issue
 
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-005 | Overlay neighbor merging and transaction-delta lookups may be material traversal hot paths on dirty mutable projections. | Measure and close | Benchmark degree, segment depth, transaction inserts/deletes/tombstones, direction, weights, allocations, and p95/p99 with correctness checks. Optimize material regressions or close with an approved regression threshold and retained gate. |
-| KI-025 | Background-worker jobs can return a Rust `GraphResult::Err` normally from a pgrx transaction closure after mutating job state, making partial commit behavior accidental. | P1 transaction fix | Centralize worker transaction policy, distinguish atomic work from intentional progress checkpoints, inject failures in every phase, and prove no unintended commit or stuck `running` job. |
-
-## P2: SQL Ergonomics and Documented Semantics
-
-These items clarify behavior or broaden the API. They are planned, but should
-not block use of the current documented SQL surface.
-
-| ID | Issue | Status | Notes |
-|---|---|---|---|
-| KI-006 | `graph.cypher()` is a narrow openCypher compatibility preview over pgGraph's supported GQL subset, not full openCypher compatibility. | Documented limitation | Keep compatibility rows honest and route broader openCypher expansion through [Roadmap](./roadmap), not this register. |
-
-## Resolved Items Awaiting Retirement
-
-These items are no longer active work. After their release-matrix regressions
-are confirmed and release notes remain the durable history, remove them from
-this page rather than carrying resolved rows indefinitely.
-
-| ID | Resolution | Retirement evidence |
-|---|---|---|
-| KI-003 | Dedicated GQL and Cypher parser fuzz targets and seed corpora exist. | Targets build and scheduled/release fuzz policy owns continuing campaigns. |
-| KI-011 | Metadata encoding moved to bincode 2 serde with strict trailing-byte rejection and a documented artifact rebuild requirement. | Upgrade/rebuild/corruption regressions green; migration remains in release notes. |
-
-## Roadmap-Owned Future Work
-
-Do not use this known-issues register for broad feature wishes that are not
-current limitations. Track these in [Roadmap](./roadmap) instead:
-
-- complete ISO GQL syntax and semantics beyond the current subset;
-- costed multi-pattern planning, streaming execution, relationship property
-  expressions, and optional path-variable projection semantics;
-- a dedicated many-to-many relationship registration helper if post-fix user
-  reports show `graph.add_edge()` remains too easy to misuse;
-- PostgreSQL 19 SQL/PGQ catalog and `GRAPH_TABLE` interoperation;
-- broader openCypher compatibility;
-- semantic-guided search and pgVector ranking;
-- WAL-driven sync;
-- COPY build scanning;
-- additional graph analytics;
-- distributed graph execution.
-
-## Lower-Priority Optimizations
-
-These are intentionally deferred until measurement shows they matter:
-
-- Replacing bitmap serialized-size estimates with native roaring helpers if the
-  pinned crate exposes them.
-- Reducing low-level clone counts in builder, traversal, weighted path, and
-  aggregation paths.
-- Combining duplicate path reconstruction passes after the larger traversal
-  allocation work is complete.
-- Cleaning up long internal function signatures when the surrounding traversal
-  parameters stabilize.
-- Cleaning up padding-bit handling in `active_count()`.
-
-Canonical enums/newtypes, native UUID/OID boundaries, checked conversions, and
-unsafe proof are active correctness work, not benchmark-dependent
-micro-optimizations.
+Include the pgGraph version, PostgreSQL major, platform, exact SQLSTATE and
+`PGxxx` diagnostic, relevant `graph.status()`/`graph.resource_status()` output,
+and a minimal source schema. Do not include credentials or production data.

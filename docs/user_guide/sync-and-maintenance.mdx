@@ -118,7 +118,7 @@ metadata lets compaction and diagnostics reason about the affected source-node
 span without rewriting existing mmap'd CSR bytes.
 </Callout>
 
-Projection segment format v5 carries stable relationship identity on topology,
+Projection segment format v6 carries stable relationship identity on topology,
 deletion, and weight rows so parallel source relationships remain distinct
 through compaction. Older segment versions are rejected across this format
 boundary and require a fresh `graph.build()` before the persisted mutable graph
@@ -192,6 +192,8 @@ FROM graph.sync_health();
 | `durable_compaction_recommended` | Durable segment fanout exceeds the configured compaction threshold |
 | `durable_gc_recommended` | Manifest-declared obsolete projection files can be evaluated by GC |
 | `durable_repair_recommended` | Active projection artifacts need targeted repair or full rebuild |
+
+## Scheduled Maintenance
 
 Use `graph.run_scheduled_maintenance()` from `pg_cron` or an external scheduler
 when you want one call that applies sync if recommended and then starts

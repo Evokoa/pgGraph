@@ -10,9 +10,8 @@ bounded traversal, path reconstruction, persistence, and maintenance behind the
 
 <Callout type="info">
 The current public API is PostgreSQL SQL functions in the `graph` schema,
-including a documented GQL-compatible subset through `graph.gql()`. pgGraph has
-an internal SQL/PGQ adapter seam for future PostgreSQL-owned graph-pattern
-hooks, but no public SQL/PGQ API is exposed yet.
+including a documented GQL-compatible subset through `graph.gql()`. SQL/PGQ is
+not part of the PostgreSQL 14–18 contract.
 </Callout>
 
 ## What It Does For You
@@ -96,25 +95,19 @@ PostgreSQL tables
       |
       | graph.add_table(), graph.add_edge(), graph.add_filter_column()
       v
-graph catalog tables
+registered graph definition
       |
       | graph.build()
       v
-backend-local Engine
-      |
-      +-- NodeStore          source table OID, primary key, active bit
-      +-- EdgeStore          CSR adjacency arrays
-      +-- reverse EdgeStore  inbound traversal
-      +-- ResolutionIndex    table+PK to node index
-      +-- FilterIndex        typed traversal filter columns
+validated derived projection
       |
       | graph.persist_on_build = true
       v
-$PGDATA/<graph.data_dir>/<graph_id>/
+generation artifacts under PostgreSQL-managed storage
       |
       | graph.auto_load = true
       v
-mmap-backed base graph in later backends
+bounded SQL and GQL results
 ```
 
 Within that graph-specific artifact root, `main.pggraph` is the logical
@@ -123,8 +116,10 @@ files and select one through `projection-current.json` plus its checksummed
 manifest. Loaders follow that selected generation, while stores without
 projection metadata can still use the compatibility path.
 
-For day-to-day SQL use, that is the whole model: source tables, graph catalog,
-active engine, SQL results.
+For day-to-day SQL use, that is the whole model: authoritative source tables,
+a registered graph definition, a rebuildable derived projection, and ordinary
+SQL results. Implementation details are documented in the
+[Contributor Architecture](/contributor_guide/architecture).
 
 ```mermaid
 flowchart TD

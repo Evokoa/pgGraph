@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "collections": [
+    {
+      "id": "quickstart",
+      "owner": "pgGraph maintainers",
+      "content_paths": ["docs/quickstart.mdx", "scripts/quickstart.sh"],
+      "version_requirement": "current pgGraph release; PostgreSQL 17 reference image",
+      "expected_contract": "three sample people, two companies, registered foreign-key relationship, successful search/traversal/path queries",
+      "reset_strategy": "scripts/quickstart.sh clean",
+      "smoke_test": "graph/tests/heavy/source_archive_smoke.sh"
+    },
+    {
+      "id": "playground-panama",
+      "owner": "pgGraph maintainers",
+      "content_paths": [
+        "sandbox/playground/catalog.py",
+        "sandbox/playground/queries.py",
+        "graph/tests/heavy/playground_release_gate.py"
+      ],
+      "version_requirement": "current pgGraph release; packaged PostgreSQL 17 reference environment",
+      "expected_contract": "verified Panama archive checksum plus release-gated CSR/mutable row counts and result hashes",
+      "reset_strategy": "recreate the disposable playground database between mutable runs",
+      "smoke_test": "graph/tests/heavy/source_archive_smoke.sh"
+    },
+    {
+      "id": "alpha-to-v1-migration",
+      "owner": "pgGraph maintainers",
+      "content_paths": [
+        "release/fixtures/alpha-to-v1.0/source.sql",
+        "release/fixtures/alpha-to-v1.0/register.sql",
+        "release/fixtures/alpha-to-v1.0/verify.sql",
+        "release/fixtures/alpha-to-v1.0/metadata.json",
+        "release/fixtures/alpha-to-v1.0/SHA256SUMS"
+      ],
+      "version_requirement": "v0.1.8 source fixture to pgGraph 1.0.0",
+      "expected_contract": "source rows survive; clean 1.0 registration and rebuild reproduce the expected graph",
+      "reset_strategy": "drop and recreate the disposable fixture database",
+      "smoke_test": "graph/tests/heavy/alpha_to_v1_fixture.sh"
+    }
+  ]
+}

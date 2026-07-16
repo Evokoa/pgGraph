@@ -1,10 +1,22 @@
 # Querying
 
+{/* Canonical public URL: /user_guide/querying. Keep section anchors stable throughout 1.x. */}
+
 Graph queries are normal SQL calls. The API has primitive functions for exact
 control, workflow wrappers for application-friendly search, expansion, paths,
 connections, and summaries, and a GQL-compatible subset for graph pattern
 queries, an openCypher compatibility surface for the same supported graph
 patterns, and narrow mapped writes over registered tables and edges.
+
+| Section | Use it for |
+|---|---|
+| [Search](#search) and [Search Modes](#search-modes) | Source-row lookup and text matching |
+| [GQL](#gql) and [openCypher Compatibility](#opencypher-compatibility) | The bounded graph-pattern profiles |
+| [Business ID Lookup](#business-id-lookup) | Resolving application identifiers |
+| [Traversal](#traversal) | Bounded BFS/DFS and multi-start queries |
+| [Workflow API](#workflow-api) | Application-oriented find, expand, path, connection, and neighborhood calls |
+| [Path Functions](#path-functions) and [Components](#components) | Paths and graph structure summaries |
+| [Hydration](#hydration) and [Tenant Scope](#tenant-scope) | Source rows, visibility, and tenancy |
 
 ## Search
 
@@ -210,8 +222,8 @@ reads intentionally keep later clauses narrow: relationship properties, `WITH`,
 `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches, writes,
 relationship variables in multi-segment paths, and named target variables on
 multi-segment variable-length boundaries are rejected with typed GQL errors.
-Relationship type alternation outside wildcard path-variable reads is also
-reserved for a later phase.
+Relationship type alternation outside wildcard path-variable reads is outside
+the 1.0 profile and fails with an actionable unsupported-feature diagnostic.
 
 The `nodes(path)` function returns the `_path.nodes` array directly,
 `relationships(path)` returns the `_path.relationships` array directly, and

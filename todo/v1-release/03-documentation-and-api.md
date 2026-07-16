@@ -37,38 +37,39 @@ duplicating detailed contracts.
 - [x] Rewrite the public roadmap around Current Baseline, 1.0 Focus, and
       Post-1.0 Direction; remove internal checkpoint language and stale alpha
       history from the public page.
-- [ ] Prune Known Issues to unresolved user-visible limitations. Move resolved
+- [x] Prune Known Issues to unresolved user-visible limitations. Move resolved
       migration history to release notes and internal engineering tasks to the
       1.0 plan.
-- [ ] Reconcile root `README.md`, `README_zh.md`, and docs quickstart so commands,
+- [x] Reconcile root `README.md`, `README_zh.md`, and docs quickstart so commands,
       supported versions, playground modes, and feature claims agree.
-- [ ] Generate API/configuration/diagnostic/GQL capability tables or make their
+- [x] Generate API/configuration/diagnostic/GQL capability tables or make their
       existing hand-maintained sources drift-checked.
-- [ ] Add public compatibility, upgrade, rollback, deprecation, backup/restore,
+- [x] Add public compatibility, upgrade, rollback, deprecation, backup/restore,
       resource-limit, and production-readiness guidance.
-- [ ] Consolidate architecture descriptions and keep deep implementation detail
+- [x] Consolidate architecture descriptions and keep deep implementation detail
       in contributor docs rather than user pages.
-- [ ] Correct stale relationship-identity descriptions in contributor engine
+- [x] Correct stale relationship-identity descriptions in contributor engine
       and traversal documentation, then add source-linked drift coverage for
       persisted and layered identity fields.
-- [ ] Split the oversized API reference, querying guide, and release-note
+- [x] Split the oversized API reference, querying guide, and release-note
       history into navigable owned sections without changing their public URLs
       until redirects are available.
 - [x] Fix `scripts/scripts.md` links and the docs reference checker treatment of
       generated or intentionally absent paths.
-- [ ] Run local-link, external-link, navigation, code-example, API drift, Rust
-      source-map drift, spelling/style, and rendered-site checks.
-- [ ] Review public tone: describe supported behavior and constraints directly;
+- [x] Run local-link, external-link, navigation, code-example, API drift, Rust
+      source-map drift, spelling/style, and static rendered-MDX checks. The
+      downstream docs host remains responsible for its application-shell build.
+- [x] Review public tone: describe supported behavior and constraints directly;
       remove private planning phrases, phase history, and future-tense claims
       that read as current functionality.
-- [ ] Give every maintained example an owner, expected output/checksum, version
+- [x] Give every maintained example an owner, expected output/checksum, version
       requirements, and an automated smoke test; delete stale examples.
-- [ ] Add a release-note template and a 1.0 migration guide before the first RC.
-- [ ] State release maturity consistently: the current line is alpha, and 1.0
+- [x] Add a release-note template and a 1.0 migration guide before the first RC.
+- [x] State release maturity consistently: the current line is alpha, and 1.0
       becomes production-supported only after the RC checklist is green.
-- [ ] Define how `README_zh.md` is synchronized with the canonical English
+- [x] Define how `README_zh.md` is synchronized with the canonical English
       documentation and prevent unsupported-version or command drift.
-- [ ] Verify Rust public API docs, `# Errors`, `# Panics`, `# Safety`, doctests,
+- [x] Verify Rust public API docs, `# Errors`, `# Panics`, `# Safety`, doctests,
       and generated `cargo doc` navigation for the supported feature set.
 
 ## Documentation Release Gate

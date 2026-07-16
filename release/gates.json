@@ -10,14 +10,14 @@
     }
   },
   "tiers": {
-    "pr": ["script-contracts", "docs-drift", "rust-static"],
-    "nightly": ["script-contracts", "docs-drift", "rust-static", "rust-tests"],
-    "rc": ["script-contracts", "docs-drift", "legacy-release"],
-    "full-matrix": ["script-contracts", "docs-drift", "legacy-release", "read-latency", "supported-majors", "postgres-sanitizer"]
+    "pr": ["script-contracts", "docs-drift", "docs-render", "rust-static"],
+    "nightly": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "rust-tests"],
+    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "package-install-matrix"],
+    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "read-latency", "supported-majors", "package-install-matrix", "postgres-sanitizer"]
   },
   "gates": {
     "script-contracts": {
-      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
+      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_run_release.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
       "cwd": "graph",
       "timeout_seconds": 300,
       "depends_on": [],
@@ -31,6 +31,22 @@
       "depends_on": ["script-contracts"],
       "thresholds": {"drift_errors": 0},
       "exclusive_resources": []
+    },
+    "docs-render": {
+      "command": ["npm", "run", "check"],
+      "cwd": "docs",
+      "timeout_seconds": 600,
+      "depends_on": ["docs-drift"],
+      "thresholds": {"mdx_compile_errors": 0},
+      "exclusive_resources": []
+    },
+    "external-links": {
+      "command": ["python3", "scripts/check_external_links.py"],
+      "cwd": ".",
+      "timeout_seconds": 900,
+      "depends_on": ["docs-drift"],
+      "thresholds": {"broken_external_links": 0},
+      "exclusive_resources": ["network"]
     },
     "rust-static": {
       "command": ["cargo", "clippy", "--features", "pg17 development", "--all-targets", "--", "-D", "warnings"],
@@ -48,28 +64,81 @@
       "thresholds": {"failed_tests": 0},
       "exclusive_resources": ["cargo-target"]
     },
+    "rust-docs": {
+      "command": ["bash", "-c", "RUSTDOCFLAGS='-D warnings -D missing-docs -D rustdoc::broken_intra_doc_links -D rustdoc::bare_urls' cargo rustdoc --lib --no-default-features --features 'pg17 development' && cargo test --doc --no-default-features --features 'pg17 development'"],
+      "cwd": "graph",
+      "timeout_seconds": 1800,
+      "depends_on": ["rust-static"],
+      "thresholds": {"rustdoc_warnings": 0, "failed_doctests": 0},
+      "exclusive_resources": ["cargo-target"]
+    },
     "legacy-release": {
       "command": ["./tests/heavy/run_release_gate.sh"],
       "cwd": "graph",
       "timeout_seconds": 14400,
-      "environment": {"PGGRAPH_LEGACY_RELEASE_GATE": "1"},
+      "environment": {
+        "PGGRAPH_LEGACY_RELEASE_GATE": "1",
+        "PG_VERSION_FEATURE": "pg17",
+        "DB_PREFIX": "pggraph_release",
+        "RUN_DOCKER": "0",
+        "RUN_FULL_MATRIX": "0",
+        "RUN_CRASH": "1",
+        "RUN_PGBENCH": "1",
+        "RUN_PACKAGE": "1",
+        "RUN_BOUNDARY": "1",
+        "RUN_INSTALL": "1",
+        "RUN_BACKUP_RESTORE": "1",
+        "RUN_BACKGROUND_LOCK": "1",
+        "RUN_BUILD_LOCK": "1",
+        "RUN_CONCURRENCY": "1",
+        "RUN_METADATA": "1",
+        "RUN_RSS": "1",
+        "RUN_RUNTIME_RESOURCES": "1",
+        "RUN_BUILD_MEMORY_STRESS": "1",
+        "RUN_SYNTHETIC": "1",
+        "RUN_PLAYGROUND": "1",
+        "RUN_GQL_CREATE_TX": "1",
+        "RUN_GQL_SET_TX": "1",
+        "RUN_GQL_DELETE_TX": "1",
+        "RUN_GQL_MERGE_RACE": "1",
+        "RUN_GQL_RELATIONSHIP_RACE": "1",
+        "RUN_TX_DELTA_CRASH": "1",
+        "RUN_NAMED_GRAPHS_HEAVY": "1",
+        "RUN_CROSS_BACKEND_DURABLE": "1",
+        "RUN_PROJECTION_RECOVERY": "1",
+        "RUN_TX_DELTA_LIFECYCLE": "1",
+        "RUN_GQL_WRITE_RECHECK": "1",
+        "RUN_GQL_ISOLATION_MATRIX": "1",
+        "RUN_SECRETS": "1",
+        "RUN_ALPHA_TO_V1_FIXTURE": "1"
+      },
       "depends_on": ["script-contracts", "docs-drift"],
       "thresholds": {"failed_gates": 0},
-      "exclusive_resources": ["pgrx-cluster", "postgres-port", "docker-playground"]
+      "exclusive_resources": ["cargo-target", "pgrx-cluster", "postgres-port", "docker-playground"]
     },
     "supported-majors": {
       "command": ["./tests/heavy/run_pg_matrix_docker.sh"],
       "cwd": "graph",
       "timeout_seconds": 14400,
-      "environment": {"RUN_DURABLE_PROJECTION_MATRIX": "1", "RUN_POSTGRES_SANITIZER": "0"},
+      "environment": {"PG_VERSIONS": "14 15 16 17 18", "RUN_DURABLE_PROJECTION_MATRIX": "1", "RUN_POSTGRES_SANITIZER": "0"},
       "depends_on": ["legacy-release"],
       "thresholds": {"supported_postgresql_majors": 5, "failed_profiles": 0},
+      "exclusive_resources": ["docker", "cargo-target"]
+    },
+    "package-install-matrix": {
+      "command": ["./tests/heavy/source_archive_smoke.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 14400,
+      "environment": {"PG_VERSIONS": "14 15 16 17 18"},
+      "depends_on": ["legacy-release"],
+      "thresholds": {"packaged_postgresql_majors": 5, "failed_packages": 0},
       "exclusive_resources": ["docker", "cargo-target"]
     },
     "read-latency": {
       "command": ["./tests/heavy/read_latency_under_sync.sh"],
       "cwd": "graph",
       "timeout_seconds": 3600,
+      "environment": {"PG_VERSION_FEATURE": "pg17", "DBNAME": "pggraph_read_latency_release"},
       "depends_on": ["legacy-release"],
       "thresholds": {"failed_latency_thresholds": 0},
       "exclusive_resources": ["pgrx-cluster", "postgres-port"]
@@ -78,9 +147,10 @@
       "command": ["./tests/heavy/run_postgres_process_sanitizer.sh"],
       "cwd": "graph",
       "timeout_seconds": 7200,
+      "environment": {"PG_VERSION_FEATURE": "pg17"},
       "depends_on": ["supported-majors"],
       "thresholds": {"unsuppressed_memory_errors": 0},
-      "exclusive_resources": ["pgrx-cluster", "postgres-port"]
+      "exclusive_resources": ["cargo-target", "pgrx-cluster", "postgres-port"]
     }
   }
 }

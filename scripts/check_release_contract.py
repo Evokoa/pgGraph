@@ -9,6 +9,7 @@ import importlib.util
 import json
 import re
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -21,6 +22,7 @@ GQL_PROFILE = ROOT / "release" / "v1-gql-profile.json"
 GQL_DOC = ROOT / "docs" / "user_guide" / "gql-profile.mdx"
 SQL_PROFILE = ROOT / "release" / "v1-sql-profile.json"
 SQL_DOC = ROOT / "docs" / "user_guide" / "sql-profile.mdx"
+SQL_SIGNATURE_DOC = ROOT / "docs" / "user_guide" / "sql-signatures.mdx"
 SAFETY = ROOT / "graph" / "src" / "safety.rs"
 CONFIG = ROOT / "graph" / "src" / "config.rs"
 GQL_SOURCES = [
@@ -58,7 +60,7 @@ def source_tree_hash(paths: list[Path]) -> str:
     return sha256_text("\n".join(records))
 
 
-def schema_contract(schema_path: Path) -> dict[str, object]:
+def normalized_schema_blocks(schema_path: Path) -> list[str]:
     text = schema_path.read_text(encoding="utf-8")
     blocks = re.findall(
         r"/\* <begin connected objects> \*/(.*?)/\* </end connected objects> \*/",
@@ -71,7 +73,11 @@ def schema_contract(schema_path: Path) -> dict[str, object]:
         compact = re.sub(r"\s+", " ", "\n".join(lines)).strip()
         if compact:
             normalized.append(compact)
-    normalized.sort()
+    return sorted(normalized)
+
+
+def schema_contract(schema_path: Path) -> dict[str, object]:
+    normalized = normalized_schema_blocks(schema_path)
     function_contracts = sorted(
         block
         for block in normalized
@@ -88,6 +94,23 @@ def schema_contract(schema_path: Path) -> dict[str, object]:
         "normalized_sha256": sha256_text("\n".join(normalized)),
         "function_contracts_sha256": sha256_text("\n".join(function_contracts)),
     }
+
+
+def schema_function_declarations(schema_path: Path) -> list[dict[str, str]]:
+    declarations: list[dict[str, str]] = []
+    for block in normalized_schema_blocks(schema_path):
+        match = re.search(
+            r'CREATE(?: OR REPLACE)?\s+FUNCTION\s+graph\.(?:"([^"]+)"|(\w+))',
+            block,
+            re.I,
+        )
+        if match is None:
+            continue
+        declaration = re.sub(r"/\*.*?\*/", "", block)
+        declaration = re.split(r"\s+AS\s+(?:'MODULE_PATHNAME'|\$\$)", declaration, maxsplit=1)[0]
+        declaration = re.sub(r"\s+", " ", declaration).strip().rstrip(";") + ";"
+        declarations.append({"name": match.group(1) or match.group(2), "declaration": declaration})
+    return sorted(declarations, key=lambda item: (item["name"], item["declaration"]))
 
 
 def diagnostics() -> list[dict[str, str]]:
@@ -278,6 +301,9 @@ def expected_contract(schema_path: Path) -> dict:
     functions = sorted(api.implemented_functions())
     internal = [name for name in functions if name.startswith("_") or name == "test_enabled"]
     public = [name for name in functions if name not in internal]
+    public_signatures = [
+        item for item in schema_function_declarations(schema_path) if item["name"] in public
+    ]
     gql_profile = validated_gql_profile()
     sql_profile = validated_sql_profile(public)
     return {
@@ -298,6 +324,7 @@ def expected_contract(schema_path: Path) -> dict:
             "silent_reinterpretation": False,
         },
         "sql_schema": schema_contract(schema_path),
+        "sql_signatures": public_signatures,
         "public_sql_functions": public,
         "internal_sql_functions": internal,
         "sql_profile": sql_profile,
@@ -320,7 +347,7 @@ def gql_profile_doc(profile: dict) -> str:
         'description: "The exact GQL read and PostgreSQL-backed write capabilities supported by pgGraph 1.0."',
         "---",
         "",
-        "<!-- Generated from release/v1-gql-profile.json; do not edit by hand. -->",
+        "{/* Generated from release/v1-gql-profile.json; do not edit by hand. */}",
         "",
         "pgGraph 1.0 implements the documented subset below. It does not claim full ISO GQL,",
         "full openCypher, or SQL/PGQ conformance. PostgreSQL source tables remain authoritative",
@@ -357,7 +384,7 @@ def sql_profile_doc(profile: dict, public_functions: list[str]) -> str:
         'description: "The exact PostgreSQL SQL function groups and assurance evidence supported by pgGraph 1.0."',
         "---",
         "",
-        "<!-- Generated from release/v1-sql-profile.json and release/v1-contract.json; do not edit by hand. -->",
+        "{/* Generated from release/v1-sql-profile.json and release/v1-contract.json; do not edit by hand. */}",
         "",
         "The functions listed in the 1.0 release contract are the complete supported SQL surface.",
         "Every function belongs to exactly one capability group below. The release checker verifies",
@@ -398,6 +425,38 @@ def sql_profile_doc(profile: dict, public_functions: list[str]) -> str:
     return "\n".join(lines)
 
 
+def sql_signature_doc(signatures: list[dict[str, str]]) -> str:
+    lines = [
+        "---",
+        'title: "Exact SQL signatures"',
+        'description: "Generated PostgreSQL signatures, defaults, and result shapes for the pgGraph 1.0 SQL API."',
+        "---",
+        "",
+        "{/* Generated from release/v1-schema.sql; do not edit by hand. */}",
+        "",
+        "This page is the exact PostgreSQL 1.0 signature contract. It includes overloads,",
+        "argument defaults, return types, and table result columns from the release schema.",
+        "The release contract gate regenerates and compares every declaration.",
+        "",
+    ]
+    totals = Counter(item["name"] for item in signatures)
+    seen: Counter[str] = Counter()
+    for item in signatures:
+        seen[item["name"]] += 1
+        suffix = f" (overload {seen[item['name']]})" if totals[item["name"]] > 1 else ""
+        lines.extend(
+            [
+                f"### `graph.{item['name']}`{suffix}",
+                "",
+                "```sql",
+                item["declaration"],
+                "```",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def changed_sections(old: dict, new: dict) -> list[str]:
     return sorted(key for key in set(old) | set(new) if old.get(key) != new.get(key))
 
@@ -419,6 +478,7 @@ def main() -> int:
     expected = expected_contract(schema_path)
     expected_gql_doc = gql_profile_doc(expected["gql_profile"])
     expected_sql_doc = sql_profile_doc(expected["sql_profile"], expected["public_sql_functions"])
+    expected_signature_doc = sql_signature_doc(expected["sql_signatures"])
     actual = json.loads(CONTRACT.read_text(encoding="utf-8")) if CONTRACT.exists() else {}
 
     if args.write:
@@ -445,12 +505,17 @@ def main() -> int:
         CONTRACT.write_text(serialized(expected), encoding="utf-8")
         GQL_DOC.write_text(expected_gql_doc, encoding="utf-8")
         SQL_DOC.write_text(expected_sql_doc, encoding="utf-8")
+        SQL_SIGNATURE_DOC.write_text(expected_signature_doc, encoding="utf-8")
         print(f"wrote {CONTRACT.relative_to(ROOT)}")
         return 0
 
     docs_current = GQL_DOC.is_file() and GQL_DOC.read_text(encoding="utf-8") == expected_gql_doc
     sql_docs_current = SQL_DOC.is_file() and SQL_DOC.read_text(encoding="utf-8") == expected_sql_doc
-    if actual != expected or not docs_current or not sql_docs_current:
+    signature_docs_current = (
+        SQL_SIGNATURE_DOC.is_file()
+        and SQL_SIGNATURE_DOC.read_text(encoding="utf-8") == expected_signature_doc
+    )
+    if actual != expected or not docs_current or not sql_docs_current or not signature_docs_current:
         print(
             "release/v1-contract.json is stale or incompatible with the supplied schema; "
             "review the compatibility diff before regenerating",
@@ -462,6 +527,8 @@ def main() -> int:
             print("  changed: generated GQL profile documentation", file=sys.stderr)
         if not sql_docs_current:
             print("  changed: generated SQL profile documentation", file=sys.stderr)
+        if not signature_docs_current:
+            print("  changed: generated SQL signature documentation", file=sys.stderr)
         return 1
 
     print("pgGraph 1.0 release contract is in sync.")

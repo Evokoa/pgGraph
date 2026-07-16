@@ -613,6 +613,32 @@
       "decision": "keep"
     },
     {
+      "path": "graph/tests/heavy/package_install_matrix.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
       "path": "graph/tests/heavy/package_validate.sh",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -1030,6 +1056,32 @@
     },
     {
       "path": "graph/tests/heavy/run_synthetic_release_evidence.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/source_archive_smoke.sh",
       "owner": "pgGraph maintainers",
       "audience": "internal",
       "tier": "rc",
@@ -1608,6 +1660,81 @@
       "decision": "keep"
     },
     {
+      "path": "scripts/check_external_links.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_fixture_integrity.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_public_docs.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
       "path": "scripts/check_release_contract.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -1909,6 +2036,31 @@
     },
     {
       "path": "scripts/run_release.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/test_run_release.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
       "tier": "pr",

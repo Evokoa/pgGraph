@@ -116,19 +116,10 @@ def setup_sql(mode: str) -> str:
     mutable_setup = "SET graph.mutable_enabled = on; SET graph.query_freshness = off;" if mode == "mutable" else ""
     return f"""
 CREATE EXTENSION IF NOT EXISTS graph;
-SELECT graph.test_enabled();
 {mutable_setup}
 SET graph.query_memory_mb = 512;
 SET graph.maintenance_memory_mb = 1024;
 SELECT graph.reset();
-TRUNCATE graph._registered_filter_columns,
-         graph._registered_edges,
-         graph._registered_tables,
-         graph._build_jobs,
-         graph._maintenance_jobs,
-         graph._sync_log,
-         graph._sync_buffer
-RESTART IDENTITY;
 SELECT graph.add_table(
   'panama.nodes'::regclass,
   'node_id',

@@ -7,8 +7,12 @@ String-valued settings such as `graph.oom_action`, `graph.sync_mode`,
 `graph.query_freshness`, and `graph.build_scan_mode` are parsed into typed Rust
 enums at the extension boundary. They remain string GUCs for compatibility with
 existing configuration files, aliases such as `readonly`/`read_only`, and
-current warning or reserved-mode behavior. A future PostgreSQL enum-GUC change
-would require an explicit migration plan for those aliases and error messages.
+current warning or reserved-mode behavior. Any representation change follows
+the published 1.x migration and deprecation policy.
+
+The release contract records the complete GUC name set and a normalized hash of
+the Rust registration source. PostgreSQL integration tests verify documented
+defaults, ranges, contexts, and invalid-value behavior against `pg_settings`.
 
 ## Setting Values
 

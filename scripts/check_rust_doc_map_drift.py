@@ -12,6 +12,8 @@ What this checks:
      repository map's SQL facade section.
   3. pgrx integration test files in graph/src/pg_tests/*.rs are mentioned in
      docs/contributor_guide/testing-release.mdx.
+  4. Contributor relationship-identity descriptions match the source fields
+     that preserve identity through pending and layered neighbors.
 
 This catches stale repository maps after module splits, renamed facade files,
 or new SQL test files. It does not inspect Rust symbols or behavior; pair it
@@ -29,6 +31,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GRAPH_SRC = ROOT / "graph" / "src"
 REPOSITORY_MAP = ROOT / "docs" / "contributor_guide" / "repository-map.mdx"
 TESTING_RELEASE = ROOT / "docs" / "contributor_guide" / "testing-release.mdx"
+ENGINE_INTERNALS = ROOT / "docs" / "contributor_guide" / "engine-internals.mdx"
+TRAVERSAL_PATHS = ROOT / "docs" / "contributor_guide" / "traversal-search-paths.mdx"
 
 # These are support/test harness files, not production modules in the source map.
 SOURCE_MODULE_EXCLUSIONS = {"pg_test.rs", "unit_tests.rs"}
@@ -84,6 +88,42 @@ def report(title: str, missing: set[str], stale: set[str]) -> bool:
     if stale:
         print(f"  documented but not present: {', '.join(sorted(stale))}", file=sys.stderr)
     return True
+
+
+def relationship_identity_drift() -> list[str]:
+    engine_source = (GRAPH_SRC / "engine.rs").read_text(encoding="utf-8")
+    segment_source = (GRAPH_SRC / "projection" / "segment.rs").read_text(encoding="utf-8")
+    neighbor_source = (GRAPH_SRC / "projection" / "neighbors.rs").read_text(encoding="utf-8")
+    engine_doc = ENGINE_INTERNALS.read_text(encoding="utf-8")
+    traversal_doc = TRAVERSAL_PATHS.read_text(encoding="utf-8")
+
+    required_source = {
+        "EdgeMutation relationship identity": (
+            engine_source,
+            "relationship_id: Option<crate::edge_store::RelationshipId>",
+        ),
+        "segment relationship identity": (segment_source, "relationship_id: Option<"),
+        "layered neighbor relationship identity": (
+            neighbor_source,
+            "relationship_id: Option<RelationshipId>",
+        ),
+    }
+    required_docs = {
+        "engine pending/layered identity": (
+            engine_doc,
+            "Clean CSR, pending overlay, and layered segment neighbors expose stable",
+        ),
+        "path pending/layered identity": (
+            traversal_doc,
+            "Pending overlay and layered\nsegment path steps carry the same generation dictionary identity",
+        ),
+    }
+    failures = [name for name, (text, marker) in required_source.items() if marker not in text]
+    failures.extend(name for name, (text, marker) in required_docs.items() if marker not in text)
+    stale_claim = "do not yet have durable relationship IDs"
+    if stale_claim in engine_doc or stale_claim in traversal_doc:
+        failures.append("stale missing-layered-identity claim")
+    return failures
 
 
 def main() -> int:
@@ -144,6 +184,12 @@ def main() -> int:
         pg_tests - documented_pg_tests,
         stale_test_rs,
     )
+    identity_failures = relationship_identity_drift()
+    if identity_failures:
+        print("Relationship identity documentation drift:", file=sys.stderr)
+        for failure in identity_failures:
+            print(f"  {failure}", file=sys.stderr)
+        failed = True
 
     if not failed:
         print("Rust source map documentation is in sync.")

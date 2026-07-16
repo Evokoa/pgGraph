@@ -1,266 +1,73 @@
 # Roadmap
 
 <Callout type="info">
-This roadmap is directional. It describes the work pgGraph is designed around,
-not a dated release commitment.
+This roadmap is directional rather than a dated release commitment. PostgreSQL
+source tables remain authoritative in every direction described here.
 </Callout>
-
-pgGraph's roadmap keeps one boundary fixed: PostgreSQL remains the source of
-truth. Version 1.0 focuses on making the documented SQL API and supported GQL
-profile production-ready on PostgreSQL 14 through 18. Broader standards,
-PostgreSQL 19, and competitive feature work follow without expanding the 1.0
-contract or creating a separate durable graph store.
 
 ## Current Baseline
 
-The current engine already supports the core SQL workflow:
+pgGraph supports PostgreSQL 14 through 18 with a frozen SQL 1.0 surface and a
+bounded, explicitly generated GQL read/write profile. The current engine
+provides:
 
-| Area | Current behavior |
+- manual and discovered table/relationship registration, named graphs, grants,
+  quotas, and tenant scoping;
+- bounded search, traversal, paths, workflows, filters, aggregation, and
+  connected-component analytics;
+- PostgreSQL-backed mapped GQL writes that preserve constraints, triggers,
+  ACLs, RLS, MVCC, and source-row identity;
+- trigger-log synchronization, transaction/savepoint overlays, scheduler-safe
+  maintenance, compaction, repair, and garbage collection;
+- coherent snapshot builds, governed external runs, artifact format v6,
+  mmap-backed projection sections, generation compare-and-swap, reader pins,
+  and last-good-generation retention;
+- enforced byte, row, work, disk, file, and elapsed-time policies with stable
+  resource diagnostics;
+- generated SQL/GQL profiles, script and unsafe inventories, packaged
+  playground examples, and PostgreSQL 14–18 release-matrix evidence.
+
+The exact supported surfaces are published in the
+[SQL 1.0 profile](/user_guide/sql-profile),
+[GQL 1.0 profile](/user_guide/gql-profile), and
+[Versioning And Compatibility](/user_guide/versioning-and-compatibility).
+
+## Remaining 1.0 Focus
+
+The remaining 1.0 work is release preparation rather than feature expansion:
+
+| Area | Release outcome |
 |---|---|
-| Registration | Manual table and edge registration plus schema auto-discovery. |
-| Querying | Bounded traversal, shortest paths, weighted shortest paths, path reconstruction, source search, workflow helpers, connected components, and a growing but explicitly incomplete GQL subset through `graph.gql()`. |
-| Maintenance | Explicit build, persist, load, sync apply, vacuum, stats, and background job entry points. |
-| Sync | Trigger-buffered change capture with explicit foreground or background apply. |
-| Persistence | Atomic `.pggraph` artifacts under PostgreSQL data storage. Format v5 maps nodes, both CSR directions and relationship IDs, resolution, filters and lexical dictionaries, and relationship identities from one validated read-only backend snapshot. |
-| Safety | ACL preflight, typed error mapping, selected traversal circuit breakers, mapped-layout validation, and build-memory preflight exist. Graph errors use standard PostgreSQL SQLSTATEs and unwind through pgrx while retaining stable diagnostics. Mapped-layout regressions pass on PostgreSQL 14 through 18 and process-level Valgrind evidence is green; hard byte budgets and other supported-major safety evidence remain in progress. |
+| Documentation | Coherent quickstart, migration, operations, API, compatibility, limitations, and translated critical commands with drift checks. |
+| Packaging | Clean source/PGXN and PostgreSQL 14–18 package-install evidence, matching checksums, SBOMs, provenance, and license/dependency validation. |
+| CI and release gates | Required PR, nightly, RC, and full-matrix tiers with retained logs and reproducible evidence. |
+| Operations | Fresh install, alpha-to-1.0 source-preserving migration, rebuild, rollback, backup/restore, crash recovery, cancellation, resource, and cleanup proofs. |
+| Release candidate | One reviewed evidence bundle tied to a clean immutable commit before any tag or publication action. |
 
-```text
-current stable core
-    |
-    +-- SQL-first graph queries
-    +-- trigger-buffered sync
-    +-- read-only mapped launch artifacts
-    +-- release and safety hardening
-```
-
-## Open Source V1 Focus
-
-The immediate open-source focus is deliberately practical: make the existing
-system easy to install, easy to verify, and hard to misunderstand.
-
-| Area | Direction |
-|---|---|
-| Documentation | Keep SQL user docs and Rust contributor docs in the Nextra docs tree as the single source of truth. |
-| Packaging | Tighten source install, package validation, fresh install smoke tests, and PostgreSQL 14-18 release evidence. |
-| CI/CD | Start with unit/static checks on every change, then add PostgreSQL-backed pgrx integration jobs, then promote heavy release gates to scheduled or manual release validation. |
-| Examples | Maintain small examples for quick evaluation and realistic examples for operational guidance. |
-| API clarity | Document every exported SQL function, reserved option, error class, and security boundary. |
-| Operations | Keep backup/restore, crash recovery, concurrency, memory, and package checks reproducible from documented scripts. |
-
-## Version 1.0 Production Work
-
-```mermaid
-flowchart LR
-  A["Correctness, security, identity"] --> D["Bounded storage and operations"]
-  B["Resource governance"] --> D
-  C["Safe generation publication"] --> D
-  D --> E["Supported SQL and GQL profile"]
-  E --> F["Docs, packaging, CI, operations"]
-  F --> G["1.0 release evidence"]
-```
-
-| Area | Planned improvement |
-|---|---|
-| Correctness and security | Close remaining coordinate-only RLS visibility, write-identity, isolation, and cross-backend publication gaps before broadening syntax. Parallel-relationship compaction, same-named filter identity, and savepoint overlays are implemented. |
-| Resource governance | Enforce hard byte/work/disk budgets across build, mmap load, query, sync, compaction, and analytics. Prefer adaptive chunks and spill to OOM. |
-| Out-of-core build | Stream node, relationship, filter, resolution, outbound, and inbound runs into a validated generation-specific artifact. |
-| Supported query profile | Freeze the SQL and GQL behavior advertised for 1.0 in a machine-readable registry. Give each advertised capability correctness, diagnostics, security, transaction, resource, and documentation evidence; reject unsupported syntax deterministically. |
-| Bounded execution | Stream or spill operators used by the supported profile where necessary to enforce documented limits. General cost-based planning is post-1.0 work. |
-| Storage and sync | Format v5 persists both CSR directions and stable relationship/filter identities; durable manifests publish generations with cross-backend compare-and-swap and source watermarks. |
-| Compatibility and upgrades | Publish 1.x stability and deprecation rules for SQL, configuration, catalogs, artifacts, diagnostics, scripts, and examples. Test fresh installs, upgrades, rebuilds, backup/restore, and rollback expectations across PostgreSQL 14-18. |
-| Release-risk refactoring | Isolate typed PostgreSQL, unsafe, artifact, publication, resource-policy, playground, and release-script boundaries where current coupling blocks production evidence. Broader module decomposition remains post-1.0. |
-| Playground and scripts | Modularize the playground, share one structured query catalog with its release validator, remove private-catalog coupling, consolidate script lifecycle helpers, and drive release tiers from one inventory while preserving documented wrappers. |
-| CI/CD rollout | First gate `cargo fmt --check`, `cargo clippy`, `cargo test`, `cargo doc`, and docs drift checks; next gate `cargo pgrx test`; final gate synthetic/heavy release scripts. |
-| Release evidence | Publish checked correctness, security, compatibility, memory, performance, packaging, recovery, and documentation evidence from clean release artifacts. |
+New query syntax, analytics breadth, or architecture expansion does not enter
+the 1.0 contract unless it is required to close a correctness, security,
+compatibility, resource, packaging, or operations defect.
 
 ## Post-1.0 Direction
 
-After the 1.0 production contract is green, the roadmap continues with:
-
 | Area | Direction |
 |---|---|
-| Full ISO GQL | Implement applicable ISO/IEC 39075:2024 requirements in vertical slices backed by the conformance registry. |
-| Costed streaming runtime | Add canonical typed binding-table IR, statistics, cost/resource planning, alternative physical plans, streaming operators, spillable blocking work, and explain estimates/actuals. |
-| PostgreSQL 19 and SQL/PGQ | Consume native property graph definitions without duplicate registration, keep SQL/PGQ conformance separate from GQL, and differential-test `GRAPH_TABLE`. |
-| Broader refactoring | Complete the planned module decomposition and consider a pure core crate only after dependency evidence supports it. |
-| Competitive engine work | Add plan caching, selective residency, optional WAL-driven sync, quota-controlled analytics, semantic-guided expansion, and reproducible competitive scorecards. |
-| Schema-flexible graphs | Add bounded data-driven labels and evolving JSONB-backed properties after the static graph engine and compatibility model are mature. |
-| Compatibility frontends | Keep openCypher narrow unless a separately measured and maintained compatibility surface is justified. |
-| Deferred research | COPY scanning, full A*, extra analytics, embedding caches, and distributed execution remain evidence- or demand-triggered decisions. |
+| ISO GQL | Add applicable ISO/IEC 39075:2024 features in vertical slices, each with parser, binder, executor, conformance, ACL/RLS, transaction, resource, and documentation evidence. |
+| Costed streaming runtime | Develop canonical typed binding-table IR, statistics, cost/resource planning, alternative physical plans, streaming operators, and spillable blocking work. |
+| PostgreSQL 19 and SQL/PGQ | Consume native property-graph definitions without duplicate registration and maintain a separate SQL/PGQ conformance matrix for `GRAPH_TABLE`. |
+| Compatibility frontends | Keep openCypher bounded unless a separately measured and maintained compatibility surface is justified. |
+| Selective residency and caching | Investigate plan caching, selective projection residency, and workload-aware artifact placement within explicit PostgreSQL resource budgets. |
+| Synchronization | Evaluate optional WAL-driven synchronization only with source-of-truth, recovery, privilege, ordering, and bounded-retention proofs. |
+| Analytics | Move broader whole-graph algorithms into quota-controlled execution with cancellation, progress, and reproducible scorecards. |
+| Semantic guidance | Explore pgVector-assisted candidate ranking without placing embedding work in the traversal hot path or artifact authority boundary. |
+| Refactoring | Revisit module or core-crate extraction only when dependency and ownership evidence shows a concrete reliability or maintainability benefit. |
+| Distributed execution | Remain research-driven until a PostgreSQL-consistent ownership, transaction, recovery, and operations model is demonstrated. |
 
-## Alpha Hardening Status
+## Decision Rules
 
-The critical-path alpha hardening pass has landed the correctness, durability,
-SQL contract, sync freshness, and operator diagnostics work that was blocking a
-clearer public baseline.
-
-| Track | Status | Notes |
-|---|---|---|
-| Data correctness | Critical baseline landed; P0 follow-ups open | Edge endpoint, exact numeric hydration, parallel relationship compaction, same-named filter identity, and savepoint overlay fixes landed. Broader write identity and relationship-row visibility remain before a full property-multigraph claim. |
-| SQL contract | Complete for the critical path | Weighted shortest paths return stable step rows; search and traversal pagination contracts are documented and tested. |
-| Persistence safety | Critical validation landed; publication follow-up open | PK UTF-8, resolution collisions, mmap bounds, and missing `PGDATA` are validated. Replacement validation-before-switch and cross-backend generation serialization remain P0. |
-| SQL boundary safety | PostgreSQL 17 hardening complete; supported-major evidence pending | Source search binds user values through SPI parameters, errors unwind through pgrx before PostgreSQL handles them, definer functions place `pg_catalog` before explicit `pg_temp`, authorization-critical catalog/operator lookups are qualified, and registered relations use OID identity. PostgreSQL 14-16 and 18 release evidence remains. |
-| Sync freshness | Complete for topology reads | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; `graph.query_freshness = 'off'` preserves manual mode. |
-| Scheduler integration | Available | `graph.run_scheduled_maintenance()` is scheduler-safe and documented for `pg_cron` or external schedulers. The Docker image enables `pg_cron` and installs a five-minute maintenance schedule. |
-| Operator diagnostics | Complete for the critical path | `graph.status()`, `graph.sync_health()`, build jobs, and maintenance jobs expose read-only reasons and progress diagnostics. |
-
-## Continuous Improvement
-
-There is always another way to optimize a graph engine, especially one that
-runs inside PostgreSQL backend processes and must respect PostgreSQL memory,
-locking, ACL, and durability semantics. The launch priority is therefore
-deliberate: make the critical correctness, persistence, safety, and operational
-paths work first, then continue improving performance and ergonomics in the
-open.
-
-The current public follow-up list is tracked in [Known Issues](./known-issues).
-Work is ranked by user impact:
-
-P0 is part of the 1.0 production gate. P1 contributes only where it is needed
-to make the advertised 1.0 profile correct and bounded. P2 and P3 are
-post-1.0 directions.
-
-| Priority | Focus | Examples |
-|---|---|---|
-| P0 | Correctness, security, soundness, and hard resource bounds | RLS-safe topology, relationship/filter identity, safe validated mmap access, guarded PostgreSQL errors, hardened definer paths, stable relation identity, validation-first artifacts, and bounded build/load/query/compaction. |
-| P1 | Full engine foundations | Canonical enums/newtypes and exact graph values, pgrx-first adapters, canonical IR, streaming operators, cost/resource planning, mmap-friendly artifact vNext, coherent sync watermarks, and PostgreSQL transaction completeness. |
-| P2 | Standards coverage and interoperability | Full ISO GQL slices and a separate PostgreSQL 19 SQL/PGQ adapter/conformance matrix. |
-| P3 | Competitive breadth and maintainability | Analytics workers, WAL sync, semantic guidance, module/core extraction decisions, and measured hot-path optimization. |
-
-The bias is to optimize with evidence, but correctness, security, and hard
-resource boundaries do not wait for a favorable benchmark. Hot-path changes
-need checked workloads showing whether allocations, SPI calls, sorts, clones,
-or lookups are material, plus proof that the bounded fallback remains intact.
-
-Rust type safety and PostgreSQL integration are an explicit engine track. Every
-closed lifecycle/policy/config value becomes a canonical enum after one
-boundary parse; graph identities, planner slots, counts, offsets, generations,
-and memory/work units become production newtypes with checked conversions.
-pgrx-native enum GUCs, UUID/OID datums, search paths, SPI, guards, and worker
-facilities are preferred. Raw PostgreSQL/mmap code is denied by default and
-confined to an allowlist with local proofs, Miri-compatible mapped-layout
-tests, PostgreSQL-process sanitizers, fuzzing, and supported-major gates.
-
-Arena-style allocation is a possible future optimization for bounded query
-scratch space, parser/binder working sets, or traversal/path reconstruction
-buffers if profiling shows allocator overhead is material. It would not replace
-`graph.maintenance()` or `graph.vacuum()`: those operations compact committed
-sync overlays and transaction deltas into a clean immutable CSR base, while an
-arena only changes how temporary memory is allocated and released inside a
-backend.
-
-## Full GQL And SQL/PGQ Standards
-
-The normative GQL target is
-[ISO/IEC 39075:2024](https://www.iso.org/standard/76120.html) plus applicable
-published corrections. The project will track the in-progress
-[Technical Corrigendum 1](https://www.iso.org/standard/93701.html) without
-claiming support for draft text. A machine-readable feature registry will
-generate capability tables and link every row to parser, binder, planner,
-executor, diagnostics, security, tests, and documentation evidence.
-
-PostgreSQL 19 documentation now includes
-[property graph definitions](https://www.postgresql.org/docs/19/ddl-property-graphs.html),
-[CREATE PROPERTY GRAPH](https://www.postgresql.org/docs/19/sql-create-property-graph.html),
-and [GRAPH_TABLE](https://www.postgresql.org/docs/19/queries-graph.html).
-pgGraph will support native PostgreSQL 19 property graph definitions as an
-authoritative registration source, while keeping SQL/PGQ conformance separate
-from GQL and preserving PostgreSQL 14-18 SQL/GQL frontends. Native
-`GRAPH_TABLE` execution remains delegated to PostgreSQL unless a stable,
-supported integration hook can safely select pgGraph acceleration.
-The pinned pgrx 0.19.1 crates already expose a `pg19` feature, so the immediate
-toolchain task is to add an experimental pgGraph feature/build lane and verify
-the exact PostgreSQL prerelease/GA version before promoting PG19 to the
-supported release matrix.
-
-Full GQL is a completion criterion, not an umbrella label for the current
-subset. Until the conformance ledger is green, docs and releases will identify
-the supported profile precisely.
-
-## Semantic-Guided Search
-
-Semantic-guided search is a distinct direction for pgGraph: combine graph
-structure, relationship constraints, and pgVector-backed node embeddings to
-find relevant paths without letting high-degree nodes dominate bounded
-traversal.
-
-The first shape should be a `guided_path()` style API rather than a promise of
-exact A* behavior. It should keep PostgreSQL as the source of truth while
-ranking candidate expansions with multiple signals:
-
-| Signal | Purpose |
-|---|---|
-| Vector distance | Prefer nodes semantically closer to the target or query embedding. |
-| Edge and path cost | Preserve compatibility with weighted graph search where callers have meaningful costs. |
-| Degree penalty | Avoid expanding super nodes unless their semantic or structural value justifies the branching cost. |
-| Edge type preference | Let callers constrain or bias search toward useful relationship classes. |
-| Bidirectional expansion | Shrink the search space where directed-edge semantics allow safe forward/backward search. |
-| Beam width and circuit breakers | Keep latency and memory predictable with bounded candidate sets, max-node caps, max-depth caps, and diagnostics. |
-
-This path should be documented as approximate, relevance-ranked search. Exact
-shortest-path behavior remains the job of `shortest_path()` and
-`weighted_shortest_path()`.
-
-Future work can add full A* as a specialized mode, but only for cost models
-where the heuristic can be made admissible. pgVector distance alone is likely
-better treated as a semantic ranking signal unless edge costs are intentionally
-designed around the same metric.
-
-## Post-1.0 Reserved And Conditional Features
-
-These directions are outside the 1.0 production release. Some configuration
-values and internals are intentionally shaped for future work, but are not
-current behavior or implied 1.0 commitments.
-
-| Feature | Current status | Roadmap direction |
-|---|---|---|
-| WAL-driven sync | `graph.sync_mode = 'wal'` is reserved and rejected when selected. | Logical replication based sync for deployments that should avoid trigger-buffer volume. |
-| COPY build scanner | `graph.build_scan_mode = 'copy'` is reserved and rejected when selected. | A server-side COPY scanner once it can preserve the same validation, error, and memory guarantees as the current SPI path. |
-| Out-of-core build and maintenance | Persisted build and vacuum scan bounded PostgreSQL batches into governed external runs, merge with fixed fanout, stream artifact v6 directly, validate the unpublished candidate, and publish it through generation compare-and-swap. The owned builder remains available for nonpersisted backend-local builds. | Extend production-shaped resource and performance coverage as larger public datasets and additional storage operators are introduced. |
-| Relationship registration helper | `graph.add_edge()` remains the public API for FK-style and edge-table relationship registration. | Consider a dedicated many-to-many helper only if repeated post-fix user reports show the documented edge-table registration shape is still too easy to misuse. |
-| Full ISO GQL | `graph.gql()` currently exposes a substantial but incomplete profile through a JSONB SQL facade. Current coverage and rejections remain documented in the query guide. | Implement every applicable ISO/IEC 39075:2024 requirement through a generated conformance ledger, correct graph identities and visibility, typed binding-table IR, cost/resource planning, streaming execution, PostgreSQL-first set-based writes, and full transaction/security gates. |
-| PostgreSQL SQL/PGQ | An internal typed adapter seam exists but is not a public API. PostgreSQL 19 has native property graph and `GRAPH_TABLE` documentation. | Add version-gated PG19 support that consumes native definitions without duplicate registration, rebases the adapter on canonical IR, handles DDL/security semantics, differential-tests `GRAPH_TABLE`, and maintains a separate SQL/PGQ conformance matrix. |
-| openCypher compatibility | `graph.cypher()` exposes only the overlapping documented subset. | Keep this as an explicitly narrow compatibility layer until full GQL foundations and evidence are complete. |
-| Online mutable graph overlays | The `mutable_overlay` build mode, transaction-delta lifecycle, overlay-aware read paths, durable committed edge projection segments, exact typed durable filter deltas, PostgreSQL-first GQL node `CREATE`, PostgreSQL-first GQL relationship `CREATE` for registered edge-row mappings, PostgreSQL-first GQL property `SET`, PostgreSQL-first GQL property `REMOVE`, PostgreSQL-first GQL edge-row `DELETE`, PostgreSQL-first GQL node `DETACH DELETE`, and PostgreSQL-first GQL node `MERGE` are present. | Continue routing narrow GQL writes through PostgreSQL-first DML and transaction-local deltas while keeping `csr_readonly` as the fast read-mostly mode. |
-| Full GQL writes | Current writes are intentionally narrow and PostgreSQL-first: mapped single-node/relationship `CREATE`, property `SET`/`REMOVE`, edge `DELETE`, node `DETACH DELETE`, and node `MERGE`. Writes are rejected on `csr_readonly` projections. | Implement the selected ISO data-modification features, including set-based/multi-row semantics and savepoints, through authoritative PostgreSQL DML, row locks/rechecks, `RETURNING`, transaction deltas, concurrency tests, and explicit mapping errors. Treat Cypher-shaped aliases separately in the conformance registry. |
-| Non-CSR mutable projection | Durable manifest generations, immutable delta CSR segments, layered neighbor reads, trigger-sync relationship identity, parallel-aware compaction and dirty-range replacement, generation-aware garbage collection, repair, diagnostics, and committed-edge cross-backend visibility are implemented for `mutable_overlay`. Maintenance/vacuum is still used to compact accumulated projection state back into a clean base graph. | Finish production verification, release documentation, and benchmark signoff before treating durable projection replacement as fully production-ready. |
-| pgVector embedding cache | Node embeddings are not part of the graph artifact or traversal hot path. | Investigate a sidecar or persisted embedding cache keyed by internal node IDs so semantic-guided search can rank candidates without source-table lookups inside the search loop. |
-| Full A* path search | Not current behavior. Existing shortest paths use bidirectional BFS and weighted paths use Dijkstra. | Consider as a specialized semantic-guided search mode only when the heuristic has an explicit admissibility contract. |
-| Additional graph analytics | Connected components exist today; PageRank, Louvain, betweenness, and similar global algorithms are not built in. | Consider companion analytics paths where they fit PostgreSQL operations and do not slow the hot traversal path. |
-| Distributed graph execution | Not a V1 goal. | Revisit only after the single-database engine, packaging, and operational model are mature. |
-
-## Non-Goals
-
-pgGraph is not trying to become:
-
-| Non-goal | Reason |
-|---|---|
-| A replacement storage engine | PostgreSQL tables, indexes, constraints, ACLs, and RLS remain the system of record. |
-| A separate graph database hidden inside PostgreSQL | GQL, SQL/PGQ, and compatibility frontends compile to PostgreSQL-authoritative graph projections rather than creating a second durable store. |
-| Broad Cypher, Gremlin, or SPARQL compatibility | The standards direction is GQL and SQL/PGQ first. Other graph-language compatibility should be considered only as a later compatibility layer. |
-| A distributed graph database | The current architecture is local to one PostgreSQL database. |
-| A global analytics engine in the OLTP query path | Expensive whole-graph algorithms need different scheduling and resource controls than bounded traversal. |
-
-## Roadmap Completion Policy
-
-Roadmap rows are active commitments or explicit decision gates, not permanent
-idea storage. When evidence is green, delivered work moves into Current
-Baseline and release notes and its planned/reserved row is removed. Conditional
-items are implemented, rejected, or moved to a deferred non-goal with a concrete
-revisit trigger. Resolved limitations leave active Known Issues after their
-regressions and release history are durable.
-
-## Documentation Policy
-
-Going forward, project documentation should live under `docs/`.
-
-- SQL behavior, installation, operations, and examples belong in
-  `docs/user_guide/`.
-- Rust internals, persistence, safety, memory, tests, and release process belong
-  in `docs/contributor_guide/`.
-- The top-level overview and system design stay directly under `docs/`.
-- Quickstart and roadmap pages live directly under `docs/`; user guide and
-  contributor guide pages live under `docs/user_guide/` and
-  `docs/contributor_guide/`.
-- Repository-local README files should stay small pointers or be removed when
-  they duplicate the docs tree.
+- Current user-visible limitations belong in [Known Issues](./known-issues).
+- Shipped behavior and migrations belong in [Release Notes](./release-notes).
+- Public SQL, GQL, configuration, diagnostics, artifacts, and scripts follow the
+  published 1.x compatibility and deprecation policy.
+- Features graduate from this roadmap only with production implementation,
+  tests, public documentation, and release-gate ownership.

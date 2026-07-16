@@ -282,13 +282,9 @@ Use this matrix when diagnosing complex production failures relating to jobs, qu
 | **Background workers unavailable** | `graph.jobs().last_status = 'queued'` | N/A | `graph.jobs()`, `graph.job_runs()` | Restore worker capacity, then run `graph.run_due_jobs()` manually. | Serves the last valid generation. |
 | **Schema/catalog drift** | `schema_status = 'invalid'` and `needs_rebuild = true` | `0A000` / `PG018` | `graph.status().schema_status`, `graph.status().needs_rebuild` | Run `graph.build()` for the selected graph. | Reads fail on affected paths until rebuilt. |
 
-## Heavy Validation Commands
+## Maintainer Validation
 
-Run focused external checks when debugging release-class issues:
-
-```bash
-cd graph
-PG_VERSION_FEATURE=pg17 DBNAME=pggraph_boundary ./tests/heavy/run_sqlstate_acl_boundary.sh
-PG_VERSION_FEATURE=pg17 DBNAME=pggraph_concurrency CLIENTS=3 ROUNDS=3 ./tests/heavy/concurrency_stress.sh
-PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh
-```
+If a reproducible issue requires release-class ACL, concurrency, install, or
+crash validation, include the public diagnostics above in the issue report.
+Maintainers can then select the appropriate focused gate from the
+[Testing And Release](../contributor_guide/testing-release) guide.

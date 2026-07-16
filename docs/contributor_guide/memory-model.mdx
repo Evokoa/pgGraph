@@ -4,7 +4,7 @@ The engine is designed around cache-friendly owned arrays during build and
 read-only mapped fixed-width arrays after persistence. PostgreSQL backends do
 not share Rust heap memory or mapped snapshots. After auto-load, each backend
 copies the artifact into an anonymous read-only mapping before typed views are
-created. Format v5 keeps both CSR directions, filter values and dictionaries,
+created. Format v6 keeps both CSR directions, filter values and dictionaries,
 and relationship identities in that mapping; mutable changes remain compact
 backend-local overlays.
 This mapping is for rebuildable graph artifacts only; PostgreSQL still owns
@@ -56,7 +56,7 @@ cap. Major vectors and maps reserve against the governor before growth.
 Traversal and query loops consume work at runtime and regularly check both
 PostgreSQL interrupts and the optional graph elapsed breaker. One query
 governor remains active across execution results, paging, sorting, output-row
-construction, and hydration, so a later phase cannot reuse memory still held by
+construction, and hydration, so a subsequent phase cannot reuse memory still held by
 an earlier phase. Load validates artifact and projection-file sizes before
 decode. Sync retains accounting from catalog and payload preflight through
 normalization, artifact staging, candidate validation, and governed manifest

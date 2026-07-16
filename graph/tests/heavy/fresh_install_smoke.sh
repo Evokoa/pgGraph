@@ -5,6 +5,7 @@ DBNAME="${DBNAME:-pggraph_install_smoke}"
 PG_VERSION_FEATURE="${PG_VERSION_FEATURE:-pg17}"
 PG_MAJOR="${PG_VERSION_FEATURE#pg}"
 PG_CONFIG="${PG_CONFIG:-}"
+SKIP_PACKAGE_INSTALL="${SKIP_PACKAGE_INSTALL:-0}"
 
 if [[ -z "$PG_CONFIG" ]]; then
   if [[ -x "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" ]]; then
@@ -17,7 +18,9 @@ if [[ -z "$PG_CONFIG" ]]; then
   fi
 fi
 
-cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --no-default-features
+if [[ "$SKIP_PACKAGE_INSTALL" != "1" ]]; then
+  cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --no-default-features
+fi
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 

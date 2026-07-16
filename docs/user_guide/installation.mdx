@@ -30,7 +30,7 @@ build should not be installed into a PostgreSQL 16 server.
 On macOS, pgGraph is available from the
 [Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) for local
 PostgreSQL extension installs. The current formula is `Evokoa/tap/pggraph`,
-installs pgGraph 0.1.8, and builds against Homebrew `postgresql@17`.
+installs pgGraph 1.0.0, and builds against Homebrew `postgresql@17`.
 
 ```bash
 brew tap Evokoa/tap
@@ -48,6 +48,11 @@ psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname 
 
 Use Homebrew when you want a local macOS PostgreSQL extension install. For the
 fastest zero-build quickstart, use the pre-built Docker image below.
+
+The Homebrew formula is a convenience channel for PostgreSQL 17. The pgGraph
+1.0 supported package matrix is the versioned PGXN/source archive and GHCR
+images for PostgreSQL 14 through 18; use one of those channels when you require
+the complete release-evidence contract.
 
 ## Install pgrx
 
@@ -138,27 +143,11 @@ cargo pgrx install --no-default-features --features pg16 --pg-config=/usr/lib/po
 CREATE EXTENSION graph;
 ```
 
-The bootstrap SQL creates:
-
-| Object | Purpose |
-|---|---|
-| `graph.node_ref` | Composite start-node type for one traversal overload |
-| `graph.node_ref(regclass, text)` | Constructor for `graph.node_ref` |
-| `graph.traverse(graph.node_ref[], ...)` | SQL wrapper over the Rust multi-start traversal overload |
-| `graph._registered_tables` | Durable graph-scoped registration catalog for node source tables |
-| `graph._registered_edges` | Durable graph-scoped registration catalog for edge definitions |
-| `graph._registered_filter_columns` | Durable graph-scoped registration catalog for traversal filter columns |
-| `graph._graphs` | Durable named graph metadata and default graph identity |
-| `graph._build_jobs` | Durable graph-scoped asynchronous build job state |
-| `graph._maintenance_jobs` | Durable graph-scoped maintenance job state |
-| `graph._jobs` | Durable graph-scoped generic job state for hosted schedulers |
-| `graph._job_runs` | Durable run history for generic graph jobs |
-| `graph._sync_policies` | Durable graph-scoped sync policy state |
-| `graph._sync_log` | Durable trigger sync log |
-| `graph._sync_buffer` | Legacy sync buffer compatibility table |
-
-Internal catalog tables are extension-owned. They are readable by `PUBLIC` but
-not directly writable by non-admin roles.
+The extension creates the public `graph` functions and types documented in the
+[API Reference](./api-reference), together with extension-owned catalogs used
+to retain registrations, jobs, and synchronization state. Treat every
+underscore-prefixed object as internal; applications should use documented
+public functions rather than reading or writing those catalogs directly.
 
 <Callout type="warning">
 Pre-release catalog schema changes require recreating development and test
@@ -185,14 +174,14 @@ available for PostgreSQL 14 through 18 and support **linux/amd64** and
 or WSL2).
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:0.1.8
+docker pull ghcr.io/evokoa/pggraph:1.0.0
 ```
 
 | Tag | Description |
 |---|---|
-| `0.1.8` | Pinned reproducible tag (PostgreSQL 17) — always resolves to the same image digest |
+| `1.0.0` | Pinned reproducible tag (PostgreSQL 17) — always resolves to the same image digest |
 | `latest` | Moving tag that points to the most recent stable PostgreSQL 17 image |
-| `pg14-0.1.8` through `pg18-0.1.8` | Versioned image for a specific PostgreSQL major |
+| `pg14-1.0.0` through `pg18-1.0.0` | Versioned image for a specific PostgreSQL major |
 | `pg14` through `pg18` | Latest stable image for a specific PostgreSQL major |
 
 Start the container:
@@ -202,7 +191,7 @@ docker run --rm \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=graph \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:0.1.8
+  ghcr.io/evokoa/pggraph:1.0.0
 ```
 
 Verify that `pg_cron` and `graph` are installed and loaded:
@@ -331,7 +320,7 @@ the graph lazily on first use when `graph.auto_load = true`.
 ## Verify Installation
 
 ```sql
-SELECT graph.test_enabled();
+SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';
 SELECT * FROM graph.status();
 ```
 
@@ -344,51 +333,24 @@ Expected initial state before build:
 | `sync_mode` | `trigger` unless configured |
 | `schema_status` | `current` |
 
-## Development Test Commands
-
-```bash
-cd graph
-cargo fmt --check
-cargo test --features pg17
-cargo pgrx test pg17
-```
-
-SQLSTATE and ACL boundary tests intentionally run outside `cargo pgrx test`
-because they need a normal client/server error boundary:
-
-```bash
-cd graph
-PG_VERSION_FEATURE=pg17 DBNAME=pggraph_boundary ./tests/heavy/run_sqlstate_acl_boundary.sh
-```
-
-## Docker And Packaging Checks
-
-The heavy test suite includes packaging, install smoke, function metadata audit,
-backup/restore, Docker smoke, and PostgreSQL major matrix scripts:
-
-```bash
-cd graph
-PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh
-PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh
-PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata ./tests/heavy/function_metadata_audit.sh
-./tests/heavy/playground_release_gate.sh
-./tests/heavy/docker_smoke.sh
-```
-
-For the full release gate:
-
-```bash
-cd graph
-PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
-```
+Package, PostgreSQL-major, security, and release validation procedures are
+maintainer workflows. Contributors can run them from the
+[Testing And Release](../contributor_guide/testing-release) guide.
 
 ## Upgrading and Migration
 
-If you are upgrading from a pre-named-graph version of pgGraph (Phase 3 or earlier), your installation will migrate automatically to the multi-graph architecture. This section explains how the migration handles existing data.
+The alpha-to-1.0 boundary is a source-preserving clean install and rebuild. It
+does not promise in-place compatibility for alpha extension catalogs or graph
+artifacts. Follow the [pgGraph 1.0 Migration Guide](./migration-1-0) before
+replacing the package.
 
-### Global Catalog to Default Graph
+### Global Catalog Registration
 
-Earlier versions of pgGraph used a single, global catalog for registration (`graph._registered_tables`, etc.). During migration, the extension creates a default graph named `default` in the `public` namespace. All existing global catalog entries are automatically assigned to this `default` graph. Your existing queries continue to work because the legacy selected-graph workflow still targets the default graph when you do not opt into a named graph explicitly.
+Earlier alpha versions used a single global registration catalog. Do not copy
+those extension-owned rows into 1.0. Record the reviewed source mappings before
+upgrade, install 1.0 cleanly, and reapply registrations through public
+`graph.add_table()`, `graph.add_edge()`, and `graph.add_filter_column()` calls.
+Calls that omit a named graph target the 1.0 default graph.
 
 ### Artifact Path Migration
 
@@ -408,15 +370,18 @@ resolve the current manifest rather than selecting the highest-numbered file.
 
 ### Projection Generation Migration
 
-If your installation used pre-computed projections, the migration seeds a new generation sequence for the `default` graph and repoints durable metadata at the migrated catalog rows. Existing projections continue to serve until you rebuild or repair them against the new catalog state.
+Alpha projections are derived state and do not continue serving across this
+boundary. Rebuild them from the authoritative PostgreSQL source tables after
+the 1.0 registrations have been applied.
 
 ### Rollback and Repair Guidance
 
-If the migration fails (e.g., due to insufficient disk space when moving artifacts), the extension may enter an inconsistent catalog state.
+If validation fails, stop before directing application traffic to the new
+extension and restore the pre-upgrade database/package pair.
 
 **To recover:**
-1. **Restore from Backup**: If you dumped `pg_extension_config_dump` prior to upgrade, restore the catalog tables.
-2. **Manual Rebuild**: Run `SELECT * FROM graph.select_graph('default');` followed by `SELECT graph.reset();` and then `SELECT * FROM graph.build();` to recreate the selected graph from your authoritative PostgreSQL source tables.
-3. **Artifact Cleanup**: If old artifact files remain under the previous graph data directory, remove them only after the rebuilt default graph is healthy.
-4. **Log Inspection**: Check the PostgreSQL error detail for diagnostics `PG009`
-   or `PG018` during extension update.
+1. **Restore the backup** into a clean database using the same alpha package.
+2. **Retry the 1.0 clean install** only after correcting the failed preflight.
+3. **Reapply reviewed registrations and rebuild** from PostgreSQL source tables.
+4. **Remove old derived artifacts only after validation** confirms the rebuilt
+   1.0 graph is healthy.

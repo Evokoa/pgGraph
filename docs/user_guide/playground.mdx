@@ -181,20 +181,12 @@ separate `Apply Sync` and maintenance examples reset their fixture and exercise
 the explicit synchronization APIs. Production deployments should choose the
 documented freshness policy for their own cross-backend visibility needs.
 
-## Release Gate
+## Verified Examples
 
-The playground SQL examples are part of the heavy release gate. The gate imports
-the same query catalog used by the Streamlit sidebar and checks each example
-against fixed result summaries for the Panama dataset:
-
-```bash
-cd graph
-./tests/heavy/playground_release_gate.sh
-PGGRAPH_PLAYGROUND_MODE=mutable ./tests/heavy/playground_release_gate.sh
-```
-
-If a playground query is added, removed, or changed, update the gate
-expectations deliberately after reviewing the new result shape.
+The packaged playground and its automated smoke test consume the same query
+catalog. Each maintained example has a stable ID and reviewed result summary
+for the Panama dataset, so documentation and application examples cannot drift
+independently.
 
 ## Cleanup
 

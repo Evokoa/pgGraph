@@ -11,11 +11,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/evokoa/pggraph/stargazers">
+  <a href="https://github.com/evokoa/pggraph">
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-0.1.8-2ea44f?style=flat-square" alt="Version 0.1.8">
+    <img src="https://img.shields.io/badge/version-1.0.0-2ea44f?style=flat-square" alt="Version 1.0.0">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -72,6 +72,10 @@ path, and relationship queries directly against ordinary PostgreSQL tables.
 Your tables stay the source of truth. pgGraph builds a derived graph index and
 lets you query it from SQL using functions in the `graph` schema.
 
+> [!WARNING]
+> The current published line is alpha software. It becomes
+> production-supported with the completed pgGraph 1.0 release.
+
 > [!TIP]
 > **Looking for a managed version?** We have launched a managed version of pgGraph on [polygres.com](https://polygres.com) for full high performance GraphRAG on Postgres.
 
@@ -98,12 +102,12 @@ The image is multi-arch (`linux/amd64` and `linux/arm64`) and works on macOS,
 Linux, and Windows via Docker Desktop.
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:0.1.8
+docker pull ghcr.io/evokoa/pggraph:1.0.0
 docker run -d --rm \
   --name pggraph \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:0.1.8
+  ghcr.io/evokoa/pggraph:1.0.0
 ```
 
 The default database is `graph` with `pg_cron` and a maintenance job
@@ -128,7 +132,7 @@ psql -h localhost -U postgres -d graph
 On macOS, pgGraph is available from the
 [Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) for local
 PostgreSQL extension installs. The current formula is `Evokoa/tap/pggraph`,
-installs pgGraph 0.1.8, and builds against Homebrew `postgresql@17`.
+installs pgGraph 1.0.0, and builds against Homebrew `postgresql@17`.
 
 ```bash
 brew tap Evokoa/tap
@@ -198,8 +202,8 @@ The script works on macOS and Linux from a normal terminal, and on Windows from
 WSL2 or Git Bash with Docker Desktop. It is not a native PowerShell or Command
 Prompt script.
 
-Starting with v0.1.5, Docker release images are published for PostgreSQL 14
-through 18. Tags without a PostgreSQL major, such as `0.1.5` and `latest`, use
+Docker release images are published for PostgreSQL 14 through 18. Tags without
+a PostgreSQL major, such as `1.0.0` and `latest`, use
 the default PostgreSQL 17 image.
 PostgreSQL 13 is no longer an official support target after upstream EOL, though
 the legacy `pg13` pgrx feature remains available on a best-effort basis. The
@@ -338,9 +342,8 @@ pgGraph operates at a different layer. SQL/PGQ expresses graph patterns and lets
 the optimizer choose how to execute them. pgGraph precomputes CSR adjacency
 stores and rebuildable artifacts for workloads that repeatedly traverse the same
 topology with bounded depth, path limits, filters, tenants, and application
-pagination. The two can be complementary: future adapters could map eligible
-SQL/PGQ patterns onto pgGraph's precomputed runtime, while general graph queries
-continue to use PostgreSQL's relational execution path.
+pagination. The pgGraph 1.0 PostgreSQL 14–18 contract does not expose SQL/PGQ.
+PostgreSQL 19 integration is tracked separately on the public roadmap.
 
 ## Community
 

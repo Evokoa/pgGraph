@@ -13,6 +13,8 @@ What this checks:
   3. GUCs registered in graph/src/config.rs are listed in
      docs/user_guide/configuration.mdx, and that page does not document removed
      graph.* settings.
+  4. The public diagnostic SQLSTATE/PGxxx table exactly matches the release
+     contract extracted from Rust error mappings.
 
 The script intentionally checks names, not full signatures. pgrx owns SQL DDL
 generation for Rust functions, so this lightweight guard is meant to catch
@@ -23,6 +25,7 @@ PostgreSQL instance.
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
 import sys
@@ -33,7 +36,9 @@ BOOTSTRAP_SQL = ROOT / "graph" / "sql" / "bootstrap.sql"
 DOCS_DIR = ROOT / "docs"
 API_REFERENCE = DOCS_DIR / "user_guide" / "api-reference.mdx"
 CONFIG_REFERENCE = DOCS_DIR / "user_guide" / "configuration.mdx"
+DIAGNOSTIC_REFERENCE = DOCS_DIR / "user_guide" / "administration-and-security.mdx"
 CONFIG_RS = GRAPH_SRC / "config.rs"
+RELEASE_CONTRACT = ROOT / "release" / "v1-contract.json"
 
 
 def implemented_functions() -> set[str]:
@@ -105,6 +110,15 @@ def documented_gucs() -> set[str]:
     return names
 
 
+def documented_diagnostics() -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    for line in DIAGNOSTIC_REFERENCE.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"\|\s*`([0-9A-Z]{5})`\s*\|\s*`(PG[0-9]{3})`\s*\|", line)
+        if match:
+            pairs.add((match.group(1), match.group(2)))
+    return pairs
+
+
 def format_graph_functions(names: set[str]) -> str:
     return ", ".join(f"graph.{name}()" for name in sorted(names))
 
@@ -137,6 +151,12 @@ def main() -> int:
     args = parser.parse_args()
 
     implementation = implemented_functions()
+    contract = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
+    public_functions = set(contract["public_sql_functions"])
+    internal_functions = set(contract["internal_sql_functions"])
+    if public_functions | internal_functions != implementation:
+        print("release SQL function inventory differs from implementation", file=sys.stderr)
+        return 1
     gucs = implemented_gucs()
 
     if args.list_implemented:
@@ -153,8 +173,8 @@ def main() -> int:
     api_functions = documented_functions(API_REFERENCE)
     failed |= report_set_diff(
         str(API_REFERENCE.relative_to(ROOT)),
-        implementation - api_functions,
-        api_functions - implementation,
+        public_functions - api_functions,
+        api_functions - public_functions,
         format_graph_functions,
     )
 
@@ -175,6 +195,17 @@ def main() -> int:
         str(CONFIG_REFERENCE.relative_to(ROOT)),
         gucs - config_gucs,
         config_gucs - gucs,
+    )
+
+    contract_diagnostics = {
+        (item["sqlstate"], item["diagnostic"]) for item in contract["diagnostics"]
+    }
+    docs_diagnostics = documented_diagnostics()
+    failed |= report_set_diff(
+        str(DIAGNOSTIC_REFERENCE.relative_to(ROOT)) + " diagnostics",
+        contract_diagnostics - docs_diagnostics,
+        docs_diagnostics - contract_diagnostics,
+        lambda pairs: ", ".join(f"{state}/{code}" for state, code in sorted(pairs)),
     )
 
     if not failed:

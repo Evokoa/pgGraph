@@ -235,5 +235,14 @@
     "date": "2026-07-16",
     "new_schema_sha256": "b72933c3d4e7c94c2f1c104a0bd2f1aaef1a1300c71bacfdd03f29b0cb20d336",
     "previous_schema_sha256": "b72933c3d4e7c94c2f1c104a0bd2f1aaef1a1300c71bacfdd03f29b0cb20d336"
+  },
+  {
+    "acknowledgement": "R6-exact-sql-signatures",
+    "changed_sections": [
+      "sql_signatures"
+    ],
+    "date": "2026-07-16",
+    "new_schema_sha256": "b72933c3d4e7c94c2f1c104a0bd2f1aaef1a1300c71bacfdd03f29b0cb20d336",
+    "previous_schema_sha256": "b72933c3d4e7c94c2f1c104a0bd2f1aaef1a1300c71bacfdd03f29b0cb20d336"
   }
 ]

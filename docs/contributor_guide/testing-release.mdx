@@ -509,6 +509,23 @@ cd graph
 ./tests/heavy/run_pg_matrix_docker.sh
 ```
 
+The release-package matrix builds the install tree from a clean source archive
+and verifies the control file, generated extension SQL, and shared library for
+every supported major:
+
+```bash
+cd graph
+./tests/heavy/source_archive_smoke.sh
+```
+
+The script derives the tag from `graph/Cargo.toml`, requires clean tracked files
+and index state, and rejects an explicit tag that does not match the package
+version. Ignored build output and untracked evidence cannot enter `git archive`.
+
+Use `package_install_matrix.sh` only when diagnosing one already-extracted
+source tree. The release gate uses `source_archive_smoke.sh` so untracked files
+from a development checkout cannot satisfy package verification.
+
 The Docker matrix runs `run_gql_write_matrix.sh` by default after the Rust and
 pgrx suites. This adds the full and persisted isolation profiles and the
 deterministic concurrent-writer gates for every selected major. Set
@@ -541,6 +558,22 @@ PGGRAPH_PLAYGROUND_YES=1 ./tests/heavy/playground_release_gate.sh
 Do not mark release verification complete when a gate is skipped or
 interrupted. Either rerun the gate successfully or record an explicit
 release-owner waiver with the measured evidence that justifies it.
+
+## Continuous Integration
+
+Pull requests and pushes to `main` run the `pr` release tier. A scheduled job
+runs the `nightly` tier, and both jobs retain the JSON evidence and associated
+logs as workflow artifacts. The jobs use runners labeled `pggraph-release` so
+the pinned Rust toolchain, PostgreSQL 17 development environment, pgrx cluster,
+Node.js dependency cache, and gitleaks binary are available without mutable
+bootstrap steps in each workflow.
+
+Runner images are maintained from the same PostgreSQL matrix Dockerfile and
+must be refreshed whenever `rust-toolchain.toml`, the pgrx version, or the
+documentation lockfile changes. Repository branch protection should require
+the `Required release gate` job. A skipped or unavailable self-hosted runner is
+not passing evidence; release owners must restore runner capacity and rerun the
+job.
 
 ## Package Release Workflow
 
@@ -621,13 +654,21 @@ release-gate timing, and SQL-facing benchmark requirements.
 
 ## Documentation Checks
 
+The repository compiles every MDX source and renders it to static HTML with
+deterministic local stand-ins for the documentation host's application-shell
+components. This catches MDX execution and markup failures without claiming to
+reproduce the separately deployed site shell. External-link checks also verify
+the published documentation routes. The docs-host deployment remains
+responsible for its own application build and visual regression checks.
+
 Rust public API docs are part of the contract. Before calling documentation
 complete:
 
 ```bash
 cd graph
-cargo doc --features pg17 --no-deps
-cargo test --doc --features pg17
+RUSTDOCFLAGS='-D warnings -D missing-docs -D rustdoc::broken_intra_doc_links -D rustdoc::bare_urls' \
+  cargo rustdoc --lib --no-default-features --features 'pg17 development'
+cargo test --doc --no-default-features --features 'pg17 development'
 ```
 
 If doctests require PostgreSQL, mark them `no_run` or keep examples in MDX user

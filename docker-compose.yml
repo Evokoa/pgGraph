@@ -1,8 +1,9 @@
 services:
   postgres:
+    image: ${PGGRAPH_QUICKSTART_IMAGE:-pggraph:quickstart-local}
     build: .
     ports:
-      - "5432:5432"
+      - "${PGGRAPH_QUICKSTART_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

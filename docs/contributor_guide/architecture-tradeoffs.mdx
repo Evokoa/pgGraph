@@ -24,7 +24,7 @@ buffer pool, and not a separate graph database that owns your data.
 | Decision | Tradeoff |
 |---|---|
 | Keep source tables authoritative | pgGraph can rebuild from PostgreSQL data, but query speed depends on a derived artifact being fresh enough for the workload. |
-| Use SQL functions as the public API | Applications stay inside PostgreSQL, but pgGraph does not yet expose a standard graph query language directly. |
+| Use SQL functions as the public API | Applications stay inside PostgreSQL; `graph.gql()` exposes the bounded documented GQL profile rather than claiming full language conformance. |
 | Precompute CSR adjacency | Traversal avoids repeatedly discovering edges through joins, but builds and maintenance become explicit operational steps. |
 | Keep engines backend-local | This matches PostgreSQL's process model and avoids shared mutable Rust state, but each backend still owns its mapped snapshot, bounded decoded metadata, and mutable overlays. |
 | Copy artifacts into read-only anonymous mappings | Typed views get stable immutable bytes even if the source inode changes, at the cost of one artifact-sized private snapshot per loading backend. |

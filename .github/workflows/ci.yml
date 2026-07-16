@@ -1,0 +1,68 @@
+name: Release gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Release-gate tier to run
+        required: true
+        default: pr
+        type: choice
+        options: [pr, nightly]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pr:
+    name: Required release gate
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.tier == 'pr')
+    runs-on: [self-hosted, pggraph-release]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install locked documentation checks
+        run: sfw npm ci --prefix docs
+      - name: Run required checks
+        run: scripts/run_release.py --tier pr --evidence release/evidence/pr.json
+      - name: Retain evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-release-evidence-${{ github.run_id }}
+          path: release/evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+  nightly:
+    name: Nightly release gate
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'nightly')
+    runs-on: [self-hosted, pggraph-release]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install locked documentation checks
+        run: sfw npm ci --prefix docs
+      - name: Run nightly checks
+        run: scripts/run_release.py --tier nightly --evidence release/evidence/nightly.json
+      - name: Retain evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-release-evidence-${{ github.run_id }}
+          path: release/evidence/
+          if-no-files-found: error
+          retention-days: 90

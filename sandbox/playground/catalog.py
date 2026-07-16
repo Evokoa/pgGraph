@@ -21,8 +21,13 @@ class QueryExample:
     capabilities: tuple[str, ...]
     statements: tuple[str, ...]
     expected_schema: tuple[str, ...] | None
-    expected_checksum: str | None
+    statement_checksum: str
     documentation_url: str
+    owner: str
+    minimum_pggraph_version: str
+    postgresql_major: int
+    reset_strategy: str
+    smoke_test: str
 
     @property
     def sql(self) -> str:
@@ -67,8 +72,13 @@ def query_examples(mode: str = "csr") -> tuple[QueryExample, ...]:
                     capabilities=capabilities,
                     statements=statements,
                     expected_schema=None,
-                    expected_checksum=hashlib.sha256("\0".join(statements).encode("utf-8")).hexdigest(),
-                    documentation_url="https://docs.evokoa.com/pggraph/user-guide/api-reference",
+                    statement_checksum=hashlib.sha256("\0".join(statements).encode("utf-8")).hexdigest(),
+                    documentation_url="https://docs.evokoa.com/pggraph/user_guide/api-reference",
+                    owner="pgGraph maintainers",
+                    minimum_pggraph_version="1.0.0",
+                    postgresql_major=17,
+                    reset_strategy="Recreate the disposable playground database for a clean catalog.",
+                    smoke_test="graph/tests/heavy/playground_release_gate.sh",
                 )
             )
     return tuple(examples)

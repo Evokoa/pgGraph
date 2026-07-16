@@ -1,6 +1,7 @@
 export default {
   index: 'Overview',
   installation: 'Installation',
+  'migration-1-0': '1.0 Migration Guide',
   'versioning-and-compatibility': 'Versioning And Compatibility',
   configuration: 'Configuration',
   'schema-registration': 'Schema Registration',
@@ -8,6 +9,7 @@ export default {
   querying: 'Querying',
   'gql-profile': 'GQL 1.0 Profile',
   'sql-profile': 'SQL 1.0 Profile',
+  'sql-signatures': 'Exact SQL Signatures',
   'filters-and-aggregation': 'Filters And Aggregation',
   'sync-and-maintenance': 'Sync And Maintenance',
   'administration-and-security': 'Administration And Security',

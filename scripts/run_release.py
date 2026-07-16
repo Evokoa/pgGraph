@@ -17,6 +17,32 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "release" / "gates.json"
+CONTROL_ENV_PREFIXES = (
+    "RUN_",
+    "PGGRAPH_",
+    "MAX_",
+    "MIN_",
+    "SYNTHETIC_",
+    "BUILD_MEMORY_",
+)
+CONTROL_ENV_NAMES = {
+    "CLIENTS",
+    "DBNAME",
+    "DB_PREFIX",
+    "JOBS",
+    "PG_CONFIG",
+    "PG_VERSION_FEATURE",
+    "PG_VERSIONS",
+    "PGDATA",
+    "PGDATABASE",
+    "PGHOST",
+    "PGPASSWORD",
+    "PGPORT",
+    "PGSERVICE",
+    "PGUSER",
+    "ROUNDS",
+    "TIME",
+}
 
 
 def load_json(path: Path) -> dict:
@@ -85,6 +111,17 @@ def acquire_locks(resources: list[str]) -> list[object]:
     return locks
 
 
+def gate_environment(gate: dict) -> dict[str, str]:
+    """Return the caller environment without undeclared release controls."""
+    declared = {key: str(value) for key, value in gate.get("environment", {}).items()}
+    environment = os.environ.copy()
+    for key in list(environment):
+        if key in CONTROL_ENV_NAMES or key.startswith(CONTROL_ENV_PREFIXES):
+            environment.pop(key)
+    environment.update(declared)
+    return environment
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tier", choices=("pr", "nightly", "rc", "full-matrix"), default="pr")
@@ -142,8 +179,7 @@ def main() -> int:
             continue
         command = gate["command"]
         cwd = ROOT / gate.get("cwd", ".")
-        environment = os.environ.copy()
-        environment.update(gate.get("environment", {}))
+        environment = gate_environment(gate)
         started = time.monotonic()
         print(f"==> {name}: {subprocess.list2cmdline(command)}", flush=True)
         locks: list[object] = []

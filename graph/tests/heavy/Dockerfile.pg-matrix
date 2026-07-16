@@ -130,6 +130,7 @@ ARG RUN_PGRX_SQL=1
 ARG RUN_GQL_WRITE_MATRIX=1
 ARG RUN_POSTGRES_SANITIZER=0
 ARG RUN_DURABLE_PROJECTION_MATRIX=0
+ARG RUN_PACKAGE_INSTALL_MATRIX=0
 ARG PROFILE_TIMEOUT_SECONDS=600
 
 # Linux test executables retain PostgreSQL backend references from the extension
@@ -170,4 +171,10 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
         PG_VERSIONS="${PG_VERSIONS}" \
         PROFILE_TIMEOUT_SECONDS="${PROFILE_TIMEOUT_SECONDS}" \
         ./tests/heavy/run_durable_projection_matrix.sh; \
+    fi
+
+RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
+    if [[ "${RUN_PACKAGE_INSTALL_MATRIX}" == "1" ]]; then \
+        PG_VERSIONS="${PG_VERSIONS}" ./tests/heavy/package_install_matrix.sh; \
     fi

@@ -89,7 +89,11 @@ wait_for_postgres() {
 
 start_postgres() {
   require_docker_compose
-  compose up --build -d postgres
+  if [[ -n "${PGGRAPH_QUICKSTART_IMAGE:-}" ]]; then
+    compose up --no-build -d postgres
+  else
+    compose up --build -d postgres
+  fi
   wait_for_postgres
   compose exec -T postgres psql -U postgres -d graph -v ON_ERROR_STOP=1 \
     -c 'CREATE EXTENSION IF NOT EXISTS graph;' >/dev/null

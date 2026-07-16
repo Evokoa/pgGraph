@@ -6,7 +6,7 @@ Usage:
 
 What this checks:
   1. Relative Markdown links in docs/**/*.mdx point at existing local files or
-     directories. External URLs, mailto links, and pure anchors are ignored.
+     directories, and local heading anchors resolve.
   2. Inline-code path references such as `graph/src/lib.rs`, `scripts/foo.py`,
      `docs/user_guide/index.mdx`, and `src/sql_facade/` point at existing
      repository paths.
@@ -49,6 +49,25 @@ def resolve_doc_link(doc: pathlib.Path, target: str) -> pathlib.Path | None:
     return resolve_mdx_route((doc.parent / target).resolve())
 
 
+def heading_anchors(path: pathlib.Path) -> set[str]:
+    if path.is_dir():
+        path = path / "index.mdx"
+    if not path.is_file():
+        return set()
+    anchors: set[str] = set()
+    counts: dict[str, int] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        plain = re.sub(r"[`*_~]", "", match.group(1)).lower()
+        base = re.sub(r"[^a-z0-9]+", "-", plain).strip("-")
+        count = counts.get(base, 0)
+        counts[base] = count + 1
+        anchors.add(base if count == 0 else f"{base}-{count}")
+    return anchors
+
+
 def resolve_mdx_route(path: pathlib.Path) -> pathlib.Path:
     """Resolve Nextra-style extensionless routes before existence checks."""
     if path.exists():
@@ -84,11 +103,20 @@ def main() -> int:
         text = doc.read_text()
         for line_no, line in enumerate(text.splitlines(), start=1):
             for match in MARKDOWN_LINK.finditer(line):
-                target = resolve_doc_link(doc, match.group(1))
+                raw_target = match.group(1).strip()
+                target = resolve_doc_link(doc, raw_target)
                 if target is not None and not target.exists():
                     failures.append(
                         f"{doc.relative_to(ROOT)}:{line_no}: missing Markdown link target {match.group(1)!r}"
                     )
+                if not is_external_link(raw_target) and "#" in raw_target:
+                    anchor = raw_target.split("#", 1)[1].split("?", 1)[0]
+                    anchor_target = target if target is not None else doc
+                    if anchor and anchor not in heading_anchors(anchor_target):
+                        failures.append(
+                            f"{doc.relative_to(ROOT)}:{line_no}: missing heading anchor {anchor!r} in "
+                            f"{anchor_target.relative_to(ROOT)}"
+                        )
 
             for match in INLINE_CODE.finditer(line):
                 target = resolve_inline_path(match.group(1))

@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "tier": "pr",
+  "started_at": "2026-07-16T17:39:32.319115+00:00",
+  "versions": {
+    "git_commit": "905dafd8d1c20bb8e1b24190ceb6b7828db3bf57",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "postgres": "PostgreSQL 18.3",
+    "python": "3.9.6",
+    "platform": "macOS-26.5-arm64-arm-64bit",
+    "pggraph": "1.0.0",
+    "source_tree_sha256": "0741663413feb723849094bfd0bb268d4a1513a0a8d9b245e3b088f4af1a5063"
+  },
+  "registry_sha256": "702628ba9f75546b914af08347668cb100323d3ff13aa2a7c1d896ceb565cb40",
+  "datasets": {
+    "panama": {
+      "source": "https://offshoreleaks-data.icij.org/offshoreleaks/csv/full-oldb.LATEST.zip",
+      "license": "ICIJ Offshore Leaks Database terms",
+      "archive_sha256": "a2e37e8b878c12fb8f946d4e85026a4ae9026dc866b1aa925730bc1b50e52914",
+      "download_bytes": 73000000,
+      "offline_behavior": "Reuse the verified local archive; otherwise request explicit download approval."
+    }
+  },
+  "gates": [
+    {
+      "name": "script-contracts",
+      "command": [
+        "bash",
+        "-c",
+        "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_run_release.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"
+      ],
+      "cwd": "graph",
+      "environment": {},
+      "timeout_seconds": 300,
+      "exclusive_resources": [],
+      "depends_on": [],
+      "thresholds": {
+        "syntax_errors": 0,
+        "unsafe_allowlist_drift": 0
+      },
+      "duration_seconds": 0.326,
+      "result": "pass",
+      "exit_code": 0,
+      "fingerprint": "bdaa71be99d651400b6ff1c71c0625729edda7d7844320c7cc3db39f2ea89989",
+      "artifacts": [
+        "todo/measurements/2026-07-16-r6-pr-evidence.json"
+      ]
+    },
+    {
+      "name": "docs-drift",
+      "command": [
+        "../scripts/check_docs_drift.sh"
+      ],
+      "cwd": "graph",
+      "environment": {},
+      "timeout_seconds": 600,
+      "exclusive_resources": [],
+      "depends_on": [
+        "script-contracts"
+      ],
+      "thresholds": {
+        "drift_errors": 0
+      },
+      "duration_seconds": 0.327,
+      "result": "pass",
+      "exit_code": 0,
+      "fingerprint": "be0893c7d01a3d86101025d9775cd5bb6b51cda965bb2e8c7bebae45b0796879",
+      "artifacts": [
+        "todo/measurements/2026-07-16-r6-pr-evidence.json"
+      ]
+    },
+    {
+      "name": "docs-render",
+      "command": [
+        "npm",
+        "run",
+        "check"
+      ],
+      "cwd": "docs",
+      "environment": {},
+      "timeout_seconds": 600,
+      "exclusive_resources": [],
+      "depends_on": [
+        "docs-drift"
+      ],
+      "thresholds": {
+        "mdx_compile_errors": 0
+      },
+      "duration_seconds": 1.942,
+      "result": "pass",
+      "exit_code": 0,
+      "fingerprint": "807bcf5262122e7dfcb344737806af1ede1a1eafaca150964edbbd79ac7880de",
+      "artifacts": [
+        "todo/measurements/2026-07-16-r6-pr-evidence.json"
+      ]
+    },
+    {
+      "name": "rust-static",
+      "command": [
+        "cargo",
+        "clippy",
+        "--features",
+        "pg17 development",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "graph",
+      "environment": {},
+      "timeout_seconds": 1800,
+      "exclusive_resources": [
+        "cargo-target"
+      ],
+      "depends_on": [
+        "script-contracts"
+      ],
+      "thresholds": {
+        "warnings": 0
+      },
+      "duration_seconds": 12.968,
+      "result": "pass",
+      "exit_code": 0,
+      "fingerprint": "df219cebc133dcdad7cfbc3098941a0f4d12276c8b04ee4e9f5b21d0c9f36cb1",
+      "artifacts": [
+        "todo/measurements/2026-07-16-r6-pr-evidence.json"
+      ]
+    }
+  ],
+  "completed_at": "2026-07-16T17:39:47.884561+00:00",
+  "result": "pass"
+}

@@ -37,6 +37,10 @@ graph/fuzz/target/
 **/*.rs.bk
 *.pdb
 
+# Generated dependency and interpreter caches
+node_modules/
+**/__pycache__/
+
 # pgrx / PostgreSQL regression tests
 **/tests/pg_regress/results/
 **/tests/pg_regress/regression.diffs

@@ -928,5 +928,611 @@
     "function_contract_count": 155,
     "function_contracts_sha256": "8dea03b767ce0d5d280d8dcdce3c2f253f7fb55c670a023accb3ee9b0003a798",
     "normalized_sha256": "b72933c3d4e7c94c2f1c104a0bd2f1aaef1a1300c71bacfdd03f29b0cb20d336"
-  }
+  },
+  "sql_signatures": [
+    {
+      "declaration": "-- graph::sql_facade::admin::active_generation_count CREATE FUNCTION graph.\"active_generation_count\"() RETURNS INT STRICT LANGUAGE c;",
+      "name": "active_generation_count"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_edge CREATE FUNCTION graph.\"add_edge\"( \"from_table\" oid, \"from_column\" TEXT, \"to_table\" oid, \"to_column\" TEXT, \"label\" TEXT, \"bidirectional\" bool DEFAULT true, \"weight_column\" TEXT DEFAULT NULL, \"label_column\" TEXT DEFAULT NULL ) RETURNS void SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "add_edge"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_edge_to_graph CREATE FUNCTION graph.\"add_edge_to_graph\"( \"graph_name\" TEXT, \"from_table\" oid, \"from_column\" TEXT, \"to_table\" oid, \"to_column\" TEXT, \"label\" TEXT, \"bidirectional\" bool DEFAULT true, \"weight_column\" TEXT DEFAULT NULL, \"label_column\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "add_edge_to_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_filter_column CREATE FUNCTION graph.\"add_filter_column\"( \"table_name\" oid, \"column_name\" TEXT, \"column_type\" TEXT DEFAULT 'numeric' ) RETURNS void STRICT LANGUAGE c;",
+      "name": "add_filter_column"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_filter_column_to_graph CREATE FUNCTION graph.\"add_filter_column_to_graph\"( \"graph_name\" TEXT, \"table_name\" oid, \"column_name\" TEXT, \"column_type\" TEXT DEFAULT 'numeric', \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;",
+      "name": "add_filter_column_to_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_sync_policy CREATE FUNCTION graph.\"add_sync_policy\"( \"graph_name\" TEXT, \"schedule_interval_secs\" bigint DEFAULT 60, \"max_sync_lag_rows\" bigint DEFAULT NULL, \"enabled\" bool DEFAULT true, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"policy_id\" TEXT, \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"enabled\" bool, \"schedule_interval_secs\" bigint, \"max_sync_lag_rows\" bigint, \"next_run_at\" timestamp with time zone, \"last_status\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "add_sync_policy"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_table CREATE FUNCTION graph.\"add_table\"( \"table_name\" oid, \"id_column\" TEXT, \"columns\" TEXT[] DEFAULT NULL, \"tenant_column\" TEXT DEFAULT NULL ) RETURNS void SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "add_table"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_table CREATE FUNCTION graph.\"add_table\"( \"table_name\" oid, \"id_columns\" TEXT[], \"columns\" TEXT[] DEFAULT NULL, \"tenant_column\" TEXT DEFAULT NULL ) RETURNS void SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "add_table"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_table_to_graph CREATE FUNCTION graph.\"add_table_to_graph\"( \"graph_name\" TEXT, \"table_name\" oid, \"id_column\" TEXT, \"columns\" TEXT[] DEFAULT NULL, \"tenant_column\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "add_table_to_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::add_table_to_graph CREATE FUNCTION graph.\"add_table_to_graph\"( \"graph_name\" TEXT, \"table_name\" oid, \"id_columns\" TEXT[], \"columns\" TEXT[] DEFAULT NULL, \"tenant_column\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "add_table_to_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::aggregate CREATE FUNCTION graph.\"aggregate\"( \"traversal\" jsonb, \"aggregations\" jsonb, \"scope\" TEXT DEFAULT 'returned_nodes', \"path_limit\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_exact_path_count', true), '')::int, 100000) ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "aggregate"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::all CREATE FUNCTION graph.\"all\"( \"filters\" jsonb[] ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "all"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::alter_edge CREATE FUNCTION graph.\"alter_edge\"( \"graph_name\" TEXT, \"label\" TEXT, \"bidirectional\" bool DEFAULT NULL, \"weight_column\" TEXT DEFAULT NULL, \"label_column\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;",
+      "name": "alter_edge"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::alter_graph CREATE FUNCTION graph.\"alter_graph\"( \"graph_name\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL, \"graph_kind\" TEXT DEFAULT NULL, \"residency\" TEXT DEFAULT NULL, \"materialization\" TEXT DEFAULT NULL, \"projection_mode\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) LANGUAGE c;",
+      "name": "alter_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::alter_job CREATE FUNCTION graph.\"alter_job\"( \"job_id\" TEXT, \"enabled\" bool DEFAULT NULL, \"schedule_interval_secs\" bigint DEFAULT NULL, \"max_runtime_secs\" bigint DEFAULT NULL, \"max_retries\" INT DEFAULT NULL ) RETURNS TABLE ( \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"policy_kind\" TEXT, \"enabled\" bool, \"schedule_interval_secs\" bigint, \"max_runtime_secs\" bigint, \"max_retries\" INT, \"next_run_at\" timestamp with time zone, \"last_status\" TEXT ) LANGUAGE c;",
+      "name": "alter_job"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::alter_sync_policy CREATE FUNCTION graph.\"alter_sync_policy\"( \"policy_id\" TEXT, \"schedule_interval_secs\" bigint DEFAULT NULL, \"max_sync_lag_rows\" bigint DEFAULT NULL, \"enabled\" bool DEFAULT NULL ) RETURNS TABLE ( \"policy_id\" TEXT, \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"enabled\" bool, \"schedule_interval_secs\" bigint, \"max_sync_lag_rows\" bigint, \"next_run_at\" timestamp with time zone, \"last_status\" TEXT ) LANGUAGE c;",
+      "name": "alter_sync_policy"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::apply_sync CREATE FUNCTION graph.\"apply_sync\"() RETURNS TABLE ( \"inserts_applied\" bigint, \"updates_applied\" bigint, \"deletes_applied\" bigint ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "apply_sync"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::at_least CREATE FUNCTION graph.\"at_least\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "at_least"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::at_most CREATE FUNCTION graph.\"at_most\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "at_most"
+    },
+    {
+      "declaration": "-- graph::sql_facade::discovery::auto_discover CREATE FUNCTION graph.\"auto_discover\"( \"schema_name\" TEXT DEFAULT 'public', \"graph_name\" TEXT DEFAULT NULL, \"build\" bool DEFAULT true, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"item_type\" TEXT, \"item_name\" TEXT, \"details\" TEXT ) LANGUAGE c;",
+      "name": "auto_discover"
+    },
+    {
+      "declaration": "-- graph::sql_facade::discovery::auto_discover_tables CREATE FUNCTION graph.\"auto_discover_tables\"( \"tables\" oid[], \"tenant_column\" TEXT DEFAULT NULL, \"graph_name\" TEXT DEFAULT NULL, \"build\" bool DEFAULT true, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"item_type\" TEXT, \"item_name\" TEXT, \"details\" TEXT ) LANGUAGE c;",
+      "name": "auto_discover_tables"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::between CREATE FUNCTION graph.\"between\"( \"column_name\" TEXT, \"lower\" jsonb, \"upper\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "between"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::build CREATE FUNCTION graph.\"build\"( \"concurrently\" bool ) RETURNS TABLE ( \"build_id\" TEXT, \"status\" TEXT, \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"sync_mode\" TEXT, \"projection_mode\" TEXT ) STRICT LANGUAGE c;",
+      "name": "build"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::build CREATE FUNCTION graph.\"build\"( \"mode\" TEXT ) RETURNS TABLE ( \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"sync_mode\" TEXT, \"projection_mode\" TEXT ) STRICT LANGUAGE c;",
+      "name": "build"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::build CREATE FUNCTION graph.\"build\"() RETURNS TABLE ( \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"sync_mode\" TEXT, \"projection_mode\" TEXT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "build"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::build_async_graph CREATE FUNCTION graph.\"build_async_graph\"( \"graph_name\" TEXT, \"projection_mode\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"build_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"sync_mode\" TEXT, \"projection_mode\" TEXT ) LANGUAGE c;",
+      "name": "build_async_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::build_graph CREATE FUNCTION graph.\"build_graph\"( \"graph_name\" TEXT, \"force_persist\" bool DEFAULT false, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"sync_mode\" TEXT, \"projection_mode\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "build_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::build_resource_status CREATE FUNCTION graph.\"build_resource_status\"() RETURNS TABLE ( \"budget_bytes\" bigint, \"peak_bytes\" bigint, \"peak_phase\" TEXT, \"pressure_events\" bigint ) STRICT LANGUAGE c;",
+      "name": "build_resource_status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::build_status CREATE FUNCTION graph.\"build_status\"( \"build_id\" TEXT ) RETURNS TABLE ( \"build_id\" TEXT, \"status\" TEXT, \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) STRICT LANGUAGE c;",
+      "name": "build_status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::build_status_for_graph CREATE FUNCTION graph.\"build_status_for_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"build_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"sync_mode\" TEXT, \"projection_mode\" TEXT, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) LANGUAGE c;",
+      "name": "build_status_for_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::components::component CREATE FUNCTION graph.\"component\"( \"component_id\" bigint, \"max_rows\" INT DEFAULT 100, \"row_offset\" INT DEFAULT 0, \"hydrate\" bool DEFAULT true ) RETURNS TABLE ( \"component_id\" bigint, \"node_table\" oid, \"node_id\" TEXT, \"node\" jsonb ) STRICT LANGUAGE c;",
+      "name": "component"
+    },
+    {
+      "declaration": "-- graph::sql_facade::components::component_stats CREATE FUNCTION graph.\"component_stats\"() RETURNS TABLE ( \"num_components\" INT, \"largest_component\" INT, \"num_isolated_nodes\" INT, \"total_active_nodes\" INT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "component_stats"
+    },
+    {
+      "declaration": "-- graph::sql_facade::components::components CREATE FUNCTION graph.\"components\"( \"max_rows\" INT DEFAULT 100, \"row_offset\" INT DEFAULT 0 ) RETURNS TABLE ( \"component_id\" bigint, \"component_size\" bigint, \"rank\" INT ) STRICT LANGUAGE c;",
+      "name": "components"
+    },
+    {
+      "declaration": "-- graph::sql_facade::components::connected_components CREATE FUNCTION graph.\"connected_components\"() RETURNS TABLE ( \"node_table\" oid, \"node_id\" TEXT, \"component_id\" bigint, \"component_size\" INT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "connected_components"
+    },
+    {
+      "declaration": "-- graph::sql_facade::workflow::connection CREATE FUNCTION graph.\"connection\"( \"source_key\" TEXT, \"source_value\" TEXT, \"target_key\" TEXT, \"target_value\" TEXT, \"source_table\" oid DEFAULT NULL, \"target_table\" oid DEFAULT NULL, \"source_k\" INT DEFAULT 3, \"target_k\" INT DEFAULT 3, \"search_mode\" TEXT DEFAULT 'contains', \"max_depth\" INT DEFAULT 6 ) RETURNS TABLE ( \"source_table_name\" TEXT, \"source_id\" TEXT, \"target_table_name\" TEXT, \"target_id\" TEXT, \"hop_count\" INT, \"step\" INT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"edge_label\" TEXT, \"readable_path\" TEXT, \"node\" jsonb ) LANGUAGE c;",
+      "name": "connection"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::contains_text CREATE FUNCTION graph.\"contains_text\"( \"column_name\" TEXT, \"value\" TEXT ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "contains_text"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::create_graph CREATE FUNCTION graph.\"create_graph\"( \"graph_name\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL, \"graph_kind\" TEXT DEFAULT 'user', \"residency\" TEXT DEFAULT 'hot', \"materialization\" TEXT DEFAULT 'shared', \"projection_mode\" TEXT DEFAULT 'csr_readonly' ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) LANGUAGE c;",
+      "name": "create_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::discovery::create_row_predicate_subgraph CREATE FUNCTION graph.\"create_row_predicate_subgraph\"( \"graph_name\" TEXT, \"row_predicate\" jsonb, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;",
+      "name": "create_row_predicate_subgraph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::current_graph CREATE FUNCTION graph.\"current_graph\"() RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "current_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::cypher::cypher CREATE FUNCTION graph.\"cypher\"( \"query\" TEXT, \"params\" jsonb DEFAULT NULL, \"hydrate\" bool DEFAULT true ) RETURNS TABLE ( \"row\" jsonb ) VOLATILE COST 1000 LANGUAGE c;",
+      "name": "cypher"
+    },
+    {
+      "declaration": "-- graph::sql_facade::cypher::cypher_compatibility CREATE FUNCTION graph.\"cypher_compatibility\"() RETURNS TABLE ( \"feature\" TEXT, \"status\" TEXT, \"notes\" TEXT ) STRICT LANGUAGE c;",
+      "name": "cypher_compatibility"
+    },
+    {
+      "declaration": "-- graph::sql_facade::cypher::cypher_explain CREATE FUNCTION graph.\"cypher_explain\"( \"query\" TEXT ) RETURNS TEXT STRICT LANGUAGE c;",
+      "name": "cypher_explain"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::drop_graph CREATE FUNCTION graph.\"drop_graph\"( \"graph_name\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) LANGUAGE c;",
+      "name": "drop_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::drop_sync_policy CREATE FUNCTION graph.\"drop_sync_policy\"( \"policy_id\" TEXT ) RETURNS TABLE ( \"policy_id\" TEXT, \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"dropped\" bool ) STRICT LANGUAGE c;",
+      "name": "drop_sync_policy"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::enable_sync CREATE FUNCTION graph.\"enable_sync\"() RETURNS void STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "enable_sync"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::eq CREATE FUNCTION graph.\"eq\"( \"column_name\" TEXT, \"value\" TEXT ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "eq"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::eq CREATE FUNCTION graph.\"eq\"( \"column_name\" TEXT, \"value\" bigint ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "eq"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::eq CREATE FUNCTION graph.\"eq\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "eq"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::equals CREATE FUNCTION graph.\"equals\"( \"column_name\" TEXT, \"value\" TEXT ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "equals"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::equals CREATE FUNCTION graph.\"equals\"( \"column_name\" TEXT, \"value\" bigint ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "equals"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::equals CREATE FUNCTION graph.\"equals\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "equals"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::estimate CREATE FUNCTION graph.\"estimate\"() RETURNS TABLE ( \"estimated_nodes\" bigint, \"estimated_edges\" bigint, \"estimated_memory_mb\" double precision, \"memory_limit_mb\" INT, \"fits_in_memory\" bool ) STRICT LANGUAGE c;",
+      "name": "estimate"
+    },
+    {
+      "declaration": "-- graph::sql_facade::workflow::expand CREATE FUNCTION graph.\"expand\"( \"seed_table\" oid, \"seed_id\" TEXT, \"max_depth\" INT DEFAULT current_setting('graph.default_max_depth')::int, \"edge_types\" TEXT[] DEFAULT NULL, \"direction\" TEXT DEFAULT 'any', \"target_table\" oid DEFAULT NULL, \"target_tables\" oid[] DEFAULT NULL, \"where_node\" jsonb DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50, \"row_offset\" INT DEFAULT 0, \"include_start\" bool DEFAULT false ) RETURNS TABLE ( \"root_table\" oid, \"root_id\" TEXT, \"root_table_name\" TEXT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"depth\" INT, \"rank\" INT, \"path\" jsonb, \"edge_path\" jsonb, \"readable_path\" TEXT, \"node\" jsonb, \"truncated\" bool ) LANGUAGE c;",
+      "name": "expand"
+    },
+    {
+      "declaration": "-- graph::sql_facade::workflow::find CREATE FUNCTION graph.\"find\"( \"property_key\" TEXT, \"property_value\" TEXT, \"table_name\" oid DEFAULT NULL, \"mode\" TEXT DEFAULT 'contains', \"case_sensitive\" bool DEFAULT false, \"max_rows\" INT DEFAULT 20, \"row_offset\" INT DEFAULT 0, \"tenant\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"match_type\" TEXT, \"score\" real, \"verified\" bool, \"rank\" INT, \"node\" jsonb ) LANGUAGE c;",
+      "name": "find"
+    },
+    {
+      "declaration": "-- graph::sql_facade::workflow::find_related CREATE FUNCTION graph.\"find_related\"( \"property_key\" TEXT, \"property_value\" TEXT, \"source_table\" oid DEFAULT NULL, \"search_mode\" TEXT DEFAULT COALESCE(NULLIF(current_setting('graph.default_search_mode'), ''), 'contains'), \"case_sensitive\" bool DEFAULT current_setting('graph.default_case_sensitive')::boolean, \"search_max_rows\" INT DEFAULT 1, \"search_row_offset\" INT DEFAULT 0, \"max_depth\" INT DEFAULT current_setting('graph.default_max_depth')::int, \"edge_types\" TEXT[] DEFAULT NULL, \"direction\" TEXT DEFAULT 'any', \"target_table\" oid DEFAULT NULL, \"target_tables\" oid[] DEFAULT NULL, \"where_node\" jsonb DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 20, \"row_offset\" INT DEFAULT 0, \"include_counts\" bool DEFAULT false, \"candidate_limit\" INT DEFAULT 10000, \"include_start\" bool DEFAULT false ) RETURNS TABLE ( \"root_table\" oid, \"root_id\" TEXT, \"root_table_name\" TEXT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"depth\" INT, \"score\" real, \"rank\" INT, \"path\" jsonb, \"edge_path\" jsonb, \"readable_path\" TEXT, \"node\" jsonb, \"candidate_count\" bigint, \"filtered_count\" bigint, \"truncated\" bool ) LANGUAGE c;",
+      "name": "find_related"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::format_path CREATE FUNCTION graph.\"format_path\"( \"path\" jsonb, \"edge_path\" jsonb, \"separator\" TEXT DEFAULT ' | ' ) RETURNS TEXT STRICT LANGUAGE c;",
+      "name": "format_path"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::get_neighbors CREATE FUNCTION graph.\"get_neighbors\"( \"graph_name\" TEXT, \"label\" TEXT, \"id\" TEXT, \"direction\" TEXT DEFAULT 'any', \"edge_types\" TEXT[] DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"hydrate\" bool DEFAULT true, \"max_rows\" INT DEFAULT 1000, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"root_table\" oid, \"root_id\" TEXT, \"node_table\" oid, \"node_id\" TEXT, \"depth\" INT, \"path\" jsonb, \"edge_path\" jsonb, \"node\" jsonb, \"root_table_name\" TEXT, \"node_table_name\" TEXT ) COST 1000 LANGUAGE c;",
+      "name": "get_neighbors"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::get_node CREATE FUNCTION graph.\"get_node\"( \"graph_name\" TEXT, \"label\" TEXT, \"id\" TEXT, \"hydrate\" bool DEFAULT true, \"tenant\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"node_idx\" bigint, \"node\" jsonb ) COST 100 LANGUAGE c;",
+      "name": "get_node"
+    },
+    {
+      "declaration": "-- graph::sql_facade::gql::gql CREATE FUNCTION graph.\"gql\"( \"query\" TEXT, \"params\" jsonb DEFAULT NULL, \"hydrate\" bool DEFAULT true ) RETURNS TABLE ( \"row\" jsonb ) VOLATILE COST 1000 LANGUAGE c;",
+      "name": "gql"
+    },
+    {
+      "declaration": "-- graph::sql_facade::gql::gql_explain CREATE FUNCTION graph.\"gql_explain\"( \"query\" TEXT ) RETURNS TEXT STRICT LANGUAGE c;",
+      "name": "gql_explain"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::grant_graph CREATE FUNCTION graph.\"grant_graph\"( \"graph_name\" TEXT, \"grantee\" TEXT, \"privilege\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"grantee\" oid, \"privilege\" TEXT, \"grantor\" oid, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) LANGUAGE c;",
+      "name": "grant_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::graph_map CREATE FUNCTION graph.\"graph_map\"( \"graph_name\" TEXT, \"format\" TEXT DEFAULT 'json', \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS jsonb LANGUAGE c;",
+      "name": "graph_map"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::graph_privileges CREATE FUNCTION graph.\"graph_privileges\"( \"graph_name\" TEXT DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"grantee\" oid, \"privilege\" TEXT, \"grantor\" oid, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "graph_privileges"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::graph_quota_usage CREATE FUNCTION graph.\"graph_quota_usage\"() RETURNS TABLE ( \"scope_type\" TEXT, \"scope_key\" TEXT, \"dimension\" TEXT, \"limit_value\" bigint, \"usage_value\" bigint, \"enforcement\" TEXT, \"exceeded\" bool ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "graph_quota_usage"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::graph_quotas CREATE FUNCTION graph.\"graph_quotas\"() RETURNS TABLE ( \"scope_type\" TEXT, \"scope_key\" TEXT, \"dimension\" TEXT, \"limit_value\" bigint, \"enforcement\" TEXT, \"updated_by\" oid, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "graph_quotas"
+    },
+    {
+      "declaration": "-- graph::sql_facade::runtime::graph_runtime_status CREATE FUNCTION graph.\"graph_runtime_status\"() RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"residency\" TEXT, \"loaded\" bool, \"artifact_exists\" bool, \"artifact_bytes\" bigint, \"node_count\" bigint, \"edge_count\" bigint, \"memory_used_mb\" double precision, \"projection_mode\" TEXT, \"last_access_unix_micros\" bigint ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "graph_runtime_status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::greater_than CREATE FUNCTION graph.\"greater_than\"( \"column_name\" TEXT, \"value\" bigint ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "greater_than"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::greater_than CREATE FUNCTION graph.\"greater_than\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "greater_than"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::gt CREATE FUNCTION graph.\"gt\"( \"column_name\" TEXT, \"value\" bigint ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "gt"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::gt CREATE FUNCTION graph.\"gt\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "gt"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::gte CREATE FUNCTION graph.\"gte\"( \"column_name\" TEXT, \"value\" bigint ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "gte"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::gte CREATE FUNCTION graph.\"gte\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "gte"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::in CREATE FUNCTION graph.\"in\"( \"column_name\" TEXT, \"values\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "in"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::ingest_projection CREATE FUNCTION graph.\"ingest_projection\"( \"max_rows\" bigint DEFAULT NULL, \"max_bytes\" bigint DEFAULT NULL ) RETURNS TABLE ( \"rows_ingested\" bigint, \"segments_published\" bigint, \"sync_watermark\" bigint ) LANGUAGE c;",
+      "name": "ingest_projection"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::is_not_null CREATE FUNCTION graph.\"is_not_null\"( \"column_name\" TEXT ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "is_not_null"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::is_null CREATE FUNCTION graph.\"is_null\"( \"column_name\" TEXT ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "is_null"
+    },
+    {
+      "declaration": "-- graph::sql_facade::components::isolated_nodes CREATE FUNCTION graph.\"isolated_nodes\"( \"max_rows\" INT DEFAULT 100, \"row_offset\" INT DEFAULT 0, \"hydrate\" bool DEFAULT true ) RETURNS TABLE ( \"component_id\" bigint, \"node_table\" oid, \"node_id\" TEXT, \"node\" jsonb ) STRICT LANGUAGE c;",
+      "name": "isolated_nodes"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::job_runs CREATE FUNCTION graph.\"job_runs\"( \"job_id\" TEXT DEFAULT NULL, \"graph_name\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"run_id\" TEXT, \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"rows_applied\" bigint, \"retry_count\" INT, \"execution_mode\" TEXT, \"sqlstate\" TEXT, \"error\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "job_runs"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::job_stats CREATE FUNCTION graph.\"job_stats\"( \"graph_name\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"policy_kind\" TEXT, \"job_count\" bigint, \"run_count\" bigint, \"completed_runs\" bigint, \"failed_runs\" bigint, \"last_run_at\" timestamp with time zone ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "job_stats"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::jobs CREATE FUNCTION graph.\"jobs\"( \"graph_name\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"policy_kind\" TEXT, \"enabled\" bool, \"schedule_interval_secs\" bigint, \"max_runtime_secs\" bigint, \"max_retries\" INT, \"next_run_at\" timestamp with time zone, \"last_run_at\" timestamp with time zone, \"last_status\" TEXT, \"last_error\" TEXT, \"last_sqlstate\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "jobs"
+    },
+    {
+      "declaration": "-- graph::sql_facade::components::largest_component CREATE FUNCTION graph.\"largest_component\"( \"max_rows\" INT DEFAULT 100, \"row_offset\" INT DEFAULT 0, \"hydrate\" bool DEFAULT true ) RETURNS TABLE ( \"component_id\" bigint, \"node_table\" oid, \"node_id\" TEXT, \"node\" jsonb ) STRICT LANGUAGE c;",
+      "name": "largest_component"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::less_than CREATE FUNCTION graph.\"less_than\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "less_than"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::list_edges CREATE FUNCTION graph.\"list_edges\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"from_table\" TEXT, \"from_column\" TEXT, \"to_table\" TEXT, \"to_column\" TEXT, \"label\" TEXT, \"bidirectional\" bool, \"weight_column\" TEXT, \"label_column\" TEXT ) LANGUAGE c;",
+      "name": "list_edges"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::list_graphs CREATE FUNCTION graph.\"list_graphs\"() RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "list_graphs"
+    },
+    {
+      "declaration": "-- graph::sql_facade::runtime::load_graph CREATE FUNCTION graph.\"load_graph\"( \"graph_name\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"loaded\" bool, \"node_count\" bigint, \"edge_count\" bigint, \"memory_used_mb\" double precision, \"projection_mode\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "load_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::runtime::loaded_graphs CREATE FUNCTION graph.\"loaded_graphs\"() RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"residency\" TEXT, \"node_count\" bigint, \"edge_count\" bigint, \"memory_used_mb\" double precision, \"projection_mode\" TEXT, \"last_access_unix_micros\" bigint ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "loaded_graphs"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::lt CREATE FUNCTION graph.\"lt\"( \"column_name\" TEXT, \"value\" bigint ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "lt"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::lt CREATE FUNCTION graph.\"lt\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "lt"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::lte CREATE FUNCTION graph.\"lte\"( \"column_name\" TEXT, \"value\" bigint ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "lte"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::lte CREATE FUNCTION graph.\"lte\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "lte"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::maintenance CREATE FUNCTION graph.\"maintenance\"( \"concurrently\" bool DEFAULT false ) RETURNS TABLE ( \"job_id\" TEXT, \"status\" TEXT, \"sync_rows_applied\" bigint, \"nodes_after\" bigint, \"edges_after\" bigint, \"vacuum_time_ms\" double precision, \"error\" TEXT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "maintenance"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::maintenance_graph CREATE FUNCTION graph.\"maintenance_graph\"( \"graph_name\" TEXT, \"concurrently\" bool DEFAULT false, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"sync_rows_applied\" bigint, \"nodes_after\" bigint, \"edges_after\" bigint, \"vacuum_time_ms\" double precision, \"error\" TEXT ) LANGUAGE c;",
+      "name": "maintenance_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::maintenance_status CREATE FUNCTION graph.\"maintenance_status\"( \"job_id\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"job_id\" TEXT, \"status\" TEXT, \"sync_rows_applied\" bigint, \"nodes_after\" bigint, \"edges_after\" bigint, \"vacuum_time_ms\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) LANGUAGE c;",
+      "name": "maintenance_status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::maintenance_status_for_graph CREATE FUNCTION graph.\"maintenance_status_for_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"sync_rows_applied\" bigint, \"nodes_after\" bigint, \"edges_after\" bigint, \"vacuum_time_ms\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) LANGUAGE c;",
+      "name": "maintenance_status_for_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::memory_profile CREATE FUNCTION graph.\"memory_profile\"( \"concurrent_backends\" INT DEFAULT 1 ) RETURNS TABLE ( \"active_backend_private_mb\" double precision, \"active_backend_shared_mb\" double precision, \"active_backend_total_mb\" double precision, \"estimated_instance_private_mb\" double precision, \"estimated_instance_shared_mb\" double precision, \"estimated_instance_total_mb\" double precision, \"memory_limit_mb\" INT, \"assumed_concurrent_backends\" INT ) STRICT LANGUAGE c;",
+      "name": "memory_profile"
+    },
+    {
+      "declaration": "-- graph::sql_facade::workflow::neighborhood CREATE FUNCTION graph.\"neighborhood\"( \"property_key\" TEXT, \"property_value\" TEXT, \"source_table\" oid DEFAULT NULL, \"search_mode\" TEXT DEFAULT 'contains', \"search_max_rows\" INT DEFAULT 1, \"max_depth\" INT DEFAULT 4, \"edge_types\" TEXT[] DEFAULT NULL, \"direction\" TEXT DEFAULT 'any', \"tenant\" TEXT DEFAULT NULL, \"sample_k\" INT DEFAULT 5, \"node_limit\" INT DEFAULT 10000 ) RETURNS TABLE ( \"depth\" INT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_count\" bigint, \"sample_nodes\" jsonb, \"truncated\" bool ) LANGUAGE c;",
+      "name": "neighborhood"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::neq CREATE FUNCTION graph.\"neq\"( \"column_name\" TEXT, \"value\" TEXT ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "neq"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::neq CREATE FUNCTION graph.\"neq\"( \"column_name\" TEXT, \"value\" bigint ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "neq"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::neq CREATE FUNCTION graph.\"neq\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "neq"
+    },
+    {
+      "declaration": "-- requires: -- auto_discover -- graph extension bootstrap SQL -- Creates catalog tables for storing registered tables and edges. DO $$ BEGIN CREATE TYPE graph.node_ref AS ( node_table REGCLASS, node_id TEXT ); EXCEPTION WHEN duplicate_object THEN NULL; END $$; CREATE OR REPLACE FUNCTION graph.node_ref(node_table REGCLASS, node_id TEXT) RETURNS graph.node_ref LANGUAGE sql IMMUTABLE PARALLEL SAFE;",
+      "name": "node_ref"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::node_ref_string CREATE FUNCTION graph.\"node_ref_string\"( \"table_name\" oid, \"node_id\" TEXT ) RETURNS TEXT STRICT LANGUAGE c;",
+      "name": "node_ref_string"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::not_equals CREATE FUNCTION graph.\"not_equals\"( \"column_name\" TEXT, \"value\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "not_equals"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::not_in CREATE FUNCTION graph.\"not_in\"( \"column_name\" TEXT, \"values\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "not_in"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::on_node CREATE FUNCTION graph.\"on_node\"( \"filter\" jsonb ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "on_node"
+    },
+    {
+      "declaration": "-- graph::sql_facade::workflow::path CREATE FUNCTION graph.\"path\"( \"source_table\" oid, \"source_id\" TEXT, \"target_table\" oid, \"target_id\" TEXT, \"max_depth\" INT DEFAULT 20 ) RETURNS TABLE ( \"step\" INT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"edge_label\" TEXT, \"readable_path\" TEXT, \"node\" jsonb ) STRICT LANGUAGE c;",
+      "name": "path"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::path_count_estimate CREATE FUNCTION graph.\"path_count_estimate\"( \"traversal\" jsonb ) RETURNS TABLE ( \"estimated_paths\" bigint, \"exact\" bool, \"capped\" bool ) STRICT LANGUAGE c;",
+      "name": "path_count_estimate"
+    },
+    {
+      "declaration": "-- graph::sql_facade::pgq::pgq CREATE FUNCTION graph.\"pgq\"( \"_query\" TEXT ) RETURNS void STRICT LANGUAGE c;",
+      "name": "pgq"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::prefix_text CREATE FUNCTION graph.\"prefix_text\"( \"column_name\" TEXT, \"value\" TEXT ) RETURNS jsonb STRICT LANGUAGE c;",
+      "name": "prefix_text"
+    },
+    {
+      "declaration": "-- graph::sql_facade::discovery::preview_discover CREATE FUNCTION graph.\"preview_discover\"( \"schema_name\" TEXT DEFAULT 'public', \"graph_name\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"item_type\" TEXT, \"item_name\" TEXT, \"details\" TEXT ) LANGUAGE c;",
+      "name": "preview_discover"
+    },
+    {
+      "declaration": "-- graph::sql_facade::discovery::preview_discover_tables CREATE FUNCTION graph.\"preview_discover_tables\"( \"tables\" oid[], \"tenant_column\" TEXT DEFAULT NULL, \"graph_name\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"item_type\" TEXT, \"item_name\" TEXT, \"details\" TEXT ) LANGUAGE c;",
+      "name": "preview_discover_tables"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::projection_compact CREATE FUNCTION graph.\"projection_compact\"( \"max_rows\" INT DEFAULT 10000, \"max_bytes\" bigint DEFAULT NULL, \"max_segments\" INT DEFAULT 1000, \"dirty_chunk_segment_threshold\" INT DEFAULT NULL ) RETURNS TABLE ( \"manifest_generation\" bigint, \"segments_compacted\" INT, \"chunks_rewritten\" INT, \"segment_count\" INT, \"dirty_chunk_count\" INT, \"sync_watermark\" bigint ) LANGUAGE c;",
+      "name": "projection_compact"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::projection_gc CREATE FUNCTION graph.\"projection_gc\"() RETURNS TABLE ( \"valid_generations_scanned\" INT, \"retained_generations\" bigint[], \"active_generations\" bigint[], \"obsolete_candidates\" INT, \"protected_candidates\" INT, \"deleted_files\" INT, \"deleted_bytes\" bigint ) STRICT LANGUAGE c;",
+      "name": "projection_gc"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::projection_repair CREATE FUNCTION graph.\"projection_repair\"() RETURNS TABLE ( \"action\" TEXT, \"generation_id\" bigint, \"rebuilt\" bool, \"chunks_rewritten\" INT, \"reason\" TEXT ) STRICT LANGUAGE c;",
+      "name": "projection_repair"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::projection_status CREATE FUNCTION graph.\"projection_status\"() RETURNS TABLE ( \"manifest_generation\" bigint, \"manifest_watermark\" bigint, \"pending_durable_rows\" bigint, \"base_artifact_bytes\" bigint, \"manifest_bytes\" bigint, \"artifact_bytes\" bigint, \"segment_count\" INT, \"segment_bytes\" bigint, \"segment_fanout\" INT, \"read_amplification\" INT, \"l0_segment_count\" INT, \"l1_segment_count\" INT, \"l2_segment_count\" INT, \"edge_segment_count\" INT, \"node_segment_count\" INT, \"dirty_chunk_count\" INT, \"dirty_chunk_bytes\" bigint, \"tombstone_ratio\" double precision, \"compaction_backlog\" INT, \"obsolete_file_count\" INT, \"obsolete_bytes\" bigint, \"active_generation_count\" INT, \"artifact_validation_state\" TEXT, \"last_ingestion_unix_micros\" bigint, \"last_compaction_unix_micros\" bigint, \"last_gc_unix_micros\" bigint, \"last_repair_unix_micros\" bigint, \"ingest_recommended\" bool, \"compaction_recommended\" bool, \"gc_recommended\" bool, \"repair_recommended\" bool ) STRICT LANGUAGE c;",
+      "name": "projection_status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::registered_edges CREATE FUNCTION graph.\"registered_edges\"() RETURNS TABLE ( \"from_table\" TEXT, \"from_column\" TEXT, \"to_table\" TEXT, \"to_column\" TEXT, \"label\" TEXT, \"bidirectional\" bool, \"weight_column\" TEXT, \"label_column\" TEXT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "registered_edges"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::registered_edges_for_graph CREATE FUNCTION graph.\"registered_edges_for_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"from_table\" TEXT, \"from_column\" TEXT, \"to_table\" TEXT, \"to_column\" TEXT, \"label\" TEXT, \"bidirectional\" bool, \"weight_column\" TEXT, \"label_column\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "registered_edges_for_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::registered_tables CREATE FUNCTION graph.\"registered_tables\"() RETURNS TABLE ( \"table_name\" TEXT, \"id_columns\" TEXT[], \"columns\" TEXT[], \"tenant_column\" TEXT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "registered_tables"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::registered_tables_for_graph CREATE FUNCTION graph.\"registered_tables_for_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"table_name\" TEXT, \"id_columns\" TEXT[], \"columns\" TEXT[], \"tenant_column\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "registered_tables_for_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::remove_edge CREATE FUNCTION graph.\"remove_edge\"( \"graph_name\" TEXT, \"label\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;",
+      "name": "remove_edge"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::remove_edge CREATE FUNCTION graph.\"remove_edge\"( \"label\" TEXT ) RETURNS void STRICT LANGUAGE c;",
+      "name": "remove_edge"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::remove_edge_from_graph CREATE FUNCTION graph.\"remove_edge_from_graph\"( \"graph_name\" TEXT, \"label\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;",
+      "name": "remove_edge_from_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::remove_job CREATE FUNCTION graph.\"remove_job\"( \"job_id\" TEXT ) RETURNS TABLE ( \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"policy_kind\" TEXT, \"removed\" bool ) STRICT LANGUAGE c;",
+      "name": "remove_job"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::remove_table CREATE FUNCTION graph.\"remove_table\"( \"table_name\" oid ) RETURNS void STRICT LANGUAGE c;",
+      "name": "remove_table"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::remove_table_from_graph CREATE FUNCTION graph.\"remove_table_from_graph\"( \"graph_name\" TEXT, \"table_name\" oid, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;",
+      "name": "remove_table_from_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::rename_edge CREATE FUNCTION graph.\"rename_edge\"( \"graph_name\" TEXT, \"old_label\" TEXT, \"new_label\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS void LANGUAGE c;",
+      "name": "rename_edge"
+    },
+    {
+      "declaration": "-- graph::sql_facade::runtime::reset CREATE FUNCTION graph.\"reset\"() RETURNS void STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "reset"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::resource_status CREATE FUNCTION graph.\"resource_status\"() RETURNS TABLE ( \"operation\" TEXT, \"memory_budget_bytes\" bigint, \"memory_peak_bytes\" bigint, \"memory_peak_phase\" TEXT, \"disk_peak_bytes\" bigint, \"rows\" bigint, \"work_units\" bigint ) STRICT LANGUAGE c;",
+      "name": "resource_status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::revoke_graph CREATE FUNCTION graph.\"revoke_graph\"( \"graph_name\" TEXT, \"grantee\" TEXT, \"privilege\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"grantee\" oid, \"privilege\" TEXT, \"grantor\" oid, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) LANGUAGE c;",
+      "name": "revoke_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::run_due_jobs CREATE FUNCTION graph.\"run_due_jobs\"( \"max_jobs\" INT DEFAULT 64 ) RETURNS TABLE ( \"job_id\" TEXT, \"run_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"policy_kind\" TEXT, \"status\" TEXT, \"rows_applied\" bigint, \"error\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "run_due_jobs"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::run_due_jobs_async CREATE FUNCTION graph.\"run_due_jobs_async\"( \"max_jobs\" INT DEFAULT 64 ) RETURNS bool STRICT LANGUAGE c;",
+      "name": "run_due_jobs_async"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::run_job CREATE FUNCTION graph.\"run_job\"( \"job_id\" TEXT ) RETURNS TABLE ( \"job_id\" TEXT, \"run_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"policy_kind\" TEXT, \"status\" TEXT, \"rows_applied\" bigint, \"error\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "run_job"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::run_scheduled_maintenance CREATE FUNCTION graph.\"run_scheduled_maintenance\"() RETURNS TABLE ( \"applied_sync\" bool, \"maintenance_started\" bool, \"maintenance_job_id\" TEXT, \"pending_sync_rows\" bigint, \"edge_buffer_used\" INT, \"message\" TEXT ) STRICT LANGUAGE c;",
+      "name": "run_scheduled_maintenance"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::run_sync_policy CREATE FUNCTION graph.\"run_sync_policy\"( \"policy_id\" TEXT ) RETURNS TABLE ( \"policy_id\" TEXT, \"job_id\" TEXT, \"run_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"rows_applied\" bigint, \"error\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "run_sync_policy"
+    },
+    {
+      "declaration": "-- graph::sql_facade::search::search CREATE FUNCTION graph.\"search\"( \"property_key\" TEXT, \"property_value\" TEXT, \"table_filter\" oid DEFAULT NULL, \"mode\" TEXT DEFAULT 'contains', \"case_sensitive\" bool DEFAULT false, \"max_rows\" INT DEFAULT 100, \"row_offset\" INT DEFAULT 0, \"tenant\" TEXT DEFAULT NULL, \"hydrate\" bool DEFAULT true ) RETURNS TABLE ( \"node_table\" oid, \"node_id\" TEXT, \"match_type\" TEXT, \"score\" real, \"verified\" bool, \"node\" jsonb, \"node_table_name\" TEXT ) LANGUAGE c;",
+      "name": "search"
+    },
+    {
+      "declaration": "-- graph::sql_facade::search::search_nodes CREATE FUNCTION graph.\"search_nodes\"( \"property_key\" TEXT, \"property_value\" TEXT, \"table_filter\" oid DEFAULT NULL, \"mode\" TEXT DEFAULT 'contains', \"case_sensitive\" bool DEFAULT false, \"max_rows\" INT DEFAULT 100, \"row_offset\" INT DEFAULT 0, \"tenant\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"node_table\" oid, \"node_id\" TEXT, \"match_type\" TEXT, \"score\" real, \"verified\" bool, \"node_table_name\" TEXT ) LANGUAGE c;",
+      "name": "search_nodes"
+    },
+    {
+      "declaration": "-- graph::sql_facade::runtime::select_graph CREATE FUNCTION graph.\"select_graph\"( \"graph_name\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"loaded\" bool ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "select_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::set_current_graph CREATE FUNCTION graph.\"set_current_graph\"( \"graph_name\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "set_current_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::set_graph_quota CREATE FUNCTION graph.\"set_graph_quota\"( \"scope_type\" TEXT, \"dimension\" TEXT, \"limit_value\" bigint, \"scope_key\" TEXT DEFAULT NULL, \"enforcement\" TEXT DEFAULT 'hard' ) RETURNS TABLE ( \"scope_type\" TEXT, \"scope_key\" TEXT, \"dimension\" TEXT, \"limit_value\" bigint, \"enforcement\" TEXT, \"updated_by\" oid, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) LANGUAGE c;",
+      "name": "set_graph_quota"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::set_graph_residency CREATE FUNCTION graph.\"set_graph_residency\"( \"graph_name\" TEXT, \"residency\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "set_graph_residency"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::shortest_path CREATE FUNCTION graph.\"shortest_path\"( \"source_table\" oid, \"source_id\" TEXT, \"target_table\" oid, \"target_id\" TEXT, \"max_depth\" INT DEFAULT 20, \"hydrate\" bool DEFAULT true ) RETURNS TABLE ( \"step\" INT, \"node_table\" oid, \"node_id\" TEXT, \"edge_label\" TEXT, \"node\" jsonb, \"node_table_name\" TEXT ) STRICT LANGUAGE c;",
+      "name": "shortest_path"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::status CREATE FUNCTION graph.\"status\"() RETURNS TABLE ( \"node_count\" INT, \"edge_count\" INT, \"memory_used_mb\" double precision, \"memory_limit_mb\" INT, \"sync_mode\" TEXT, \"sync_status\" TEXT, \"last_build\" timestamp with time zone, \"last_vacuum\" timestamp with time zone, \"edge_types\" TEXT[], \"edge_buffer_used\" INT, \"has_unidirectional_edges\" bool, \"schema_status\" TEXT, \"sync_lag\" bigint, \"pending_edge_deltas\" INT, \"needs_vacuum\" bool, \"needs_rebuild\" bool, \"applied_sync_id\" bigint, \"pending_sync_rows\" bigint, \"invalid_reason\" TEXT, \"disabled_trigger_count\" INT, \"read_only\" bool, \"read_only_reason\" TEXT, \"projection_mode\" TEXT, \"overlay_tombstone_count\" INT, \"overlay_memory_bytes\" bigint, \"compaction_recommended\" bool, \"tx_delta_dirty\" bool, \"tx_delta_added_nodes\" INT, \"tx_delta_deleted_nodes\" INT, \"tx_delta_added_edges\" INT, \"tx_delta_deleted_edges\" INT, \"tx_delta_memory_bytes\" bigint ) STRICT LANGUAGE c;",
+      "name": "status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::sync_health CREATE FUNCTION graph.\"sync_health\"() RETURNS TABLE ( \"sync_mode\" TEXT, \"query_freshness\" TEXT, \"sync_batch_size\" INT, \"applied_sync_id\" bigint, \"max_sync_log_id\" bigint, \"pending_sync_rows\" bigint, \"disabled_trigger_count\" INT, \"edge_buffer_used\" INT, \"edge_buffer_size\" INT, \"needs_vacuum\" bool, \"needs_rebuild\" bool, \"read_only\" bool, \"read_only_reason\" TEXT, \"projection_mode\" TEXT, \"overlay_tombstone_count\" INT, \"overlay_memory_bytes\" bigint, \"compaction_recommended\" bool, \"tx_delta_dirty\" bool, \"tx_delta_added_nodes\" INT, \"tx_delta_deleted_nodes\" INT, \"tx_delta_added_edges\" INT, \"tx_delta_deleted_edges\" INT, \"tx_delta_memory_bytes\" bigint, \"apply_sync_recommended\" bool, \"maintenance_recommended\" bool, \"durable_ingest_recommended\" bool, \"durable_compaction_recommended\" bool, \"durable_gc_recommended\" bool, \"durable_repair_recommended\" bool ) STRICT LANGUAGE c;",
+      "name": "sync_health"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::sync_policy_status CREATE FUNCTION graph.\"sync_policy_status\"( \"graph_name\" TEXT DEFAULT NULL, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"policy_id\" TEXT, \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"enabled\" bool, \"schedule_interval_secs\" bigint, \"max_sync_lag_rows\" bigint, \"next_run_at\" timestamp with time zone, \"last_run_at\" timestamp with time zone, \"last_status\" TEXT, \"last_error\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "sync_policy_status"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::transfer_graph_ownership CREATE FUNCTION graph.\"transfer_graph_ownership\"( \"graph_name\" TEXT, \"new_owner\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"owner_role\" oid, \"created_by\" oid, \"tenant\" TEXT, \"namespace\" TEXT, \"graph_kind\" TEXT, \"residency\" TEXT, \"materialization\" TEXT, \"projection_mode\" TEXT, \"created_at\" timestamp with time zone, \"updated_at\" timestamp with time zone ) LANGUAGE c;",
+      "name": "transfer_graph_ownership"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::traverse CREATE FUNCTION graph.\"traverse\"( \"seed_table\" oid, \"seed_id\" TEXT, \"max_depth\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), \"edge_types\" TEXT[] DEFAULT NULL, \"direction\" TEXT DEFAULT 'any', \"node_tables\" oid[] DEFAULT NULL, \"filter\" jsonb DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"strategy\" TEXT DEFAULT 'bfs', \"uniqueness\" TEXT DEFAULT 'node_global', \"include_start\" bool DEFAULT true, \"hydrate\" bool DEFAULT true, \"max_rows\" INT DEFAULT 1000, \"row_offset\" INT DEFAULT 0, \"max_nodes\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), \"max_frontier\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) ) RETURNS TABLE ( \"root_table\" oid, \"root_id\" TEXT, \"node_table\" oid, \"node_id\" TEXT, \"depth\" INT, \"path\" jsonb, \"edge_path\" jsonb, \"node\" jsonb, \"root_table_name\" TEXT, \"node_table_name\" TEXT ) SECURITY DEFINER COST 1000 SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "traverse"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::traverse CREATE FUNCTION graph.\"traverse\"( \"start_tables\" oid[], \"start_ids\" TEXT[], \"max_depth\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), \"edge_types\" TEXT[] DEFAULT NULL, \"direction\" TEXT DEFAULT 'any', \"node_tables\" oid[] DEFAULT NULL, \"filter\" jsonb DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"strategy\" TEXT DEFAULT 'bfs', \"uniqueness\" TEXT DEFAULT 'node_global', \"include_start\" bool DEFAULT true, \"hydrate\" bool DEFAULT true, \"max_rows\" INT DEFAULT 1000, \"row_offset\" INT DEFAULT 0, \"max_nodes\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), \"max_frontier\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) ) RETURNS TABLE ( \"root_table\" oid, \"root_id\" TEXT, \"node_table\" oid, \"node_id\" TEXT, \"depth\" INT, \"path\" jsonb, \"edge_path\" jsonb, \"node\" jsonb, \"root_table_name\" TEXT, \"node_table_name\" TEXT ) COST 1000 LANGUAGE c;",
+      "name": "traverse"
+    },
+    {
+      "declaration": "-- graph::sql_facade::search::traverse_search CREATE FUNCTION graph.\"traverse_search\"( \"property_key\" TEXT, \"property_value\" TEXT, \"table_filter\" oid DEFAULT NULL, \"search_mode\" TEXT DEFAULT COALESCE(NULLIF(current_setting('graph.default_search_mode'), ''), 'contains'), \"case_sensitive\" bool DEFAULT current_setting('graph.default_case_sensitive')::boolean, \"search_max_rows\" INT DEFAULT 100, \"search_row_offset\" INT DEFAULT 0, \"max_depth\" INT DEFAULT current_setting('graph.default_max_depth')::int, \"edge_types\" TEXT[] DEFAULT NULL, \"direction\" TEXT DEFAULT 'any', \"node_tables\" oid[] DEFAULT NULL, \"filter\" jsonb DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"strategy\" TEXT DEFAULT 'bfs', \"uniqueness\" TEXT DEFAULT 'node_per_root', \"include_start\" bool DEFAULT true, \"hydrate\" bool DEFAULT current_setting('graph.default_hydrate')::boolean, \"max_rows\" INT DEFAULT 1000, \"row_offset\" INT DEFAULT 0 ) RETURNS TABLE ( \"root_table\" oid, \"root_id\" TEXT, \"node_table\" oid, \"node_id\" TEXT, \"depth\" INT, \"path\" jsonb, \"edge_path\" jsonb, \"node\" jsonb, \"root_table_name\" TEXT, \"node_table_name\" TEXT ) LANGUAGE c;",
+      "name": "traverse_search"
+    },
+    {
+      "declaration": "-- graph::sql_facade::runtime::unload_graph CREATE FUNCTION graph.\"unload_graph\"( \"graph_name\" TEXT, \"tenant\" TEXT DEFAULT NULL, \"namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"graph_id\" TEXT, \"graph_name\" TEXT, \"unloaded\" bool ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "unload_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::vacuum CREATE FUNCTION graph.\"vacuum\"() RETURNS TABLE ( \"nodes_before\" bigint, \"nodes_after\" bigint, \"tombstones_removed\" bigint, \"edges_rebuilt\" bigint, \"vacuum_time_ms\" double precision ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "vacuum"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::vacuum_graph CREATE FUNCTION graph.\"vacuum_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"nodes_before\" bigint, \"nodes_after\" bigint, \"tombstones_removed\" bigint, \"edges_rebuilt\" bigint, \"vacuum_time_ms\" double precision ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "name": "vacuum_graph"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::weighted_shortest_path CREATE FUNCTION graph.\"weighted_shortest_path\"( \"source_table\" oid, \"source_id\" TEXT, \"target_table\" oid, \"target_id\" TEXT ) RETURNS TABLE ( \"step\" INT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"edge_label\" TEXT, \"edge_weight\" bigint, \"step_cost\" bigint, \"total_cost\" bigint ) STRICT LANGUAGE c;",
+      "name": "weighted_shortest_path"
+    }
+  ]
 }

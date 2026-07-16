@@ -1,0 +1,93 @@
+# pgGraph 1.0 Migration Guide
+
+This guide covers the supported transition from the final 0.1.x alpha line to
+pgGraph 1.0. PostgreSQL source tables remain authoritative. Alpha graph
+catalogs and projection artifacts are derived state and are not an in-place
+1.0 compatibility promise.
+
+## Before The Maintenance Window
+
+Record the installed versions, graph state, registrations, and package source.
+Take a tested PostgreSQL backup before changing binaries:
+
+```bash
+pg_dump --format=custom --file=pggraph-before-1.0.dump DBNAME
+psql -X -v ON_ERROR_STOP=1 -d DBNAME \
+  -c "SELECT extversion FROM pg_extension WHERE extname = 'graph';"
+psql -X -v ON_ERROR_STOP=1 -d DBNAME \
+  -c "SELECT * FROM graph.status();"
+```
+
+Export reviewed registration commands from application migrations or your
+infrastructure repository. Do not treat rows from extension-owned `graph._*`
+catalogs as a portable backup format.
+
+Verify that the backup restores into a separate database with the old package
+before entering the maintenance window. Keep the old package and its matching
+PostgreSQL-major build until 1.0 validation is complete.
+
+## Install 1.0 Cleanly
+
+Stop graph-using application traffic, preserve the PostgreSQL source schema,
+remove the alpha extension, and install the 1.0 package built for the same
+PostgreSQL major. Dropping the extension removes extension-owned catalogs; it
+must not drop the ordinary source tables registered with pgGraph.
+
+```sql
+DROP EXTENSION graph;
+CREATE EXTENSION graph VERSION '1.0.0';
+SELECT extversion FROM pg_extension WHERE extname = 'graph';
+```
+
+Reapply registrations only through documented public functions, then rebuild:
+
+```sql
+-- Reapply reviewed graph.add_table(...), graph.add_edge(...), and
+-- graph.add_filter_column(...) calls here.
+SELECT * FROM graph.build();
+SELECT * FROM graph.status();
+```
+
+For named graphs, recreate graph metadata and grants before applying each
+graph's registrations. Re-enable trigger synchronization only after the build
+and validation queries succeed.
+
+## Validate
+
+Check source-row counts independently of pgGraph, then run representative
+search, traversal, path, GQL, ACL/RLS, and tenant-scoped queries. Confirm:
+
+- the extension version is `1.0.0` and PostgreSQL major matches the package;
+- registered tables, relationships, filters, named graphs, grants, and quotas
+  match the reviewed configuration;
+- `graph.status()`, `graph.sync_health()`, and `graph.resource_status()` report
+  healthy bounded state;
+- no application query depends on an internal catalog or a GQL construct
+  outside the generated 1.0 profiles;
+- backup, maintenance scheduling, monitoring, and recovery procedures point to
+  the new installation.
+
+The release fixture at `release/fixtures/alpha-to-v1.0/` is bound to the signed
+`v0.1.8` producer tag and an immutable SHA-256 manifest. The clean source-archive
+gate installs that alpha package, drops the alpha extension without dropping
+the source table, installs 1.0, reapplies registration, and verifies the source
+checksum and rebuilt graph.
+
+## Roll Back
+
+Do not install an alpha binary over 1.0 catalogs or artifacts. If validation
+fails, stop application traffic, restore `pggraph-before-1.0.dump` into a clean
+database with the matching alpha package, and direct traffic back only after
+the old source and graph checks pass.
+
+If the failure is limited to derived 1.0 projection state, keep the source
+tables and 1.0 catalog, correct the cause, and run `graph.build()` again. A
+failed generation publication retains the last validated generation; use
+`graph.projection_status()` and `graph.projection_repair()` only as documented.
+
+## Later 1.x Upgrades
+
+After 1.0, supported 1.x releases provide versioned extension-update paths.
+Use `ALTER EXTENSION graph UPDATE TO 'X.Y.Z'` only when the target release notes
+declare that path. Follow [Versioning And Compatibility](./versioning-and-compatibility)
+for deprecation, artifact, PostgreSQL-major, and rollback rules.
