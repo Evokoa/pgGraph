@@ -209,8 +209,8 @@ INSERT INTO graph._graphs (
 )
 SELECT '00000000-0000-0000-0000-000000000001'::uuid,
        'default',
-       current_user::regrole::oid,
-       current_user::regrole::oid,
+       pg_catalog.quote_ident(CURRENT_USER)::pg_catalog.regrole::pg_catalog.oid,
+       pg_catalog.quote_ident(CURRENT_USER)::pg_catalog.regrole::pg_catalog.oid,
        NULL,
        'public',
        'global',
@@ -286,7 +286,9 @@ CREATE TABLE IF NOT EXISTS graph._graph_quotas (
     ),
     limit_value BIGINT NOT NULL CHECK (limit_value >= 0),
     enforcement TEXT NOT NULL CHECK (enforcement IN ('hard', 'warn')),
-    updated_by  OID NOT NULL DEFAULT current_user::regrole::oid,
+    updated_by  OID NOT NULL DEFAULT (
+        pg_catalog.quote_ident(CURRENT_USER)::pg_catalog.regrole::pg_catalog.oid
+    ),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (scope_type, scope_key, dimension)
@@ -298,12 +300,17 @@ ALTER TABLE graph._graph_quotas
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 
 UPDATE graph._graph_quotas
-SET updated_by = COALESCE(updated_by, current_user::regrole::oid),
+SET updated_by = COALESCE(
+        updated_by,
+        pg_catalog.quote_ident(CURRENT_USER)::pg_catalog.regrole::pg_catalog.oid
+    ),
     created_at = COALESCE(created_at, now()),
     updated_at = COALESCE(updated_at, now());
 
 ALTER TABLE graph._graph_quotas
-    ALTER COLUMN updated_by SET DEFAULT current_user::regrole::oid,
+    ALTER COLUMN updated_by SET DEFAULT (
+        pg_catalog.quote_ident(CURRENT_USER)::pg_catalog.regrole::pg_catalog.oid
+    ),
     ALTER COLUMN updated_by SET NOT NULL,
     ALTER COLUMN created_at SET DEFAULT now(),
     ALTER COLUMN created_at SET NOT NULL,

@@ -10,6 +10,6 @@
     {"path": "graph/src/node_store.rs", "blocks": 2, "boundary": "validated mmap typed views", "owner": "artifact validation"},
     {"path": "graph/src/persistence.rs", "blocks": 1, "boundary": "PostgreSQL data directory FFI", "owner": "persistence adapter"},
     {"path": "graph/src/projection/tx_delta.rs", "blocks": 1, "boundary": "PostgreSQL transaction callbacks", "owner": "transaction adapter"},
-    {"path": "graph/src/sql_jobs.rs", "blocks": 2, "boundary": "PostgreSQL backend identity FFI", "owner": "background-job adapter"}
+    {"path": "graph/src/sql_jobs.rs", "blocks": 1, "boundary": "PostgreSQL backend PID FFI", "owner": "background-job adapter"}
   ]
 }

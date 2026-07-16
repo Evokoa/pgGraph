@@ -157,8 +157,12 @@ pub(crate) fn create_graph_metadata(
                  )
                  SELECT md5(clock_timestamp()::text || random()::text || $1)::uuid,
                         $1,
-                        current_user::regrole::oid,
-                        current_user::regrole::oid,
+                        (SELECT oid
+                           FROM pg_catalog.pg_roles
+                          WHERE rolname OPERATOR(pg_catalog.=) CURRENT_USER),
+                        (SELECT oid
+                           FROM pg_catalog.pg_roles
+                          WHERE rolname OPERATOR(pg_catalog.=) CURRENT_USER),
                         $2,
                         $3,
                         $4,
@@ -372,7 +376,14 @@ pub(crate) fn grant_graph_privilege(
                 "INSERT INTO graph._graph_grants (
                      graph_id, grantee, privilege, grantor
                  )
-                 VALUES ($1::uuid, $2::oid, $3, current_user::regrole::oid)
+                 VALUES (
+                     $1::uuid,
+                     $2::oid,
+                     $3,
+                     (SELECT oid
+                        FROM pg_catalog.pg_roles
+                       WHERE rolname OPERATOR(pg_catalog.=) CURRENT_USER)
+                 )
                  ON CONFLICT (graph_id, grantee, privilege)
                  DO UPDATE
                     SET grantor = EXCLUDED.grantor,
@@ -582,7 +593,16 @@ pub(crate) fn set_graph_quota(
                      enforcement,
                      updated_by
                  )
-                 VALUES ($1, $2, $3, $4, $5, current_user::regrole::oid)
+                 VALUES (
+                     $1,
+                     $2,
+                     $3,
+                     $4,
+                     $5,
+                     (SELECT oid
+                        FROM pg_catalog.pg_roles
+                       WHERE rolname OPERATOR(pg_catalog.=) CURRENT_USER)
+                 )
                  ON CONFLICT (scope_type, scope_key, dimension)
                  DO UPDATE
                     SET limit_value = EXCLUDED.limit_value,
@@ -891,7 +911,11 @@ pub(crate) fn resolve_graph_metadata(
                   WHERE graph_name = $1
                     AND COALESCE(tenant, '') = COALESCE($2, '')
                     AND COALESCE(namespace, '') = COALESCE($3, '')
-                    AND owner_role = current_user::regrole::oid
+                    AND owner_role = (
+                        SELECT oid
+                          FROM pg_catalog.pg_roles
+                         WHERE rolname OPERATOR(pg_catalog.=) CURRENT_USER
+                    )
                   ORDER BY created_at
                   LIMIT 1",
                 None,
@@ -1478,9 +1502,13 @@ fn graph_job_count(owner_oid: Option<pgrx::pg_sys::Oid>) -> safety::GraphResult<
 }
 
 fn current_user_oid() -> safety::GraphResult<pgrx::pg_sys::Oid> {
-    Spi::get_one::<pgrx::pg_sys::Oid>("SELECT current_user::regrole::oid")
-        .map_err(|err| graph_catalog_error("read current user oid", err))?
-        .ok_or_else(|| safety::GraphError::Internal("current user oid was null".to_string()))
+    Spi::get_one::<pgrx::pg_sys::Oid>(
+        "SELECT oid
+           FROM pg_catalog.pg_roles
+          WHERE rolname OPERATOR(pg_catalog.=) CURRENT_USER",
+    )
+    .map_err(|err| graph_catalog_error("read current user oid", err))?
+    .ok_or_else(|| safety::GraphError::Internal("current user oid was null".to_string()))
 }
 
 pub(crate) fn current_role_oid() -> safety::GraphResult<pgrx::pg_sys::Oid> {

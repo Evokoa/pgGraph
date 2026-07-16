@@ -9,7 +9,9 @@ CLIENTS="${CLIENTS:-6}"
 ROUNDS="${ROUNDS:-8}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
 WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-concurrency.XXXXXX")"
-PROBE_ROLE="graph_worker_probe_${$}_${RANDOM}"
+# Mixed case and spaces prove OID lookup compares the effective role name
+# exactly instead of reparsing it through regrole identifier syntax.
+PROBE_ROLE="PgGraph Worker Probe ${$} ${RANDOM}"
 PROBE_ROLE_CREATED=0
 
 cleanup_probe_role() {

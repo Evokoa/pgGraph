@@ -500,17 +500,40 @@ pub(crate) fn run_maintenance_job(job_id: &str) -> safety::GraphResult<()> {
 }
 
 fn current_database_and_user_oids() -> safety::GraphResult<(u32, u32)> {
-    // SAFETY: launch helpers run inside a connected PostgreSQL backend.
-    // MyDatabaseId identifies that backend's database, and GetUserId returns
-    // the effective current_user, including SET ROLE and SECURITY DEFINER.
-    let (database_oid, user_oid) =
-        unsafe { (pgrx::pg_sys::MyDatabaseId, pgrx::pg_sys::GetUserId()) };
-    if database_oid == pgrx::pg_sys::Oid::INVALID || user_oid == pgrx::pg_sys::Oid::INVALID {
-        return Err(safety::GraphError::Internal(
+    let (database_oid, user_oid) = Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT database.oid,
+                    role.oid
+               FROM pg_catalog.pg_database AS database
+               JOIN pg_catalog.pg_roles AS role
+                 ON role.rolname OPERATOR(pg_catalog.=) CURRENT_USER
+              WHERE database.datname OPERATOR(pg_catalog.=)
+                    pg_catalog.current_database()",
+            Some(1),
+            &[],
+        )?;
+        let row = rows.first();
+        Ok::<_, pgrx::spi::SpiError>((
+            row.get::<pgrx::pg_sys::Oid>(1)?,
+            row.get::<pgrx::pg_sys::Oid>(2)?,
+        ))
+    })
+    .map_err(|err| {
+        safety::GraphError::Internal(format!(
+            "background worker database/effective-role lookup failed: {err}"
+        ))
+    })?;
+    match (database_oid, user_oid) {
+        (Some(database_oid), Some(user_oid))
+            if database_oid != pgrx::pg_sys::Oid::INVALID
+                && user_oid != pgrx::pg_sys::Oid::INVALID =>
+        {
+            Ok((database_oid.to_u32(), user_oid.to_u32()))
+        }
+        _ => Err(safety::GraphError::Internal(
             "background worker launch requires a connected database and effective role".to_string(),
-        ));
+        )),
     }
-    Ok((database_oid.to_u32(), user_oid.to_u32()))
 }
 
 pub(crate) fn launch_build_worker(build_id: &str) -> safety::GraphResult<()> {

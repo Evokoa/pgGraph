@@ -91,7 +91,7 @@ Current unsafe areas:
 | `_PG_init()` temporary mmap | Pre-warm existing file pages |
 | `NodeStore` mmap reads | Form typed slices from validated aligned ranges |
 | `EdgeStore` mmap reads | Form typed CSR slices from validated aligned ranges |
-| `sql_jobs.rs` background worker launch | Read PostgreSQL backend PID, database OID, and effective role OID for bounded worker registration and effective-role SPI connections |
+| `sql_jobs.rs` background worker launch | Read PostgreSQL backend PID for worker notification; database and effective-role OIDs are resolved through SPI |
 
 ## Unsafe Invariants
 
