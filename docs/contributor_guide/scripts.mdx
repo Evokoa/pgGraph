@@ -42,11 +42,17 @@ python3 scripts/run_release.py --tier full-matrix
 ```
 
 Each run writes `release/evidence/<tier>.json` atomically with the exact command,
-environment overrides, tool and pgGraph versions, dataset provenance/checksum,
-duration, result, thresholds/artifact locations, and a gate fingerprint. Add
-`--resume` to reuse only a passing record whose command, registry, versions,
-and fingerprint still match. Gates sharing a PostgreSQL cluster, port, Docker
-daemon, or Cargo target are declared exclusive and run serially.
+environment overrides, tool and pgGraph versions, dependency-lockfile hashes,
+dataset provenance/checksum, duration, result, thresholds, artifact SHA-256s,
+and a gate fingerprint. Combined output is retained under
+`release/evidence/logs/<tier>/`. Add `--resume` to reuse only a passing record
+whose command, registry, versions, fingerprint, and retained artifact hashes
+still match. Gates sharing a PostgreSQL cluster, port, Docker daemon, or Cargo
+target are declared exclusive and run serially.
+
+The `rc` and `full-matrix` tiers run destructive crash checks inside a cluster
+created and removed by `scripts/with_disposable_postgres.sh`. Direct use of the
+historical aggregate command still requires an explicit disposable `PGDATA`.
 
 The historical aggregate interface remains supported:
 

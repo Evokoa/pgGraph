@@ -462,8 +462,8 @@ gates, pgbench sync stress, playground validation, optional crash gates, and
 optional Docker smoke depending on its `RUN_*` environment variables.
 
 The default command is not the full production release gate: Docker and crash
-gates are off unless explicitly enabled, and crash gates also require a
-disposable `PGDATA`. For staged release evidence, keep skipped pieces explicit
+gates are off unless explicitly enabled. For staged release evidence, keep
+skipped pieces explicit
 in the command and record the reason:
 
 ```bash
@@ -474,6 +474,17 @@ PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_release_m16 \
   ./tests/heavy/run_release_gate.sh
 ```
 
+The named RC tier provisions its own temporary cluster and retains each gate's
+combined log and artifact digest:
+
+```bash
+python3 scripts/run_release.py --tier rc
+```
+
+Use the named tier for reproducible release evidence. When diagnosing the
+historical aggregate command, run it through the same disposable-cluster
+wrapper:
+
 Enable the heavy production-only pieces explicitly when the environment is
 ready:
 
@@ -481,24 +492,22 @@ ready:
 cd graph
 PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_release \
   RUN_DOCKER=1 RUN_CRASH=1 RUN_TX_DELTA_CRASH=1 \
-  PGDATA=/path/to/disposable/pgdata \
-  ./tests/heavy/run_release_gate.sh
+  ../scripts/with_disposable_postgres.sh ./tests/heavy/run_release_gate.sh
 ```
 
-Run crash gates only against a disposable PostgreSQL cluster because they kill
-and restart the postmaster:
+Run crash gates only through the disposable wrapper because they kill and
+restart the postmaster. The wrapper creates a private data directory and socket;
+the fixture verifies a per-run sentinel, the connected server's data directory,
+and the postmaster command immediately before termination:
 
 ```bash
 cd graph
-PGHOST=/tmp/pggraph-crash PGPORT=55437 PGDATA=/tmp/pggraph-crash/data \
-  POSTGRES_CTL=/path/to/pg_ctl POSTGRES_OPTS="-p 55437 -k /tmp/pggraph-crash" \
-  DBNAME=pggraph_release_crash ./tests/heavy/crash_recovery.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_crash \
+  ../scripts/with_disposable_postgres.sh ./tests/heavy/crash_recovery.sh
 
-PGHOST=/tmp/pggraph-crash PGPORT=55437 PGDATA=/tmp/pggraph-crash/data \
-  POSTGRES_CTL=/path/to/pg_ctl POSTGRES_OPTS="-p 55437 -k /tmp/pggraph-crash" \
-  PG_CONFIG=/path/to/pg_config PG_VERSION_FEATURE=pg17 \
+PG_VERSION_FEATURE=pg17 \
   DBNAME=pggraph_release_tx_delta_crash \
-  ./tests/heavy/tx_delta_crash_recovery.sh
+  ../scripts/with_disposable_postgres.sh ./tests/heavy/tx_delta_crash_recovery.sh
 ```
 
 `crash_recovery.sh` proves committed trigger rows survive postmaster death,

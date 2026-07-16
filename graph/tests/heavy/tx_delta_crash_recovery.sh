@@ -10,6 +10,10 @@ POSTGRES_CTL="${POSTGRES_CTL:-pg_ctl}"
 POSTGRES_OPTS="${POSTGRES_OPTS:-}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
 WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-tx-delta-crash.XXXXXX")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=../../../scripts/lib/pggraph-common.sh
+source "$ROOT_DIR/scripts/lib/pggraph-common.sh"
 
 cleanup() {
   rm -rf "$WORKDIR"
@@ -144,6 +148,7 @@ psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -f "$WORKDIR/open-overlay.sql" \
 overlay_pid=$!
 wait_for_overlay_session
 
+pggraph_validate_disposable_cluster "$DBNAME"
 postgres_pid="$(head -n 1 "$PGDATA/postmaster.pid")"
 kill -9 "$postgres_pid"
 sleep 2

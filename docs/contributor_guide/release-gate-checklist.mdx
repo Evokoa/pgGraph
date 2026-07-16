@@ -20,9 +20,10 @@ Use these rules when an automated or low-context agent runs the checklist:
 - Do not retry a failed gate more than once unless the failure is clearly
   environmental, such as a transient Docker pull, stale pgrx install, or
   disposable database name collision.
-- Do not run `RUN_CRASH=1`, `RUN_TX_DELTA_CRASH=1`, `crash_recovery.sh`, or
-  `tx_delta_crash_recovery.sh` unless `PGDATA` points to a disposable
-  PostgreSQL cluster created for release testing.
+- Run `RUN_CRASH=1`, `RUN_TX_DELTA_CRASH=1`, `crash_recovery.sh`, and
+  `tx_delta_crash_recovery.sh` only through
+  `scripts/with_disposable_postgres.sh`; the fixture refuses clusters without
+  its per-run sentinel and connected-server identity checks.
 - Do not run `pg_upgrade_validate.sh` unless both old and new data directories
   are throwaway directories.
 - Do not run package-manager `install` or `add` commands without the `sfw`
@@ -307,8 +308,18 @@ recovery, full PostgreSQL-major matrix, or peak RSS. Enable those explicitly.
 
 ## Full Production Gate
 
-Use a disposable PostgreSQL cluster for crash gates. Do not point `PGDATA` at a
-development database you care about, and never at production.
+Use the repository's disposable PostgreSQL wrapper for crash gates. It refuses
+caller-supplied clusters, development databases, and production paths.
+
+For the reproducible RC tier, the repository creates and removes that cluster,
+retains one log per gate, and records dependency lockfile and artifact hashes:
+
+```bash
+python3 scripts/run_release.py --tier rc
+```
+
+Use this lower-level aggregate form only for diagnosis; the wrapper still owns
+the cluster:
 
 ```bash
 cd graph
@@ -319,8 +330,7 @@ RUN_CRASH=1 \
 RUN_TX_DELTA_CRASH=1 \
 RUN_FULL_MATRIX=1 \
 RUN_RSS=1 \
-PGDATA=/path/to/disposable/pgdata \
-./tests/heavy/run_release_gate.sh
+../scripts/with_disposable_postgres.sh ./tests/heavy/run_release_gate.sh
 ```
 
 For a staged environment that cannot run Docker, playground, pgbench, or crash

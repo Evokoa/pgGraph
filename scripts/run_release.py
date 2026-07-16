@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import glob
 import hashlib
 import json
 import os
 import platform
+import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,17 +55,84 @@ def load_json(path: Path) -> dict:
         return json.load(stream)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def lockfile_hashes() -> dict[str, str]:
+    hashes = {}
+    for relative in ("graph/Cargo.lock", "docs/package-lock.json", "flake.lock"):
+        path = ROOT / relative
+        if path.is_file():
+            hashes[relative] = sha256_file(path)
+    return hashes
+
+
+def validate_registry(registry: dict) -> None:
+    """Reject invalid tier dependencies and unsafe crash-gate declarations."""
+    gates = registry.get("gates", {})
+    for tier, names in registry.get("tiers", {}).items():
+        completed: set[str] = set()
+        for name in names:
+            if name not in gates:
+                raise ValueError(f"tier {tier!r} references unknown gate {name!r}")
+            missing = set(gates[name].get("depends_on", [])) - completed
+            if missing:
+                raise ValueError(
+                    f"tier {tier!r} gate {name!r} precedes dependencies: "
+                    f"{', '.join(sorted(missing))}"
+                )
+            completed.add(name)
+    for name, gate in gates.items():
+        environment = gate.get("environment", {})
+        crash_enabled = environment.get("RUN_CRASH") == "1" or environment.get("RUN_TX_DELTA_CRASH") == "1"
+        command = gate.get("command", [])
+        disposable_wrapper = command and Path(command[0]).name == "with_disposable_postgres.sh"
+        destructive_cluster_script = any(
+            Path(argument).name in {"crash_recovery.sh", "tx_delta_crash_recovery.sh"}
+            for argument in command
+        )
+        if crash_enabled and "PGDATA" not in environment and not disposable_wrapper:
+            raise ValueError(
+                f"gate {name!r} enables crash tests without PGDATA or "
+                "with_disposable_postgres.sh"
+            )
+        if destructive_cluster_script and not disposable_wrapper:
+            raise ValueError(
+                f"gate {name!r} invokes a destructive cluster script without "
+                "with_disposable_postgres.sh"
+            )
+
+
 def fingerprint(name: str, gate: dict, versions: dict[str, str], registry_sha256: str) -> str:
     payload = json.dumps({"name": name, "gate": gate, "versions": versions, "registry_sha256": registry_sha256}, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def command_version(command: list[str]) -> str:
+def command_version(command: list[str], cwd: Path = ROOT) -> str:
     try:
-        proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=10, check=False)
+        proc = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         return f"unavailable: {exc}"
-    return (proc.stdout or proc.stderr).splitlines()[0][:300] if proc.returncode == 0 else "unavailable"
+    if proc.returncode != 0:
+        return "unavailable"
+    lines = (proc.stdout or proc.stderr).splitlines()
+    return lines[0][:300] if lines else ""
+
+
+def git_status_porcelain() -> list[str]:
+    proc = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.splitlines()
 
 
 def source_tree_sha256(excluded: Path) -> str:
@@ -93,6 +163,82 @@ def atomic_write(path: Path, value: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def run_gate(command: list[str], cwd: Path, environment: dict[str, str], timeout: int, log_path: Path) -> tuple[str, int]:
+    """Run one gate while streaming and retaining its combined output."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+
+        def pump_output() -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+                sys.stdout.write(line)
+                sys.stdout.flush()
+
+        pump = threading.Thread(target=pump_output, daemon=True)
+        pump.start()
+        try:
+            exit_code = proc.wait(timeout=timeout)
+            result = "pass" if exit_code == 0 else "fail"
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+            result, exit_code = "timeout", 124
+        except KeyboardInterrupt:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+            result, exit_code = "interrupted", 130
+        pump.join(timeout=10)
+        if proc.stdout is not None:
+            proc.stdout.close()
+    return result, exit_code
+
+
+def artifact_record(path: Path) -> dict[str, object]:
+    relative = path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else str(path)
+    return {"path": relative, "sha256": sha256_file(path), "bytes": path.stat().st_size}
+
+
+def collect_artifacts(gate: dict, log_path: Path) -> list[dict[str, object]]:
+    paths = {log_path.resolve()}
+    for pattern in gate.get("artifacts", []):
+        candidate = (ROOT / pattern).resolve()
+        if not candidate.is_relative_to(ROOT):
+            raise ValueError(f"artifact path escapes repository: {pattern}")
+        paths.update(Path(match).resolve() for match in glob.glob(str(candidate), recursive=True))
+    return [artifact_record(path) for path in sorted(paths) if path.is_file()]
+
+
+def passing_record_is_reusable(record: dict) -> bool:
+    if record.get("result") != "pass":
+        return False
+    for artifact in record.get("artifacts", []):
+        path = Path(artifact["path"])
+        path = path if path.is_absolute() else ROOT / path
+        if not path.is_file() or sha256_file(path) != artifact.get("sha256"):
+            return False
+    return True
 
 
 def acquire_locks(resources: list[str]) -> list[object]:
@@ -132,6 +278,11 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="list tiers and gates without running them")
     args = parser.parse_args()
     registry = load_json(REGISTRY)
+    try:
+        validate_registry(registry)
+    except ValueError as exc:
+        print(f"invalid release registry: {exc}", file=sys.stderr)
+        return 2
     if args.list:
         for tier, gates in registry["tiers"].items():
             print(f"{tier}: {', '.join(gates)}")
@@ -142,8 +293,9 @@ def main() -> int:
     prior_gates = {gate["name"]: gate for gate in previous.get("gates", [])}
     versions = {
         "git_commit": command_version(["git", "rev-parse", "HEAD"]),
-        "rustc": command_version(["rustc", "--version"]),
-        "cargo": command_version(["cargo", "--version"]),
+        "git_status_porcelain": git_status_porcelain(),
+        "rustc": command_version(["rustc", "--version"], ROOT / "graph"),
+        "cargo": command_version(["cargo", "--version"], ROOT / "graph"),
         "postgres": command_version(["pg_config", "--version"]),
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -156,11 +308,22 @@ def main() -> int:
     }
     registry_sha256 = hashlib.sha256(REGISTRY.read_bytes()).hexdigest()
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "tier": args.tier,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "versions": versions,
         "registry_sha256": registry_sha256,
+        "lockfiles": lockfile_hashes(),
+        "release_contracts": {
+            relative: sha256_file(ROOT / relative)
+            for relative in (
+                "release/gates.json",
+                "release/maturity.json",
+                "release/v1-contract.json",
+                "release/v1-gql-profile.json",
+                "release/v1-sql-profile.json",
+            )
+        },
         "datasets": registry.get("datasets", {}),
         "gates": [],
     }
@@ -172,7 +335,7 @@ def main() -> int:
             print(f"{name}: unmet dependencies: {', '.join(sorted(missing_dependencies))}", file=sys.stderr)
             return 2
         digest = fingerprint(name, gate, versions, registry_sha256)
-        if args.resume and prior_gates.get(name, {}).get("result") == "pass" and prior_gates[name].get("fingerprint") == digest:
+        if args.resume and prior_gates.get(name, {}).get("fingerprint") == digest and passing_record_is_reusable(prior_gates[name]):
             record = dict(prior_gates[name])
             record["resumed"] = True
             manifest["gates"].append(record)
@@ -182,20 +345,23 @@ def main() -> int:
         command = gate["command"]
         cwd = ROOT / gate.get("cwd", ".")
         environment = gate_environment(gate)
+        log_path = evidence_path.parent / "logs" / evidence_path.stem / f"{name}.log"
         started = time.monotonic()
         print(f"==> {name}: {subprocess.list2cmdline(command)}", flush=True)
         locks: list[object] = []
         try:
             locks = acquire_locks(gate.get("exclusive_resources", []))
             try:
-                proc = subprocess.run(command, cwd=cwd, env=environment, timeout=gate["timeout_seconds"], check=False)
-                result = "pass" if proc.returncode == 0 else "fail"
-                exit_code = proc.returncode
+                result, exit_code = run_gate(
+                    command,
+                    cwd,
+                    environment,
+                    gate["timeout_seconds"],
+                    log_path,
+                )
             finally:
                 for lock in locks:
                     lock.close()
-        except subprocess.TimeoutExpired:
-            result, exit_code = "timeout", 124
         except RuntimeError as exc:
             print(f"{name}: {exc}", file=sys.stderr)
             result, exit_code = "blocked", 2
@@ -212,11 +378,15 @@ def main() -> int:
             "result": result,
             "exit_code": exit_code,
             "fingerprint": digest,
-            "artifacts": [evidence_path.relative_to(ROOT).as_posix()] if evidence_path.is_relative_to(ROOT) else [str(evidence_path)],
+            "artifacts": collect_artifacts(gate, log_path),
         }
         manifest["gates"].append(record)
         atomic_write(evidence_path, manifest)
         if result != "pass":
+            manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+            manifest["result"] = result
+            manifest["failed_gate"] = name
+            atomic_write(evidence_path, manifest)
             return exit_code or 1
     manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
     manifest["result"] = "pass"

@@ -12,8 +12,8 @@
   "tiers": {
     "pr": ["script-contracts", "docs-drift", "docs-render", "rust-static"],
     "nightly": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "rust-tests"],
-    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "package-install-matrix"],
-    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "read-latency", "supported-majors", "package-install-matrix", "postgres-sanitizer"]
+    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix"],
+    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "package-install-matrix", "postgres-sanitizer"]
   },
   "gates": {
     "script-contracts": {
@@ -82,7 +82,7 @@
         "DB_PREFIX": "pggraph_release",
         "RUN_DOCKER": "0",
         "RUN_FULL_MATRIX": "0",
-        "RUN_CRASH": "1",
+        "RUN_CRASH": "0",
         "RUN_PGBENCH": "1",
         "RUN_PACKAGE": "1",
         "RUN_BOUNDARY": "1",
@@ -102,7 +102,7 @@
         "RUN_GQL_DELETE_TX": "1",
         "RUN_GQL_MERGE_RACE": "1",
         "RUN_GQL_RELATIONSHIP_RACE": "1",
-        "RUN_TX_DELTA_CRASH": "1",
+        "RUN_TX_DELTA_CRASH": "0",
         "RUN_NAMED_GRAPHS_HEAVY": "1",
         "RUN_CROSS_BACKEND_DURABLE": "1",
         "RUN_PROJECTION_RECOVERY": "1",
@@ -115,6 +115,24 @@
       "depends_on": ["script-contracts", "docs-drift"],
       "thresholds": {"failed_gates": 0},
       "exclusive_resources": ["cargo-target", "pgrx-cluster", "postgres-port", "docker-playground"]
+    },
+    "crash-recovery": {
+      "command": ["../scripts/with_disposable_postgres.sh", "./tests/heavy/crash_recovery.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 3600,
+      "environment": {"PG_VERSION_FEATURE": "pg17", "DBNAME": "pggraph_release_crash"},
+      "depends_on": ["legacy-release"],
+      "thresholds": {"failed_crash_recoveries": 0},
+      "exclusive_resources": ["cargo-target", "disposable-postgres-cluster", "postgres-port"]
+    },
+    "tx-delta-crash-recovery": {
+      "command": ["../scripts/with_disposable_postgres.sh", "./tests/heavy/tx_delta_crash_recovery.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 3600,
+      "environment": {"PG_VERSION_FEATURE": "pg17", "DBNAME": "pggraph_release_tx_delta_crash"},
+      "depends_on": ["crash-recovery"],
+      "thresholds": {"failed_crash_recoveries": 0},
+      "exclusive_resources": ["cargo-target", "disposable-postgres-cluster", "postgres-port"]
     },
     "supported-majors": {
       "command": ["./tests/heavy/run_pg_matrix_docker.sh"],
@@ -138,7 +156,8 @@
       "command": ["./tests/heavy/read_latency_under_sync.sh"],
       "cwd": "graph",
       "timeout_seconds": 3600,
-      "environment": {"PG_VERSION_FEATURE": "pg17", "DBNAME": "pggraph_read_latency_release"},
+      "environment": {"PG_VERSION_FEATURE": "pg17", "DBNAME": "pggraph_read_latency_release", "OUTPUT_DIR": "../release/evidence/artifacts/read-latency"},
+      "artifacts": ["release/evidence/artifacts/read-latency/*.csv"],
       "depends_on": ["legacy-release"],
       "thresholds": {"failed_latency_thresholds": 0},
       "exclusive_resources": ["pgrx-cluster", "postgres-port"]

@@ -1,12 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DBNAME="${DBNAME:-postgres}"
+DBNAME="${DBNAME:-pggraph_crash}"
 PGDATA="${PGDATA:?PGDATA must point at the test Postgres data directory}"
+PG_VERSION_FEATURE="${PG_VERSION_FEATURE:-pg17}"
+PG_MAJOR="${PG_VERSION_FEATURE#pg}"
+PG_CONFIG="${PG_CONFIG:-}"
 POSTGRES_CTL="${POSTGRES_CTL:-pg_ctl}"
 POSTGRES_OPTS="${POSTGRES_OPTS:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSPECTOR="$SCRIPT_DIR/../../../scripts/inspect_pggraph_artifact.py"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=../../../scripts/lib/pggraph-common.sh
+source "$ROOT_DIR/scripts/lib/pggraph-common.sh"
+
+if [[ -z "$PG_CONFIG" ]]; then
+  if [[ -x "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" ]]; then
+    PG_CONFIG="/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
+  elif [[ -x "/opt/homebrew/opt/postgresql@${PG_MAJOR}/bin/pg_config" ]]; then
+    PG_CONFIG="/opt/homebrew/opt/postgresql@${PG_MAJOR}/bin/pg_config"
+  else
+    echo "PG_CONFIG is required for $PG_VERSION_FEATURE"
+    exit 2
+  fi
+fi
+
+cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --no-default-features
+dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
+createdb "$DBNAME"
 
 start_postgres() {
   if [[ -n "$POSTGRES_OPTS" ]]; then
@@ -54,6 +75,7 @@ INSERT INTO public.graph_crash_nodes VALUES ('50001', 'node-50001');
 INSERT INTO public.graph_crash_edges (from_id, to_id) VALUES ('50000', '50001');
 SQL
 
+pggraph_validate_disposable_cluster "$DBNAME"
 postgres_pid="$(head -n 1 "$PGDATA/postmaster.pid")"
 kill -9 "$postgres_pid"
 sleep 2
@@ -101,6 +123,7 @@ fi
 graph_file="$(python3 "$INSPECTOR" --resolve-only "$graph_logical_path")"
 if [[ -f "$graph_file" ]]; then
   printf 'X' | dd of="$graph_file" bs=1 seek=0 count=1 conv=notrunc status=none
+  pggraph_validate_disposable_cluster "$DBNAME"
   "$POSTGRES_CTL" -D "$PGDATA" -m immediate stop
   start_postgres
   wait_for_postgres
