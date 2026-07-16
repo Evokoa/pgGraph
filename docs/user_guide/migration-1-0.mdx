@@ -34,10 +34,14 @@ PostgreSQL major. Dropping the extension removes extension-owned catalogs; it
 must not drop the ordinary source tables registered with pgGraph.
 
 ```sql
-DROP EXTENSION graph;
+DROP EXTENSION graph CASCADE;
 CREATE EXTENSION graph VERSION '1.0.0';
 SELECT extversion FROM pg_extension WHERE extname = 'graph';
 ```
+
+`CASCADE` removes pgGraph's generated synchronization triggers and their
+extension-schema functions. Verify the ordinary source tables and their row
+counts immediately afterward; pgGraph never makes those tables extension-owned.
 
 Reapply registrations only through documented public functions, then rebuild:
 

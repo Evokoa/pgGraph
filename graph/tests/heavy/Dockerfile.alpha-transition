@@ -1,4 +1,4 @@
-ARG BASE_IMAGE
+ARG BASE_IMAGE=pggraph:source-archive-build-1.0.0
 FROM ${BASE_IMAGE}
 
 USER pggraph
@@ -21,8 +21,9 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -f /src/fixture/source.sql; \
     psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -f /src/fixture/register.sql; \
     test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$DBNAME" -c "SELECT md5(string_agg(id || '|' || name || '|' || coalesce(manager_id, ''), E'\\n' ORDER BY id)) FROM release_fixture_people")" = "7597c464628b5c2e0674ea849bd8337a"; \
-    psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c "DROP EXTENSION graph;"; \
+    psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c "DROP EXTENSION graph CASCADE;"; \
     test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$DBNAME" -c 'SELECT count(*) FROM release_fixture_people')" = "3"; \
+    test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$DBNAME" -c "SELECT md5(string_agg(id || '|' || name || '|' || coalesce(manager_id, ''), E'\\n' ORDER BY id)) FROM release_fixture_people")" = "7597c464628b5c2e0674ea849bd8337a"; \
     cargo pgrx stop pg17; \
     cd /src/graph; \
     cargo pgrx install \

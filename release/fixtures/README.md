@@ -27,8 +27,9 @@ and rebuilds derived state. `graph/tests/heavy/alpha_to_v1_fixture.sh` can prepa
 or verify either side independently. The release
 `graph/tests/heavy/source_archive_smoke.sh` gate builds the annotated,
 SSH-signature-bearing `v0.1.8`
-source, creates and drops the alpha extension while preserving the fixture
-table, installs the clean 1.0 archive, reapplies registration, and verifies the
+source, creates and drops the alpha extension with `CASCADE` to remove generated
+sync triggers while preserving the fixture table, installs the clean 1.0
+archive, reapplies registration, and verifies the
 source checksum and rebuilt graph. `SHA256SUMS` binds the immutable fixture
 files, and `scripts/check_fixture_integrity.py` checks that their producer
 commit is the commit named by that signature-bearing tag. Cryptographic signer
