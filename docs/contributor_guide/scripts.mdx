@@ -84,6 +84,8 @@ root unless noted otherwise.
 | `inspect_pggraph_artifact.py` | Debugging persistence or release evidence | Reads a `.pggraph` artifact and prints section metadata as JSON. Used by synthetic release evidence workflows when an artifact is available. |
 | `build_docker_pggraph_package.sh` | Building extension artifacts with Docker | Builds `graph-pg<major>/` package directories for one PostgreSQL major or all supported majors. |
 | `copy_pggraph_package_to_docker_postgres.sh` | Installing a prebuilt package into a running container | Copies `graph.control`, `graph--<version>.sql`, and `graph.so` into a running PostgreSQL container, then optionally creates the extension. |
+| `prepare_release_bundle.py` | Preparing an immutable source candidate | Archives an explicit Git commit and creates deterministic SHA-256 sums, an SPDX 2.3 dependency SBOM, provenance, and a release manifest. |
+| `verify_release_bundle.py` | Reviewing or publishing a prepared candidate | Rejects missing, extra, renamed, or changed files and verifies manifest, checksum, SBOM, provenance, version, and source-commit identity without rebuilding. |
 | `install_into_docker_postgres.sh` | One-command install into an existing container | Builds a Docker package and immediately copies it into one running PostgreSQL container. This is a wrapper around the two Docker package scripts. |
 
 ## Documentation Scripts

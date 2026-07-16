@@ -540,6 +540,18 @@ Use `package_install_matrix.sh` only when diagnosing one already-extracted
 source tree. The release gate uses `source_archive_smoke.sh` so untracked files
 from a development checkout cannot satisfy package verification.
 
+Create the reviewed release bundle from an explicit commit after package smoke:
+
+```bash
+commit="$(git rev-parse HEAD)"
+scripts/prepare_release_bundle.py --ref "$commit" --out-dir dist/release-bundle
+scripts/verify_release_bundle.py dist/release-bundle --commit "$commit"
+```
+
+The verifier checks the PGXN archive, SPDX dependency SBOM, provenance subject,
+release manifest, complete file set, sizes, and SHA-256 digests without
+rebuilding any payload.
+
 The Docker matrix runs `run_gql_write_matrix.sh` by default after the Rust and
 pgrx suites. This adds the full and persisted isolation profiles and the
 deterministic concurrent-writer gates for every selected major. Set

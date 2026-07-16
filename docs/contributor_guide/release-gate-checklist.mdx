@@ -584,6 +584,19 @@ Required local state:
 - PGXN credentials, GitHub credentials, Docker registry credentials, and any
   required 2FA/session state are available to the release owner.
 
+Prepare and verify the exact source candidate before any tag or publication:
+
+```bash
+commit="$(git rev-parse HEAD)"
+scripts/prepare_release_bundle.py --ref "$commit" --out-dir dist/release-bundle
+scripts/verify_release_bundle.py dist/release-bundle --commit "$commit"
+```
+
+The bundle contains one PGXN ZIP, SPDX 2.3 SBOM, provenance statement,
+`release-manifest.json`, and `SHA256SUMS`. Repeating preparation from the same
+commit must produce the same payload digests. Publication consumes these exact
+verified bytes; it does not rebuild the ZIP.
+
 Before release automation:
 
 ```bash

@@ -10,6 +10,8 @@ This is the quick index for repository scripts. The detailed maintainer guide is
 | `scripts/check_doc_references.py` | Validates local documentation links and references. |
 | `scripts/check_docs_drift.sh` | Runs the aggregate documentation drift checks. |
 | `scripts/check_secrets.sh` | Runs the gitleaks release gate over Git history and pending tracked changes. |
+| `scripts/prepare_release_bundle.py` | Builds a deterministic source archive, SBOM, provenance, manifest, and checksums from an explicit Git ref. |
+| `scripts/verify_release_bundle.py` | Verifies the complete release bundle and exact source identity without rebuilding. |
 | `scripts/check_dependency_updates.py` | Audits pinned Cargo, Python, Docker, and Nix flake GitHub inputs and reports update candidates at least 6 hours old by default. |
 | `scripts/check_rust_doc_map_drift.py` | Checks contributor documentation against the Rust source map. |
 | `scripts/check_release_contract.py` | Checks the machine-readable 1.x SQL, GUC, diagnostic, distribution, and GQL-profile inventory. |

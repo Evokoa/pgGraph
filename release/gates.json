@@ -12,12 +12,12 @@
   "tiers": {
     "pr": ["script-contracts", "docs-drift", "docs-render", "rust-static"],
     "nightly": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "rust-tests"],
-    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix"],
-    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "package-install-matrix", "postgres-sanitizer"]
+    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "release-bundle"],
+    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "package-install-matrix", "postgres-sanitizer", "release-bundle"]
   },
   "gates": {
     "script-contracts": {
-      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_run_release.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
+      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_run_release.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_release_bundle.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
       "cwd": "graph",
       "timeout_seconds": 300,
       "depends_on": [],
@@ -170,6 +170,15 @@
       "depends_on": ["supported-majors"],
       "thresholds": {"unsuppressed_memory_errors": 0},
       "exclusive_resources": ["cargo-target", "pgrx-cluster", "postgres-port"]
+    },
+    "release-bundle": {
+      "command": ["bash", "-c", "../scripts/prepare_release_bundle.py --ref HEAD --out-dir ../release/evidence/artifacts/release-bundle && ../scripts/verify_release_bundle.py ../release/evidence/artifacts/release-bundle --commit $(git rev-parse HEAD)"],
+      "cwd": "graph",
+      "timeout_seconds": 600,
+      "depends_on": ["package-install-matrix"],
+      "thresholds": {"missing_artifacts": 0, "checksum_mismatches": 0},
+      "artifacts": ["release/evidence/artifacts/release-bundle/*"],
+      "exclusive_resources": []
     }
   }
 }

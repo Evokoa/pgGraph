@@ -36,7 +36,7 @@ if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=no)" ]]; the
   exit 2
 fi
 
-"$ROOT_DIR/scripts/build_pgxn_dist.sh" "$TAG" "$WORKDIR"
+"$ROOT_DIR/scripts/build_pgxn_dist.sh" "$TAG" "$WORKDIR" --ref HEAD
 archive="$WORKDIR/pgGraph-${TAG#v}.zip"
 unzip -q "$archive" -d "$WORKDIR/source"
 source_root="$WORKDIR/source/pgGraph-${TAG#v}"
