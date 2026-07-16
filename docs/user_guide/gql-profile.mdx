@@ -1,0 +1,38 @@
+---
+title: "GQL 1.0 profile"
+description: "The exact GQL read and PostgreSQL-backed write capabilities supported by pgGraph 1.0."
+---
+
+<!-- Generated from release/v1-gql-profile.json; do not edit by hand. -->
+
+pgGraph 1.0 implements the documented subset below. It does not claim full ISO GQL,
+full openCypher, or SQL/PGQ conformance. PostgreSQL source tables remain authoritative
+for every mapped write.
+
+| Capability ID | Profile | Positive executable evidence |
+|---|---|---|
+| `match` | read | `gql_single_directed_match_matches_traverse_fixture` |
+| `optional_match_single_relationship` | read | `gql_optional_match_matches_left_outer_sql` |
+| `where_node_properties` | read | `gql_optional_match_filters_orders_and_paginates_null_rows` |
+| `with` | read | `gql_with_projection_scope_aliases_and_shadows` |
+| `return_projection` | read | `gql_defaults_to_hydrated_nodes_and_projects_ids_explicitly` |
+| `distinct` | read | `gql_distinct_matches_sql_distinct_counts` |
+| `order_limit_offset` | read | `gql_optional_match_filters_orders_and_paginates_null_rows` |
+| `aggregates` | read | `gql_aggregates_match_sql_grouping_and_numeric_results` |
+| `bounded_paths_and_path_functions` | read | `gql_path_values_and_functions_have_stable_shape` |
+| `mapped_single_node_create` | write | `gql_create_node_inserts_mapped_row_and_records_delta` |
+| `mapped_single_relationship_create` | write | `gql_create_relationship_inserts_edge_row_and_records_delta` |
+| `mapped_single_node_set_remove` | write | `gql_set_property_updates_source_row_and_filter_index`, `gql_remove_typed_property_sets_source_column_null_idempotently` |
+| `mapped_single_relationship_delete` | write | `gql_delete_edge_removes_source_row_and_tombstones_neighbors` |
+| `mapped_single_node_detach_delete` | write | `gql_detach_delete_removes_incident_edges_before_node` |
+| `mapped_single_node_merge` | write | `gql_merge_node_inserts_then_updates_mapped_row` |
+
+Each read capability inherits parser, binder, governed executor, negative diagnostic,
+ACL/RLS, resource, and documentation evidence. Each write capability additionally
+inherits transaction, rollback/resource, and PostgreSQL source-of-truth evidence.
+The release contract checker verifies every referenced implementation marker and test.
+
+Unsupported and compatibility syntax is covered by
+`release/v1-gql-unsupported.json`. Those examples must fail before execution with
+their recorded SQLSTATE and stable guidance fragment; they are not silently accepted
+as a broader compatibility promise.

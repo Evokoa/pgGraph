@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "contract": "These forms are outside the pgGraph 1.0 GQL profile and must fail before execution with the recorded SQLSTATE and stable guidance fragment.",
+  "cases": [
+    {"id": "unbounded-path", "query": "MATCH (a)-[:knows*]-(b) RETURN a", "sqlstate": "0A000", "message_contains": "explicit upper bound"},
+    {"id": "union", "query": "MATCH (a) RETURN a UNION MATCH (b) RETURN b", "sqlstate": "42601", "message_contains": "expected end of query"},
+    {"id": "call", "query": "CALL foo() RETURN 1", "sqlstate": "42601", "message_contains": "expected MATCH clause"},
+    {"id": "multi-hop-single-pattern", "query": "MATCH (a)-[:x]->(b)-[:y]->(c) RETURN c", "sqlstate": "0A000", "message_contains": "exactly one relationship"},
+    {"id": "node-only-multi-pattern", "query": "MATCH (a), (b) RETURN a", "sqlstate": "0A000", "message_contains": "fixed single-relationship patterns"},
+    {"id": "optional-multi-hop", "query": "OPTIONAL MATCH (a)-[:x]->(b)-[:y]->(c) RETURN c", "sqlstate": "0A000", "message_contains": "exactly one relationship"},
+    {"id": "case-expression", "query": "MATCH (a) RETURN CASE WHEN true THEN 1 ELSE 0 END", "sqlstate": "42601", "message_contains": "expected end of query"},
+    {"id": "negative-skip", "query": "MATCH (a) RETURN a SKIP -1", "sqlstate": "42601", "message_contains": "SKIP requires an integer"},
+    {"id": "node-only-delete", "query": "MATCH (a) DELETE a RETURN a", "sqlstate": "0A000", "message_contains": "exactly one relationship"},
+    {"id": "sql-pgq-graph-table", "query": "GRAPH_TABLE (g MATCH (a) COLUMNS (a.id))", "sqlstate": "42601", "message_contains": "expected MATCH clause"}
+  ]
+}

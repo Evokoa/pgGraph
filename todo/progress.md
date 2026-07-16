@@ -6,16 +6,16 @@ the authoritative checkpoint handoff, measurement log, and next-action record.
 
 Last synchronized: 2026-07-16
 
-Current phase: R5 supported query and write profile. R1 through R4 are
-complete. Release-risk boundaries now have checked ownership, the script and
-unsafe inventories are drift-gated, named release tiers produce resumable
-evidence, and the packaged PostgreSQL 17 playground passes the shared CSR and
-mutable catalogs.
+Current phase: R6 documentation, packaging, CI, and operations. R1 through R5
+are complete. The exact 134-function SQL surface and bounded GQL read/write
+profile now have generated public inventories, executable assurance evidence,
+explicit compatibility dispositions, deterministic unsupported diagnostics,
+and drift enforcement.
 
 Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
-and dynamic graphs are post-1.0 roadmap work. R1 through R4 are complete; R5 is
+and dynamic graphs are post-1.0 roadmap work. R1 through R5 are complete; R6 is
 the active release checkpoint.
 
 2026-07-16 R2D manifest publication — Projection publishers now stage and
@@ -263,3 +263,8 @@ isolation profiles, and every durable projection profile.
 modular bounded playground replace implicit ownership. The packaged PostgreSQL
 17 reference passes 40 CSR and 41 mutable shared-catalog examples without
 changing expected results.
+
+2026-07-16 R5 supported profile — The exact SQL and GQL 1.0 surfaces are
+generated and drift-gated, unsupported compatibility syntax has stable
+diagnostics, every public SQL function has one evidence group, and bounded GQL
+writes retain PostgreSQL as the authoritative source of truth.

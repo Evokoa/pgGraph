@@ -18,6 +18,9 @@ CONTRACT = ROOT / "release" / "v1-contract.json"
 CHANGES = ROOT / "release" / "contract-changes.json"
 DEFAULT_SCHEMA = ROOT / "release" / "v1-schema.sql"
 GQL_PROFILE = ROOT / "release" / "v1-gql-profile.json"
+GQL_DOC = ROOT / "docs" / "user_guide" / "gql-profile.mdx"
+SQL_PROFILE = ROOT / "release" / "v1-sql-profile.json"
+SQL_DOC = ROOT / "docs" / "user_guide" / "sql-profile.mdx"
 SAFETY = ROOT / "graph" / "src" / "safety.rs"
 CONFIG = ROOT / "graph" / "src" / "config.rs"
 GQL_SOURCES = [
@@ -112,6 +115,69 @@ def diagnostics() -> list[dict[str, str]]:
 
 def validated_gql_profile() -> dict:
     profile = json.loads(GQL_PROFILE.read_text(encoding="utf-8"))
+    assurance_profiles = profile.get("assurance_profiles")
+    if not isinstance(assurance_profiles, dict):
+        raise RuntimeError("release/v1-gql-profile.json must define assurance_profiles")
+    required_tests = {
+        "read": {"negative_diagnostics", "acl_rls", "resource", "operator_bounds"},
+        "write": {"negative_diagnostics", "acl_rls", "transaction", "resource", "source_of_truth", "write_recheck"},
+    }
+
+    def validate_reference(item: dict, *, executable: bool) -> None:
+        path = ROOT / item["path"]
+        symbol = item["symbol"]
+        source = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if executable:
+            test_pattern = re.compile(
+                rf"#\[(?:pg_test|test)\]\s*fn\s+{re.escape(symbol)}\s*\("
+            )
+            if not test_pattern.search(source):
+                raise RuntimeError(f"GQL executable test evidence missing: {item}")
+        elif symbol not in source:
+            raise RuntimeError(f"GQL implementation/documentation evidence missing: {item}")
+
+    for name, required in required_tests.items():
+        assurance = assurance_profiles.get(name)
+        if not isinstance(assurance, dict):
+            raise RuntimeError(f"missing GQL assurance profile: {name}")
+        implementation = assurance.get("implementation", [])
+        stages = {item.get("stage") for item in implementation}
+        if stages != {"parser", "binder", "executor"}:
+            raise RuntimeError(f"GQL assurance profile {name} must cover parser, binder, and executor")
+        for item in implementation:
+            validate_reference(item, executable=False)
+        tests = assurance.get("tests", {})
+        if set(tests) != required:
+            raise RuntimeError(
+                f"GQL assurance profile {name} test dimensions differ: "
+                f"missing={sorted(required - set(tests))}, extra={sorted(set(tests) - required)}"
+            )
+        for items in tests.values():
+            if not isinstance(items, list) or not items:
+                raise RuntimeError(f"GQL assurance profile {name} has an empty test dimension")
+            for item in items:
+                validate_reference(item, executable=True)
+        documentation = assurance.get("documentation", [])
+        if not isinstance(documentation, list) or not documentation:
+            raise RuntimeError(f"GQL assurance profile {name} has no documentation evidence")
+        for item in documentation:
+            validate_reference(item, executable=False)
+
+    corpus_path = ROOT / profile.get("unsupported_corpus", "")
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8")) if corpus_path.is_file() else {}
+    cases = corpus.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise RuntimeError("GQL unsupported corpus must contain cases")
+    case_ids = [case.get("id") for case in cases]
+    if len(case_ids) != len(set(case_ids)):
+        raise RuntimeError("GQL unsupported corpus ids must be unique")
+    for case in cases:
+        if case.get("sqlstate") not in {"0A000", "42601"} or not all(
+            isinstance(case.get(field), str) and case[field]
+            for field in ("id", "query", "message_contains")
+        ):
+            raise RuntimeError(f"invalid GQL unsupported corpus case: {case}")
+
     capabilities = profile.get("capabilities")
     if not isinstance(capabilities, list) or not capabilities:
         raise RuntimeError("release/v1-gql-profile.json must contain capabilities")
@@ -122,19 +188,88 @@ def validated_gql_profile() -> dict:
         if not isinstance(capability_id, str) or capability_id in seen:
             raise RuntimeError(f"invalid or duplicate GQL capability id: {capability_id!r}")
         seen.add(capability_id)
+        if capability.get("assurance_profile") not in assurance_profiles:
+            raise RuntimeError(f"GQL capability {capability_id} has no valid assurance profile")
         if not isinstance(evidence, list) or not evidence:
             raise RuntimeError(f"GQL capability {capability_id} has no evidence")
         for item in evidence:
-            path = ROOT / item["path"]
-            symbol = item["symbol"]
-            source = path.read_text(encoding="utf-8") if path.is_file() else ""
-            test_pattern = re.compile(
-                rf"#\[(?:pg_test|test)\]\s*fn\s+{re.escape(symbol)}\s*\("
+            validate_reference(item, executable=True)
+    return profile
+
+
+def validated_sql_profile(public_functions: list[str]) -> dict:
+    """Validate exhaustive SQL capability ownership and executable assurance evidence."""
+    profile = json.loads(SQL_PROFILE.read_text(encoding="utf-8"))
+    groups = profile.get("groups")
+    if not isinstance(groups, list) or not groups:
+        raise RuntimeError("release/v1-sql-profile.json must contain capability groups")
+    dispositions = profile.get("function_dispositions", {})
+    if profile.get("default_disposition") != "supported" or not isinstance(dispositions, dict):
+        raise RuntimeError("SQL profile must declare a supported default disposition")
+    unknown_dispositions = set(dispositions) - set(public_functions)
+    invalid_dispositions = set(dispositions.values()) - {
+        "supported",
+        "bounded_compatibility",
+        "intentional_rejection",
+    }
+    if unknown_dispositions or invalid_dispositions:
+        raise RuntimeError(
+            "invalid SQL function dispositions: "
+            f"unknown={sorted(unknown_dispositions)}, values={sorted(invalid_dispositions)}"
+        )
+
+    group_ids: set[str] = set()
+    owners: dict[str, list[str]] = {name: [] for name in public_functions}
+    for group in groups:
+        group_id = group.get("id")
+        if not isinstance(group_id, str) or not group_id or group_id in group_ids:
+            raise RuntimeError(f"invalid or duplicate SQL capability group: {group_id!r}")
+        group_ids.add(group_id)
+        patterns = group.get("function_patterns")
+        if not isinstance(patterns, list) or not patterns:
+            raise RuntimeError(f"SQL capability group {group_id} has no function patterns")
+        compiled = [re.compile(pattern) for pattern in patterns]
+        matched = [name for name in public_functions if any(regex.fullmatch(name) for regex in compiled)]
+        if not matched:
+            raise RuntimeError(f"SQL capability group {group_id} matches no public functions")
+        for name in matched:
+            owners[name].append(group_id)
+
+        tests = group.get("tests")
+        if not isinstance(tests, dict) or not tests:
+            raise RuntimeError(f"SQL capability group {group_id} has no test evidence")
+        if not {"positive", "negative_diagnostics"}.issubset(tests):
+            raise RuntimeError(
+                f"SQL capability group {group_id} must include positive and negative diagnostics evidence"
             )
-            if not test_pattern.search(source):
-                raise RuntimeError(
-                    f"GQL capability {capability_id} executable test evidence missing: {item}"
+        for dimension, items in tests.items():
+            if not isinstance(items, list) or not items:
+                raise RuntimeError(f"SQL capability group {group_id} has empty {dimension} evidence")
+            for item in items:
+                path = ROOT / item["path"]
+                source = path.read_text(encoding="utf-8") if path.is_file() else ""
+                symbol = item["symbol"]
+                test_pattern = re.compile(
+                    rf"#\[(?:pg_test|test)\]\s*fn\s+{re.escape(symbol)}\s*\("
                 )
+                if not test_pattern.search(source):
+                    raise RuntimeError(f"SQL executable test evidence missing: {item}")
+
+        documentation = group.get("documentation")
+        if not isinstance(documentation, list) or not documentation:
+            raise RuntimeError(f"SQL capability group {group_id} has no documentation evidence")
+        for item in documentation:
+            path = ROOT / item["path"]
+            source = path.read_text(encoding="utf-8") if path.is_file() else ""
+            if item["symbol"] not in source:
+                raise RuntimeError(f"SQL documentation evidence missing: {item}")
+
+    invalid = {name: groups for name, groups in owners.items() if len(groups) != 1}
+    if invalid:
+        raise RuntimeError(
+            "public SQL functions must belong to exactly one capability group: "
+            f"{invalid}"
+        )
     return profile
 
 
@@ -143,6 +278,8 @@ def expected_contract(schema_path: Path) -> dict:
     functions = sorted(api.implemented_functions())
     internal = [name for name in functions if name.startswith("_") or name == "test_enabled"]
     public = [name for name in functions if name not in internal]
+    gql_profile = validated_gql_profile()
+    sql_profile = validated_sql_profile(public)
     return {
         "schema_version": 2,
         "release_line": "1.x",
@@ -163,16 +300,102 @@ def expected_contract(schema_path: Path) -> dict:
         "sql_schema": schema_contract(schema_path),
         "public_sql_functions": public,
         "internal_sql_functions": internal,
+        "sql_profile": sql_profile,
         "gucs": sorted(api.implemented_gucs()),
         "guc_source_sha256": sha256_text(normalized_source(CONFIG)),
         "diagnostics": diagnostics(),
-        "gql_profile": validated_gql_profile(),
+        "gql_profile": gql_profile,
         "gql_implementation_sha256": source_tree_hash(GQL_SOURCES),
     }
 
 
 def serialized(value: object) -> str:
     return json.dumps(value, indent=2, sort_keys=True) + "\n"
+
+
+def gql_profile_doc(profile: dict) -> str:
+    lines = [
+        "---",
+        'title: "GQL 1.0 profile"',
+        'description: "The exact GQL read and PostgreSQL-backed write capabilities supported by pgGraph 1.0."',
+        "---",
+        "",
+        "<!-- Generated from release/v1-gql-profile.json; do not edit by hand. -->",
+        "",
+        "pgGraph 1.0 implements the documented subset below. It does not claim full ISO GQL,",
+        "full openCypher, or SQL/PGQ conformance. PostgreSQL source tables remain authoritative",
+        "for every mapped write.",
+        "",
+        "| Capability ID | Profile | Positive executable evidence |",
+        "|---|---|---|",
+    ]
+    for capability in profile["capabilities"]:
+        evidence = ", ".join(f"`{item['symbol']}`" for item in capability["evidence"])
+        lines.append(f"| `{capability['id']}` | {capability['assurance_profile']} | {evidence} |")
+    lines.extend(
+        [
+            "",
+            "Each read capability inherits parser, binder, governed executor, negative diagnostic,",
+            "ACL/RLS, resource, and documentation evidence. Each write capability additionally",
+            "inherits transaction, rollback/resource, and PostgreSQL source-of-truth evidence.",
+            "The release contract checker verifies every referenced implementation marker and test.",
+            "",
+            "Unsupported and compatibility syntax is covered by",
+            "`release/v1-gql-unsupported.json`. Those examples must fail before execution with",
+            "their recorded SQLSTATE and stable guidance fragment; they are not silently accepted",
+            "as a broader compatibility promise.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def sql_profile_doc(profile: dict, public_functions: list[str]) -> str:
+    lines = [
+        "---",
+        'title: "SQL 1.0 profile"',
+        'description: "The exact PostgreSQL SQL function groups and assurance evidence supported by pgGraph 1.0."',
+        "---",
+        "",
+        "<!-- Generated from release/v1-sql-profile.json and release/v1-contract.json; do not edit by hand. -->",
+        "",
+        "The functions listed in the 1.0 release contract are the complete supported SQL surface.",
+        "Every function belongs to exactly one capability group below. The release checker verifies",
+        "that each group has executable positive and negative evidence, applicable authorization,",
+        "transaction, resource, or recovery evidence, and public documentation.",
+        "Compatibility and intentionally rejected endpoints are identified explicitly below.",
+        "",
+        "| Capability group | Public functions | Assurance dimensions |",
+        "|---|---|---|",
+    ]
+    for group in profile["groups"]:
+        patterns = [re.compile(pattern) for pattern in group["function_patterns"]]
+        functions = [
+            name
+            for name in public_functions
+            if any(regex.fullmatch(name) for regex in patterns)
+        ]
+        function_text = ", ".join(f"`graph.{name}()`" for name in functions)
+        dimensions = ", ".join(group["tests"])
+        lines.append(f"| `{group['id']}` | {function_text} | {dimensions} |")
+    lines.extend(
+        [
+            "",
+            "## Compatibility dispositions",
+            "",
+        ]
+    )
+    for name, disposition in sorted(profile["function_dispositions"].items()):
+        lines.append(f"- `graph.{name}()` — `{disposition}`")
+    lines.extend(
+        [
+            "",
+            "This profile describes pgGraph's SQL extension API. It does not expand the separate",
+            "GQL or openCypher compatibility claims; see the GQL 1.0 profile for those boundaries.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def changed_sections(old: dict, new: dict) -> list[str]:
@@ -194,6 +417,8 @@ def main() -> int:
         print(f"generated SQL schema missing: {schema_path}", file=sys.stderr)
         return 1
     expected = expected_contract(schema_path)
+    expected_gql_doc = gql_profile_doc(expected["gql_profile"])
+    expected_sql_doc = sql_profile_doc(expected["sql_profile"], expected["public_sql_functions"])
     actual = json.loads(CONTRACT.read_text(encoding="utf-8")) if CONTRACT.exists() else {}
 
     if args.write:
@@ -218,10 +443,14 @@ def main() -> int:
             )
             CHANGES.write_text(serialized(records), encoding="utf-8")
         CONTRACT.write_text(serialized(expected), encoding="utf-8")
+        GQL_DOC.write_text(expected_gql_doc, encoding="utf-8")
+        SQL_DOC.write_text(expected_sql_doc, encoding="utf-8")
         print(f"wrote {CONTRACT.relative_to(ROOT)}")
         return 0
 
-    if actual != expected:
+    docs_current = GQL_DOC.is_file() and GQL_DOC.read_text(encoding="utf-8") == expected_gql_doc
+    sql_docs_current = SQL_DOC.is_file() and SQL_DOC.read_text(encoding="utf-8") == expected_sql_doc
+    if actual != expected or not docs_current or not sql_docs_current:
         print(
             "release/v1-contract.json is stale or incompatible with the supplied schema; "
             "review the compatibility diff before regenerating",
@@ -229,6 +458,10 @@ def main() -> int:
         )
         for section in changed_sections(actual, expected):
             print(f"  changed: {section}", file=sys.stderr)
+        if not docs_current:
+            print("  changed: generated GQL profile documentation", file=sys.stderr)
+        if not sql_docs_current:
+            print("  changed: generated SQL profile documentation", file=sys.stderr)
         return 1
 
     print("pgGraph 1.0 release contract is in sync.")

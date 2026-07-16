@@ -6,6 +6,8 @@ export default {
   'schema-registration': 'Schema Registration',
   'build-and-persistence': 'Build And Persistence',
   querying: 'Querying',
+  'gql-profile': 'GQL 1.0 Profile',
+  'sql-profile': 'SQL 1.0 Profile',
   'filters-and-aggregation': 'Filters And Aggregation',
   'sync-and-maintenance': 'Sync And Maintenance',
   'administration-and-security': 'Administration And Security',

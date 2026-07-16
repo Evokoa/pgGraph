@@ -97,7 +97,7 @@ pub(crate) struct PhysicalWildcardPathSegment {
     pub(crate) rel_type_filters: BTreeSet<String>,
 }
 
-/// Single-hop physical plan for Phase 1B.
+/// Executable physical plan for a supported 1.0 single-hop read.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PhysicalPlan {
     /// Whether unmatched source rows should be null-extended.

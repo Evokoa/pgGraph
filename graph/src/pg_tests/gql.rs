@@ -1,4 +1,39 @@
 #[pg_test]
+fn gql_unsupported_profile_corpus_has_stable_diagnostics() {
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../release/v1-gql-unsupported.json"
+    ))
+    .expect("unsupported GQL corpus must be valid JSON");
+    let cases = corpus["cases"]
+        .as_array()
+        .expect("unsupported GQL corpus cases must be an array");
+
+    for case in cases {
+        let id = case["id"].as_str().expect("case id must be text");
+        let query = case["query"].as_str().expect("case query must be text");
+        let expected_state = case["sqlstate"]
+            .as_str()
+            .expect("case SQLSTATE must be text");
+        let expected_message = case["message_contains"]
+            .as_str()
+            .expect("case message fragment must be text");
+        let statement = format!("SELECT * FROM graph.gql({})", super::sql_literal(query));
+
+        assert_eq!(
+            sqlstate_for_error(&statement).as_deref(),
+            Some(expected_state),
+            "unexpected SQLSTATE for unsupported corpus case {id}"
+        );
+        let message = sql_error_message(&statement)
+            .unwrap_or_else(|| panic!("missing error message for unsupported corpus case {id}"));
+        assert!(
+            message.contains(expected_message),
+            "unexpected message for unsupported corpus case {id}: {message}"
+        );
+    }
+}
+
+#[pg_test]
 fn gql_single_directed_match_matches_traverse_fixture() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

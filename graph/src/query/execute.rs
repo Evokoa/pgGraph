@@ -14,7 +14,7 @@ use super::physical_plan::{
     PhysicalWildcardPathSegment,
 };
 
-/// Coordinate-only node value returned by Phase 1B.
+/// Coordinate-only node value returned by the 1.0 single-hop executor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GqlNodeCoordinate {
     /// Backing source table OID.

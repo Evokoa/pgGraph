@@ -1,0 +1,33 @@
+---
+title: "SQL 1.0 profile"
+description: "The exact PostgreSQL SQL function groups and assurance evidence supported by pgGraph 1.0."
+---
+
+<!-- Generated from release/v1-sql-profile.json and release/v1-contract.json; do not edit by hand. -->
+
+The functions listed in the 1.0 release contract are the complete supported SQL surface.
+Every function belongs to exactly one capability group below. The release checker verifies
+that each group has executable positive and negative evidence, applicable authorization,
+transaction, resource, or recovery evidence, and public documentation.
+Compatibility and intentionally rejected endpoints are identified explicitly below.
+
+| Capability group | Public functions | Assurance dimensions |
+|---|---|---|
+| `graph_administration` | `graph.alter_graph()`, `graph.create_graph()`, `graph.current_graph()`, `graph.drop_graph()`, `graph.grant_graph()`, `graph.graph_map()`, `graph.graph_privileges()`, `graph.graph_quota_usage()`, `graph.graph_quotas()`, `graph.graph_runtime_status()`, `graph.list_graphs()`, `graph.reset()`, `graph.revoke_graph()`, `graph.select_graph()`, `graph.set_current_graph()`, `graph.set_graph_quota()`, `graph.set_graph_residency()`, `graph.transfer_graph_ownership()` | positive, negative_diagnostics, authorization, resource |
+| `registration_discovery` | `graph.add_edge()`, `graph.add_edge_to_graph()`, `graph.add_filter_column()`, `graph.add_filter_column_to_graph()`, `graph.add_table()`, `graph.add_table_to_graph()`, `graph.alter_edge()`, `graph.auto_discover()`, `graph.auto_discover_tables()`, `graph.create_row_predicate_subgraph()`, `graph.estimate()`, `graph.list_edges()`, `graph.preview_discover()`, `graph.preview_discover_tables()`, `graph.registered_edges()`, `graph.registered_edges_for_graph()`, `graph.registered_tables()`, `graph.registered_tables_for_graph()`, `graph.remove_edge()`, `graph.remove_edge_from_graph()`, `graph.remove_table()`, `graph.remove_table_from_graph()`, `graph.rename_edge()` | positive, negative_diagnostics, authorization, transaction |
+| `build_persistence` | `graph.active_generation_count()`, `graph.build()`, `graph.build_async_graph()`, `graph.build_graph()`, `graph.build_resource_status()`, `graph.build_status()`, `graph.build_status_for_graph()`, `graph.load_graph()`, `graph.loaded_graphs()`, `graph.memory_profile()`, `graph.projection_compact()`, `graph.projection_gc()`, `graph.projection_repair()`, `graph.projection_status()`, `graph.resource_status()`, `graph.status()`, `graph.unload_graph()`, `graph.vacuum()`, `graph.vacuum_graph()` | positive, negative_diagnostics, authorization, resource, recovery |
+| `sync_maintenance_jobs` | `graph.add_sync_policy()`, `graph.alter_job()`, `graph.alter_sync_policy()`, `graph.apply_sync()`, `graph.drop_sync_policy()`, `graph.enable_sync()`, `graph.ingest_projection()`, `graph.job_runs()`, `graph.job_stats()`, `graph.jobs()`, `graph.maintenance()`, `graph.maintenance_graph()`, `graph.maintenance_status()`, `graph.maintenance_status_for_graph()`, `graph.remove_job()`, `graph.run_due_jobs()`, `graph.run_due_jobs_async()`, `graph.run_job()`, `graph.run_scheduled_maintenance()`, `graph.run_sync_policy()`, `graph.sync_health()`, `graph.sync_policy_status()` | positive, negative_diagnostics, authorization, resource, transaction |
+| `query_predicates_analytics` | `graph.aggregate()`, `graph.all()`, `graph.at_least()`, `graph.at_most()`, `graph.between()`, `graph.component()`, `graph.component_stats()`, `graph.components()`, `graph.connected_components()`, `graph.contains_text()`, `graph.eq()`, `graph.equals()`, `graph.greater_than()`, `graph.gt()`, `graph.gte()`, `graph.in()`, `graph.is_not_null()`, `graph.is_null()`, `graph.isolated_nodes()`, `graph.largest_component()`, `graph.less_than()`, `graph.lt()`, `graph.lte()`, `graph.neq()`, `graph.node_ref()`, `graph.node_ref_string()`, `graph.not_equals()`, `graph.not_in()`, `graph.on_node()`, `graph.path_count_estimate()`, `graph.prefix_text()`, `graph.shortest_path()`, `graph.traverse()`, `graph.traverse_search()`, `graph.weighted_shortest_path()` | positive, negative_diagnostics, acl_rls, resource |
+| `workflow_search` | `graph.connection()`, `graph.expand()`, `graph.find()`, `graph.find_related()`, `graph.format_path()`, `graph.get_neighbors()`, `graph.get_node()`, `graph.neighborhood()`, `graph.path()`, `graph.search()`, `graph.search_nodes()` | positive, negative_diagnostics, acl_rls, resource |
+| `gql_compatibility` | `graph.cypher()`, `graph.cypher_compatibility()`, `graph.cypher_explain()`, `graph.gql()`, `graph.gql_explain()`, `graph.pgq()` | positive, negative_diagnostics, acl_rls, resource, transaction |
+
+## Compatibility dispositions
+
+- `graph.create_row_predicate_subgraph()` — `intentional_rejection`
+- `graph.cypher()` — `bounded_compatibility`
+- `graph.cypher_compatibility()` — `bounded_compatibility`
+- `graph.cypher_explain()` — `bounded_compatibility`
+- `graph.pgq()` — `intentional_rejection`
+
+This profile describes pgGraph's SQL extension API. It does not expand the separate
+GQL or openCypher compatibility claims; see the GQL 1.0 profile for those boundaries.

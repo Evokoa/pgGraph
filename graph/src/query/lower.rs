@@ -210,7 +210,7 @@ fn identity_lookup_rhs(
     }
 }
 
-/// Lower a bound logical plan into the executable Phase 1B physical plan.
+/// Lower a bound logical plan into the executable 1.0 single-hop physical plan.
 pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
     PhysicalPlan {
         optional: plan.optional,

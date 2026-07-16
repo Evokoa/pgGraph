@@ -1,4 +1,36 @@
 #[pg_test]
+fn filter_constructor_surface_has_stable_shapes_and_aliases() {
+    let all_match = Spi::get_one::<bool>(
+        r#"SELECT
+            graph.equals('name', 'Ada'::text) = '{"where":{"name":{"eq":"Ada"}}}'::jsonb
+            AND graph.equals('age', 42::bigint) = graph.eq('age', 42::bigint)
+            AND graph.not_equals('name', '"Ada"'::jsonb) = graph.neq('name', '"Ada"'::jsonb)
+            AND graph.in('age', '[41,42]'::jsonb) = '{"where":{"age":{"in":[41,42]}}}'::jsonb
+            AND graph.not_in('age', '[1,2]'::jsonb) = '{"where":{"age":{"not_in":[1,2]}}}'::jsonb
+            AND graph.contains_text('name', 'da') = '{"where":{"name":{"contains":"da"}}}'::jsonb
+            AND graph.prefix_text('name', 'A') = '{"where":{"name":{"prefix":"A"}}}'::jsonb
+            AND graph.is_null('age') = '{"where":{"age":{"is_null":null}}}'::jsonb
+            AND graph.is_not_null('age') = '{"where":{"age":{"is_not_null":null}}}'::jsonb
+            AND graph.greater_than('age', 40::bigint) = graph.gt('age', 40::bigint)
+            AND graph.at_least('age', '40'::jsonb) = graph.gte('age', 40::bigint)
+            AND graph.less_than('age', '50'::jsonb) = graph.lt('age', 50::bigint)
+            AND graph.at_most('age', '50'::jsonb) = graph.lte('age', 50::bigint)
+            AND graph.between('age', '40'::jsonb, '50'::jsonb) =
+                '{"where":{"age":{"between":[40,50]}}}'::jsonb
+            AND graph.on_node(graph.eq('age', 42::bigint)) =
+                '{"node":{"where":{"age":{"eq":42}}}}'::jsonb
+            AND graph.all(ARRAY[
+                graph.on_node(graph.eq('age', 42::bigint)),
+                graph.prefix_text('name', 'A')
+            ]) = '{"where":{"age":{"eq":42},"name":{"prefix":"A"}}}'::jsonb"#,
+    )
+    .expect("filter constructor query failed")
+    .unwrap_or(false);
+
+    assert!(all_match, "public filter constructors changed shape or alias semantics");
+}
+
+#[pg_test]
 fn traverse_accepts_structured_jsonb_numeric_filters() {
     reset_and_create_fixtures();
     Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")

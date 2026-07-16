@@ -3,21 +3,61 @@
   "full_iso_gql": false,
   "full_opencypher": false,
   "public_sql_pgq": false,
+  "assurance_profiles": {
+    "read": {
+      "implementation": [
+        {"stage": "parser", "path": "graph/src/gql/parser.rs", "symbol": "pub(crate) fn parse("},
+        {"stage": "binder", "path": "graph/src/query/semantics.rs", "symbol": "pub(crate) fn bind("},
+        {"stage": "executor", "path": "graph/src/query/execute.rs", "symbol": "pub(crate) fn execute_governed("}
+      ],
+      "tests": {
+        "negative_diagnostics": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_unsupported_profile_corpus_has_stable_diagnostics"}],
+        "acl_rls": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_hydration_fails_closed_when_source_row_is_not_visible"}],
+        "resource": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_statement_memory_limit_is_shared_across_read_phases"}],
+        "operator_bounds": [
+          {"path": "graph/src/query/value.rs", "symbol": "distinct_checks_elapsed_budget_while_draining_rows"},
+          {"path": "graph/src/query/value.rs", "symbol": "grouping_checks_elapsed_budget_while_scanning_rows"},
+          {"path": "graph/src/query/value.rs", "symbol": "sort_checks_elapsed_budget_during_comparisons"},
+          {"path": "graph/src/query/tests.rs", "symbol": "wildcard_path_variable_length_reports_row_cap_exhaustion"},
+          {"path": "graph/src/query/tests.rs", "symbol": "executor_enforces_hard_row_cap_before_projection"},
+          {"path": "graph/src/query/tests.rs", "symbol": "relationship_node_projection_errors_when_required_hydration_is_missing"}
+        ]
+      },
+      "documentation": [{"path": "docs/user_guide/querying.mdx", "symbol": "## GQL"}]
+    },
+    "write": {
+      "implementation": [
+        {"stage": "parser", "path": "graph/src/gql/parser.rs", "symbol": "pub(crate) fn parse_statement("},
+        {"stage": "binder", "path": "graph/src/query/semantics.rs", "symbol": "pub(crate) fn bind_statement("},
+        {"stage": "executor", "path": "graph/src/sql_facade/gql.rs", "symbol": "fn execute_statement_governed("}
+      ],
+      "tests": {
+        "negative_diagnostics": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_node_rejects_unregistered_label"}],
+        "acl_rls": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_node_preserves_source_table_rls"}],
+        "transaction": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_relationship_can_use_transaction_created_nodes"}],
+        "resource": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_node_delta_limit_aborts_statement_before_source_insert"}],
+        "source_of_truth": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_respects_partition_routing_constraints_and_user_triggers"}],
+        "write_recheck": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_delete_edge_write_recheck_rejects_stale_endpoint_predicate"}]
+      },
+      "documentation": [{"path": "docs/user_guide/querying.mdx", "symbol": "### GQL Writes"}]
+    }
+  },
+  "unsupported_corpus": "release/v1-gql-unsupported.json",
   "capabilities": [
-    {"id": "match", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_single_directed_match_matches_traverse_fixture"}]},
-    {"id": "optional_match_single_relationship", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_matches_left_outer_sql"}]},
-    {"id": "where_node_properties", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_filters_orders_and_paginates_null_rows"}]},
-    {"id": "with", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_with_projection_scope_aliases_and_shadows"}]},
-    {"id": "return_projection", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_defaults_to_hydrated_nodes_and_projects_ids_explicitly"}]},
-    {"id": "distinct", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_distinct_matches_sql_distinct_counts"}]},
-    {"id": "order_limit_offset", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_filters_orders_and_paginates_null_rows"}]},
-    {"id": "aggregates", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_aggregates_match_sql_grouping_and_numeric_results"}]},
-    {"id": "bounded_paths_and_path_functions", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_path_values_and_functions_have_stable_shape"}]},
-    {"id": "mapped_single_node_create", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_node_inserts_mapped_row_and_records_delta"}]},
-    {"id": "mapped_single_relationship_create", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_relationship_inserts_edge_row_and_records_delta"}]},
-    {"id": "mapped_single_node_set_remove", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_set_property_updates_source_row_and_filter_index"}, {"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_remove_typed_property_sets_source_column_null_idempotently"}]},
-    {"id": "mapped_single_relationship_delete", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_delete_edge_removes_source_row_and_tombstones_neighbors"}]},
-    {"id": "mapped_single_node_detach_delete", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_detach_delete_removes_incident_edges_before_node"}]},
-    {"id": "mapped_single_node_merge", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_merge_node_inserts_then_updates_mapped_row"}]}
+    {"id": "match", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_single_directed_match_matches_traverse_fixture"}]},
+    {"id": "optional_match_single_relationship", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_matches_left_outer_sql"}]},
+    {"id": "where_node_properties", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_filters_orders_and_paginates_null_rows"}]},
+    {"id": "with", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_with_projection_scope_aliases_and_shadows"}]},
+    {"id": "return_projection", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_defaults_to_hydrated_nodes_and_projects_ids_explicitly"}]},
+    {"id": "distinct", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_distinct_matches_sql_distinct_counts"}]},
+    {"id": "order_limit_offset", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_optional_match_filters_orders_and_paginates_null_rows"}]},
+    {"id": "aggregates", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_aggregates_match_sql_grouping_and_numeric_results"}]},
+    {"id": "bounded_paths_and_path_functions", "assurance_profile": "read", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_path_values_and_functions_have_stable_shape"}]},
+    {"id": "mapped_single_node_create", "assurance_profile": "write", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_node_inserts_mapped_row_and_records_delta"}]},
+    {"id": "mapped_single_relationship_create", "assurance_profile": "write", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_create_relationship_inserts_edge_row_and_records_delta"}]},
+    {"id": "mapped_single_node_set_remove", "assurance_profile": "write", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_set_property_updates_source_row_and_filter_index"}, {"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_remove_typed_property_sets_source_column_null_idempotently"}]},
+    {"id": "mapped_single_relationship_delete", "assurance_profile": "write", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_delete_edge_removes_source_row_and_tombstones_neighbors"}]},
+    {"id": "mapped_single_node_detach_delete", "assurance_profile": "write", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_detach_delete_removes_incident_edges_before_node"}]},
+    {"id": "mapped_single_node_merge", "assurance_profile": "write", "evidence": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_merge_node_inserts_then_updates_mapped_row"}]}
   ]
 }

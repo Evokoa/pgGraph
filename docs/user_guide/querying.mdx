@@ -52,6 +52,10 @@ the final global merge.
 JSONB object per row. Node labels resolve to registered source-table names, and
 relationship types resolve to registered edge labels.
 
+The generated [GQL 1.0 profile](./gql-profile) is the exact machine-checked
+capability inventory. It deliberately does not claim full ISO GQL, openCypher,
+or SQL/PGQ conformance.
+
 ```sql
 SELECT row
 FROM graph.gql(
@@ -312,11 +316,13 @@ such as `u.profile.plan`; returned JSONB arrays and objects keep their JSON
 shape. A missing key inside a JSONB property path projects as JSON `null`, but
 it does not satisfy `IS NULL`; explicit JSON `null` does.
 
-Planned outside this subset:
+Outside the 1.0 profile:
 
 - Relationship property expressions such as `r.weight`.
 - Multi-pattern relationship properties, relationship/path property aggregate
   inputs, and numeric aggregates over relationship/path values.
+
+### GQL Writes
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table or one directed relationship row into a

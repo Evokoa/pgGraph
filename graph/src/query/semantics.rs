@@ -30,7 +30,7 @@ const MAX_BOUND_HOPS: u32 = 64;
 /// # Errors
 ///
 /// Returns [`GqlError`] when the query uses valid syntax outside the current
-/// Phase 1B execution slice or when labels/types cannot resolve in the catalog.
+/// documented pgGraph 1.0 profile or when labels/types cannot resolve in the catalog.
 pub(crate) fn bind(
     query: &crate::gql::ast::Query,
     catalog: &impl CatalogSnapshot,
@@ -42,8 +42,8 @@ pub(crate) fn bind(
     let target = bind_node(target_pat, catalog)?;
     let rel_type = require_single_relationship_type(
         rel_pat,
-        "anonymous relationship types require a later phase",
-        "relationship type alternation outside wildcard path variables requires a later phase",
+        "anonymous relationship types are outside the 1.0 profile; name one registered relationship type after `:`",
+        "relationship type alternation is outside the 1.0 single-pattern profile; use one registered type or a supported wildcard path-variable read",
     )?;
     let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
     let predicate = bind_predicates(
@@ -207,20 +207,20 @@ fn bind_join_read(
         let [(rel, target)] = pattern.tail.as_slice() else {
             return Err(GqlError::unsupported(
                 pattern.span,
-                "multi-pattern joins currently support fixed single-relationship patterns",
+                "the 1.0 multi-pattern profile supports fixed single-relationship patterns; split multi-hop work into bounded MATCH stages",
             ));
         };
         if !rel.props.is_empty() {
             return Err(GqlError::unsupported(
                 rel.span,
-                "relationship properties over multi-pattern joins require a later phase",
+                "relationship property maps are outside the 1.0 multi-pattern profile; move the predicate to mapped node properties or use a supported single pattern",
             ));
         }
         let hops = bind_hops(rel)?;
         let rel_type = require_single_relationship_type(
             rel,
-            "anonymous relationship types in multi-pattern joins require a later phase",
-            "relationship type alternation in multi-pattern joins requires a later phase",
+            "anonymous relationship types are outside the 1.0 multi-pattern profile; name one registered relationship type after `:`",
+            "relationship type alternation is outside the 1.0 multi-pattern profile; use one registered relationship type per pattern",
         )?;
         let source_slot = bind_join_node_slot(
             &pattern.start,
@@ -342,13 +342,13 @@ fn bind_join_node_slot(
     if !node.props.is_empty() {
         return Err(GqlError::unsupported(
             node.span,
-            "node properties in multi-pattern joins require a later phase",
+            "inline node property maps are outside the 1.0 multi-pattern profile; move the predicate to WHERE",
         ));
     }
     let var = node.var.as_ref().ok_or_else(|| {
         GqlError::unsupported(
             node.span,
-            "anonymous nodes in multi-pattern joins require a later phase",
+            "anonymous nodes are outside the 1.0 multi-pattern profile; bind each node to a variable",
         )
     })?;
     if rel_by_var.contains_key(&var.text) || path_by_var.contains_key(&var.text) {
@@ -1079,12 +1079,12 @@ fn bind_join_with_item(
                 if scope.rel_by_var.contains_key(&var.text) {
                     GqlError::unsupported(
                         property.span,
-                        "relationship properties over multi-pattern joins require a later phase",
+                        "relationship property projection is outside the 1.0 multi-pattern profile; return the relationship identity or mapped nodes",
                     )
                 } else if scope.path_by_var.contains_key(&var.text) {
                     GqlError::unsupported(
                         property.span,
-                        "path properties over multi-pattern joins require a later phase",
+                        "path property projection is outside the 1.0 multi-pattern profile; return the path or mapped node properties",
                     )
                 } else if scope.property_by_var.contains_key(&var.text) {
                     GqlError::bind(
@@ -1214,12 +1214,12 @@ fn bind_join_returns(
                     if scope.lookup.rel_by_var.contains_key(&var.text) {
                         GqlError::unsupported(
                             property.span,
-                            "relationship properties over multi-pattern joins require a later phase",
+                            "relationship property projection is outside the 1.0 multi-pattern profile; return the relationship identity or mapped nodes",
                         )
                     } else if scope.lookup.path_by_var.contains_key(&var.text) {
                         GqlError::unsupported(
                             property.span,
-                            "path properties over multi-pattern joins require a later phase",
+                            "path property projection is outside the 1.0 multi-pattern profile; return the path or mapped node properties",
                         )
                     } else if scope.lookup.property_by_var.contains_key(&var.text) {
                         GqlError::bind(
@@ -1361,12 +1361,12 @@ fn bind_join_aggregate_arg(
                 if scope.rel_by_var.contains_key(&var.text) {
                     GqlError::unsupported(
                         property.span,
-                        "relationship properties over multi-pattern joins require a later phase",
+                        "relationship property projection is outside the 1.0 multi-pattern profile; return the relationship identity or mapped nodes",
                     )
                 } else if scope.path_by_var.contains_key(&var.text) {
                     GqlError::unsupported(
                         property.span,
-                        "path properties over multi-pattern joins require a later phase",
+                        "path property projection is outside the 1.0 multi-pattern profile; return the path or mapped node properties",
                     )
                 } else {
                     GqlError::bind(
@@ -1468,13 +1468,13 @@ fn bind_wildcard_path_read(
         if tail.len() > 1 && rel.var.is_some() {
             return Err(GqlError::unsupported(
                 rel.span,
-                "relationship variables in multi-segment path variables require a later phase",
+                "relationship variables are outside the 1.0 multi-segment wildcard profile; bind the path variable instead",
             ));
         }
         if tail.len() > 1 && rel.var_len.is_some() && target.var.is_some() {
             return Err(GqlError::unsupported(
                 target.span,
-                "named target nodes on multi-segment variable-length wildcard paths require a later phase",
+                "named intermediate targets are outside the 1.0 multi-segment variable-length wildcard profile; bind the path variable instead",
             ));
         }
         if let (Some(source_table_oid), Some(target_table_oid)) =
@@ -2094,7 +2094,7 @@ fn bind_create_node(
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN DISTINCT is implemented in a later phase",
+            "RETURN DISTINCT is outside the 1.0 CREATE profile; return the mapped row directly",
         ));
     }
     let node = bind_node(&query.create.node, catalog)?;
@@ -2126,7 +2126,7 @@ fn bind_create_relationship(
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN DISTINCT over relationship CREATE is implemented in a later phase",
+            "RETURN DISTINCT is outside the 1.0 relationship CREATE profile; return the mapped row directly",
         ));
     }
     let matched_nodes = bind_create_relationship_match_nodes(&query.match_, catalog)?;
@@ -2192,7 +2192,7 @@ fn bind_create_relationship(
     let rel_type = require_single_relationship_type(
         rel_pat,
         "relationship CREATE requires a concrete relationship type",
-        "relationship type alternation in CREATE requires a later phase",
+        "relationship type alternation is outside the 1.0 CREATE profile; name one registered relationship type",
     )?;
     let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
     let edge_mapping = rel_info.edge_mapping.clone().ok_or_else(|| {
@@ -2213,7 +2213,7 @@ fn bind_create_relationship(
     if returns.iter().any(ReturnBinding::is_aggregate) {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN aggregates over relationship CREATE are implemented in a later phase",
+            "RETURN aggregates are outside the 1.0 relationship CREATE profile; aggregate in a subsequent read",
         ));
     }
     Ok(LogicalCreateRelationship {
@@ -2255,7 +2255,7 @@ fn bind_merge_node(
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN DISTINCT over MERGE is implemented in a later phase",
+            "RETURN DISTINCT is outside the 1.0 MERGE profile; return the mapped row directly",
         ));
     }
     let node = bind_node(&query.merge.node, catalog)?;
@@ -2393,7 +2393,7 @@ fn bind_create_properties(
         if key.text.contains('.') {
             return Err(GqlError::unsupported(
                 key.span,
-                "writes to jsonb property paths require the Phase 4 jsonb write path",
+                "nested jsonb property writes are outside the 1.0 profile; write a mapped top-level column or update the PostgreSQL source row",
             ));
         }
         if !seen.insert(key.text.as_str()) {
@@ -2466,11 +2466,11 @@ fn bind_create_value(value: &Operand) -> Result<CreateValue, GqlError> {
         Operand::Param { name, .. } => Ok(CreateValue::Param(name.text.clone())),
         Operand::List { span, .. } => Err(GqlError::unsupported(
             *span,
-            "write property lists are implemented in a later write phase",
+            "list-valued write expressions are outside the 1.0 profile; pass a scalar mapped-column value or update the PostgreSQL source row",
         )),
         Operand::Property { span, .. } => Err(GqlError::unsupported(
             *span,
-            "write property references require MATCH writes from a later phase",
+            "property-reference write expressions are outside the 1.0 profile; pass a literal or parameter",
         )),
         Operand::Identity { span, .. } => Err(GqlError::unsupported(
             *span,
@@ -2505,7 +2505,7 @@ fn bind_write_returns(
                 if property.text.contains('.') && !allow_jsonb_paths {
                     return Err(GqlError::unsupported(
                         property.span,
-                        "write RETURN jsonb property paths require the Phase 4 jsonb write path",
+                        "nested jsonb RETURN paths are outside the 1.0 write profile; return a mapped top-level column",
                     ));
                 }
                 CreateReturnBinding::Property {
@@ -2531,13 +2531,13 @@ fn bind_write_returns(
             ReturnExpr::Func { span, .. } => {
                 return Err(GqlError::unsupported(
                     *span,
-                    "RETURN functions over CREATE are implemented in a later phase",
+                    "RETURN functions are outside the 1.0 CREATE profile; apply the function in a subsequent read",
                 ));
             }
             ReturnExpr::Aggregate { span, .. } => {
                 return Err(GqlError::unsupported(
                     *span,
-                    "RETURN aggregates over CREATE are implemented in a later phase",
+                    "RETURN aggregates are outside the 1.0 CREATE profile; aggregate in a subsequent read",
                 ));
             }
         };
@@ -2559,7 +2559,7 @@ fn bind_set_property(
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN DISTINCT over SET is implemented in a later phase",
+            "RETURN DISTINCT is outside the 1.0 SET profile; return the mapped row directly",
         ));
     }
     if query.match_.optional {
@@ -2587,7 +2587,7 @@ fn bind_set_property(
     if property.contains('.') {
         return Err(GqlError::unsupported(
             query.set.target.property.span,
-            "writes to jsonb property paths require the Phase 4 jsonb write path",
+            "nested jsonb property writes are outside the 1.0 profile; write a mapped top-level column or update the PostgreSQL source row",
         ));
     }
     if property.starts_with('_') {
@@ -2621,7 +2621,7 @@ fn bind_remove_property(
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN DISTINCT over REMOVE is implemented in a later phase",
+            "RETURN DISTINCT is outside the 1.0 REMOVE profile; return the mapped row directly",
         ));
     }
     if query.match_.optional {
@@ -2723,7 +2723,7 @@ fn bind_delete_edge(
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN DISTINCT is implemented in a later phase",
+            "RETURN DISTINCT is outside the 1.0 DELETE profile; return the deleted mapping directly",
         ));
     }
     let (source_pat, rel_pat, target_pat) = single_outbound_hop(&query.match_)?;
@@ -2770,7 +2770,7 @@ fn bind_delete_edge(
     if returns.iter().any(ReturnBinding::is_aggregate) {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN aggregates over DELETE are implemented in a later phase",
+            "RETURN aggregates are outside the 1.0 DELETE profile; aggregate in a subsequent read",
         ));
     }
     Ok(LogicalDeleteEdge {
@@ -2820,7 +2820,7 @@ fn bind_delete_edge_mapping(
     if rel_pat.rel_types.len() > 1 {
         return Err(GqlError::unsupported(
             rel_pat.span,
-            "relationship type alternation in DELETE requires a later phase",
+            "relationship type alternation is outside the 1.0 DELETE profile; name one registered relationship type",
         ));
     }
     if source_pat.label.is_some() && target_pat.label.is_some() && !rel_pat.rel_types.is_empty() {
@@ -2980,7 +2980,7 @@ fn bind_detach_delete_node(
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,
-            "RETURN DISTINCT over DETACH DELETE is implemented in a later phase",
+            "RETURN DISTINCT is outside the 1.0 DETACH DELETE profile; return the deleted mapping directly",
         ));
     }
     let Pattern { start, tail, .. } = &query.match_.pattern;
@@ -3101,7 +3101,7 @@ fn single_outbound_hop(match_: &MatchClause) -> Result<(&NodePat, &RelPat, &Node
     let [(rel, target)] = tail.as_slice() else {
         return Err(GqlError::unsupported(
             match_.pattern.span,
-            "Phase 1B supports exactly one relationship in MATCH",
+            "the 1.0 single-pattern profile supports exactly one relationship in MATCH; use a bounded multi-pattern query or a supported node-only operation",
         ));
     };
     if !rel.props.is_empty() {
@@ -3151,10 +3151,16 @@ fn bind_hops(rel: &RelPat) -> Result<HopBounds, GqlError> {
 
 fn bind_node(node: &NodePat, catalog: &impl CatalogSnapshot) -> Result<BoundNode, GqlError> {
     let var = node.var.as_ref().ok_or_else(|| {
-        GqlError::unsupported(node.span, "anonymous node patterns require a later phase")
+        GqlError::unsupported(
+            node.span,
+            "anonymous node patterns are outside the 1.0 profile; bind the node to a variable",
+        )
     })?;
     let label = node.label.as_ref().ok_or_else(|| {
-        GqlError::unsupported(node.span, "unlabeled node patterns require a later phase")
+        GqlError::unsupported(
+            node.span,
+            "unlabeled node patterns are outside the 1.0 profile; use a registered label",
+        )
     })?;
     let info = catalog.resolve_node_label(&label.text, label.span)?;
     if let Some(property) = info.properties.iter().find(|property| {
@@ -3953,7 +3959,7 @@ fn validate_property(
         BindingSide::PathNode(_) => {
             return Err(GqlError::unsupported(
                 span,
-                "property references over multi-segment path variables require a later phase",
+                "property references over multi-segment paths are outside the 1.0 profile; project mapped node properties in a supported pattern",
             ));
         }
     };

@@ -339,15 +339,15 @@ fn binder_routes_relationship_type_alternation_to_wildcard_paths_only() {
     for (query, expected) in [
         (
             "MATCH (u:users)-[:friend|works_at]->(v:users) RETURN u",
-            "relationship type alternation outside wildcard path variables",
+            "relationship type alternation is outside the 1.0 single-pattern profile",
         ),
         (
             "MATCH (u:users)-[:friend|works_at]->(v:users), (v)-[:friend]->(u) RETURN u",
-            "relationship type alternation in multi-pattern joins",
+            "relationship type alternation is outside the 1.0 multi-pattern profile",
         ),
         (
             "MATCH (u:users)-[r:friend|works_at]->(v:users) DELETE r RETURN u",
-            "relationship type alternation in DELETE",
+            "relationship type alternation is outside the 1.0 DELETE profile",
         ),
     ] {
         let ast = crate::gql::parse_statement(query).unwrap();
@@ -364,11 +364,11 @@ fn binder_rejects_deferred_variable_length_wildcard_bindings() {
     for (query, expected) in [
         (
             "MATCH p=()-[*1..3]->(e)-[]->() RETURN p",
-            "named target nodes on multi-segment variable-length wildcard paths",
+            "named intermediate targets are outside the 1.0 multi-segment variable-length wildcard profile",
         ),
         (
             "MATCH p=()-[]->()-[*1..3]->(e) RETURN p",
-            "named target nodes on multi-segment variable-length wildcard paths",
+            "named intermediate targets are outside the 1.0 multi-segment variable-length wildcard profile",
         ),
     ] {
         let ast = crate::gql::parse_statement(query).unwrap();
@@ -412,7 +412,7 @@ fn binder_rejects_multi_segment_wildcard_relationship_variables() {
 
     assert!(
         err.to_string()
-            .contains("relationship variables in multi-segment path variables"),
+            .contains("relationship variables are outside the 1.0 multi-segment wildcard profile"),
         "unexpected error: {err}"
     );
 }
@@ -1349,7 +1349,9 @@ fn binder_rejects_delete_return_aggregates() {
     let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
 
     assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
-    assert!(err.to_string().contains("aggregates over DELETE"));
+    assert!(err
+        .to_string()
+        .contains("RETURN aggregates are outside the 1.0 DELETE profile"));
 }
 
 #[test]
@@ -2811,15 +2813,15 @@ fn multi_pattern_join_rejects_deferred_shapes() {
         ),
         (
             "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN r.role",
-            "relationship properties over multi-pattern joins require a later phase",
+            "relationship property projection is outside the 1.0 multi-pattern profile",
         ),
         (
             "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN p.weight",
-            "path properties over multi-pattern joins require a later phase",
+            "path property projection is outside the 1.0 multi-pattern profile; return the path or mapped node properties",
         ),
         (
             "MATCH (u:users)-[:works_at {role: 'eng'}]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
-            "relationship properties over multi-pattern joins require a later phase",
+            "relationship property maps are outside the 1.0 multi-pattern profile",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH c AS company RETURN u",

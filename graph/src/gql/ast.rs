@@ -47,7 +47,7 @@ pub(crate) struct Query {
 /// `WITH` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WithClause {
-    /// `WITH DISTINCT`; parsed now and rejected during binding until Phase 3D.
+    /// `WITH DISTINCT`; supported where documented by the 1.0 read profile.
     pub(crate) distinct: bool,
     /// Projected expressions visible to downstream clauses.
     pub(crate) items: Vec<ReturnItem>,
@@ -503,7 +503,7 @@ pub(crate) enum LiteralValue {
 /// `RETURN` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReturnClause {
-    /// `RETURN DISTINCT`; parsed now and rejected during binding until Phase 3.
+    /// `RETURN DISTINCT`; support depends on the documented 1.0 statement profile.
     pub(crate) distinct: bool,
     /// Return expressions.
     pub(crate) items: Vec<ReturnItem>,

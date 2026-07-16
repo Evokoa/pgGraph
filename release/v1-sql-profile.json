@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "profile": "pgGraph 1.0 SQL API",
+  "default_disposition": "supported",
+  "function_dispositions": {
+    "create_row_predicate_subgraph": "intentional_rejection",
+    "cypher": "bounded_compatibility",
+    "cypher_compatibility": "bounded_compatibility",
+    "cypher_explain": "bounded_compatibility",
+    "pgq": "intentional_rejection"
+  },
+  "groups": [
+    {
+      "id": "graph_administration",
+      "function_patterns": [
+        "^(create_graph|drop_graph|alter_graph|list_graphs|current_graph|select_graph|set_current_graph|grant_graph|revoke_graph|transfer_graph_ownership|graph_privileges|graph_quotas|graph_quota_usage|set_graph_quota|set_graph_residency|graph_runtime_status|graph_map|reset)$"
+      ],
+      "tests": {
+        "positive": [{"path": "graph/src/pg_tests/named_graphs.rs", "symbol": "default_graph_compatibility_workflow_still_uses_legacy_sql_surface"}],
+        "negative_diagnostics": [{"path": "graph/src/pg_tests/named_graphs.rs", "symbol": "drop_graph_rejects_non_empty_graph_with_pggraph_sqlstate"}],
+        "authorization": [{"path": "graph/src/pg_tests/named_graphs.rs", "symbol": "graph_grants_gate_visibility_queries_and_builds"}],
+        "resource": [{"path": "graph/src/pg_tests/named_graphs.rs", "symbol": "graph_quotas_block_named_graph_creation_before_catalog_state"}]
+      },
+      "documentation": [{"path": "docs/user_guide/administration-and-security.mdx", "symbol": "Named graphs"}]
+    },
+    {
+      "id": "registration_discovery",
+      "function_patterns": [
+        "^(add_table|add_table_to_graph|remove_table|remove_table_from_graph|add_edge|add_edge_to_graph|alter_edge|remove_edge|remove_edge_from_graph|rename_edge|add_filter_column|add_filter_column_to_graph|registered_tables|registered_tables_for_graph|registered_edges|registered_edges_for_graph|list_edges|auto_discover|auto_discover_tables|preview_discover|preview_discover_tables|create_row_predicate_subgraph|estimate)$"
+      ],
+      "tests": {
+        "positive": [{"path": "graph/src/pg_tests/registration_search.rs", "symbol": "public_add_edge_supports_fk_style_registered_source_tables"}],
+        "negative_diagnostics": [{"path": "graph/src/pg_tests/registration_search.rs", "symbol": "add_table_identifier_validation_rejects_nullable_unique_and_non_unique_columns"}],
+        "authorization": [{"path": "graph/src/pg_tests/maintenance_admin.rs", "symbol": "relationship_management_requires_graph_admin"}],
+        "transaction": [{"path": "graph/src/pg_tests/maintenance_admin.rs", "symbol": "admin_remove_apis_update_catalog_side_effects"}]
+      },
+      "documentation": [{"path": "docs/user_guide/schema-registration.mdx", "symbol": "graph.add_table"}]
+    },
+    {
+      "id": "build_persistence",
+      "function_patterns": [
+        "^(build|build_graph|build_async_graph|build_status|build_status_for_graph|build_resource_status|load_graph|unload_graph|loaded_graphs|status|memory_profile|resource_status|active_generation_count|projection_status|projection_compact|projection_gc|projection_repair|vacuum|vacuum_graph)$"
+      ],
+      "tests": {
+        "positive": [{"path": "graph/src/pg_tests/sync_config_build.rs", "symbol": "persisted_direct_build_matches_owned_build_for_public_queries"}],
+        "negative_diagnostics": [{"path": "graph/src/pg_tests/sync_config_build.rs", "symbol": "build_fails_closed_when_sync_checkpoint_read_fails"}],
+        "authorization": [{"path": "graph/src/pg_tests/named_graphs.rs", "symbol": "graph_grants_gate_visibility_queries_and_builds"}],
+        "resource": [{"path": "graph/src/pg_tests/sync_config_build.rs", "symbol": "every_oom_action_rejects_over_budget_build_before_allocation"}],
+        "recovery": [{"path": "graph/src/pg_tests/maintenance_admin.rs", "symbol": "full_rebuild_restores_valid_projection_generation"}]
+      },
+      "documentation": [{"path": "docs/user_guide/build-and-persistence.mdx", "symbol": "graph.build()"}]
+    },
+    {
+      "id": "sync_maintenance_jobs",
+      "function_patterns": [
+        "^(add_sync_policy|alter_sync_policy|drop_sync_policy|enable_sync|apply_sync|sync_health|sync_policy_status|run_sync_policy|maintenance|maintenance_graph|maintenance_status|maintenance_status_for_graph|run_scheduled_maintenance|ingest_projection|jobs|job_runs|job_stats|alter_job|remove_job|run_job|run_due_jobs|run_due_jobs_async)$"
+      ],
+      "tests": {
+        "positive": [{"path": "graph/src/pg_tests/sync_config_build.rs", "symbol": "trigger_sync_adds_edge_overlay_after_explicit_apply_sync"}],
+        "negative_diagnostics": [{"path": "graph/src/pg_tests/maintenance_admin.rs", "symbol": "failed_apply_sync_rows_remain_buffered"}],
+        "authorization": [{"path": "graph/src/pg_tests/named_graphs.rs", "symbol": "sync_policies_run_through_visible_durable_jobs"}],
+        "resource": [{"path": "graph/src/pg_tests/maintenance_admin.rs", "symbol": "edge_buffer_overflow_from_sql_sync_enters_read_only_mode"}],
+        "transaction": [{"path": "graph/src/pg_tests/maintenance_admin.rs", "symbol": "cross_backend_committed_write_visible_without_full_rebuild"}]
+      },
+      "documentation": [{"path": "docs/user_guide/sync-and-maintenance.mdx", "symbol": "graph.apply_sync()"}]
+    },
+    {
+      "id": "query_predicates_analytics",
+      "function_patterns": [
+        "^(traverse|traverse_search|shortest_path|weighted_shortest_path|aggregate|path_count_estimate|component|components|component_stats|connected_components|largest_component|isolated_nodes|all|at_least|at_most|between|contains_text|eq|equals|greater_than|gt|gte|in|is_not_null|is_null|less_than|lt|lte|neq|not_equals|not_in|on_node|prefix_text|node_ref|node_ref_string)$"
+      ],
+      "tests": {
+        "positive": [
+          {"path": "graph/src/pg_tests/traversal_api.rs", "symbol": "traversal_helpers_edge_path_and_composition_apis_work"},
+          {"path": "graph/src/pg_tests/filters.rs", "symbol": "filter_constructor_surface_has_stable_shapes_and_aliases"}
+        ],
+        "negative_diagnostics": [{"path": "graph/src/pg_tests/filters.rs", "symbol": "traverse_rejects_raw_jsonb_filters_outside_registered_catalog_contract"}],
+        "acl_rls": [{"path": "graph/src/pg_tests/maintenance_admin.rs", "symbol": "tenant_scope_filters_search_and_traversal"}],
+        "resource": [{"path": "graph/src/pg_tests/sync_config_build.rs", "symbol": "traversal_work_limit_returns_stable_resource_diagnostic_and_status"}]
+      },
+      "documentation": [{"path": "docs/user_guide/querying.mdx", "symbol": "graph.traverse("}]
+    },
+    {
+      "id": "workflow_search",
+      "function_patterns": [
+        "^(find|find_related|expand|search|search_nodes|get_neighbors|get_node|path|format_path|connection|neighborhood)$"
+      ],
+      "tests": {
+        "positive": [{"path": "graph/src/pg_tests/workflow_search_api.rs", "symbol": "workflow_find_returns_hydrated_ranked_rows_with_aliases"}],
+        "negative_diagnostics": [{"path": "graph/src/pg_tests/workflow_validation.rs", "symbol": "workflow_rejects_negative_limits_and_offsets"}],
+        "acl_rls": [{"path": "graph/src/pg_tests/maintenance_admin.rs", "symbol": "tenant_scope_filters_search_and_traversal"}],
+        "resource": [{"path": "graph/src/pg_tests/workflow_relationship_api.rs", "symbol": "public_workflows_share_the_low_query_memory_budget_end_to_end"}]
+      },
+      "documentation": [{"path": "docs/user_guide/querying.mdx", "symbol": "graph.find()"}]
+    },
+    {
+      "id": "gql_compatibility",
+      "function_patterns": [
+        "^(gql|gql_explain|cypher|cypher_explain|cypher_compatibility|pgq)$"
+      ],
+      "tests": {
+        "positive": [{"path": "graph/src/pg_tests/cypher.rs", "symbol": "cypher_matches_gql_for_supported_read_subset"}],
+        "negative_diagnostics": [
+          {"path": "graph/src/pg_tests/cypher.rs", "symbol": "cypher_rejects_unsupported_cypher_only_syntax"},
+          {"path": "graph/src/pg_tests/cypher.rs", "symbol": "pgq_public_endpoint_is_permanently_rejected"}
+        ],
+        "acl_rls": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_hydration_fails_closed_when_source_row_is_not_visible"}],
+        "resource": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_statement_memory_limit_is_shared_across_read_phases"}],
+        "transaction": [{"path": "graph/src/pg_tests/gql.rs", "symbol": "gql_reads_transaction_delta_edge_overlay"}]
+      },
+      "documentation": [{"path": "docs/user_guide/querying.mdx", "symbol": "openCypher Compatibility"}]
+    }
+  ]
+}

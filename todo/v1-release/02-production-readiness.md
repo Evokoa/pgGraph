@@ -74,13 +74,13 @@ supporting context where it does not conflict with that authoritative plan.
 
 ## R5: Supported Query And Write Profile
 
-- [ ] Freeze the exact SQL and GQL profile advertised for 1.0.
-- [ ] Ensure every advertised capability has parser/binder/executor,
+- [x] Freeze the exact SQL and GQL profile advertised for 1.0.
+- [x] Ensure every advertised capability has parser/binder/executor,
       diagnostics, ACL/RLS, transaction, resource, positive, negative, and docs
       evidence as applicable.
-- [ ] Make unsupported GQL and compatibility syntax fail deterministically with
+- [x] Make unsupported GQL and compatibility syntax fail deterministically with
       guidance; do not imply full ISO GQL or broad openCypher conformance.
-- [ ] Bound all operators used by the supported profile, including path search,
+- [x] Bound all operators used by the supported profile, including path search,
       aggregate, distinct, sort, hydration, and write rechecks.
-- [ ] Keep PostgreSQL DML authoritative for every graph write and reject
+- [x] Keep PostgreSQL DML authoritative for every graph write and reject
       unmapped writes with actionable mapping guidance.
