@@ -298,6 +298,23 @@ Detailed rules live in [Safety And Security](./safety-security). Keep rustdoc
 `# Safety` sections and local `// SAFETY:` comments current when touching any
 unsafe area.
 
+`release/unsafe-allowlist.json` assigns every production unsafe block to a
+named boundary and owner. `scripts/check_unsafe_allowlist.py` rejects a new or
+removed block, a count change, or a block without a nearby `SAFETY:`
+explanation. Persistence and projection decoding use checked arithmetic and
+fallible integer conversions before these typed mapped views are constructed;
+pgrx-specific raw values remain inside the SQL, catalog, transaction, and
+background-job adapters.
+
+Release-risk ownership is intentionally split without changing the public SQL
+surface: `resource.rs` owns byte/work policy and reservations;
+`projection/manifest.rs`, `gc.rs`, and `recovery.rs` own generation publication
+and retention; `persistence.rs` owns artifact layout and validation; and the
+persisted-build scanner/pipeline modules own bounded source-to-artifact work.
+This keeps validation and failure tests local to each boundary. A broader crate
+or module decomposition is a post-1.0 roadmap decision because it is not needed
+to prove the 1.0 compatibility contract.
+
 ## Where To Make Changes
 
 | Change | Start here |

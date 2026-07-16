@@ -1,0 +1,1961 @@
+{
+  "schema_version": 1,
+  "contract": {
+    "public_compatibility": "Public/stable commands, defaults, environment variables, and exit meanings remain compatible throughout 1.x.",
+    "exit_codes": {
+      "0": "success",
+      "1": "runtime or gate failure",
+      "2": "invalid command line or unsafe target"
+    },
+    "decisions": {
+      "keep": "Retain the entry point.",
+      "merge": "Move implementation behind a compatibility wrapper.",
+      "replace": "Retain a deprecation wrapper for the 1.x window.",
+      "delete": "Only unreferenced internal scripts may be removed after inventory review."
+    }
+  },
+  "reviewed_overlaps": [
+    {
+      "paths": [
+        "scripts/quickstart.sh",
+        "sandbox/start_playground.sh"
+      ],
+      "decision": "merge implementation, keep wrappers",
+      "reason": "quickstart is the stable dispatcher; start_playground remains the stable direct playground command"
+    },
+    {
+      "paths": [
+        "graph/tests/heavy/run_pg_matrix.sh",
+        "graph/tests/heavy/run_pg_matrix_docker.sh"
+      ],
+      "decision": "keep platform adapters",
+      "reason": "local pgrx and isolated Docker matrices exercise distinct supported operator environments"
+    },
+    {
+      "paths": [
+        "graph/tests/heavy/*.sh"
+      ],
+      "decision": "keep versioned workflow fixtures",
+      "reason": "database setup differs by failure boundary; shared naming, polling, prerequisite, timeout, logging, and evidence behavior belongs in scripts/lib/pggraph-common.sh and the tier runner"
+    }
+  ],
+  "scripts": [
+    {
+      "path": "graph/tests/heavy/alpha_to_v1_fixture.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/background_job_lock_regression.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/backup_restore_validate.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/build_lock_regression.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/build_memory_stress.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/concurrency_stress.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/crash_recovery.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/cross_backend_durable_projection.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/docker_smoke.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/fresh_install_smoke.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/function_metadata_audit.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/gql_create_tx_lifecycle.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/gql_delete_tx_lifecycle.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/gql_isolation_matrix.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/gql_merge_race.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/gql_relationship_race.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/gql_set_tx_lifecycle.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/gql_write_recheck_race.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/measure_build_rss.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/measure_mmap_pss.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/measure_runtime_resources.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/named_graphs_heavy_gate.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/package_validate.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/pg_upgrade_validate.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/playground_release_gate.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/playground_release_gate.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/projection_recovery_gate.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/read_latency_under_sync.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/relation_identity_concurrent_ddl.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_durable_projection_matrix.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_gql_write_matrix.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_memory_sanitizers.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_pg_matrix.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "maintainer/stable",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_pg_matrix_docker.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "maintainer/stable",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_pgbench_sync.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_postgres_process_sanitizer.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_release_gate.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "maintainer/stable",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_sqlstate_acl_boundary.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_synthetic_release_evidence.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/synthetic_release_smoke.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/tx_delta_crash_recovery.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/tx_delta_lifecycle.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/cleanup.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "public/stable",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/common/docker.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/common/run_benchmarks.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/app.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/bootstrap.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/catalog.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/client.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/config.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/execution.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/queries.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/results.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/test_catalog.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/run_benchmarks.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "public/stable",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/start_playground.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "public/stable",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/build_docker_pggraph_package.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/build_pgxn_dist.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_dependency_updates.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_doc_references.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_docs_drift.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "maintainer/stable",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_release_contract.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_rust_doc_map_drift.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_script_inventory.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_secrets.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "maintainer/stable",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_sql_api_drift.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_unsafe_allowlist.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/clean_generated_artifacts.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/copy_pggraph_package_to_docker_postgres.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/inspect_pggraph_artifact.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/install_into_docker_postgres.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/lib/pggraph-common.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/quickstart.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "public/stable",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/run_release.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/validate_release.py",
+      "owner": "pgGraph maintainers",
+      "audience": "maintainer/stable",
+      "tier": "rc",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    }
+  ]
+}

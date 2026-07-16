@@ -1,9 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PGGRAPH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=../../../scripts/lib/pggraph-common.sh
+source "${PGGRAPH_ROOT}/scripts/lib/pggraph-common.sh"
+
+if [[ "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: run_release_gate.sh [--tier pr|nightly|rc|full-matrix] [runner options]
+
+With no arguments, runs the stable 1.x environment-variable interface.
+With --tier, delegates to scripts/run_release.py and writes JSON evidence.
+EOF
+  exit 0
+fi
+
+if [[ "${1:-}" == "--tier" ]]; then
+  exec python3 "${PGGRAPH_ROOT}/scripts/run_release.py" "$@"
+fi
+
+if (( $# > 0 )); then
+  echo "Error: unknown argument: $1" >&2
+  echo "Run with --help for the supported interface." >&2
+  exit 2
+fi
+
 PG_VERSION_FEATURE="${PG_VERSION_FEATURE:-pg17}"
 DEVELOPMENT_FEATURES="$PG_VERSION_FEATURE development"
 DB_PREFIX="${DB_PREFIX:-pggraph_release}"
+pggraph_validate_database_name "${DB_PREFIX}_gate"
 RUN_DOCKER="${RUN_DOCKER:-0}"
 RUN_FULL_MATRIX="${RUN_FULL_MATRIX:-0}"
 RUN_CRASH="${RUN_CRASH:-0}"
@@ -35,6 +60,11 @@ RUN_GQL_WRITE_RECHECK="${RUN_GQL_WRITE_RECHECK:-1}"
 RUN_GQL_ISOLATION_MATRIX="${RUN_GQL_ISOLATION_MATRIX:-1}"
 RUN_SECRETS="${RUN_SECRETS:-1}"
 RUN_ALPHA_TO_V1_FIXTURE="${RUN_ALPHA_TO_V1_FIXTURE:-1}"
+
+PYTHONDONTWRITEBYTECODE=1 python3 ../scripts/check_script_inventory.py
+PYTHONDONTWRITEBYTECODE=1 python3 ../scripts/check_unsafe_allowlist.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground \
+  python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'
 
 if [[ "$RUN_SECRETS" == "1" ]]; then
   ../scripts/check_secrets.sh all

@@ -16,8 +16,9 @@ sandbox/start_playground.sh
 ```
 
 The script creates a Python virtualenv under `sandbox/playground/.venv` when
-needed and installs the playground dependencies there. It also starts or reuses
-the `pggraph-sandbox` PostgreSQL container.
+needed and installs the pinned playground dependencies there through `sfw`.
+The script never falls back to an unwrapped package installation. It also
+starts or reuses the `pggraph-sandbox` PostgreSQL container.
 
 By default, the playground starts in `csr_readonly` mode. To start the same
 dataset with mutable GQL writes enabled:
@@ -45,6 +46,7 @@ You need:
 
 - Docker or Docker Desktop;
 - Python 3.10 or newer;
+- `sfw` when the pinned virtual environment must be created or refreshed;
 - network access for the first dataset download.
 
 If Docker is missing or the daemon is not running, the script prints direct
@@ -57,12 +59,17 @@ intended as a quick inspector and SQL demo environment, not a full benchmark
 runner. The prepared snapshot is the upstream export generated on 2025-03-31;
 the loader verifies its SHA-256 checksum before import so an upstream `LATEST`
 change cannot silently alter examples or release-gate expectations.
+The data is published by the International Consortium of Investigative
+Journalists under the Offshore Leaks Database terms. The loader prints the
+download size and requires approval, retries through a temporary file, and can
+reuse a previously downloaded archive only after verifying its checksum.
 
-The sandbox sets `graph.query_memory_mb = 512` for this database. The Panama
+The sandbox sets `graph.query_memory_mb = 512` and
+`graph.maintenance_memory_mb = 1024` for this disposable session. The Panama
 projection contains about two million nodes, and the built-in hydrated path and
-GQL examples intentionally use a larger workspace than pgGraph's generic
-64 MiB default. This setting applies only to the disposable playground database
-and is not a recommended production default.
+mutable sync examples intentionally use a larger workspace than pgGraph's
+generic query and maintenance defaults. These settings apply only to the
+disposable playground and are not recommended production defaults.
 
 For LDBC and benchmark reports, use:
 
@@ -85,6 +92,17 @@ show:
 
 You can edit the SQL and run any query against the Docker-backed PostgreSQL 17
 database with pgGraph installed.
+
+PostgreSQL 17 is the pgGraph 1.0 reference environment for this packaged
+playground. The extension itself supports and is release-tested on PostgreSQL
+14 through 18. The app health-checks its connection and reconnects after a
+broken socket, applies a 30-second statement timeout, and displays at most
+1,000 rows per result set by default. Override those local demo limits with
+positive `PGGRAPH_STATEMENT_TIMEOUT_MS` and `PGGRAPH_MAX_RESULT_ROWS` values.
+The mutable demo's maintenance allowance can be changed with the positive
+`PGGRAPH_MAINTENANCE_MEMORY_MB` setting.
+The SQL editor is a trusted local operator surface: do not expose it directly
+to untrusted users or place credentials in SQL text.
 
 Useful starting points:
 
@@ -113,6 +131,13 @@ the build to complete or reports the build error.
 
 The sidebar query catalog is shared with the playground release gate. It
 currently validates 40 CSR examples and 41 mutable examples:
+
+Every entry has a stable ID, question, capability/mode requirements, explicit
+statement boundaries, a definition checksum, and a documentation link.
+Multi-statement examples are never split on semicolons, so quoted and
+dollar-quoted SQL remains intact. Mutable examples use dedicated
+`pggraph-playground-*` source rows and the release fixture resets them before
+each deterministic run.
 
 | Section | Queries |
 |---|---|
@@ -149,7 +174,12 @@ Supported GQL in the playground includes:
 
 The CSR sidebar focuses on read queries and admin/operator checks. The mutable
 sidebar adds idempotent MERGE examples and rebuilds the graph with
-`mutable_overlay`.
+`mutable_overlay`. That disposable session sets `graph.query_freshness = off`
+so one example cannot launch a production-scale durable catch-up before the
+next example; the same backend retains its committed mutable overlay. The
+separate `Apply Sync` and maintenance examples reset their fixture and exercise
+the explicit synchronization APIs. Production deployments should choose the
+documented freshness policy for their own cross-backend visibility needs.
 
 ## Release Gate
 

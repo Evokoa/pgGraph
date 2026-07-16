@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "datasets": {
+    "panama": {
+      "source": "https://offshoreleaks-data.icij.org/offshoreleaks/csv/full-oldb.LATEST.zip",
+      "license": "ICIJ Offshore Leaks Database terms",
+      "archive_sha256": "a2e37e8b878c12fb8f946d4e85026a4ae9026dc866b1aa925730bc1b50e52914",
+      "download_bytes": 73000000,
+      "offline_behavior": "Reuse the verified local archive; otherwise request explicit download approval."
+    }
+  },
+  "tiers": {
+    "pr": ["script-contracts", "docs-drift", "rust-static"],
+    "nightly": ["script-contracts", "docs-drift", "rust-static", "rust-tests"],
+    "rc": ["script-contracts", "docs-drift", "legacy-release"],
+    "full-matrix": ["script-contracts", "docs-drift", "legacy-release", "read-latency", "supported-majors", "postgres-sanitizer"]
+  },
+  "gates": {
+    "script-contracts": {
+      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
+      "cwd": "graph",
+      "timeout_seconds": 300,
+      "depends_on": [],
+      "thresholds": {"syntax_errors": 0, "unsafe_allowlist_drift": 0},
+      "exclusive_resources": []
+    },
+    "docs-drift": {
+      "command": ["../scripts/check_docs_drift.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 600,
+      "depends_on": ["script-contracts"],
+      "thresholds": {"drift_errors": 0},
+      "exclusive_resources": []
+    },
+    "rust-static": {
+      "command": ["cargo", "clippy", "--features", "pg17 development", "--all-targets", "--", "-D", "warnings"],
+      "cwd": "graph",
+      "timeout_seconds": 1800,
+      "depends_on": ["script-contracts"],
+      "thresholds": {"warnings": 0},
+      "exclusive_resources": ["cargo-target"]
+    },
+    "rust-tests": {
+      "command": ["cargo", "test", "--features", "pg17"],
+      "cwd": "graph",
+      "timeout_seconds": 1800,
+      "depends_on": ["rust-static"],
+      "thresholds": {"failed_tests": 0},
+      "exclusive_resources": ["cargo-target"]
+    },
+    "legacy-release": {
+      "command": ["./tests/heavy/run_release_gate.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 14400,
+      "environment": {"PGGRAPH_LEGACY_RELEASE_GATE": "1"},
+      "depends_on": ["script-contracts", "docs-drift"],
+      "thresholds": {"failed_gates": 0},
+      "exclusive_resources": ["pgrx-cluster", "postgres-port", "docker-playground"]
+    },
+    "supported-majors": {
+      "command": ["./tests/heavy/run_pg_matrix_docker.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 14400,
+      "environment": {"RUN_DURABLE_PROJECTION_MATRIX": "1", "RUN_POSTGRES_SANITIZER": "0"},
+      "depends_on": ["legacy-release"],
+      "thresholds": {"supported_postgresql_majors": 5, "failed_profiles": 0},
+      "exclusive_resources": ["docker", "cargo-target"]
+    },
+    "read-latency": {
+      "command": ["./tests/heavy/read_latency_under_sync.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 3600,
+      "depends_on": ["legacy-release"],
+      "thresholds": {"failed_latency_thresholds": 0},
+      "exclusive_resources": ["pgrx-cluster", "postgres-port"]
+    },
+    "postgres-sanitizer": {
+      "command": ["./tests/heavy/run_postgres_process_sanitizer.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 7200,
+      "depends_on": ["supported-majors"],
+      "thresholds": {"unsuppressed_memory_errors": 0},
+      "exclusive_resources": ["pgrx-cluster", "postgres-port"]
+    }
+  }
+}

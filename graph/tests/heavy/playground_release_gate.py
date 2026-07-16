@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[3]
 PLAYGROUND_DIR = ROOT / "sandbox" / "playground"
 sys.path.insert(0, str(PLAYGROUND_DIR))
 
-from queries import QUERY_QUESTIONS, query_catalog  # noqa: E402
+from catalog import query_catalog  # noqa: E402
 
 
 EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
@@ -113,12 +113,13 @@ SAME_SESSION_SETUP_LABELS = {
 
 def setup_sql(mode: str) -> str:
     build_mode = "mutable_overlay" if mode == "mutable" else "csr_readonly"
-    mutable_setup = "SET graph.mutable_enabled = on;" if mode == "mutable" else ""
+    mutable_setup = "SET graph.mutable_enabled = on; SET graph.query_freshness = off;" if mode == "mutable" else ""
     return f"""
 CREATE EXTENSION IF NOT EXISTS graph;
 SELECT graph.test_enabled();
 {mutable_setup}
 SET graph.query_memory_mb = 512;
+SET graph.maintenance_memory_mb = 1024;
 SELECT graph.reset();
 TRUNCATE graph._registered_filter_columns,
          graph._registered_edges,
@@ -194,56 +195,8 @@ def run_psql(
     return proc.stdout.strip()
 
 
-def split_sql(sql: str) -> list[str]:
-    uncommented = "\n".join(
-        line for line in sql.splitlines() if not line.lstrip().startswith("--")
-    )
-    statements = [part.strip() for part in uncommented.split(";")]
-    return [part for part in statements if part]
-
-
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
-
-
-def summarize_statement(
-    dsn: str, statement: str, timeout: int, prelude: str = ""
-) -> dict[str, object]:
-    setup = f"\\o /dev/null\n{prelude}\n\\o\n" if prelude else ""
-    wrapped = f"""
-{setup}
-WITH __pggraph_playground_query AS (
-{textwrap.indent(statement, "  ")}
-),
-__pggraph_numbered AS (
-  SELECT row_number() OVER () AS row_number,
-         to_jsonb(__pggraph_playground_query) AS row_json
-  FROM __pggraph_playground_query
-)
-SELECT jsonb_build_object(
-  'row_count', count(*),
-  'hash', md5(coalesce(string_agg(row_json::text, E'\\n' ORDER BY row_number), ''))
-)::text
-FROM __pggraph_numbered;
-"""
-    raw = run_psql(dsn, wrapped, timeout)
-    if not raw:
-        raise RuntimeError("statement returned no summary row")
-    return json.loads(raw)
-
-
-def summarize_query(
-    dsn: str, sql: str, timeout: int, prelude: str = ""
-) -> list[dict[str, object]]:
-    return [
-        summarize_statement(
-            dsn,
-            statement,
-            timeout,
-            prelude if index == 0 else "",
-        )
-        for index, statement in enumerate(split_sql(sql))
-    ]
 
 
 def summarize_catalog_session(
@@ -254,10 +207,10 @@ def summarize_catalog_session(
     setup = setup_sql(mode)
     quiet_setup = f"\\o /dev/null\n{setup}\n\\o\n"
     chunks = [quiet_setup]
-    for label, sql in query_catalog(mode).items():
+    for label, example in query_catalog(mode).items():
         if label in SAME_SESSION_SETUP_LABELS:
             chunks.append(quiet_setup)
-        for index, statement in enumerate(split_sql(sql)):
+        for index, statement in enumerate(example.statements):
             chunks.append(f"\\warn pggraph playground gate: {label} [{index}]")
             chunks.append(
                 f"""
@@ -296,18 +249,12 @@ FROM __pggraph_numbered;
 def validate_catalog(expected: dict[str, list[dict[str, object]]], mode: str) -> dict[str, str]:
     queries = query_catalog(mode)
     query_labels = set(queries)
-    question_labels = set(QUERY_QUESTIONS)
-    all_query_labels = set(query_catalog("csr")) | set(query_catalog("mutable"))
     expected_labels = set(expected)
     errors: dict[str, str] = {}
 
-    missing_questions = sorted(query_labels - question_labels)
+    missing_questions = sorted(label for label, example in queries.items() if not example.question)
     if missing_questions:
         errors["questions"] = f"missing questions for: {', '.join(missing_questions)}"
-
-    stale_questions = sorted(question_labels - all_query_labels)
-    if stale_questions:
-        errors["stale_questions"] = f"questions without queries: {', '.join(stale_questions)}"
 
     missing_expected = sorted(query_labels - expected_labels)
     if missing_expected:

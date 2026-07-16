@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "policy": "Every production unsafe block must be listed here and carry a nearby SAFETY explanation.",
+  "entries": [
+    {"path": "graph/src/acl.rs", "blocks": 1, "boundary": "PostgreSQL ACL FFI", "owner": "SQL security adapter"},
+    {"path": "graph/src/catalog/graphs.rs", "blocks": 1, "boundary": "PostgreSQL role FFI", "owner": "catalog adapter"},
+    {"path": "graph/src/edge_store.rs", "blocks": 1, "boundary": "validated mmap typed view", "owner": "artifact validation"},
+    {"path": "graph/src/lib.rs", "blocks": 1, "boundary": "read-only mmap advice", "owner": "backend load adapter"},
+    {"path": "graph/src/mapped_bytes.rs", "blocks": 1, "boundary": "Miri-compatible test backing", "owner": "mapped byte ownership"},
+    {"path": "graph/src/node_store.rs", "blocks": 2, "boundary": "validated mmap typed views", "owner": "artifact validation"},
+    {"path": "graph/src/persistence.rs", "blocks": 1, "boundary": "PostgreSQL data directory FFI", "owner": "persistence adapter"},
+    {"path": "graph/src/projection/tx_delta.rs", "blocks": 1, "boundary": "PostgreSQL transaction callbacks", "owner": "transaction adapter"},
+    {"path": "graph/src/sql_jobs.rs", "blocks": 1, "boundary": "PostgreSQL backend PID FFI", "owner": "background-job adapter"}
+  ]
+}

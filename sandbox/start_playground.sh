@@ -110,20 +110,14 @@ wait_for_playground_ready() {
   return 1
 }
 
-USE_SFW_PIP=0
-if command -v sfw >/dev/null 2>&1; then
-  USE_SFW_PIP=1
-else
-  echo "Warning: sfw was not found; falling back to direct pip for playground dependencies." >&2
+if ! command -v sfw >/dev/null 2>&1; then
+  echo "Error: sfw is required before the playground can install Python dependencies." >&2
+  echo "Install sfw, or provision sandbox/playground/.venv from requirements.txt ahead of time." >&2
+  exit 1
 fi
 
 run_venv_pip() {
-  if [ "${USE_SFW_PIP}" = "1" ]; then
-    PATH="${VENV_DIR}/bin:${PATH}" sfw pip "$@"
-    return
-  fi
-
-  "${VENV_DIR}/bin/python" -m pip "$@"
+  PATH="${VENV_DIR}/bin:${PATH}" sfw pip "$@"
 }
 
 APP_PORT="$(choose_app_port)"

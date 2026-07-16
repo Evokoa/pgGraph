@@ -12,6 +12,7 @@ export default {
   'safety-security': 'Safety And Security',
   'sql-tests': 'SQL Tests',
   scripts: 'Scripts',
+  'script-inventory': 'Script Inventory',
   benchmarking: 'Benchmarking',
   'release-gate-checklist': 'Release Gate Checklist',
   'release-note-template': 'Release Note Template',

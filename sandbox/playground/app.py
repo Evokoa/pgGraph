@@ -1,36 +1,30 @@
 import base64
 import json
-import os
-import time
 from pathlib import Path
 
-import psycopg
 import streamlit as st
-from psycopg.rows import dict_row
 
+from bootstrap import ensure_graph_loaded
+from catalog import query_examples
+from client import DatabaseClient
+from config import PlaygroundConfig
+from execution import run_with_error_handling
 from queries import (
     DEFAULT_QUESTION,
     DEFAULT_SQL,
     PLAYGROUND_CONTEXT,
-    QUERY_QUESTIONS,
-    normalize_playground_mode,
-    query_sections,
 )
 
-GRAPH_BUSY_SQLSTATE = "PG006"
-GRAPH_BUILD_WAIT_SECONDS = 600
 
-
-def playground_mode() -> str:
-    return normalize_playground_mode(os.environ.get("PGGRAPH_PLAYGROUND_MODE"))
-
-
-def build_mode() -> str:
-    return "mutable_overlay" if playground_mode() == "mutable" else "csr_readonly"
+@st.cache_resource(show_spinner=False)
+def runtime() -> tuple[PlaygroundConfig, DatabaseClient]:
+    config = PlaygroundConfig.from_environment()
+    return config, DatabaseClient(config)
 
 
 def asset_path(name: str) -> Path:
-    return Path(os.environ.get("PGGRAPH_ASSETS_DIR", "assets")) / name
+    config, _ = runtime()
+    return config.assets_dir / name
 
 
 def svg_data_uri(path: Path) -> str:
@@ -40,194 +34,11 @@ def svg_data_uri(path: Path) -> str:
     return f"data:image/svg+xml;base64,{payload}"
 
 
-@st.cache_resource(show_spinner=False)
-def connection() -> psycopg.Connection:
-    conn = psycopg.connect(os.environ["PGGRAPH_DSN"], row_factory=dict_row, autocommit=True)
-    ensure_graph_loaded(conn)
-    return conn
-
-
-def fetch_one(conn: psycopg.Connection, sql: str) -> dict:
+def fetch_one(conn, sql: str) -> dict:
     with conn.cursor() as cur:
         cur.execute(sql)
         row = cur.fetchone()
         return dict(row) if row else {}
-
-
-def is_graph_busy(exc: Exception) -> bool:
-    return isinstance(exc, psycopg.Error) and getattr(exc, "sqlstate", None) == GRAPH_BUSY_SQLSTATE
-
-
-def graph_status(cur: psycopg.Cursor) -> dict:
-    cur.execute("SELECT node_count, edge_count, projection_mode FROM graph.status();")
-    row = cur.fetchone()
-    return dict(row) if row else {"node_count": 0, "edge_count": 0, "projection_mode": ""}
-
-
-def ensure_active_graph(cur: psycopg.Cursor) -> None:
-    deadline = time.monotonic() + GRAPH_BUILD_WAIT_SECONDS
-    attempt = 0
-
-    while True:
-        status = graph_status(cur)
-        if (
-            status["node_count"] > 0
-            and status["edge_count"] > 0
-            and status["projection_mode"] == build_mode()
-        ):
-            return
-
-        try:
-            if build_mode() == "mutable_overlay":
-                cur.execute("SET graph.mutable_enabled = on;")
-            cur.execute("SELECT * FROM graph.build(%s);", (build_mode(),))
-            if cur.description:
-                cur.fetchall()
-            return
-        except Exception as exc:
-            if not is_graph_busy(exc):
-                raise
-            if time.monotonic() >= deadline:
-                raise RuntimeError("Timed out waiting for another graph build or vacuum to finish.") from exc
-            time.sleep(min(5, 1 + attempt))
-            attempt += 1
-
-
-def ensure_graph_loaded(conn: psycopg.Connection) -> None:
-    with conn.cursor() as cur:
-        cur.execute("CREATE EXTENSION IF NOT EXISTS graph;")
-        cur.execute("SELECT graph.test_enabled();")
-        if build_mode() == "mutable_overlay":
-            cur.execute("SET graph.mutable_enabled = on;")
-        cur.execute("SELECT count(*) AS nodes FROM panama.nodes;")
-        source_nodes = cur.fetchone()["nodes"]
-        if source_nodes == 0:
-            raise RuntimeError("Panama tables are empty. Rerun sandbox/start_playground.sh to prepare the dataset.")
-
-        cur.execute(
-            """
-            SELECT EXISTS (
-              SELECT 1
-              FROM graph.registered_tables()
-              WHERE table_name = 'panama.nodes'
-            ) AS registered;
-            """
-        )
-        if not cur.fetchone()["registered"]:
-            cur.execute("SELECT graph.reset();")
-            cur.execute(
-                """
-                TRUNCATE graph._registered_filter_columns,
-                         graph._registered_edges,
-                         graph._registered_tables,
-                         graph._build_jobs,
-                         graph._maintenance_jobs,
-                         graph._sync_log,
-                         graph._sync_buffer
-                RESTART IDENTITY;
-                """
-            )
-            cur.execute(
-                """
-                SELECT graph.add_table(
-                  'panama.nodes'::regclass,
-                  'node_id',
-                  ARRAY['name', 'countries', 'country_codes', 'label']
-                );
-                """
-            )
-            cur.execute(
-                """
-                SELECT graph.add_edge(
-                  from_table := 'panama.edges'::regclass,
-                  from_column := 'start_id',
-                  to_table := 'panama.nodes'::regclass,
-                  to_column := 'end_id',
-                  label := 'related_to',
-                  bidirectional := true,
-                  label_column := 'rel_type'
-                );
-                """
-            )
-
-        ensure_active_graph(cur)
-
-        cur.execute(
-            """
-            WITH seed AS (
-              SELECT start_id
-              FROM panama.edges
-              GROUP BY start_id
-              ORDER BY count(*) DESC
-              LIMIT 1
-            )
-            SELECT count(*)
-            FROM seed, LATERAL graph.traverse(
-              'panama.nodes'::regclass,
-              seed.start_id,
-              1,
-              hydrate := false,
-              max_rows := 1
-            );
-            """
-        )
-
-
-def format_elapsed(seconds: float) -> str:
-    if seconds < 1:
-        return f"{seconds * 1000:.0f} ms"
-    return f"{seconds:.2f} s"
-
-
-def run_sql(sql: str) -> dict:
-    started = time.perf_counter()
-    conn = connection()
-    ensure_graph_loaded(conn)
-    result_sets: list[dict] = []
-    messages: list[str] = []
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        result_index = 1
-        while True:
-            if cur.description:
-                rows = [dict(row) for row in cur.fetchall()]
-                result_sets.append(
-                    {
-                        "index": result_index,
-                        "row_count": len(rows),
-                        "rows": rows,
-                    }
-                )
-                result_index += 1
-            elif cur.statusmessage:
-                messages.append(cur.statusmessage)
-            if not cur.nextset():
-                break
-
-    elapsed_seconds = time.perf_counter() - started
-    return {
-        "ok": True,
-        "elapsed_seconds": elapsed_seconds,
-        "elapsed": format_elapsed(elapsed_seconds),
-        "result_sets": result_sets,
-        "messages": messages or ["Query completed."],
-    }
-
-
-def run_sql_with_error_handling(sql: str) -> dict:
-    started = time.perf_counter()
-    try:
-        return run_sql(sql)
-    except Exception as exc:
-        elapsed_seconds = time.perf_counter() - started
-        return {
-            "ok": False,
-            "elapsed_seconds": elapsed_seconds,
-            "elapsed": format_elapsed(elapsed_seconds),
-            "error": f"{type(exc).__name__}: {exc}",
-            "result_sets": [],
-            "messages": [],
-        }
 
 
 def render_result(result: dict) -> None:
@@ -304,10 +115,12 @@ def render_metric_strip(status: dict | None) -> None:
     )
 
 
-def initialize_graph() -> tuple[psycopg.Connection, dict]:
+def initialize_graph() -> tuple[object, dict]:
     with st.status("Preparing Panama graph...", expanded=True) as status_box:
         st.write("Connecting to PostgreSQL and checking the loaded dataset.")
-        conn = connection()
+        config, client = runtime()
+        conn = client.connection()
+        ensure_graph_loaded(conn, config)
         st.write("Verifying graph catalog registration and build status.")
         graph_status = fetch_one(conn, "SELECT * FROM graph.status();")
         status_box.update(label="Panama graph is ready.", state="complete", expanded=False)
@@ -481,22 +294,22 @@ def sidebar() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.sidebar.caption(f"Mode: {build_mode()}")
+    config, _ = runtime()
+    st.sidebar.caption(f"Mode: {config.build_mode}")
     filter_text = st.sidebar.text_input("Filter queries...", label_visibility="collapsed", placeholder="Filter queries...")
     normalized_filter = filter_text.strip().lower()
-    for section, queries in query_sections(playground_mode()):
-        visible_queries = {
-            label: sql
-            for label, sql in queries.items()
-            if not normalized_filter or normalized_filter in label.lower() or normalized_filter in section.lower()
-        }
-        if not visible_queries:
+    examples = query_examples(config.mode)
+    for section in dict.fromkeys(example.section for example in examples):
+        visible_examples = [example for example in examples if example.section == section and (not normalized_filter or normalized_filter in example.title.lower() or normalized_filter in section.lower())]
+        if not visible_examples:
             continue
         st.sidebar.markdown(f'<div class="workflow">{section}</div>', unsafe_allow_html=True)
-        for label, sql in visible_queries.items():
-            if st.sidebar.button(label, use_container_width=True):
-                st.session_state.sql = sql
-                st.session_state.question = QUERY_QUESTIONS.get(label, DEFAULT_QUESTION)
+        for example in visible_examples:
+            if st.sidebar.button(example.title, use_container_width=True):
+                st.session_state.editor_sql = example.sql
+                st.session_state.catalog_sql = example.sql
+                st.session_state.statements = example.statements
+                st.session_state.question = example.question
                 st.session_state.result = {}
     st.sidebar.divider()
     st.sidebar.link_button("Docs", "https://docs.evokoa.com/pggraph", use_container_width=True)
@@ -512,8 +325,12 @@ def main() -> None:
     apply_css()
     sidebar()
 
-    if "sql" not in st.session_state:
-        st.session_state.sql = DEFAULT_SQL
+    if "editor_sql" not in st.session_state:
+        st.session_state.editor_sql = DEFAULT_SQL
+    if "statements" not in st.session_state:
+        default = next(example for example in query_examples(runtime()[0].mode) if example.title == "Status + Catalog")
+        st.session_state.statements = default.statements
+        st.session_state.catalog_sql = default.sql
     if "question" not in st.session_state:
         st.session_state.question = DEFAULT_QUESTION
     if "result" not in st.session_state:
@@ -538,7 +355,7 @@ def main() -> None:
 
     left, right = st.columns(2, gap="large")
     with left:
-        st.session_state.sql = st.text_area("SQL", value=st.session_state.sql, height=430)
+        editor_sql = st.text_area("SQL", key="editor_sql", height=430)
         run_button_slot = st.empty()
         run_clicked = run_button_slot.button("Run SQL", type="primary")
         if run_clicked:
@@ -546,7 +363,11 @@ def main() -> None:
     with right:
         if run_clicked:
             with st.spinner("Running SQL..."):
-                st.session_state.result = run_sql_with_error_handling(st.session_state.sql)
+                config, client = runtime()
+                connection = client.connection()
+                ensure_graph_loaded(connection, config)
+                statements = st.session_state.statements if editor_sql == st.session_state.catalog_sql else (editor_sql,)
+                st.session_state.result = run_with_error_handling(connection, statements, config)
             st.rerun()
         render_result(st.session_state.result)
 

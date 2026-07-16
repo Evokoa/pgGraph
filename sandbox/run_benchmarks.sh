@@ -72,20 +72,14 @@ if [ ! -d "${VENV_DIR}" ]; then
   "${BENCHMARK_PYTHON}" -m venv "${VENV_DIR}"
 fi
 
-USE_SFW_PIP=0
-if command -v sfw >/dev/null 2>&1; then
-  USE_SFW_PIP=1
-else
-  echo "Warning: sfw was not found; falling back to direct pip for benchmark dependencies." >&2
+if ! command -v sfw >/dev/null 2>&1; then
+  echo "Error: sfw is required before benchmark dependencies can be installed." >&2
+  echo "Install sfw, or provision sandbox/benchmark/.venv from requirements.txt ahead of time." >&2
+  exit 1
 fi
 
 run_venv_pip() {
-  if [ "${USE_SFW_PIP}" = "1" ]; then
-    PATH="${VENV_DIR}/bin:${PATH}" sfw pip "$@"
-    return
-  fi
-
-  "${VENV_DIR}/bin/python" -m pip "$@"
+  PATH="${VENV_DIR}/bin:${PATH}" sfw pip "$@"
 }
 
 run_venv_pip install --upgrade pip >/dev/null

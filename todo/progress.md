@@ -6,15 +6,16 @@ the authoritative checkpoint handoff, measurement log, and next-action record.
 
 Last synchronized: 2026-07-16
 
-Current phase: R4 release-risk refactoring. R1 through R3 are complete: the
-bounded persisted build streams a fenced PostgreSQL snapshot through governed
-runs into a validated generation-specific artifact, then publishes it with
-generation compare-and-swap without exposing an unvalidated serving base.
+Current phase: R5 supported query and write profile. R1 through R4 are
+complete. Release-risk boundaries now have checked ownership, the script and
+unsafe inventories are drift-gated, named release tiers produce resumable
+evidence, and the packaged PostgreSQL 17 playground passes the shared CSR and
+mutable catalogs.
 
 Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
-and dynamic graphs are post-1.0 roadmap work. R1 through R3 are complete; R4 is
+and dynamic graphs are post-1.0 roadmap work. R1 through R4 are complete; R5 is
 the active release checkpoint.
 
 2026-07-16 R2D manifest publication — Projection publishers now stage and
@@ -256,3 +257,9 @@ the prior serving generation on every tested fault, and pass the complete
 release gate plus independent review. The final PostgreSQL 14–18 Docker matrix
 passes 860 Rust and 1,132 serialized pgrx tests per major, the GQL write and
 isolation profiles, and every durable projection profile.
+
+2026-07-16 R4 release-risk refactoring — A generated 75-entry script inventory,
+10-block unsafe allowlist, declarative locked/resumable release tiers, and a
+modular bounded playground replace implicit ownership. The packaged PostgreSQL
+17 reference passes 40 CSR and 41 mutable shared-catalog examples without
+changing expected results.

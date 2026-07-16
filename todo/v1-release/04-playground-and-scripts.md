@@ -35,76 +35,76 @@ compatibility window.
 
 ## P1: Inventory And Contract Freeze
 
-- [ ] Create a machine-readable script inventory containing owner, audience,
+- [x] Create a machine-readable script inventory containing owner, audience,
       tier, required tools, inputs, outputs, destructive behavior, timeout,
       supported platforms, and CI/release usage.
-- [ ] Classify entry points as public/stable, maintainer/stable, or internal.
-- [ ] Freeze public commands and exit-code/environment contracts for 1.0.
-- [ ] Identify duplicate, unused, obsolete, or misleading scripts and record
+- [x] Classify entry points as public/stable, maintainer/stable, or internal.
+- [x] Freeze public commands and exit-code/environment contracts for 1.0.
+- [x] Identify duplicate, unused, obsolete, or misleading scripts and record
       keep/merge/replace/delete decisions before moving files.
-- [ ] Add `bash -n` and ShellCheck coverage for every maintained shell script,
+- [x] Add `bash -n` and ShellCheck coverage for every maintained shell script,
       plus focused Python lint/type/unit checks for script helpers.
-- [ ] Require `sfw` for any dependency installation performed by a script, or
+- [x] Require `sfw` for any dependency installation performed by a script, or
       use a prebuilt/locked environment that performs no runtime installation.
 
 ## P2: Shared Script Foundations
 
-- [ ] Put shared PostgreSQL/pgrx lifecycle, database naming, polling, timeout,
+- [x] Put shared PostgreSQL/pgrx lifecycle, database naming, polling, timeout,
       cleanup, logging, prerequisite, and evidence helpers in one sourced
       library with a narrow documented interface.
-- [ ] Require traps to clean only resources created by the current script;
+- [x] Require traps to clean only resources created by the current script;
       reject unsafe or ambiguous database/cluster targets.
-- [ ] Standardize `--help`, exit codes, environment validation, timeouts,
+- [x] Standardize `--help`, exit codes, environment validation, timeouts,
       temporary directories, log locations, and machine-readable summaries.
-- [ ] Replace copied shell SQL with versioned `.sql` fixtures where doing so
+- [x] Replace copied shell SQL with versioned `.sql` fixtures where doing so
       improves reviewability and reuse.
-- [ ] Keep platform-specific behavior at adapters; do not spread macOS/Linux/
+- [x] Keep platform-specific behavior at adapters; do not spread macOS/Linux/
       Docker branching through every workflow.
 
 ## P3: Release Orchestration
 
-- [ ] Replace boolean-sprawl orchestration with named tiers such as `pr`,
+- [x] Replace boolean-sprawl orchestration with named tiers such as `pr`,
       `nightly`, `rc`, and `full-matrix`, backed by a declarative gate registry.
-- [ ] Record exact command, PostgreSQL/pgGraph versions, duration, result,
+- [x] Record exact command, PostgreSQL/pgGraph versions, duration, result,
       dataset checksum, memory/performance thresholds, and artifact locations
       in one evidence manifest.
-- [ ] Make dependencies and exclusivity explicit so database/port/cluster
+- [x] Make dependencies and exclusivity explicit so database/port/cluster
       collisions cannot silently corrupt results.
-- [ ] Support resuming an interrupted release run without treating stale output
+- [x] Support resuming an interrupted release run without treating stale output
       as fresh evidence.
-- [ ] Preserve `run_release_gate.sh` as a compatibility wrapper for at least the
+- [x] Preserve `run_release_gate.sh` as a compatibility wrapper for at least the
       documented 1.x deprecation window if its interface changes.
-- [ ] Reconcile the aggregate runner with every documented required gate,
+- [x] Reconcile the aggregate runner with every documented required gate,
       including docs drift, release metadata validation, upgrade, latency,
       sanitizers, and supported-major evidence.
 
 ## P4: Playground Refactor
 
-- [ ] Separate configuration, database client, bootstrap/registration, build
+- [x] Separate configuration, database client, bootstrap/registration, build
       coordination, query catalog, execution, result models, and Streamlit UI.
-- [ ] Move query examples into structured data with stable IDs, title,
+- [x] Move query examples into structured data with stable IDs, title,
       question, mode/capability requirements, SQL, expected schema or checksum,
       and documentation link.
-- [ ] Make the automated release gate and UI consume the same query catalog so
+- [x] Make the automated release gate and UI consume the same query catalog so
       examples cannot drift.
-- [ ] Represent multi-statement examples as explicit statement lists; do not
+- [x] Represent multi-statement examples as explicit statement lists; do not
       parse SQL by splitting on semicolons.
-- [ ] Remove direct truncation of pgGraph internal catalogs from the playground;
+- [x] Remove direct truncation of pgGraph internal catalogs from the playground;
       use supported reset/registration APIs or add a narrowly scoped test-only
       fixture mechanism outside the user-facing app.
-- [ ] Use explicit connection health/reconnect and bounded query execution;
+- [x] Use explicit connection health/reconnect and bounded query execution;
       avoid caching a permanently broken connection.
-- [ ] Keep mutable examples isolated and resettable so one user/session cannot
+- [x] Keep mutable examples isolated and resettable so one user/session cannot
       make later examples nondeterministic.
-- [ ] Separate dataset acquisition/checksum/setup from application startup and
+- [x] Separate dataset acquisition/checksum/setup from application startup and
       document licensing, size, provenance, and offline/retry behavior.
-- [ ] Add unit tests for catalog parsing and result formatting, integration tests
+- [x] Add unit tests for catalog parsing and result formatting, integration tests
       for bootstrap/reconnect/error handling, and packaged end-to-end smoke tests
       for CSR and mutable modes.
-- [ ] Review accessibility, error guidance, secret handling, SQL trust boundary,
+- [x] Review accessibility, error guidance, secret handling, SQL trust boundary,
       row/result caps, and deployment assumptions before presenting the
       playground as production-adjacent.
-- [ ] Document PostgreSQL 17 as the 1.0 playground reference environment. The
+- [x] Document PostgreSQL 17 as the 1.0 playground reference environment. The
       extension itself still passes the PostgreSQL 14-18 release matrix.
 
 ## Compatibility And Migration

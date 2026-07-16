@@ -61,15 +61,15 @@ supporting context where it does not conflict with that authoritative plan.
 
 ## R4: Release-Risk Refactoring
 
-- [ ] Complete canonical enum/newtype, checked-conversion, pgrx-adapter, exact
+- [x] Complete canonical enum/newtype, checked-conversion, pgrx-adapter, exact
       value, and unsafe/raw-FFI allowlist work needed by R1-R3.
-- [ ] Split publication, generation, resource policy, artifact validation, and
+- [x] Split publication, generation, resource policy, artifact validation, and
       compatibility ownership where current coupling prevents isolated tests.
-- [ ] Keep mechanical moves separate from behavior changes and preserve SQL,
+- [x] Keep mechanical moves separate from behavior changes and preserve SQL,
       SQLSTATE, artifact, and configuration contracts.
-- [ ] Execute the playground/scripts overhaul in
+- [x] Execute the playground/scripts overhaul in
       [04-playground-and-scripts.md](./04-playground-and-scripts.md).
-- [ ] Re-evaluate broader module or crate extraction after 1.0; do not make
+- [x] Re-evaluate broader module or crate extraction after 1.0; do not make
       wholesale decomposition a release gate without concrete risk evidence.
 
 ## R5: Supported Query And Write Profile

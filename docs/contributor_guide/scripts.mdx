@@ -2,7 +2,62 @@
 
 This page explains what each repository script is for, when to run it, and how
 it fits into the release and maintenance workflow. The short index lives at
-[`scripts/scripts.md`](../../scripts/scripts.md).
+[`scripts/scripts.md`](../../scripts/scripts.md), and the complete generated
+[script inventory](./script-inventory) is checked against the repository on
+every release run.
+
+## Stability And Ownership
+
+`release/scripts.json` is the machine-readable source for script ownership,
+audience, tier, tools, inputs, outputs, destructive behavior, timeouts,
+platform support, and release usage. Run this after adding, moving, or removing
+an entry point:
+
+```bash
+python3 scripts/check_script_inventory.py --write
+python3 scripts/check_script_inventory.py
+```
+
+The checker runs `bash -n` over every maintained shell script and ShellCheck
+error-level checks when ShellCheck is installed. Public/stable commands retain
+their arguments, defaults, environment variables, and exit meanings throughout
+1.x. Maintainer/stable commands follow the same window. Internal fixtures can
+remain workflow-specific when their caller is recorded in the inventory.
+
+Shared logging, prerequisite, safe database-name, timeout, temporary-directory,
+and checksum helpers live in `scripts/lib/pggraph-common.sh`. A cleanup trap
+must only name resources created by its own process; cluster-destructive scripts
+must continue to require an explicit disposable target.
+
+## Named Release Tiers
+
+The declarative registry in `release/gates.json` defines gate dependencies,
+timeouts, and exclusive resources for four tiers:
+
+```bash
+python3 scripts/run_release.py --tier pr
+python3 scripts/run_release.py --tier nightly
+python3 scripts/run_release.py --tier rc
+python3 scripts/run_release.py --tier full-matrix
+```
+
+Each run writes `release/evidence/<tier>.json` atomically with the exact command,
+environment overrides, tool and pgGraph versions, dataset provenance/checksum,
+duration, result, thresholds/artifact locations, and a gate fingerprint. Add
+`--resume` to reuse only a passing record whose command, registry, versions,
+and fingerprint still match. Gates sharing a PostgreSQL cluster, port, Docker
+daemon, or Cargo target are declared exclusive and run serially.
+
+The historical aggregate interface remains supported:
+
+```bash
+cd graph
+./tests/heavy/run_release_gate.sh
+./tests/heavy/run_release_gate.sh --tier rc
+```
+
+With no arguments, all documented `RUN_*`, `DB_PREFIX`, and PostgreSQL feature
+environment contracts retain their 1.x behavior.
 
 ## Root Script Groups
 
