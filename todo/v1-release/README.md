@@ -27,8 +27,8 @@ remain visible on the public roadmap without blocking this release.
 | R3 | Bounded storage, build, sync, and compaction | Production-scale operations spill, mmap, or fail predictably; snapshot/watermark and compaction behavior is crash-safe and equivalent. | Complete |
 | R4 | Release-risk refactoring | High-risk boundaries are typed and isolated; playground, scripts, and release orchestration have clear ownership without changing public behavior. | Complete |
 | R5 | Supported query and write profile | Every advertised SQL/GQL feature has conformance, security, transaction, resource, diagnostic, and documentation evidence. Unsupported syntax fails deterministically. | Complete |
-| R6 | Documentation, packaging, CI, and operations | Public docs are coherent; PG14-18 install/upgrade/package matrix and required CI/release gates are green. | In progress |
-| R7 | Release candidate and 1.0 publication | Clean install, upgrade, rollback, backup/restore, crash, performance, and artifact evidence is archived; no release-blocking issue remains. | Planned |
+| R6 | Documentation, packaging, CI, and operations | Public docs are coherent; PG14-18 install/upgrade/package matrix and required CI/release gates are green. | Complete |
+| R7 | Release candidate and 1.0 publication | Clean install, upgrade, rollback, backup/restore, crash, performance, and artifact evidence is archived; no release-blocking issue remains. | In progress |
 
 Phases are completed in order. Work may be prepared in parallel, but a phase
 does not close until its exit evidence is recorded in `todo/progress.md`.

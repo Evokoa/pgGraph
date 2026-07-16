@@ -617,3 +617,13 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Rust documentation | `cd graph && RUSTDOCFLAGS="-D warnings" cargo doc --features "pg17 development" --no-deps`; doctests | PASS |
 | Contract, docs, and whitespace | `scripts/check_docs_drift.sh`; `git diff --check` | PASS |
 | Independent Rust review | Two fresh `rust-reviewing` passes over the complete R3C diff and closure fixes | PASS after exact CSR/resolution validation, canonical filter ranges, duplicate identity/registry checks, fallible governed metadata, and expanded corruption coverage |
+
+### 2026-07-16 R6 Documentation And Packaging Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Clean release archive | `cd graph && PG_VERSIONS='14 15 16 17 18' ./tests/heavy/source_archive_smoke.sh` | PASS: packaged install smoke on PG14-18, true v0.1.8-to-1.0.0 source-preserving transition, archive-built runtime quickstart, 40 CSR playground queries, and 41 mutable playground queries |
+| Public documentation | `cd docs && npm run check`; `scripts/check_docs_drift.sh`; external-link gate | PASS: compiled/rendered MDX, spelling, local/API/source-map drift, and 27 external URLs |
+| Rust and script assurance | Strict Clippy/rustdoc/doctests, release-runner/playground tests, script/unsafe inventories | PASS |
+| Evidence | `todo/measurements/2026-07-16-r6-documentation-packaging.md` | PASS: source commit, commands, package/migration/example results, corrections, and deviations recorded |
+| Independent review | Fresh `rust-reviewing` review plus production discovery-lock correction | PASS: `auto_discover(..., build => true)` rejects caller-owned catalog writes with `55P03`/`PG006` and leaks no registration |

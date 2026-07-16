@@ -6,17 +6,25 @@ the authoritative checkpoint handoff, measurement log, and next-action record.
 
 Last synchronized: 2026-07-16
 
-Current phase: R6 documentation, packaging, CI, and operations. R1 through R5
-are complete. The exact 134-function SQL surface and bounded GQL read/write
-profile now have generated public inventories, executable assurance evidence,
-explicit compatibility dispositions, deterministic unsupported diagnostics,
-and drift enforcement.
+Current phase: R7 release candidate assurance. R1 through R6 are complete.
+R6 froze the exact 134-function SQL surface and bounded GQL read/write profile,
+made their public inventories and documentation drift-enforced, and passed the
+clean PostgreSQL 14-18 package, alpha migration, packaged quickstart, and
+packaged CSR/mutable playground gates.
 
 Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
-and dynamic graphs are post-1.0 roadmap work. R1 through R5 are complete; R6 is
+and dynamic graphs are post-1.0 roadmap work. R1 through R6 are complete; R7 is
 the active release checkpoint.
+
+2026-07-16 R6 documentation and packaging — Public SQL/GQL inventories,
+compatibility and migration guidance, rendered documentation, CI tiers, script
+ownership, PG14-18 release packages, the real alpha-to-1.0 transition,
+archive-built quickstart, and 40 CSR/41 mutable playground queries pass from the
+clean `267bd39` source archive with no R6 waiver; the independent review
+correction at `57acb58` adds the production discovery-lock regression without
+changing runtime source.
 
 2026-07-16 R2D manifest publication — Projection publishers now stage and
 validate immutable manifests, compare-and-swap a bounded checksummed current
