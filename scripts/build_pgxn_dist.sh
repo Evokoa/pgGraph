@@ -37,7 +37,11 @@ fi
 
 version="${tag#v}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-archive_dir="$repo_root/$out_dir"
+if [[ "$out_dir" = /* ]]; then
+  archive_dir="$out_dir"
+else
+  archive_dir="$repo_root/$out_dir"
+fi
 archive_name="pgGraph-${version}.zip"
 
 mkdir -p "$archive_dir"
@@ -49,4 +53,4 @@ git -C "$repo_root" archive \
   --output="$archive_dir/$archive_name" \
   HEAD
 
-echo "$out_dir/$archive_name"
+echo "$archive_dir/$archive_name"
