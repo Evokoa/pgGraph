@@ -67,8 +67,11 @@ search, traversal, path, GQL, ACL/RLS, and tenant-scoped queries. Confirm:
 - backup, maintenance scheduling, monitoring, and recovery procedures point to
   the new installation.
 
-The release fixture at `release/fixtures/alpha-to-v1.0/` is bound to the signed
-`v0.1.8` producer tag and an immutable SHA-256 manifest. The clean source-archive
+The release fixture at `release/fixtures/alpha-to-v1.0/` is bound to the
+annotated, SSH-signature-bearing `v0.1.8` producer tag and an immutable SHA-256
+manifest. Trusted-signer verification is a release-infrastructure policy; the
+repository gate checks the tag object, signature presence, producer commit, and
+fixture checksums. The clean source-archive
 gate installs that alpha package, drops the alpha extension without dropping
 the source table, installs 1.0, reapplies registration, and verifies the source
 checksum and rebuilt graph.

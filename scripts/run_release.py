@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "release" / "gates.json"
 CONTROL_ENV_PREFIXES = (
     "RUN_",
+    "SKIP_",
+    "PREPARE_",
     "PGGRAPH_",
     "MAX_",
     "MIN_",

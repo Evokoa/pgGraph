@@ -18,6 +18,8 @@ class GateEnvironmentTests(unittest.TestCase):
             "PG_VERSIONS": "17",
             "PGHOST": "unexpected",
             "MAX_RSS_MB": "1",
+            "SKIP_PACKAGE_INSTALL": "1",
+            "PREPARE_PLAYGROUND": "0",
         }
         gate = {"environment": {"RUN_INSTALL": "1", "PG_VERSIONS": "14 15 16 17 18"}}
         with patch.dict(os.environ, caller, clear=True):
@@ -26,6 +28,8 @@ class GateEnvironmentTests(unittest.TestCase):
         self.assertEqual(environment["PG_VERSIONS"], "14 15 16 17 18")
         self.assertNotIn("PGHOST", environment)
         self.assertNotIn("MAX_RSS_MB", environment)
+        self.assertNotIn("SKIP_PACKAGE_INSTALL", environment)
+        self.assertNotIn("PREPARE_PLAYGROUND", environment)
         self.assertEqual(environment["PATH"], "/usr/bin")
 
     def test_undeclared_control_does_not_reach_gate(self) -> None:

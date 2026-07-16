@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify immutable release fixtures and their signed producer tag binding."""
+"""Verify immutable release fixtures and their signature-bearing tag binding."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def main() -> int:
         for failure in failures:
             print(f"fixture integrity: {failure}", file=sys.stderr)
         return 1
-    print(f"Alpha fixture integrity passed for signed producer tag {tag}.")
+    print(f"Alpha fixture integrity passed for signature-bearing producer tag {tag}.")
     return 0
 
 

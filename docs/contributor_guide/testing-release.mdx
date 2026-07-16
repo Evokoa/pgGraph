@@ -562,8 +562,9 @@ release-owner waiver with the measured evidence that justifies it.
 ## Continuous Integration
 
 Pull requests and pushes to `main` run the `pr` release tier. A scheduled job
-runs the `nightly` tier, and both jobs retain the JSON evidence and associated
-logs as workflow artifacts. The jobs use runners labeled `pggraph-release` so
+runs the `nightly` tier. Both jobs retain the JSON evidence as a workflow
+artifact, while GitHub Actions retains the command output in the job log. The
+jobs use runners labeled `pggraph-release` so
 the pinned Rust toolchain, PostgreSQL 17 development environment, pgrx cluster,
 Node.js dependency cache, and gitleaks binary are available without mutable
 bootstrap steps in each workflow.

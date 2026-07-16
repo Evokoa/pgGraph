@@ -25,11 +25,14 @@ in-place catalog or artifact compatibility, so the supported transition
 preserves source tables, installs 1.0 cleanly, reapplies reviewed registration,
 and rebuilds derived state. `graph/tests/heavy/alpha_to_v1_fixture.sh` can prepare
 or verify either side independently. The release
-`graph/tests/heavy/source_archive_smoke.sh` gate builds the signed `v0.1.8`
+`graph/tests/heavy/source_archive_smoke.sh` gate builds the annotated,
+SSH-signature-bearing `v0.1.8`
 source, creates and drops the alpha extension while preserving the fixture
 table, installs the clean 1.0 archive, reapplies registration, and verifies the
 source checksum and rebuilt graph. `SHA256SUMS` binds the immutable fixture
-files, and `scripts/check_fixture_integrity.py` binds their producer commit to
-the annotated SSH-signed tag. The 1.x line uses versioned extension migrations
+files, and `scripts/check_fixture_integrity.py` checks that their producer
+commit is the commit named by that signature-bearing tag. Cryptographic signer
+trust is configured by release infrastructure, not inferred from signature
+presence alone. The 1.x line uses versioned extension migrations
 beginning with the first 1.x-to-1.x release pair; no fictional migration pair
 is required for the initial 1.0.0 release.
