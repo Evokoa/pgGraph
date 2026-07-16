@@ -88,6 +88,7 @@ DECLARE
     saw_build_job BOOLEAN;
     saw_maintenance_job BOOLEAN;
     traversed BIGINT;
+    attempt INTEGER;
 BEGIN
     SELECT count(*) > 0 INTO saw_build_job
     FROM graph._build_jobs
@@ -103,9 +104,42 @@ BEGIN
         RAISE EXCEPTION 'concurrent maintenance did not leave a durable job row';
     END IF;
 
-    PERFORM * FROM graph.build();
-    PERFORM * FROM graph.apply_sync();
-    PERFORM * FROM graph.vacuum();
+    -- The enqueueing sessions can exit before their dynamic workers acquire
+    -- the maintenance lock. Treat only the documented transient contention as
+    -- retryable; each operation retains a 12-second hard deadline.
+    FOR attempt IN 1..120 LOOP
+        BEGIN
+            PERFORM * FROM graph.build();
+            EXIT;
+        EXCEPTION WHEN lock_not_available THEN
+            IF attempt = 120 THEN
+                RAISE;
+            END IF;
+            PERFORM pg_sleep(0.1);
+        END;
+    END LOOP;
+    FOR attempt IN 1..120 LOOP
+        BEGIN
+            PERFORM * FROM graph.apply_sync();
+            EXIT;
+        EXCEPTION WHEN lock_not_available THEN
+            IF attempt = 120 THEN
+                RAISE;
+            END IF;
+            PERFORM pg_sleep(0.1);
+        END;
+    END LOOP;
+    FOR attempt IN 1..120 LOOP
+        BEGIN
+            PERFORM * FROM graph.vacuum();
+            EXIT;
+        EXCEPTION WHEN lock_not_available THEN
+            IF attempt = 120 THEN
+                RAISE;
+            END IF;
+            PERFORM pg_sleep(0.1);
+        END;
+    END LOOP;
     SELECT count(*) INTO traversed
     FROM graph.traverse('public.graph_concurrency_nodes'::regclass, '1', 4, edge_types := ARRAY['linked'], direction := 'out', max_rows := 100);
     IF traversed = 0 THEN
