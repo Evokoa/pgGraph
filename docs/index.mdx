@@ -12,21 +12,21 @@ import { RocketLaunch, DownloadSimple, Database, MapTrifold, TreeStructure, Term
 Graph database superpowers for your existing Postgres data.
 
 <ProjectBadges>
-  <Badge 
-    label="Built by" 
-    value="Evokoa" 
-    color="orange" 
-    href="https://evokoa.com" 
-    icon={<img src="/images/evokoa-ek-logo.svg" alt="Evokoa logo" className="badge-evokoa-logo" />} 
+  <Badge
+    label="Built by"
+    value="Evokoa"
+    color="orange"
+    href="https://evokoa.com"
+    icon={<img src="/images/evokoa-ek-logo.svg" alt="Evokoa logo" className="badge-evokoa-logo" />}
   />
   <Badge label="License" value="Apache-2.0" color="blue" href="https://github.com/Evokoa/pggraph/blob/main/LICENSE" />
   <Badge label="version" value="1.0.0" color="green" href="https://github.com/Evokoa/pggraph/blob/main/graph/Cargo.toml" />
   <Badge label="PostgreSQL" value="14-18" color="blue" href="https://www.postgresql.org/" />
 </ProjectBadges>
 
-pgGraph lets you run complex graph queries, like finding shortest paths, mapping relationships, 
-and discovering networks, directly on your existing PostgreSQL tables using standard SQL. 
-You don't need to migrate your data to a separate graph database, and your app keeps writing 
+pgGraph lets you run complex graph queries, like finding shortest paths, mapping relationships,
+and discovering networks, directly on your existing PostgreSQL tables using standard SQL.
+You don't need to migrate your data to a separate graph database, and your app keeps writing
 data the exact same way it always has. Postgres remains your single source of truth.
 
 <PolygresBanner />
@@ -47,20 +47,20 @@ data the exact same way it always has. Postgres remains your single source of tr
 
 
 <Callout type="warning">
-  pgGraph is currently alpha software for experimentation, demos, benchmarks, and early
-  feedback. The core graph features are usable, but memory hardening for very
-  large graphs and expensive algorithms is still in progress.
-  Run it in Docker or a dedicated development database for now, not on a production or
-  shared PostgreSQL cluster.
+  The published line remains v0.1.8 alpha. This source contains the pgGraph
+  1.0.0 release candidate; it is not yet tagged or published. Its SQL/GQL,
+  resource, persistence, migration, and package contracts are frozen for final
+  release validation. Build the candidate from source until signed artifacts
+  are announced.
 </Callout>
 
 ## Evokoa
-pgGraph is built by [Evokoa](https://evokoa.com). 
+pgGraph is built by [Evokoa](https://evokoa.com).
 We are building the missing infrastructure for widespread AI adoption.
 We are committed to keeping pgGraph 100% free and open-source, forever.
 
 Star our repo to help us reach more developers, and follow our journey below:
-<SocialLinks 
+<SocialLinks
   website="https://evokoa.com"
   github="http://github.com/evokoa/pgGraph"
   discord="https://discord.gg/HyUvAzmHej"

@@ -73,8 +73,9 @@ Your tables stay the source of truth. pgGraph builds a derived graph index and
 lets you query it from SQL using functions in the `graph` schema.
 
 > [!WARNING]
-> The current published line is alpha software. It becomes
-> production-supported with the completed pgGraph 1.0 release.
+> The current published line is v0.1.8 alpha. This commit contains the pgGraph
+> 1.0.0 release candidate; it is not yet tagged or published. Build the
+> candidate from source until the signed 1.0.0 artifacts are announced.
 
 > [!TIP]
 > **Looking for a managed version?** We have launched a managed version of pgGraph on [polygres.com](https://polygres.com) for full high performance GraphRAG on Postgres.
@@ -95,23 +96,17 @@ query language.
 
 ## Quickstart
 
-The fastest way to try pgGraph is to pull the pre-built Docker image — no
-build step needed.
-
-The image is multi-arch (`linux/amd64` and `linux/arm64`) and works on macOS,
-Linux, and Windows via Docker Desktop.
+The release candidate's supported quickstart builds a disposable PostgreSQL 17
+image from this repository:
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:1.0.0
-docker run -d --rm \
-  --name pggraph \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:1.0.0
+git clone https://github.com/evokoa/pggraph.git
+cd pggraph
+scripts/quickstart.sh
 ```
 
-The default database is `graph` with `pg_cron` and a maintenance job
-pre-configured.
+After 1.0.0 publication, the signed multi-architecture release image will use
+`ghcr.io/evokoa/pggraph:1.0.0`. Verify its published digest before deployment.
 
 Verify the extensions are loaded (uses `psql` inside the container, so you
 don't need a local PostgreSQL client):
@@ -127,12 +122,12 @@ If you have `psql` installed locally you can also connect directly:
 psql -h localhost -U postgres -d graph
 ```
 
-## Homebrew Installation
+## Homebrew Installation After Publication
 
-On macOS, pgGraph is available from the
-[Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) for local
-PostgreSQL extension installs. The current formula is `Evokoa/tap/pggraph`,
-installs pgGraph 1.0.0, and builds against Homebrew `postgresql@17`.
+After 1.0.0 publication, the
+[Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) is the convenience
+channel for local PostgreSQL 17 extension installs. Until then, use the source
+quickstart above; the published tap may still resolve to the alpha line.
 
 ```bash
 brew tap Evokoa/tap
@@ -148,9 +143,8 @@ psql -d postgres -c "CREATE EXTENSION graph;"
 psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';"
 ```
 
-If you want the fastest zero-build quickstart, use the Docker image above. Use
-Homebrew when you want pgGraph installed as a local PostgreSQL extension on
-macOS.
+Use Homebrew after its formula version and checksum match the signed 1.0.0
+release bundle.
 
 To build from source or run the full interactive demo instead, use the included
 quickstart script. It starts a disposable Docker-backed PostgreSQL database,
@@ -204,17 +198,18 @@ The script works on macOS and Linux from a normal terminal, and on Windows from
 WSL2 or Git Bash with Docker Desktop. It is not a native PowerShell or Command
 Prompt script.
 
-Docker release images are published for PostgreSQL 14 through 18. Tags without
-a PostgreSQL major, such as `1.0.0` and `latest`, use
-the default PostgreSQL 17 image.
+The 1.0.0 release workflow prepares Docker images for PostgreSQL 14 through 18.
+After publication, tags without a PostgreSQL major, such as `1.0.0` and
+`latest`, use the default PostgreSQL 17 image.
 PostgreSQL 13 is no longer an official support target after upstream EOL, though
 the legacy `pg13` pgrx feature remains available on a best-effort basis. The
 PostgreSQL major version of the extension package must match the target server.
 
-## PGXN Source Installation
+## PGXN Source Installation After Publication
 
-pgGraph is available on PGXN as a source distribution. Because pgGraph is a
-Rust/pgrx extension, building from source requires the Rust toolchain.
+After the signed 1.0.0 bundle is published, PGXN provides the same verified
+source ZIP. Because pgGraph is a Rust/pgrx extension, building from source
+requires the Rust toolchain.
 
 ### Prerequisites
 
@@ -349,7 +344,7 @@ PostgreSQL 19 integration is tracked separately on the public roadmap.
 
 ## Community
 
-pgGraph is built by [Evokoa](https://evokoa.com). 
+pgGraph is built by [Evokoa](https://evokoa.com).
 Follow the project through
 the links at the top of this README.
 

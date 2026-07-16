@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
-  "state": "alpha",
-  "production_version": "1.0.0",
-  "promotion_gate": "todo/v1-release/05-release-candidate-checklist.md"
+  "state": "candidate",
+  "published_version": "0.1.8",
+  "candidate_version": "1.0.0",
+  "production_version": null,
+  "promotion_gate": "docs/contributor_guide/release-gate-checklist.mdx"
 }

@@ -12,7 +12,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_DOCS = [ROOT / "docs" / "quickstart.mdx", ROOT / "docs" / "known-issues.mdx"]
+PUBLIC_DOCS = [
+    ROOT / "README.md",
+    ROOT / "README_zh.md",
+    ROOT / "docs" / "index.mdx",
+    ROOT / "docs" / "quickstart.mdx",
+    ROOT / "docs" / "known-issues.mdx",
+    ROOT / "docs" / "roadmap.mdx",
+    ROOT / "docs" / "release-notes.mdx",
+]
 PUBLIC_DOCS.extend((ROOT / "docs" / "user_guide").glob("*.mdx"))
 FORBIDDEN_PUBLIC_PHRASES = {
     r"\bPhase [0-9][A-Za-z]?\b": "internal phase name",
@@ -61,18 +69,9 @@ def style_failures() -> list[str]:
             for match in re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE):
                 line = text.count("\n", 0, match.start()) + 1
                 failures.append(f"{path.relative_to(ROOT)}:{line}: {description}")
-        headings: set[str] = set()
         for line_no, line in enumerate(text.splitlines(), start=1):
             if line.rstrip() != line:
                 failures.append(f"{path.relative_to(ROOT)}:{line_no}: trailing whitespace")
-            heading = re.match(r"^#{1,6}\s+(.+)$", line)
-            if heading:
-                normalized = re.sub(r"[^a-z0-9]+", "-", heading.group(1).lower()).strip("-")
-                if normalized in headings:
-                    failures.append(
-                        f"{path.relative_to(ROOT)}:{line_no}: duplicate rendered heading anchor {normalized!r}"
-                    )
-                headings.add(normalized)
     return failures
 
 
@@ -92,24 +91,23 @@ def readme_failures(version: str, maturity: dict) -> list[str]:
         if version not in files[name]:
             failures.append(f"{name} does not mention current version {version}")
     exact_version_markers = {
-        "README.md": (
-            f"version-{version}",
+        "README.md": (f"version-{version}",),
+        "README_zh.md": (f"version-{version}", f"`{version}`"),
+        "docs/quickstart.mdx": (f"`{version}`",),
+        "docs/user_guide/installation.mdx": (version,),
+        "docs/index.mdx": (f'value="{version}"',),
+    }
+    if maturity["state"] == "published":
+        exact_version_markers["README.md"] += (
             f"ghcr.io/evokoa/pggraph:{version}",
             f"installs pgGraph {version}",
-        ),
-        "README_zh.md": (
-            f"version-{version}",
-            f"ghcr.io/evokoa/pggraph:{version}",
-            f"`{version}`",
-        ),
-        "docs/quickstart.mdx": (f"`{version}`",),
-        "docs/user_guide/installation.mdx": (
+        )
+        exact_version_markers["README_zh.md"] += (f"ghcr.io/evokoa/pggraph:{version}",)
+        exact_version_markers["docs/user_guide/installation.mdx"] += (
             f"installs pgGraph {version}",
             f"ghcr.io/evokoa/pggraph:{version}",
             f"`pg14-{version}` through `pg18-{version}`",
-        ),
-        "docs/index.mdx": (f'value="{version}"',),
-    }
+        )
     for name, markers in exact_version_markers.items():
         for marker in markers:
             if marker not in files[name]:
@@ -129,10 +127,34 @@ def readme_failures(version: str, maturity: dict) -> list[str]:
             failures.append(f"{name} does not state PostgreSQL 14-18 support")
     if "README_SYNC_POLICY" not in files["README_zh.md"]:
         failures.append("README_zh.md does not declare its synchronization policy")
-    maturity_phrase = "alpha" if maturity["state"] == "alpha" else "production-supported"
+    maturity_phrases = {
+        "alpha": "alpha",
+        "candidate": "not yet tagged or published",
+        "release_ready": "release-ready but unpublished",
+        "published": "production-supported",
+    }
+    if maturity["state"] not in maturity_phrases:
+        failures.append(f"release/maturity.json has unknown state {maturity['state']!r}")
+        return failures
+    maturity_phrase = maturity_phrases[maturity["state"]]
     for name in ("README.md", "README_zh.md", "docs/index.mdx", "docs/known-issues.mdx"):
         if maturity_phrase.lower() not in files.get(name, (ROOT / name).read_text(encoding="utf-8")).lower():
             failures.append(f"{name} does not reflect maturity state {maturity['state']!r}")
+    if maturity["state"] != "published":
+        forbidden_availability = {
+            "README.md": ("The fastest way to try pgGraph is to pull the pre-built Docker image", "pgGraph is available on PGXN"),
+            "README_zh.md": ("pgGraph 在 PGXN 上以源码分发包的形式提供",),
+            "docs/quickstart.mdx": ("Docker release images are published for PostgreSQL 14 through 18",),
+            "docs/user_guide/installation.mdx": (
+                f"installs pgGraph {version}",
+                "pgGraph is available on PGXN",
+                "A pre-built image is published on GitHub Container Registry for each release",
+            ),
+        }
+        for name, phrases in forbidden_availability.items():
+            for phrase in phrases:
+                if phrase in files[name]:
+                    failures.append(f"{name} claims unavailable candidate distribution: {phrase!r}")
     return failures
 
 

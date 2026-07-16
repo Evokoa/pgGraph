@@ -11,13 +11,13 @@
   },
   "tiers": {
     "pr": ["script-contracts", "docs-drift", "docs-render", "rust-static"],
-    "nightly": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "rust-tests"],
-    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "release-bundle"],
-    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "package-install-matrix", "postgres-sanitizer", "release-bundle"]
+    "nightly": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "rust-docs", "rust-tests"],
+    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "release-bundle"],
+    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "postgres-sanitizer", "release-bundle"]
   },
   "gates": {
     "script-contracts": {
-      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_run_release.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_release_bundle.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
+      "command": ["bash", "-c", "python3 ../scripts/check_script_inventory.py && python3 ../scripts/check_unsafe_allowlist.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_run_release.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_release_bundle.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../scripts python3 ../scripts/test_release_validation.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../sandbox/playground python3 -m unittest discover -s ../sandbox/playground -p 'test_*.py'"],
       "cwd": "graph",
       "timeout_seconds": 300,
       "depends_on": [],
@@ -62,6 +62,22 @@
       "timeout_seconds": 1800,
       "depends_on": ["rust-static"],
       "thresholds": {"failed_tests": 0},
+      "exclusive_resources": ["cargo-target"]
+    },
+    "checked-casts": {
+      "command": ["python3", "../scripts/check_cast_allowlist.py"],
+      "cwd": "graph",
+      "timeout_seconds": 1800,
+      "depends_on": ["rust-static"],
+      "thresholds": {"unreviewed_cast_diagnostics": 0},
+      "exclusive_resources": ["cargo-target"]
+    },
+    "miri-mapped": {
+      "command": ["bash", "-c", "export MIRIFLAGS='-Zmiri-tree-borrows -Zmiri-permissive-provenance'; cargo +nightly miri test --features pg17 --lib edge_store::tests::mmap_ && cargo +nightly miri test --features pg17 --lib node_store::tests::mmap_ && cargo +nightly miri test --features pg17 --lib filter_index::tests::mapped_ && cargo +nightly miri test --features pg17 --lib relationship_identity_store::tests::mapped_ && cargo +nightly miri test --features pg17 --lib tenant_store::tests::mapped_"],
+      "cwd": "graph",
+      "timeout_seconds": 7200,
+      "depends_on": ["checked-casts"],
+      "thresholds": {"miri_failures": 0},
       "exclusive_resources": ["cargo-target"]
     },
     "rust-docs": {
@@ -138,9 +154,27 @@
       "command": ["./tests/heavy/run_pg_matrix_docker.sh"],
       "cwd": "graph",
       "timeout_seconds": 14400,
-      "environment": {"PG_VERSIONS": "14 15 16 17 18", "RUN_DURABLE_PROJECTION_MATRIX": "1", "RUN_POSTGRES_SANITIZER": "0"},
+      "environment": {"PG_VERSIONS": "14 15 16 17 18", "RUN_DURABLE_PROJECTION_MATRIX": "1", "RUN_CRASH_MATRIX": "1", "RUN_POSTGRES_SANITIZER": "0"},
       "depends_on": ["legacy-release"],
       "thresholds": {"supported_postgresql_majors": 5, "failed_profiles": 0},
+      "exclusive_resources": ["docker", "cargo-target"]
+    },
+    "linux-runtime-resources": {
+      "command": ["./tests/heavy/run_pg_matrix_docker.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 7200,
+      "environment": {"IMAGE": "pggraph:runtime-resources", "PG_VERSIONS": "17", "RUN_RUST_TESTS": "0", "RUN_PGRX_SQL": "0", "RUN_GQL_WRITE_MATRIX": "0", "RUN_DURABLE_PROJECTION_MATRIX": "0", "RUN_PACKAGE_INSTALL_MATRIX": "0", "RUN_CRASH_MATRIX": "0", "RUN_RUNTIME_RESOURCES": "1"},
+      "depends_on": ["supported-majors"],
+      "thresholds": {"max_rss_mb": 1024, "max_pss_mb": 1024, "missing_linux_pss_samples": 0},
+      "exclusive_resources": ["docker", "cargo-target"]
+    },
+    "pg-upgrade-matrix": {
+      "command": ["./tests/heavy/run_pg_matrix_docker.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 14400,
+      "environment": {"IMAGE": "pggraph:pg-upgrade-matrix", "PG_VERSIONS": "14 15 16 17 18", "RUN_RUST_TESTS": "0", "RUN_PGRX_SQL": "0", "RUN_GQL_WRITE_MATRIX": "0", "RUN_DURABLE_PROJECTION_MATRIX": "0", "RUN_PACKAGE_INSTALL_MATRIX": "0", "RUN_CRASH_MATRIX": "0", "RUN_RUNTIME_RESOURCES": "0", "RUN_PG_UPGRADE_MATRIX": "1"},
+      "depends_on": ["supported-majors"],
+      "thresholds": {"successful_upgrade_pairs": 4, "failed_upgrade_checks": 0},
       "exclusive_resources": ["docker", "cargo-target"]
     },
     "package-install-matrix": {

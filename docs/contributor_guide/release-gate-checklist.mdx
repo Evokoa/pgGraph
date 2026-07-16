@@ -24,8 +24,8 @@ Use these rules when an automated or low-context agent runs the checklist:
   `tx_delta_crash_recovery.sh` only through
   `scripts/with_disposable_postgres.sh`; the fixture refuses clusters without
   its per-run sentinel and connected-server identity checks.
-- Do not run `pg_upgrade_validate.sh` unless both old and new data directories
-  are throwaway directories.
+- Run PostgreSQL binary-upgrade checks through `run_pg_upgrade_matrix.sh`; the
+  lower-level validator refuses directories outside its per-run sentinel.
 - Do not run package-manager `install` or `add` commands without the `sfw`
   wrapper.
 - Do not mark skipped opt-in gates as passed. Record them as skipped with a
@@ -97,7 +97,8 @@ The normal PostgreSQL 17 release path should use `PG_VERSION_FEATURE=pg17`.
 Before tagging a release, collect successful output for:
 
 - docs drift, dependency freshness, formatting, clippy, docs, unit tests, pgrx
-  SQL tests, dependency audit, fuzz compile, and projection fuzz seed corpora;
+  SQL tests, dependency audit, checked-cast drift, Miri mapped validation, fuzz
+  compile, and projection fuzz seed corpora;
 - package validation, fresh install smoke, SQL metadata audit, SQLSTATE/ACL
   boundary, backup/restore, lock regressions, concurrency stress, synthetic
   release fixture, playground query gate, GQL write lifecycle gates, named graph
@@ -438,7 +439,9 @@ disposable cluster paths.
 | `docker_smoke.sh` | Build root Docker image and run extension workflow in container | `IMAGE=pggraph:smoke CONTAINER=pggraph-smoke PG_MAJOR=17 ./tests/heavy/docker_smoke.sh` |
 | `crash_recovery.sh` | Kill and restart disposable postmaster, then verify reload and corrupt artifact rejection | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_crash PGDATA=/path/to/disposable/pgdata ./tests/heavy/crash_recovery.sh` |
 | `tx_delta_crash_recovery.sh` | Kill disposable postmaster with uncommitted overlay and verify it does not persist | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta_crash PGDATA=/path/to/disposable/pgdata ./tests/heavy/tx_delta_crash_recovery.sh` |
-| `pg_upgrade_validate.sh` | Run `pg_upgrade --check` for a database containing pgGraph | `OLD_BINDIR=/path/to/old/bin NEW_BINDIR=/path/to/new/bin OLD_DATADIR=/tmp/pg-old NEW_DATADIR=/tmp/pg-new ./tests/heavy/pg_upgrade_validate.sh` |
+| `run_crash_matrix.sh` | Run both destructive crash profiles on PostgreSQL 14–18 through new disposable clusters | `PG_VERSIONS="14 15 16 17 18" ./tests/heavy/run_crash_matrix.sh` |
+| `run_pg_upgrade_matrix.sh` | Run adjacent PostgreSQL 14→15 through 17→18 `pg_upgrade --check` and rebuild validation | `./tests/heavy/run_pg_upgrade_matrix.sh` |
+| `pg_upgrade_validate.sh` | Validate one sentinel-owned PostgreSQL upgrade pair; normally called by the matrix wrapper | `./tests/heavy/run_pg_upgrade_matrix.sh` |
 | `measure_build_rss.sh` | Capture peak backend RSS during graph build | `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_rss NODE_COUNT=200000 MAX_RSS_MB=0 ./tests/heavy/measure_build_rss.sh` |
 | `build_memory_stress.sh` | Run baseline, small-batch, repeated-rebuild, and low-memory rebuild profiles | `PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_memstress ./tests/heavy/build_memory_stress.sh` |
 | `measure_mmap_pss.sh` | Linux-only mmap sharing PSS measurement across backends | `DBNAME=graph_test BACKENDS=50 ./tests/heavy/measure_mmap_pss.sh` |
@@ -481,15 +484,13 @@ DBNAME=pggraph_release_tx_delta_crash \
 ./tests/heavy/tx_delta_crash_recovery.sh
 ```
 
-Run upgrade validation only with throwaway old and new data directories:
+Run upgrade validation in the supported-major Docker environment. The wrapper
+creates both clusters, installs the matching extension binaries, and supplies
+the required safety sentinel:
 
 ```bash
 cd graph
-OLD_BINDIR=/path/to/old/bin \
-NEW_BINDIR=/path/to/new/bin \
-OLD_DATADIR=/tmp/pggraph-old \
-NEW_DATADIR=/tmp/pggraph-new \
-./tests/heavy/pg_upgrade_validate.sh
+./tests/heavy/run_pg_upgrade_matrix.sh
 ```
 
 ## Matrix Gates
@@ -575,7 +576,8 @@ Required local state:
 - The release commit is checked out and `git status --short` is empty.
 - `graph/Cargo.toml`, package metadata, docs, Docker defaults, and release notes
   identify the intended version.
-- `scripts/validate_release.py` passes with `--tag vX.Y.Z --check-main`.
+- Before tagging, `scripts/validate_release.py` passes with `--version X.Y.Z`,
+  the exact full commit SHA, `--check-main`, and `--require-clean`.
 - A signing key is configured for Git tags. Use the repository's required
   signing backend, such as GPG, SSH signing, or the platform-managed signing
   flow.
@@ -632,7 +634,8 @@ git tag -v vX.Y.Z
 Build and validate release packages before pushing the tag:
 
 ```bash
-scripts/validate_release.py --tag vX.Y.Z --check-main
+scripts/validate_release.py --tag vX.Y.Z --check-main \
+  --require-clean --require-signed-tag
 
 cd graph
 PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh
@@ -645,21 +648,24 @@ git push origin HEAD
 git push origin vX.Y.Z
 ```
 
-The GitHub Actions release workflow has two manual phases:
+The GitHub Actions release workflow has two manual phases. The intended tag
+name is supplied to both, but preparation happens before the tag exists:
 
 | Phase | Required state |
 |---|---|
-| `prepare` | Tag exists, release metadata validates, prepared Docker images and PGXN archive build and verify |
-| `publish` | GitHub Release exists, prepared artifacts match the release tag, Docker manifests and PGXN archive publish without rebuild |
+| `prepare` | A full 40-character source commit and successful full-matrix evidence run are supplied; the verified source bundle, Docker manifests, and immutable evidence archive are prepared and attested. |
+| `publish` | A signed annotated tag and GitHub Release exist at that exact commit; the prepared run ID is supplied and every published byte or image digest is reused without rebuilding. |
 
-Run the `prepare` phase first and inspect its generated artifacts before
-publishing. The `publish` phase must consume prepared artifacts for the exact
-tag; it must not rebuild from a moving branch or untagged commit.
+Run the `prepare` phase first and inspect its generated artifacts and
+attestations before creating the tag. The `publish` phase must consume prepared
+artifacts for the exact tag; it must not rebuild from a moving branch or
+untagged commit. Publication attaches the verified full-matrix evidence archive
+to the GitHub Release so the release record outlives workflow retention.
 
 Use this when validating release metadata locally:
 
 ```bash
-scripts/validate_release.py --tag vX.Y.Z --check-main
+scripts/validate_release.py --version X.Y.Z --ref "$(git rev-parse HEAD)" --check-main --require-clean
 ```
 
 ## Evidence Template

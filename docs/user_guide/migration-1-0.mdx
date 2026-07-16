@@ -33,6 +33,21 @@ remove the alpha extension, and install the 1.0 package built for the same
 PostgreSQL major. Dropping the extension removes extension-owned catalogs; it
 must not drop the ordinary source tables registered with pgGraph.
 
+Before using `CASCADE`, run a dependency preflight in a separate `psql`
+session. PostgreSQL reports every object that would block a plain drop; the
+failed transaction is discarded when the session exits:
+
+```sql
+BEGIN;
+DROP EXTENSION graph;
+-- This transaction is expected to abort when dependents exist.
+```
+
+Review the reported application views, functions, generated synchronization
+objects, and other dependents. Recreate every application-owned object from its
+ordinary migration after the clean install. Do not proceed merely because the
+source tables themselves are not extension-owned.
+
 ```sql
 DROP EXTENSION graph CASCADE;
 CREATE EXTENSION graph VERSION '1.0.0';
@@ -40,8 +55,10 @@ SELECT extversion FROM pg_extension WHERE extname = 'graph';
 ```
 
 `CASCADE` removes pgGraph's generated synchronization triggers and their
-extension-schema functions. Verify the ordinary source tables and their row
-counts immediately afterward; pgGraph never makes those tables extension-owned.
+extension-schema functions, and it also removes application objects that depend
+on extension functions or types. Verify the ordinary source tables and their
+row counts immediately afterward; pgGraph never makes those tables
+extension-owned.
 
 Reapply registrations only through documented public functions, then rebuild:
 

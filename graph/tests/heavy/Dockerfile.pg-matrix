@@ -131,6 +131,9 @@ ARG RUN_GQL_WRITE_MATRIX=1
 ARG RUN_POSTGRES_SANITIZER=0
 ARG RUN_DURABLE_PROJECTION_MATRIX=0
 ARG RUN_PACKAGE_INSTALL_MATRIX=0
+ARG RUN_CRASH_MATRIX=0
+ARG RUN_RUNTIME_RESOURCES=0
+ARG RUN_PG_UPGRADE_MATRIX=0
 ARG PROFILE_TIMEOUT_SECONDS=600
 
 # Linux test executables retain PostgreSQL backend references from the extension
@@ -177,4 +180,27 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     if [[ "${RUN_PACKAGE_INSTALL_MATRIX}" == "1" ]]; then \
         PG_VERSIONS="${PG_VERSIONS}" ./tests/heavy/package_install_matrix.sh; \
+    fi
+
+RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
+    if [[ "${RUN_CRASH_MATRIX}" == "1" ]]; then \
+        PG_VERSIONS="${PG_VERSIONS}" ./tests/heavy/run_crash_matrix.sh; \
+    fi
+
+RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
+    if [[ "${RUN_RUNTIME_RESOURCES}" == "1" ]]; then \
+        PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config \
+        PG_VERSION_FEATURE=pg17 \
+        DBNAME=pggraph_runtime_resources_linux \
+        MAX_RSS_MB=1024 \
+        MAX_PSS_MB=1024 \
+        ./tests/heavy/measure_runtime_resources.sh; \
+    fi
+
+RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
+    if [[ "${RUN_PG_UPGRADE_MATRIX}" == "1" ]]; then \
+        ./tests/heavy/run_pg_upgrade_matrix.sh; \
     fi

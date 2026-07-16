@@ -309,6 +309,8 @@ playground query stability.
 | `read_latency_under_sync.sh` | Read-latency baseline | Measures traversal and path p50/p95/p99 latency with no backlog, pending sync backlog, and concurrent sync writers. |
 | `backup_restore_validate.sh` | Dump/restore behavior | Validates source tables, graph catalog state, sync state, and persisted graph behavior across backup and restore. |
 | `pg_upgrade_validate.sh` | Upgrade compatibility | Runs `pg_upgrade --check` for a database containing pgGraph. |
+| `run_pg_upgrade_matrix.sh` | Supported-major upgrade compatibility | Creates sentinel-owned throwaway clusters and checks adjacent PostgreSQL 14→15 through 17→18 upgrades, followed by a derived-artifact rebuild. |
+| `run_crash_matrix.sh` | Supported-major crash recovery | Runs persisted-generation and transaction-overlay crash recovery in separate disposable PostgreSQL 14–18 clusters. |
 | `crash_recovery.sh` | Disposable-cluster crash behavior | Kills a disposable postmaster, restarts it, checks persisted graph reload, and verifies corrupt artifact rejection. |
 | `background_job_lock_regression.sh` | Background job lock safety | Validates build/maintenance lock and failure-state behavior. |
 | `build_lock_regression.sh` | Build/vacuum conflict safety | Validates lock conflicts and persisted artifact behavior around build and vacuum. |

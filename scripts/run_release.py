@@ -20,6 +20,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "release" / "gates.json"
+RELEASE_CONTRACT_PATHS = (
+    "release/cast-allowlist.json",
+    "release/contract-changes.json",
+    "release/examples.json",
+    "release/gates.json",
+    "release/maturity.json",
+    "release/scripts.json",
+    "release/unsafe-allowlist.json",
+    "release/v1-contract.json",
+    "release/v1-gql-profile.json",
+    "release/v1-gql-unsupported.json",
+    "release/v1-schema.sql",
+    "release/v1-sql-profile.json",
+)
 CONTROL_ENV_PREFIXES = (
     "RUN_",
     "SKIP_",
@@ -316,13 +330,7 @@ def main() -> int:
         "lockfiles": lockfile_hashes(),
         "release_contracts": {
             relative: sha256_file(ROOT / relative)
-            for relative in (
-                "release/gates.json",
-                "release/maturity.json",
-                "release/v1-contract.json",
-                "release/v1-gql-profile.json",
-                "release/v1-sql-profile.json",
-            )
+            for relative in RELEASE_CONTRACT_PATHS
         },
         "datasets": registry.get("datasets", {}),
         "gates": [],

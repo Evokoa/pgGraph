@@ -41,11 +41,13 @@ exit meanings throughout the pgGraph 1.x compatibility window.
 | `graph/tests/heavy/projection_recovery_gate.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/read_latency_under_sync.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/relation_identity_concurrent_ddl.sh` | internal | rc | no | 3600s |
+| `graph/tests/heavy/run_crash_matrix.sh` | internal | rc | yes | 3600s |
 | `graph/tests/heavy/run_durable_projection_matrix.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/run_gql_write_matrix.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/run_memory_sanitizers.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/run_pg_matrix.sh` | maintainer/stable | rc | no | 3600s |
 | `graph/tests/heavy/run_pg_matrix_docker.sh` | maintainer/stable | rc | no | 3600s |
+| `graph/tests/heavy/run_pg_upgrade_matrix.sh` | internal | rc | yes | 3600s |
 | `graph/tests/heavy/run_pgbench_sync.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/run_postgres_process_sanitizer.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/run_release_gate.sh` | maintainer/stable | rc | no | 3600s |
@@ -71,6 +73,7 @@ exit meanings throughout the pgGraph 1.x compatibility window.
 | `sandbox/start_playground.sh` | public/stable | pr | no | 600s |
 | `scripts/build_docker_pggraph_package.sh` | internal | pr | no | 600s |
 | `scripts/build_pgxn_dist.sh` | internal | pr | no | 600s |
+| `scripts/check_cast_allowlist.py` | internal | pr | no | 600s |
 | `scripts/check_dependency_updates.py` | internal | pr | no | 600s |
 | `scripts/check_doc_references.py` | internal | pr | no | 600s |
 | `scripts/check_docs_drift.sh` | maintainer/stable | rc | no | 600s |
@@ -92,9 +95,11 @@ exit meanings throughout the pgGraph 1.x compatibility window.
 | `scripts/quickstart.sh` | public/stable | pr | no | 600s |
 | `scripts/run_release.py` | internal | pr | no | 600s |
 | `scripts/test_release_bundle.py` | internal | pr | no | 600s |
+| `scripts/test_release_validation.py` | internal | pr | no | 600s |
 | `scripts/test_run_release.py` | internal | pr | no | 600s |
 | `scripts/validate_release.py` | maintainer/stable | rc | no | 600s |
 | `scripts/verify_release_bundle.py` | internal | pr | no | 600s |
+| `scripts/verify_release_evidence.py` | internal | pr | no | 600s |
 | `scripts/with_disposable_postgres.sh` | internal | pr | no | 600s |
 
 The machine-readable source at `release/scripts.json` also records owners,

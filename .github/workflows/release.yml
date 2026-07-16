@@ -11,12 +11,26 @@ on:
           - prepare
           - publish
       tag:
-        description: Release tag in vX.Y.Z form
+        description: Intended or existing release tag in vX.Y.Z form
         required: true
+        type: string
+      source_ref:
+        description: Full 40-character commit SHA for prepare mode
+        required: false
+        default: ""
+        type: string
+      evidence_run_id:
+        description: Successful full-matrix workflow run ID for prepare mode
+        required: false
+        type: string
+      prepare_run_id:
+        description: Successful prepare workflow run ID for publish mode
+        required: false
         type: string
 
 permissions:
   contents: read
+  actions: read
 
 env:
   IMAGE_NAME: ghcr.io/evokoa/pggraph
@@ -30,12 +44,15 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
       short_sha: ${{ steps.commit.outputs.short_sha }}
+      full_sha: ${{ steps.commit.outputs.full_sha }}
+      source_ref: ${{ steps.release.outputs.source_ref }}
     steps:
       - name: Resolve release input
         id: release
         run: |
           mode="${{ inputs.mode }}"
           tag="${{ inputs.tag }}"
+          source_ref="${{ inputs.source_ref }}"
 
           if [[ "$mode" != "prepare" && "$mode" != "publish" ]]; then
             echo "Mode must be prepare or publish: $mode" >&2
@@ -47,9 +64,23 @@ jobs:
             exit 1
           fi
 
+          if [[ "$mode" == "prepare" && ( -z "$source_ref" || -z "${{ inputs.evidence_run_id }}" ) ]]; then
+            echo "Prepare mode requires source_ref and evidence_run_id" >&2
+            exit 1
+          fi
+          if [[ "$mode" == "prepare" && ! "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Prepare source_ref must be a full 40-character commit SHA" >&2
+            exit 1
+          fi
+          if [[ "$mode" == "publish" && -z "${{ inputs.prepare_run_id }}" ]]; then
+            echo "Publish mode requires prepare_run_id" >&2
+            exit 1
+          fi
+
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$source_ref" >> "$GITHUB_OUTPUT"
 
       - name: Verify GitHub Release exists
         if: steps.release.outputs.mode == 'publish'
@@ -58,73 +89,140 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release view "${{ steps.release.outputs.tag }}" >/dev/null
 
-      - name: Checkout release tag
+      - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: ${{ steps.release.outputs.mode == 'prepare' && steps.release.outputs.source_ref || steps.release.outputs.tag }}
           fetch-depth: 0
 
-      - name: Validate release metadata
-        run: scripts/validate_release.py --tag "${{ steps.release.outputs.tag }}" --check-main
+      - name: Download full-matrix evidence
+        if: steps.release.outputs.mode == 'prepare'
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.evidence_run_id }}
+          pattern: release-evidence-full-matrix-*
+          path: release/evidence
+          merge-multiple: true
+          github-token: ${{ github.token }}
+
+      - name: Validate preparation source and evidence
+        if: steps.release.outputs.mode == 'prepare'
+        run: |
+          commit="$(git rev-parse HEAD)"
+          scripts/validate_release.py \
+            --version "${{ steps.release.outputs.version }}" \
+            --ref "$commit" --check-main --require-clean
+          scripts/verify_release_evidence.py release/evidence \
+            --tier full-matrix --commit "$commit"
+
+      - name: Validate signed publication tag
+        if: steps.release.outputs.mode == 'publish'
+        run: |
+          scripts/validate_release.py \
+            --tag "${{ steps.release.outputs.tag }}" \
+            --check-main --require-clean --require-signed-tag
 
       - name: Capture release commit
         id: commit
-        run: echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "full_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  pgxn-artifact:
-    name: Build PGXN artifact
+  release-bundle:
+    name: Build source release bundle
     if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - name: Checkout release tag
+      - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate.outputs.tag }}
+          ref: ${{ needs.validate.outputs.full_sha }}
+          fetch-depth: 0
 
-      - name: Build PGXN source archive
-        run: scripts/build_pgxn_dist.sh "${{ needs.validate.outputs.tag }}" dist
-
-      - name: Verify PGXN source archive
+      - name: Build deterministic release bundle
         run: |
-          python3 - <<'PY'
-          import json
-          import zipfile
-          from pathlib import Path
+          scripts/prepare_release_bundle.py \
+            --version "${{ needs.validate.outputs.version }}" \
+            --ref "${{ needs.validate.outputs.full_sha }}" \
+            --out-dir dist
 
-          version = "${{ needs.validate.outputs.version }}"
-          archive = Path(f"dist/pgGraph-{version}.zip")
-          prefix = f"pgGraph-{version}/"
+      - name: Verify release bundle
+        run: |
+          scripts/verify_release_bundle.py dist \
+            --version "${{ needs.validate.outputs.version }}" \
+            --commit "${{ needs.validate.outputs.full_sha }}"
 
-          with zipfile.ZipFile(archive) as package:
-              names = set(package.namelist())
-              required = {
-                  f"{prefix}META.json",
-                  f"{prefix}Makefile",
-                  f"{prefix}README.md",
-                  f"{prefix}LICENSE",
-                  f"{prefix}graph/Cargo.toml",
-                  f"{prefix}graph/graph.control",
-              }
-              missing = sorted(required - names)
-              if missing:
-                  raise SystemExit(f"PGXN archive is missing: {', '.join(missing)}")
+      - name: Attest release bundle provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
 
-              meta = json.loads(package.read(f"{prefix}META.json"))
-
-          if meta.get("version") != version:
-              raise SystemExit(
-                  f"PGXN archive META.json version {meta.get('version')!r} "
-                  f"does not match {version!r}"
-              )
-          PY
+      - name: Attest source archive SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: dist/pgGraph-${{ needs.validate.outputs.version }}.zip
+          sbom-path: dist/pgGraph-${{ needs.validate.outputs.version }}.spdx.json
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pgxn-source-${{ needs.validate.outputs.version }}
-          path: dist/pgGraph-${{ needs.validate.outputs.version }}.zip
+          name: release-bundle-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}
+          path: dist/
           if-no-files-found: error
+          retention-days: 90
+
+  release-evidence:
+    name: Preserve verified release evidence
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.full_sha }}
+          fetch-depth: 0
+
+      - name: Download full-matrix evidence
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.evidence_run_id }}
+          pattern: release-evidence-full-matrix-*
+          path: release/evidence
+          merge-multiple: true
+          github-token: ${{ github.token }}
+
+      - name: Verify and archive exact evidence
+        run: |
+          scripts/verify_release_evidence.py release/evidence \
+            --tier full-matrix --commit "${{ needs.validate.outputs.full_sha }}"
+          mkdir -p evidence-dist
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -C release/evidence -cf - . \
+            | gzip -n > "evidence-dist/release-evidence-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}.tar.gz"
+
+      - name: Attest evidence archive provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: evidence-dist/release-evidence-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}.tar.gz
+
+      - name: Upload immutable evidence archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-archive-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}
+          path: evidence-dist/
+          if-no-files-found: error
+          retention-days: 90
 
   approve-publishing:
     name: Approve package publishing
@@ -137,22 +235,100 @@ jobs:
       - name: Approved
         run: echo "Approved PGXN and Docker package publishing."
 
+  verify-prepared-artifacts:
+    name: Verify prepared source attestations
+    if: needs.validate.outputs.mode == 'publish'
+    needs:
+      - validate
+      - approve-publishing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Download prepared release bundle
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.prepare_run_id }}
+          pattern: release-bundle-${{ needs.validate.outputs.version }}-*
+          path: dist
+          merge-multiple: true
+          github-token: ${{ github.token }}
+
+      - name: Download prepared release evidence
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.prepare_run_id }}
+          pattern: release-evidence-archive-${{ needs.validate.outputs.version }}-*
+          path: evidence-dist
+          merge-multiple: true
+          github-token: ${{ github.token }}
+
+      - name: Verify bundle and GitHub attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/verify_release_bundle.py dist \
+            --version "${{ needs.validate.outputs.version }}" \
+            --commit "${{ needs.validate.outputs.full_sha }}"
+          for artifact in dist/*; do
+            gh attestation verify "$artifact" \
+              --repo "${{ github.repository }}" \
+              --predicate-type https://slsa.dev/provenance/v1
+          done
+          gh attestation verify \
+            "dist/pgGraph-${{ needs.validate.outputs.version }}.zip" \
+            --repo "${{ github.repository }}" \
+            --predicate-type https://spdx.dev/Document/v2.3
+          evidence_archive="$(find evidence-dist -name '*.tar.gz' -type f -print -quit)"
+          test -n "$evidence_archive"
+          gh attestation verify "$evidence_archive" \
+            --repo "${{ github.repository }}" \
+            --predicate-type https://slsa.dev/provenance/v1
+          mkdir -p release/evidence
+          tar -xzf "$evidence_archive" -C release/evidence
+          scripts/verify_release_evidence.py release/evidence \
+            --tier full-matrix --commit "${{ needs.validate.outputs.full_sha }}"
+
   publish-pgxn:
     name: Publish PGXN package
     if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
       - approve-publishing
+      - verify-prepared-artifacts
     runs-on: ubuntu-latest
     container: pgxn/pgxn-tools
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - name: Checkout release tag
+      - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate.outputs.tag }}
+          ref: ${{ needs.validate.outputs.full_sha }}
 
-      - name: Build PGXN source archive
-        run: scripts/build_pgxn_dist.sh "${{ needs.validate.outputs.tag }}" dist
+      - name: Download prepared release bundle
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.prepare_run_id }}
+          pattern: release-bundle-${{ needs.validate.outputs.version }}-*
+          path: dist
+          merge-multiple: true
+          github-token: ${{ github.token }}
+
+      - name: Verify prepared release bundle
+        run: |
+          scripts/verify_release_bundle.py dist \
+            --version "${{ needs.validate.outputs.version }}" \
+            --commit "${{ needs.validate.outputs.full_sha }}"
 
       - name: Publish to PGXN
         env:
@@ -167,7 +343,19 @@ jobs:
       - validate
       - publish-pgxn
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
+      - name: Download prepared release bundle
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.prepare_run_id }}
+          pattern: release-bundle-${{ needs.validate.outputs.version }}-*
+          path: dist
+          merge-multiple: true
+          github-token: ${{ github.token }}
+
       - name: Verify PGXN metadata is visible
         run: |
           url="https://api.pgxn.org/dist/pggraph/${{ needs.validate.outputs.version }}/META.json"
@@ -195,33 +383,64 @@ jobs:
               raise SystemExit(f"Expected PGXN version {expected}, got {actual!r}")
           PY
 
+      - name: Verify published PGXN archive bytes
+        run: |
+          url="https://api.pgxn.org/dist/pggraph/${{ needs.validate.outputs.version }}/pgGraph-${{ needs.validate.outputs.version }}.zip"
+          curl --fail --silent --show-error --location "$url" --output /tmp/pggraph-published.zip
+          expected="$(sha256sum "dist/pgGraph-${{ needs.validate.outputs.version }}.zip" | awk '{print $1}')"
+          actual="$(sha256sum /tmp/pggraph-published.zip | awk '{print $1}')"
+          test "$actual" = "$expected"
+
   attach-pgxn-artifact:
     name: Attach PGXN artifact to GitHub Release
     if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
       - approve-publishing
+      - verify-prepared-artifacts
       - pgxn-verify
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
-      - name: Checkout release tag
+      - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate.outputs.tag }}
+          ref: ${{ needs.validate.outputs.full_sha }}
+          fetch-depth: 0
 
-      - name: Build PGXN source archive
-        run: scripts/build_pgxn_dist.sh "${{ needs.validate.outputs.tag }}" dist
+      - name: Download prepared release bundle
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.prepare_run_id }}
+          pattern: release-bundle-${{ needs.validate.outputs.version }}-*
+          path: dist
+          merge-multiple: true
+          github-token: ${{ github.token }}
 
-      - name: Attach archive to GitHub Release
+      - name: Download prepared release evidence
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.prepare_run_id }}
+          pattern: release-evidence-archive-${{ needs.validate.outputs.version }}-*
+          path: evidence-dist
+          merge-multiple: true
+          github-token: ${{ github.token }}
+
+      - name: Verify prepared release bundle
+        run: |
+          scripts/verify_release_bundle.py dist \
+            --version "${{ needs.validate.outputs.version }}" \
+            --commit "${{ needs.validate.outputs.full_sha }}"
+
+      - name: Attach exact bundle to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           gh release upload "${{ needs.validate.outputs.tag }}" \
-            "dist/pgGraph-${{ needs.validate.outputs.version }}.zip" \
-            --clobber
+            dist/* evidence-dist/*.tar.gz --clobber
 
   docker:
     name: Prepare Docker image PG${{ matrix.pg }} ${{ matrix.platform.name }}
@@ -244,10 +463,11 @@ jobs:
             runner: ubuntu-24.04-arm
             pair: linux-arm64
     steps:
-      - name: Checkout release tag
+      - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate.outputs.tag }}
+          ref: ${{ needs.validate.outputs.full_sha }}
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -285,6 +505,8 @@ jobs:
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           tags: ${{ env.IMAGE_NAME }}
           labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
           cache-from: type=gha,scope=pggraph-pg${{ matrix.pg }}-${{ matrix.platform.pair }}
           cache-to: type=gha,mode=max,scope=pggraph-pg${{ matrix.pg }}-${{ matrix.platform.pair }}
 
@@ -300,7 +522,7 @@ jobs:
           name: digests-pg${{ matrix.pg }}-${{ matrix.platform.pair }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 90
 
   docker-merge:
     name: Merge prepared Docker image PG${{ matrix.pg }}
@@ -368,6 +590,26 @@ jobs:
           image="${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}-prepared"
           digest="$(docker buildx imagetools inspect "$image" | awk '/Digest:/ { print $2; exit }')"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Record prepared manifest digest
+        run: |
+          mkdir -p "${{ runner.temp }}/manifest"
+          jq -n \
+            --arg image "${{ env.IMAGE_NAME }}" \
+            --arg pg "${{ matrix.pg }}" \
+            --arg tag "${{ needs.validate.outputs.tag }}" \
+            --arg commit "${{ needs.validate.outputs.full_sha }}" \
+            --arg digest "${{ steps.manifest.outputs.digest }}" \
+            '{image: $image, postgresql_major: ($pg | tonumber), intended_tag: $tag, source_commit: $commit, digest: $digest}' \
+            > "${{ runner.temp }}/manifest/pg${{ matrix.pg }}.json"
+
+      - name: Retain prepared manifest digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-manifest-pg${{ matrix.pg }}-${{ needs.validate.outputs.short_sha }}
+          path: ${{ runner.temp }}/manifest/pg${{ matrix.pg }}.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Attest image provenance
         uses: actions/attest-build-provenance@v2
@@ -472,16 +714,46 @@ jobs:
         if: always()
         run: docker rm -f pggraph-release-verify-pg${{ matrix.pg }}-${{ matrix.platform.pair }} >/dev/null 2>&1 || true
 
+  docker-manifests:
+    name: Retain prepared Docker manifest digests
+    if: needs.validate.outputs.mode == 'prepare'
+    needs:
+      - validate
+      - docker-merge
+      - docker-verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download prepared manifest records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: docker-manifest-pg*-${{ needs.validate.outputs.short_sha }}
+          path: manifests
+          merge-multiple: true
+
+      - name: Build deterministic manifest inventory
+        run: jq -s 'sort_by(.postgresql_major)' manifests/*.json > docker-manifests.json
+
+      - name: Upload manifest inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-manifests-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}
+          path: docker-manifests.json
+          if-no-files-found: error
+          retention-days: 90
+
   publish-docker:
     name: Publish Docker image PG${{ matrix.pg }}
     if: needs.validate.outputs.mode == 'publish'
     needs:
       - validate
       - approve-publishing
+      - verify-prepared-artifacts
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      actions: read
+      attestations: read
     strategy:
       fail-fast: false
       matrix:
@@ -497,7 +769,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Promote prepared image tags
+      - name: Download prepared manifest inventory
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.prepare_run_id }}
+          pattern: docker-manifests-${{ needs.validate.outputs.version }}-*
+          path: manifests
+          merge-multiple: true
+          github-token: ${{ github.token }}
+
+      - name: Verify and promote prepared image digest
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           source="${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}-prepared"
           sha_source="${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-sha-${{ needs.validate.outputs.short_sha }}"
@@ -506,11 +789,30 @@ jobs:
 
           source_digest="$(docker buildx imagetools inspect "$source" | awk '/Digest:/ { print $2; exit }')"
           sha_digest="$(docker buildx imagetools inspect "$sha_source" | awk '/Digest:/ { print $2; exit }')"
+          jq -e \
+            --arg image "${{ env.IMAGE_NAME }}" \
+            --arg tag "${{ needs.validate.outputs.tag }}" \
+            --arg commit "${{ needs.validate.outputs.full_sha }}" \
+            --argjson pg "${{ matrix.pg }}" \
+            '[.[] | select(
+              .image == $image and
+              .intended_tag == $tag and
+              .source_commit == $commit and
+              .postgresql_major == $pg and
+              (.digest | startswith("sha256:"))
+            )] | length == 1' manifests/docker-manifests.json >/dev/null
+          expected_digest="$(jq -r '.[] | select(.postgresql_major == ${{ matrix.pg }}) | .digest' manifests/docker-manifests.json)"
 
-          if [[ "$source_digest" != "$sha_digest" ]]; then
-            echo "Prepared tag digest $source_digest does not match commit tag digest $sha_digest" >&2
+          if [[ "$source_digest" != "$sha_digest" || "$source_digest" != "$expected_digest" ]]; then
+            echo "Prepared Docker digest does not match the retained candidate manifest" >&2
             exit 1
           fi
+          source_by_digest="${{ env.IMAGE_NAME }}@$expected_digest"
+          gh attestation verify "oci://$source_by_digest" \
+            --repo "${{ github.repository }}" \
+            --predicate-type https://slsa.dev/provenance/v1
+          docker buildx imagetools inspect "$source_by_digest" \
+            --format '{{ json .SBOM }}' | jq -e 'length > 0' >/dev/null
 
           tags=(
             -t "${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}"
@@ -528,7 +830,7 @@ jobs:
             )
           fi
 
-          docker buildx imagetools create "${tags[@]}" "$source"
+          docker buildx imagetools create "${tags[@]}" "$source_by_digest"
 
   publish-docker-verify:
     name: Verify published image PG${{ matrix.pg }} ${{ matrix.platform.name }}
@@ -751,8 +1053,10 @@ jobs:
     if: needs.validate.outputs.mode == 'prepare'
     needs:
       - validate
-      - pgxn-artifact
+      - release-bundle
+      - release-evidence
       - docker-verify
+      - docker-manifests
     runs-on: ubuntu-latest
     steps:
       - name: Summarize prepared packages
@@ -761,7 +1065,9 @@ jobs:
             echo "## Prepared packages"
             echo
             echo "- Commit: ${{ needs.validate.outputs.short_sha }}"
-            echo "- PGXN workflow artifact: pgxn-source-${{ needs.validate.outputs.version }}"
+            echo "- Source bundle: release-bundle-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}"
+            echo "- Release evidence: release-evidence-archive-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}"
+            echo "- Docker manifests: docker-manifests-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}"
             echo "- Docker: ${{ env.IMAGE_NAME }}:pg14-${{ needs.validate.outputs.tag }}-prepared"
             echo "- Docker: ${{ env.IMAGE_NAME }}:pg15-${{ needs.validate.outputs.tag }}-prepared"
             echo "- Docker: ${{ env.IMAGE_NAME }}:pg16-${{ needs.validate.outputs.tag }}-prepared"

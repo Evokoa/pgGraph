@@ -13,7 +13,7 @@ on:
         required: true
         default: pr
         type: choice
-        options: [pr, nightly]
+        options: [pr, nightly, rc, full-matrix]
 
 permissions:
   contents: read
@@ -63,6 +63,40 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nightly-release-evidence-${{ github.run_id }}
+          path: release/evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  release-candidate:
+    name: ${{ inputs.tier }} release evidence
+    if: github.event_name == 'workflow_dispatch' && (inputs.tier == 'rc' || inputs.tier == 'full-matrix')
+    runs-on: [self-hosted, pggraph-release]
+    environment: release-candidate
+    timeout-minutes: 1440
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require an immutable clean source commit
+        run: |
+          test -z "$(git status --porcelain=v1)"
+          git rev-parse HEAD
+      - name: Install locked documentation checks
+        run: sfw npm ci --prefix docs
+      - name: Run release candidate checks
+        run: scripts/run_release.py --tier "${{ inputs.tier }}" --evidence "release/evidence/${{ inputs.tier }}.json"
+      - name: Verify retained evidence
+        if: success()
+        run: |
+          scripts/verify_release_evidence.py \
+            "release/evidence/${{ inputs.tier }}.json" \
+            --tier "${{ inputs.tier }}" \
+            --commit "$(git rev-parse HEAD)"
+      - name: Retain release candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ inputs.tier }}-${{ github.sha }}-${{ github.run_id }}
           path: release/evidence/
           if-no-files-found: error
           retention-days: 90

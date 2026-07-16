@@ -178,6 +178,8 @@ Heavy suites:
 | `backup_restore_validate.sh` | Dump/restore state validation |
 | `docker_smoke.sh` | Container smoke test |
 | `pg_upgrade_validate.sh` | Upgrade validation |
+| `run_pg_upgrade_matrix.sh` | Sentinel-owned adjacent PostgreSQL-major upgrade matrix |
+| `run_crash_matrix.sh` | PostgreSQL 14–18 persisted and transaction-overlay crash matrix |
 | `background_job_lock_regression.sh` | Background job lock/failure behavior |
 | `build_lock_regression.sh` | Build/vacuum lock conflict behavior |
 | `concurrency_stress.sh` | Mixed build/sync/vacuum/traversal stress |
@@ -348,9 +350,7 @@ PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke
 PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata ./tests/heavy/function_metadata_audit.sh
 PG_VERSION_FEATURE=pg17 SOURCE_DB=pggraph_backup_src RESTORE_DB=pggraph_backup_dst ./tests/heavy/backup_restore_validate.sh
 ./tests/heavy/docker_smoke.sh
-OLD_BINDIR=/path/to/old/bin NEW_BINDIR=/path/to/new/bin \
-  OLD_DATADIR=/tmp/pg-old NEW_DATADIR=/tmp/pg-new \
-  ./tests/heavy/pg_upgrade_validate.sh
+./tests/heavy/run_pg_upgrade_matrix.sh
 ```
 
 Worker and memory sizing checks:

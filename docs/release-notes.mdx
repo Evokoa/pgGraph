@@ -12,6 +12,7 @@ so these sections remain explicit.
 
 | Release history |
 |---|
+| [v1.0.0](#v1-0-0-production-contract) |
 | [v0.1.8](#v0-1-8-named-graphs-and-production-release-hardening) |
 | [v0.1.7](#v0-1-7-durable-projection-operations) |
 | [v0.1.6](#v0-1-6-gql-path-patterns-and-release-reliability) |
@@ -21,6 +22,73 @@ so these sections remain explicit.
 | [v0.1.2](#v0-1-2-alpha-hardening-follow-up) |
 | [v0.1.1](#v0-1-1-alpha-hardening-critical-paths) |
 | [v0.1.0](#v0-1-0-initial-alpha) |
+
+## v1.0.0: Production Contract
+
+`v1.0.0` freezes pgGraph's first production contract for PostgreSQL 14 through
+18. The source tree currently contains the release candidate; it is not yet
+tagged or published. PostgreSQL source tables remain authoritative, while graph
+artifacts and mutable projection generations remain validated, rebuildable
+derived state.
+
+### Supported Surface
+
+- The exact SQL function, configuration, diagnostic, and bounded GQL read/write
+  profiles are generated and drift-checked. Full ISO GQL, full openCypher, and a
+  public SQL/PGQ `GRAPH_TABLE` surface are not claimed.
+- Named graphs, PostgreSQL-backed mapped writes, durable synchronization,
+  resource-governed traversal and analytics, persisted generation recovery,
+  maintenance jobs, and operator diagnostics are supported within the public
+  limits documentation.
+- Standard PostgreSQL SQLSTATEs are paired with stable `PGxxx` diagnostics in
+  `DETAIL`. Applications migrating from alpha builds must update any code that
+  depended on the earlier nonstandard SQLSTATE mapping.
+
+### Alpha Migration And Rebuild
+
+The supported transition from `v0.1.8` is source-preserving, not an in-place
+catalog or binary upgrade. Back up the database, record graph registrations,
+disable writers and schedulers, remove the alpha extension, install 1.0.0,
+reapply registration, and rebuild from the PostgreSQL source tables. Before
+using `DROP EXTENSION graph CASCADE`, inventory application objects that depend
+on extension functions or types; `CASCADE` removes those dependents as well as
+extension-generated sync objects.
+
+Alpha `.pggraph` files, projection manifests, and segments are not loaded as a
+1.0 compatibility promise. Rebuild them with the 1.0 engine. The 1.0 base
+artifact format is v6 and mutable projection metadata is checksummed and
+generation-addressed.
+
+### Rollback
+
+Do not install an alpha binary over 1.0 catalogs or artifacts. Before cutover,
+retain a logical backup plus the matching alpha package and registration
+inventory. Rollback restores that backup into a clean database using the alpha
+package; source rows are authoritative, and derived graph state is rebuilt.
+
+### Security, Resources, And Deprecations
+
+- Extension and generated trigger security-definer boundaries use a pinned
+  `pg_catalog, pg_temp` search path, preserve caller-role ACL/RLS checks, and
+  reject unsafe catalog/source lock combinations before publication.
+- Build, load, query, hydration, synchronization, compaction, and supported
+  analytics enforce documented memory, work, row, disk, file, and elapsed-time
+  limits. Rejected work does not replace the last validated generation.
+- The alpha `graph.oom_action` and `graph.allow_unsafe_oom_actions` settings are
+  accepted as read-only compatibility aliases throughout 1.x. They do not
+  authorize unsafe allocation behavior and should be removed from new
+  configurations.
+
+### Candidate Validation And Distribution
+
+The candidate is validated through retained RC/full-matrix evidence, clean
+PostgreSQL 14–18 source-package installation, the signed alpha migration
+fixture, backup/restore and crash recovery, concurrency and transaction gates,
+resource measurements, sanitizers, fuzz/Miri checks, and packaged quickstart
+and playground examples. The source candidate bundle contains one commit-bound
+PGXN ZIP, SPDX 2.3 SBOM, provenance, manifest, and complete SHA-256 set.
+Publication consumes those exact prepared bytes after signed-tag verification;
+it does not rebuild the archive.
 
 ## v0.1.8: Named Graphs And Production Release Hardening
 
@@ -44,31 +112,6 @@ gate evidence through signed tags and package publishing.
 
 ### Highlights
 
-- Switched pgGraph errors to standard PostgreSQL SQLSTATEs while retaining the
-  stable `PGxxx` diagnostic in `DETAIL`; the pgrx error boundary now unwinds
-  live Rust frames before PostgreSQL handles the error.
-- Changed build-memory preflight to checked integer-byte accounting with exact
-  counts for unknown table statistics. Every over-budget build now fails before
-  construction; legacy read-only OOM settings remain accepted for 1.x
-  configuration compatibility but no longer authorize an unsafe build.
-- Added live phase reservations, fallible major-vector growth, adaptive
-  byte-bounded spool batches, and `graph.build_resource_status()`. Stale
-  positive statistics and long source keys are now checked during construction,
-  while the low-memory serving-engine unload path remains available.
-- Added hard memory, work, row, disk, elapsed, and PostgreSQL interrupt breakers
-  to persisted load, traversal and path execution, GQL hydration and blocking
-  projection, durable sync ingestion, range compaction, and connected-component
-  analytics. `graph.resource_status()` exposes backend-local peak telemetry;
-  limit failures use SQLSTATE `54000` with diagnostic `PG007` and do not publish
-  an unvalidated replacement.
-- Added checksummed current-generation pointers and compare-and-swap publication
-  for persisted projections. Candidate manifests are fsynced and validated
-  before the serving pointer changes; stale publishers return `PG006`, active
-  reader heartbeats protect old generations, and generation-aware GC removes
-  abandoned manifests without inferring current state from file-name order.
-- Decode durable projection segments once when a generation is installed and
-  pin the derived layered snapshot in the serving engine, removing per-query
-  projection-file reads and durable-map reconstruction.
 - Added a durable named-graph catalog with graph creation, selection,
   description, residency, grants, quotas, and metadata inspection APIs.
 - Scoped node registrations, relationship registrations, filter columns, build
@@ -84,65 +127,6 @@ gate evidence through signed tags and package publishing.
 - Added GQL `CREATE` support for registered relationships, including source-row
   inserts, transaction-local visibility, and hydrated relationship rows in
   query results.
-- Preserved identities for relationship rows ingested after a persisted build
-  by storing a checksummed manifest-referenced dictionary; standalone mapped
-  relationship tables now receive trigger-sync coverage without requiring a
-  separate node-table registration.
-- Made relationship tombstones identity-specific across GQL writes, trigger
-  replay, durable projection ingestion, and reload so deleting one parallel
-  source row does not hide equal-endpoint siblings.
-- Added write conformance coverage proving PostgreSQL partition routing,
-  constraints, and user triggers remain authoritative and rejected writes do
-  not leave transaction-local graph state.
-- Added a two-session isolation gate proving backend-local mapped writes follow
-  PostgreSQL READ COMMITTED, REPEATABLE READ, and SERIALIZABLE visibility
-  rules. The persisted variant covers durable new-node identity and repeated
-  persisted builds.
-- Verified the release and pgrx suites plus the full, persisted, MERGE,
-  relationship, and stale-write concurrency gates on PostgreSQL 14 through 18.
-  This retires the finite write-correctness, stale-recheck, transaction-created
-  node, and mutable-write isolation limitations from Known Issues.
-- Verified persisted mmap load, traversal, reload, corruption rejection,
-  build-job execution, transaction callbacks, and guarded error unwinding in a
-  Valgrind-instrumented PostgreSQL process with zero unsuppressed errors. This,
-  together with the PostgreSQL 14 through 18 mapped-layout matrix, retires the
-  mapped-store ownership limitation from Known Issues.
-- Added durable post-build node identities with contiguous allocation, exact
-  primary-key and tenant payloads, typed filter restoration, same-batch edge
-  endpoints independent of sync-row order, tenant moves that preserve identity,
-  transient lifecycle tombstones, fresh-candidate validation, cold-backend
-  reload, and graph-scoped cross-backend publication locking.
-- Made unrepresentable durable mutations fail closed without advancing the
-  projection watermark; incremental `TRUNCATE` and standalone endpoint
-  identity changes report rebuild guidance.
-- Added a shared-writer/exclusive-ingest PostgreSQL transaction barrier so
-  durable ingestion cannot skip an active lower sync ID or publish a writer's
-  own row before rollback. Exact target endpoints also cannot attach to another
-  table with the same primary key.
-- Verified cross-backend durable projection lifecycle, competing publication,
-  writer commit and rollback horizons, artifact preservation, and build/vacuum
-  exclusion on PostgreSQL 14 through 18. This retires the durable post-build
-  node identity limitation from Known Issues.
-- Verified mapped-store validation, guarded PostgreSQL error unwinding, exact
-  durable values, relationship and filter identity, ACL/RLS visibility, and
-  security-definer metadata on PostgreSQL 14 through 18. Concurrent DDL gates
-  additionally prove that builds serialize with registered-relation changes,
-  renames preserve OID identity, and drop/recreate cannot retarget a
-  registration by name. These completed matrix-only limitations are retired
-  from Known Issues.
-- Added a fail-closed trigger-definition preflight for upgrades. Run
-  `graph.enable_sync()` or a trigger-mode `graph.build()` to refresh older sync
-  triggers before durable ingestion; trigger-mode builds refresh them before
-  taking the source snapshot.
-- Pinned extension and generated trigger-sync security-definer functions to
-  `pg_catalog, pg_temp`, qualified authorization-critical catalog and operator
-  lookups, and added temporary plus persistent hostile-schema release gates.
-  Refresh existing trigger definitions with `graph.enable_sync()` after
-  upgrading.
-- Rebased mutable projection manifests after persisted build and vacuum. Each
-  replacement base publishes a monotonic base-only generation with the new
-  checksum and watermark, while superseded segments, chunks, and identity
-  dictionaries enter generation-aware garbage collection.
 - Added graph-scoped projection and sync behavior so replay, dirty-range
   ingest, copy-on-write compaction, and runtime selection ignore unrelated
   graph state.
@@ -370,20 +354,17 @@ arrows from `relationships(path)` may observe changed output for reverse
 matches on bidirectional relationships. The new output is the registered schema
 direction, not the reverse path-pattern direction.
 
-The persisted artifact formats changed for this release. Graph artifacts use
-graph format v3, and projection segments now use segment format v3. The segment
-format preserves schema direction and exact registered filter values, including
-signed numeric, boolean, text, date, timestamp-with-time-zone, UUID, SQL `NULL`,
-and tombstones. Existing source tables and graph registrations do not need to be
-rewritten.
+The persisted artifact formats changed for this release. Graph artifacts now
+use graph format v3, and projection segments now use segment format v2, so the
+schema-direction metadata can be loaded safely. Existing source tables and graph
+registrations do not need to be rewritten.
 
 ### Upgrade Note
 
 <Callout type="warning">
-`.pggraph` artifacts written before `v0.1.7`, and mutable projection segments
-written with segment format v2, must be regenerated with `SELECT graph.build();`
-after upgrading. These files are derived artifacts, not the source of truth;
-PostgreSQL source tables remain authoritative.
+`.pggraph` artifacts written before `v0.1.7` must be regenerated with
+`SELECT graph.build();` after upgrading. These files are derived artifacts, not
+the source of truth; PostgreSQL source tables remain authoritative.
 </Callout>
 
 Regenerating the derived artifact is the intended upgrade path:
@@ -793,8 +774,8 @@ supply-chain policy.
   including `read_only_reason`.
 - `graph.build_status()` and `graph.maintenance_status()` now include
   `progress_phase` and `progress_message`.
-- Sync mutations against an already read-only engine now use diagnostic `PG012`
-  instead of reusing `PG008`.
+- Sync mutations against an already read-only engine now report `PG012` instead
+  of reusing `PG008`.
 
 <Callout type="info">
   Docker users should recreate existing pgGraph Docker volumes to pick up the
@@ -860,8 +841,8 @@ supply-chain policy.
   semantics.
 - Improved memory/status accounting with store-specific heap estimates and a
   conservative logical floor.
-- Preserved diagnostic `PG008` for edge-buffer capacity breaches and uses
-  diagnostic `PG012` for later read-only sync mutations.
+- Preserved `PG008` for edge-buffer capacity breaches and uses `PG012` for later
+  read-only sync mutations.
 - Added missing `SAFETY:` comments on test-only mmap unsafe blocks so clippy
   release gates pass.
 

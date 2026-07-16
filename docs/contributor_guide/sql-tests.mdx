@@ -78,6 +78,8 @@ clusters where the pgrx harness is not representative enough.
 | `backup_restore_validate.sh` | Dump/restore behavior for source tables, graph catalog state, sync state, and persisted artifacts |
 | `docker_smoke.sh` | Container build and extension smoke test |
 | `pg_upgrade_validate.sh` | `pg_upgrade --check` compatibility for a database containing pgGraph |
+| `run_pg_upgrade_matrix.sh` | Sentinel-owned PostgreSQL 14→15 through 17→18 upgrade and rebuild matrix |
+| `run_crash_matrix.sh` | PostgreSQL 14–18 persisted-generation and transaction-overlay crash matrix |
 | `background_job_lock_regression.sh` | Background build/maintenance lock and failure behavior |
 | `build_lock_regression.sh` | Build/vacuum lock conflicts and persisted artifact behavior |
 | `concurrency_stress.sh` | Mixed build, sync, vacuum, maintenance, and traversal concurrency |

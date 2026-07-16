@@ -28,8 +28,10 @@ cluster per major and removes it on exit. Set `PG_VERSIONS` to a space-separated
 subset or provide `PG_CONFIG_<major>` for a nonstandard installation path.
 
 Most scripts expect a disposable database and accept variables such as
-`PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and `DBNAME`. Scripts that kill or
-upgrade PostgreSQL require disposable `PGDATA` directories.
+`PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and `DBNAME`. Crash scripts run through
+`scripts/with_disposable_postgres.sh`; PostgreSQL binary upgrades run through
+`run_pg_upgrade_matrix.sh`, whose lower-level validator requires a per-run
+safety sentinel.
 
 `run_postgres_process_sanitizer.sh` creates its own disposable cluster and
 runs the postmaster plus child processes under Valgrind. It covers persisted

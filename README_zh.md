@@ -71,7 +71,9 @@ pgGraph 是一个 PostgreSQL 扩展，用于直接针对普通 PostgreSQL 表运
 你的表仍然是事实来源。pgGraph 会构建一个派生的图索引，并让你通过 SQL 使用 `graph` schema 中的函数来查询它。
 
 > [!WARNING]
-> 当前发布线是 alpha 软件。完成 pgGraph 1.0 发布后才进入生产支持状态。
+> 当前已发布版本是 v0.1.8 alpha。本提交包含 pgGraph 1.0.0 发布候选版本；
+> it is not yet tagged or published（尚未创建 tag 或发布）。在签名的 1.0.0
+> 构件正式发布前，请从源码构建候选版本。
 
 <!-- README_SYNC_POLICY: README.md is canonical; version, PostgreSQL support, and shared commands are checked by scripts/check_public_docs.py. -->
 
@@ -91,19 +93,16 @@ pgGraph 在你现有的 PostgreSQL 表之上添加图查询，不需要单独的
 
 ## 快速开始
 
-想要快速体验 pgGraph，最简单的方法是拉取预构建的 Docker 镜像——无需编译。
-
-该镜像为多架构镜像（`linux/amd64` 和 `linux/arm64`），可在 macOS、Linux 和
-Windows（通过 Docker Desktop）上运行。
+发布候选版本的推荐快速体验方式，是从本仓库构建一次性的 PostgreSQL 17 镜像：
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:1.0.0
-docker run -d --rm \
-  --name pggraph \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:1.0.0
+git clone https://github.com/evokoa/pggraph.git
+cd pggraph
+scripts/quickstart.sh
 ```
+
+1.0.0 发布后，签名的多架构镜像将使用
+`ghcr.io/evokoa/pggraph:1.0.0`；部署前应验证发布的 digest。
 
 默认数据库是 `graph`，已预配置 `pg_cron` 和维护定时任务。
 
@@ -164,12 +163,12 @@ scripts/quickstart.sh playground panama mutable
 
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。
 
-Docker 发布镜像覆盖 PostgreSQL 14 到 18。未带 PostgreSQL 主版本的 tag（例如 `1.0.0` 和 `latest`）使用默认 PostgreSQL 17 镜像。PostgreSQL 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
+1.0.0 发布流程会为 PostgreSQL 14 到 18 准备 Docker 镜像。发布后，未带 PostgreSQL 主版本的 tag（例如 `1.0.0` 和 `latest`）使用默认 PostgreSQL 17 镜像。PostgreSQL 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
 
-## PGXN 源码安装
+## 发布后的 PGXN 源码安装
 
-pgGraph 在 PGXN 上以源码分发包的形式提供。因为 pgGraph 是一个 Rust/pgrx 扩展，
-从源码构建需要 Rust 工具链。
+签名的 1.0.0 bundle 发布后，PGXN 将提供同一份已验证源码 ZIP。因为 pgGraph
+是一个 Rust/pgrx 扩展，从源码构建需要 Rust 工具链。
 
 ### 前置要求
 
