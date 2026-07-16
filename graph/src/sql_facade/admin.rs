@@ -1857,6 +1857,31 @@ pub(super) fn build() -> TableIterator<
     })
 }
 
+pub(super) fn build_after_discovery() -> TableIterator<
+    'static,
+    (
+        name!(nodes_loaded, i64),
+        name!(edges_loaded, i64),
+        name!(build_time_ms, f64),
+        name!(memory_used_mb, f64),
+        name!(sync_mode, String),
+        name!(projection_mode, String),
+    ),
+> {
+    let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+    require_selected_graph_build_result_for_role(caller_oid).unwrap_or_else(|err| err.report());
+    let result =
+        crate::sql_build::execute_build_after_discovery(false).unwrap_or_else(|err| err.report());
+    TableIterator::new(vec![(
+        result.nodes_loaded,
+        result.edges_loaded,
+        result.build_time_ms,
+        result.memory_used_mb,
+        result.sync_mode,
+        result.projection_mode,
+    )])
+}
+
 /// Build a named graph without requiring a separate `set_current_graph()` call.
 #[pg_extern(schema = "graph", security_definer)]
 #[search_path(pg_catalog, pg_temp)]

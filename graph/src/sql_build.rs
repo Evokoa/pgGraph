@@ -328,6 +328,23 @@ pub(crate) fn execute_build(force_persist: bool) -> safety::GraphResult<BuildExe
     execute_build_with_mode_and_progress(force_persist, mode, &mut progress)
 }
 
+/// Build immediately after trusted schema discovery registered the mapping rows.
+pub(crate) fn execute_build_after_discovery(
+    force_persist: bool,
+) -> safety::GraphResult<BuildExecutionResult> {
+    let mode = configured_projection_mode()?;
+    let mut progress = |_, _| Ok(());
+    execute_build_inner(
+        force_persist,
+        mode,
+        ProjectionModeGate::CheckGuc,
+        CatalogLockGate::DiscoveryRegistration,
+        "building",
+        "building graph from discovered source tables",
+        &mut progress,
+    )
+}
+
 pub(crate) fn execute_build_with_mode(
     force_persist: bool,
     projection_mode: config::ProjectionMode,
@@ -345,6 +362,7 @@ pub(crate) fn execute_build_with_mode_and_progress(
         force_persist,
         projection_mode,
         ProjectionModeGate::CheckGuc,
+        CatalogLockGate::Caller,
         "building",
         "building graph from registered source tables",
         progress,
@@ -360,6 +378,7 @@ pub(crate) fn execute_build_with_prevalidated_mode_and_progress(
         force_persist,
         projection_mode,
         ProjectionModeGate::Prevalidated,
+        CatalogLockGate::Caller,
         "building",
         "building graph from registered source tables",
         progress,
@@ -372,10 +391,17 @@ enum ProjectionModeGate {
     Prevalidated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogLockGate {
+    Caller,
+    DiscoveryRegistration,
+}
+
 fn execute_build_inner(
     force_persist: bool,
     projection_mode: config::ProjectionMode,
     mode_gate: ProjectionModeGate,
+    catalog_lock_gate: CatalogLockGate,
     build_phase: &'static str,
     build_message: &'static str,
     progress: &mut ProgressCallback<'_>,
@@ -388,7 +414,12 @@ fn execute_build_inner(
     }
 
     acquire_build_lock()?;
-    crate::build_snapshot::lock_catalog()?;
+    match catalog_lock_gate {
+        CatalogLockGate::Caller => crate::build_snapshot::lock_catalog()?,
+        CatalogLockGate::DiscoveryRegistration => {
+            crate::build_snapshot::lock_catalog_after_discovery()?
+        }
+    }
     let (tables, edges, filter_columns) = read_catalog()?;
 
     if tables.is_empty() {
@@ -503,6 +534,7 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
         force_persist,
         configured_projection_mode()?,
         ProjectionModeGate::CheckGuc,
+        CatalogLockGate::Caller,
         "rebuilding",
         "rebuilding graph for maintenance",
         progress,

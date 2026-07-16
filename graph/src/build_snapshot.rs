@@ -81,7 +81,26 @@ impl SourceSnapshotBoundary {
 
 /// Lock the mapping catalog before any build reads its rows.
 pub(crate) fn lock_catalog() -> safety::GraphResult<()> {
-    reject_current_backend_write_locks(&catalog_relation_oids_sql(), "mapping catalog")?;
+    lock_catalog_inner(true)
+}
+
+/// Prove that a discovery build did not inherit caller-owned catalog writes.
+pub(crate) fn prepare_catalog_discovery_build() -> safety::GraphResult<()> {
+    reject_current_backend_write_locks(&catalog_relation_oids_sql(), "mapping catalog")
+}
+
+/// Lock the mapping catalog after this extension registered discovery results.
+///
+/// The discovery statement owns the catalog write locks by construction. Source
+/// relation write locks remain forbidden when the build boundary is established.
+pub(crate) fn lock_catalog_after_discovery() -> safety::GraphResult<()> {
+    lock_catalog_inner(false)
+}
+
+fn lock_catalog_inner(reject_current_writes: bool) -> safety::GraphResult<()> {
+    if reject_current_writes {
+        reject_current_backend_write_locks(&catalog_relation_oids_sql(), "mapping catalog")?;
+    }
     for relation in CATALOG_RELATIONS {
         try_lock_relation(&format!("LOCK TABLE {relation} IN SHARE MODE NOWAIT"))?;
     }

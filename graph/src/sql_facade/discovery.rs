@@ -1,4 +1,4 @@
-use super::admin::{build, with_panic_boundary};
+use super::admin::{build_after_discovery, with_panic_boundary};
 use super::*;
 
 /// Auto-discover tables and foreign keys from a schema.
@@ -21,6 +21,10 @@ fn auto_discover(
 > {
     with_panic_boundary("auto_discover()", || {
         let graph = target_graph_metadata(graph_name, graph_tenant, graph_namespace);
+        if build {
+            crate::build_snapshot::prepare_catalog_discovery_build()
+                .unwrap_or_else(|err| err.report());
+        }
         let mut result = match discover::discover_schema(schema_name) {
             Ok((tables, edges, discoveries)) => {
                 register_discovery_for_graph(&graph.graph_id, tables, edges, discoveries)
@@ -56,6 +60,10 @@ fn auto_discover_tables(
 > {
     with_panic_boundary("auto_discover_tables()", || {
         let graph = target_graph_metadata(graph_name, graph_tenant, graph_namespace);
+        if build {
+            crate::build_snapshot::prepare_catalog_discovery_build()
+                .unwrap_or_else(|err| err.report());
+        }
         let table_oids = tables.iter().map(|oid| oid.to_u32()).collect::<Vec<_>>();
         let mut result = match discover::discover_table_set(&table_oids, tenant_column.as_deref()) {
             Ok((tables, edges, discoveries)) => {
@@ -214,7 +222,7 @@ fn append_auto_build_summary(
 ) {
     catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
     // Build automatically so discovered schemas are immediately queryable.
-    let build_rows: Vec<_> = build().collect();
+    let build_rows: Vec<_> = build_after_discovery().collect();
     if let Some((nodes, edges, _ms, mem_mb, sync_mode, projection_mode)) = build_rows.first() {
         result.push((
             "build".to_string(),
