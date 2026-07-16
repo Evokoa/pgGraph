@@ -7,6 +7,7 @@ COPY --chown=pggraph:pggraph fixture/ /src/fixture/
 
 RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/alpha/graph/target,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     set -euo pipefail; \
     test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' /src/alpha/graph/Cargo.toml | head -1)" = "0.1.8"; \
     cd /src/alpha/graph; \
