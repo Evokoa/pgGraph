@@ -365,6 +365,11 @@ PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_memstress ./tests/heavy/build_memory_s
 DBNAME=graph_test BACKENDS=50 ./tests/heavy/measure_mmap_pss.sh
 ```
 
+The build-lock regression also verifies that discovery with `build => true`
+fails closed with `55P03`/`PG006` when its caller already owns a mapping-catalog
+write lock. The failed transaction must not leave a partially discovered table
+registered.
+
 `build_memory_stress.sh` composes the RSS harness into baseline, small-batch,
 repeated rebuild, and low-memory rebuild profiles. Tune it with `NODE_COUNT`,
 `EDGE_COUNT`, `BASELINE_BATCH_SIZE`, `SMALL_BATCH_SIZE`, `REBUILD_ROUNDS`, and

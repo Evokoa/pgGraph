@@ -91,6 +91,10 @@ CREATE TABLE public.graph_lock_edges (
     from_id TEXT NOT NULL REFERENCES public.graph_lock_nodes(id),
     to_id TEXT NOT NULL REFERENCES public.graph_lock_nodes(id)
 );
+CREATE TABLE public.graph_discovery_lock_candidate (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+);
 INSERT INTO public.graph_lock_nodes (id, name)
 VALUES ('a', 'alpha'), ('b', 'beta');
 INSERT INTO public.graph_lock_edges (from_id, to_id)
@@ -186,6 +190,34 @@ if [[ "$current_catalog_writer_status" -eq 0 ]] ||
   ! grep -q "55P03" "$WORKDIR/current-catalog-writer.log"; then
   echo "caller-owned mapping-catalog write did not fail with 55P03"
   cat "$WORKDIR/current-catalog-writer.log"
+  exit 1
+fi
+
+if [[ "$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM graph._registered_tables WHERE table_oid = 'public.graph_discovery_lock_candidate'::regclass::oid")" != "0" ]]; then
+  echo "discovery lock candidate was unexpectedly registered before the regression"
+  exit 1
+fi
+
+set +e
+psql -X --set=VERBOSITY=verbose -v ON_ERROR_STOP=1 "$DBNAME" \
+  >"$WORKDIR/current-discovery-catalog-writer.log" 2>&1 <<'SQL'
+BEGIN;
+UPDATE graph._registered_tables SET columns = columns
+WHERE table_oid = 'public.graph_lock_nodes'::regclass::oid;
+SELECT * FROM graph.auto_discover('public', build => true);
+COMMIT;
+SQL
+current_discovery_catalog_writer_status=$?
+set -e
+if [[ "$current_discovery_catalog_writer_status" -eq 0 ]] ||
+  ! grep -q "55P03" "$WORKDIR/current-discovery-catalog-writer.log" ||
+  ! grep -q "PG006" "$WORKDIR/current-discovery-catalog-writer.log"; then
+  echo "auto-discovery accepted a caller-owned mapping-catalog write"
+  cat "$WORKDIR/current-discovery-catalog-writer.log"
+  exit 1
+fi
+if [[ "$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c "SELECT count(*) FROM graph._registered_tables WHERE table_oid = 'public.graph_discovery_lock_candidate'::regclass::oid")" != "0" ]]; then
+  echo "failed auto-discovery leaked a source registration"
   exit 1
 fi
 
