@@ -126,9 +126,31 @@ INSERT INTO people VALUES
     ('p1', 'Alice', 'c1'),
     ('p2', 'Bob', 'c1'),
     ('p3', 'Carol', 'c2');
-
-SELECT * FROM graph.auto_discover('public');
 SQL
+  build_demo_graph
+}
+
+build_demo_graph() {
+  local attempt=""
+  local output=""
+
+  for attempt in $(seq 1 30); do
+    if output="$(compose exec -T postgres psql -U postgres -d graph \
+      -v ON_ERROR_STOP=1 -c "SELECT * FROM graph.auto_discover('public');" 2>&1)"; then
+      printf '%s\n' "${output}"
+      return 0
+    fi
+
+    if ! grep -Fq 'PG006' <<<"${output}"; then
+      printf '%s\n' "${output}" >&2
+      return 1
+    fi
+    sleep 1
+  done
+
+  printf '%s\n' "${output}" >&2
+  echo "Error: pgGraph maintenance remained busy for 30 seconds." >&2
+  return 1
 }
 
 run_demo_sql() {
@@ -163,7 +185,12 @@ INSERT INTO people VALUES
 
 \echo ''
 \echo 'pgGraph discovery and build'
-SELECT * FROM graph.auto_discover('public');
+SQL
+
+  build_demo_graph
+
+  compose exec -T postgres psql -U postgres -d graph -v ON_ERROR_STOP=1 <<'SQL'
+\pset pager off
 
 \echo ''
 \echo 'Example data: ordinary PostgreSQL tables'

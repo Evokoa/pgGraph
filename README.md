@@ -155,7 +155,9 @@ macOS.
 To build from source or run the full interactive demo instead, use the included
 quickstart script. It starts a disposable Docker-backed PostgreSQL database,
 installs pgGraph, creates two normal PostgreSQL tables, discovers the foreign
-key relationship, builds the graph, and runs example queries.
+key relationship, builds the graph, and runs example queries. If the image's
+scheduled maintenance is already active, the demo waits for that bounded
+operation to finish before building instead of failing with a transient lock.
 
 You need Docker or Docker Desktop installed and running:
 
