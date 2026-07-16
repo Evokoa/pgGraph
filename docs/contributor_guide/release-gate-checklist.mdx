@@ -662,6 +662,13 @@ artifacts for the exact tag; it must not rebuild from a moving branch or
 untagged commit. Publication attaches the verified full-matrix evidence archive
 to the GitHub Release so the release record outlives workflow retention.
 
+Homebrew is a separate channel. After the signed release exists, the tap owner
+updates the formula URL and SHA-256 from the verified source bundle, runs
+`brew audit --strict --online pggraph`, `brew style pggraph`, and
+`brew test pggraph`, then verifies the installed PostgreSQL 17 extension reports
+the released version. Do not describe the formula as available before that
+handoff completes.
+
 Use this when validating release metadata locally:
 
 ```bash

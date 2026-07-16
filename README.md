@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.0.0-2ea44f?style=flat-square" alt="Version 1.0.0">
+    <img src="https://img.shields.io/badge/version-1.0.0%20release--ready-f59e0b?style=flat-square" alt="Version 1.0.0 release-ready">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -73,9 +73,9 @@ Your tables stay the source of truth. pgGraph builds a derived graph index and
 lets you query it from SQL using functions in the `graph` schema.
 
 > [!WARNING]
-> The current published line is v0.1.8 alpha. This commit contains the pgGraph
-> 1.0.0 release candidate; it is not yet tagged or published. Build the
-> candidate from source until the signed 1.0.0 artifacts are announced.
+> The current published line is v0.1.8 alpha. This commit contains pgGraph
+> 1.0.0, which is release-ready but unpublished. Build the reviewed source
+> commit until the signed 1.0.0 artifacts are announced.
 
 > [!TIP]
 > **Looking for a managed version?** We have launched a managed version of pgGraph on [polygres.com](https://polygres.com) for full high performance GraphRAG on Postgres.
@@ -96,7 +96,7 @@ query language.
 
 ## Quickstart
 
-The release candidate's supported quickstart builds a disposable PostgreSQL 17
+The release-ready source's supported quickstart builds a disposable PostgreSQL 17
 image from this repository:
 
 ```bash

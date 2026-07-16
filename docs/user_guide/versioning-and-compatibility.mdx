@@ -10,7 +10,7 @@ derived state and can be rebuilt.
 pgGraph 1.0 supports PostgreSQL 14 through 18. PostgreSQL 17 is the default
 development and playground reference version. Published container images target
 Linux on AMD64 and ARM64, and PGXN carries the verified source bundle after a
-release is published. The 1.0.0 source candidate is not yet tagged or published.
+release is published. The 1.0.0 source is release-ready but unpublished.
 
 A patch release never removes a PostgreSQL major. A minor 1.x release may
 retire a major only after upstream PostgreSQL support ends, with at least one
@@ -42,8 +42,8 @@ The 1.0 contract requires every artifact reader to validate its format and
 feature version before mapping data. Compatible artifacts load normally. An
 incompatible, future, corrupt, or incomplete artifact must fail closed with an
 actionable rebuild error and must never be silently reinterpreted. Cross-backend
-validation-before-publication and last-good-generation retention remain release
-gates until the 1.0 release evidence is complete.
+validation-before-publication and last-good-generation retention are permanent
+release gates.
 
 Because PostgreSQL tables are the source of truth, rebuilding derived graph
 state is the compatibility fallback. Release notes identify any release that

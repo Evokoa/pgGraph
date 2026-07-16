@@ -5,6 +5,9 @@ This roadmap is directional rather than a dated release commitment. PostgreSQL
 source tables remain authoritative in every direction described here.
 </Callout>
 
+pgGraph 1.0.0 is release-ready but unpublished. Signed tags and package
+publication remain explicit release-owner actions, not roadmap work.
+
 ## Current Baseline
 
 pgGraph supports PostgreSQL 14 through 18 with a frozen SQL 1.0 surface and a
@@ -32,9 +35,9 @@ The exact supported surfaces are documented in the
 [GQL 1.0 profile](/user_guide/gql-profile), and
 [Versioning And Compatibility](/user_guide/versioning-and-compatibility).
 
-## Remaining 1.0 Focus
+## 1.0 Release-Ready Baseline
 
-The remaining 1.0 work is release preparation rather than feature expansion:
+The 1.0 release program established these permanent release outcomes:
 
 | Area | Release outcome |
 |---|---|
@@ -42,11 +45,10 @@ The remaining 1.0 work is release preparation rather than feature expansion:
 | Packaging | Clean source/PGXN and PostgreSQL 14–18 package-install evidence, matching checksums, SBOMs, provenance, and license/dependency validation. |
 | CI and release gates | Required PR, nightly, RC, and full-matrix tiers with retained logs and reproducible evidence. |
 | Operations | Fresh install, alpha-to-1.0 source-preserving migration, rebuild, rollback, backup/restore, crash recovery, cancellation, resource, and cleanup proofs. |
-| Release candidate | One reviewed evidence bundle tied to a clean immutable commit before any tag or publication action. |
+| Release evidence | One reviewed evidence bundle tied to a clean immutable commit before any tag or publication action. |
 
-New query syntax, analytics breadth, or architecture expansion does not enter
-the 1.0 contract unless it is required to close a correctness, security,
-compatibility, resource, packaging, or operations defect.
+Future 1.x work does not weaken these outcomes. New query syntax, analytics
+breadth, and architecture expansion remain post-1.0 directions.
 
 ## Post-1.0 Direction
 

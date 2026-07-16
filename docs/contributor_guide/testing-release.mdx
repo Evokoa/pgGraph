@@ -587,62 +587,72 @@ release-owner waiver with the measured evidence that justifies it.
 
 ## Continuous Integration
 
-Pull requests and pushes to `main` run the `pr` release tier. A scheduled job
-runs the `nightly` tier. Both jobs retain the JSON evidence as a workflow
-artifact, while GitHub Actions retains the command output in the job log. The
-jobs use runners labeled `pggraph-release` so
+The versioned workflow definitions configure pull requests and pushes to
+`main` for the `pr` release tier and a scheduled job for the `nightly` tier.
+Both definitions retain JSON evidence as a workflow artifact, while GitHub
+Actions retains command output in the job log. The jobs require runners labeled
+`pggraph-release` so
 the pinned Rust toolchain, PostgreSQL 17 development environment, pgrx cluster,
 Node.js dependency cache, and gitleaks binary are available without mutable
 bootstrap steps in each workflow.
 
 Runner images are maintained from the same PostgreSQL matrix Dockerfile and
 must be refreshed whenever `rust-toolchain.toml`, the pgrx version, or the
-documentation lockfile changes. Repository branch protection should require
-the `Required release gate` job. A skipped or unavailable self-hosted runner is
-not passing evidence; release owners must restore runner capacity and rerun the
-job.
+documentation lockfile changes. Before publication, the release owner verifies
+that Actions schedules these definitions, the required runners are available,
+repository rules require the `Required release gate` job, and protected release
+environments match policy. A skipped or unavailable runner is not passing
+evidence.
 
 ## Package Release Workflow
 
-The package workflow is manually dispatched in two phases so the expensive
-multi-architecture Docker builds can run before the public release window.
-
-After release metadata is updated and merged, create and push the intended
-release tag:
-
-```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
-
-Run the `Prepare Or Publish Packages` GitHub Actions workflow with:
+The package workflow is manually dispatched in two phases so verified source
+and multi-architecture Docker artifacts can be prepared before a signed tag or
+public release exists. Run `Prepare Or Publish Packages` with:
 
 ```text
 mode: prepare
 tag: vX.Y.Z
+source_ref: <full reviewed commit SHA>
+evidence_run_id: <successful full-matrix run ID>
 ```
 
-The prepare phase validates the tag and metadata, builds PostgreSQL 14 through
-18 Docker images, pushes prepared GHCR tags, verifies those prepared images, and
-uploads the PGXN source archive as a workflow artifact. Prepared Docker tags use
-the release tag plus a `-prepared` suffix, for example:
+The prepare phase validates the commit and evidence, builds PostgreSQL 14
+through 18 Docker images, pushes commit-addressed prepared GHCR tags, verifies
+those prepared images, and uploads the source bundle as a workflow artifact.
 
 ```text
 ghcr.io/<owner>/pggraph:pg17-vX.Y.Z-prepared
 ```
 
-After prepare passes, create the GitHub Release for the same tag. Then dispatch
-the workflow again with:
+After preparation and artifact review pass, create and verify the signed
+annotated tag at the exact commit, push it, and create the GitHub Release. Then
+dispatch the workflow again with:
 
 ```text
 mode: publish
 tag: vX.Y.Z
+prepare_run_id: <successful prepare run ID>
 ```
 
 The publish phase verifies the GitHub Release exists, checks that the prepared
 tag matches the prepared commit-sha tag, promotes prepared Docker manifests to
 the public release tags, publishes PGXN, attaches the PGXN archive to the GitHub
 Release, and verifies the final GHCR tags. It must not rebuild the Docker images.
+
+### Separate Homebrew Tap Handoff
+
+The protected package workflow does not publish the external Evokoa Homebrew
+tap. After the signed GitHub release exists, the tap owner performs a separate
+handoff:
+
+1. Update the formula to the signed 1.0.0 source archive URL and exact SHA-256.
+2. Run `brew audit --strict --online pggraph`, `brew style pggraph`, and
+   `brew test pggraph` in the tap repository.
+3. Install into PostgreSQL 17, query `pg_extension`, and verify the reported
+   extension version is `1.0.0`.
+4. Announce Homebrew availability only after the formula commit and checksum
+   are reviewed. A delayed tap update does not change PGXN/GHCR release bytes.
 
 ## Fuzzing
 

@@ -276,3 +276,9 @@ changing expected results.
 generated and drift-gated, unsupported compatibility syntax has stable
 diagnostics, every public SQL function has one evidence group, and bounded GQL
 writes retain PostgreSQL as the authoritative source of truth.
+
+2026-07-16 R7 release-ready closure — The PostgreSQL 14–18 release matrix,
+packaged examples, compatibility and migration proofs, security/resource/crash
+gates, deterministic source bundle, and independent reviews are complete;
+pgGraph 1.0.0 is release-ready but unpublished, with signed tag and publication
+reserved for the release-owner handoff.

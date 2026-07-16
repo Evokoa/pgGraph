@@ -1,5 +1,9 @@
 # Build Order
 
+> **Archived 2026-07-16:** The release-scoped checkpoints are complete. This
+> order is retained for historical context; later engine work is owned only by
+> the public roadmap.
+
 This is the long-term engine build order. The
 [pgGraph 1.0 release program](../v1-release/README.md) owns release scope:
 checkpoints 0 through 3 are production blockers, checkpoint 4 and checkpoint 5
@@ -164,10 +168,9 @@ correctness, tails, memory, build/load, update lag, and operational cost.
 
 ## Checkpoint 9: Clear The Current Public Backlog
 
-- Complete every `OPEN` row in
-  [the closure ledger](./09-public-backlog-closure.md).
-- Resolve each `CONDITIONAL` item through its stated evidence gate: implement
-  it or remove it with a durable rejection/non-goal rationale.
+- Close every 1.0 row in
+  [the closure ledger](./09-public-backlog-closure.md) and assign every
+  undelivered direction to the post-1.0 roadmap.
 - Move `RESOLVED-RETIRE` items out of active Known Issues after release
   regressions and release-note evidence are confirmed.
 - Graduate delivered roadmap work into Current Baseline, then remove its

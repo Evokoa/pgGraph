@@ -7,9 +7,9 @@ still exposes it, but PostgreSQL 13 has reached upstream EOL and is not part of
 the release support matrix.
 
 <Callout type="warning">
-The source tree currently represents the pgGraph 1.0.0 release candidate. It is
-not yet tagged or published. Build from the reviewed source commit until the
-signed PGXN, GHCR, and Homebrew artifacts are announced.
+The pgGraph 1.0.0 source tree is release-ready but unpublished. Build from the
+reviewed source commit until signed PGXN and GHCR artifacts and the matching
+Homebrew formula are announced.
 </Callout>
 
 ## Source Build Requirements
@@ -54,12 +54,17 @@ psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname 
 ```
 
 Use Homebrew after its formula version and checksum match the signed 1.0.0
-release bundle. For the candidate quickstart, build the repository's Compose
+release bundle. Before publication, build the repository's Compose
 image locally.
 
 The Homebrew formula is a convenience channel for PostgreSQL 17. After
 publication, the complete 1.0 package matrix is the checksummed PGXN/source
 archive and attested GHCR images for PostgreSQL 14 through 18.
+
+Homebrew is maintained through the separate Evokoa tap, not published by this
+repository's protected PGXN/GHCR workflow. The tap owner updates its source URL
+and checksum from the signed release bundle, runs the formula audit and test,
+and announces availability only after the installed extension reports 1.0.0.
 
 ## Install pgrx
 

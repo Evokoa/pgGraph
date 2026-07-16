@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.0.0-2ea44f?style=flat-square" alt="Version 1.0.0">
+    <img src="https://img.shields.io/badge/version-1.0.0%20release--ready-f59e0b?style=flat-square" alt="Version 1.0.0 release-ready">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -71,9 +71,9 @@ pgGraph 是一个 PostgreSQL 扩展，用于直接针对普通 PostgreSQL 表运
 你的表仍然是事实来源。pgGraph 会构建一个派生的图索引，并让你通过 SQL 使用 `graph` schema 中的函数来查询它。
 
 > [!WARNING]
-> 当前已发布版本是 v0.1.8 alpha。本提交包含 pgGraph 1.0.0 发布候选版本；
-> 该版本尚未创建 tag 或发布。在签名的 1.0.0 构件正式发布前，请从源码构建
-> 候选版本。
+> 当前已发布版本是 v0.1.8 alpha。本提交中的 pgGraph 1.0.0
+> 已达到发布就绪状态，但尚未发布。在签名的 1.0.0 构件正式发布前，请从
+> 已审查的源码提交构建。
 
 <!-- README_SYNC_POLICY: README.md is canonical; version, PostgreSQL support, and shared commands are checked by scripts/check_public_docs.py. -->
 
@@ -93,7 +93,7 @@ pgGraph 在你现有的 PostgreSQL 表之上添加图查询，不需要单独的
 
 ## 快速开始
 
-发布候选版本的推荐快速体验方式，是从本仓库构建一次性的 PostgreSQL 17 镜像：
+发布就绪源码的推荐快速体验方式，是从本仓库构建一次性的 PostgreSQL 17 镜像：
 
 ```bash
 git clone https://github.com/evokoa/pggraph.git
@@ -117,6 +117,27 @@ docker exec pggraph psql -U postgres -d graph \
 
 ```bash
 psql -h localhost -U postgres -d graph
+```
+
+## 发布后的 Homebrew 安装
+
+1.0.0 发布后，[Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap)
+将作为 PostgreSQL 17 的便捷安装渠道。该 tap 由独立发布流程维护；在公式版本
+和 checksum 与已签名的 1.0.0 release bundle 一致之前，请继续使用上面的源码
+快速开始流程。tap 在更新完成前仍可能指向 alpha 版本。
+
+```bash
+brew tap Evokoa/tap
+brew install pggraph
+brew test pggraph
+```
+
+安装后，确认扩展版本：
+
+```bash
+brew services start postgresql@17
+psql -d postgres -c "CREATE EXTENSION graph;"
+psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';"
 ```
 
 如果你想从源码构建或运行完整的交互式演示，可以使用提供的快速启动脚本。

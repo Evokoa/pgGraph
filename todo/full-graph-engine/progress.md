@@ -2,30 +2,30 @@
 
 Last updated: 2026-07-16
 
-The authoritative 1.0 scope now lives in
-[`../v1-release/README.md`](../v1-release/README.md). This file continues to
-track detailed full-engine implementation evidence; it does not make
-PostgreSQL 19, full ISO GQL, competitive breadth, or dynamic graphs a 1.0
-release blocker.
+> **Archived:** The authoritative completed 1.0 scope lives in
+> [`../v1-release/README.md`](../v1-release/README.md). This file preserves
+> historical implementation evidence and has no next executable checkpoint.
+> PostgreSQL 19, full ISO GQL, competitive breadth, dynamic graphs, and broader
+> refactoring are owned by the public roadmap.
 
 ## Current State
 
 | Checkpoint | Status | Evidence / next action |
 |---|---|---|
-| 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
-| Rust type/unsafe/pgrx boundary | KI-020 retired; RUST-00C through RUST-00F supported-major retirement pending | Mapped stores own validated ranges and pass Miri, full Rust ASan, PostgreSQL 14-18 regressions, and a PostgreSQL-process Valgrind gate. Graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. |
+| 0. Freeze and measure | Complete for 1.0 | Machine-readable conformance, static safety, regression, and resource baselines are release-gated. |
+| Rust type/unsafe/pgrx boundary | Complete for 1.0 | Mapped stores own validated ranges and pass Miri, full Rust ASan, PostgreSQL 14-18 regressions, and a PostgreSQL-process Valgrind gate. Graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. |
 | 1A. Security and identity | Complete | R1 correctness, authorization, durable identity, transaction isolation, DDL identity, and PostgreSQL 14-18 regression evidence is complete. |
-| 1B. Memory containment | Complete | R2A-R2C enforce checked build policy, live construction reservations, load/query/sync/compaction/analytics breakers, pinned projection snapshots, and a repeatable RSS/Linux-PSS runtime gate; inbound/filter mmap and analytics worker isolation remain explicit R3 work. |
-| 1C. Safe publication | Manifest subphase complete | Checksummed pointer CAS, cross-process locks, reader pins, rollback ancestry, and bounded GC are implemented; the generation-specific base-artifact switch closes with R3C/R3D. |
-| 2. Artifact vNext/out-of-core | In progress | Execute `../v1-release/r3-bounded-storage-execution-plan.md`: source fence, governed runs, v5 mapped artifact, then direct persisted spill build. |
-| 3. Bounded load/sync/compaction | Not started | mmap inbound/filter data and range compaction. |
-| 4. Refactor foundations | Not started | Complete canonical enum/newtype, pgrx-adapter, and unsafe-allowlist work from `10-rust-type-safety-pgrx-boundaries.md` while splitting modules. |
-| 5. Streaming costed runtime | Not started | Canonical IR and resource governor are prerequisites. |
-| 6. Full GQL slices | Not started | Conformance registry is prerequisite. |
-| 7. PostgreSQL 19 SQL/PGQ | Planned | Pinned pgrx 0.19.1 exposes `pg19`; add the graph feature/experimental lane, then execute PG19-0 through PG19-5 without duplicate registration. |
-| 8. Competitive program | Planned | Requires correctness and reproducible baseline. |
-| 9. Clear current public backlog | Planned | Close every ledger row and remove delivered/resolved work from active Roadmap/Known Issues. |
-| Public backlog closure | In progress | `09-public-backlog-closure.md` maps every current Roadmap/KI row to evidence or an explicit decision. |
+| 1B. Memory containment | Complete | R2A-R2C enforce checked build policy, live construction reservations, load/query/sync/compaction/analytics breakers, pinned projection snapshots, and repeatable RSS/Linux-PSS gates. |
+| 1C. Safe publication | Complete | Checksummed pointer CAS, cross-process locks, reader pins, rollback ancestry, generation-specific base artifacts, and bounded GC are implemented. |
+| 2. Artifact vNext/out-of-core | Complete for 1.0 | R3 delivered the coherent source fence, governed runs, mapped artifact v6, and direct persisted spill build. |
+| 3. Bounded load/sync/compaction | Complete for 1.0 | Required mmap residency, bounded sync ingest, range compaction, and recovery gates are permanent. |
+| 4. Refactor foundations | Roadmap archive | Release-risk boundaries closed in R4; broader module decomposition remains public roadmap work. |
+| 5. Streaming costed runtime | Roadmap archive | The bounded 1.0 profile is complete; generalized costed streaming remains public roadmap work. |
+| 6. Full GQL slices | Roadmap archive | The generated bounded 1.0 profile is complete; full ISO GQL remains public roadmap work. |
+| 7. PostgreSQL 19 SQL/PGQ | Roadmap archive | PostgreSQL 19 and SQL/PGQ are post-1.0 directions. |
+| 8. Competitive program | Roadmap archive | Competitive breadth and scorecards are post-1.0 directions. |
+| 9. Clear current public backlog | Complete | Delivered work graduated, current limits remain in Known Issues, and future directions moved to Roadmap. |
+| Public backlog closure | Complete | `09-public-backlog-closure.md` is an archived disposition ledger. |
 
 ## Completed This Review
 
@@ -95,7 +95,7 @@ release blocker.
   Overlay and layered neighbors intentionally expose no ID until their segment
   formats migrate or relationship hydration/RLS can fail closed.
 
-- Reviewed roadmap, known issues, TODO history, memory model, build/load,
+- Reviewed roadmap, known issues, planning history, memory model, build/load,
   projection, GQL, query execution, hydration, and major refactor hotspots.
 - Committed pre-existing low-memory rebuild mitigation as `8fea899`.
 - Verified formatting, warnings-denied clippy, 652 Rust tests (1 ignored),
@@ -110,7 +110,11 @@ release blocker.
 - Verified pinned pgrx 0.19.1 already exposes `pg19`; the remaining PG19 work
   is an explicit feature/toolchain/test/package gate, not a wait for pgrx.
 
-## Next Executable Checkpoint
+## Historical Checkpoint Notes
+
+The notes below record the order used during implementation. They are not an
+active queue; any undelivered direction now starts from the public roadmap with
+a new plan and acceptance evidence.
 
 Checkpoint 0 regression pack, in this order:
 

@@ -63,7 +63,7 @@ Linux PSS is not available from macOS. On Linux the same gate samples
 `RUN_RUNTIME_RESOURCES=1`. The supported-environment release run must retain
 that Linux PSS evidence rather than substituting RSS.
 
-## Preserved State And Remaining KI-013 Work
+## Preserved State After R2C
 
 - A replacement load with no remaining private-memory headroom rejects before
   allocation; the serving engine is not mutated.

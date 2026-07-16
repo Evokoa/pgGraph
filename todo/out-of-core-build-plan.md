@@ -1,5 +1,10 @@
 # Out-Of-Core Graph Build Plan
 
+> **Archived 2026-07-16:** The release-scoped design was implemented through
+> governed external runs, direct persisted artifact v6 construction, bounded
+> load/sync/compaction, and release resource gates. This file is retained only
+> as historical design context and contains no remaining task.
+
 > **Program note:** This focused sketch predates the full codebase review.
 > [Memory Governance And Out-Of-Core Execution](./full-graph-engine/01-memory-governance.md)
 > is now authoritative where the plans differ. It also covers mmap load, query

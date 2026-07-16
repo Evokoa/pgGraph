@@ -1,8 +1,9 @@
 # pgGraph 1.0 Release Program
 
-This directory is the single source of truth for work required to publish
-pgGraph 1.0. The broader full-engine plans remain useful design references,
-but an item is a 1.0 blocker only when it appears here.
+This directory archives the completed work required to make pgGraph 1.0
+release-ready. The broader full-engine plans remain design references, while
+post-1.0 work is owned by the public roadmap. Signed tags and publication are
+release-owner actions outside this completed implementation program.
 
 ## Release Contract
 
@@ -28,10 +29,10 @@ remain visible on the public roadmap without blocking this release.
 | R4 | Release-risk refactoring | High-risk boundaries are typed and isolated; playground, scripts, and release orchestration have clear ownership without changing public behavior. | Complete |
 | R5 | Supported query and write profile | Every advertised SQL/GQL feature has conformance, security, transaction, resource, diagnostic, and documentation evidence. Unsupported syntax fails deterministically. | Complete |
 | R6 | Documentation, packaging, CI, and operations | Public docs are coherent; PG14-18 install/upgrade/package matrix and required CI/release gates are green. | Complete |
-| R7 | Release candidate and 1.0 publication | Clean install, upgrade, rollback, backup/restore, crash, performance, and artifact evidence is archived; no release-blocking issue remains. | In progress |
+| R7 | Release-ready handoff | Clean install, upgrade, rollback, backup/restore, crash, performance, and artifact evidence is archived; no release-blocking issue remains. | Complete |
 
-Phases are completed in order. Work may be prepared in parallel, but a phase
-does not close until its exit evidence is recorded in `todo/progress.md`.
+All phases completed in order. Their exit evidence is recorded in
+`todo/progress.md` and the linked measurement reports.
 
 ## Required Plans
 

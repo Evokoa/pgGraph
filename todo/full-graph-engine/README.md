@@ -1,5 +1,10 @@
 # Full Graph Engine Program
 
+> **Archived 2026-07-16:** This directory is a historical design and evidence
+> snapshot. It contains no executable work queue. The completed 1.0 program is in
+> [../v1-release/](../v1-release/README.md); all undelivered directions are
+> owned by the public roadmap.
+
 > **Release scope:** This program describes the long-term engine. The
 > [pgGraph 1.0 release program](../v1-release/README.md) is the authoritative
 > source for 1.0 blockers and explicitly places broader standards, PostgreSQL
@@ -34,7 +39,11 @@ reproducible correctness, latency, throughput, build, sync, and memory results.
 - Parallel relationships retain source-row identity.
 - Long-running loops are interruptible and resource failures are typed.
 
-## Stop-Ship Findings
+## Historical Stop-Ship Findings
+
+These findings drove the 1.0 work. They are retained for design context; their
+release-scoped outcomes are complete, while broader expansions are roadmap
+items rather than tasks in this archive.
 
 | Finding | Evidence | Required outcome |
 |---|---|---|

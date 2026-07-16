@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "state": "candidate",
+  "state": "release_ready",
   "published_version": "0.1.8",
   "candidate_version": "1.0.0",
   "production_version": null,
