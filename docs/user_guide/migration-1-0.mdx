@@ -34,14 +34,21 @@ PostgreSQL major. Dropping the extension removes extension-owned catalogs; it
 must not drop the ordinary source tables registered with pgGraph.
 
 Before using `CASCADE`, run a dependency preflight in a separate `psql`
-session. PostgreSQL reports every object that would block a plain drop; the
-failed transaction is discarded when the session exits:
+session. PostgreSQL reports every object that would block a plain drop. Always
+end the preflight with `ROLLBACK`, whether the drop succeeds or the transaction
+is already aborted:
 
 ```sql
 BEGIN;
 DROP EXTENSION graph;
--- This transaction is expected to abort when dependents exist.
+-- Review either the dependency error or the successful dry-run result.
+ROLLBACK;
 ```
+
+If dependents exist, `DROP EXTENSION` fails and `ROLLBACK` clears the aborted
+transaction. If no dependents exist, the drop succeeds only inside the test
+transaction and `ROLLBACK` restores the extension. Do not close or reuse the
+session until the rollback result is visible.
 
 Review the reported application views, functions, generated synchronization
 objects, and other dependents. Recreate every application-owned object from its

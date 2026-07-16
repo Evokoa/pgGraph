@@ -35,6 +35,42 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertEqual(failure.exception.code, 1)
             self.assertIn("candidate_version", stderr.getvalue())
 
+    def test_release_dependencies_are_immutable(self) -> None:
+        validate_release.validate_release_dependencies()
+
+    def test_moving_release_action_fails(self) -> None:
+        original = validate_release.read_text
+
+        def read_text(path: str) -> str:
+            if path == ".github/workflows/release.yml":
+                return "steps:\n  - uses: actions/checkout@v4\n"
+            return original(path)
+
+        with patch.object(validate_release, "read_text", side_effect=read_text):
+            stderr = StringIO()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit):
+                validate_release.validate_release_dependencies()
+            self.assertIn("not pinned to a full commit", stderr.getvalue())
+
+    def test_moving_postgres_release_image_fails(self) -> None:
+        original = validate_release.read_text
+
+        def read_text(path: str) -> str:
+            value = original(path)
+            if path == ".github/workflows/release.yml":
+                return value.replace(
+                    "postgres:17-bookworm@sha256:"
+                    "4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394",
+                    "postgres:17-bookworm",
+                )
+            return value
+
+        with patch.object(validate_release, "read_text", side_effect=read_text):
+            stderr = StringIO()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit):
+                validate_release.validate_release_dependencies()
+            self.assertIn("PostgreSQL image is not pinned by digest", stderr.getvalue())
+
 
 class ReleaseEvidenceTests(unittest.TestCase):
     @staticmethod

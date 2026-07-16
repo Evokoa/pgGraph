@@ -29,7 +29,7 @@ jobs:
     runs-on: [self-hosted, pggraph-release]
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       - name: Install locked documentation checks
@@ -38,7 +38,7 @@ jobs:
         run: scripts/run_release.py --tier pr --evidence release/evidence/pr.json
       - name: Retain evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pr-release-evidence-${{ github.run_id }}
           path: release/evidence/
@@ -51,7 +51,7 @@ jobs:
     runs-on: [self-hosted, pggraph-release]
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       - name: Install locked documentation checks
@@ -60,7 +60,7 @@ jobs:
         run: scripts/run_release.py --tier nightly --evidence release/evidence/nightly.json
       - name: Retain evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nightly-release-evidence-${{ github.run_id }}
           path: release/evidence/
@@ -74,7 +74,7 @@ jobs:
     environment: release-candidate
     timeout-minutes: 1440
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       - name: Require an immutable clean source commit
@@ -94,7 +94,7 @@ jobs:
             --commit "$(git rev-parse HEAD)"
       - name: Retain release candidate evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-evidence-${{ inputs.tier }}-${{ github.sha }}-${{ github.run_id }}
           path: release/evidence/

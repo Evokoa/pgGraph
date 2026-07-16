@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
+import subprocess
+import zipfile
 from pathlib import Path
 
 
@@ -27,6 +30,66 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version")
     parser.add_argument("--commit")
     return parser.parse_args()
+
+
+def git_output(*args: str) -> bytes:
+    return subprocess.check_output(["git", *args], cwd=Path(__file__).resolve().parents[1])
+
+
+def verify_source_archive(archive: Path, version: str, commit: str) -> None:
+    prefix = f"pgGraph-{version}/"
+    tree: dict[str, str] = {}
+    for record in git_output("ls-tree", "-rz", "--full-tree", commit).split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_name = record.split(b"\t", 1)
+        _mode, kind, object_id = metadata.decode("ascii").split()
+        if kind == "blob":
+            tree[raw_name.decode("utf-8")] = object_id
+
+    with zipfile.ZipFile(archive) as source_zip:
+        members: dict[str, zipfile.ZipInfo] = {}
+        for info in source_zip.infolist():
+            if info.flag_bits & 0x1:
+                fail(f"encrypted source-archive member: {info.filename}")
+            if not info.filename.startswith(prefix):
+                fail(f"source-archive member is outside {prefix!r}: {info.filename}")
+            relative = info.filename.removeprefix(prefix)
+            if not relative or info.is_dir():
+                continue
+            if relative.startswith("/") or ".." in Path(relative).parts:
+                fail(f"unsafe source-archive member: {info.filename}")
+            if relative in members:
+                fail(f"duplicate source-archive member: {relative}")
+            members[relative] = info
+
+        if set(members) != set(tree):
+            difference = sorted(set(members) ^ set(tree))
+            fail(f"source archive differs from commit tree: {difference[:10]}")
+        for name, object_id in tree.items():
+            if source_zip.read(members[name]) != git_output("cat-file", "blob", object_id):
+                fail(f"source-archive content differs from commit: {name}")
+
+        required = {
+            "LICENSE",
+            "META.json",
+            "README.md",
+            "graph/Cargo.lock",
+            "graph/Cargo.toml",
+            "graph/graph.control",
+        }
+        if missing := sorted(required - set(members)):
+            fail(f"source archive is missing required files: {missing}")
+        meta = json.loads(source_zip.read(members["META.json"]))
+        if meta.get("name") != "pgGraph" or meta.get("version") != version:
+            fail("source-archive META.json does not describe the release version")
+        cargo = source_zip.read(members["graph/Cargo.toml"]).decode("utf-8")
+        cargo_version = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.MULTILINE)
+        if not cargo_version or cargo_version.group(1) != version:
+            fail("source-archive Cargo.toml version differs from the release")
+        control = source_zip.read(members["graph/graph.control"]).decode("utf-8")
+        if "default_version = '@CARGO_VERSION@'" not in control:
+            fail("source-archive control file does not use the package version token")
 
 
 def main() -> int:
@@ -64,6 +127,7 @@ def main() -> int:
     }
     if expected_payload != required_payload:
         fail(f"unexpected payload set: {sorted(expected_payload)}")
+    verify_source_archive(bundle / archive_name, manifest["version"], manifest["source_commit"])
 
     checksums = {}
     for line in checksums_path.read_text(encoding="utf-8").splitlines():

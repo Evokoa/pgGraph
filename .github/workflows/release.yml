@@ -72,8 +72,16 @@ jobs:
             echo "Prepare source_ref must be a full 40-character commit SHA" >&2
             exit 1
           fi
+          if [[ "$mode" == "prepare" && ! "${{ inputs.evidence_run_id }}" =~ ^[0-9]+$ ]]; then
+            echo "Prepare evidence_run_id must be a numeric workflow run ID" >&2
+            exit 1
+          fi
           if [[ "$mode" == "publish" && -z "${{ inputs.prepare_run_id }}" ]]; then
             echo "Publish mode requires prepare_run_id" >&2
+            exit 1
+          fi
+          if [[ "$mode" == "publish" && ! "${{ inputs.prepare_run_id }}" =~ ^[0-9]+$ ]]; then
+            echo "Publish prepare_run_id must be a numeric workflow run ID" >&2
             exit 1
           fi
 
@@ -90,14 +98,14 @@ jobs:
         run: gh release view "${{ steps.release.outputs.tag }}" >/dev/null
 
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ steps.release.outputs.mode == 'prepare' && steps.release.outputs.source_ref || steps.release.outputs.tag }}
           fetch-depth: 0
 
       - name: Download full-matrix evidence
         if: steps.release.outputs.mode == 'prepare'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.evidence_run_id }}
           pattern: release-evidence-full-matrix-*
@@ -105,10 +113,42 @@ jobs:
           merge-multiple: true
           github-token: ${{ github.token }}
 
+      - name: Authenticate full-matrix workflow run
+        if: steps.release.outputs.mode == 'prepare'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EXPECTED_SHA: ${{ steps.release.outputs.source_ref }}
+          RUN_ID: ${{ inputs.evidence_run_id }}
+        run: |
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > /tmp/evidence-run.json
+          jq -e \
+            --arg repo "$GH_REPO" \
+            --arg sha "$EXPECTED_SHA" \
+            --arg workflow ".github/workflows/ci.yml" \
+            '.repository.full_name == $repo and
+             .head_repository.full_name == $repo and
+             .event == "workflow_dispatch" and
+             .status == "completed" and
+             .conclusion == "success" and
+             .head_sha == $sha and
+             (.path | split("@")[0]) == $workflow' \
+            /tmp/evidence-run.json >/dev/null
+          gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+            | jq -s -e \
+              --arg sha "$EXPECTED_SHA" \
+              '[.[].jobs[] | select(
+                 .name == "full-matrix release evidence" and
+                 .head_sha == $sha and
+                 .status == "completed" and
+                 .conclusion == "success"
+               )] | length == 1' >/dev/null
+
       - name: Validate preparation source and evidence
         if: steps.release.outputs.mode == 'prepare'
         run: |
           commit="$(git rev-parse HEAD)"
+          test "${{ github.sha }}" = "$commit"
           scripts/validate_release.py \
             --version "${{ steps.release.outputs.version }}" \
             --ref "$commit" --check-main --require-clean
@@ -118,9 +158,32 @@ jobs:
       - name: Validate signed publication tag
         if: steps.release.outputs.mode == 'publish'
         run: |
+          test "${{ github.sha }}" = "$(git rev-parse HEAD)"
           scripts/validate_release.py \
             --tag "${{ steps.release.outputs.tag }}" \
             --check-main --require-clean --require-signed-tag
+
+      - name: Authenticate preparation workflow run
+        if: steps.release.outputs.mode == 'publish'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EXPECTED_SHA: ${{ github.sha }}
+          RUN_ID: ${{ inputs.prepare_run_id }}
+        run: |
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > /tmp/prepare-run.json
+          jq -e \
+            --arg repo "$GH_REPO" \
+            --arg sha "$EXPECTED_SHA" \
+            --arg workflow ".github/workflows/release.yml" \
+            '.repository.full_name == $repo and
+             .head_repository.full_name == $repo and
+             .event == "workflow_dispatch" and
+             .status == "completed" and
+             .conclusion == "success" and
+             .head_sha == $sha and
+             (.path | split("@")[0]) == $workflow' \
+            /tmp/prepare-run.json >/dev/null
 
       - name: Capture release commit
         id: commit
@@ -139,7 +202,7 @@ jobs:
       attestations: write
     steps:
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.validate.outputs.full_sha }}
           fetch-depth: 0
@@ -158,18 +221,18 @@ jobs:
             --commit "${{ needs.validate.outputs.full_sha }}"
 
       - name: Attest release bundle provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: dist/*
 
       - name: Attest source archive SBOM
-        uses: actions/attest-sbom@v2
+        uses: actions/attest-sbom@10926c72720ffc3f7b666661c8e55b1344e2a365 # v2
         with:
           subject-path: dist/pgGraph-${{ needs.validate.outputs.version }}.zip
           sbom-path: dist/pgGraph-${{ needs.validate.outputs.version }}.spdx.json
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-bundle-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}
           path: dist/
@@ -188,13 +251,13 @@ jobs:
       attestations: write
     steps:
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.validate.outputs.full_sha }}
           fetch-depth: 0
 
       - name: Download full-matrix evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.evidence_run_id }}
           pattern: release-evidence-full-matrix-*
@@ -212,12 +275,12 @@ jobs:
             | gzip -n > "evidence-dist/release-evidence-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}.tar.gz"
 
       - name: Attest evidence archive provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: evidence-dist/release-evidence-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}.tar.gz
 
       - name: Upload immutable evidence archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-evidence-archive-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}
           path: evidence-dist/
@@ -248,13 +311,13 @@ jobs:
       attestations: read
     steps:
       - name: Checkout release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.validate.outputs.tag }}
           fetch-depth: 0
 
       - name: Download prepared release bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.prepare_run_id }}
           pattern: release-bundle-${{ needs.validate.outputs.version }}-*
@@ -263,7 +326,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Download prepared release evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.prepare_run_id }}
           pattern: release-evidence-archive-${{ needs.validate.outputs.version }}-*
@@ -281,16 +344,22 @@ jobs:
           for artifact in dist/*; do
             gh attestation verify "$artifact" \
               --repo "${{ github.repository }}" \
+              --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
+              --source-digest "${{ needs.validate.outputs.full_sha }}" \
               --predicate-type https://slsa.dev/provenance/v1
           done
           gh attestation verify \
             "dist/pgGraph-${{ needs.validate.outputs.version }}.zip" \
             --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
+            --source-digest "${{ needs.validate.outputs.full_sha }}" \
             --predicate-type https://spdx.dev/Document/v2.3
           evidence_archive="$(find evidence-dist -name '*.tar.gz' -type f -print -quit)"
           test -n "$evidence_archive"
           gh attestation verify "$evidence_archive" \
             --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
+            --source-digest "${{ needs.validate.outputs.full_sha }}" \
             --predicate-type https://slsa.dev/provenance/v1
           mkdir -p release/evidence
           tar -xzf "$evidence_archive" -C release/evidence
@@ -305,18 +374,18 @@ jobs:
       - approve-publishing
       - verify-prepared-artifacts
     runs-on: ubuntu-latest
-    container: pgxn/pgxn-tools
+    container: pgxn/pgxn-tools:v1@sha256:53e79ef1c8b9a0ee88b51e89b36fd30c46c9f2326aec0cde1d7f66e47ad719ff
     permissions:
       contents: read
       actions: read
     steps:
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.validate.outputs.full_sha }}
 
       - name: Download prepared release bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.prepare_run_id }}
           pattern: release-bundle-${{ needs.validate.outputs.version }}-*
@@ -348,7 +417,7 @@ jobs:
       actions: read
     steps:
       - name: Download prepared release bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.prepare_run_id }}
           pattern: release-bundle-${{ needs.validate.outputs.version }}-*
@@ -405,13 +474,13 @@ jobs:
       actions: read
     steps:
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.validate.outputs.full_sha }}
           fetch-depth: 0
 
       - name: Download prepared release bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.prepare_run_id }}
           pattern: release-bundle-${{ needs.validate.outputs.version }}-*
@@ -420,7 +489,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Download prepared release evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.prepare_run_id }}
           pattern: release-evidence-archive-${{ needs.validate.outputs.version }}-*
@@ -464,16 +533,16 @@ jobs:
             pair: linux-arm64
     steps:
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.validate.outputs.full_sha }}
           fetch-depth: 0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -481,7 +550,7 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -493,15 +562,28 @@ jobs:
             org.opencontainers.image.postgresql.major=${{ matrix.pg }}
             org.opencontainers.image.revision=${{ needs.validate.outputs.short_sha }}
 
+      - name: Select immutable PostgreSQL base image
+        id: postgres-base
+        run: |
+          case "${{ matrix.pg }}" in
+            14) image="postgres:14-bookworm@sha256:9062043625415b4628f0ca44c2c65de93778afb7b1db33aff67877cace3b966f" ;;
+            15) image="postgres:15-bookworm@sha256:b0c5bab0fbba8e0c221f73b1dc6359ec35f8650074377e727299df248fc8ad51" ;;
+            16) image="postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55" ;;
+            17) image="postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394" ;;
+            18) image="postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296" ;;
+            *) echo "Unsupported PostgreSQL major: ${{ matrix.pg }}" >&2; exit 2 ;;
+          esac
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: ${{ matrix.platform.name }}
           build-args: |
             PG_MAJOR=${{ matrix.pg }}
-            POSTGRES_IMAGE=postgres:${{ matrix.pg }}-bookworm
+            POSTGRES_IMAGE=${{ steps.postgres-base.outputs.image }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           tags: ${{ env.IMAGE_NAME }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -517,7 +599,7 @@ jobs:
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digests-pg${{ matrix.pg }}-${{ matrix.platform.pair }}
           path: ${{ runner.temp }}/digests/*
@@ -542,10 +624,10 @@ jobs:
         pg: [14, 15, 16, 17, 18]
     steps:
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -553,7 +635,7 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -562,7 +644,7 @@ jobs:
             type=raw,value=pg${{ matrix.pg }}-${{ needs.validate.outputs.version }}-prepared
 
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-pg${{ matrix.pg }}-*
@@ -604,7 +686,7 @@ jobs:
             > "${{ runner.temp }}/manifest/pg${{ matrix.pg }}.json"
 
       - name: Retain prepared manifest digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: docker-manifest-pg${{ matrix.pg }}-${{ needs.validate.outputs.short_sha }}
           path: ${{ runner.temp }}/manifest/pg${{ matrix.pg }}.json
@@ -612,7 +694,7 @@ jobs:
           retention-days: 90
 
       - name: Attest image provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
@@ -640,7 +722,7 @@ jobs:
             pair: linux-arm64
     steps:
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -724,7 +806,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download prepared manifest records
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: docker-manifest-pg*-${{ needs.validate.outputs.short_sha }}
           path: manifests
@@ -734,7 +816,7 @@ jobs:
         run: jq -s 'sort_by(.postgresql_major)' manifests/*.json > docker-manifests.json
 
       - name: Upload manifest inventory
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: docker-manifests-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}
           path: docker-manifests.json
@@ -760,17 +842,17 @@ jobs:
         pg: [14, 15, 16, 17, 18]
     steps:
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
       - name: Download prepared manifest inventory
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           run-id: ${{ inputs.prepare_run_id }}
           pattern: docker-manifests-${{ needs.validate.outputs.version }}-*
@@ -810,6 +892,8 @@ jobs:
           source_by_digest="${{ env.IMAGE_NAME }}@$expected_digest"
           gh attestation verify "oci://$source_by_digest" \
             --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
+            --source-digest "${{ needs.validate.outputs.full_sha }}" \
             --predicate-type https://slsa.dev/provenance/v1
           docker buildx imagetools inspect "$source_by_digest" \
             --format '{{ json .SBOM }}' | jq -e 'length > 0' >/dev/null
@@ -854,7 +938,7 @@ jobs:
             pair: linux-arm64
     steps:
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -949,7 +1033,7 @@ jobs:
             pair: linux-arm64
     steps:
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

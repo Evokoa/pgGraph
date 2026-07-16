@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CARGO_PACKAGE_RE = re.compile(r"^\[package\]\s*(.*?)(?=^\[|\Z)", re.MULTILINE | re.DOTALL)
 CARGO_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
+ACTION_SHA_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
+IMAGE_DIGEST_RE = re.compile(r"^[^\s@]+(?::[^\s@]+)?@sha256:[0-9a-f]{64}$")
 
 
 def fail(message: str) -> None:
@@ -59,6 +61,44 @@ def validate_version_metadata(version: str) -> None:
         fail(f"docs/release-notes.mdx is missing {release_heading}")
 
 
+def validate_release_dependencies() -> None:
+    for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+        for line_number, line in enumerate(read_text(path).splitlines(), start=1):
+            match = re.match(r"\s*-?\s*uses:\s*([^\s#]+)", line)
+            if match:
+                dependency = match.group(1)
+                if not dependency.startswith("./") and not ACTION_SHA_RE.fullmatch(dependency):
+                    fail(f"{path}:{line_number} action is not pinned to a full commit: {dependency}")
+            match = re.match(r"\s*container:\s*([^\s#]+)", line)
+            if match and not IMAGE_DIGEST_RE.fullmatch(match.group(1)):
+                fail(f"{path}:{line_number} container is not pinned by digest: {match.group(1)}")
+
+    dockerfile = read_text("Dockerfile")
+    for name in ("RUST_IMAGE", "POSTGRES_IMAGE"):
+        match = re.search(rf"^ARG {name}=([^\s]+)$", dockerfile, re.MULTILINE)
+        if not match or not IMAGE_DIGEST_RE.fullmatch(match.group(1)):
+            fail(f"Dockerfile {name} must be pinned by digest")
+    matrix_image = read_text("graph/tests/heavy/Dockerfile.pg-matrix").splitlines()[0]
+    if not re.fullmatch(r"FROM\s+[^\s]+@sha256:[0-9a-f]{64}", matrix_image):
+        fail("Dockerfile.pg-matrix builder image must be pinned by digest")
+
+    release_workflow = read_text(".github/workflows/release.yml")
+    postgres_images = re.findall(r'image="(postgres:[^"]+)"', release_workflow)
+    expected_majors = {str(major) for major in range(14, 19)}
+    actual_majors: set[str] = set()
+    for image in postgres_images:
+        if not IMAGE_DIGEST_RE.fullmatch(image):
+            fail(f"release workflow PostgreSQL image is not pinned by digest: {image}")
+        major_match = re.fullmatch(r"postgres:(\d+)-bookworm@sha256:[0-9a-f]{64}", image)
+        if major_match:
+            actual_majors.add(major_match.group(1))
+    if actual_majors != expected_majors:
+        fail(
+            "release workflow must pin PostgreSQL base images for majors 14 through 18; "
+            f"found {sorted(actual_majors)}"
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -100,6 +140,7 @@ def main() -> None:
         fail("release worktree is not clean")
 
     validate_version_metadata(version)
+    validate_release_dependencies()
 
     if args.check_main:
         run_git(["fetch", "--no-tags", "origin", "main:refs/remotes/origin/main"])

@@ -10,13 +10,33 @@ EOF
 }
 
 require_docker() {
+  local info_timeout_seconds="${PGGRAPH_DOCKER_INFO_TIMEOUT_SECONDS:-20}"
+
   if ! command -v docker >/dev/null 2>&1; then
     echo "Error: Docker is not installed or not available on PATH." >&2
     docker_install_help >&2
     exit 1
   fi
 
-  if ! docker info >/dev/null 2>&1; then
+  if ! python3 - "$info_timeout_seconds" <<'PY'
+import subprocess
+import sys
+
+timeout = int(sys.argv[1])
+try:
+    completed = subprocess.run(
+        ["docker", "info"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=timeout,
+        check=False,
+    )
+except subprocess.TimeoutExpired:
+    print(f"Error: Docker daemon check timed out after {timeout} seconds.", file=sys.stderr)
+    raise SystemExit(124)
+raise SystemExit(completed.returncode)
+PY
+  then
     echo "Error: Cannot connect to the Docker daemon. Is Docker Desktop running?" >&2
     docker_install_help >&2
     exit 1

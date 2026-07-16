@@ -75,7 +75,20 @@ SQL
 "$OLD_BINDIR/pg_ctl" -D "$OLD_DATADIR" -w stop
 old_started=0
 
-"$NEW_BINDIR/initdb" --auth=trust --username="$PGUSER" -D "$NEW_DATADIR" >/dev/null
+old_checksum_version="$("$OLD_BINDIR/pg_controldata" "$OLD_DATADIR" \
+  | awk -F: '/Data page checksum version/ { gsub(/[[:space:]]/, "", $2); print $2 }')"
+if [[ ! "$old_checksum_version" =~ ^[0-9]+$ ]]; then
+  echo "Could not determine old-cluster checksum mode" >&2
+  exit 2
+fi
+initdb_checksum_args=()
+if (( old_checksum_version > 0 )); then
+  initdb_checksum_args+=(--data-checksums)
+elif "$NEW_BINDIR/initdb" --help | grep -q -- '--no-data-checksums'; then
+  initdb_checksum_args+=(--no-data-checksums)
+fi
+"$NEW_BINDIR/initdb" --auth=trust --username="$PGUSER" \
+  "${initdb_checksum_args[@]}" -D "$NEW_DATADIR" >/dev/null
 (
   cd "$WORKDIR"
   "$NEW_BINDIR/pg_upgrade" \
@@ -105,7 +118,12 @@ new_started=1
 SET graph.persist_on_build = on;
 SELECT * FROM graph.build();
 SELECT node_count, edge_count FROM graph.status();
-SELECT count(*) FROM graph.search('Child', table_filter := 'graph_upgrade_nodes'::regclass);
+SELECT count(*)
+FROM graph.search(
+  'name',
+  'Child',
+  table_filter := 'graph_upgrade_nodes'::regclass
+);
 SQL
 "$NEW_BINDIR/pg_ctl" -D "$NEW_DATADIR" -w stop
 new_started=0

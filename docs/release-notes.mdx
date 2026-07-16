@@ -81,14 +81,14 @@ package; source rows are authoritative, and derived graph state is rebuilt.
 
 ### Candidate Validation And Distribution
 
-The candidate is validated through retained RC/full-matrix evidence, clean
+Before release, the candidate must pass retained RC/full-matrix evidence, clean
 PostgreSQL 14–18 source-package installation, the signed alpha migration
 fixture, backup/restore and crash recovery, concurrency and transaction gates,
 resource measurements, sanitizers, fuzz/Miri checks, and packaged quickstart
-and playground examples. The source candidate bundle contains one commit-bound
-PGXN ZIP, SPDX 2.3 SBOM, provenance, manifest, and complete SHA-256 set.
-Publication consumes those exact prepared bytes after signed-tag verification;
-it does not rebuild the archive.
+and playground examples. The prepared source bundle will contain one
+commit-bound PGXN ZIP, SPDX 2.3 SBOM, provenance, manifest, and complete SHA-256
+set. Publication consumes those exact prepared bytes after signed-tag
+verification; it does not rebuild the archive.
 
 ## v0.1.8: Named Graphs And Production Release Hardening
 

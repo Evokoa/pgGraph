@@ -3,7 +3,8 @@
 ## Product And Compatibility
 
 - [ ] The supported PostgreSQL, platform, packaging, SQL, GQL, configuration,
-      artifact, and operations contract is frozen and published.
+      artifact, and operations contract is frozen and documented in the
+      release candidate.
 - [ ] API and conformance inventories match implementation with no drift.
 - [ ] All deprecations, migrations, rebuild requirements, and rollback limits
       appear in release notes and the migration guide.
@@ -41,8 +42,9 @@
       release artifacts rather than a development checkout.
 - [ ] Public docs render without broken links, stale claims, duplicated
       contracts, or internal planning language.
-- [ ] CI required checks, nightly gates, and RC evidence retention are enabled
-      and documented.
+- [ ] CI definitions for required checks, nightly gates, and RC evidence
+      retention are versioned and tested. Repository rules and protected
+      environments are verified by the release owner before publication.
 
 ## Release Evidence
 
@@ -51,5 +53,5 @@
       correctness results, RSS/PSS, spill, latency percentiles, and known
       deviations.
 - [ ] A second reviewer verifies the evidence against this checklist.
-- [ ] Tag and publish only from a clean, reproducible commit after final smoke
-      installation succeeds.
+- [ ] The release-owner handoff requires a signed tag and publication only from
+      the reviewed clean commit after final smoke installation succeeds.

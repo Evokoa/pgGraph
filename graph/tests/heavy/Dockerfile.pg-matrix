@@ -1,4 +1,4 @@
-FROM rust:1-bookworm
+FROM rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc
 
 ARG PGRX_VERSION=0.19.1
 ARG SFW_VERSION=1.13.1
@@ -121,7 +121,8 @@ RUN set -euo pipefail; \
 
 USER root
 COPY --chown=pggraph:pggraph graph/ /src/graph/
-COPY --chown=pggraph:pggraph scripts/inspect_pggraph_artifact.py /src/scripts/inspect_pggraph_artifact.py
+COPY --chown=pggraph:pggraph release/ /src/release/
+COPY --chown=pggraph:pggraph scripts/ /src/scripts/
 USER pggraph
 
 ARG PG_VERSIONS="14 15 16 17 18"
@@ -196,6 +197,7 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
         DBNAME=pggraph_runtime_resources_linux \
         MAX_RSS_MB=1024 \
         MAX_PSS_MB=1024 \
+        /src/scripts/with_disposable_postgres.sh \
         ./tests/heavy/measure_runtime_resources.sh; \
     fi
 

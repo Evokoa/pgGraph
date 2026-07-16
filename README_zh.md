@@ -72,8 +72,8 @@ pgGraph 是一个 PostgreSQL 扩展，用于直接针对普通 PostgreSQL 表运
 
 > [!WARNING]
 > 当前已发布版本是 v0.1.8 alpha。本提交包含 pgGraph 1.0.0 发布候选版本；
-> it is not yet tagged or published（尚未创建 tag 或发布）。在签名的 1.0.0
-> 构件正式发布前，请从源码构建候选版本。
+> 该版本尚未创建 tag 或发布。在签名的 1.0.0 构件正式发布前，请从源码构建
+> 候选版本。
 
 <!-- README_SYNC_POLICY: README.md is canonical; version, PostgreSQL support, and shared commands are checked by scripts/check_public_docs.py. -->
 
