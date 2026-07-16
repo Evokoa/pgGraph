@@ -38,41 +38,80 @@ pub(super) fn search(
     with_panic_boundary("search()", || {
         check_enabled();
         ensure_current_graph().unwrap_or_else(|err| err.report());
-        let tenant_scope =
-            resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
-        validate_search_request(
-            property_key,
-            table_filter.map(|oid| oid.to_u32()),
-            tenant_scope.as_deref(),
-        )
-        .unwrap_or_else(|err| err.report());
-        let mode = types::SearchMode::parse(mode).unwrap_or_else(|| {
-            safety::GraphError::InvalidFilter {
-                reason: format!(
-                    "unsupported search mode '{}'; expected contains, exact, prefix, or token",
-                    mode
-                ),
-            }
-            .report()
-        });
-        let row_offset =
-            usize_from_nonnegative(row_offset, "row_offset").unwrap_or_else(|err| err.report());
-        let max_rows =
-            usize_from_nonnegative(max_rows, "max_rows").unwrap_or_else(|err| err.report());
-        let rows = source_table_search_rows(
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let rows = search_rows_governed(
             property_key,
             property_value,
-            table_filter.map(|oid| oid.to_u32()),
+            table_filter,
             mode,
             case_sensitive,
-            tenant_scope.as_deref(),
-            hydrate,
-            row_offset,
             max_rows,
+            row_offset,
+            tenant.as_deref(),
+            hydrate,
+            &governor,
         )
         .unwrap_or_else(|err| err.report());
         TableIterator::new(rows)
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn search_rows_governed(
+    property_key: &str,
+    property_value: &str,
+    table_filter: Option<pgrx::pg_sys::Oid>,
+    mode: &str,
+    case_sensitive: bool,
+    max_rows: i32,
+    row_offset: i32,
+    tenant: Option<&str>,
+    hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<crate::api_types::SearchOutputRow>> {
+    let tenant_scope = resolve_tenant_scope(tenant)?;
+    validate_search_request(
+        property_key,
+        table_filter.map(|oid| oid.to_u32()),
+        tenant_scope.as_deref(),
+    )?;
+    let mode = types::SearchMode::parse(mode).ok_or_else(|| safety::GraphError::InvalidFilter {
+        reason: format!(
+            "unsupported search mode '{}'; expected contains, exact, prefix, or token",
+            mode
+        ),
+    })?;
+    let row_offset = usize_from_nonnegative(row_offset, "row_offset")?;
+    let max_rows = usize_from_nonnegative(max_rows, "max_rows")?;
+    source_table_search_rows_governed(
+        property_key,
+        property_value,
+        table_filter.map(|oid| oid.to_u32()),
+        mode,
+        case_sensitive,
+        tenant_scope.as_deref(),
+        hydrate,
+        row_offset,
+        max_rows,
+        governor,
+    )
+}
+
+fn reserve_search_tuple_output(
+    governor: &crate::resource::ResourceGovernor,
+    rows: usize,
+) -> safety::GraphResult<crate::resource::ResourceLease<'_>> {
+    let bytes = rows
+        .checked_mul(std::mem::size_of::<crate::api_types::SearchOutputRow>())
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("search output estimate overflowed".to_string())
+        })?;
+    governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryCandidates, bytes)
+        .map_err(crate::safety::resource_limit_error)
 }
 
 /// Coordinate-only search primitive for diagnostics and composition.
@@ -99,7 +138,12 @@ fn search_nodes(
     ),
 > {
     with_panic_boundary("search_nodes()", || {
-        let rows = search(
+        check_enabled();
+        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let rows = search_rows_governed(
             property_key,
             property_value,
             table_filter,
@@ -107,22 +151,29 @@ fn search_nodes(
             case_sensitive,
             max_rows,
             row_offset,
-            tenant,
+            tenant.as_deref(),
             false,
+            &governor,
         )
-        .map(
-            |(node_table, node_id, match_type, score, verified, _node, node_table_name)| {
-                (
-                    node_table,
-                    node_id,
-                    match_type,
-                    score,
-                    verified,
-                    node_table_name,
-                )
-            },
-        )
-        .collect::<Vec<_>>();
+        .unwrap_or_else(|err| err.report());
+        let output_lease =
+            reserve_search_tuple_output(&governor, rows.len()).unwrap_or_else(|err| err.report());
+        let rows = rows
+            .into_iter()
+            .map(
+                |(node_table, node_id, match_type, score, verified, _node, node_table_name)| {
+                    (
+                        node_table,
+                        node_id,
+                        match_type,
+                        score,
+                        verified,
+                        node_table_name,
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
+        output_lease.retain_until_governor_drop();
         TableIterator::new(rows)
     })
 }
@@ -179,17 +230,10 @@ pub(super) fn traverse_search(
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let tenant_scope =
-            resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
-        let (direction, strategy, uniqueness) = crate::sql_traversal::validate_traverse_options(
-            direction,
-            tenant_scope.as_deref(),
-            strategy,
-            uniqueness,
-        )
-        .unwrap_or_else(|err| err.report());
-
-        let starts = search(
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let rows = traverse_search_rows_governed(
             property_key,
             property_value,
             table_filter,
@@ -197,43 +241,111 @@ pub(super) fn traverse_search(
             case_sensitive,
             search_max_rows,
             search_row_offset,
-            tenant_scope.clone(),
-            false,
+            max_depth,
+            edge_types.as_deref(),
+            direction,
+            node_tables.as_deref(),
+            filter.as_ref(),
+            tenant.as_deref(),
+            strategy,
+            uniqueness,
+            include_start,
+            hydrate,
+            max_rows,
+            row_offset,
+            &governor,
         )
-        .collect::<Vec<_>>();
-
-        let mut candidates = Vec::new();
-        for (root_table, root_id, _match_type, _score, verified, _node, _node_table_name) in starts
-        {
-            if !verified {
-                continue;
-            }
-            let request = TraverseRequest {
-                root_table,
-                root_id: &root_id,
-                max_depth,
-                edge_types: edge_types.as_deref(),
-                node_tables: node_tables.as_deref(),
-                filter: filter.as_ref(),
-                tenant: tenant_scope.as_deref(),
-                direction,
-                strategy,
-                include_start,
-                hydrate,
-                limit: max_rows,
-                offset: row_offset,
-                max_nodes: config::MAX_NODES.get(),
-                max_frontier: config::MAX_FRONTIER.get(),
-            };
-            let mut start_candidates =
-                execute_traverse_candidates(&request).unwrap_or_else(|err| err.report());
-            candidates.append(&mut start_candidates);
-        }
-        sort_traverse_candidates_for_many(&mut candidates);
-        apply_traversal_uniqueness(&mut candidates, uniqueness);
-        let rows =
-            paginate_and_format_traverse_candidates(candidates, hydrate, row_offset, max_rows)
-                .unwrap_or_else(|err| err.report());
+        .unwrap_or_else(|err| err.report());
         TableIterator::new(rows)
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn traverse_search_rows_governed(
+    property_key: &str,
+    property_value: &str,
+    table_filter: Option<pgrx::pg_sys::Oid>,
+    search_mode: &str,
+    case_sensitive: bool,
+    search_max_rows: i32,
+    search_row_offset: i32,
+    max_depth: i32,
+    edge_types: Option<&[String]>,
+    direction: &str,
+    node_tables: Option<&[pgrx::pg_sys::Oid]>,
+    filter: Option<&pgrx::JsonB>,
+    tenant: Option<&str>,
+    strategy: &str,
+    uniqueness: &str,
+    include_start: bool,
+    hydrate: bool,
+    max_rows: i32,
+    row_offset: i32,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
+    check_enabled_result()?;
+    ensure_current_graph_for_query(current_query_freshness()?)?;
+    let tenant_scope = resolve_tenant_scope(tenant)?;
+    let (direction, strategy, uniqueness) = crate::sql_traversal::validate_traverse_options(
+        direction,
+        tenant_scope.as_deref(),
+        strategy,
+        uniqueness,
+    )?;
+    let start_rows = usize::try_from(search_max_rows.max(0)).unwrap_or(usize::MAX);
+    let max_primary_key = ENGINE.with(|engine| engine.borrow().node_store.max_primary_key_bytes());
+    let starts_bytes = start_rows
+        .checked_mul(max_primary_key.saturating_add(1_024))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("traversal search seed estimate overflowed".to_string())
+        })?;
+    let _starts_workspace = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryCandidates,
+            starts_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let starts = search_rows_governed(
+        property_key,
+        property_value,
+        table_filter,
+        search_mode,
+        case_sensitive,
+        search_max_rows,
+        search_row_offset,
+        tenant_scope.as_deref(),
+        false,
+        governor,
+    )?;
+    let mut candidates = Vec::new();
+    for (root_table, root_id, _match_type, _score, verified, _node, _node_table_name) in starts {
+        if !verified {
+            continue;
+        }
+        let request = TraverseRequest {
+            root_table,
+            root_id: &root_id,
+            max_depth,
+            edge_types,
+            node_tables,
+            filter,
+            tenant: tenant_scope.as_deref(),
+            direction,
+            strategy,
+            include_start,
+            hydrate,
+            limit: max_rows,
+            offset: row_offset,
+            max_nodes: config::MAX_NODES.get(),
+            max_frontier: config::MAX_FRONTIER.get(),
+        };
+        let mut start_candidates = execute_traverse_candidates_governed(&request, governor)?;
+        candidates.append(&mut start_candidates);
+    }
+    sort_traverse_candidates_for_many_governed(&mut candidates, governor)?;
+    apply_traversal_uniqueness_governed(&mut candidates, uniqueness, governor)?;
+    paginate_and_format_traverse_candidates_governed(
+        candidates, hydrate, row_offset, max_rows, governor,
+    )
 }

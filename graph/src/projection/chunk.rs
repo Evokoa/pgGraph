@@ -4,7 +4,7 @@
 //! CSR artifact. Publishing a new manifest with replacement chunks keeps older
 //! generations readable while allowing targeted repair and dirty-range rewrites.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -50,6 +50,15 @@ pub(crate) trait BaseChunkSource {
 
     /// Return full replacement edges for `range`.
     fn edges_in_range(&self, range: SourceRange) -> GraphResult<Vec<IdentifiedRawEdge>>;
+
+    fn edge_counts_in_range(&self, range: SourceRange) -> GraphResult<(usize, usize)> {
+        let edges = self.edges_in_range(range)?;
+        let weighted = edges
+            .iter()
+            .filter(|edge| edge.edge.weight.is_some())
+            .count();
+        Ok((edges.len(), weighted))
+    }
 }
 
 /// Base chunk source backed by an [`EdgeStore`].
@@ -60,6 +69,29 @@ pub(crate) struct EdgeStoreChunkSource<'a> {
 impl<'a> EdgeStoreChunkSource<'a> {
     pub(crate) fn new(store: &'a EdgeStore) -> Self {
         Self { store }
+    }
+
+    fn edge_counts_in_range(&self, range: SourceRange) -> GraphResult<(usize, usize)> {
+        if range.end > self.store.node_count() {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "base chunk range {}..{} exceeds node count {}",
+                    range.start,
+                    range.end,
+                    self.store.node_count()
+                ),
+            });
+        }
+        (range.start..range.end).try_fold((0usize, 0usize), |(edges, weighted), source| {
+            let (targets, _, _, weights) = self.store.neighbors_weighted_with_schema(source);
+            let edges = edges
+                .checked_add(targets.len())
+                .ok_or_else(|| GraphError::Internal("base chunk edge count overflowed".into()))?;
+            let weighted = weighted
+                .checked_add(weights.len())
+                .ok_or_else(|| GraphError::Internal("base chunk weight count overflowed".into()))?;
+            Ok((edges, weighted))
+        })
     }
 }
 
@@ -79,7 +111,11 @@ impl BaseChunkSource for EdgeStoreChunkSource<'_> {
                 ),
             });
         }
+        let (edge_count, _) = self.edge_counts_in_range(range)?;
         let mut edges = Vec::new();
+        edges
+            .try_reserve_exact(edge_count)
+            .map_err(chunk_allocation_error)?;
         for source in range.start..range.end {
             let (targets, type_ids, schema_reversed, weights) =
                 self.store.neighbors_weighted_with_schema(source);
@@ -108,6 +144,10 @@ impl BaseChunkSource for EdgeStoreChunkSource<'_> {
             }
         }
         Ok(edges)
+    }
+
+    fn edge_counts_in_range(&self, range: SourceRange) -> GraphResult<(usize, usize)> {
+        EdgeStoreChunkSource::edge_counts_in_range(self, range)
     }
 }
 
@@ -145,17 +185,20 @@ pub(crate) fn publish_base_chunk_rewrite(
 pub(crate) fn publish_base_chunk_rewrite_with_segments(
     root: &Path,
     previous: &ProjectionManifest,
-    source: &impl BaseChunkSource,
+    source: &EdgeStoreChunkSource<'_>,
     dirty_ranges: &[SourceRange],
     retained_segments: Vec<crate::projection::manifest::ManifestSegmentRef>,
+    governor: &crate::resource::ResourceGovernor,
+    max_memory_bytes: usize,
 ) -> GraphResult<BaseChunkRewriteResult> {
-    publish_base_chunk_rewrite_with_segments_and_reason(
+    publish_base_chunk_rewrite_inner(
         root,
         previous,
         source,
         dirty_ranges,
         retained_segments,
         BaseChunkRewriteReason::Compaction,
+        Some((governor, max_memory_bytes)),
     )
 }
 
@@ -167,12 +210,52 @@ fn publish_base_chunk_rewrite_with_segments_and_reason(
     retained_segments: Vec<crate::projection::manifest::ManifestSegmentRef>,
     reason: BaseChunkRewriteReason,
 ) -> GraphResult<BaseChunkRewriteResult> {
+    publish_base_chunk_rewrite_inner(
+        root,
+        previous,
+        source,
+        dirty_ranges,
+        retained_segments,
+        reason,
+        None,
+    )
+}
+
+fn publish_base_chunk_rewrite_inner(
+    root: &Path,
+    previous: &ProjectionManifest,
+    source: &impl BaseChunkSource,
+    dirty_ranges: &[SourceRange],
+    retained_segments: Vec<crate::projection::manifest::ManifestSegmentRef>,
+    reason: BaseChunkRewriteReason,
+    resources: Option<(&crate::resource::ResourceGovernor, usize)>,
+) -> GraphResult<BaseChunkRewriteResult> {
     if dirty_ranges.is_empty() {
+        let _clone_memory = match resources {
+            Some((governor, max_memory_bytes)) => Some(reserve_compaction_publication_memory(
+                governor,
+                previous.estimated_heap_bytes()?,
+                max_memory_bytes,
+            )?),
+            None => None,
+        };
         return Ok(BaseChunkRewriteResult {
             manifest: previous.clone(),
             chunks_rewritten: 0,
         });
     }
+    let _publication_memory = match resources {
+        Some((governor, max_memory_bytes)) => Some(reserve_compaction_publication_memory(
+            governor,
+            base_chunk_publication_memory_upper_bound(
+                previous,
+                dirty_ranges.len(),
+                max_memory_bytes,
+            )?,
+            max_memory_bytes,
+        )?),
+        None => None,
+    };
     let dirty_ranges = expand_dirty_ranges(previous, dirty_ranges)?;
     validate_ranges(source, &dirty_ranges)?;
     let generation_id = previous
@@ -180,41 +263,89 @@ fn publish_base_chunk_rewrite_with_segments_and_reason(
         .checked_add(1)
         .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into()))?;
     let mut rewritten = Vec::new();
+    rewritten
+        .try_reserve_exact(dirty_ranges.len())
+        .map_err(chunk_allocation_error)?;
     for (chunk_id, range) in dirty_ranges.iter().copied().enumerate() {
-        let segment = build_base_chunk_segment(source, range, previous.sync_watermark)?;
-        let path = root.join(base_chunk_file_name(generation_id, chunk_id as u32));
-        write_chunk_atomically(root, &path, &segment)?;
-        rewritten.push(chunk_ref(
-            root,
-            &path,
+        let (edge_count, weighted_count) = match resources {
+            Some(_) => source.edge_counts_in_range(range)?,
+            None => (0, 0),
+        };
+        let _construction_memory = match resources {
+            Some((governor, max_memory_bytes)) => Some(reserve_chunk_construction(
+                governor,
+                edge_count,
+                weighted_count,
+                max_memory_bytes,
+            )?),
+            None => None,
+        };
+        let edges = source.edges_in_range(range)?;
+        let dirty_edge_count = edges.len();
+        let segment = build_base_chunk_segment(
+            edges,
             range,
-            source.edges_in_range(range)?.len(),
-        )?);
+            previous.sync_watermark,
+            resources.map(|_| (edge_count, weighted_count)),
+        )?;
+        let path = root.join(base_chunk_file_name(generation_id, chunk_id as u32));
+        let checksum = match resources {
+            Some((governor, max_memory_bytes)) => {
+                write_chunk_atomically_governed(root, &path, &segment, governor, max_memory_bytes)?
+            }
+            None => write_chunk_atomically(root, &path, &segment)?,
+        };
+        rewritten.push(chunk_ref(root, &path, range, dirty_edge_count, checksum)?);
     }
 
-    let mut obsolete_files = previous.obsolete_files.clone();
-    let mut base_chunks = previous
-        .base_chunks
-        .iter()
-        .filter(|chunk| {
-            let range = SourceRange {
-                start: chunk.source_start,
-                end: chunk.source_end,
-            };
-            let replaced = dirty_ranges.iter().any(|dirty| dirty.overlaps(range));
-            if replaced {
-                obsolete_files.push(ManifestFileRef {
-                    path: chunk.path.clone(),
-                    bytes: 0,
-                });
-            }
-            !replaced
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut obsolete_files = Vec::new();
+    obsolete_files
+        .try_reserve_exact(
+            previous
+                .obsolete_files
+                .len()
+                .checked_add(previous.base_chunks.len())
+                .ok_or_else(|| {
+                    GraphError::Internal("base chunk obsolete reference count overflowed".into())
+                })?,
+        )
+        .map_err(chunk_allocation_error)?;
+    obsolete_files.extend(previous.obsolete_files.iter().cloned());
+    let mut base_chunks = Vec::new();
+    base_chunks
+        .try_reserve_exact(
+            previous
+                .base_chunks
+                .len()
+                .checked_add(rewritten.len())
+                .ok_or_else(|| {
+                    GraphError::Internal("base chunk reference count overflowed".into())
+                })?,
+        )
+        .map_err(chunk_allocation_error)?;
+    base_chunks.extend(previous.base_chunks.iter().filter_map(|chunk| {
+        let range = SourceRange {
+            start: chunk.source_start,
+            end: chunk.source_end,
+        };
+        let replaced = dirty_ranges.iter().any(|dirty| dirty.overlaps(range));
+        if replaced {
+            obsolete_files.push(ManifestFileRef {
+                path: chunk.path.clone(),
+                bytes: 0,
+            });
+        }
+        (!replaced).then(|| chunk.clone())
+    }));
     let new_chunks = rewritten.clone();
     base_chunks.extend(rewritten);
-    base_chunks.sort_by_key(|chunk| (chunk.source_start, chunk.source_end, chunk.path.clone()));
+    base_chunks.sort_by(|left, right| {
+        (left.source_start, left.source_end, left.path.as_str()).cmp(&(
+            right.source_start,
+            right.source_end,
+            right.path.as_str(),
+        ))
+    });
 
     let mut manifest = ProjectionManifest::base_only(
         generation_id,
@@ -236,7 +367,16 @@ fn publish_base_chunk_rewrite_with_segments_and_reason(
     manifest.base_chunks = base_chunks;
     manifest.obsolete_files = obsolete_files;
     let store = ProjectionManifestStore::new(root);
-    if let Err(err) = store.publish(&manifest) {
+    let publication = match resources {
+        Some((governor, max_memory_bytes)) => store.publish_governed(
+            &manifest,
+            governor,
+            crate::resource::ResourcePhase::CompactionMerge,
+            max_memory_bytes,
+        ),
+        None => store.publish(&manifest),
+    };
+    if let Err(err) = publication {
         if !store.manifest_path(generation_id).exists() {
             cleanup_chunk_refs(root, &new_chunks)?;
         }
@@ -307,16 +447,25 @@ fn expand_dirty_ranges(
     previous: &ProjectionManifest,
     dirty_ranges: &[SourceRange],
 ) -> GraphResult<Vec<SourceRange>> {
-    let mut expanded = dirty_ranges.to_vec();
+    let mut expanded = Vec::new();
+    expanded
+        .try_reserve_exact(dirty_ranges.len())
+        .map_err(chunk_allocation_error)?;
+    expanded.extend_from_slice(dirty_ranges);
     loop {
         let mut changed = false;
         for chunk in &previous.base_chunks {
             let chunk_range = SourceRange::new(chunk.source_start, chunk.source_end)?;
-            let overlapping = expanded
-                .iter()
-                .copied()
-                .filter(|range| range.overlaps(chunk_range))
-                .collect::<Vec<_>>();
+            let mut overlapping = Vec::new();
+            overlapping
+                .try_reserve_exact(expanded.len())
+                .map_err(chunk_allocation_error)?;
+            overlapping.extend(
+                expanded
+                    .iter()
+                    .copied()
+                    .filter(|range| range.overlaps(chunk_range)),
+            );
             if overlapping.is_empty() {
                 continue;
             }
@@ -354,11 +503,11 @@ fn expand_dirty_ranges(
 }
 
 fn build_base_chunk_segment(
-    source: &impl BaseChunkSource,
+    edges: Vec<IdentifiedRawEdge>,
     range: SourceRange,
     sync_watermark: i64,
+    capacities: Option<(usize, usize)>,
 ) -> GraphResult<DeltaSegment> {
-    let edges = source.edges_in_range(range)?;
     let mut segment = DeltaSegment::new(
         SegmentKind::Edge,
         0,
@@ -367,6 +516,16 @@ fn build_base_chunk_segment(
         range.end,
         sync_watermark,
     )?;
+    if let Some((edges, weights)) = capacities {
+        segment
+            .edge_inserts
+            .try_reserve_exact(edges)
+            .map_err(chunk_allocation_error)?;
+        segment
+            .edge_weights
+            .try_reserve_exact(weights)
+            .map_err(chunk_allocation_error)?;
+    }
     for identified in edges {
         let edge = identified.edge;
         let relationship_id = (identified.relationship_id != NO_RELATIONSHIP_ID)
@@ -397,6 +556,7 @@ fn chunk_ref(
     path: &Path,
     range: SourceRange,
     dirty_edge_count: usize,
+    checksum: String,
 ) -> GraphResult<ManifestChunkRef> {
     let relative = path
         .strip_prefix(root)
@@ -405,7 +565,7 @@ fn chunk_ref(
         .to_string();
     Ok(ManifestChunkRef {
         path: relative,
-        checksum: chunk_checksum(path)?,
+        checksum,
         source_start: range.start,
         source_end: range.end,
         dirty_source_count: range.end - range.start,
@@ -420,10 +580,21 @@ fn chunk_checksum_matches(root: &Path, chunk: &ManifestChunkRef) -> GraphResult<
 }
 
 fn chunk_checksum(path: &Path) -> GraphResult<String> {
-    let bytes = std::fs::read(path).map_err(|err| {
+    let mut file = std::fs::File::open(path).map_err(|err| {
         GraphError::Internal(format!("read projection base chunk checksum: {err}"))
     })?;
-    Ok(format!("crc32:{:08x}", crc32fast::hash(&bytes)))
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|err| {
+            GraphError::Internal(format!("read projection base chunk checksum: {err}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("crc32:{:08x}", hasher.finalize()))
 }
 
 fn cleanup_chunk_refs(root: &Path, chunks: &[ManifestChunkRef]) -> GraphResult<()> {
@@ -450,10 +621,158 @@ fn write_chunk_atomically(
     root: &Path,
     final_path: &Path,
     segment: &DeltaSegment,
-) -> GraphResult<()> {
+) -> GraphResult<String> {
     std::fs::create_dir_all(root)
         .map_err(|err| GraphError::Internal(format!("create projection chunk dir: {err}")))?;
     let bytes = segment.to_bytes()?;
+    write_chunk_bytes_atomically(root, final_path, &bytes)?;
+    Ok(format!("crc32:{:08x}", crc32fast::hash(&bytes)))
+}
+
+fn reserve_compaction_publication_memory(
+    governor: &crate::resource::ResourceGovernor,
+    bytes: usize,
+    max_memory_bytes: usize,
+) -> GraphResult<crate::resource::ResourceLease<'_>> {
+    let used = governor.memory_used().as_u64().min(usize::MAX as u64) as usize;
+    if used
+        .checked_add(bytes)
+        .is_none_or(|next| next > max_memory_bytes)
+    {
+        return Err(GraphError::ResourceLimit {
+            resource: "memory bytes".to_string(),
+            phase: crate::resource::ResourcePhase::CompactionMerge
+                .as_str()
+                .to_string(),
+            used: u64::try_from(used).unwrap_or(u64::MAX),
+            requested: u64::try_from(bytes).unwrap_or(u64::MAX),
+            limit: u64::try_from(max_memory_bytes).unwrap_or(u64::MAX),
+        });
+    }
+    let bytes =
+        crate::resource::ByteCount::from_usize(bytes).ok_or_else(|| GraphError::ResourceLimit {
+            resource: "memory bytes".to_string(),
+            phase: crate::resource::ResourcePhase::CompactionMerge
+                .as_str()
+                .to_string(),
+            used: u64::try_from(used).unwrap_or(u64::MAX),
+            requested: u64::MAX,
+            limit: u64::try_from(max_memory_bytes).unwrap_or(u64::MAX),
+        })?;
+    governor
+        .reserve_memory(crate::resource::ResourcePhase::CompactionMerge, bytes)
+        .map_err(crate::safety::resource_limit_error)
+}
+
+fn chunk_allocation_error(_error: std::collections::TryReserveError) -> GraphError {
+    GraphError::ResourceLimit {
+        resource: "memory bytes".to_string(),
+        phase: crate::resource::ResourcePhase::CompactionMerge
+            .as_str()
+            .to_string(),
+        used: 0,
+        requested: u64::MAX,
+        limit: u64::MAX,
+    }
+}
+
+fn base_chunk_publication_memory_upper_bound(
+    previous: &ProjectionManifest,
+    dirty_range_count: usize,
+    max_memory_bytes: usize,
+) -> GraphResult<usize> {
+    const GENERATED_CHUNK_REFERENCE_BYTES: usize = 512;
+    const FILESYSTEM_WORKSPACE_BYTES: usize = 64 * 1024;
+
+    let previous_clones = previous
+        .estimated_heap_bytes()?
+        .checked_mul(2)
+        .ok_or_else(|| chunk_memory_limit(0, usize::MAX, max_memory_bytes))?;
+    let ranges = dirty_range_count
+        .checked_mul(std::mem::size_of::<SourceRange>())
+        .and_then(|bytes| bytes.checked_mul(3))
+        .ok_or_else(|| chunk_memory_limit(previous_clones, usize::MAX, max_memory_bytes))?;
+    let generated = dirty_range_count
+        .checked_mul(
+            std::mem::size_of::<ManifestChunkRef>()
+                .checked_mul(2)
+                .and_then(|bytes| bytes.checked_add(GENERATED_CHUNK_REFERENCE_BYTES * 2))
+                .ok_or_else(|| chunk_memory_limit(previous_clones, usize::MAX, max_memory_bytes))?,
+        )
+        .ok_or_else(|| chunk_memory_limit(previous_clones, usize::MAX, max_memory_bytes))?;
+    previous_clones
+        .checked_add(ranges)
+        .and_then(|bytes| bytes.checked_add(generated))
+        .and_then(|bytes| bytes.checked_add(FILESYSTEM_WORKSPACE_BYTES))
+        .ok_or_else(|| chunk_memory_limit(previous_clones, usize::MAX, max_memory_bytes))
+}
+
+fn chunk_memory_limit(used: usize, requested: usize, limit: usize) -> GraphError {
+    GraphError::ResourceLimit {
+        resource: "memory bytes".to_string(),
+        phase: crate::resource::ResourcePhase::CompactionMerge
+            .as_str()
+            .to_string(),
+        used: u64::try_from(used).unwrap_or(u64::MAX),
+        requested: u64::try_from(requested).unwrap_or(u64::MAX),
+        limit: u64::try_from(limit).unwrap_or(u64::MAX),
+    }
+}
+
+fn reserve_chunk_construction(
+    governor: &crate::resource::ResourceGovernor,
+    edges: usize,
+    weighted: usize,
+    max_memory_bytes: usize,
+) -> GraphResult<crate::resource::ResourceLease<'_>> {
+    let source = edges
+        .checked_mul(std::mem::size_of::<IdentifiedRawEdge>())
+        .ok_or_else(|| GraphError::Internal("base chunk source allocation overflowed".into()))?;
+    let inserts = edges
+        .checked_mul(std::mem::size_of::<SegmentEdge>())
+        .ok_or_else(|| GraphError::Internal("base chunk insert allocation overflowed".into()))?;
+    let weights = weighted
+        .checked_mul(std::mem::size_of::<SegmentEdgeWeight>())
+        .ok_or_else(|| GraphError::Internal("base chunk weight allocation overflowed".into()))?;
+    let bytes = source
+        .checked_add(inserts)
+        .and_then(|value| value.checked_add(weights))
+        .ok_or_else(|| {
+            GraphError::Internal("base chunk construction allocation overflowed".into())
+        })?;
+    reserve_compaction_publication_memory(governor, bytes, max_memory_bytes)
+}
+
+fn write_chunk_atomically_governed(
+    root: &Path,
+    final_path: &Path,
+    segment: &DeltaSegment,
+    governor: &crate::resource::ResourceGovernor,
+    max_memory_bytes: usize,
+) -> GraphResult<String> {
+    std::fs::create_dir_all(root)
+        .map_err(|err| GraphError::Internal(format!("create projection chunk dir: {err}")))?;
+    let encoded_len = segment.encoded_len()?;
+    let serialization_bytes = encoded_len.checked_mul(2).ok_or_else(|| {
+        GraphError::Internal("base chunk serialization allocation overflowed".into())
+    })?;
+    let _serialization_memory =
+        reserve_compaction_publication_memory(governor, serialization_bytes, max_memory_bytes)?;
+    let encoded_bytes = crate::resource::ByteCount::from_usize(encoded_len)
+        .ok_or_else(|| GraphError::Internal("base chunk staging allocation exceeds u64".into()))?;
+    let _staging_disk = governor
+        .reserve_disk(
+            crate::resource::ResourcePhase::CompactionMerge,
+            encoded_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let bytes = segment.to_bytes()?;
+    debug_assert_eq!(bytes.len(), encoded_len);
+    write_chunk_bytes_atomically(root, final_path, &bytes)?;
+    Ok(format!("crc32:{:08x}", crc32fast::hash(&bytes)))
+}
+
+fn write_chunk_bytes_atomically(root: &Path, final_path: &Path, bytes: &[u8]) -> GraphResult<()> {
     let tmp_path = temp_chunk_path(root, final_path)?;
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
@@ -461,7 +780,7 @@ fn write_chunk_atomically(
             .create_new(true)
             .open(&tmp_path)
             .map_err(|err| GraphError::Internal(format!("create temp projection chunk: {err}")))?;
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .map_err(|err| GraphError::Internal(format!("write temp projection chunk: {err}")))?;
         file.sync_all()
             .map_err(|err| GraphError::Internal(format!("fsync temp projection chunk: {err}")))?;
@@ -579,6 +898,62 @@ mod tests {
 
         assert_eq!(result.chunks_rewritten, 1);
         assert_full_csr_equivalence(4, &expected, &layered);
+    }
+
+    #[test]
+    fn governed_chunk_publication_rejects_before_staging_and_preserves_current() {
+        let dir = ProjectionArtifactDir::new(
+            "governed_chunk_publication_rejects_before_staging_and_preserves_current",
+        );
+        std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+        let previous = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
+        let store = ProjectionManifestStore::new(dir.path());
+        store.publish(&previous).expect("base manifest publishes");
+        let rebuilt = edge_store_from_tuples(4, &[(0, 1, 1), (1, 3, 1), (2, 0, 1)]);
+        let source = EdgeStoreChunkSource::new(&rebuilt);
+        let range = SourceRange::new(0, 3).expect("range is valid");
+        let (edges, weighted) = source
+            .edge_counts_in_range(range)
+            .expect("edge counts preflight");
+        let construction_limit = edges
+            .checked_mul(
+                std::mem::size_of::<IdentifiedRawEdge>() + std::mem::size_of::<SegmentEdge>(),
+            )
+            .and_then(|bytes| {
+                weighted
+                    .checked_mul(std::mem::size_of::<SegmentEdgeWeight>())
+                    .and_then(|weight_bytes| bytes.checked_add(weight_bytes))
+            })
+            .expect("fixture allocation fits usize");
+        let governor = crate::resource::maintenance_governor(
+            crate::resource::ByteCount::ZERO,
+            crate::resource::RowCount::UNLIMITED,
+        );
+
+        let error = publish_base_chunk_rewrite_with_segments(
+            dir.path(),
+            &previous,
+            &source,
+            &[range],
+            Vec::new(),
+            &governor,
+            construction_limit,
+        )
+        .expect_err("serialization must not exceed the remaining publication budget");
+
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        assert_eq!(
+            store
+                .load_latest_current()
+                .expect("current manifest loads")
+                .expect("current manifest exists")
+                .generation_id,
+            previous.generation_id
+        );
+        assert!(!dir
+            .path()
+            .join(base_chunk_file_name(previous.generation_id + 1, 0))
+            .exists());
     }
 
     #[test]

@@ -15,8 +15,8 @@ release blocker.
 | 0. Freeze and measure | In progress | Static audit complete; add the ordered P0 regression pack below and machine-readable conformance baseline. |
 | Rust type/unsafe/pgrx boundary | KI-020 retired; RUST-00C through RUST-00F supported-major retirement pending | Mapped stores own validated ranges and pass Miri, full Rust ASan, PostgreSQL 14-18 regressions, and a PostgreSQL-process Valgrind gate. Graph errors unwind through pgrx, durable filter deltas preserve exact values, security-definer functions pin `pg_catalog`, and registered relations retain OID identity. |
 | 1A. Security and identity | Complete | R1 correctness, authorization, durable identity, transaction isolation, DDL identity, and PostgreSQL 14-18 regression evidence is complete. |
-| 1B. Memory containment | In progress | R2A/R2B centralize checked preflight and enforce the effective replacement budget through construction and persistence with adaptive byte batches; R2C extends breakers to load, query, sync, compaction, and analytics. |
-| 1C. Safe publication | Not started | Add cross-backend lock/CAS and validate before switch. |
+| 1B. Memory containment | Complete | R2A-R2C enforce checked build policy, live construction reservations, load/query/sync/compaction/analytics breakers, pinned projection snapshots, and a repeatable RSS/Linux-PSS runtime gate; inbound/filter mmap and analytics worker isolation remain explicit R3 work. |
+| 1C. Safe publication | In progress | R2D adds cross-backend lock/CAS, validate-before-switch, rollback retention, reader pins, and bounded generation garbage collection. |
 | 2. Artifact vNext/out-of-core | Planned | Focused predecessor is `todo/out-of-core-build-plan.md`. |
 | 3. Bounded load/sync/compaction | Not started | mmap inbound/filter data and range compaction. |
 | 4. Refactor foundations | Not started | Complete canonical enum/newtype, pgrx-adapter, and unsafe-allowlist work from `10-rust-type-safety-pgrx-boundaries.md` while splitting modules. |
@@ -585,3 +585,14 @@ fixtures; they do not disable isolation or undefined-behavior checking.
 | Supported-major durable lifecycle and locks | PostgreSQL 14-18 Docker durable projection matrix | PASS: cross-backend lifecycle and publication/writer lock profiles passed on every supported major; KI-026 retired |
 | Supported-major relation identity and R1 safety closure | PostgreSQL 14-18 Docker durable projection matrix plus the preceding 981-test pgrx matrix per major | PASS: concurrent rename/drop-recreate serialization, OID-stable rename, fail-closed recreation, mapped validation, guarded errors, exact durable values, ACL/RLS identity, filters, and definer metadata; KI-014 through KI-017 and KI-021 through KI-024 retired |
 | R1 safety closure independent review | `rust-reviewing` subagent over the raw checkpoint diff | PASS after tracking the active DDL coordination key and adding bounded TERM/KILL client cleanup |
+
+### 2026-07-15 R2C Runtime Resource Breakers Checkpoint
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Rust suite | `cd graph && cargo test --no-default-features --features "pg17 development" --no-fail-fast` | PASS: 778 passed, 1 ignored; doctests 0 |
+| PostgreSQL 17 suite | `cd graph && cargo pgrx test --features "pg17 development" pg17` | PASS: 1,049 passed, 1 ignored; doctests 0 |
+| Runtime resource profile | `cd graph && PG_VERSION_FEATURE=pg17 DBNAME=pggraph_runtime_resources_r2c ./tests/heavy/measure_runtime_resources.sh` | PASS: three persisted loads, traversal, hydrated GQL, analytics, two durable sync/compaction cycles, stable PG007 rejection, 87 MiB peak RSS; Linux PSS remains a supported-environment release-matrix gate |
+| Clippy and Rust documentation | `cd graph && cargo clippy --features "pg17 development" --all-targets -- -D warnings`; `cargo clippy --no-default-features --features "pg17 development pg_test" --lib -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --features "pg17 development" --no-deps` | PASS |
+| Contract, docs, secrets, shell, and whitespace | Generated pg17 schema plus `scripts/check_release_contract.py`; `scripts/check_docs_drift.sh`; `scripts/check_secrets.sh all`; runtime/release shell syntax; `git diff --check` | PASS |
+| Independent Rust review | Fresh `rust-reviewing` subagent over the complete raw diff and two follow-up closure batches | PASS: checked token SQL/matcher sizing, borrowed workflow inputs, cumulative fallible output accounting, public low-budget PG007 coverage, compaction/sync closure, evidence, and tree integrity |

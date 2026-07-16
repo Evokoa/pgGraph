@@ -296,20 +296,49 @@ fn resolve_visible_runtime_graph_for_role(
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────
 
-pub(super) fn largest_component_id() -> safety::GraphResult<i64> {
+pub(super) fn largest_component_rows(
+    limit: i32,
+    offset: i32,
+    hydrate: bool,
+) -> safety::GraphResult<Vec<ComponentNodeRow>> {
     check_enabled_result()?;
     require_graph_admin_result()?;
     ensure_current_graph_for_query(current_query_freshness()?)?;
-    ENGINE.with(|e| {
+    let offset = usize_from_nonnegative(offset, "offset")?;
+    let limit = usize_from_nonnegative(limit, "limit")?;
+    let (page, governor) = ENGINE.with(|e| {
         let eng = e.borrow();
-        let cc_result = eng.connected_components()?;
-        cc_result
+        let governor = eng.analytics_resource_governor()?;
+        let cc_result = eng.connected_components_governed(&governor)?;
+        let component_id = cc_result
             .component_sizes
             .iter()
             .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
             .map(|(&component_id, _)| component_id as i64)
-            .ok_or(safety::GraphError::NotBuilt)
-    })
+            .ok_or(safety::GraphError::NotBuilt)?;
+        let page_bytes = limit
+            .checked_mul(
+                std::mem::size_of::<connected_components::ComponentRow>()
+                    .saturating_add(eng.node_store.max_primary_key_bytes()),
+            )
+            .and_then(crate::resource::ByteCount::from_usize)
+            .ok_or_else(|| {
+                safety::GraphError::Internal("component page estimate overflowed".to_string())
+            })?;
+        let page_lease = governor
+            .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, page_bytes)
+            .map_err(crate::safety::resource_limit_error)?;
+        let page = connected_components::component_rows_page(
+            &cc_result,
+            &eng.node_store,
+            component_id as u32,
+            offset,
+            limit,
+        )?;
+        page_lease.retain_until_governor_drop();
+        Ok::<_, safety::GraphError>((page, governor))
+    })?;
+    hydrate_component_page_governed(page, hydrate, &governor)
 }
 
 pub(super) fn component_rows(
@@ -329,25 +358,74 @@ pub(super) fn component_rows(
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
 
-    let page = ENGINE.with(|e| {
+    let (page, governor) = ENGINE.with(|e| {
         let eng = e.borrow();
-        let cc_result = eng.connected_components()?;
-        connected_components::component_rows_page(
+        let governor = eng.analytics_resource_governor()?;
+        let cc_result = eng.connected_components_governed(&governor)?;
+        let page_bytes = limit
+            .checked_mul(
+                std::mem::size_of::<connected_components::ComponentRow>()
+                    .saturating_add(eng.node_store.max_primary_key_bytes()),
+            )
+            .and_then(crate::resource::ByteCount::from_usize)
+            .ok_or_else(|| {
+                safety::GraphError::Internal("component page estimate overflowed".to_string())
+            })?;
+        let page_lease = governor
+            .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, page_bytes)
+            .map_err(crate::safety::resource_limit_error)?;
+        let page = connected_components::component_rows_page(
             &cc_result,
             &eng.node_store,
             component_id as u32,
             offset,
             limit,
-        )
+        )?;
+        page_lease.retain_until_governor_drop();
+        Ok::<_, safety::GraphError>((page, governor))
     })?;
 
-    hydrate_component_page(page, hydrate)
+    hydrate_component_page_governed(page, hydrate, &governor)
 }
 
 pub(super) fn hydrate_component_page(
     page: Vec<connected_components::ComponentRow>,
     hydrate: bool,
 ) -> safety::GraphResult<Vec<ComponentNodeRow>> {
+    let governor = ENGINE.with(|engine| engine.borrow().analytics_resource_governor())?;
+    hydrate_component_page_governed(page, hydrate, &governor)
+}
+
+pub(super) fn hydrate_component_page_governed(
+    page: Vec<connected_components::ComponentRow>,
+    hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<ComponentNodeRow>> {
+    let page_bytes = page.iter().try_fold(0usize, |bytes, row| {
+        bytes
+            .checked_add(std::mem::size_of::<types::TraversalResult>())
+            .and_then(|bytes| bytes.checked_add(row.node_id.len()))
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ComponentNodeRow>()))
+            .ok_or_else(|| {
+                safety::GraphError::Internal("component output estimate overflowed".to_string())
+            })
+    })?;
+    let output_lease = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryCandidates,
+            crate::resource::ByteCount::from_usize(page_bytes).ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "component output estimate does not fit u64".to_string(),
+                )
+            })?,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryCandidates,
+            crate::resource::WorkUnits::new(u64::try_from(page.len()).unwrap_or(u64::MAX)),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
     let traversal_rows = page
         .iter()
         .map(|row| types::TraversalResult {
@@ -359,12 +437,12 @@ pub(super) fn hydrate_component_page(
         })
         .collect::<Vec<_>>();
     let mut hydrated = if hydrate {
-        hydrate_nodes(&traversal_rows)?
+        hydrate_nodes_governed(&traversal_rows, governor)?
     } else {
         HashMap::new()
     };
 
-    Ok(page
+    let rows = page
         .into_iter()
         .map(|row| {
             let node = hydrated.remove(&(row.node_table.0, row.node_id.clone()));
@@ -375,7 +453,9 @@ pub(super) fn hydrate_component_page(
                 node,
             )
         })
-        .collect())
+        .collect();
+    output_lease.retain_until_governor_drop();
+    Ok(rows)
 }
 
 /// Auto-load the persisted graph if the engine is empty and auto_load is enabled.

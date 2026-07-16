@@ -22,11 +22,11 @@
 
 ## R2: Resource Containment And Safe Publication
 
-- [ ] Centralize byte, work, row, disk, and time policy with checked unit types
+- [x] Centralize byte, work, row, disk, and time policy with checked unit types
       and fallible reservations.
-- [ ] Enforce preflight plus runtime breakers for build, load, queries, sync,
+- [x] Enforce preflight plus runtime breakers for build, load, queries, sync,
       compaction, and advertised analytics.
-- [ ] Prefer bounded adaptive batches and spill; return a stable typed resource
+- [x] Prefer bounded adaptive batches and spill; return a stable typed resource
       error before backend or container OOM.
 - [ ] Add production-shaped RSS/PSS gates for stale statistics, many filters,
       high-cardinality values, parallel edges, supernodes, `LIMIT 1`, concurrent
@@ -39,6 +39,11 @@
       competing-publisher/crash/fault-injection tests.
 
 ## R3: Bounded Storage, Build, Sync, And Compaction
+
+Detailed design and acceptance gates are owned by
+[Memory Governance And Out-Of-Core Execution](../full-graph-engine/01-memory-governance.md);
+the earlier [focused out-of-core build sketch](../out-of-core-build-plan.md) is
+supporting context where it does not conflict with that authoritative plan.
 
 - [ ] Build from one coherent PostgreSQL snapshot and publish a declared source
       watermark after bounded catch-up.

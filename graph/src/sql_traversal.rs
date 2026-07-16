@@ -6,7 +6,7 @@ use crate::sql_filters::{
     hydration_filters_match, parse_structured_filter, typed_pushdown_filter_op,
     ParsedStructuredFilter,
 };
-use crate::sql_hydration::hydrate_nodes;
+use crate::sql_hydration::hydrate_nodes_governed;
 use crate::{acl, safety, types, ENGINE};
 use std::collections::{HashMap, HashSet};
 
@@ -56,18 +56,45 @@ pub(crate) fn validate_traverse_options(
 pub(crate) fn execute_traverse_rows(
     request: &TraverseRequest<'_>,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
-    let candidates = execute_traverse_candidates(request)?;
-    paginate_and_format_traverse_candidates(
+    let governor = query_governor()?;
+    execute_traverse_rows_governed(request, &governor)
+}
+
+/// Executes and materializes one traversal under a single operation budget.
+pub(crate) fn execute_traverse_rows_governed(
+    request: &TraverseRequest<'_>,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<TraverseRow>> {
+    let candidates = execute_traverse_candidates_governed(request, governor)?;
+    paginate_and_format_traverse_candidates_governed(
         candidates,
         request.hydrate,
         request.offset,
         request.limit,
+        governor,
     )
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn execute_traverse_candidates(
     request: &TraverseRequest<'_>,
 ) -> safety::GraphResult<Vec<TraverseCandidate>> {
+    let governor = query_governor()?;
+    execute_traverse_candidates_governed(request, &governor)
+}
+
+/// Executes a traversal while preserving the caller's work and elapsed clocks.
+pub(crate) fn execute_traverse_candidates_governed(
+    request: &TraverseRequest<'_>,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<TraverseCandidate>> {
+    let request_bytes = traversal_request_workspace_upper_bound(request)?;
+    let _request_workspace = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryCandidates,
+            request_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
     acl::check_table_acl(request.root_table.to_u32())?;
 
     let table_filter = request
@@ -99,7 +126,7 @@ pub(crate) fn execute_traverse_candidates(
             filter_ops.push(typed_pushdown_filter_op(&eng.filter_index, filter)?);
         }
 
-        eng.traverse_with_filter_ops(
+        eng.traverse_with_filter_ops_governed(
             request.root_table.to_u32(),
             request.root_id,
             request.max_depth,
@@ -110,14 +137,25 @@ pub(crate) fn execute_traverse_candidates(
             request.tenant,
             request.strategy,
             request.direction,
+            governor,
         )
     })?;
 
+    let page_lease = reserve_traversal_rows(
+        governor,
+        crate::resource::ResourcePhase::QueryBlocking,
+        &results,
+        2,
+    )?;
     let mut page = results
         .into_iter()
         .filter(|r| request.include_start || r.depth != 0)
         .filter(|r| table_filter.is_empty() || table_filter.contains(&r.node_table.0))
         .collect::<Vec<_>>();
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
+        .map_err(crate::safety::resource_limit_error)?;
+    crate::resource::check_postgres_interrupts();
     page.sort_by(|left, right| {
         left.depth
             .cmp(&right.depth)
@@ -126,8 +164,8 @@ pub(crate) fn execute_traverse_candidates(
     });
     let root_table_name = relation_name(request.root_table.to_u32())?;
     let needs_hydration_verification = !structured_filter.hydration_filters.is_empty();
-    let hydrated = if needs_hydration_verification {
-        hydrate_nodes(&page)?
+    let mut hydrated = if needs_hydration_verification {
+        hydrate_nodes_governed(&page, governor)?
     } else {
         HashMap::new()
     };
@@ -145,12 +183,12 @@ pub(crate) fn execute_traverse_candidates(
         });
     }
 
-    Ok(page
+    let candidates = page
         .into_iter()
         .map(|row| {
             let pre_hydrated = hydrated
-                .get(&(row.node_table.0, row.node_id.clone()))
-                .map(|node| node.0.clone());
+                .remove(&(row.node_table.0, row.node_id.clone()))
+                .map(|node| node.0);
             TraverseCandidate {
                 root_table: request.root_table,
                 root_id: request.root_id.to_string(),
@@ -159,7 +197,9 @@ pub(crate) fn execute_traverse_candidates(
                 pre_hydrated,
             }
         })
-        .collect())
+        .collect();
+    page_lease.retain_until_governor_drop();
+    Ok(candidates)
 }
 
 pub(crate) fn sort_traverse_candidates_for_many(rows: &mut [TraverseCandidate]) {
@@ -172,6 +212,35 @@ pub(crate) fn sort_traverse_candidates_for_many(rows: &mut [TraverseCandidate]) 
             .then_with(|| left.row.node_table.cmp(&right.row.node_table))
             .then_with(|| left.row.node_id.cmp(&right.row.node_id))
     });
+}
+
+/// Sorts multi-root candidates while charging the stable-sort workspace.
+pub(crate) fn sort_traverse_candidates_for_many_governed(
+    rows: &mut [TraverseCandidate],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<()> {
+    let bytes = rows
+        .len()
+        .checked_mul(std::mem::size_of::<TraverseCandidate>())
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("traversal sort estimate overflowed".to_string())
+        })?;
+    let _workspace = governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, bytes)
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryBlocking,
+            crate::resource::WorkUnits::new(sort_work_units(rows.len())?),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
+        .map_err(crate::safety::resource_limit_error)?;
+    crate::resource::check_postgres_interrupts();
+    sort_traverse_candidates_for_many(rows);
+    Ok(())
 }
 
 pub(crate) fn apply_traversal_uniqueness(
@@ -188,14 +257,72 @@ pub(crate) fn apply_traversal_uniqueness(
     });
 }
 
+/// Applies cross-root uniqueness with a governed hash-set workspace.
+pub(crate) fn apply_traversal_uniqueness_governed(
+    candidates: &mut Vec<TraverseCandidate>,
+    uniqueness: types::TraversalUniqueness,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<()> {
+    if uniqueness == types::TraversalUniqueness::NodePerRoot {
+        return Ok(());
+    }
+    let key_bytes = candidates.iter().try_fold(0usize, |bytes, candidate| {
+        bytes
+            .checked_add(candidate.row.node_id.len())
+            .and_then(|bytes| bytes.checked_add(64))
+            .ok_or_else(|| {
+                safety::GraphError::Internal("uniqueness estimate overflowed".to_string())
+            })
+    })?;
+    let _workspace = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryBlocking,
+            crate::resource::ByteCount::from_usize(key_bytes).ok_or_else(|| {
+                safety::GraphError::Internal("uniqueness estimate does not fit u64".to_string())
+            })?,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryBlocking,
+            crate::resource::WorkUnits::new(u64::try_from(candidates.len()).unwrap_or(u64::MAX)),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    apply_traversal_uniqueness(candidates, uniqueness);
+    Ok(())
+}
+
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn paginate_and_format_traverse_candidates(
     candidates: Vec<TraverseCandidate>,
     hydrate: bool,
     offset: i32,
     limit: i32,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
+    let governor = query_governor()?;
+    paginate_and_format_traverse_candidates_governed(candidates, hydrate, offset, limit, &governor)
+}
+
+/// Pages, hydrates, and formats candidates under the execution governor.
+pub(crate) fn paginate_and_format_traverse_candidates_governed(
+    candidates: Vec<TraverseCandidate>,
+    hydrate: bool,
+    offset: i32,
+    limit: i32,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<TraverseRow>> {
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
+    let selected = candidates.len().saturating_sub(offset).min(limit);
+    let page_bytes = selected
+        .checked_mul(std::mem::size_of::<TraverseCandidate>())
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("traversal page estimate overflowed".to_string())
+        })?;
+    let page_lease = governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, page_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
     let mut page = candidates
         .into_iter()
         .skip(offset)
@@ -207,12 +334,30 @@ pub(crate) fn paginate_and_format_traverse_candidates(
             .filter(|candidate| candidate.pre_hydrated.is_none())
             .map(|candidate| candidate.row.clone())
             .collect::<Vec<_>>();
-        hydrate_nodes(&rows_to_hydrate)?
+        hydrate_nodes_governed(&rows_to_hydrate, governor)?
     } else {
         HashMap::new()
     };
 
-    page.drain(..)
+    let output_bytes = traverse_output_upper_bound(&page)?;
+    let output_lease = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryCandidates,
+            output_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryCandidates,
+            crate::resource::WorkUnits::new(traverse_output_work(&page)?),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
+        .map_err(crate::safety::resource_limit_error)?;
+    crate::resource::check_postgres_interrupts();
+    let rows = page
+        .drain(..)
         .map(|candidate| {
             let node = if hydrate {
                 candidate.pre_hydrated.map(pgrx::JsonB).or_else(|| {
@@ -243,7 +388,191 @@ pub(crate) fn paginate_and_format_traverse_candidates(
                 relation_name(candidate.row.node_table.0)?,
             ))
         })
-        .collect()
+        .collect::<safety::GraphResult<Vec<_>>>()?;
+    page_lease.retain_until_governor_drop();
+    output_lease.retain_until_governor_drop();
+    Ok(rows)
+}
+
+fn query_governor() -> safety::GraphResult<crate::resource::ResourceGovernor> {
+    ENGINE.with(|engine| engine.borrow().query_resource_governor())
+}
+
+fn traversal_request_workspace_upper_bound(
+    request: &TraverseRequest<'_>,
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let table_bytes = request
+        .node_tables
+        .map_or(0, |tables| tables.len().saturating_mul(64));
+    let edge_bytes = request.edge_types.map_or(0, |edges| {
+        edges.iter().fold(0usize, |bytes, edge| {
+            bytes.saturating_add(edge.len()).saturating_add(64)
+        })
+    });
+    let filter_bytes = request
+        .filter
+        .map_or(Ok(0), |filter| json_workspace_upper_bound(&filter.0))?;
+    table_bytes
+        .checked_add(edge_bytes)
+        .and_then(|bytes| bytes.checked_add(filter_bytes))
+        .and_then(|bytes| bytes.checked_add(request.root_id.len()))
+        .and_then(|bytes| bytes.checked_add(1_024))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("traversal request estimate overflowed".to_string())
+        })
+}
+
+fn json_workspace_upper_bound(value: &serde_json::Value) -> safety::GraphResult<usize> {
+    const ITEM_BYTES: usize = 512;
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(ITEM_BYTES)
+        }
+        serde_json::Value::String(value) => ITEM_BYTES.checked_add(value.len()).ok_or_else(|| {
+            safety::GraphError::Internal("JSON workspace estimate overflowed".to_string())
+        }),
+        serde_json::Value::Array(values) => values.iter().try_fold(ITEM_BYTES, |bytes, value| {
+            bytes
+                .checked_add(json_workspace_upper_bound(value)?)
+                .ok_or_else(|| {
+                    safety::GraphError::Internal("JSON workspace estimate overflowed".to_string())
+                })
+        }),
+        serde_json::Value::Object(values) => {
+            values.iter().try_fold(ITEM_BYTES, |bytes, (key, value)| {
+                bytes
+                    .checked_add(key.len())
+                    .and_then(|bytes| bytes.checked_add(json_workspace_upper_bound(value).ok()?))
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal(
+                            "JSON workspace estimate overflowed".to_string(),
+                        )
+                    })
+            })
+        }
+    }
+}
+
+fn reserve_traversal_rows<'a>(
+    governor: &'a crate::resource::ResourceGovernor,
+    phase: crate::resource::ResourcePhase,
+    rows: &[types::TraversalResult],
+    allocation_multiplier: usize,
+) -> safety::GraphResult<crate::resource::ResourceLease<'a>> {
+    let bytes = rows.iter().try_fold(0usize, |bytes, row| {
+        let path_bytes = row.path.iter().try_fold(0usize, |bytes, coord| {
+            bytes
+                .checked_add(std::mem::size_of::<types::PathCoordinate>())
+                .and_then(|bytes| bytes.checked_add(coord.node_id.len()))
+                .ok_or_else(|| {
+                    safety::GraphError::Internal("traversal row estimate overflowed".to_string())
+                })
+        })?;
+        let edge_bytes = row.edge_path.iter().try_fold(0usize, |bytes, edge| {
+            bytes
+                .checked_add(std::mem::size_of::<String>())
+                .and_then(|bytes| bytes.checked_add(edge.len()))
+                .ok_or_else(|| {
+                    safety::GraphError::Internal("traversal row estimate overflowed".to_string())
+                })
+        })?;
+        bytes
+            .checked_add(std::mem::size_of::<types::TraversalResult>())
+            .and_then(|bytes| bytes.checked_add(row.node_id.len()))
+            .and_then(|bytes| bytes.checked_add(path_bytes))
+            .and_then(|bytes| bytes.checked_add(edge_bytes))
+            .ok_or_else(|| {
+                safety::GraphError::Internal("traversal row estimate overflowed".to_string())
+            })
+    })?;
+    let bytes = bytes
+        .checked_mul(allocation_multiplier)
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("traversal row estimate overflowed".to_string())
+        })?;
+    governor
+        .reserve_memory(phase, bytes)
+        .map_err(crate::safety::resource_limit_error)
+}
+
+fn traverse_output_upper_bound(
+    rows: &[TraverseCandidate],
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let bytes = rows.iter().try_fold(0usize, |bytes, candidate| {
+        let path = candidate
+            .row
+            .path
+            .iter()
+            .try_fold(0usize, |bytes, coordinate| {
+                bytes
+                    .checked_add(coordinate.node_id.len())
+                    .and_then(|bytes| bytes.checked_add(512))
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal(
+                            "traversal output estimate overflowed".to_string(),
+                        )
+                    })
+            })?;
+        let edges = candidate
+            .row
+            .edge_path
+            .iter()
+            .try_fold(0usize, |bytes, edge| {
+                bytes
+                    .checked_add(edge.len())
+                    .and_then(|bytes| bytes.checked_add(128))
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal(
+                            "traversal output estimate overflowed".to_string(),
+                        )
+                    })
+            })?;
+        bytes
+            .checked_add(std::mem::size_of::<TraverseRow>())
+            .and_then(|bytes| bytes.checked_add(candidate.root_id.len()))
+            .and_then(|bytes| bytes.checked_add(candidate.root_table_name.len()))
+            .and_then(|bytes| bytes.checked_add(candidate.row.node_id.len().saturating_mul(2)))
+            .and_then(|bytes| bytes.checked_add(path))
+            .and_then(|bytes| bytes.checked_add(edges))
+            .and_then(|bytes| bytes.checked_add(512))
+            .ok_or_else(|| {
+                safety::GraphError::Internal("traversal output estimate overflowed".to_string())
+            })
+    })?;
+    crate::resource::ByteCount::from_usize(bytes).ok_or_else(|| {
+        safety::GraphError::Internal("traversal output estimate does not fit u64".to_string())
+    })
+}
+
+fn traverse_output_work(rows: &[TraverseCandidate]) -> safety::GraphResult<u64> {
+    rows.iter().try_fold(0u64, |work, row| {
+        let row_work = row
+            .row
+            .path
+            .len()
+            .saturating_add(row.row.edge_path.len())
+            .saturating_add(1);
+        work.checked_add(u64::try_from(row_work).unwrap_or(u64::MAX))
+            .ok_or_else(|| {
+                safety::GraphError::Internal("traversal output work overflowed".to_string())
+            })
+    })
+}
+
+fn sort_work_units(rows: usize) -> safety::GraphResult<u64> {
+    if rows < 2 {
+        return Ok(u64::try_from(rows).unwrap_or(u64::MAX));
+    }
+    let comparisons = rows
+        .checked_mul(usize::BITS as usize - rows.leading_zeros() as usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("traversal sort work overflowed".to_string())
+        })?;
+    u64::try_from(comparisons).map_err(|_| {
+        safety::GraphError::Internal("traversal sort work does not fit u64".to_string())
+    })
 }
 
 pub(crate) fn path_coordinates_json(
@@ -493,7 +822,8 @@ pub(crate) fn u32_from_nonnegative(value: i32, name: &str) -> safety::GraphResul
 
 #[cfg(test)]
 mod tests {
-    use super::parse_node_ref_json_parts;
+    use super::*;
+    use std::time::Duration;
 
     #[test]
     fn node_ref_json_part_parser_rejects_non_contract_shapes() {
@@ -506,5 +836,123 @@ mod tests {
         assert!(parse_node_ref_json_parts(&serde_json::json!(["public.users"])).is_err());
         assert!(parse_node_ref_json_parts(&serde_json::json!([42, "u1"])).is_err());
         assert!(parse_node_ref_json_parts(&serde_json::json!({"table": "public.users"})).is_err());
+    }
+
+    fn test_limits(
+        memory: crate::resource::ByteCount,
+        work: u64,
+        elapsed: Duration,
+    ) -> crate::resource::ResourceLimits {
+        crate::resource::ResourceLimits::bounded(
+            crate::resource::MemoryBudget::new(memory),
+            crate::resource::DiskBudget::UNLIMITED,
+            crate::resource::RowCount::UNLIMITED,
+            crate::resource::WorkUnits::new(work),
+            crate::resource::ElapsedBudget::new(elapsed),
+        )
+    }
+
+    fn one_result() -> types::TraversalResult {
+        types::TraversalResult {
+            node_table: types::TableOid(42),
+            node_id: "node-1".to_string(),
+            depth: 0,
+            path: vec![types::PathCoordinate {
+                table_oid: types::TableOid(42),
+                node_id: "node-1".to_string(),
+            }],
+            edge_path: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn retained_execution_rows_cannot_reuse_the_full_output_budget() {
+        let sizing = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            )),
+        );
+        let rows = [one_result()];
+        let sizing_lease = reserve_traversal_rows(
+            &sizing,
+            crate::resource::ResourcePhase::QueryCandidates,
+            &rows,
+            1,
+        )
+        .expect("sizing reservation succeeds");
+        let exact = sizing.memory_used();
+        drop(sizing_lease);
+
+        let shared = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(exact)),
+        );
+        reserve_traversal_rows(
+            &shared,
+            crate::resource::ResourcePhase::QueryCandidates,
+            &rows,
+            1,
+        )
+        .expect("execution result fits")
+        .retain_until_governor_drop();
+        let error = reserve_traversal_rows(
+            &shared,
+            crate::resource::ResourcePhase::QueryBlocking,
+            &rows,
+            1,
+        )
+        .err()
+        .expect("paging cannot reuse memory retained by execution");
+        assert!(matches!(error, safety::GraphError::ResourceLimit { .. }));
+
+        let separate = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(exact)),
+        );
+        reserve_traversal_rows(
+            &separate,
+            crate::resource::ResourcePhase::QueryBlocking,
+            &rows,
+            1,
+        )
+        .expect("the same phase fits only under a restarted governor");
+    }
+
+    #[test]
+    fn hydration_consumes_the_execution_work_budget_instead_of_restarting_it() {
+        let governor = crate::resource::ResourceGovernor::new(test_limits(
+            crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            10,
+            Duration::MAX,
+        ));
+        governor
+            .consume_work(
+                crate::resource::ResourcePhase::QueryExpand,
+                crate::resource::WorkUnits::new(5),
+            )
+            .expect("execution work fits");
+        let error = crate::sql_hydration::reserve_hydration_workspace(&governor, 6, 0)
+            .err()
+            .expect("hydration must observe execution work already consumed");
+        assert!(matches!(error, safety::GraphError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn blocking_phase_observes_elapsed_time_from_operation_start() {
+        let expired = crate::resource::ResourceGovernor::new(test_limits(
+            crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            u64::MAX,
+            Duration::from_millis(10),
+        ));
+        std::thread::sleep(Duration::from_millis(20));
+        let error = sort_traverse_candidates_for_many_governed(&mut [], &expired)
+            .expect_err("sort uses the original operation clock");
+        assert!(matches!(error, safety::GraphError::ResourceLimit { .. }));
+
+        let fresh = crate::resource::ResourceGovernor::new(test_limits(
+            crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            u64::MAX,
+            Duration::from_millis(10),
+        ));
+        sort_traverse_candidates_for_many_governed(&mut [], &fresh)
+            .expect("a fresh clock has not expired");
     }
 }

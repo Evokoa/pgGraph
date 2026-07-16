@@ -3,8 +3,8 @@
 //! Compaction reduces manifest segment fanout by publishing a new generation
 //! whose higher-level artifacts expose the same layered read output.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,7 @@ use crate::edge_store::{
 use crate::projection::chunk::{
     publish_base_chunk_rewrite_with_segments, EdgeStoreChunkSource, SourceRange,
 };
-use crate::projection::layered::{LayeredNeighbors, ManifestSegmentProvider};
+use crate::projection::layered::{LayeredNeighbors, LayeredSnapshot};
 use crate::projection::manifest::{
     ManifestFileRef, ManifestSegmentRef, ProjectionManifest, ProjectionManifestStore,
 };
@@ -24,10 +24,12 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 type CompactionEdgeKey = (u32, u8, bool, Option<crate::edge_store::RelationshipId>);
+const COMPACTION_FILESYSTEM_WORKSPACE_BYTES: usize = 64 * 1024;
 
 /// Bounds for one compaction pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompactionBudgets {
+    pub(crate) resident_bytes: crate::resource::ByteCount,
     pub(crate) max_rows: usize,
     pub(crate) max_bytes: usize,
     pub(crate) max_segments: usize,
@@ -39,6 +41,7 @@ impl CompactionBudgets {
     #[cfg(test)]
     fn generous() -> Self {
         Self {
+            resident_bytes: crate::resource::ByteCount::ZERO,
             max_rows: 10_000,
             max_bytes: 10_000_000,
             max_segments: 1_000,
@@ -70,8 +73,40 @@ pub(crate) fn compact_generation(
     budgets: CompactionBudgets,
 ) -> GraphResult<CompactionResult> {
     let started = Instant::now();
-    let edge_segments = load_edge_segments(root, previous)?;
+    let row_budget =
+        crate::resource::RowCount::new(u64::try_from(budgets.max_rows).map_err(|_| {
+            GraphError::Internal("compaction row budget does not fit u64".to_string())
+        })?);
+    let governor = crate::resource::maintenance_governor(budgets.resident_bytes, row_budget);
+    let mut memory = reserve_compaction_memory(
+        &governor,
+        COMPACTION_FILESYSTEM_WORKSPACE_BYTES,
+        budgets.max_bytes,
+    )?;
+    let segment_file_bytes = preflight_segment_files(root, previous, budgets)?;
+    let (edge_segments, edge_segment_bytes) = load_edge_segments(
+        root,
+        previous,
+        &mut memory,
+        COMPACTION_FILESYSTEM_WORKSPACE_BYTES,
+        budgets.max_bytes,
+    )?;
     if edge_segments.is_empty() {
+        let clone_bytes = previous.estimated_heap_bytes()?;
+        resize_compaction_memory(
+            &mut memory,
+            COMPACTION_FILESYSTEM_WORKSPACE_BYTES
+                .checked_add(clone_bytes)
+                .ok_or_else(|| {
+                    compaction_resource_limit(
+                        "memory bytes",
+                        COMPACTION_FILESYSTEM_WORKSPACE_BYTES,
+                        clone_bytes,
+                        budgets.max_bytes,
+                    )
+                })?,
+            budgets.max_bytes,
+        )?;
         return Ok(CompactionResult {
             manifest: previous.clone(),
             segments_compacted: 0,
@@ -79,19 +114,251 @@ pub(crate) fn compact_generation(
         });
     }
     validate_budgets(&edge_segments, budgets, started)?;
-    let ranges = compacted_source_ranges(&edge_segments)?;
-    let retained_segments = retained_segments(previous, &edge_segments);
+    let rows = segment_rows(&edge_segments)?;
+    governor
+        .consume_rows(
+            crate::resource::ResourcePhase::CompactionMerge,
+            crate::resource::RowCount::new(u64::try_from(rows).map_err(|_| {
+                GraphError::Internal("compaction row count does not fit u64".to_string())
+            })?),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let (ranges, range_heap_bytes) = compacted_source_ranges(
+        &edge_segments,
+        &mut memory,
+        COMPACTION_FILESYSTEM_WORKSPACE_BYTES
+            .checked_add(edge_segment_bytes)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    COMPACTION_FILESYSTEM_WORKSPACE_BYTES,
+                    edge_segment_bytes,
+                    budgets.max_bytes,
+                )
+            })?,
+        budgets.max_bytes,
+    )?;
+    let base_chunk_file_bytes = relevant_base_chunk_file_bytes(root, previous, &ranges)?;
+    let (base_chunks, base_chunk_heap_bytes) = load_relevant_base_chunks(
+        root,
+        previous,
+        &ranges,
+        budgets.max_bytes.saturating_sub(segment_file_bytes),
+        &mut memory,
+        COMPACTION_FILESYSTEM_WORKSPACE_BYTES
+            .checked_add(edge_segment_bytes)
+            .and_then(|bytes| bytes.checked_add(range_heap_bytes))
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    COMPACTION_FILESYSTEM_WORKSPACE_BYTES,
+                    edge_segment_bytes.saturating_add(range_heap_bytes),
+                    budgets.max_bytes,
+                )
+            })?,
+        budgets.max_bytes,
+    )?;
+    let decoded_bytes = edge_segment_bytes
+        .checked_add(base_chunk_heap_bytes)
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                edge_segment_bytes,
+                base_chunk_file_bytes,
+                budgets.max_bytes,
+            )
+        })?;
+    let decoded_and_ranges = decoded_bytes.checked_add(range_heap_bytes).ok_or_else(|| {
+        compaction_resource_limit(
+            "memory bytes",
+            decoded_bytes,
+            range_heap_bytes,
+            budgets.max_bytes,
+        )
+    })?;
+    let refs_heap_bytes = base_chunks
+        .len()
+        .checked_add(edge_segments.len())
+        .and_then(|count| count.checked_mul(std::mem::size_of::<&DeltaSegment>()))
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                decoded_and_ranges,
+                usize::MAX,
+                budgets.max_bytes,
+            )
+        })?;
+    resize_compaction_memory(
+        &mut memory,
+        decoded_and_ranges
+            .checked_add(refs_heap_bytes)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    decoded_and_ranges,
+                    refs_heap_bytes,
+                    budgets.max_bytes,
+                )
+            })?,
+        budgets.max_bytes,
+    )?;
+    let mut base_chunk_refs = Vec::new();
+    base_chunk_refs
+        .try_reserve_exact(base_chunks.len())
+        .map_err(compaction_allocation_error)?;
+    base_chunk_refs.extend(base_chunks.iter());
+    let mut segment_refs = Vec::new();
+    segment_refs
+        .try_reserve_exact(edge_segments.len())
+        .map_err(compaction_allocation_error)?;
+    segment_refs.extend(edge_segments.iter().map(|loaded| &loaded.segment));
+    let snapshot_plan = LayeredSnapshot::build_plan(&base_chunk_refs, &segment_refs)?;
+    let auxiliary_live_bytes = COMPACTION_FILESYSTEM_WORKSPACE_BYTES
+        .checked_add(range_heap_bytes)
+        .and_then(|bytes| bytes.checked_add(refs_heap_bytes))
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                COMPACTION_FILESYSTEM_WORKSPACE_BYTES,
+                refs_heap_bytes,
+                budgets.max_bytes,
+            )
+        })?;
+    let decoded_with_auxiliary =
+        decoded_bytes
+            .checked_add(auxiliary_live_bytes)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    decoded_bytes,
+                    auxiliary_live_bytes,
+                    budgets.max_bytes,
+                )
+            })?;
+    let snapshot_preflight = decoded_with_auxiliary
+        .checked_add(snapshot_plan.estimated_peak_bytes())
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                decoded_with_auxiliary,
+                snapshot_plan.estimated_peak_bytes(),
+                budgets.max_bytes,
+            )
+        })?;
+    resize_compaction_memory(&mut memory, snapshot_preflight, budgets.max_bytes)?;
+    let snapshot = LayeredSnapshot::try_build_from_refs_with_plan(
+        base,
+        &base_chunk_refs,
+        &segment_refs,
+        snapshot_plan,
+    )?;
+    let live_snapshot_bytes = decoded_with_auxiliary
+        .checked_add(snapshot.estimated_heap_bytes())
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                decoded_with_auxiliary,
+                snapshot.estimated_heap_bytes(),
+                budgets.max_bytes,
+            )
+        })?;
+    resize_compaction_memory(&mut memory, live_snapshot_bytes, budgets.max_bytes)?;
+    let scratch_bytes = compaction_source_scratch_bytes(
+        base,
+        &base_chunks,
+        &edge_segments,
+        &mut memory,
+        live_snapshot_bytes,
+        budgets.max_bytes,
+        CompactionExecution {
+            governor: &governor,
+            started,
+            max_elapsed: budgets.max_elapsed,
+        },
+    )?;
+    let live_with_scratch = live_snapshot_bytes
+        .checked_add(scratch_bytes)
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                live_snapshot_bytes,
+                scratch_bytes,
+                budgets.max_bytes,
+            )
+        })?;
+    resize_compaction_memory(&mut memory, live_with_scratch, budgets.max_bytes)?;
+    let layered = LayeredNeighbors::from_snapshot(base, &snapshot);
+    let (retained_segments, retained_heap_bytes) = retained_segments_governed(
+        previous,
+        &edge_segments,
+        &mut memory,
+        live_with_scratch,
+        budgets.max_bytes,
+    )?;
+    let live_workspace_bytes = live_with_scratch
+        .checked_add(retained_heap_bytes)
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                live_with_scratch,
+                retained_heap_bytes,
+                budgets.max_bytes,
+            )
+        })?;
     if budgets
         .dirty_chunk_segment_threshold
         .is_some_and(|threshold| edge_segments.len() >= threshold)
     {
-        let final_store = materialize_layered_store(root, previous, base)?;
+        let final_store_plan = plan_materialized_store(
+            base,
+            &layered,
+            &ranges,
+            CompactionExecution {
+                governor: &governor,
+                started,
+                max_elapsed: budgets.max_elapsed,
+            },
+        )?;
+        let final_store_preflight = final_store_plan.heap_bytes;
+        let rewrite_preflight = live_workspace_bytes
+            .checked_add(final_store_preflight)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    live_workspace_bytes,
+                    final_store_preflight,
+                    budgets.max_bytes,
+                )
+            })?;
+        resize_compaction_memory(&mut memory, rewrite_preflight, budgets.max_bytes)?;
+        let final_store = materialize_layered_ranges(
+            base,
+            &layered,
+            &ranges,
+            final_store_plan.edge_count,
+            &governor,
+            started,
+            budgets.max_elapsed,
+        )?;
+        let rewrite_bytes = live_workspace_bytes
+            .checked_add(final_store_plan.heap_bytes)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    live_workspace_bytes,
+                    final_store_plan.heap_bytes,
+                    budgets.max_bytes,
+                )
+            })?;
+        resize_compaction_memory(&mut memory, rewrite_bytes, budgets.max_bytes)?;
         let result = publish_base_chunk_rewrite_with_segments(
             root,
             previous,
             &EdgeStoreChunkSource::new(&final_store),
             &ranges,
             retained_segments,
+            &governor,
+            budgets.max_bytes,
         )?;
         return Ok(CompactionResult {
             manifest: result.manifest,
@@ -100,14 +367,83 @@ pub(crate) fn compact_generation(
         });
     }
 
-    let compacted = build_compacted_segment(root, previous, base, &edge_segments, &ranges)?;
+    let compacted_plan = plan_compacted_segment(
+        base,
+        &layered,
+        &ranges,
+        CompactionExecution {
+            governor: &governor,
+            started,
+            max_elapsed: budgets.max_elapsed,
+        },
+    )?;
+    let compacted_preflight = compacted_plan.heap_bytes;
+    let compacted_preflight_live = live_workspace_bytes
+        .checked_add(compacted_preflight)
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                live_workspace_bytes,
+                compacted_preflight,
+                budgets.max_bytes,
+            )
+        })?;
+    resize_compaction_memory(&mut memory, compacted_preflight_live, budgets.max_bytes)?;
+    let compacted = build_compacted_segment(
+        previous,
+        base,
+        &layered,
+        &edge_segments,
+        &ranges,
+        compacted_plan,
+        CompactionExecution {
+            governor: &governor,
+            started,
+            max_elapsed: budgets.max_elapsed,
+        },
+    )?;
+    let compacted_heap_bytes = estimated_delta_segment_heap_bytes(&compacted)?;
+    let compacted_live_bytes = live_workspace_bytes
+        .checked_add(compacted_heap_bytes)
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                live_workspace_bytes,
+                compacted_heap_bytes,
+                budgets.max_bytes,
+            )
+        })?;
+    resize_compaction_memory(&mut memory, compacted_live_bytes, budgets.max_bytes)?;
     let generation_id = previous
         .generation_id
         .checked_add(1)
         .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into()))?;
+    let manifest_publication_bytes = compaction_manifest_publication_upper_bound(
+        previous,
+        &edge_segments,
+        COMPACTION_SOURCE_SCRATCH_FIXED_BYTES,
+        budgets.max_bytes,
+    )?;
+    let publication_live_bytes = compacted_live_bytes
+        .checked_add(manifest_publication_bytes)
+        .ok_or_else(|| {
+            compaction_resource_limit(
+                "memory bytes",
+                compacted_live_bytes,
+                manifest_publication_bytes,
+                budgets.max_bytes,
+            )
+        })?;
+    resize_compaction_memory(&mut memory, publication_live_bytes, budgets.max_bytes)?;
     let segment_path = root.join(compacted_segment_file_name(generation_id, 0));
-    write_segment_atomically(root, &segment_path, &compacted)?;
-    let segment_ref = segment_ref(root, &segment_path, &compacted)?;
+    let checksum = write_segment_atomically(
+        root,
+        &segment_path,
+        &compacted,
+        &governor,
+        budgets.max_bytes,
+    )?;
+    let segment_ref = segment_ref_with_checksum(root, &segment_path, &compacted, checksum)?;
     let mut manifest = ProjectionManifest::base_only(
         generation_id,
         previous.base_artifact_path.clone(),
@@ -131,7 +467,12 @@ pub(crate) fn compact_generation(
             bytes: 0,
         }));
     let store = ProjectionManifestStore::new(root);
-    if let Err(err) = store.publish(&manifest) {
+    if let Err(err) = store.publish_governed(
+        &manifest,
+        &governor,
+        crate::resource::ResourcePhase::CompactionMerge,
+        budgets.max_bytes,
+    ) {
         if !store.manifest_path(generation_id).exists() {
             let _ = std::fs::remove_file(&segment_path);
         }
@@ -145,45 +486,450 @@ pub(crate) fn compact_generation(
     })
 }
 
+fn preflight_segment_files(
+    root: &Path,
+    manifest: &ProjectionManifest,
+    budgets: CompactionBudgets,
+) -> GraphResult<usize> {
+    let mut bytes = 0usize;
+    let mut segments = 0usize;
+    for segment in manifest
+        .segments
+        .iter()
+        .filter(|segment| segment.level <= 2)
+    {
+        crate::resource::check_postgres_interrupts();
+        segments = segments.checked_add(1).ok_or_else(|| {
+            GraphError::Internal("projection compaction segment count overflowed".to_string())
+        })?;
+        if segments > budgets.max_segments {
+            return Err(GraphError::ResourceLimit {
+                resource: "segments".to_string(),
+                phase: crate::resource::ResourcePhase::CompactionMerge
+                    .as_str()
+                    .to_string(),
+                used: u64::try_from(segments - 1).unwrap_or(u64::MAX),
+                requested: 1,
+                limit: u64::try_from(budgets.max_segments).unwrap_or(u64::MAX),
+            });
+        }
+        let file_bytes = std::fs::metadata(root.join(&segment.path))
+            .map_err(|error| {
+                GraphError::Internal(format!("projection segment metadata read failed: {error}"))
+            })?
+            .len();
+        let file_bytes = usize::try_from(file_bytes).map_err(|_| GraphError::ResourceLimit {
+            resource: "disk bytes".to_string(),
+            phase: crate::resource::ResourcePhase::CompactionMerge
+                .as_str()
+                .to_string(),
+            used: u64::try_from(bytes).unwrap_or(u64::MAX),
+            requested: u64::MAX,
+            limit: u64::try_from(budgets.max_bytes).unwrap_or(u64::MAX),
+        })?;
+        bytes = bytes
+            .checked_add(file_bytes)
+            .ok_or_else(|| GraphError::ResourceLimit {
+                resource: "disk bytes".to_string(),
+                phase: crate::resource::ResourcePhase::CompactionMerge
+                    .as_str()
+                    .to_string(),
+                used: u64::try_from(bytes).unwrap_or(u64::MAX),
+                requested: u64::try_from(file_bytes).unwrap_or(u64::MAX),
+                limit: u64::try_from(budgets.max_bytes).unwrap_or(u64::MAX),
+            })?;
+        if bytes > budgets.max_bytes {
+            return Err(GraphError::ResourceLimit {
+                resource: "disk bytes".to_string(),
+                phase: crate::resource::ResourcePhase::CompactionMerge
+                    .as_str()
+                    .to_string(),
+                used: u64::try_from(bytes - file_bytes).unwrap_or(u64::MAX),
+                requested: u64::try_from(file_bytes).unwrap_or(u64::MAX),
+                limit: u64::try_from(budgets.max_bytes).unwrap_or(u64::MAX),
+            });
+        }
+    }
+    Ok(bytes)
+}
+
+fn compaction_resource_limit(
+    resource: &str,
+    used: usize,
+    requested: usize,
+    limit: usize,
+) -> GraphError {
+    GraphError::ResourceLimit {
+        resource: resource.to_string(),
+        phase: crate::resource::ResourcePhase::CompactionMerge
+            .as_str()
+            .to_string(),
+        used: u64::try_from(used).unwrap_or(u64::MAX),
+        requested: u64::try_from(requested).unwrap_or(u64::MAX),
+        limit: u64::try_from(limit).unwrap_or(u64::MAX),
+    }
+}
+
+fn reserve_compaction_memory(
+    governor: &crate::resource::ResourceGovernor,
+    bytes: usize,
+    ceiling: usize,
+) -> GraphResult<crate::resource::ResourceLease<'_>> {
+    if bytes > ceiling {
+        return Err(compaction_resource_limit("memory bytes", 0, bytes, ceiling));
+    }
+    let bytes = crate::resource::ByteCount::from_usize(bytes)
+        .ok_or_else(|| compaction_resource_limit("memory bytes", 0, bytes, ceiling))?;
+    governor
+        .reserve_memory(crate::resource::ResourcePhase::CompactionMerge, bytes)
+        .map_err(crate::safety::resource_limit_error)
+}
+
+fn resize_compaction_memory(
+    lease: &mut crate::resource::ResourceLease<'_>,
+    target: usize,
+    ceiling: usize,
+) -> GraphResult<()> {
+    if target > ceiling {
+        return Err(compaction_resource_limit(
+            "memory bytes",
+            lease.amount().as_u64().min(usize::MAX as u64) as usize,
+            target.saturating_sub(lease.amount().as_u64().min(usize::MAX as u64) as usize),
+            ceiling,
+        ));
+    }
+    let target = crate::resource::ByteCount::from_usize(target).ok_or_else(|| {
+        compaction_resource_limit(
+            "memory bytes",
+            lease.amount().as_u64().min(usize::MAX as u64) as usize,
+            usize::MAX,
+            ceiling,
+        )
+    })?;
+    lease
+        .try_resize(target)
+        .map_err(crate::safety::resource_limit_error)
+}
+
+fn relevant_base_chunk_file_bytes(
+    root: &Path,
+    manifest: &ProjectionManifest,
+    ranges: &[SourceRange],
+) -> GraphResult<usize> {
+    manifest
+        .base_chunks
+        .iter()
+        .filter(|chunk| {
+            ranges
+                .iter()
+                .any(|range| chunk.source_start < range.end && range.start < chunk.source_end)
+        })
+        .try_fold(0usize, |total, chunk| {
+            let bytes = std::fs::metadata(root.join(&chunk.path))
+                .map_err(|error| {
+                    GraphError::Internal(format!(
+                        "projection base chunk metadata read failed: {error}"
+                    ))
+                })?
+                .len();
+            let bytes = usize::try_from(bytes).map_err(|_| {
+                compaction_resource_limit("memory bytes", total, usize::MAX, usize::MAX)
+            })?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| compaction_resource_limit("memory bytes", total, bytes, usize::MAX))
+        })
+}
+
+fn estimated_segments_heap_bytes(segments: &[LoadedEdgeSegment]) -> GraphResult<usize> {
+    let wrappers = segments
+        .len()
+        .checked_mul(std::mem::size_of::<LoadedEdgeSegment>())
+        .ok_or_else(|| compaction_resource_limit("memory bytes", 0, usize::MAX, usize::MAX))?;
+    segments.iter().try_fold(wrappers, |total, loaded| {
+        let reference_strings = loaded
+            .reference
+            .path
+            .capacity()
+            .checked_add(loaded.reference.checksum.capacity())
+            .ok_or_else(|| {
+                compaction_resource_limit("memory bytes", total, usize::MAX, usize::MAX)
+            })?;
+        let segment = estimated_delta_segment_heap_bytes(&loaded.segment)?;
+        total
+            .checked_add(reference_strings)
+            .and_then(|value| value.checked_add(segment))
+            .ok_or_else(|| compaction_resource_limit("memory bytes", total, segment, usize::MAX))
+    })
+}
+
+fn estimated_delta_segments_heap_bytes(segments: &[DeltaSegment]) -> GraphResult<usize> {
+    let wrappers = segments
+        .len()
+        .checked_mul(std::mem::size_of::<DeltaSegment>())
+        .ok_or_else(|| compaction_resource_limit("memory bytes", 0, usize::MAX, usize::MAX))?;
+    segments.iter().try_fold(wrappers, |total, segment| {
+        let bytes = estimated_delta_segment_heap_bytes(segment)?;
+        total
+            .checked_add(bytes)
+            .ok_or_else(|| compaction_resource_limit("memory bytes", total, bytes, usize::MAX))
+    })
+}
+
+fn estimated_delta_segment_heap_bytes(segment: &DeltaSegment) -> GraphResult<usize> {
+    let fixed = [
+        segment
+            .edge_inserts
+            .capacity()
+            .checked_mul(std::mem::size_of::<SegmentEdge>()),
+        segment
+            .edge_deletes
+            .capacity()
+            .checked_mul(std::mem::size_of::<SegmentEdge>()),
+        segment
+            .edge_weights
+            .capacity()
+            .checked_mul(std::mem::size_of::<SegmentEdgeWeight>()),
+        segment
+            .node_states
+            .capacity()
+            .checked_mul(std::mem::size_of::<
+                crate::projection::segment::SegmentNodeState,
+            >()),
+        segment
+            .resolutions
+            .capacity()
+            .checked_mul(std::mem::size_of::<
+                crate::projection::segment::SegmentResolution,
+            >()),
+        segment.filters.capacity().checked_mul(std::mem::size_of::<
+            crate::projection::segment::SegmentFilterValue,
+        >()),
+        segment
+            .tenants
+            .capacity()
+            .checked_mul(std::mem::size_of::<crate::projection::segment::SegmentTenant>()),
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| {
+        let bytes = bytes.ok_or(())?;
+        total.checked_add(bytes).ok_or(())
+    })
+    .map_err(|()| compaction_resource_limit("memory bytes", 0, usize::MAX, usize::MAX))?;
+    let strings = segment
+        .resolutions
+        .iter()
+        .filter_map(|row| row.primary_key.as_ref())
+        .map(String::capacity)
+        .chain(
+            segment
+                .tenants
+                .iter()
+                .filter_map(|row| row.tenant.as_ref())
+                .map(String::capacity),
+        )
+        .chain(segment.filters.iter().map(|row| row.value.heap_bytes()))
+        .try_fold(0usize, |total, bytes| total.checked_add(bytes).ok_or(()))
+        .map_err(|()| compaction_resource_limit("memory bytes", fixed, usize::MAX, usize::MAX))?;
+    fixed
+        .checked_add(strings)
+        .ok_or_else(|| compaction_resource_limit("memory bytes", fixed, strings, usize::MAX))
+}
+
+fn compaction_manifest_publication_upper_bound(
+    previous: &ProjectionManifest,
+    compacted: &[LoadedEdgeSegment],
+    filesystem_workspace_bytes: usize,
+    max_bytes: usize,
+) -> GraphResult<usize> {
+    let previous_heap = previous.estimated_heap_bytes()?;
+    let replacement_peak = previous_heap
+        .checked_mul(2)
+        .ok_or_else(|| compaction_resource_limit("memory bytes", 0, usize::MAX, max_bytes))?;
+    let obsolete_growth = compacted.iter().try_fold(
+        compacted
+            .len()
+            .checked_mul(std::mem::size_of::<ManifestFileRef>())
+            .ok_or_else(|| compaction_resource_limit("memory bytes", 0, usize::MAX, max_bytes))?,
+        |bytes, loaded| {
+            bytes
+                .checked_add(loaded.reference.path.len())
+                .ok_or_else(|| {
+                    compaction_resource_limit("memory bytes", bytes, usize::MAX, max_bytes)
+                })
+        },
+    )?;
+    replacement_peak
+        .checked_add(obsolete_growth)
+        .and_then(|bytes| bytes.checked_add(filesystem_workspace_bytes))
+        .ok_or_else(|| {
+            compaction_resource_limit("memory bytes", replacement_peak, usize::MAX, max_bytes)
+        })
+}
+
+fn segment_rows(segments: &[LoadedEdgeSegment]) -> GraphResult<usize> {
+    segments.iter().try_fold(0usize, |total, loaded| {
+        let rows = segment_row_count(&loaded.segment);
+        total
+            .checked_add(rows)
+            .ok_or_else(|| compaction_resource_limit("rows", total, rows, usize::MAX))
+    })
+}
+
+fn load_relevant_base_chunks(
+    root: &Path,
+    manifest: &ProjectionManifest,
+    ranges: &[SourceRange],
+    remaining_bytes: usize,
+    memory: &mut crate::resource::ResourceLease<'_>,
+    existing_live_bytes: usize,
+    max_bytes: usize,
+) -> GraphResult<(Vec<DeltaSegment>, usize)> {
+    let selected_count = manifest
+        .base_chunks
+        .iter()
+        .filter(|chunk| {
+            ranges
+                .iter()
+                .any(|range| chunk.source_start < range.end && range.start < chunk.source_end)
+        })
+        .count();
+    let file_bytes = manifest
+        .base_chunks
+        .iter()
+        .filter(|chunk| {
+            ranges
+                .iter()
+                .any(|range| chunk.source_start < range.end && range.start < chunk.source_end)
+        })
+        .try_fold(0usize, |total, chunk| {
+            let bytes = manifest_file_bytes(root, &chunk.path)?;
+            total.checked_add(bytes).ok_or_else(|| {
+                compaction_resource_limit("disk bytes", total, bytes, remaining_bytes)
+            })
+        })?;
+    if file_bytes > remaining_bytes {
+        return Err(GraphError::ResourceLimit {
+            resource: "disk bytes".to_string(),
+            phase: crate::resource::ResourcePhase::CompactionMerge
+                .as_str()
+                .to_string(),
+            used: 0,
+            requested: file_bytes as u64,
+            limit: remaining_bytes as u64,
+        });
+    }
+    let wrapper_bytes = selected_count
+        .checked_mul(std::mem::size_of::<DeltaSegment>())
+        .ok_or_else(|| {
+            compaction_resource_limit("memory bytes", existing_live_bytes, usize::MAX, max_bytes)
+        })?;
+    let mut retained_bytes = wrapper_bytes;
+    resize_compaction_memory(
+        memory,
+        existing_live_bytes
+            .checked_add(retained_bytes)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    existing_live_bytes,
+                    retained_bytes,
+                    max_bytes,
+                )
+            })?,
+        max_bytes,
+    )?;
+    let mut chunks = Vec::new();
+    chunks
+        .try_reserve_exact(selected_count)
+        .map_err(compaction_allocation_error)?;
+    for reference in manifest.base_chunks.iter().filter(|chunk| {
+        ranges
+            .iter()
+            .any(|range| chunk.source_start < range.end && range.start < chunk.source_end)
+    }) {
+        let file_bytes = manifest_file_bytes(root, &reference.path)?;
+        let raw_target = existing_live_bytes
+            .checked_add(retained_bytes)
+            .and_then(|live| live.checked_add(file_bytes))
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    existing_live_bytes + retained_bytes,
+                    file_bytes,
+                    max_bytes,
+                )
+            })?;
+        resize_compaction_memory(memory, raw_target, max_bytes)?;
+        let raw =
+            read_manifest_segment_bytes(root, &reference.path, &reference.checksum, file_bytes)?;
+        let decoded_upper = DeltaSegment::decoded_heap_upper_bound(&raw)?;
+        let decode_target = raw_target.checked_add(decoded_upper).ok_or_else(|| {
+            compaction_resource_limit("memory bytes", raw_target, decoded_upper, max_bytes)
+        })?;
+        resize_compaction_memory(memory, decode_target, max_bytes)?;
+        let decoded = DeltaSegment::from_bytes(&raw)?;
+        drop(raw);
+        let decoded_bytes = estimated_delta_segment_heap_bytes(&decoded)?;
+        retained_bytes = retained_bytes.checked_add(decoded_bytes).ok_or_else(|| {
+            compaction_resource_limit("memory bytes", retained_bytes, decoded_bytes, max_bytes)
+        })?;
+        chunks.push(decoded);
+        resize_compaction_memory(
+            memory,
+            existing_live_bytes
+                .checked_add(retained_bytes)
+                .ok_or_else(|| {
+                    compaction_resource_limit(
+                        "memory bytes",
+                        existing_live_bytes,
+                        retained_bytes,
+                        max_bytes,
+                    )
+                })?,
+            max_bytes,
+        )?;
+    }
+    Ok((chunks, retained_bytes))
+}
+
 fn validate_budgets(
     segments: &[LoadedEdgeSegment],
     budgets: CompactionBudgets,
     started: Instant,
 ) -> GraphResult<()> {
     if segments.len() > budgets.max_segments {
-        return Err(GraphError::OverlayLimit {
-            kind: "projection_compaction_segments".to_string(),
-            requested: segments.len(),
-            limit: budgets.max_segments,
-        });
+        return Err(compaction_resource_limit(
+            "segments",
+            0,
+            segments.len(),
+            budgets.max_segments,
+        ));
     }
-    let rows = segments
-        .iter()
-        .map(|loaded| segment_row_count(&loaded.segment))
-        .sum::<usize>();
+    let rows = segment_rows(segments)?;
     if rows > budgets.max_rows {
-        return Err(GraphError::OverlayLimit {
-            kind: "projection_compaction_rows".to_string(),
-            requested: rows,
-            limit: budgets.max_rows,
-        });
+        return Err(compaction_resource_limit("rows", 0, rows, budgets.max_rows));
     }
     let bytes = rows.checked_mul(32).ok_or_else(|| {
-        GraphError::Internal("projection compaction byte estimate overflowed".into())
+        compaction_resource_limit("memory bytes", 0, usize::MAX, budgets.max_bytes)
     })?;
     if bytes > budgets.max_bytes {
-        return Err(GraphError::OverlayLimit {
-            kind: "projection_compaction_bytes".to_string(),
-            requested: bytes,
-            limit: budgets.max_bytes,
-        });
+        return Err(compaction_resource_limit(
+            "memory bytes",
+            0,
+            bytes,
+            budgets.max_bytes,
+        ));
     }
     if started.elapsed() > budgets.max_elapsed {
-        return Err(GraphError::OverlayLimit {
-            kind: "projection_compaction_elapsed".to_string(),
-            requested: started.elapsed().as_micros() as usize,
-            limit: budgets.max_elapsed.as_micros() as usize,
-        });
+        let elapsed = started.elapsed().as_micros().min(usize::MAX as u128) as usize;
+        let limit = budgets.max_elapsed.as_micros().min(usize::MAX as u128) as usize;
+        return Err(compaction_resource_limit(
+            "elapsed microseconds",
+            elapsed,
+            0,
+            limit,
+        ));
     }
     Ok(())
 }
@@ -191,59 +937,266 @@ fn validate_budgets(
 fn load_edge_segments(
     root: &Path,
     manifest: &ProjectionManifest,
-) -> GraphResult<Vec<LoadedEdgeSegment>> {
-    manifest
+    memory: &mut crate::resource::ResourceLease<'_>,
+    fixed_live_bytes: usize,
+    max_bytes: usize,
+) -> GraphResult<(Vec<LoadedEdgeSegment>, usize)> {
+    let selected_count = manifest
         .segments
         .iter()
         .filter(|segment| segment.level <= 2)
-        .map(|reference| {
-            read_manifest_segment(root, reference).map(|segment| LoadedEdgeSegment {
-                reference: reference.clone(),
-                segment,
-            })
-        })
-        .filter_map(|loaded| match loaded {
-            Ok(loaded) if loaded.segment.header.kind == SegmentKind::Edge => Some(Ok(loaded)),
-            Ok(_) => None,
-            Err(err) => Some(Err(err)),
-        })
-        .collect()
-}
-
-fn retained_segments(
-    manifest: &ProjectionManifest,
-    compacted: &[LoadedEdgeSegment],
-) -> Vec<ManifestSegmentRef> {
-    let compacted_paths = compacted
-        .iter()
-        .map(|loaded| loaded.reference.path.as_str())
-        .collect::<BTreeSet<_>>();
-    manifest
+        .count();
+    let wrapper_bytes = selected_count
+        .checked_mul(std::mem::size_of::<LoadedEdgeSegment>())
+        .ok_or_else(|| compaction_resource_limit("memory bytes", 0, usize::MAX, max_bytes))?;
+    resize_compaction_memory(
+        memory,
+        fixed_live_bytes.checked_add(wrapper_bytes).ok_or_else(|| {
+            compaction_resource_limit("memory bytes", fixed_live_bytes, wrapper_bytes, max_bytes)
+        })?,
+        max_bytes,
+    )?;
+    let mut retained_bytes = wrapper_bytes;
+    let mut loaded = Vec::new();
+    loaded
+        .try_reserve_exact(selected_count)
+        .map_err(compaction_allocation_error)?;
+    for reference in manifest
         .segments
         .iter()
-        .filter(|segment| !compacted_paths.contains(segment.path.as_str()))
-        .cloned()
-        .collect()
+        .filter(|segment| segment.level <= 2)
+    {
+        let file_bytes = manifest_file_bytes(root, &reference.path)?;
+        let raw_target = fixed_live_bytes
+            .checked_add(retained_bytes)
+            .and_then(|bytes| bytes.checked_add(file_bytes))
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    fixed_live_bytes.saturating_add(retained_bytes),
+                    file_bytes,
+                    max_bytes,
+                )
+            })?;
+        resize_compaction_memory(memory, raw_target, max_bytes)?;
+        let raw =
+            read_manifest_segment_bytes(root, &reference.path, &reference.checksum, file_bytes)?;
+        let decoded_upper = DeltaSegment::decoded_heap_upper_bound(&raw)?;
+        let reference_bytes = reference
+            .path
+            .len()
+            .checked_add(reference.checksum.len())
+            .ok_or_else(|| {
+                compaction_resource_limit("memory bytes", raw_target, usize::MAX, max_bytes)
+            })?;
+        let decode_target = raw_target
+            .checked_add(decoded_upper)
+            .and_then(|target| target.checked_add(reference_bytes))
+            .ok_or_else(|| {
+                compaction_resource_limit("memory bytes", raw_target, decoded_upper, max_bytes)
+            })?;
+        resize_compaction_memory(memory, decode_target, max_bytes)?;
+        let segment = DeltaSegment::from_bytes(&raw)?;
+        drop(raw);
+        if segment.header.kind == SegmentKind::Edge {
+            let segment_bytes = estimated_delta_segment_heap_bytes(&segment)?;
+            retained_bytes = retained_bytes
+                .checked_add(reference_bytes)
+                .and_then(|bytes| bytes.checked_add(segment_bytes))
+                .ok_or_else(|| {
+                    compaction_resource_limit(
+                        "memory bytes",
+                        retained_bytes,
+                        segment_bytes,
+                        max_bytes,
+                    )
+                })?;
+            loaded.push(LoadedEdgeSegment {
+                reference: reference.clone(),
+                segment,
+            });
+        }
+        resize_compaction_memory(
+            memory,
+            fixed_live_bytes
+                .checked_add(retained_bytes)
+                .ok_or_else(|| {
+                    compaction_resource_limit(
+                        "memory bytes",
+                        fixed_live_bytes,
+                        retained_bytes,
+                        max_bytes,
+                    )
+                })?,
+            max_bytes,
+        )?;
+    }
+    Ok((loaded, retained_bytes))
 }
 
-fn read_manifest_segment(root: &Path, segment: &ManifestSegmentRef) -> GraphResult<DeltaSegment> {
-    let path = root.join(&segment.path);
-    let bytes = std::fs::read(&path)
+fn retained_segments_governed(
+    manifest: &ProjectionManifest,
+    compacted: &[LoadedEdgeSegment],
+    memory: &mut crate::resource::ResourceLease<'_>,
+    existing_live_bytes: usize,
+    max_bytes: usize,
+) -> GraphResult<(Vec<ManifestSegmentRef>, usize)> {
+    let retained_count = manifest
+        .segments
+        .iter()
+        .filter(|segment| {
+            !compacted
+                .iter()
+                .any(|loaded| loaded.reference.path == segment.path)
+        })
+        .count();
+    let heap_bytes = manifest
+        .segments
+        .iter()
+        .filter(|segment| {
+            !compacted
+                .iter()
+                .any(|loaded| loaded.reference.path == segment.path)
+        })
+        .try_fold(
+            retained_count
+                .checked_mul(std::mem::size_of::<ManifestSegmentRef>())
+                .ok_or_else(|| {
+                    compaction_resource_limit(
+                        "memory bytes",
+                        existing_live_bytes,
+                        usize::MAX,
+                        max_bytes,
+                    )
+                })?,
+            |bytes, segment| {
+                bytes
+                    .checked_add(segment.path.len())
+                    .and_then(|bytes| bytes.checked_add(segment.checksum.len()))
+                    .ok_or_else(|| {
+                        compaction_resource_limit(
+                            "memory bytes",
+                            existing_live_bytes,
+                            usize::MAX,
+                            max_bytes,
+                        )
+                    })
+            },
+        )?;
+    resize_compaction_memory(
+        memory,
+        existing_live_bytes.checked_add(heap_bytes).ok_or_else(|| {
+            compaction_resource_limit("memory bytes", existing_live_bytes, heap_bytes, max_bytes)
+        })?,
+        max_bytes,
+    )?;
+    let mut retained = Vec::new();
+    retained
+        .try_reserve_exact(retained_count)
+        .map_err(compaction_allocation_error)?;
+    retained.extend(
+        manifest
+            .segments
+            .iter()
+            .filter(|segment| {
+                !compacted
+                    .iter()
+                    .any(|loaded| loaded.reference.path == segment.path)
+            })
+            .cloned(),
+    );
+    Ok((retained, heap_bytes))
+}
+
+fn manifest_file_bytes(root: &Path, path: &str) -> GraphResult<usize> {
+    usize::try_from(
+        std::fs::metadata(root.join(path))
+            .map_err(|err| {
+                GraphError::Internal(format!("projection segment metadata read failed: {err}"))
+            })?
+            .len(),
+    )
+    .map_err(|_| compaction_resource_limit("memory bytes", 0, usize::MAX, usize::MAX))
+}
+
+fn read_manifest_segment_bytes(
+    root: &Path,
+    path: &str,
+    expected_checksum: &str,
+    expected_bytes: usize,
+) -> GraphResult<Vec<u8>> {
+    let path = root.join(path);
+    let mut file = std::fs::File::open(&path)
+        .map_err(|err| GraphError::Internal(format!("projection segment open failed: {err}")))?;
+    let mut bytes = vec![0_u8; expected_bytes];
+    file.read_exact(&mut bytes)
         .map_err(|err| GraphError::Internal(format!("projection segment read failed: {err}")))?;
-    let checksum = format!("crc32:{:08x}", crc32fast::hash(&bytes));
-    if checksum != segment.checksum {
+    let mut extra = [0_u8; 1];
+    if file
+        .read(&mut extra)
+        .map_err(|err| GraphError::Internal(format!("projection segment read failed: {err}")))?
+        != 0
+    {
         return Err(GraphError::CorruptFile {
             reason: format!(
-                "projection segment checksum mismatch for {}: expected {}, got {}",
-                segment.path, segment.checksum, checksum
+                "projection segment {} changed size while it was being read",
+                path.display()
             ),
         });
     }
-    DeltaSegment::from_bytes(&bytes)
+    let checksum = crc32fast::hash(&bytes);
+    let checksum_matches = expected_checksum
+        .strip_prefix("crc32:")
+        .and_then(|value| u32::from_str_radix(value, 16).ok())
+        == Some(checksum);
+    if !checksum_matches {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "projection segment checksum mismatch for {}: expected {}, got crc32:{checksum:08x}",
+                path.display(),
+                expected_checksum
+            ),
+        });
+    }
+    Ok(bytes)
 }
 
-fn compacted_source_ranges(segments: &[LoadedEdgeSegment]) -> GraphResult<Vec<SourceRange>> {
+fn compacted_source_ranges(
+    segments: &[LoadedEdgeSegment],
+    memory: &mut crate::resource::ResourceLease<'_>,
+    existing_live_bytes: usize,
+    max_bytes: usize,
+) -> GraphResult<(Vec<SourceRange>, usize)> {
+    let range_capacity_bytes = segments
+        .len()
+        .checked_mul(std::mem::size_of::<(u32, u32)>())
+        .and_then(|bytes| {
+            segments
+                .len()
+                .checked_mul(std::mem::size_of::<SourceRange>())
+                .and_then(|merged| bytes.checked_add(merged))
+        })
+        .ok_or_else(|| {
+            compaction_resource_limit("memory bytes", existing_live_bytes, usize::MAX, max_bytes)
+        })?;
+    resize_compaction_memory(
+        memory,
+        existing_live_bytes
+            .checked_add(range_capacity_bytes)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    existing_live_bytes,
+                    range_capacity_bytes,
+                    max_bytes,
+                )
+            })?,
+        max_bytes,
+    )?;
     let mut ranges = Vec::<(u32, u32)>::new();
+    ranges
+        .try_reserve_exact(segments.len())
+        .map_err(compaction_allocation_error)?;
     for segment in segments {
         let start = segment.segment.header.source_start;
         let end = segment.segment.header.source_end;
@@ -253,7 +1206,10 @@ fn compacted_source_ranges(segments: &[LoadedEdgeSegment]) -> GraphResult<Vec<So
     }
     ranges.sort_unstable_by_key(|&(start, end)| (start, end));
     let mut merged = Vec::<SourceRange>::new();
-    for (start, end) in ranges {
+    merged
+        .try_reserve_exact(segments.len())
+        .map_err(compaction_allocation_error)?;
+    for (start, end) in ranges.drain(..) {
         if let Some(last) = merged.last_mut() {
             if start < last.end {
                 last.end = last.end.max(end);
@@ -262,18 +1218,239 @@ fn compacted_source_ranges(segments: &[LoadedEdgeSegment]) -> GraphResult<Vec<So
         }
         merged.push(SourceRange::new(start, end)?);
     }
-    Ok(merged)
+    drop(ranges);
+    let retained_bytes = merged
+        .capacity()
+        .checked_mul(std::mem::size_of::<SourceRange>())
+        .ok_or_else(|| {
+            compaction_resource_limit("memory bytes", existing_live_bytes, usize::MAX, max_bytes)
+        })?;
+    resize_compaction_memory(
+        memory,
+        existing_live_bytes
+            .checked_add(retained_bytes)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    existing_live_bytes,
+                    retained_bytes,
+                    max_bytes,
+                )
+            })?,
+        max_bytes,
+    )?;
+    Ok((merged, retained_bytes))
+}
+
+#[derive(Clone, Copy)]
+struct CompactionExecution<'a> {
+    governor: &'a crate::resource::ResourceGovernor,
+    started: Instant,
+    max_elapsed: Duration,
+}
+
+const COMPACTION_SOURCE_SCRATCH_FIXED_BYTES: usize = 64 * 1024;
+// One source can transiently coexist in the layered merge map, its owned
+// iterator, weighted lookup maps, and the base/final comparison maps. A 1.5 KiB
+// allowance per possible edge is deliberately larger than the sum of their
+// key/value layouts and B-tree node slack on supported 64-bit targets.
+const COMPACTION_SOURCE_SCRATCH_BYTES_PER_EDGE: usize = 1_536;
+
+fn compaction_allocation_error(_error: std::collections::TryReserveError) -> GraphError {
+    GraphError::ResourceLimit {
+        resource: "memory bytes".to_string(),
+        phase: crate::resource::ResourcePhase::CompactionMerge
+            .as_str()
+            .to_string(),
+        used: 0,
+        requested: u64::MAX,
+        limit: u64::MAX,
+    }
+}
+
+fn compaction_source_scratch_bytes(
+    base: &EdgeStore,
+    base_chunks: &[DeltaSegment],
+    segments: &[LoadedEdgeSegment],
+    memory: &mut crate::resource::ResourceLease<'_>,
+    existing_live_bytes: usize,
+    max_bytes: usize,
+    execution: CompactionExecution<'_>,
+) -> GraphResult<usize> {
+    let insert_count = base_chunks
+        .iter()
+        .map(|segment| segment.edge_inserts.len())
+        .chain(
+            segments
+                .iter()
+                .map(|loaded| loaded.segment.edge_inserts.len()),
+        )
+        .try_fold(0usize, |total, rows| {
+            total
+                .checked_add(rows)
+                .ok_or_else(|| compaction_resource_limit("memory bytes", total, rows, max_bytes))
+        })?;
+    let source_bytes = insert_count
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| {
+            compaction_resource_limit("memory bytes", existing_live_bytes, usize::MAX, max_bytes)
+        })?;
+    resize_compaction_memory(
+        memory,
+        existing_live_bytes
+            .checked_add(source_bytes)
+            .ok_or_else(|| {
+                compaction_resource_limit(
+                    "memory bytes",
+                    existing_live_bytes,
+                    source_bytes,
+                    max_bytes,
+                )
+            })?,
+        max_bytes,
+    )?;
+    let mut inserted_sources = Vec::new();
+    inserted_sources
+        .try_reserve_exact(insert_count)
+        .map_err(compaction_allocation_error)?;
+    inserted_sources.extend(
+        base_chunks
+            .iter()
+            .flat_map(|segment| segment.edge_inserts.iter().map(|edge| edge.source)),
+    );
+    inserted_sources.extend(
+        segments
+            .iter()
+            .flat_map(|loaded| loaded.segment.edge_inserts.iter().map(|edge| edge.source)),
+    );
+    inserted_sources.sort_unstable();
+
+    let mut max_degree = 0usize;
+    for source in 0..base.node_count() {
+        compaction_tick(execution.governor, execution.started, execution.max_elapsed)?;
+        max_degree = max_degree.max(base.neighbors(source).0.len());
+    }
+    let mut index = 0usize;
+    while index < inserted_sources.len() {
+        let source = inserted_sources[index];
+        let mut end = index + 1;
+        while end < inserted_sources.len() && inserted_sources[end] == source {
+            end += 1;
+        }
+        let inserts = end - index;
+        let degree = base
+            .neighbors(source)
+            .0
+            .len()
+            .checked_add(inserts)
+            .ok_or_else(|| compaction_resource_limit("memory bytes", 0, usize::MAX, max_bytes))?;
+        max_degree = max_degree.max(degree);
+        index = end;
+    }
+    drop(inserted_sources);
+    max_degree
+        .checked_mul(COMPACTION_SOURCE_SCRATCH_BYTES_PER_EDGE)
+        .and_then(|bytes| bytes.checked_add(COMPACTION_SOURCE_SCRATCH_FIXED_BYTES))
+        .ok_or_else(|| {
+            compaction_resource_limit("memory bytes", existing_live_bytes, usize::MAX, max_bytes)
+        })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MaterializedStorePlan {
+    edge_count: usize,
+    heap_bytes: usize,
+}
+
+fn plan_materialized_store(
+    base: &EdgeStore,
+    layered: &LayeredNeighbors<'_>,
+    ranges: &[SourceRange],
+    execution: CompactionExecution<'_>,
+) -> GraphResult<MaterializedStorePlan> {
+    let edge_count = ranges
+        .iter()
+        .flat_map(|range| range.start..range.end)
+        .try_fold(0usize, |total, source| {
+            compaction_tick(execution.governor, execution.started, execution.max_elapsed)?;
+            let degree = layered.neighbors(source).count();
+            total
+                .checked_add(degree)
+                .ok_or_else(|| compaction_resource_limit("memory bytes", total, degree, usize::MAX))
+        })?;
+    let heap_bytes = SortedEdgeStoreBuilder::planned_storage_bytes(
+        base.node_count(),
+        edge_count,
+        layered.has_weighted_edges(),
+    )?;
+    Ok(MaterializedStorePlan {
+        edge_count,
+        heap_bytes,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompactedSegmentPlan {
+    deletes: usize,
+    inserts: usize,
+    weights: usize,
+    heap_bytes: usize,
+}
+
+fn plan_compacted_segment(
+    base: &EdgeStore,
+    layered: &LayeredNeighbors<'_>,
+    ranges: &[SourceRange],
+    execution: CompactionExecution<'_>,
+) -> GraphResult<CompactedSegmentPlan> {
+    let (base_edges, final_edges) = ranges
+        .iter()
+        .flat_map(|range| range.start..range.end)
+        .try_fold((0usize, 0usize), |(base_total, final_total), source| {
+            compaction_tick(execution.governor, execution.started, execution.max_elapsed)?;
+            let base_degree = base.neighbors(source).0.len();
+            let final_degree = layered.neighbors(source).count();
+            let base_total = base_total.checked_add(base_degree).ok_or_else(|| {
+                compaction_resource_limit("memory bytes", base_total, base_degree, usize::MAX)
+            })?;
+            let final_total = final_total.checked_add(final_degree).ok_or_else(|| {
+                compaction_resource_limit("memory bytes", final_total, final_degree, usize::MAX)
+            })?;
+            Ok((base_total, final_total))
+        })?;
+    let deletes = base_edges;
+    let inserts = final_edges;
+    let edges = deletes
+        .checked_mul(std::mem::size_of::<SegmentEdge>())
+        .and_then(|bytes| {
+            inserts
+                .checked_mul(std::mem::size_of::<SegmentEdge>())
+                .and_then(|insert_bytes| bytes.checked_add(insert_bytes))
+        })
+        .ok_or_else(|| compaction_resource_limit("memory bytes", 0, usize::MAX, usize::MAX))?;
+    let weights = final_edges
+        .checked_mul(std::mem::size_of::<SegmentEdgeWeight>())
+        .ok_or_else(|| compaction_resource_limit("memory bytes", edges, usize::MAX, usize::MAX))?;
+    let heap_bytes = edges
+        .checked_add(weights)
+        .ok_or_else(|| compaction_resource_limit("memory bytes", edges, weights, usize::MAX))?;
+    Ok(CompactedSegmentPlan {
+        deletes,
+        inserts,
+        weights: final_edges,
+        heap_bytes,
+    })
 }
 
 fn build_compacted_segment(
-    root: &Path,
     previous: &ProjectionManifest,
     base: &EdgeStore,
+    layered: &LayeredNeighbors<'_>,
     segments: &[LoadedEdgeSegment],
     ranges: &[SourceRange],
+    plan: CompactedSegmentPlan,
+    execution: CompactionExecution<'_>,
 ) -> GraphResult<DeltaSegment> {
-    let provider = ManifestSegmentProvider::new(root, previous);
-    let layered = LayeredNeighbors::from_provider(base, &provider)?;
     let source_start = ranges.iter().map(|range| range.start).min().unwrap_or(0);
     let source_end = ranges.iter().map(|range| range.end).max().unwrap_or(0);
     let next_level = segments
@@ -291,10 +1468,23 @@ fn build_compacted_segment(
         source_end,
         previous.sync_watermark,
     )?;
+    compacted
+        .edge_deletes
+        .try_reserve_exact(plan.deletes)
+        .map_err(compaction_allocation_error)?;
+    compacted
+        .edge_inserts
+        .try_reserve_exact(plan.inserts)
+        .map_err(compaction_allocation_error)?;
+    compacted
+        .edge_weights
+        .try_reserve_exact(plan.weights)
+        .map_err(compaction_allocation_error)?;
     for range in ranges {
         for source in range.start..range.end {
+            compaction_tick(execution.governor, execution.started, execution.max_elapsed)?;
             let base_edges = edge_set(base, source);
-            let final_edges = edge_map_from_layered(&layered, source);
+            let final_edges = edge_map_from_layered(layered, source);
             for &(target, type_id, schema_reversed, relationship_id) in base_edges.keys() {
                 if final_edges.contains_key(&(target, type_id, schema_reversed, relationship_id)) {
                     continue;
@@ -336,16 +1526,23 @@ fn build_compacted_segment(
     Ok(compacted)
 }
 
-fn materialize_layered_store(
-    root: &Path,
-    previous: &ProjectionManifest,
+fn materialize_layered_ranges(
     base: &EdgeStore,
+    layered: &LayeredNeighbors<'_>,
+    ranges: &[SourceRange],
+    edge_count: usize,
+    governor: &crate::resource::ResourceGovernor,
+    started: Instant,
+    max_elapsed: Duration,
 ) -> GraphResult<EdgeStore> {
-    let provider = ManifestSegmentProvider::new(root, previous);
-    let layered = LayeredNeighbors::from_provider(base, &provider)?;
     let has_weights = layered.has_weighted_edges();
-    let mut builder = SortedEdgeStoreBuilder::new(base.node_count(), has_weights);
-    for source in 0..base.node_count() {
+    let mut builder = SortedEdgeStoreBuilder::try_new_with_edge_capacity(
+        base.node_count(),
+        edge_count,
+        has_weights,
+    )?;
+    for source in ranges.iter().flat_map(|range| range.start..range.end) {
+        compaction_tick(governor, started, max_elapsed)?;
         let weights = layered
             .weighted_neighbors(source)
             .into_iter()
@@ -382,6 +1579,38 @@ fn materialize_layered_store(
         }
     }
     Ok(builder.finish())
+}
+
+fn compaction_tick(
+    governor: &crate::resource::ResourceGovernor,
+    started: Instant,
+    max_elapsed: Duration,
+) -> GraphResult<()> {
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::CompactionMerge,
+            crate::resource::WorkUnits::new(1),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let elapsed = started.elapsed();
+    if elapsed > max_elapsed {
+        return Err(GraphError::ResourceLimit {
+            resource: "elapsed microseconds".to_string(),
+            phase: crate::resource::ResourcePhase::CompactionMerge
+                .as_str()
+                .to_string(),
+            used: elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+            requested: 0,
+            limit: max_elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+        });
+    }
+    if governor.work_used().as_u64().is_multiple_of(1_024) {
+        crate::resource::check_postgres_interrupts();
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::CompactionMerge)
+            .map_err(crate::safety::resource_limit_error)?;
+    }
+    Ok(())
 }
 
 fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<CompactionEdgeKey, Option<u32>> {
@@ -479,6 +1708,16 @@ fn segment_ref(
     path: &Path,
     segment: &DeltaSegment,
 ) -> GraphResult<ManifestSegmentRef> {
+    let checksum = segment_checksum(path)?;
+    segment_ref_with_checksum(root, path, segment, checksum)
+}
+
+fn segment_ref_with_checksum(
+    root: &Path,
+    path: &Path,
+    segment: &DeltaSegment,
+    checksum: String,
+) -> GraphResult<ManifestSegmentRef> {
     let relative = path
         .strip_prefix(root)
         .map_err(|_| GraphError::Internal("projection segment path escaped artifact root".into()))?
@@ -486,7 +1725,7 @@ fn segment_ref(
         .to_string();
     Ok(ManifestSegmentRef {
         path: relative,
-        checksum: segment_checksum(path)?,
+        checksum,
         level: segment.header.level,
         source_start: segment.header.source_start,
         source_end: segment.header.source_end,
@@ -495,20 +1734,66 @@ fn segment_ref(
 }
 
 fn segment_checksum(path: &Path) -> GraphResult<String> {
-    let bytes = std::fs::read(path)
+    let mut file = std::fs::File::open(path)
         .map_err(|err| GraphError::Internal(format!("read projection segment checksum: {err}")))?;
-    Ok(format!("crc32:{:08x}", crc32fast::hash(&bytes)))
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|err| {
+            GraphError::Internal(format!("read projection segment checksum: {err}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("crc32:{:08x}", hasher.finalize()))
 }
 
 fn write_segment_atomically(
     root: &Path,
     final_path: &Path,
     segment: &DeltaSegment,
-) -> GraphResult<()> {
+    governor: &crate::resource::ResourceGovernor,
+    max_bytes: usize,
+) -> GraphResult<String> {
     std::fs::create_dir_all(root)
         .map_err(|err| GraphError::Internal(format!("create projection segment dir: {err}")))?;
     let tmp_path = temp_segment_path(root, final_path)?;
+    let encoded_len = segment.encoded_len()?;
+    let serialization_bytes = encoded_len
+        .checked_mul(2)
+        .ok_or_else(|| compaction_resource_limit("memory bytes", 0, usize::MAX, max_bytes))?;
+    let used = governor.memory_used().as_u64().min(usize::MAX as u64) as usize;
+    if used
+        .checked_add(serialization_bytes)
+        .is_none_or(|next| next > max_bytes)
+    {
+        return Err(compaction_resource_limit(
+            "memory bytes",
+            used,
+            serialization_bytes,
+            max_bytes,
+        ));
+    }
+    let serialization_bytes = crate::resource::ByteCount::from_usize(serialization_bytes)
+        .ok_or_else(|| compaction_resource_limit("memory bytes", used, usize::MAX, max_bytes))?;
+    let _encoded_memory = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::CompactionMerge,
+            serialization_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let encoded_bytes = crate::resource::ByteCount::from_usize(encoded_len)
+        .ok_or_else(|| compaction_resource_limit("disk bytes", 0, usize::MAX, max_bytes))?;
+    let _staging_disk = governor
+        .reserve_disk(
+            crate::resource::ResourcePhase::CompactionMerge,
+            encoded_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
     let bytes = segment.to_bytes()?;
+    debug_assert_eq!(bytes.len(), encoded_len);
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -537,7 +1822,8 @@ fn write_segment_atomically(
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp_path);
     }
-    result
+    result?;
+    Ok(format!("crc32:{:08x}", crc32fast::hash(&bytes)))
 }
 
 fn temp_segment_path(root: &Path, final_path: &Path) -> GraphResult<PathBuf> {
@@ -1040,6 +2326,256 @@ mod tests {
     }
 
     #[test]
+    fn compaction_accounts_for_live_engine_residency_before_allocating() {
+        let (dir, base, manifest) = fixture_manifest(
+            "compaction_accounts_for_live_engine_residency_before_allocating",
+            vec![segment(1, 0, 0, &[(0, 2, 1)], &[])],
+        );
+        let budgets = CompactionBudgets {
+            resident_bytes: crate::resource::ByteCount::from_mib(2_048)
+                .expect("configured test memory fits"),
+            ..CompactionBudgets::generous()
+        };
+
+        let error = compact_generation(dir.path(), &manifest, &base, budgets)
+            .expect_err("resident graph must consume maintenance headroom");
+
+        assert!(matches!(error, GraphError::ResourceLimit { .. }));
+        let current = ProjectionManifestStore::new(dir.path().to_path_buf())
+            .load_latest_current()
+            .expect("manifest lookup succeeds")
+            .expect("fixture manifest remains current");
+        assert_eq!(current.generation_id, manifest.generation_id);
+    }
+
+    #[test]
+    fn compaction_treats_max_bytes_as_a_ceiling_for_tiny_input() {
+        let (dir, base, manifest) = fixture_manifest(
+            "compaction_treats_max_bytes_as_a_ceiling_for_tiny_input",
+            vec![segment(1, 0, 0, &[(0, 2, 1)], &[])],
+        );
+        let budgets = CompactionBudgets {
+            max_bytes: 1_000_000_000,
+            ..CompactionBudgets::generous()
+        };
+
+        let result = compact_generation(dir.path(), &manifest, &base, budgets)
+            .expect("a high ceiling must not be charged as live memory");
+
+        assert_eq!(result.segments_compacted, 1);
+        assert!(result.manifest.generation_id > manifest.generation_id);
+    }
+
+    #[test]
+    fn compaction_rejects_encoded_and_decoded_segment_overlap_before_decode() {
+        let (dir, base, manifest) = fixture_manifest(
+            "compaction_rejects_encoded_and_decoded_segment_overlap_before_decode",
+            vec![segment(1, 0, 0, &[(0, 2, 1)], &[])],
+        );
+        let encoded_bytes = manifest_file_bytes(dir.path(), &manifest.segments[0].path)
+            .expect("segment metadata reads");
+        let budgets = CompactionBudgets {
+            max_bytes: encoded_bytes,
+            ..CompactionBudgets::generous()
+        };
+
+        let error = compact_generation(dir.path(), &manifest, &base, budgets)
+            .expect_err("raw plus decoded segment must exceed an encoded-only ceiling");
+
+        assert!(matches!(
+            &error,
+            GraphError::ResourceLimit { resource, .. } if resource == "memory bytes"
+        ));
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+    }
+
+    #[test]
+    fn base_chunk_loader_rejects_encoded_and_decoded_overlap_before_decode() {
+        let (dir, base, manifest) = fixture_manifest(
+            "base_chunk_loader_rejects_encoded_and_decoded_overlap_before_decode",
+            vec![segment(1, 0, 0, &[(0, 2, 1)], &[])],
+        );
+        let rewritten = compact_generation(
+            dir.path(),
+            &manifest,
+            &base,
+            CompactionBudgets {
+                dirty_chunk_segment_threshold: Some(1),
+                ..CompactionBudgets::generous()
+            },
+        )
+        .expect("fixture chunk rewrite publishes");
+        let chunk = rewritten
+            .manifest
+            .base_chunks
+            .first()
+            .expect("rewrite publishes a base chunk");
+        let encoded_bytes =
+            manifest_file_bytes(dir.path(), &chunk.path).expect("chunk metadata reads");
+        let governor = crate::resource::maintenance_governor(
+            crate::resource::ByteCount::ZERO,
+            crate::resource::RowCount::UNLIMITED,
+        );
+        let mut memory = reserve_compaction_memory(&governor, 0, encoded_bytes)
+            .expect("empty reservation succeeds");
+        let ranges = [
+            SourceRange::new(chunk.source_start, chunk.source_end).expect("chunk range is valid")
+        ];
+
+        let error = load_relevant_base_chunks(
+            dir.path(),
+            &rewritten.manifest,
+            &ranges,
+            encoded_bytes,
+            &mut memory,
+            0,
+            encoded_bytes,
+        )
+        .expect_err("raw plus decoded chunk must exceed an encoded-only ceiling");
+
+        assert!(matches!(
+            &error,
+            GraphError::ResourceLimit { resource, .. } if resource == "memory bytes"
+        ));
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+    }
+
+    #[test]
+    fn compaction_near_residency_limit_preserves_current_generation() {
+        let (dir, base, manifest) = fixture_manifest(
+            "compaction_near_residency_limit_preserves_current_generation",
+            vec![segment(1, 0, 0, &[(0, 2, 1)], &[])],
+        );
+        let budgets = CompactionBudgets {
+            resident_bytes: crate::resource::ByteCount::from_bytes(2_048_u64 * 1_048_576 - 1),
+            ..CompactionBudgets::generous()
+        };
+
+        let error = compact_generation(dir.path(), &manifest, &base, budgets)
+            .expect_err("live structures must not exceed remaining memory");
+        let current = ProjectionManifestStore::new(dir.path().to_path_buf())
+            .load_latest_current()
+            .expect("manifest lookup succeeds")
+            .expect("fixture manifest remains current");
+
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        assert_eq!(current.generation_id, manifest.generation_id);
+    }
+
+    #[test]
+    fn compaction_high_degree_scratch_rejects_before_publication() {
+        let dir =
+            ProjectionArtifactDir::new("compaction_high_degree_scratch_rejects_before_publication");
+        std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+        let edges = (1..=2_048).map(|target| (0, target, 1)).collect::<Vec<_>>();
+        let base = edge_store_from_tuples(2_050, &edges);
+        let mutation = segment(1, 0, 0, &[(0, 2_049, 1)], &[]);
+        let path = dir.segment_path(1, 0);
+        mutation.write_to_path(&path).expect("segment writes");
+        let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
+        manifest
+            .segments
+            .push(segment_ref(dir.path(), &path, &mutation).expect("segment ref"));
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("fixture manifest publishes");
+
+        let error = compact_generation(
+            dir.path(),
+            &manifest,
+            &base,
+            CompactionBudgets {
+                max_bytes: 2_500_000,
+                ..CompactionBudgets::generous()
+            },
+        )
+        .expect_err("per-source merge maps must fit before materialization");
+        let current = ProjectionManifestStore::new(dir.path())
+            .load_latest_current()
+            .expect("manifest lookup succeeds")
+            .expect("fixture generation remains current");
+
+        assert!(matches!(error, GraphError::ResourceLimit { .. }));
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        assert_eq!(current.generation_id, manifest.generation_id);
+        assert!(!ProjectionManifestStore::new(dir.path())
+            .manifest_path(2)
+            .exists());
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("artifact directory reads")
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("compact-segment"))
+                .count(),
+            0,
+            "scratch rejection must happen before staging compacted output"
+        );
+    }
+
+    #[test]
+    fn compaction_public_budget_failures_use_resource_limit_diagnostic() {
+        let cases = [
+            CompactionBudgets {
+                max_segments: 0,
+                ..CompactionBudgets::generous()
+            },
+            CompactionBudgets {
+                max_rows: 0,
+                ..CompactionBudgets::generous()
+            },
+            CompactionBudgets {
+                max_bytes: 1,
+                ..CompactionBudgets::generous()
+            },
+            CompactionBudgets {
+                max_elapsed: Duration::ZERO,
+                ..CompactionBudgets::generous()
+            },
+        ];
+
+        for (case, budgets) in cases.into_iter().enumerate() {
+            let (dir, base, manifest) = fixture_manifest(
+                &format!("compaction_resource_limit_diagnostic_{case}"),
+                vec![segment(1, 0, 0, &[(0, 2, 1)], &[])],
+            );
+
+            let error = compact_generation(dir.path(), &manifest, &base, budgets)
+                .expect_err("tight public budget must reject compaction");
+
+            assert!(
+                matches!(error, GraphError::ResourceLimit { .. }),
+                "case {case} returned {error:?}"
+            );
+            assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        }
+    }
+
+    #[test]
+    fn governed_segment_publication_rejects_before_staging() {
+        let dir = ProjectionArtifactDir::new("governed_segment_publication_rejects_before_staging");
+        let compacted = segment(1, 1, 0, &[(0, 2, 1)], &[]);
+        let path = dir.path().join("governed-segment.pggraph-delta");
+        let encoded_len = compacted.encoded_len().expect("encoded length preflights");
+        let max_bytes = encoded_len
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_sub(1))
+            .expect("fixture serialization budget fits usize");
+        let governor = crate::resource::maintenance_governor(
+            crate::resource::ByteCount::ZERO,
+            crate::resource::RowCount::UNLIMITED,
+        );
+
+        let error = write_segment_atomically(dir.path(), &path, &compacted, &governor, max_bytes)
+            .expect_err("serialization must be rejected before staging");
+
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn compaction_dirty_chunk_rewrite_merges_overlapping_ranges() {
         let (dir, base, manifest) = fixture_manifest(
             "compaction_dirty_chunk_rewrite_merges_overlapping_ranges",
@@ -1235,7 +2771,7 @@ mod tests {
             .expect("manifest loads")
             .expect("current exists");
 
-        assert!(matches!(err, GraphError::OverlayLimit { .. }));
+        assert!(matches!(err, GraphError::ResourceLimit { .. }));
         assert_eq!(current.generation_id, manifest.generation_id);
     }
 

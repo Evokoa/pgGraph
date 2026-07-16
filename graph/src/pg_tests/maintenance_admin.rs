@@ -74,13 +74,8 @@ fn generated_sync_definers_pin_search_path_and_ignore_shadow_functions() {
         )",
     )
     .expect("create sync definer table failed");
-    super::insert_registered_table(
-        "public.graph_test_sync_definer_pgtest",
-        "id",
-        "name",
-        None,
-    )
-    .expect("register sync definer table failed");
+    super::insert_registered_table("public.graph_test_sync_definer_pgtest", "id", "name", None)
+        .expect("register sync definer table failed");
     Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
 
     let pinned_functions = Spi::get_one::<i64>(
@@ -105,8 +100,7 @@ fn generated_sync_definers_pin_search_path_and_ignore_shadow_functions() {
     .unwrap_or(0);
     assert_eq!(pinned_functions, 2);
 
-    Spi::run("CREATE SCHEMA graph_test_sync_shadow_pgtest")
-        .expect("create shadow schema failed");
+    Spi::run("CREATE SCHEMA graph_test_sync_shadow_pgtest").expect("create shadow schema failed");
     Spi::run("CREATE TABLE public.graph_test_sync_shadow_calls_pgtest (called boolean NOT NULL)")
         .expect("create shadow marker failed");
     Spi::run(
@@ -129,16 +123,14 @@ fn generated_sync_definers_pin_search_path_and_ignore_shadow_functions() {
     .expect("source insert under hostile search path failed");
     Spi::run("SET search_path = pg_catalog, public").expect("restore search path failed");
 
-    let shadow_calls = Spi::get_one::<i64>(
-        "SELECT count(*) FROM public.graph_test_sync_shadow_calls_pgtest",
-    )
-    .expect("read shadow call marker failed")
-    .unwrap_or(-1);
-    let sync_rows = Spi::get_one::<i64>(
-        "SELECT count(*) FROM graph._sync_log WHERE new_pk = 'safe'",
-    )
-    .expect("read sync rows failed")
-    .unwrap_or(0);
+    let shadow_calls =
+        Spi::get_one::<i64>("SELECT count(*) FROM public.graph_test_sync_shadow_calls_pgtest")
+            .expect("read shadow call marker failed")
+            .unwrap_or(-1);
+    let sync_rows =
+        Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_log WHERE new_pk = 'safe'")
+            .expect("read sync rows failed")
+            .unwrap_or(0);
     assert_eq!(shadow_calls, 0);
     assert_eq!(sync_rows, 1);
 }
@@ -418,8 +410,8 @@ fn sync_log_batch_reader_respects_limit_and_high_watermark() {
     )
     .expect("insert batched users failed");
 
-    let first_two = super::sql_sync::read_sync_log_entries_after(0, 2, None)
-        .expect("limited sync read failed");
+    let first_two =
+        super::sql_sync::read_sync_log_entries_after(0, 2, None).expect("limited sync read failed");
     let high_water = first_two[1].id;
     let bounded = super::sql_sync::read_sync_log_entries_after(0, 10, Some(high_water))
         .expect("high-water sync read failed");
@@ -1121,10 +1113,9 @@ fn csr_readonly_apply_sync_ignores_later_mutable_default_guc() {
     .expect("update csr mode sync edge failed");
 
     Spi::run("SELECT * FROM graph.apply_sync()").expect("apply csr mode sync failed");
-    let edge_buffer_used =
-        Spi::get_one::<i32>("SELECT edge_buffer_used FROM graph.sync_health()")
-            .expect("csr mode sync health failed")
-            .unwrap_or(-1);
+    let edge_buffer_used = Spi::get_one::<i32>("SELECT edge_buffer_used FROM graph.sync_health()")
+        .expect("csr mode sync health failed")
+        .unwrap_or(-1);
 
     assert_eq!(edge_buffer_used, 1);
     Spi::run("RESET graph.default_projection_mode").expect("reset projection mode failed");
@@ -1271,11 +1262,9 @@ fn setup_topology_auto_sync_fixture() -> i64 {
     .expect("add topology edge failed");
     Spi::run("SELECT * FROM graph.build()").expect("build failed");
 
-    let base_component_count = Spi::get_one::<i64>("SELECT count(*) FROM graph.components()")
+    Spi::get_one::<i64>("SELECT count(*) FROM graph.components()")
         .expect("base components failed")
-        .unwrap_or(0);
-
-    base_component_count
+        .unwrap_or(0)
 }
 
 fn insert_topology_auto_sync_node(id: &str, parent_id: Option<&str>, name: &str) {
@@ -1381,7 +1370,11 @@ fn topology_reads_auto_sync_traversal_and_paths() {
 fn weighted_shortest_path_rejects_pending_edge_overlay_with_pg018() {
     setup_topology_auto_sync_fixture();
 
-    insert_topology_auto_sync_node("pending-weighted-child", Some("root"), "Pending Weighted Child");
+    insert_topology_auto_sync_node(
+        "pending-weighted-child",
+        Some("root"),
+        "Pending Weighted Child",
+    );
     let sqlstate = sqlstate_for_error(
         "SELECT * FROM graph.weighted_shortest_path(
             'graph_test_topology_auto_sync_pgtest'::regclass,
@@ -1457,9 +1450,10 @@ fn topology_reads_auto_sync_component_entrypoints() {
     let base_component_count = setup_topology_auto_sync_fixture();
 
     insert_topology_auto_sync_node("stats-node", None, "Stats Node");
-    let total_active_nodes = Spi::get_one::<i32>("SELECT total_active_nodes FROM graph.component_stats()")
-        .expect("component stats failed")
-        .unwrap_or(0);
+    let total_active_nodes =
+        Spi::get_one::<i32>("SELECT total_active_nodes FROM graph.component_stats()")
+            .expect("component stats failed")
+            .unwrap_or(0);
 
     insert_topology_auto_sync_node("connected-node", None, "Connected Node");
     let connected_components_sees_node = Spi::get_one::<i64>(
@@ -1495,13 +1489,11 @@ fn topology_reads_auto_sync_component_entrypoints() {
     )
     .expect("root component lookup failed")
     .expect("root component id missing");
-    let root_component_rows = Spi::get_one::<i64>(
-        &format!(
-            "SELECT count(*)
+    let root_component_rows = Spi::get_one::<i64>(&format!(
+        "SELECT count(*)
                  FROM graph.component({root_component_id}, hydrate := false)
                  WHERE node_id = 'root'"
-        ),
-    )
+    ))
     .expect("component failed")
     .unwrap_or(0);
 
@@ -1560,8 +1552,12 @@ fn topology_reads_error_on_pending_covers_topology_but_not_search() {
     assert!(sql_raises("SELECT * FROM graph.component_stats()"));
     assert!(sql_raises("SELECT * FROM graph.connected_components()"));
     assert!(sql_raises("SELECT * FROM graph.components()"));
-    assert!(sql_raises("SELECT * FROM graph.isolated_nodes(hydrate := false)"));
-    assert!(sql_raises("SELECT * FROM graph.largest_component(hydrate := false)"));
+    assert!(sql_raises(
+        "SELECT * FROM graph.isolated_nodes(hydrate := false)"
+    ));
+    assert!(sql_raises(
+        "SELECT * FROM graph.largest_component(hydrate := false)"
+    ));
     assert!(sql_raises(&format!(
         "SELECT * FROM graph.component({root_component_id}, hydrate := false)"
     )));
@@ -1875,32 +1871,38 @@ fn sync_health_distinguishes_tx_delta_edge_buffer_and_durable_projection_pressur
         9_401_001,
     );
 
-    let (tx_dirty, edge_buffer_used, durable_ingest, durable_compaction, durable_gc, durable_repair) =
-        Spi::connect(|client| {
-            let result = client
-                .select(
-                    "SELECT tx_delta_dirty,
+    let (
+        tx_dirty,
+        edge_buffer_used,
+        durable_ingest,
+        durable_compaction,
+        durable_gc,
+        durable_repair,
+    ) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT tx_delta_dirty,
                             edge_buffer_used,
                             durable_ingest_recommended,
                             durable_compaction_recommended,
                             durable_gc_recommended,
                             durable_repair_recommended
                        FROM graph.sync_health()",
-                    None,
-                    &[],
-                )
-                .expect("sync health projection pressure query failed");
-            let row = result.first();
-            Ok::<_, pgrx::spi::Error>((
-                row.get::<bool>(1)?.unwrap_or(true),
-                row.get::<i32>(2)?.unwrap_or(-1),
-                row.get::<bool>(3)?.unwrap_or(false),
-                row.get::<bool>(4)?.unwrap_or(false),
-                row.get::<bool>(5)?.unwrap_or(false),
-                row.get::<bool>(6)?.unwrap_or(false),
-            ))
-        })
-        .expect("sync health projection pressure read failed");
+                None,
+                &[],
+            )
+            .expect("sync health projection pressure query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<bool>(1)?.unwrap_or(true),
+            row.get::<i32>(2)?.unwrap_or(-1),
+            row.get::<bool>(3)?.unwrap_or(false),
+            row.get::<bool>(4)?.unwrap_or(false),
+            row.get::<bool>(5)?.unwrap_or(false),
+            row.get::<bool>(6)?.unwrap_or(false),
+        ))
+    })
+    .expect("sync health projection pressure read failed");
 
     assert!(!tx_dirty);
     assert_eq!(edge_buffer_used, 0);
@@ -2291,13 +2293,15 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
         1,
     )
     .expect("chunk segment creates");
-    chunk.edge_inserts.push(crate::projection::segment::SegmentEdge {
-        source: 0,
-        target: 1,
-        type_id: 1,
-    schema_reversed: false,
-    relationship_id: None,
-    });
+    chunk
+        .edge_inserts
+        .push(crate::projection::segment::SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
     write_pgtest_segment(&chunk_path, &chunk);
     let chunk_checksum = format!(
         "crc32:{:08x}",
@@ -2456,7 +2460,8 @@ fn setup_projection_status_pressure_fixture(
             path: relative_projection_test_path(&root, &obsolete),
             bytes: 3,
         });
-    store.publish(&manifest)
+    store
+        .publish(&manifest)
         .expect("projection status manifest publishes");
     std::fs::write(&chunk, b"corrupt chunk").expect("chunk corruption writes");
 
@@ -2489,8 +2494,8 @@ fn write_projection_status_segment(path: &std::path::Path, level: u8) {
             source: 0,
             target: 1,
             type_id: 1,
-        schema_reversed: false,
-        relationship_id: None,
+            schema_reversed: false,
+            relationship_id: None,
         });
     segment
         .edge_deletes
@@ -2498,8 +2503,8 @@ fn write_projection_status_segment(path: &std::path::Path, level: u8) {
             source: 1,
             target: 0,
             type_id: 1,
-        schema_reversed: false,
-        relationship_id: None,
+            schema_reversed: false,
+            relationship_id: None,
         });
     write_pgtest_segment(path, &segment);
 }
@@ -2562,6 +2567,300 @@ fn ingest_projection_exposes_operator_contract_field_names() {
         .unwrap_or(false);
 
     assert!(signature_matches);
+}
+
+#[pg_test]
+fn ingest_projection_bounds_payload_bytes_before_replay_and_preserves_watermark() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SET graph.sync_mode = 'trigger';
+         SET graph.persist_on_build = on;
+         SET graph.maintenance_memory_mb = 16;
+         DROP TABLE IF EXISTS public.graph_test_projection_byte_limit_pgtest CASCADE;
+         CREATE TABLE public.graph_test_projection_byte_limit_pgtest (
+             id TEXT PRIMARY KEY,
+             note TEXT NOT NULL
+         );
+         INSERT INTO public.graph_test_projection_byte_limit_pgtest (id, note)
+         VALUES ('base', 'base');
+         SELECT graph.add_table(
+             'graph_test_projection_byte_limit_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['note']
+         );
+         SELECT * FROM graph.build();
+         CREATE OR REPLACE FUNCTION public.graph_test_projection_byte_limit_error(
+             row_limit bigint,
+             byte_limit bigint
+         )
+         RETURNS text
+         LANGUAGE plpgsql
+         AS $$
+         DECLARE
+             detail_text text;
+         BEGIN
+             PERFORM *
+               FROM graph.ingest_projection(max_rows := row_limit, max_bytes := byte_limit);
+             RETURN NULL;
+         EXCEPTION WHEN others THEN
+             GET STACKED DIAGNOSTICS detail_text = PG_EXCEPTION_DETAIL;
+             RETURN SQLSTATE || '|' || COALESCE(detail_text, '') || '|' || SQLERRM;
+         END
+         $$;",
+    )
+    .expect("create projection byte-limit fixture failed");
+
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_byte_limit_pgtest (id, note)
+         VALUES ('tiny', 'tiny')",
+    )
+    .expect("insert tiny projection row failed");
+    let tiny_rows = Spi::get_one::<i64>(
+        "SELECT rows_ingested
+           FROM graph.ingest_projection(max_rows := 100, max_bytes := 8388608)",
+    )
+    .expect("high-cap tiny projection ingest failed")
+    .unwrap_or_default();
+    assert!(tiny_rows > 0);
+
+    let watermark_before_oversized =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read watermark before oversized input failed")
+            .unwrap_or_default();
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_byte_limit_pgtest (id, note)
+         VALUES ('oversized', repeat('x', 4096))",
+    )
+    .expect("insert oversized projection row failed");
+    let oversized_bytes = projection_sync_input_sizes_after(watermark_before_oversized)
+        .into_iter()
+        .next()
+        .expect("oversized sync row size must exist");
+    let oversized_error = Spi::get_one_with_args::<String>(
+        "SELECT public.graph_test_projection_byte_limit_error(100, $1)",
+        &[(oversized_bytes - 1).into()],
+    )
+    .expect("oversized projection error query failed")
+    .unwrap_or_default();
+    let watermark_after_oversized =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read watermark after oversized input failed")
+            .unwrap_or_default();
+    assert!(
+        oversized_error.starts_with("54000|") && oversized_error.contains("PG007"),
+        "unexpected oversized-input error: {oversized_error}"
+    );
+    assert_eq!(watermark_after_oversized, watermark_before_oversized);
+
+    Spi::get_one_with_args::<i64>(
+        "SELECT rows_ingested
+           FROM graph.ingest_projection(max_rows := 100, max_bytes := $1)",
+        &[(oversized_bytes * 4).into()],
+    )
+    .expect("ingest previously oversized projection row failed");
+    let watermark_before_cumulative =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read watermark before cumulative input failed")
+            .unwrap_or_default();
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_byte_limit_pgtest (id, note)
+         VALUES ('cumulative-a', repeat('a', 512)),
+                ('cumulative-b', repeat('b', 512))",
+    )
+    .expect("insert cumulative projection rows failed");
+    let cumulative_sizes = projection_sync_input_sizes_after(watermark_before_cumulative);
+    assert_eq!(cumulative_sizes.len(), 2);
+    let cumulative_limit = cumulative_sizes.iter().copied().max().unwrap_or_default();
+    let cumulative_error = Spi::get_one_with_args::<String>(
+        "SELECT public.graph_test_projection_byte_limit_error(100, $1)",
+        &[cumulative_limit.into()],
+    )
+    .expect("cumulative projection error query failed")
+    .unwrap_or_default();
+    let watermark_after_cumulative =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read watermark after cumulative input failed")
+            .unwrap_or_default();
+    assert!(
+        cumulative_error.starts_with("54000|") && cumulative_error.contains("PG007"),
+        "unexpected cumulative-input error: {cumulative_error}"
+    );
+    assert_eq!(watermark_after_cumulative, watermark_before_cumulative);
+
+    Spi::run(
+        "SELECT *
+           FROM graph.ingest_projection(max_rows := 100, max_bytes := 8388608);
+         SET graph.maintenance_memory_mb = 1;
+         INSERT INTO public.graph_test_projection_byte_limit_pgtest (id, note)
+         VALUES ('wide-json', repeat('w', 8192))",
+    )
+    .expect("create wide projection input failed");
+    let watermark_before_wide =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read watermark before wide input failed")
+            .unwrap_or_default();
+    let wide_error = Spi::get_one::<String>(
+        "SELECT public.graph_test_projection_byte_limit_error(100, 1073741824)",
+    )
+    .expect("wide projection error query failed")
+    .unwrap_or_default();
+    let watermark_after_wide =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read watermark after wide input failed")
+            .unwrap_or_default();
+    assert!(
+        wide_error.starts_with("54000|") && wide_error.contains("PG007"),
+        "unexpected wide-input error: {wide_error}"
+    );
+    assert_eq!(watermark_after_wide, watermark_before_wide);
+
+    Spi::run(
+        "SET graph.maintenance_memory_mb = 64;
+         SELECT *
+           FROM graph.ingest_projection(max_rows := 100, max_bytes := 1073741824);
+         SET graph.maintenance_memory_mb = 1;
+         INSERT INTO public.graph_test_projection_byte_limit_pgtest (id, note)
+         SELECT 'many-' || value::text, 'small'
+           FROM generate_series(1, 5000) AS value",
+    )
+    .expect("create high-row-cap projection input failed");
+    let watermark_before_high_row_cap =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read watermark before high-row-cap input failed")
+            .unwrap_or_default();
+    let high_row_cap_error = Spi::get_one::<String>(
+        "SELECT public.graph_test_projection_byte_limit_error(100000, 1073741824)",
+    )
+    .expect("high-row-cap projection error query failed")
+    .unwrap_or_default();
+    let watermark_after_high_row_cap =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read watermark after high-row-cap input failed")
+            .unwrap_or_default();
+    assert!(
+        high_row_cap_error.starts_with("54000|") && high_row_cap_error.contains("PG007"),
+        "unexpected high-row-cap error: {high_row_cap_error}"
+    );
+    assert_eq!(watermark_after_high_row_cap, watermark_before_high_row_cap);
+
+    Spi::run(
+        "RESET graph.maintenance_memory_mb;
+         SET graph.persist_on_build = off;
+         RESET graph.sync_mode",
+    )
+    .expect("reset projection byte-limit settings failed");
+}
+
+#[pg_test]
+fn ingest_projection_preflights_mapping_fanout_without_advancing_watermark() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run(
+        "SELECT graph.reset();
+         SET graph.auto_load = off;
+         SET graph.enabled = on;
+         SET graph.sync_mode = 'trigger';
+         SET graph.persist_on_build = on;
+         DROP TABLE IF EXISTS public.graph_test_projection_fanout_pgtest CASCADE;
+         CREATE TABLE public.graph_test_projection_fanout_pgtest (
+             id TEXT PRIMARY KEY,
+             parent_id TEXT NULL REFERENCES public.graph_test_projection_fanout_pgtest(id)
+         );
+         INSERT INTO public.graph_test_projection_fanout_pgtest (id, parent_id)
+         VALUES ('root', NULL);
+         SELECT graph.add_table(
+             'graph_test_projection_fanout_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['parent_id']
+         );",
+    )
+    .expect("create projection fanout fixture failed");
+    for edge_idx in 1..=254 {
+        Spi::run(&format!(
+            "SELECT graph.add_edge(
+                 'graph_test_projection_fanout_pgtest'::regclass,
+                 'parent_id',
+                 'graph_test_projection_fanout_pgtest'::regclass,
+                 'id',
+                 'projection_fanout_{edge_idx}',
+                 bidirectional := true
+             )"
+        ))
+        .expect("add projection fanout edge failed");
+    }
+    Spi::run(
+        "SELECT * FROM graph.build();
+         CREATE OR REPLACE FUNCTION public.graph_test_projection_fanout_error()
+         RETURNS text
+         LANGUAGE plpgsql
+         AS $$
+         DECLARE
+             detail_text text;
+         BEGIN
+             PERFORM *
+               FROM graph.ingest_projection(max_rows := 100, max_bytes := 1073741824);
+             RETURN NULL;
+         EXCEPTION WHEN others THEN
+             GET STACKED DIAGNOSTICS detail_text = PG_EXCEPTION_DETAIL;
+             RETURN SQLSTATE || '|' || COALESCE(detail_text, '') || '|' || SQLERRM;
+         END
+         $$;
+         SET graph.maintenance_memory_mb = 1;
+         INSERT INTO public.graph_test_projection_fanout_pgtest (id, parent_id)
+         VALUES ('child', 'root');",
+    )
+    .expect("build projection fanout fixture failed");
+    let watermark_before =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read fanout watermark before ingest failed")
+            .unwrap_or_default();
+    let error = Spi::get_one::<String>("SELECT public.graph_test_projection_fanout_error()")
+        .expect("mapping-fanout projection error query failed")
+        .unwrap_or_default();
+    let watermark_after =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read fanout watermark after ingest failed")
+            .unwrap_or_default();
+
+    assert!(
+        error.starts_with("54000|") && error.contains("PG007"),
+        "unexpected mapping-fanout error: {error}"
+    );
+    assert_eq!(watermark_after, watermark_before);
+    Spi::run(
+        "RESET graph.maintenance_memory_mb;
+         SET graph.persist_on_build = off;
+         RESET graph.sync_mode",
+    )
+    .expect("reset projection fanout settings failed");
+}
+
+fn projection_sync_input_sizes_after(watermark: i64) -> Vec<i64> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT octet_length(op::text)::bigint + octet_length(table_name)
+                        + COALESCE(octet_length(old_pk), 0)
+                        + COALESCE(octet_length(new_pk), 0)
+                        + COALESCE(octet_length(properties::text), 0)
+                        + COALESCE(octet_length(old_row::text), 0)
+                        + COALESCE(octet_length(new_row::text), 0)
+                   FROM graph._sync_log
+                  WHERE id > $1
+                    AND table_oid = 'graph_test_projection_byte_limit_pgtest'::regclass
+                  ORDER BY id",
+                None,
+                &[watermark.into()],
+            )
+            .expect("read projection sync input sizes failed");
+        rows.into_iter()
+            .map(|row| {
+                row.get::<i64>(1)
+                    .expect("read projection sync input size column failed")
+                    .expect("projection sync input size must not be null")
+            })
+            .collect()
+    })
 }
 
 #[pg_test]
@@ -2841,9 +3140,7 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
             (Some(child_idx), Some(root_idx), Some(linked_type), Some(layered)) => layered
                 .for_direction(crate::types::TraversalDirection::Any)
                 .neighbors(child_idx)
-                .any(|neighbor| {
-                    neighbor.target == root_idx && neighbor.type_id == linked_type
-                }),
+                .any(|neighbor| neighbor.target == root_idx && neighbor.type_id == linked_type),
             _ => false,
         };
         engine.resolve(edge_table_oid, "rel-1").is_none() && linked_edge_present
@@ -2856,11 +3153,10 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
         .expect("composite table OID query failed")
         .map(u32::from)
         .unwrap_or_default();
-        let primary_key = Spi::get_one::<String>(
-            "SELECT jsonb_build_array('組織'::text, 'clé-1'::text)::text",
-        )
-        .expect("composite primary key encoding failed")
-        .unwrap_or_default();
+        let primary_key =
+            Spi::get_one::<String>("SELECT jsonb_build_array('組織'::text, 'clé-1'::text)::text")
+                .expect("composite primary key encoding failed")
+                .unwrap_or_default();
         engine.borrow().resolve(table_oid, &primary_key).is_some()
     });
     assert!(composite_identity_restored);
@@ -2873,11 +3169,10 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
              VALUES ('grandchild', 'child', 101, 'tenant-b')",
     )
     .expect("insert second projection batch failed");
-    let second_batch_segments = Spi::get_one::<i64>(
-        "SELECT segments_published FROM graph.ingest_projection()",
-    )
-    .expect("ingest second projection batch failed")
-    .unwrap_or_default();
+    let second_batch_segments =
+        Spi::get_one::<i64>("SELECT segments_published FROM graph.ingest_projection()")
+            .expect("ingest second projection batch failed")
+            .unwrap_or_default();
     let grandchild_filter_match = Spi::get_one::<i64>(
         "SELECT count(*)::bigint
            FROM graph.traverse(
@@ -2952,8 +3247,7 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
           WHERE id = 'root'",
     )
     .expect("update root tenant failed");
-    Spi::run("SELECT * FROM graph.ingest_projection()")
-        .expect("ingest tenant-only update failed");
+    Spi::run("SELECT * FROM graph.ingest_projection()").expect("ingest tenant-only update failed");
     let tenant_move_preserved_identity_and_edge = crate::ENGINE.with(|engine| {
         use crate::projection::neighbors::NeighborSource;
 
@@ -2992,10 +3286,9 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
     });
     assert!(tenant_move_preserved_identity_and_edge);
 
-    let watermark_before_invalid = Spi::get_one::<i64>(
-        "SELECT manifest_watermark FROM graph.projection_status()",
-    )
-    .expect("watermark before invalid relationship failed");
+    let watermark_before_invalid =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("watermark before invalid relationship failed");
     Spi::run(
         "INSERT INTO public.graph_test_projection_ingest_edges_pgtest (id, from_id, to_id)
              VALUES ('invalid-endpoint', 'child', 'missing-node')",
@@ -3021,15 +3314,16 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
              $$",
     )
     .expect("create mixed projection error helper failed");
-    let mixed_error =
-        Spi::get_one::<String>("SELECT public.graph_test_projection_mixed_error()")
-            .expect("mixed projection error query failed")
-            .unwrap_or_default();
-    let watermark_after_invalid = Spi::get_one::<i64>(
-        "SELECT manifest_watermark FROM graph.projection_status()",
-    )
-    .expect("watermark after invalid relationship failed");
-    assert!(mixed_error.starts_with("0A000|"), "unexpected error: {mixed_error}");
+    let mixed_error = Spi::get_one::<String>("SELECT public.graph_test_projection_mixed_error()")
+        .expect("mixed projection error query failed")
+        .unwrap_or_default();
+    let watermark_after_invalid =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("watermark after invalid relationship failed");
+    assert!(
+        mixed_error.starts_with("0A000|"),
+        "unexpected error: {mixed_error}"
+    );
     assert_eq!(watermark_after_invalid, watermark_before_invalid);
     Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
     Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
@@ -3063,10 +3357,9 @@ fn ingest_projection_rejects_truncate_without_advancing_watermark() {
     )
     .expect("add projection no-row table failed");
     Spi::run("SELECT * FROM graph.build()").expect("build projection no-row graph failed");
-    let watermark_before = Spi::get_one::<i64>(
-        "SELECT manifest_watermark FROM graph.projection_status()",
-    )
-    .expect("projection watermark before truncate failed");
+    let watermark_before =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("projection watermark before truncate failed");
     Spi::run("TRUNCATE public.graph_test_projection_no_rows_pgtest")
         .expect("truncate projection no-row table failed");
     Spi::run(
@@ -3092,16 +3385,18 @@ fn ingest_projection_rejects_truncate_without_advancing_watermark() {
     let error = Spi::get_one::<String>("SELECT public.graph_test_projection_ingest_error()")
         .expect("truncate ingest error query failed")
         .unwrap_or_default();
-    let watermark_after = Spi::get_one::<i64>(
-        "SELECT manifest_watermark FROM graph.projection_status()",
-    )
-    .expect("projection watermark after truncate failed");
+    let watermark_after =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("projection watermark after truncate failed");
     let max_sync_id = Spi::get_one::<i64>("SELECT max(id) FROM graph._sync_log")
         .expect("max sync id read failed")
         .unwrap_or(0);
 
     assert!(error.starts_with("0A000|"), "unexpected error: {error}");
-    assert!(error.contains("rebuild the graph"), "unexpected error: {error}");
+    assert!(
+        error.contains("rebuild the graph"),
+        "unexpected error: {error}"
+    );
     assert_eq!(watermark_after, watermark_before);
     assert!(max_sync_id > watermark_after.unwrap_or(0));
     Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
@@ -3154,10 +3449,9 @@ fn ingest_projection_rejects_standalone_endpoint_identity_changes() {
          SELECT * FROM graph.build();",
     )
     .expect("build standalone endpoint guard fixture failed");
-    let watermark_before = Spi::get_one::<i64>(
-        "SELECT manifest_watermark FROM graph.projection_status()",
-    )
-    .expect("standalone guard watermark before mutation failed");
+    let watermark_before =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("standalone guard watermark before mutation failed");
 
     Spi::run(
         "DELETE FROM public.graph_test_projection_guard_nodes_pgtest WHERE id = 'a';
@@ -3180,10 +3474,9 @@ fn ingest_projection_rejects_standalone_endpoint_identity_changes() {
     let error = Spi::get_one::<String>("SELECT public.graph_test_projection_guard_error()")
         .expect("standalone endpoint guard error query failed")
         .unwrap_or_default();
-    let watermark_after = Spi::get_one::<i64>(
-        "SELECT manifest_watermark FROM graph.projection_status()",
-    )
-    .expect("standalone guard watermark after mutation failed");
+    let watermark_after =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("standalone guard watermark after mutation failed");
 
     assert!(error.starts_with("0A000|"), "unexpected error: {error}");
     assert!(
@@ -3215,11 +3508,9 @@ fn projection_generation_heartbeat_records_backend_generation() {
             .expect("projection manifest installs");
     });
 
-    let active_status_count = Spi::get_one::<i32>(
-        "SELECT graph.active_generation_count()",
-    )
-    .expect("status active generation count failed")
-    .unwrap_or(0);
+    let active_status_count = Spi::get_one::<i32>("SELECT graph.active_generation_count()")
+        .expect("status active generation count failed")
+        .unwrap_or(0);
 
     let (row_count, backend_matches, generation_id, sync_watermark) = Spi::connect(|client| {
         let result = client
@@ -3858,14 +4149,16 @@ fn relationship_management_apis_are_graph_scoped() {
             )",
     )
     .expect("remove renamed edge failed");
-    let phase11_a_edges =
-        Spi::get_one::<i64>("SELECT count(*) FROM graph.list_edges('phase11_a', graph_namespace := 'app')")
-            .expect("phase11_a edge count failed")
-            .unwrap_or(0);
-    let phase11_b_edges =
-        Spi::get_one::<i64>("SELECT count(*) FROM graph.list_edges('phase11_b', graph_namespace := 'app')")
-            .expect("phase11_b edge count failed")
-            .unwrap_or(0);
+    let phase11_a_edges = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.list_edges('phase11_a', graph_namespace := 'app')",
+    )
+    .expect("phase11_a edge count failed")
+    .unwrap_or(0);
+    let phase11_b_edges = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.list_edges('phase11_b', graph_namespace := 'app')",
+    )
+    .expect("phase11_b edge count failed")
+    .unwrap_or(0);
 
     assert!(renamed);
     assert!(untouched);
@@ -3914,7 +4207,8 @@ fn graph_map_exports_deterministic_metadata_only_json() {
     .0;
 
     assert_eq!(
-        map.pointer("/graph/graph_name").and_then(|value| value.as_str()),
+        map.pointer("/graph/graph_name")
+            .and_then(|value| value.as_str()),
         Some("phase11_map")
     );
     assert_eq!(
@@ -3932,7 +4226,9 @@ fn graph_map_exports_deterministic_metadata_only_json() {
             .and_then(|value| value.as_str()),
         Some("static_label")
     );
-    assert!(map.pointer("/catalog/relationships/0/from_column").is_some());
+    assert!(map
+        .pointer("/catalog/relationships/0/from_column")
+        .is_some());
     assert!(map.pointer("/data").is_none());
 }
 

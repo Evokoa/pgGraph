@@ -189,3 +189,89 @@ fn workflow_relationship_wrappers_return_empty_sets_for_unreachable_inputs() {
     assert_eq!(no_connection_count, 0);
     assert_eq!(no_neighborhood_count, 0);
 }
+
+#[pg_test]
+fn public_workflows_share_the_low_query_memory_budget_end_to_end() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         SELECT 'chain-' || pg_catalog.lpad(i::text, 4, '0') || pg_catalog.repeat('x', 96),
+                CASE WHEN i = 1000 THEN 'Chain Target' ELSE 'Chain Node ' || i::text END,
+                i
+           FROM pg_catalog.generate_series(3, 1000) AS i",
+    )
+    .expect("insert workflow budget nodes failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         SELECT 'chain-edge-' || i::text,
+                CASE WHEN i = 3
+                     THEN 'u2'
+                     ELSE 'chain-' || pg_catalog.lpad((i - 1)::text, 4, '0') || pg_catalog.repeat('x', 96)
+                END,
+                'chain-' || pg_catalog.lpad(i::text, 4, '0') || pg_catalog.repeat('x', 96)
+           FROM pg_catalog.generate_series(3, 1000) AS i",
+    )
+    .expect("insert workflow budget edges failed");
+    build_friendship_fixture_graph();
+    Spi::run("SET LOCAL graph.query_memory_mb = 1").expect("set workflow query budget failed");
+
+    let statements = [
+        "SELECT * FROM graph.expand(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             max_depth := 1200,
+             max_rows := 1200
+         )",
+        "SELECT * FROM graph.find_related(
+             'name',
+             'Alice',
+             source_table := 'graph_test_users_pgtest'::regclass,
+             search_mode := 'exact',
+             max_depth := 1200,
+             max_rows := 1200,
+             candidate_limit := 1200
+         )",
+        "SELECT * FROM graph.path(
+             'graph_test_users_pgtest'::regclass,
+             'u1',
+             'graph_test_users_pgtest'::regclass,
+             (SELECT id FROM public.graph_test_users_pgtest WHERE name = 'Chain Target'),
+             max_depth := 1200
+         )",
+        "SELECT * FROM graph.connection(
+             source_key := 'name',
+             source_value := 'Alice',
+             target_key := 'name',
+             target_value := 'Chain Target',
+             source_table := 'graph_test_users_pgtest'::regclass,
+             target_table := 'graph_test_users_pgtest'::regclass,
+             source_k := 1,
+             target_k := 1,
+             search_mode := 'exact',
+             max_depth := 1200
+         )",
+        "SELECT * FROM graph.neighborhood(
+             'name',
+             'Alice',
+             source_table := 'graph_test_users_pgtest'::regclass,
+             search_mode := 'exact',
+             max_depth := 1200,
+             sample_k := 10,
+             node_limit := 1200
+         )",
+    ];
+    for statement in statements {
+        assert_eq!(
+            sqlstate_for_error(statement).as_deref(),
+            Some("54000"),
+            "workflow did not reject at the configured memory boundary: {statement}"
+        );
+        assert_eq!(
+            sql_error_detail(statement).as_deref(),
+            Some("pgGraph diagnostic: PG007"),
+            "workflow did not retain the stable resource diagnostic: {statement}"
+        );
+    }
+
+    Spi::run("SET LOCAL graph.query_memory_mb = 64").expect("restore workflow query budget failed");
+}

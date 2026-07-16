@@ -5,9 +5,9 @@ use crate::api_types::{
     TraverseRequest, TraverseRow,
 };
 use crate::catalog::{table_oid_from_name, validate_column_exists};
-use crate::sql_hydration::{hydrate_node, hydrate_nodes};
+use crate::sql_hydration::{hydrate_node_governed, hydrate_nodes_governed};
 use crate::sql_traversal::{
-    execute_traverse_rows, json_i32_field, json_number_as_f64, json_number_from_f64,
+    execute_traverse_rows_governed, json_i32_field, json_number_as_f64, json_number_from_f64,
     optional_string_array, parse_node_ref_json_string, path_node_field, required_string_field,
     usize_from_nonnegative,
 };
@@ -46,10 +46,12 @@ pub(crate) fn aggregate_impl(
     let specs = parse_aggregation_specs(aggregations)?;
     let scope = parse_aggregate_scope(scope)?;
     let path_limit = usize_from_nonnegative(path_limit, "path_limit")?;
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
     match scope {
         AggregateScope::ReturnedNodes | AggregateScope::ChosenParentPath => {}
         AggregateScope::AllPossiblePaths => {
-            let (paths, _exact, capped) = indexed_paths_for_request(&request, path_limit)?;
+            let (paths, _exact, capped) =
+                indexed_paths_for_request_governed(&request, path_limit, &governor)?;
             if capped {
                 return Err(safety::GraphError::InvalidFilter {
                     reason: format!(
@@ -58,17 +60,17 @@ pub(crate) fn aggregate_impl(
                     ),
                 });
             }
-            return aggregate_indexed_paths(&paths, specs);
+            return aggregate_indexed_paths_governed(&paths, specs, &governor);
         }
     }
 
-    let rows = execute_aggregation_traversal(&request, path_limit)?;
+    let rows = execute_aggregation_traversal_governed(&request, path_limit, &governor)?;
     let rows = rows
         .into_iter()
         .filter(|row| row.4 >= request.min_depth)
         .collect::<Vec<_>>();
     let aggregate_rows = if scope.expands_parent_path() {
-        expand_rows_to_parent_path(rows)?
+        expand_rows_to_parent_path_governed(rows, &governor)?
     } else {
         rows
     };
@@ -148,14 +150,25 @@ pub(crate) fn path_count_estimate_impl(
     check_enabled_result()?;
     let request = parse_aggregation_traversal_request(traversal)?;
     let path_limit = usize_from_nonnegative(path_limit, "graph.max_exact_path_count")?;
-    path_count_for_request(&request, path_limit)
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    path_count_for_request_governed(&request, path_limit, &governor)
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn path_count_for_request(
     request: &AggregationTraversalRequest,
     path_limit: usize,
 ) -> safety::GraphResult<(i64, bool, bool)> {
-    let (paths, exact, capped) = indexed_paths_for_request(request, path_limit)?;
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    path_count_for_request_governed(request, path_limit, &governor)
+}
+
+fn path_count_for_request_governed(
+    request: &AggregationTraversalRequest,
+    path_limit: usize,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<(i64, bool, bool)> {
+    let (paths, exact, capped) = indexed_paths_for_request_governed(request, path_limit, governor)?;
     if capped || !exact {
         Ok((path_limit as i64, false, true))
     } else {
@@ -163,11 +176,36 @@ pub(crate) fn path_count_for_request(
     }
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn indexed_paths_for_request(
     request: &AggregationTraversalRequest,
     path_limit: usize,
 ) -> safety::GraphResult<(Vec<IndexedPath>, bool, bool)> {
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    indexed_paths_for_request_governed(request, path_limit, &governor)
+}
+
+fn indexed_paths_for_request_governed(
+    request: &AggregationTraversalRequest,
+    path_limit: usize,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<(Vec<IndexedPath>, bool, bool)> {
     let edge_limit = path_limit.saturating_add(1);
+    let path_width = usize::try_from(request.max_depth.max(0))
+        .unwrap_or(usize::MAX)
+        .saturating_add(1);
+    let path_bytes = edge_limit
+        .checked_mul(path_width)
+        .and_then(|slots| slots.checked_mul(std::mem::size_of::<u32>()))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| bytes.checked_add(edge_limit.saturating_mul(192)))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("exact-path workspace overflowed".to_string())
+        })?;
+    let path_lease = governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryPaths, path_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
     let node_table_filter = request
         .node_tables
         .as_ref()
@@ -179,6 +217,41 @@ pub(crate) fn indexed_paths_for_request(
         if !eng.built {
             return Err(safety::GraphError::NotBuilt);
         }
+        let max_base_degree =
+            (0..eng.node_store.node_count()).try_fold(0usize, |maximum, node| {
+                governor
+                    .consume_work(
+                        crate::resource::ResourcePhase::QueryPaths,
+                        crate::resource::WorkUnits::new(1),
+                    )
+                    .map_err(crate::safety::resource_limit_error)?;
+                let outgoing = eng.edge_store.neighbors(node).0.len();
+                let incoming = eng.reverse_edge_store.neighbors(node).0.len();
+                let degree = match request.direction {
+                    types::TraversalDirection::Out => outgoing,
+                    types::TraversalDirection::In => incoming,
+                    types::TraversalDirection::Any => outgoing.saturating_add(incoming),
+                };
+                Ok::<_, safety::GraphError>(maximum.max(degree))
+            })?;
+        let overlay_per_frame = eng.edge_buffer.len().saturating_mul(2);
+        let scratch_bytes = max_base_degree
+            .saturating_add(overlay_per_frame)
+            .checked_mul(path_width)
+            .and_then(|slots| slots.checked_mul(96))
+            .and_then(crate::resource::ByteCount::from_usize)
+            .ok_or_else(|| {
+                safety::GraphError::Internal("exact-path neighbor workspace overflowed".to_string())
+            })?;
+        let _scratch = governor
+            .reserve_memory(crate::resource::ResourcePhase::QueryExpand, scratch_bytes)
+            .map_err(crate::safety::resource_limit_error)?;
+        let _overlay = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryExpand,
+                eng.estimated_traversal_overlay_clone_bytes()?,
+            )
+            .map_err(crate::safety::resource_limit_error)?;
         let edge_type_filter = aggregation_edge_type_filter(&eng, request)?;
         let (overlay_inserts, overlay_deletes) = aggregation_edge_overlay(&eng, request.direction);
         let mut paths = Vec::new();
@@ -204,7 +277,8 @@ pub(crate) fn indexed_paths_for_request(
                 node_table_filter.as_ref(),
                 &overlay_inserts,
                 &overlay_deletes,
-            );
+                governor,
+            )?;
             if paths.len() > path_limit {
                 break;
             }
@@ -212,15 +286,17 @@ pub(crate) fn indexed_paths_for_request(
         Ok::<_, safety::GraphError>(paths)
     })?;
 
-    if indexed_paths.len() > path_limit {
-        Ok((
+    let result = if indexed_paths.len() > path_limit {
+        (
             indexed_paths.into_iter().take(path_limit).collect(),
             false,
             true,
-        ))
+        )
     } else {
-        Ok((indexed_paths, true, false))
-    }
+        (indexed_paths, true, false)
+    };
+    path_lease.retain_until_governor_drop();
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -237,7 +313,17 @@ pub(crate) fn enumerate_all_paths_dfs(
     node_table_filter: Option<&HashSet<u32>>,
     overlay_inserts: &OverlayInserts,
     overlay_deletes: &OverlayDeletes,
-) {
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<()> {
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryPaths,
+            crate::resource::WorkUnits::new(1),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::QueryPaths)
+        .map_err(crate::safety::resource_limit_error)?;
     if depth >= request.min_depth
         && node_table_filter.is_none_or(|tables| {
             eng.node_store
@@ -247,11 +333,11 @@ pub(crate) fn enumerate_all_paths_dfs(
     {
         record_indexed_path(path, paths, seen_paths);
         if paths.len() >= edge_limit {
-            return;
+            return Ok(());
         }
     }
     if depth >= request.max_depth {
-        return;
+        return Ok(());
     }
 
     for (neighbor, edge_type) in aggregation_neighbors(
@@ -262,7 +348,7 @@ pub(crate) fn enumerate_all_paths_dfs(
         overlay_deletes,
     ) {
         if paths.len() >= edge_limit {
-            return;
+            return Ok(());
         }
         if edge_type_filter.is_some_and(|allowed| !allowed.contains(&edge_type)) {
             continue;
@@ -284,9 +370,11 @@ pub(crate) fn enumerate_all_paths_dfs(
             node_table_filter,
             overlay_inserts,
             overlay_deletes,
-        );
+            governor,
+        )?;
         path.pop();
     }
+    Ok(())
 }
 
 fn record_indexed_path(
@@ -449,12 +537,22 @@ pub(crate) fn push_base_neighbors(
     }
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn aggregate_indexed_paths(
     paths: &[IndexedPath],
     specs: Vec<AggregateSpec>,
 ) -> safety::GraphResult<serde_json::Value> {
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    aggregate_indexed_paths_governed(paths, specs, &governor)
+}
+
+fn aggregate_indexed_paths_governed(
+    paths: &[IndexedPath],
+    specs: Vec<AggregateSpec>,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<serde_json::Value> {
     let coordinates_by_idx = indexed_path_coordinates(paths)?;
-    let hydrated = hydrate_indexed_path_nodes(&coordinates_by_idx)?;
+    let hydrated = hydrate_indexed_path_nodes_governed(&coordinates_by_idx, governor)?;
     let mut accumulators = specs
         .iter()
         .map(|spec| (spec.alias.clone(), AggregateAccumulator::default()))
@@ -462,6 +560,12 @@ pub(crate) fn aggregate_indexed_paths(
 
     for path in paths {
         for idx in path.iter() {
+            governor
+                .consume_work(
+                    crate::resource::ResourcePhase::QueryBlocking,
+                    crate::resource::WorkUnits::new(1),
+                )
+                .map_err(crate::safety::resource_limit_error)?;
             let Some(coord) = coordinates_by_idx.get(idx) else {
                 continue;
             };
@@ -487,8 +591,17 @@ pub(crate) fn aggregate_indexed_paths(
     aggregate_output(specs, accumulators)
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 fn hydrate_indexed_path_nodes(
     coordinates_by_idx: &HashMap<u32, types::PathCoordinate>,
+) -> safety::GraphResult<HashMap<u32, HashMap<String, pgrx::JsonB>>> {
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    hydrate_indexed_path_nodes_governed(coordinates_by_idx, &governor)
+}
+
+fn hydrate_indexed_path_nodes_governed(
+    coordinates_by_idx: &HashMap<u32, types::PathCoordinate>,
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<HashMap<u32, HashMap<String, pgrx::JsonB>>> {
     let unique_rows = coordinates_by_idx
         .values()
@@ -500,7 +613,7 @@ fn hydrate_indexed_path_nodes(
             edge_path: Vec::new(),
         })
         .collect::<Vec<_>>();
-    hydrate_nodes(&unique_rows).map(group_hydrated_nodes_by_table)
+    hydrate_nodes_governed(&unique_rows, governor).map(group_hydrated_nodes_by_table)
 }
 
 fn group_hydrated_nodes_by_table(
@@ -549,9 +662,19 @@ pub(crate) fn indexed_path_coordinates(
     })
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn execute_aggregation_traversal(
     request: &AggregationTraversalRequest,
     limit: usize,
+) -> safety::GraphResult<Vec<TraverseRow>> {
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    execute_aggregation_traversal_governed(request, limit, &governor)
+}
+
+fn execute_aggregation_traversal_governed(
+    request: &AggregationTraversalRequest,
+    limit: usize,
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let node_tables = request
         .node_tables
@@ -583,15 +706,48 @@ pub(crate) fn execute_aggregation_traversal(
             max_nodes: crate::config::MAX_NODES.get(),
             max_frontier: crate::config::MAX_FRONTIER.get(),
         };
-        let mut start_rows = execute_traverse_rows(&traverse_request)?;
+        let mut start_rows = execute_traverse_rows_governed(&traverse_request, governor)?;
         rows.append(&mut start_rows);
     }
     Ok(rows)
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn expand_rows_to_parent_path(
     rows: Vec<TraverseRow>,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    expand_rows_to_parent_path_governed(rows, &governor)
+}
+
+fn expand_rows_to_parent_path_governed(
+    rows: Vec<TraverseRow>,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<TraverseRow>> {
+    let output_count = rows.iter().try_fold(0usize, |count, row| {
+        let width = row.5 .0.as_array().map_or(0, Vec::len);
+        count.checked_add(width).ok_or_else(|| {
+            safety::GraphError::Internal("expanded parent-path row count overflowed".to_string())
+        })
+    })?;
+    let output_bytes = output_count
+        .checked_mul(2_048)
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("expanded parent-path workspace overflowed".to_string())
+        })?;
+    let output_lease = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryCandidates,
+            output_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryCandidates,
+            crate::resource::WorkUnits::new(u64::try_from(output_count).unwrap_or(u64::MAX)),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
     let by_coord = rows
         .iter()
         .filter_map(|row| {
@@ -609,10 +765,11 @@ pub(crate) fn expand_rows_to_parent_path(
             let table = path_node_field(coord, "table")?;
             let id = path_node_field(coord, "id")?;
             let table_oid = table_oid_from_name(table)?;
-            let node = by_coord
-                .get(&(table_oid, id))
-                .map(|node| pgrx::JsonB(node.0.clone()))
-                .or_else(|| hydrate_node(table_oid, id).ok().flatten());
+            let node = if let Some(node) = by_coord.get(&(table_oid, id)) {
+                Some(pgrx::JsonB(node.0.clone()))
+            } else {
+                hydrate_node_governed(table_oid, id, governor)?
+            };
             expanded.push((
                 row.0,
                 row.1.clone(),
@@ -627,6 +784,7 @@ pub(crate) fn expand_rows_to_parent_path(
             ));
         }
     }
+    output_lease.retain_until_governor_drop();
     Ok(expanded)
 }
 

@@ -94,6 +94,29 @@ replacement construction and persistence against that budget. Pressure events
 count adaptive byte-triggered batch flushes; row-ceiling flushes remain
 controlled by `graph.build_batch_size`.
 
+### `graph.resource_status()`
+
+```sql
+SELECT * FROM graph.resource_status();
+```
+
+Returns one row for the most recent completed governed operation in the current
+PostgreSQL backend, or no rows before such an operation has completed:
+
+```text
+operation text,
+memory_budget_bytes bigint,
+memory_peak_bytes bigint,
+memory_peak_phase text,
+disk_peak_bytes bigint,
+rows bigint,
+work_units bigint
+```
+
+Operations include `load`, `query`, `maintenance`, and `analytics`. The row is
+backend-local diagnostic telemetry. It is replaced when the next governed
+operation completes and is not an aggregate across sessions.
+
 ### `graph.active_generation_count()`
 
 ```sql

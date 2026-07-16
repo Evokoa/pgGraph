@@ -118,14 +118,50 @@ pub(crate) fn project_rows_with_relationships(
     params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
+    let governor = projection_governor()?;
+    project_rows_with_relationships_governed(
+        rows,
+        plan,
+        hydrated,
+        hydrated_relationships,
+        params,
+        hydrate_nodes,
+        &governor,
+    )
+}
+
+pub(crate) fn project_rows_with_relationships_governed(
+    rows: Vec<GqlRow>,
+    plan: &PhysicalPlan,
+    hydrated: &HydratedRows,
+    hydrated_relationships: &HydratedRelationships,
+    params: &QueryParams,
+    hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<serde_json::Value>> {
+    reserve_gql_projection_workspace(
+        governor,
+        &rows,
+        hydrated,
+        hydrated_relationships,
+        hydrate_nodes,
+    )?
+    .retain_until_governor_drop();
     let mut rows = collect_projectable_rows(rows, plan, hydrated, params)?;
-    apply_distinct_stages_to_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
+    apply_distinct_stages_to_rows(&mut rows, plan, hydrated, hydrate_nodes, governor)?;
     if plan.returns.iter().any(ReturnSlot::is_aggregate) {
-        let mut projected = aggregate_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
+        let mut projected = aggregate_rows(
+            &rows,
+            &plan.returns,
+            plan,
+            hydrated,
+            hydrate_nodes,
+            governor,
+        )?;
         if plan.distinct {
-            dedup_projected_rows(&mut projected)?;
+            dedup_projected_rows(&mut projected, governor)?;
         }
-        sort_and_window(&mut projected, plan.skip, plan.limit);
+        sort_and_window(&mut projected, plan.skip, plan.limit, governor)?;
         return Ok(projected.into_iter().map(|row| row.row).collect());
     }
 
@@ -137,9 +173,9 @@ pub(crate) fn project_rows_with_relationships(
         });
     }
     if plan.distinct {
-        dedup_projected_rows(&mut projected)?;
+        dedup_projected_rows(&mut projected, governor)?;
     }
-    sort_and_window(&mut projected, plan.skip, plan.limit);
+    sort_and_window(&mut projected, plan.skip, plan.limit, governor)?;
     Ok(projected.into_iter().map(|row| row.row).collect())
 }
 
@@ -149,6 +185,7 @@ pub(crate) fn project_rows_with_relationships(
 ///
 /// Returns [`GraphError::GqlExecution`] when a wildcard path references table
 /// metadata absent from the physical plan or hydrated row lookup.
+#[cfg(test)]
 pub(crate) fn project_wildcard_path_rows(
     rows: Vec<GqlRow>,
     plan: &PhysicalWildcardPathPlan,
@@ -156,6 +193,26 @@ pub(crate) fn project_wildcard_path_rows(
     params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
+    let governor = projection_governor()?;
+    project_wildcard_path_rows_governed(rows, plan, hydrated, params, hydrate_nodes, &governor)
+}
+
+pub(crate) fn project_wildcard_path_rows_governed(
+    rows: Vec<GqlRow>,
+    plan: &PhysicalWildcardPathPlan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+    hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<serde_json::Value>> {
+    reserve_gql_projection_workspace(
+        governor,
+        &rows,
+        hydrated,
+        &HydratedRelationships::new(),
+        hydrate_nodes,
+    )?
+    .retain_until_governor_drop();
     let mut projected = Vec::with_capacity(rows.len());
     for row in rows {
         if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
@@ -177,6 +234,7 @@ pub(crate) fn project_wildcard_path_rows(
 ///
 /// Returns [`GraphError::GqlExecution`] when a joined row is missing a required
 /// node slot or hydration needed for a projected value is absent.
+#[cfg(test)]
 pub(crate) fn project_join_rows(
     rows: Vec<GqlRow>,
     plan: &PhysicalJoinPlan,
@@ -184,6 +242,26 @@ pub(crate) fn project_join_rows(
     params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
+    let governor = projection_governor()?;
+    project_join_rows_governed(rows, plan, hydrated, params, hydrate_nodes, &governor)
+}
+
+pub(crate) fn project_join_rows_governed(
+    rows: Vec<GqlRow>,
+    plan: &PhysicalJoinPlan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+    hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<serde_json::Value>> {
+    reserve_gql_projection_workspace(
+        governor,
+        &rows,
+        hydrated,
+        &HydratedRelationships::new(),
+        hydrate_nodes,
+    )?
+    .retain_until_governor_drop();
     let mut rows = rows
         .into_iter()
         .filter_map(|row| {
@@ -194,7 +272,7 @@ pub(crate) fn project_join_rows(
             }
         })
         .collect::<GraphResult<Vec<_>>>()?;
-    apply_distinct_stages_to_join_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
+    apply_distinct_stages_to_join_rows(&mut rows, plan, hydrated, hydrate_nodes, governor)?;
     if !plan.aggregate_projection.is_empty() {
         let mut projected = aggregate_join_rows(
             &rows,
@@ -202,17 +280,19 @@ pub(crate) fn project_join_rows(
             plan,
             hydrated,
             hydrate_nodes,
+            governor,
         )?;
         apply_distinct_stages_to_projected_rows(
             &mut projected,
             &plan.post_aggregate_distinct_stages,
+            governor,
         )?;
         if plan.returns.iter().any(ReturnSlot::is_aggregate) {
-            projected = aggregate_projected_rows(&projected, &plan.returns, plan)?;
+            projected = aggregate_projected_rows(&projected, &plan.returns, plan, governor)?;
             if plan.distinct {
-                dedup_projected_rows(&mut projected)?;
+                dedup_projected_rows(&mut projected, governor)?;
             }
-            sort_and_window(&mut projected, plan.skip, plan.limit);
+            sort_and_window(&mut projected, plan.skip, plan.limit, governor)?;
             return Ok(projected.into_iter().map(|row| row.row).collect());
         }
 
@@ -225,18 +305,24 @@ pub(crate) fn project_join_rows(
             });
         }
         if plan.distinct {
-            dedup_projected_rows(&mut final_rows)?;
+            dedup_projected_rows(&mut final_rows, governor)?;
         }
-        sort_and_window(&mut final_rows, plan.skip, plan.limit);
+        sort_and_window(&mut final_rows, plan.skip, plan.limit, governor)?;
         return Ok(final_rows.into_iter().map(|row| row.row).collect());
     }
     if plan.returns.iter().any(ReturnSlot::is_aggregate) || !plan.aggregate_group_slots.is_empty() {
-        let mut projected =
-            aggregate_join_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
+        let mut projected = aggregate_join_rows(
+            &rows,
+            &plan.returns,
+            plan,
+            hydrated,
+            hydrate_nodes,
+            governor,
+        )?;
         if plan.distinct {
-            dedup_projected_rows(&mut projected)?;
+            dedup_projected_rows(&mut projected, governor)?;
         }
-        sort_and_window(&mut projected, plan.skip, plan.limit);
+        sort_and_window(&mut projected, plan.skip, plan.limit, governor)?;
         return Ok(projected.into_iter().map(|row| row.row).collect());
     }
 
@@ -248,9 +334,9 @@ pub(crate) fn project_join_rows(
         });
     }
     if plan.distinct {
-        dedup_projected_rows(&mut projected)?;
+        dedup_projected_rows(&mut projected, governor)?;
     }
-    sort_and_window(&mut projected, plan.skip, plan.limit);
+    sort_and_window(&mut projected, plan.skip, plan.limit, governor)?;
     Ok(projected.into_iter().map(|row| row.row).collect())
 }
 
@@ -341,6 +427,7 @@ fn flush_optional_source(
 /// Returns [`GraphError::GqlParameter`] when a required parameter is missing
 /// and [`GraphError::GqlExecution`] when predicate evaluation cannot be
 /// completed safely.
+#[cfg(test)]
 pub(crate) fn project_node_rows(
     input_rows: Vec<GqlNodeRow>,
     plan: &PhysicalNodeScan,
@@ -348,6 +435,20 @@ pub(crate) fn project_node_rows(
     params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
+    let governor = projection_governor()?;
+    project_node_rows_governed(input_rows, plan, hydrated, params, hydrate_nodes, &governor)
+}
+
+pub(crate) fn project_node_rows_governed(
+    input_rows: Vec<GqlNodeRow>,
+    plan: &PhysicalNodeScan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+    hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<serde_json::Value>> {
+    reserve_node_projection_workspace(governor, &input_rows, hydrated, hydrate_nodes)?
+        .retain_until_governor_drop();
     let mut rows = Vec::new();
     for row in input_rows {
         if row.optional_null {
@@ -368,14 +469,20 @@ pub(crate) fn project_node_rows(
             optional_null: true,
         });
     }
-    apply_distinct_stages_to_node_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
+    apply_distinct_stages_to_node_rows(&mut rows, plan, hydrated, hydrate_nodes, governor)?;
     if plan.returns.iter().any(ReturnSlot::is_aggregate) {
-        let mut projected =
-            aggregate_node_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
+        let mut projected = aggregate_node_rows(
+            &rows,
+            &plan.returns,
+            plan,
+            hydrated,
+            hydrate_nodes,
+            governor,
+        )?;
         if plan.distinct {
-            dedup_projected_rows(&mut projected)?;
+            dedup_projected_rows(&mut projected, governor)?;
         }
-        sort_and_window(&mut projected, plan.skip, plan.limit);
+        sort_and_window(&mut projected, plan.skip, plan.limit, governor)?;
         return Ok(projected.into_iter().map(|row| row.row).collect());
     }
 
@@ -387,10 +494,198 @@ pub(crate) fn project_node_rows(
         });
     }
     if plan.distinct {
-        dedup_projected_rows(&mut projected)?;
+        dedup_projected_rows(&mut projected, governor)?;
     }
-    sort_and_window(&mut projected, plan.skip, plan.limit);
+    sort_and_window(&mut projected, plan.skip, plan.limit, governor)?;
     Ok(projected.into_iter().map(|row| row.row).collect())
+}
+
+fn projection_governor() -> GraphResult<crate::resource::ResourceGovernor> {
+    let resident = crate::ENGINE
+        .with(|engine| {
+            crate::resource::ByteCount::from_usize(engine.borrow().estimated_memory_used_bytes())
+        })
+        .ok_or_else(|| GraphError::Internal("engine residency does not fit u64".to_string()))?;
+    Ok(crate::resource::query_governor(resident))
+}
+
+fn reserve_gql_projection_workspace<'a>(
+    governor: &'a crate::resource::ResourceGovernor,
+    rows: &[GqlRow],
+    hydrated: &HydratedRows,
+    hydrated_relationships: &HydratedRelationships,
+    hydrate_nodes: bool,
+) -> GraphResult<crate::resource::ResourceLease<'a>> {
+    let max_hydrated_bytes = if hydrate_nodes {
+        hydrated
+            .values()
+            .chain(hydrated_relationships.values())
+            .map(estimated_json_bytes)
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let bytes = rows.iter().try_fold(0usize, |total, row| {
+        let elements = 2usize
+            .saturating_add(row.path_nodes.len())
+            .saturating_add(row.path_relationships.len())
+            .saturating_add(row.join_node_slots.as_ref().map_or(0, |slots| slots.len()))
+            .saturating_add(row.join_path_nodes.as_ref().map_or(0, |paths| {
+                paths.iter().filter_map(Option::as_ref).map(Vec::len).sum()
+            }))
+            .saturating_add(row.join_path_relationships.as_ref().map_or(0, |paths| {
+                paths.iter().filter_map(Option::as_ref).map(Vec::len).sum()
+            }));
+        let row_bytes = elements
+            .checked_mul(max_hydrated_bytes.saturating_add(256))
+            .and_then(|bytes| bytes.checked_add(gql_row_coordinate_bytes(row)))
+            .and_then(|bytes| bytes.checked_add(1_024))
+            .and_then(|bytes| bytes.checked_mul(3))
+            .ok_or_else(|| {
+                GraphError::Internal("GQL projection estimate overflowed".to_string())
+            })?;
+        total
+            .checked_add(row_bytes)
+            .ok_or_else(|| GraphError::Internal("GQL projection estimate overflowed".to_string()))
+    })?;
+    reserve_projection_workspace(governor, rows.len(), bytes)
+}
+
+fn reserve_node_projection_workspace<'a>(
+    governor: &'a crate::resource::ResourceGovernor,
+    rows: &[GqlNodeRow],
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<crate::resource::ResourceLease<'a>> {
+    let max_hydrated_bytes = if hydrate_nodes {
+        hydrated
+            .values()
+            .map(estimated_json_bytes)
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let bytes = rows.iter().try_fold(0usize, |total, row| {
+        let row_bytes = max_hydrated_bytes
+            .checked_add(row.node.node_id.len())
+            .and_then(|bytes| bytes.checked_add(1_024))
+            .and_then(|bytes| bytes.checked_mul(3))
+            .ok_or_else(|| {
+                GraphError::Internal("GQL projection estimate overflowed".to_string())
+            })?;
+        total
+            .checked_add(row_bytes)
+            .ok_or_else(|| GraphError::Internal("GQL projection estimate overflowed".to_string()))
+    })?;
+    reserve_projection_workspace(governor, rows.len(), bytes)
+}
+
+fn estimated_json_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(value) => {
+            if *value {
+                4
+            } else {
+                5
+            }
+        }
+        serde_json::Value::Number(value) => value.to_string().len(),
+        serde_json::Value::String(value) => value.len().saturating_add(2),
+        serde_json::Value::Array(values) => values.iter().fold(2usize, |total, value| {
+            total
+                .saturating_add(estimated_json_bytes(value))
+                .saturating_add(1)
+        }),
+        serde_json::Value::Object(values) => values.iter().fold(2usize, |total, (key, value)| {
+            total
+                .saturating_add(key.len())
+                .saturating_add(3)
+                .saturating_add(estimated_json_bytes(value))
+                .saturating_add(1)
+        }),
+    }
+}
+
+fn gql_row_coordinate_bytes(row: &GqlRow) -> usize {
+    fn coordinate_bytes(coordinate: &GqlNodeCoordinate) -> usize {
+        coordinate
+            .node_id
+            .len()
+            .saturating_add(std::mem::size_of::<u32>())
+    }
+
+    let mut bytes = coordinate_bytes(&row.source)
+        .saturating_add(row.target.as_ref().map_or(0, coordinate_bytes))
+        .saturating_add(row.rel_start.as_ref().map_or(0, coordinate_bytes))
+        .saturating_add(row.rel_end.as_ref().map_or(0, coordinate_bytes));
+    bytes = row.path_nodes.iter().fold(bytes, |total, coordinate| {
+        total.saturating_add(coordinate_bytes(coordinate))
+    });
+    bytes = row
+        .path_relationships
+        .iter()
+        .fold(bytes, |total, relationship| {
+            total
+                .saturating_add(relationship.rel_type.len())
+                .saturating_add(coordinate_bytes(&relationship.start))
+                .saturating_add(coordinate_bytes(&relationship.end))
+        });
+    if let Some(slots) = &row.join_node_slots {
+        bytes = slots.iter().flatten().fold(bytes, |total, coordinate| {
+            total.saturating_add(coordinate_bytes(coordinate))
+        });
+    }
+    if let Some(paths) = &row.join_path_nodes {
+        bytes = paths
+            .iter()
+            .flatten()
+            .flatten()
+            .fold(bytes, |total, coordinate| {
+                total.saturating_add(coordinate_bytes(coordinate))
+            });
+    }
+    if let Some(paths) = &row.join_path_relationships {
+        bytes = paths
+            .iter()
+            .flatten()
+            .flatten()
+            .fold(bytes, |total, relationship| {
+                total
+                    .saturating_add(relationship.rel_type.len())
+                    .saturating_add(coordinate_bytes(&relationship.start))
+                    .saturating_add(coordinate_bytes(&relationship.end))
+            });
+    }
+    bytes
+}
+
+fn reserve_projection_workspace<'a>(
+    governor: &'a crate::resource::ResourceGovernor,
+    rows: usize,
+    bytes: usize,
+) -> GraphResult<crate::resource::ResourceLease<'a>> {
+    let work = u64::try_from(rows)
+        .ok()
+        .and_then(|rows| rows.checked_mul(4))
+        .ok_or_else(|| GraphError::Internal("GQL projection work overflowed".to_string()))?;
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryBlocking,
+            crate::resource::WorkUnits::new(work),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    crate::resource::check_postgres_interrupts();
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
+        .map_err(crate::safety::resource_limit_error)?;
+    let bytes = crate::resource::ByteCount::from_usize(bytes)
+        .ok_or_else(|| GraphError::Internal("GQL projection bytes do not fit u64".to_string()))?;
+    governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, bytes)
+        .map_err(crate::safety::resource_limit_error)
 }
 
 fn apply_distinct_stages_to_rows(
@@ -398,9 +693,10 @@ fn apply_distinct_stages_to_rows(
     plan: &PhysicalPlan,
     hydrated: &HydratedRows,
     hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
     for stage in &plan.distinct_stages {
-        dedup_by_slots(rows, stage, |row, slot| {
+        dedup_by_slots(rows, stage, governor, |row, slot| {
             project_slot_value(row, slot, plan, hydrated, hydrate_nodes)
         })?;
     }
@@ -412,9 +708,10 @@ fn apply_distinct_stages_to_node_rows(
     plan: &PhysicalNodeScan,
     hydrated: &HydratedRows,
     hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
     for stage in &plan.distinct_stages {
-        dedup_by_slots(rows, stage, |row, slot| {
+        dedup_by_slots(rows, stage, governor, |row, slot| {
             project_node_slot_value(row, slot, plan, hydrated, hydrate_nodes)
         })?;
     }
@@ -426,9 +723,10 @@ fn apply_distinct_stages_to_join_rows(
     plan: &PhysicalJoinPlan,
     hydrated: &HydratedRows,
     hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
     for stage in &plan.distinct_stages {
-        dedup_by_slots(rows, stage, |row, slot| {
+        dedup_by_slots(rows, stage, governor, |row, slot| {
             project_join_slot_value(row, slot, plan, hydrated, hydrate_nodes)
         })?;
     }
@@ -438,9 +736,10 @@ fn apply_distinct_stages_to_join_rows(
 fn apply_distinct_stages_to_projected_rows(
     rows: &mut Vec<ProjectedRow>,
     stages: &[Vec<ReturnSlot>],
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
     for stage in stages {
-        dedup_by_slots(rows, stage, |row, slot| {
+        dedup_by_slots(rows, stage, governor, |row, slot| {
             project_projected_slot_value(&row.row, slot)
         })?;
     }
@@ -450,6 +749,7 @@ fn apply_distinct_stages_to_projected_rows(
 fn dedup_by_slots<Row, KeyValue>(
     rows: &mut Vec<Row>,
     slots: &[ReturnSlot],
+    governor: &crate::resource::ResourceGovernor,
     key_value: KeyValue,
 ) -> GraphResult<()>
 where
@@ -457,7 +757,8 @@ where
 {
     let mut seen = HashSet::with_capacity(rows.len().min(MAX_GQL_DISTINCT_KEYS));
     let mut deduped = Vec::with_capacity(rows.len());
-    for row in rows.drain(..) {
+    for (index, row) in rows.drain(..).enumerate() {
+        check_blocking_progress(governor, index)?;
         let key_values = slots
             .iter()
             .map(|slot| key_value(&row, slot))
@@ -470,10 +771,14 @@ where
     Ok(())
 }
 
-fn dedup_projected_rows(projected: &mut Vec<ProjectedRow>) -> GraphResult<()> {
+fn dedup_projected_rows(
+    projected: &mut Vec<ProjectedRow>,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<()> {
     let mut seen = HashSet::with_capacity(projected.len().min(MAX_GQL_DISTINCT_KEYS));
     let mut deduped = Vec::with_capacity(projected.len());
-    for row in projected.drain(..) {
+    for (index, row) in projected.drain(..).enumerate() {
+        check_blocking_progress(governor, index)?;
         if insert_distinct_key(&mut seen, row.row.clone())? {
             deduped.push(row);
         }
@@ -496,12 +801,38 @@ fn insert_distinct_key(seen: &mut HashSet<String>, value: serde_json::Value) -> 
     Ok(true)
 }
 
-fn sort_and_window(projected: &mut Vec<ProjectedRow>, skip: Option<u64>, limit: Option<u64>) {
+fn sort_and_window(
+    projected: &mut Vec<ProjectedRow>,
+    skip: Option<u64>,
+    limit: Option<u64>,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<()> {
     if projected
         .first()
         .is_some_and(|row| !row.sort_values.is_empty())
     {
-        projected.sort_by(compare_projected_rows);
+        let comparisons = std::cell::Cell::new(0usize);
+        let error = std::cell::Cell::new(None);
+        projected.sort_by(|left, right| {
+            if error.get().is_some() {
+                return std::cmp::Ordering::Equal;
+            }
+            let comparison = comparisons.get();
+            comparisons.set(comparison.saturating_add(1));
+            if comparison.is_multiple_of(BLOCKING_CHECK_INTERVAL) {
+                crate::resource::check_postgres_interrupts();
+                if let Err(limit) =
+                    governor.check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
+                {
+                    error.set(Some(limit));
+                    return std::cmp::Ordering::Equal;
+                }
+            }
+            compare_projected_rows(left, right)
+        });
+        if let Some(error) = error.get() {
+            return Err(crate::safety::resource_limit_error(error));
+        }
     }
     let skip = usize::try_from(skip.unwrap_or(0)).unwrap_or(usize::MAX);
     let limit = limit
@@ -512,6 +843,22 @@ fn sort_and_window(projected: &mut Vec<ProjectedRow>, skip: Option<u64>, limit: 
         projected.drain(0..drain);
     }
     projected.truncate(limit.min(projected.len()));
+    Ok(())
+}
+
+const BLOCKING_CHECK_INTERVAL: usize = 1_024;
+
+fn check_blocking_progress(
+    governor: &crate::resource::ResourceGovernor,
+    index: usize,
+) -> GraphResult<()> {
+    if index.is_multiple_of(BLOCKING_CHECK_INTERVAL) {
+        crate::resource::check_postgres_interrupts();
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
+            .map_err(crate::safety::resource_limit_error)?;
+    }
+    Ok(())
 }
 
 fn apply_value_window(values: &mut Vec<serde_json::Value>, skip: Option<u64>, limit: Option<u64>) {
@@ -532,6 +879,7 @@ fn aggregate_rows(
     plan: &PhysicalPlan,
     hydrated: &HydratedRows,
     hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<ProjectedRow>> {
     aggregate_by(
         rows,
@@ -540,6 +888,7 @@ fn aggregate_rows(
         |row, slot| project_slot_value(row, slot, plan, hydrated, hydrate_nodes),
         |row, arg| aggregate_arg_value(row, arg, plan, hydrated, hydrate_nodes),
         |output| aggregate_sort_values(output, plan.order_by.as_slice()),
+        governor,
     )
 }
 
@@ -549,6 +898,7 @@ fn aggregate_node_rows(
     plan: &PhysicalNodeScan,
     hydrated: &HydratedRows,
     hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<ProjectedRow>> {
     aggregate_by(
         rows,
@@ -560,6 +910,7 @@ fn aggregate_node_rows(
             aggregate_arg_value_for_node(&fake, arg, &plan.label, hydrated, hydrate_nodes)
         },
         |output| aggregate_sort_values(output, plan.order_by.as_slice()),
+        governor,
     )
 }
 
@@ -569,6 +920,7 @@ fn aggregate_join_rows(
     plan: &PhysicalJoinPlan,
     hydrated: &HydratedRows,
     hydrate_nodes: bool,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<ProjectedRow>> {
     aggregate_by(
         rows,
@@ -577,6 +929,7 @@ fn aggregate_join_rows(
         |row, slot| project_join_slot_value(row, slot, plan, hydrated, hydrate_nodes),
         |row, arg| aggregate_arg_value_for_join(row, arg, plan, hydrated, hydrate_nodes),
         |output| aggregate_sort_values(output, plan.order_by.as_slice()),
+        governor,
     )
 }
 
@@ -584,6 +937,7 @@ fn aggregate_projected_rows(
     rows: &[ProjectedRow],
     returns: &[ReturnSlot],
     plan: &PhysicalJoinPlan,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<ProjectedRow>> {
     aggregate_by(
         rows,
@@ -592,6 +946,7 @@ fn aggregate_projected_rows(
         |row, slot| project_projected_slot_value(&row.row, slot),
         |row, arg| aggregate_arg_value_for_projected(&row.row, arg),
         |output| aggregate_sort_values(output, plan.order_by.as_slice()),
+        governor,
     )
 }
 
@@ -602,6 +957,7 @@ fn aggregate_by<Row, ProjectValue, AggregateValue, SortValues>(
     project_value: ProjectValue,
     aggregate_value: AggregateValue,
     sort_values: SortValues,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<ProjectedRow>>
 where
     ProjectValue: Fn(&Row, &ReturnSlot) -> GraphResult<serde_json::Value>,
@@ -616,7 +972,8 @@ where
         returns.iter().filter(|slot| slot.is_aggregate()).collect();
     let mut groups: BTreeMap<String, AggregateGroup> = BTreeMap::new();
 
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
+        check_blocking_progress(governor, index)?;
         let group_values = group_slots
             .iter()
             .map(|slot| project_value(row, slot))
@@ -2517,4 +2874,86 @@ fn wildcard_label_for_table(plan: &PhysicalWildcardPathPlan, table_oid: u32) -> 
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("wildcard path plan has no label for table OID {table_oid}"),
         })
+}
+
+#[cfg(test)]
+mod blocking_resource_tests {
+    use super::*;
+    use crate::resource::{
+        ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
+        RowCount, WorkUnits,
+    };
+    use std::time::Duration;
+
+    fn expired_governor() -> ResourceGovernor {
+        ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1_024)),
+            DiskBudget::new(ByteCount::from_bytes(1_024)),
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
+            ElapsedBudget::new(Duration::ZERO),
+        ))
+    }
+
+    #[test]
+    fn distinct_checks_elapsed_budget_while_draining_rows() {
+        let mut rows = vec![ProjectedRow {
+            row: serde_json::json!({"value": 1}),
+            sort_values: Vec::new(),
+        }];
+        let governor = expired_governor();
+        std::thread::sleep(Duration::from_millis(1));
+
+        let error =
+            dedup_projected_rows(&mut rows, &governor).expect_err("expired DISTINCT must stop");
+
+        assert!(matches!(error, GraphError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn grouping_checks_elapsed_budget_while_scanning_rows() {
+        let rows = [1u8];
+        let governor = expired_governor();
+        std::thread::sleep(Duration::from_millis(1));
+
+        let error = aggregate_by(
+            &rows,
+            &[],
+            &[],
+            |_row, _slot| Ok(serde_json::Value::Null),
+            |_row, _arg| Ok(serde_json::Value::Null),
+            |_output| Vec::new(),
+            &governor,
+        )
+        .expect_err("expired grouping must stop");
+
+        assert!(matches!(error, GraphError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn sort_checks_elapsed_budget_during_comparisons() {
+        let mut rows = vec![
+            ProjectedRow {
+                row: serde_json::json!({"value": 2}),
+                sort_values: vec![SortValue {
+                    value: serde_json::json!(2),
+                    desc: false,
+                }],
+            },
+            ProjectedRow {
+                row: serde_json::json!({"value": 1}),
+                sort_values: vec![SortValue {
+                    value: serde_json::json!(1),
+                    desc: false,
+                }],
+            },
+        ];
+        let governor = expired_governor();
+        std::thread::sleep(Duration::from_millis(1));
+
+        let error =
+            sort_and_window(&mut rows, None, None, &governor).expect_err("expired sort must stop");
+
+        assert!(matches!(error, GraphError::ResourceLimit { .. }));
+    }
 }

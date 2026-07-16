@@ -539,6 +539,62 @@ fn build_resource_status_reports_byte_adaptive_pressure_for_long_rows() {
 }
 
 #[pg_test]
+fn traversal_work_limit_returns_stable_resource_diagnostic_and_status() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()") .expect("reset failed");
+    Spi::run("SET LOCAL graph.auto_load = off").expect("disable auto-load failed");
+    clear_graph_catalog_for_test();
+    Spi::run(
+        "DROP TABLE IF EXISTS public.graph_test_resource_paths CASCADE;
+         CREATE TABLE public.graph_test_resource_paths (
+             id text PRIMARY KEY,
+             parent_id text REFERENCES public.graph_test_resource_paths(id)
+         );
+         INSERT INTO public.graph_test_resource_paths VALUES
+             ('root', NULL), ('a', 'root'), ('b', 'root');
+         SELECT graph.add_table(
+             'graph_test_resource_paths'::regclass,
+             id_column := 'id'
+         );
+         SELECT graph.add_edge(
+             'graph_test_resource_paths'::regclass,
+             'parent_id',
+             'graph_test_resource_paths'::regclass,
+             'id',
+             'parent',
+             bidirectional := false
+         );
+         SELECT * FROM graph.build();
+         SET LOCAL graph.query_work_limit = 1;",
+    )
+    .expect("resource path fixture failed");
+
+    let statement = "SELECT * FROM graph.traverse('graph_test_resource_paths'::regclass, 'root', 3, direction := 'in', hydrate := false)";
+    assert_eq!(sqlstate_for_error(statement).as_deref(), Some("54000"));
+    assert_eq!(
+        sql_error_detail(statement).as_deref(),
+        Some("pgGraph diagnostic: PG007")
+    );
+    let status = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT operation, work_units FROM graph.resource_status()",
+                None,
+                &[],
+            )?
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)?.unwrap_or_default(),
+            row.get::<i64>(2)?.unwrap_or_default(),
+        ))
+    })
+    .expect("resource status read failed");
+    assert_eq!(status.0, "query");
+    assert_eq!(status.1, 1);
+}
+
+#[pg_test]
 fn stale_positive_statistics_are_stopped_by_runtime_build_budget() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");

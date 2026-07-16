@@ -26,6 +26,18 @@ pub static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Default: 2048 MB. Range: 64–32768.
 pub static MEMORY_LIMIT_MB: GucSetting<i32> = GucSetting::<i32>::new(2048);
 
+/// Maximum private workspace for one graph query.
+/// Default: 64 MB. Range: 1–32768.
+pub static QUERY_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(64);
+
+/// Maximum private workspace for one maintenance or analytics operation.
+/// Default: 256 MB. Range: 1–32768.
+pub static MAINTENANCE_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
+
+/// Maximum spill/staging bytes for one governed operation.
+/// Default: 4096 MB. Range: 1–1048576.
+pub static SPILL_DISK_LIMIT_MB: GucSetting<i32> = GucSetting::<i32>::new(4096);
+
 // ─── Query Defaults ───
 
 /// Default maximum BFS depth when not specified by the caller.
@@ -59,6 +71,14 @@ pub static MAX_FRONTIER: GucSetting<i32> = GucSetting::<i32>::new(100_000);
 /// Counts above this return early with capped=true.
 /// Default: 100000. Range: 1–10000000.
 pub static MAX_EXACT_PATH_COUNT: GucSetting<i32> = GucSetting::<i32>::new(100_000);
+
+/// Maximum expansions or equivalent abstract work units per query.
+/// Default: 10,000,000. Range: 1–2,000,000,000.
+pub static QUERY_WORK_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(10_000_000);
+
+/// Optional graph-operation deadline in milliseconds; zero disables it.
+/// Default: 0. Range: 0–86,400,000.
+pub static OPERATION_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 /// Maximum active rows per SPI cursor build batch.
 /// Default: 10000. Range: 1–1000000.
@@ -474,6 +494,39 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_int_guc(
+        c"graph.query_memory_mb",
+        c"Maximum private workspace (MB) for one graph query.",
+        c"The effective query workspace is also bounded by graph.memory_limit_mb after loaded graph residency.",
+        &QUERY_MEMORY_MB,
+        1,
+        32768,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.maintenance_memory_mb",
+        c"Maximum private workspace (MB) for one graph maintenance or analytics operation.",
+        c"Applies to sync normalization, compaction, and whole-graph analytics.",
+        &MAINTENANCE_MEMORY_MB,
+        1,
+        32768,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.spill_disk_limit_mb",
+        c"Maximum spill or staging disk (MB) for one governed operation.",
+        c"The filesystem and PostgreSQL temp_file_limit may impose lower limits.",
+        &SPILL_DISK_LIMIT_MB,
+        1,
+        1_048_576,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     // ── Query Defaults ──
 
     GucRegistry::define_int_guc(
@@ -543,6 +596,28 @@ pub fn register_gucs() {
         &MAX_EXACT_PATH_COUNT,
         1,
         10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.query_work_limit",
+        c"Maximum expansions or equivalent work units for one graph query.",
+        c"Queries stop with diagnostic PG007 before crossing this limit.",
+        &QUERY_WORK_LIMIT,
+        1,
+        2_000_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.operation_timeout_ms",
+        c"Optional graph-operation deadline in milliseconds.",
+        c"Zero disables the pgGraph deadline; PostgreSQL statement_timeout remains authoritative.",
+        &OPERATION_TIMEOUT_MS,
+        0,
+        86_400_000,
         GucContext::Userset,
         GucFlags::default(),
     );

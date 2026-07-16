@@ -28,6 +28,7 @@ authoritative table storage, WAL, MVCC, durability, and crash recovery.
     - **resolution_delta** — indexed post-load sync inserts
     - **edge_buffer** — post-load sync edge overlays
     - **tenant_membership** — backend-local state
+    - **projection_snapshot** — decoded immutable durable segment maps pinned per generation
   </SharedMemoryHeap>
 </SharedMemoryDiagram>
 
@@ -40,6 +41,32 @@ flag bytes used to identify generated reverse copies of bidirectional edge
 rows. The reverse CSR and bincode sections are currently per-backend heap
 structures.
 </Callout>
+
+## Runtime Resource Governors
+
+Graph-owned transient allocations use a statement-local governor with typed
+byte, row, work, disk, and elapsed units. A query or maintenance governor first
+subtracts the selected engine's estimated backend-private residency from
+`graph.memory_limit_mb`, then applies the narrower operation-specific workspace
+cap. Major vectors and maps reserve against the governor before growth.
+
+Traversal and query loops consume work at runtime and regularly check both
+PostgreSQL interrupts and the optional graph elapsed breaker. One query
+governor remains active across execution results, paging, sorting, output-row
+construction, and hydration, so a later phase cannot reuse memory still held by
+an earlier phase. Load validates artifact and projection-file sizes before
+decode. Sync retains accounting from catalog and payload preflight through
+normalization, artifact staging, candidate validation, and governed manifest
+publication. Compaction charges relevant source ranges, high-degree scratch,
+output construction, and manifest publication while retaining the previous
+generation on rejection.
+Dropping the governor publishes a backend-local peak snapshot used by
+`graph.resource_status()`.
+
+The governor covers graph-owned Rust allocations. PostgreSQL executor memory,
+client result buffering, and unrelated extension allocations remain governed by
+PostgreSQL facilities such as `statement_timeout`, `work_mem`, role limits, and
+connection admission.
 
 ## NodeStore
 

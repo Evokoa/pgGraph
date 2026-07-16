@@ -14,6 +14,7 @@ struct SourceSearchStatement {
     table_name: String,
     display_table_name: String,
     query: String,
+    size_query: String,
     params: Vec<String>,
 }
 
@@ -122,6 +123,7 @@ fn source_table_search_statements(
     tenant: Option<&str>,
     hydrate: bool,
     candidate_limit: Option<usize>,
+    mut workspace: Option<&mut crate::resource::ResourceLease<'_>>,
 ) -> safety::GraphResult<Vec<SourceSearchStatement>> {
     let (tables, _edges, _filter_columns) = read_catalog()?;
     let mut statements = Vec::new();
@@ -130,12 +132,26 @@ fn source_table_search_statements(
         if !table.columns.iter().any(|column| column == property_key) {
             continue;
         }
-
-        let table_name = sql_table_name_from_oid(table.table_oid)?;
         let table_oid = table.table_oid;
         if table_filter.is_some_and(|filter| filter != table_oid) {
             continue;
         }
+
+        if let Some(workspace) = workspace.as_deref_mut() {
+            let statement_bytes = search_statement_workspace_bound(
+                property_key,
+                property_value,
+                tenant,
+                mode,
+                table.id_columns.columns(),
+                table.tenant_column.as_deref(),
+            )?;
+            workspace
+                .try_grow(statement_bytes)
+                .map_err(crate::safety::resource_limit_error)?;
+        }
+
+        let table_name = sql_table_name_from_oid(table_oid)?;
         acl::check_table_acl(table_oid)?;
         validate_column_exists(table_oid, property_key)?;
 
@@ -145,6 +161,12 @@ fn source_table_search_statements(
             "to_jsonb(src.*)"
         } else {
             "NULL::jsonb"
+        };
+        let node_size_select = if hydrate {
+            "pg_catalog.pg_column_size(pg_catalog.to_jsonb(src.*))::bigint AS graph_json_binary_bytes,
+             pg_catalog.octet_length(pg_catalog.to_jsonb(src.*)::text)::bigint AS graph_json_text_bytes"
+        } else {
+            "0::bigint AS graph_json_binary_bytes, 0::bigint AS graph_json_text_bytes"
         };
         let mut params = Vec::new();
         let (search_predicate, mut search_params) =
@@ -179,17 +201,85 @@ fn source_table_search_statements(
             predicates.join(" AND "),
             limit_clause
         );
+        let size_query = format!(
+            "SELECT pg_catalog.count(*)::bigint,
+                    COALESCE(pg_catalog.sum(pg_catalog.octet_length(graph_node_id)), 0)::bigint,
+                    COALESCE(pg_catalog.sum(pg_catalog.octet_length(graph_value)), 0)::bigint,
+                    COALESCE(pg_catalog.max(pg_catalog.octet_length(graph_value)), 0)::bigint,
+                    COALESCE(pg_catalog.sum(graph_json_binary_bytes), 0)::bigint,
+                    COALESCE(pg_catalog.sum(graph_json_text_bytes), 0)::bigint
+               FROM (
+                 SELECT {pk_expr} AS graph_node_id,
+                        {value_expr} AS graph_value,
+                        {node_size_select}
+                   FROM {table_name} src
+                  WHERE {predicates}
+                  ORDER BY graph_node_id{limit_clause}
+               ) search_candidates",
+            table_name = table_name.as_sql(),
+            predicates = predicates.join(" AND "),
+        );
 
+        statements.try_reserve(1).map_err(|error| {
+            safety::GraphError::Internal(format!(
+                "search statement vector allocation failed: {error}"
+            ))
+        })?;
         statements.push(SourceSearchStatement {
             table_oid,
             table_name: table_name.as_sql().to_string(),
             display_table_name: relation_name(table_oid).unwrap_or_else(|_| table_oid.to_string()),
             query,
+            size_query,
             params,
         });
     }
 
     Ok(statements)
+}
+
+fn search_statement_workspace_bound(
+    property_key: &str,
+    property_value: &str,
+    tenant: Option<&str>,
+    mode: types::SearchMode,
+    id_columns: &[String],
+    tenant_column: Option<&str>,
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let token_count = if mode == types::SearchMode::Token {
+        property_value
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .count()
+            .max(1)
+    } else {
+        1
+    };
+    let quoted_key_bound = property_key
+        .len()
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(32));
+    let repeated_predicate_bytes = quoted_key_bound
+        .and_then(|bytes| bytes.checked_add(128))
+        .and_then(|bytes| bytes.checked_mul(token_count))
+        .and_then(|bytes| bytes.checked_mul(8));
+    let id_bytes = id_columns.iter().try_fold(0usize, |bytes, column| {
+        bytes.checked_add(column.len().saturating_mul(4))
+    });
+    let bytes = property_value
+        .len()
+        .checked_mul(32)
+        .and_then(|bytes| bytes.checked_add(property_key.len().saturating_mul(16)))
+        .and_then(|bytes| bytes.checked_add(tenant.map_or(0, str::len).saturating_mul(16)))
+        .and_then(|bytes| bytes.checked_add(tenant_column.map_or(0, str::len).saturating_mul(8)))
+        .and_then(|bytes| bytes.checked_add(id_bytes?))
+        .and_then(|bytes| bytes.checked_add(repeated_predicate_bytes?))
+        .and_then(|bytes| bytes.checked_add(64 * 1_024))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("search statement workspace overflowed".to_string())
+        })?;
+    Ok(bytes)
 }
 
 #[cfg(feature = "pg_test")]
@@ -211,6 +301,7 @@ pub(crate) fn source_table_search_sql_and_params_for_test(
         case_sensitive,
         tenant,
         hydrate,
+        None,
         None,
     )?
     .into_iter()
@@ -238,6 +329,7 @@ pub(crate) fn source_table_search_sql_for_test(
         tenant,
         hydrate,
         None,
+        None,
     )?
     .into_iter()
     .map(|statement| statement.query)
@@ -245,6 +337,7 @@ pub(crate) fn source_table_search_sql_for_test(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn source_table_search_rows(
     property_key: &str,
     property_value: &str,
@@ -256,6 +349,35 @@ pub(crate) fn source_table_search_rows(
     offset: usize,
     limit: usize,
 ) -> safety::GraphResult<Vec<SearchOutputRow>> {
+    let governor = crate::ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    source_table_search_rows_governed(
+        property_key,
+        property_value,
+        table_filter,
+        mode,
+        case_sensitive,
+        tenant,
+        hydrate,
+        offset,
+        limit,
+        &governor,
+    )
+}
+
+/// Searches source tables within a caller-owned operation budget.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_table_search_rows_governed(
+    property_key: &str,
+    property_value: &str,
+    table_filter: Option<u32>,
+    mode: types::SearchMode,
+    case_sensitive: bool,
+    tenant: Option<&str>,
+    hydrate: bool,
+    offset: usize,
+    limit: usize,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<SearchOutputRow>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -266,6 +388,16 @@ pub(crate) fn source_table_search_rows(
             .ok_or_else(|| safety::GraphError::InvalidFilter {
                 reason: "row_offset + max_rows overflows".to_string(),
             })?;
+    let mut workspace = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryCandidates,
+            crate::resource::ByteCount::ZERO,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let matcher_bytes = search_matcher_workspace_bound(property_value, mode, case_sensitive)?;
+    workspace
+        .try_grow(matcher_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
     let statements = source_table_search_statements(
         property_key,
         property_value,
@@ -275,13 +407,43 @@ pub(crate) fn source_table_search_rows(
         tenant,
         hydrate,
         Some(candidate_limit),
+        Some(&mut workspace),
     )?;
     let mut rows = Vec::new();
     let matcher = SearchValueMatcher::new(property_value, mode, case_sensitive);
     let match_type = mode.as_match_type().to_string();
 
     for statement in statements {
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
+            .map_err(crate::safety::resource_limit_error)?;
+        crate::resource::check_postgres_interrupts();
+        governor
+            .consume_work(
+                crate::resource::ResourcePhase::QueryCandidates,
+                crate::resource::WorkUnits::new(1),
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        let sizes = search_statement_sizes(&statement)?;
+        reserve_search_materialization(
+            &mut workspace,
+            sizes,
+            statement.display_table_name.len(),
+            match_type.len(),
+        )?;
+        let statement_rows = usize::try_from(sizes.rows).map_err(|_| {
+            safety::GraphError::Internal(
+                "search row count does not fit the current platform".to_string(),
+            )
+        })?;
+        rows.try_reserve(statement_rows).map_err(|error| {
+            safety::GraphError::Internal(format!(
+                "search candidate allocation failed after reservation: {error}"
+            ))
+        })?;
         Spi::connect(|client| {
+            // The per-statement reservation includes 8 KiB of fixed slack for
+            // both parameter Vecs and their pgrx datum wrappers.
             let params = statement
                 .params
                 .iter()
@@ -296,6 +458,16 @@ pub(crate) fn source_table_search_rows(
                     ))
                 })?;
             for row in result {
+                governor
+                    .consume_work(
+                        crate::resource::ResourcePhase::QueryCandidates,
+                        crate::resource::WorkUnits::new(1),
+                    )
+                    .map_err(crate::safety::resource_limit_error)?;
+                governor
+                    .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
+                    .map_err(crate::safety::resource_limit_error)?;
+                crate::resource::check_postgres_interrupts();
                 let node_id = row
                     .get::<String>(1)
                     .map_err(|e| {
@@ -330,10 +502,179 @@ pub(crate) fn source_table_search_rows(
         })?;
     }
 
+    govern_search_blocking(governor, &rows)?;
     sort_search_rows(&mut rows);
     dedupe_search_rows(&mut rows);
+    let page_len = rows.len().saturating_sub(offset).min(limit);
+    let page_bytes = page_len
+        .checked_mul(std::mem::size_of::<SearchOutputRow>())
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("search page workspace overflowed".to_string())
+        })?;
+    let page_lease = governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, page_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
+    let mut page = Vec::new();
+    page.try_reserve_exact(page_len).map_err(|error| {
+        safety::GraphError::Internal(format!(
+            "search page allocation failed after reservation: {error}"
+        ))
+    })?;
+    page.extend(rows.into_iter().skip(offset).take(limit));
+    workspace.retain_until_governor_drop();
+    page_lease.retain_until_governor_drop();
+    Ok(page)
+}
 
-    Ok(rows.into_iter().skip(offset).take(limit).collect())
+fn search_matcher_workspace_bound(
+    property_value: &str,
+    mode: types::SearchMode,
+    case_sensitive: bool,
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let comparable_bytes = property_value
+        .len()
+        .checked_mul(if case_sensitive { 1 } else { 12 });
+    let token_slots = if mode == types::SearchMode::Token {
+        property_value
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .count()
+            .max(1)
+            .checked_mul(if case_sensitive { 1 } else { 3 })
+    } else {
+        Some(0)
+    };
+    let token_headers = token_slots
+        .and_then(|tokens| tokens.checked_mul(std::mem::size_of::<String>()))
+        .and_then(|bytes| bytes.checked_mul(2));
+    let bytes = comparable_bytes
+        .and_then(|bytes| bytes.checked_mul(3))
+        .and_then(|bytes| bytes.checked_add(token_headers?))
+        .and_then(|bytes| bytes.checked_add(1_024))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("search matcher workspace overflowed".to_string())
+        })?;
+    Ok(bytes)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SearchMaterializationSizes {
+    rows: u64,
+    id_bytes: u64,
+    actual_bytes: u64,
+    max_actual_bytes: u64,
+    json_binary_bytes: u64,
+    json_text_bytes: u64,
+}
+
+fn search_statement_sizes(
+    statement: &SourceSearchStatement,
+) -> safety::GraphResult<SearchMaterializationSizes> {
+    Spi::connect(|client| {
+        let params = statement
+            .params
+            .iter()
+            .map(|param| param.as_str().into())
+            .collect::<Vec<_>>();
+        let result = client
+            .select(&statement.size_query, None, &params)
+            .map_err(|error| {
+                safety::GraphError::Internal(format!(
+                    "source-table search size preflight failed for {}: {error}",
+                    statement.table_name
+                ))
+            })?;
+        let row = result.first();
+        let read = |column, label: &str| -> safety::GraphResult<u64> {
+            let value = row.get::<i64>(column).map_err(|error| {
+                safety::GraphError::Internal(format!("search {label} size read failed: {error}"))
+            })?;
+            Ok(u64::try_from(value.unwrap_or(0).max(0)).unwrap_or(0))
+        };
+        Ok(SearchMaterializationSizes {
+            rows: read(1, "row count")?,
+            id_bytes: read(2, "primary-key")?,
+            actual_bytes: read(3, "property value")?,
+            max_actual_bytes: read(4, "maximum property value")?,
+            json_binary_bytes: read(5, "JSONB")?,
+            json_text_bytes: read(6, "JSON text")?,
+        })
+    })
+}
+
+fn reserve_search_materialization(
+    workspace: &mut crate::resource::ResourceLease<'_>,
+    sizes: SearchMaterializationSizes,
+    display_name_bytes: usize,
+    match_type_bytes: usize,
+) -> safety::GraphResult<()> {
+    let row_overhead = u64::try_from(std::mem::size_of::<SearchOutputRow>())
+        .unwrap_or(u64::MAX)
+        .checked_add(u64::try_from(display_name_bytes).unwrap_or(u64::MAX))
+        .and_then(|bytes| bytes.checked_add(u64::try_from(match_type_bytes).unwrap_or(u64::MAX)))
+        .and_then(|bytes| bytes.checked_add(256))
+        .ok_or_else(|| {
+            safety::GraphError::Internal("search row estimate overflowed".to_string())
+        })?;
+    let bytes = sizes
+        .rows
+        .checked_mul(row_overhead)
+        .and_then(|bytes| bytes.checked_add(sizes.id_bytes))
+        .and_then(|bytes| bytes.checked_add(sizes.actual_bytes.checked_mul(4)?))
+        .and_then(|bytes| bytes.checked_add(sizes.max_actual_bytes.checked_mul(4)?))
+        .ok_or_else(|| {
+            safety::GraphError::Internal("search materialization estimate overflowed".to_string())
+        })?;
+    workspace
+        .try_grow(crate::resource::ByteCount::from_bytes(bytes))
+        .map_err(crate::safety::resource_limit_error)?;
+    crate::sql_hydration::reserve_jsonb_materialization(
+        workspace,
+        sizes.rows,
+        sizes.json_binary_bytes,
+        sizes.json_text_bytes,
+    )
+}
+
+fn govern_search_blocking(
+    governor: &crate::resource::ResourceGovernor,
+    rows: &[SearchOutputRow],
+) -> safety::GraphResult<()> {
+    let sort_bytes = rows
+        .len()
+        .checked_mul(std::mem::size_of::<SearchOutputRow>())
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("search sort estimate overflowed".to_string())
+        })?;
+    let _sort_workspace = governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, sort_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
+    let comparisons = if rows.len() < 2 {
+        rows.len()
+    } else {
+        rows.len()
+            .checked_mul(usize::BITS as usize - rows.len().leading_zeros() as usize)
+            .ok_or_else(|| {
+                safety::GraphError::Internal("search sort work overflowed".to_string())
+            })?
+    };
+    let work = comparisons.checked_add(rows.len()).ok_or_else(|| {
+        safety::GraphError::Internal("search blocking work overflowed".to_string())
+    })?;
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryBlocking,
+            crate::resource::WorkUnits::new(u64::try_from(work).unwrap_or(u64::MAX)),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
+        .map_err(crate::safety::resource_limit_error)?;
+    crate::resource::check_postgres_interrupts();
+    Ok(())
 }
 
 fn sort_search_rows(rows: &mut [SearchOutputRow]) {
@@ -451,6 +792,7 @@ fn search_value_matches(
 mod tests {
     use super::*;
     use crate::types::SearchMode;
+    use std::time::Duration;
 
     #[test]
     fn search_value_matcher_preserves_text_modes_and_case_handling() {
@@ -500,5 +842,178 @@ mod tests {
             SearchMode::Token,
             false
         ));
+    }
+
+    #[test]
+    fn high_token_count_statement_is_rejected_before_sql_construction() {
+        let value = std::iter::repeat_n("a", 4_096)
+            .collect::<Vec<_>>()
+            .join("-");
+        let bound = search_statement_workspace_bound(
+            "name",
+            &value,
+            None,
+            SearchMode::Token,
+            &["id".to_string()],
+            None,
+        )
+        .expect("checked token bound fits");
+        let governor = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            )),
+        );
+        let mut workspace = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryCandidates,
+                crate::resource::ByteCount::ZERO,
+            )
+            .expect("empty reservation succeeds");
+
+        let error = workspace
+            .try_grow(bound)
+            .expect_err("high-token SQL must exceed the small budget");
+        assert_eq!(error.kind(), crate::resource::ResourceKind::Memory);
+        assert_eq!(
+            error.phase(),
+            crate::resource::ResourcePhase::QueryCandidates
+        );
+    }
+
+    #[test]
+    fn dense_token_matcher_accounts_for_string_headers_without_statements() {
+        let value = std::iter::repeat_n("a", 4_096)
+            .collect::<Vec<_>>()
+            .join("-");
+        let bound = search_matcher_workspace_bound(&value, SearchMode::Token, true)
+            .expect("dense token matcher bound fits");
+        let old_estimate = value.len() * 8 + 1_024;
+
+        assert!(bound.as_u64() > old_estimate as u64);
+        let governor = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                crate::resource::ByteCount::from_bytes(old_estimate as u64),
+            )),
+        );
+        let mut workspace = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryCandidates,
+                crate::resource::ByteCount::ZERO,
+            )
+            .expect("empty reservation succeeds");
+        assert!(workspace.try_grow(bound).is_err());
+    }
+
+    #[test]
+    fn unicode_casefold_matcher_uses_expansion_and_token_headroom() {
+        let value = "İ-Σ-K-ﬃ".repeat(1_024);
+        let sensitive = search_matcher_workspace_bound(&value, SearchMode::Token, true)
+            .expect("case-sensitive matcher bound fits");
+        let insensitive = search_matcher_workspace_bound(&value, SearchMode::Token, false)
+            .expect("case-insensitive matcher bound fits");
+
+        assert!(insensitive > sensitive);
+        assert!(insensitive.as_u64() > value.len() as u64 * 12);
+    }
+
+    fn test_limits(
+        memory: crate::resource::ByteCount,
+        work: u64,
+        elapsed: Duration,
+    ) -> crate::resource::ResourceLimits {
+        crate::resource::ResourceLimits::bounded(
+            crate::resource::MemoryBudget::new(memory),
+            crate::resource::DiskBudget::UNLIMITED,
+            crate::resource::RowCount::UNLIMITED,
+            crate::resource::WorkUnits::new(work),
+            crate::resource::ElapsedBudget::new(elapsed),
+        )
+    }
+
+    fn search_row(id: &str) -> SearchOutputRow {
+        (
+            pgrx::pg_sys::Oid::from_u32(42),
+            id.to_string(),
+            "exact".to_string(),
+            1.0,
+            true,
+            None,
+            "public.nodes".to_string(),
+        )
+    }
+
+    #[test]
+    fn consecutive_search_materializations_share_retained_memory() {
+        let sizes = SearchMaterializationSizes {
+            rows: 2,
+            id_bytes: 32,
+            actual_bytes: 64,
+            max_actual_bytes: 32,
+            json_binary_bytes: 0,
+            json_text_bytes: 0,
+        };
+        let sizing = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            )),
+        );
+        let mut sizing_lease = sizing
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryCandidates,
+                crate::resource::ByteCount::ZERO,
+            )
+            .expect("empty reservation succeeds");
+        reserve_search_materialization(&mut sizing_lease, sizes, 12, 5)
+            .expect("sizing reservation succeeds");
+        let exact = sizing.memory_used();
+
+        let shared = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(exact)),
+        );
+        let mut shared_lease = shared
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryCandidates,
+                crate::resource::ByteCount::ZERO,
+            )
+            .expect("empty reservation succeeds");
+        reserve_search_materialization(&mut shared_lease, sizes, 12, 5)
+            .expect("first source search fits");
+        let error = reserve_search_materialization(&mut shared_lease, sizes, 12, 5)
+            .expect_err("second source search cannot reuse retained output memory");
+        assert!(matches!(error, safety::GraphError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn search_blocking_work_is_cumulative() {
+        let rows = vec![search_row("a"), search_row("b")];
+        let governor = crate::resource::ResourceGovernor::new(test_limits(
+            crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            10,
+            Duration::MAX,
+        ));
+        govern_search_blocking(&governor, &rows).expect("first blocking phase fits");
+        let error = govern_search_blocking(&governor, &rows)
+            .expect_err("second blocking phase observes work already consumed");
+        assert!(matches!(error, safety::GraphError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn search_blocking_uses_the_original_elapsed_clock() {
+        let expired = crate::resource::ResourceGovernor::new(test_limits(
+            crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            u64::MAX,
+            Duration::from_millis(10),
+        ));
+        std::thread::sleep(Duration::from_millis(20));
+        let error = govern_search_blocking(&expired, &[])
+            .expect_err("search blocking observes operation start time");
+        assert!(matches!(error, safety::GraphError::ResourceLimit { .. }));
+
+        let fresh = crate::resource::ResourceGovernor::new(test_limits(
+            crate::resource::ByteCount::from_mib(1).expect("test budget fits"),
+            u64::MAX,
+            Duration::from_millis(10),
+        ));
+        govern_search_blocking(&fresh, &[]).expect("fresh operation clock has not expired");
     }
 }

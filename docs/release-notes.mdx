@@ -41,6 +41,15 @@ gate evidence through signed tags and package publishing.
   byte-bounded spool batches, and `graph.build_resource_status()`. Stale
   positive statistics and long source keys are now checked during construction,
   while the low-memory serving-engine unload path remains available.
+- Added hard memory, work, row, disk, elapsed, and PostgreSQL interrupt breakers
+  to persisted load, traversal and path execution, GQL hydration and blocking
+  projection, durable sync ingestion, range compaction, and connected-component
+  analytics. `graph.resource_status()` exposes backend-local peak telemetry;
+  limit failures use SQLSTATE `54000` with diagnostic `PG007` and do not publish
+  an unvalidated replacement.
+- Decode durable projection segments once when a generation is installed and
+  pin the derived layered snapshot in the serving engine, removing per-query
+  projection-file reads and durable-map reconstruction.
 - Added a durable named-graph catalog with graph creation, selection,
   description, residency, grants, quotas, and metadata inspection APIs.
 - Scoped node registrations, relationship registrations, filter columns, build

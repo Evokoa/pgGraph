@@ -54,6 +54,7 @@ pub(crate) enum GraphDiagnosticCode {
     EdgeTypeLimit,
     InvalidFilter,
     BuildLocked,
+    ResourceLimit,
     EdgeBufferFull,
     CorruptFile,
     NodeNotFound,
@@ -80,6 +81,7 @@ impl GraphDiagnosticCode {
             Self::EdgeTypeLimit => "PG004",
             Self::InvalidFilter => "PG005",
             Self::BuildLocked => "PG006",
+            Self::ResourceLimit => "PG007",
             Self::EdgeBufferFull => "PG008",
             Self::CorruptFile => "PG009",
             Self::NodeNotFound => "PG010",
@@ -151,6 +153,15 @@ pub enum GraphError {
 
     #[error("Another graph maintenance operation or registered source transaction is active")]
     BuildLocked, // PG006
+
+    #[error("Graph resource limit exceeded in {phase}: {resource} would be {requested} with {used} already used; limit is {limit}")]
+    ResourceLimit {
+        resource: String,
+        phase: String,
+        used: u64,
+        requested: u64,
+        limit: u64,
+    }, // PG007
 
     #[error("Edge mutation buffer full ({size} entries). Graph is in read-only mode.")]
     EdgeBufferFull { size: usize }, // PG008
@@ -243,6 +254,11 @@ impl GraphError {
                 GraphDiagnosticCode::BuildLocked,
                 "55P03",
                 PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+            ),
+            GraphError::ResourceLimit { .. } => (
+                GraphDiagnosticCode::ResourceLimit,
+                "54000",
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
             ),
             GraphError::EdgeBufferFull { .. } => (
                 GraphDiagnosticCode::EdgeBufferFull,
@@ -350,6 +366,15 @@ impl GraphError {
             GraphError::BuildLocked => {
                 "Wait for the active graph operation or source transaction to complete, then retry; inspect pg_stat_activity for long-running sessions.".to_string()
             }
+            GraphError::ResourceLimit { resource, .. } if resource == "work units" => {
+                "Reduce graph depth, candidates, or result cardinality, or increase graph.query_work_limit.".to_string()
+            }
+            GraphError::ResourceLimit { resource, .. } if resource == "disk bytes" => {
+                "Reduce the operation size or increase graph.spill_disk_limit_mb after confirming free disk space.".to_string()
+            }
+            GraphError::ResourceLimit { .. } => {
+                "Reduce the operation size or raise the applicable graph query or maintenance resource limit.".to_string()
+            }
             GraphError::EdgeBufferFull { .. } => {
                 "Run graph.vacuum() to merge pending mutations, or increase graph.edge_buffer_size.".to_string()
             }
@@ -406,6 +431,16 @@ impl GraphError {
             .set_hint(hint)
             .report(PgLogLevel::ERROR);
         unreachable!("pgrx ERROR reporting returned unexpectedly");
+    }
+}
+
+pub(crate) fn resource_limit_error(error: crate::resource::ResourceLimitError) -> GraphError {
+    GraphError::ResourceLimit {
+        resource: error.kind().as_str().to_string(),
+        phase: error.phase().as_str().to_string(),
+        used: error.used(),
+        requested: error.requested(),
+        limit: error.limit(),
     }
 }
 
@@ -503,6 +538,20 @@ mod tests {
     fn build_locked_maps_to_pg006() {
         assert_eq!(GraphError::BuildLocked.diagnostic_code().as_str(), "PG006");
         assert_eq!(GraphError::BuildLocked.sqlstate(), "55P03");
+    }
+
+    #[test]
+    fn resource_limit_maps_to_pg007() {
+        let err = GraphError::ResourceLimit {
+            resource: "work units".to_string(),
+            phase: "query.expand".to_string(),
+            used: 10,
+            requested: 1,
+            limit: 10,
+        };
+        assert_eq!(err.diagnostic_code().as_str(), "PG007");
+        assert_eq!(err.sqlstate(), "54000");
+        assert!(err.hint().contains("graph.query_work_limit"));
     }
 
     #[test]
@@ -731,6 +780,13 @@ mod tests {
                 limit: 1,
             },
             GraphError::BuildLocked,
+            GraphError::ResourceLimit {
+                resource: "rows".into(),
+                phase: "sync.ingest".into(),
+                used: 1,
+                requested: 1,
+                limit: 1,
+            },
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },
             GraphError::IncompatibleVersion("r".into()),
@@ -776,6 +832,13 @@ mod tests {
                 limit: 1,
             },
             GraphError::BuildLocked,
+            GraphError::ResourceLimit {
+                resource: "rows".into(),
+                phase: "sync.ingest".into(),
+                used: 1,
+                requested: 1,
+                limit: 1,
+            },
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },
             GraphError::IncompatibleVersion("r".into()),
@@ -826,6 +889,13 @@ mod tests {
                 limit: 1,
             },
             GraphError::BuildLocked,
+            GraphError::ResourceLimit {
+                resource: "rows".into(),
+                phase: "sync.ingest".into(),
+                used: 1,
+                requested: 1,
+                limit: 1,
+            },
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },
             GraphError::IncompatibleVersion("r".into()),

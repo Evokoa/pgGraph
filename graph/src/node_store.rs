@@ -206,6 +206,7 @@ enum ArrayBacking {
 /// metadata.
 pub struct NodeStore {
     backing: ArrayBacking,
+    max_primary_key_bytes: usize,
 }
 
 impl NodeStore {
@@ -217,6 +218,7 @@ impl NodeStore {
                 table_oids: Vec::new(),
                 primary_keys: Vec::new(),
             },
+            max_primary_key_bytes: 0,
         }
     }
 
@@ -228,13 +230,22 @@ impl NodeStore {
                 table_oids: Vec::with_capacity(capacity),
                 primary_keys: Vec::with_capacity(capacity),
             },
+            max_primary_key_bytes: 0,
         }
     }
 
     /// Create an mmap-backed NodeStore from validated owning metadata.
     pub(crate) fn from_mmap(arrays: MmapNodeArrays) -> Self {
+        let max_primary_key_bytes = arrays
+            .primary_key_offsets()
+            .windows(2)
+            .filter_map(|offsets| offsets[1].checked_sub(offsets[0]))
+            .filter_map(|bytes| usize::try_from(bytes).ok())
+            .max()
+            .unwrap_or_default();
         Self {
             backing: ArrayBacking::Mmap { arrays },
+            max_primary_key_bytes,
         }
     }
 
@@ -247,6 +258,7 @@ impl NodeStore {
         reason = "mmap stores are immutable views; callers must materialize before mutation"
     )]
     pub fn add_node(&mut self, table_oid: u32, primary_key: String) -> u32 {
+        self.max_primary_key_bytes = self.max_primary_key_bytes.max(primary_key.len());
         match &mut self.backing {
             ArrayBacking::Owned {
                 is_active,
@@ -272,6 +284,7 @@ impl NodeStore {
     /// Returns `GraphError::Oom` when an owned array cannot grow, or an
     /// internal error for index overflow or mmap-backed storage.
     pub(crate) fn try_add_node(&mut self, table_oid: u32, primary_key: String) -> GraphResult<u32> {
+        let primary_key_bytes = primary_key.len();
         match &mut self.backing {
             ArrayBacking::Owned {
                 is_active,
@@ -286,6 +299,7 @@ impl NodeStore {
                 is_active.push(true);
                 table_oids.push(table_oid);
                 primary_keys.push(primary_key);
+                self.max_primary_key_bytes = self.max_primary_key_bytes.max(primary_key_bytes);
                 Ok(idx)
             }
             ArrayBacking::Mmap { .. } => Err(GraphError::Internal(
@@ -404,6 +418,11 @@ impl NodeStore {
         }
     }
 
+    /// Largest source primary-key width retained by this store.
+    pub(crate) const fn max_primary_key_bytes(&self) -> usize {
+        self.max_primary_key_bytes
+    }
+
     /// True when this store is backed by mmap'd read-only memory.
     pub fn is_mmap_backed(&self) -> bool {
         matches!(self.backing, ArrayBacking::Mmap { .. })
@@ -457,6 +476,7 @@ impl NodeStore {
                     table_oids: table_oids.clone(),
                     primary_keys: primary_keys.clone(),
                 },
+                max_primary_key_bytes: self.max_primary_key_bytes,
             },
             ArrayBacking::Mmap { arrays } => {
                 let mut is_active = BitVec::with_capacity(arrays.node_count as usize);
@@ -485,6 +505,7 @@ impl NodeStore {
                         table_oids,
                         primary_keys,
                     },
+                    max_primary_key_bytes: self.max_primary_key_bytes,
                 }
             }
         }
@@ -605,6 +626,23 @@ mod tests {
         assert_eq!(b, 1);
         assert_eq!(c, 2);
         assert_eq!(store.node_count(), 3);
+    }
+
+    #[test]
+    fn maximum_primary_key_width_is_maintained_during_growth() {
+        let mut store = NodeStore::new();
+        assert_eq!(store.max_primary_key_bytes(), 0);
+
+        store.add_node(1, "short".to_string());
+        store
+            .try_add_node(1, "a-much-longer-primary-key".to_string())
+            .expect("owned node append succeeds");
+        store.add_node(1, "mid-sized".to_string());
+
+        assert_eq!(
+            store.max_primary_key_bytes(),
+            "a-much-longer-primary-key".len()
+        );
     }
 
     #[test]

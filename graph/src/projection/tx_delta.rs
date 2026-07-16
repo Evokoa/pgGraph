@@ -47,6 +47,7 @@ pub(crate) struct DeltaEdge {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TxGraphDelta {
     added_nodes: Vec<AddedNode>,
+    max_added_node_primary_key_bytes: usize,
     deleted_nodes: HashSet<u32>,
     added_edges: HashMap<u32, Vec<DeltaEdge>>,
     deleted_edges: HashSet<(u32, u32, u8, bool, Option<RelationshipId>)>,
@@ -148,6 +149,8 @@ impl TxGraphDelta {
 
     #[cfg(test)]
     fn add_node_for_test(&mut self, table_oid: u32, primary_key: &str, node_idx: u32) {
+        self.max_added_node_primary_key_bytes =
+            self.max_added_node_primary_key_bytes.max(primary_key.len());
         self.added_nodes.push(AddedNode {
             table_oid,
             primary_key: primary_key.to_string(),
@@ -176,6 +179,9 @@ pub(crate) fn record_added_node(
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        delta.max_added_node_primary_key_bytes = delta
+            .max_added_node_primary_key_bytes
+            .max(primary_key.len());
         delta.added_nodes.push(AddedNode {
             table_oid,
             primary_key: primary_key.to_string(),
@@ -197,6 +203,9 @@ pub(crate) fn record_added_node_indexed(
     TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        delta.max_added_node_primary_key_bytes = delta
+            .max_added_node_primary_key_bytes
+            .max(primary_key.len());
         let offset = delta
             .added_nodes
             .iter()
@@ -281,6 +290,17 @@ pub(crate) fn added_node_indexes(
                     .filter_map(|node| node.node_idx)
                     .collect()
             })
+            .unwrap_or_default()
+    })
+}
+
+/// Return the largest transaction-local node primary-key byte length.
+pub(crate) fn max_added_node_primary_key_bytes() -> usize {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .map(|delta| delta.max_added_node_primary_key_bytes)
             .unwrap_or_default()
     })
 }
@@ -512,6 +532,21 @@ pub(crate) fn relationship_identities() -> Vec<RelationshipIdentity> {
             .as_ref()
             .map(|delta| delta.relationship_identities.clone())
             .unwrap_or_default()
+    })
+}
+
+/// Borrow one transaction-local relationship identity by allocation offset.
+pub(crate) fn with_relationship_identity<R>(
+    offset: usize,
+    read: impl FnOnce(Option<&RelationshipIdentity>) -> R,
+) -> R {
+    TX_DELTA.with(|delta| {
+        let borrowed = delta.borrow();
+        read(
+            borrowed
+                .as_ref()
+                .and_then(|delta| delta.relationship_identities.get(offset)),
+        )
     })
 }
 

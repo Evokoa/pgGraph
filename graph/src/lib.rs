@@ -582,6 +582,7 @@ pub mod bench_support {
             let previous =
                 publish_manifest_with_segments(&dir, 1, sparse_segments(base.node_count(), 8, 0));
             let budgets = CompactionBudgets {
+                resident_bytes: crate::resource::ByteCount::ZERO,
                 max_rows: 10_000,
                 max_bytes: 10_000_000,
                 max_segments: 1_000,

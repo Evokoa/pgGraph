@@ -6,18 +6,17 @@ the authoritative checkpoint handoff, measurement log, and next-action record.
 
 Last synchronized: 2026-07-15
 
-Current phase: R2/Checkpoint 1B immediate resource containment. R1 correctness,
-security, identity, transaction, and supported-major evidence is complete. The
-active R2A checkpoint introduces checked resource units and one statement-local
-governor, removes over-budget read-only construction, and makes build preflight
-use exact integer bytes before broader build/load/query/maintenance enforcement.
+Current phase: R2D generation-safe publication. R2A-R2C enforce checked build
+policy, live replacement reservations, and adaptive batches. R2C extends typed
+memory/work/row/disk/elapsed limits and PostgreSQL interrupts through persisted
+load, query/path execution, hydration, sync ingestion, range compaction, and
+analytics, with a reusable RSS/Linux-PSS profile.
 
 Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
 single source of truth for pgGraph 1.0 scope. The existing full-engine plans
 remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
-and dynamic graphs are post-1.0 roadmap work. R1 is complete; the next
-implementation work is R2/Checkpoint 1B resource containment and safe
-publication.
+and dynamic graphs are post-1.0 roadmap work. R1 and R2A-R2C are complete; R2D
+safe publication is the active release checkpoint.
 
 2026-07-11 R1 savepoints — Transaction-local graph overlays now follow nested
 PostgreSQL savepoint and PL subtransaction release/rollback semantics, including
@@ -195,6 +194,15 @@ pressure and major vectors grow fallibly. Long keys, stale positive statistics,
 low-memory replacement, and persisted typed filters pass with 728 Rust tests
 and 994 PostgreSQL 17 tests (one intentional ignore in each suite), plus all
 static, documentation, contract, and secret gates.
+
+2026-07-15 R2C runtime resource breakers — One statement/maintenance governor
+now spans persisted load, direct search, traversal, GQL, hydration, workflow
+postprocessing, durable sync, range compaction, and analytics. Dense-token and
+Unicode search, all public workflow wrappers, and publication-preservation
+boundaries are covered. The checkpoint passes 778 Rust tests and 1,049
+PostgreSQL 17 tests (one intentional ignore in each suite), a three-load/two-sync
+runtime profile at 87 MiB peak RSS, strict normal and pg-test Clippy, rustdoc,
+schema/contract/docs drift, gitleaks, and independent terminal review.
 
 2026-07-11 R1 compaction — Segment format v5 and identity-aware layered keys
 preserve equal-endpoint parallel relationship rows, weights, and specific

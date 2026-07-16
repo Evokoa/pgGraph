@@ -35,7 +35,7 @@ formatting, Clippy, rustdoc, documentation/contract drift, and focused review.
 Exit evidence: stale/no-statistics, long-key, wide-filter, and low-memory build
 profiles fail before allocation or stay within the declared envelope.
 
-## R2C: Load, Query, Sync, Compaction, And Analytics Breakers
+## R2C: Load, Query, Sync, Compaction, And Analytics Breakers — Complete
 
 - Apply the same governor to mapped-load metadata, source candidates,
   expansions, frontiers, paths, hydration, blocking operators, sync

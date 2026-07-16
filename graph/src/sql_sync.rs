@@ -8,10 +8,13 @@ use crate::catalog::{
 use crate::filter_index::{EncodedFilterValue, FilterColumnType, PersistedFilterValue};
 use crate::persistence::{
     graph_artifact_checksum_for_path, graph_artifact_version, graph_file_path, load_graph_file,
-    load_graph_file_with_projection_candidate, projection_manifest_root, read_sync_checkpoint,
+    load_graph_file_with_projection_candidate_and_residency, load_graph_file_with_residency,
+    projection_manifest_root, read_sync_checkpoint,
 };
 use crate::projection::ingest::{ProjectionIngestResult, ProjectionIngester, ProjectionSyncRow};
-use crate::projection::manifest::ProjectionManifestStore;
+use crate::projection::manifest::{
+    ProjectionManifestStore, MANIFEST_DECODED_MEMORY_BYTES_PER_JSON_BYTE,
+};
 use crate::projection::normalize::{MutationBufferLimits, MutationOperation};
 use crate::resolution_index::ResolutionIndexBuilder;
 use crate::sql_filters::{
@@ -208,7 +211,7 @@ pub(crate) fn max_sync_log_id_direct() -> safety::GraphResult<i64> {
     .map_err(|e| safety::GraphError::Internal(format!("sync checkpoint read failed: {}", e)))
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct SyncApplyStats {
     pub(crate) inserts: i64,
     pub(crate) updates: i64,
@@ -221,6 +224,7 @@ pub(crate) struct ProjectionIngestStats {
     pub(crate) rows_ingested: i64,
     pub(crate) segments_published: i64,
     pub(crate) sync_watermark: i64,
+    apply_stats: SyncApplyStats,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -538,23 +542,10 @@ fn should_apply_sync_via_durable_projection() -> bool {
 }
 
 fn apply_sync_via_durable_projection(target_sync_id: i64) -> safety::GraphResult<SyncApplyStats> {
-    ensure_sync_writer_barrier_triggers()?;
-    acquire_sync_writer_barrier()?;
-    let graph_path = graph_file_path()?;
-    let root = projection_manifest_root(&graph_path);
-    let previous = ProjectionManifestStore::new(root).load_latest_current()?;
-    let previous_watermark = previous.as_ref().map_or(
-        read_sync_checkpoint(&graph_path)?.unwrap_or(0),
-        |manifest| manifest.sync_watermark,
-    );
-    ensure_no_current_transaction_sync_rows(previous_watermark)?;
     let batch_size = config::sync_batch_size().max(1);
-    let entries =
-        read_sync_log_entries_after(previous_watermark, batch_size, Some(target_sync_id))?;
-    let mut stats = sync_apply_stats_from_entries(&entries);
-
-    let _projection =
+    let projection =
         ingest_projection_until_internal(Some(batch_size as i64), None, Some(target_sync_id))?;
+    let mut stats = projection.apply_stats;
 
     apply_legacy_sync_buffer(&mut stats)?;
 
@@ -616,16 +607,46 @@ fn ingest_projection_until_internal(
         return Err(safety::GraphError::NotBuilt);
     }
     let root = projection_manifest_root(&graph_path);
+    let row_limit = optional_nonnegative_usize(max_rows, "max_rows")?
+        .unwrap_or_else(|| config::sync_batch_size().max(1));
+    let byte_limit = optional_nonnegative_usize(max_bytes, "max_bytes")?
+        .unwrap_or_else(config::max_overlay_memory_bytes);
+    let resident_bytes = crate::ENGINE
+        .with(|engine| {
+            crate::resource::ByteCount::from_usize(engine.borrow().estimated_memory_used_bytes())
+        })
+        .ok_or_else(|| {
+            safety::GraphError::Internal("engine residency does not fit u64".to_string())
+        })?;
+    let row_budget = crate::resource::RowCount::new(u64::try_from(row_limit).map_err(|_| {
+        safety::GraphError::Internal("sync row limit does not fit u64".to_string())
+    })?);
+    let governor = crate::resource::maintenance_governor(resident_bytes, row_budget);
+    let mut memory = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::SyncIngest,
+            crate::resource::ByteCount::from_bytes(SYNC_PREFLIGHT_FIXED_BYTES as u64),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let context_bytes = sync_context_memory_upper_bound(&graph.graph_id)?;
+    let manifest_bytes = sync_manifest_memory_upper_bound(&root)?;
+    let context_and_manifest = context_bytes
+        .checked_add(manifest_bytes)
+        .and_then(|bytes| {
+            bytes.checked_add(crate::resource::ByteCount::from_bytes(
+                SYNC_PREFLIGHT_FIXED_BYTES as u64,
+            ))
+        })
+        .ok_or_else(sync_normalization_size_overflow)?;
+    memory
+        .try_resize(context_and_manifest)
+        .map_err(crate::safety::resource_limit_error)?;
     let store = ProjectionManifestStore::new(root.clone());
     let previous = store.load_latest_current()?;
     let previous_watermark = previous.as_ref().map_or(
         read_sync_checkpoint(&graph_path)?.unwrap_or(0),
         |manifest| manifest.sync_watermark,
     );
-    let row_limit = optional_nonnegative_usize(max_rows, "max_rows")?
-        .unwrap_or_else(|| config::sync_batch_size().max(1));
-    let byte_limit = optional_nonnegative_usize(max_bytes, "max_bytes")?
-        .unwrap_or_else(config::max_overlay_memory_bytes);
     ensure_sync_writer_barrier_triggers()?;
     acquire_sync_writer_barrier()?;
     ensure_no_current_transaction_sync_rows(previous_watermark)?;
@@ -633,7 +654,29 @@ fn ingest_projection_until_internal(
     // shared-lock writers have either committed or caused barrier acquisition
     // to fail, and later writers cannot publish sync rows until this
     // transaction releases the barrier.
-    let entries = read_sync_log_entries_after(previous_watermark, row_limit, target_sync_id)?;
+    let entries = read_sync_log_entries_after_bounded(
+        previous_watermark,
+        row_limit,
+        target_sync_id,
+        byte_limit,
+        &mut memory,
+    )?;
+    let live_bytes = crate::resource::ByteCount::from_usize(sync_entries_heap_bytes(&entries)?)
+        .ok_or_else(|| safety::GraphError::Internal("sync workspace overflowed".to_string()))?;
+    let context_and_entries = context_and_manifest
+        .checked_add(live_bytes)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    memory
+        .try_resize(context_and_entries)
+        .map_err(crate::safety::resource_limit_error)?;
+    governor
+        .consume_rows(
+            crate::resource::ResourcePhase::SyncIngest,
+            crate::resource::RowCount::new(u64::try_from(entries.len()).map_err(|_| {
+                safety::GraphError::Internal("sync row count does not fit u64".to_string())
+            })?),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
     if entries.is_empty() {
         return Ok(ProjectionIngestStats {
             sync_watermark: previous_watermark,
@@ -661,10 +704,44 @@ fn ingest_projection_until_internal(
     // Plan durable identities from the persisted base plus current manifest,
     // never from the serving engine. The latter can contain transaction-local
     // node slots that are intentionally absent from durable artifacts.
-    let planning_engine = load_graph_file(&graph_path)?;
     let mut context = SyncReplayContext::load()?;
+    let normalization_bytes = sync_normalization_memory_upper_bound(&entries, &context)?
+        .checked_add(context_and_manifest)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let duplicate_engine_peak = resident_bytes
+        .checked_add(resident_bytes)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let governed_peak = normalization_bytes
+        .checked_add(duplicate_engine_peak)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    memory
+        .try_resize(governed_peak)
+        .map_err(crate::safety::resource_limit_error)?;
+    let planning_residency = resident_bytes
+        .checked_add(normalization_bytes)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("sync planning residency overflowed".to_string())
+        })?;
+    let planning_engine = load_graph_file_with_residency(&graph_path, planning_residency)?;
+    let planning_engine_bytes =
+        crate::resource::ByteCount::from_usize(planning_engine.estimated_memory_used_bytes())
+            .ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "sync planning engine residency does not fit u64".to_string(),
+                )
+            })?;
+    let validated_engine_peak = planning_engine_bytes
+        .checked_add(planning_engine_bytes)
+        .and_then(|engines| normalization_bytes.checked_add(engines))
+        .ok_or_else(sync_normalization_size_overflow)?;
+    memory
+        .try_resize(validated_engine_peak)
+        .map_err(crate::safety::resource_limit_error)?;
     let rows =
         projection_rows_from_sync_entries_with_engine(&planning_engine, &entries, &mut context)?;
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::SyncIngest)
+        .map_err(crate::safety::resource_limit_error)?;
     if rows.is_empty() {
         return Err(safety::GraphError::UnsupportedOperation {
             operation: "durable projection ingestion".to_string(),
@@ -674,7 +751,7 @@ fn ingest_projection_until_internal(
             ),
         });
     }
-    let relationship_identities = planning_engine.relationship_identities.clone();
+    let relationship_identities = &planning_engine.relationship_identities;
     let base_artifact_path = graph_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -688,13 +765,25 @@ fn ingest_projection_until_internal(
         graph_artifact_checksum_for_path(&graph_path)?,
         graph_artifact_version(),
     );
-    let (result, validated_engine) = ingester.ingest_committed_rows_with_identities_validated(
+    let candidate_residency = planning_residency
+        .checked_add(planning_engine_bytes)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("sync candidate residency overflowed".to_string())
+        })?;
+    let (result, validated_engine) = ingester.ingest_committed_rows_with_identities_governed(
         &rows,
         MutationBufferLimits::new(row_limit, byte_limit),
-        &relationship_identities,
-        |candidate| load_graph_file_with_projection_candidate(&graph_path, candidate),
+        relationship_identities,
+        &governor,
+        |candidate| {
+            load_graph_file_with_projection_candidate_and_residency(
+                &graph_path,
+                candidate,
+                candidate_residency,
+            )
+        },
     )?;
-    let stats = projection_ingest_stats(result, previous_watermark);
+    let stats = projection_ingest_stats(result, previous_watermark, &entries);
     if stats.sync_watermark > previous_watermark {
         let mut validated_engine = validated_engine.ok_or_else(|| {
             safety::GraphError::Internal(
@@ -707,9 +796,258 @@ fn ingest_projection_until_internal(
     Ok(stats)
 }
 
+fn sync_entries_heap_bytes(entries: &[SyncLogEntry]) -> safety::GraphResult<usize> {
+    entries.iter().try_fold(
+        entries
+            .len()
+            .checked_mul(2)
+            .and_then(|count| count.checked_mul(std::mem::size_of::<SyncLogEntry>()))
+            .ok_or_else(sync_normalization_size_overflow)?,
+        |total, entry| {
+            total
+                .checked_add(entry.table_name.capacity())
+                .and_then(|bytes| {
+                    bytes.checked_add(entry.old_pk.as_ref().map_or(0, String::capacity))
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(entry.new_pk.as_ref().map_or(0, String::capacity))
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(entry.properties.as_ref().map_or(0, String::capacity))
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(entry.old_row.as_ref().map_or(0, String::capacity))
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(entry.new_row.as_ref().map_or(0, String::capacity))
+                })
+                .ok_or_else(sync_normalization_size_overflow)
+        },
+    )
+}
+
+const SYNC_CONTEXT_FIXED_BYTES_PER_ROW: usize = 16 * 1024;
+const SYNC_CONTEXT_BYTES_PER_CATALOG_BYTE: usize = 64;
+const SYNC_PREFLIGHT_FIXED_BYTES: usize = 1024 * 1024;
+
+/// Preflight the selected graph's decoded catalog context without materializing
+/// its Rust vectors, strings, sets, or maps.
+fn sync_context_memory_upper_bound(
+    graph_id: &str,
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let (row_count, text_bytes) = Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT COALESCE(sum(row_count), 0)::bigint,
+                    COALESCE(sum(text_bytes), 0)::bigint
+               FROM (
+                    SELECT count(*)::bigint AS row_count,
+                           COALESCE(sum(
+                               octet_length(COALESCE(table_name, ''))
+                             + octet_length(COALESCE(id_column, ''))
+                             + octet_length(COALESCE(columns, ''))
+                             + octet_length(COALESCE(tenant_column, ''))
+                           ), 0)::bigint AS text_bytes
+                      FROM graph._registered_tables
+                     WHERE graph_id = $1::uuid
+                    UNION ALL
+                    SELECT count(*)::bigint,
+                           COALESCE(sum(
+                               octet_length(COALESCE(from_table, ''))
+                             + octet_length(COALESCE(from_column, ''))
+                             + octet_length(COALESCE(source_key_columns, ''))
+                             + octet_length(COALESCE(to_table, ''))
+                             + octet_length(COALESCE(to_column, ''))
+                             + octet_length(COALESCE(label, ''))
+                             + octet_length(COALESCE(weight_column, ''))
+                             + octet_length(COALESCE(label_column, ''))
+                           ), 0)::bigint
+                      FROM graph._registered_edges
+                     WHERE graph_id = $1::uuid
+                    UNION ALL
+                    SELECT count(*)::bigint,
+                           COALESCE(sum(
+                               octet_length(COALESCE(table_name, ''))
+                             + octet_length(COALESCE(column_name, ''))
+                             + octet_length(COALESCE(column_type, ''))
+                           ), 0)::bigint
+                      FROM graph._registered_filter_columns
+                     WHERE graph_id = $1::uuid
+               ) AS catalog_sizes",
+            None,
+            &[graph_id.into()],
+        )?;
+        let row = rows.first();
+        Ok::<_, pgrx::spi::SpiError>((
+            row.get::<i64>(1)?.unwrap_or(0),
+            row.get::<i64>(2)?.unwrap_or(0),
+        ))
+    })
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync catalog resource preflight failed: {err}"))
+    })?;
+    sync_context_bound_from_counts(row_count, text_bytes)
+}
+
+fn sync_context_bound_from_counts(
+    row_count: i64,
+    text_bytes: i64,
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let row_count = usize::try_from(row_count).map_err(|_| sync_normalization_size_overflow())?;
+    let text_bytes = usize::try_from(text_bytes).map_err(|_| sync_normalization_size_overflow())?;
+    let bytes = row_count
+        .checked_mul(SYNC_CONTEXT_FIXED_BYTES_PER_ROW)
+        .and_then(|fixed| {
+            text_bytes
+                .checked_mul(SYNC_CONTEXT_BYTES_PER_CATALOG_BYTE)
+                .and_then(|text| fixed.checked_add(text))
+        })
+        .ok_or_else(sync_normalization_size_overflow)?;
+    crate::resource::ByteCount::from_usize(bytes).ok_or_else(sync_normalization_size_overflow)
+}
+
+/// Bound the decoded current manifest and its active-reference validation
+/// workspace before loading any manifest JSON.
+fn sync_manifest_memory_upper_bound(
+    root: &std::path::Path,
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(crate::resource::ByteCount::ZERO)
+        }
+        Err(err) => {
+            return Err(safety::GraphError::Internal(format!(
+                "sync manifest resource preflight failed: {err}"
+            )))
+        }
+    };
+    let mut largest = 0usize;
+    for entry in entries {
+        crate::resource::check_postgres_interrupts();
+        let entry = entry.map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "sync manifest entry resource preflight failed: {err}"
+            ))
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("projection-generation-") || !name.ends_with(".json") {
+            continue;
+        }
+        let bytes = usize::try_from(
+            entry
+                .metadata()
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "sync manifest stat resource preflight failed: {err}"
+                    ))
+                })?
+                .len(),
+        )
+        .map_err(|_| sync_normalization_size_overflow())?;
+        largest = largest.max(bytes);
+    }
+    let bytes = largest
+        .checked_mul(MANIFEST_DECODED_MEMORY_BYTES_PER_JSON_BYTE)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    crate::resource::ByteCount::from_usize(bytes).ok_or_else(sync_normalization_size_overflow)
+}
+
+// A JSON byte can introduce at most one syntactic value/container boundary or
+// one byte of owned string data. The deliberately generous factor covers the
+// `serde_json::Value` node, object-table control bytes, decoded key/value
+// storage, and allocator rounding. Per-entry fixed storage separately covers
+// the prepared row, planner hash tables, and their minimum allocations.
+const SYNC_JSON_WORKSPACE_BYTES_PER_INPUT_BYTE: usize = 256;
+const SYNC_NORMALIZATION_FIXED_BYTES_PER_ENTRY: usize = 16 * 1024;
+const SYNC_PROJECTED_ROW_FIXED_BYTES: usize = 1024;
+
+/// Returns a conservative upper bound for every allocation made while sync
+/// rows are parsed, planned, and expanded into projection rows.
+///
+/// An update is the maximal operation: it can emit two node rows, old and new
+/// rows for every filter, and old/new rows in both directions for every edge
+/// mapping. Dynamic strings in each emitted row originate in that entry's raw
+/// payload, so charging one full payload per possible output row is also an
+/// upper bound for mapping fanout.
+fn sync_normalization_memory_upper_bound(
+    entries: &[SyncLogEntry],
+    context: &SyncReplayContext,
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let edge_rows = context.edges.len().checked_mul(4);
+    let filter_rows = context.filters.len().checked_mul(2);
+    let rows_per_entry = edge_rows
+        .and_then(|rows| rows.checked_add(filter_rows?))
+        .and_then(|rows| rows.checked_add(2))
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let projected_rows = entries
+        .len()
+        .checked_mul(rows_per_entry)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    // `Vec::push` grows geometrically, so its capacity is less than twice the
+    // required length (with a four-element minimum allocation).
+    let projected_capacity = projected_rows
+        .checked_mul(2)
+        .map(|capacity| capacity.max(4))
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let projected_fixed = projected_capacity
+        .checked_mul(std::mem::size_of::<ProjectionSyncRow>().max(SYNC_PROJECTED_ROW_FIXED_BYTES))
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let entry_fixed = entries
+        .len()
+        .checked_mul(SYNC_NORMALIZATION_FIXED_BYTES_PER_ENTRY)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let raw_bytes = entries.iter().try_fold(0usize, |total, entry| {
+        let entry_bytes = sync_entry_dynamic_bytes(entry)?;
+        total
+            .checked_add(entry_bytes)
+            .ok_or_else(sync_normalization_size_overflow)
+    })?;
+    let json_workspace = raw_bytes
+        .checked_mul(SYNC_JSON_WORKSPACE_BYTES_PER_INPUT_BYTE)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let projected_strings = raw_bytes
+        .checked_mul(rows_per_entry)
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let total = sync_entries_heap_bytes(entries)?
+        .checked_add(entry_fixed)
+        .and_then(|bytes| bytes.checked_add(json_workspace))
+        .and_then(|bytes| bytes.checked_add(projected_fixed))
+        .and_then(|bytes| bytes.checked_add(projected_strings))
+        .ok_or_else(sync_normalization_size_overflow)?;
+    crate::resource::ByteCount::from_usize(total).ok_or_else(sync_normalization_size_overflow)
+}
+
+fn sync_entry_dynamic_bytes(entry: &SyncLogEntry) -> safety::GraphResult<usize> {
+    entry
+        .table_name
+        .len()
+        .checked_add(entry.old_pk.as_ref().map_or(0, String::len))
+        .and_then(|bytes| bytes.checked_add(entry.new_pk.as_ref().map_or(0, String::len)))
+        .and_then(|bytes| bytes.checked_add(entry.properties.as_ref().map_or(0, String::len)))
+        .and_then(|bytes| bytes.checked_add(entry.old_row.as_ref().map_or(0, String::len)))
+        .and_then(|bytes| bytes.checked_add(entry.new_row.as_ref().map_or(0, String::len)))
+        .ok_or_else(sync_normalization_size_overflow)
+}
+
+fn sync_normalization_size_overflow() -> safety::GraphError {
+    safety::GraphError::ResourceLimit {
+        resource: "memory".to_string(),
+        phase: crate::resource::ResourcePhase::SyncIngest
+            .as_str()
+            .to_string(),
+        used: 0,
+        requested: u64::MAX,
+        limit: u64::MAX,
+    }
+}
+
 fn projection_ingest_stats(
     result: ProjectionIngestResult,
     previous_watermark: i64,
+    entries: &[SyncLogEntry],
 ) -> ProjectionIngestStats {
     ProjectionIngestStats {
         rows_ingested: result.rows_ingested.min(i64::MAX as usize) as i64,
@@ -718,6 +1056,7 @@ fn projection_ingest_stats(
             .manifest
             .as_ref()
             .map_or(previous_watermark, |manifest| manifest.sync_watermark),
+        apply_stats: sync_apply_stats_from_entries(entries),
     }
 }
 
@@ -943,6 +1282,30 @@ pub(crate) fn read_sync_log_entries_after(
     limit: usize,
     high_watermark: Option<i64>,
 ) -> safety::GraphResult<Vec<SyncLogEntry>> {
+    read_sync_log_entries_after_internal(applied_sync_id, limit, high_watermark, None)
+}
+
+fn read_sync_log_entries_after_bounded(
+    applied_sync_id: i64,
+    limit: usize,
+    high_watermark: Option<i64>,
+    max_bytes: usize,
+    memory: &mut crate::resource::ResourceLease<'_>,
+) -> safety::GraphResult<Vec<SyncLogEntry>> {
+    read_sync_log_entries_after_internal(
+        applied_sync_id,
+        limit,
+        high_watermark,
+        Some((max_bytes, memory)),
+    )
+}
+
+fn read_sync_log_entries_after_internal(
+    applied_sync_id: i64,
+    limit: usize,
+    high_watermark: Option<i64>,
+    bounded: Option<(usize, &mut crate::resource::ResourceLease<'_>)>,
+) -> safety::GraphResult<Vec<SyncLogEntry>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -951,6 +1314,17 @@ pub(crate) fn read_sync_log_entries_after(
         return Ok(Vec::new());
     }
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    if let Some((max_bytes, memory)) = bounded {
+        let ids = read_sync_log_entry_plan_after(
+            applied_sync_id,
+            limit,
+            high_watermark,
+            &applicable_table_oids,
+            max_bytes,
+            memory,
+        )?;
+        return read_sync_log_entries_by_ids(&ids, &applicable_table_oids);
+    }
     Spi::connect(|client| {
         let rows = client
             .select(
@@ -966,7 +1340,7 @@ pub(crate) fn read_sync_log_entries_after(
                 &[
                     applied_sync_id.into(),
                     limit.into(),
-                    applicable_table_oids.into(),
+                    applicable_table_oids.to_vec().into(),
                     high_watermark.into(),
                 ],
             )
@@ -1021,6 +1395,327 @@ pub(crate) fn read_sync_log_entries_after(
         }
         Ok::<_, safety::GraphError>(entries)
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SyncInputRowSize {
+    id: i64,
+    bytes: usize,
+}
+
+const SYNC_INPUT_PREFLIGHT_BATCH_ROWS: usize = 1_024;
+
+fn read_sync_log_entry_plan_after(
+    applied_sync_id: i64,
+    limit: i64,
+    high_watermark: Option<i64>,
+    applicable_table_oids: &[i32],
+    max_bytes: usize,
+    memory: &mut crate::resource::ResourceLease<'_>,
+) -> safety::GraphResult<Vec<i64>> {
+    Spi::connect(|client| {
+        let mut cursor = client.open_cursor(
+            "SELECT id,
+                    octet_length(op::text)::bigint + octet_length(table_name)
+                    + COALESCE(octet_length(old_pk), 0)
+                    + COALESCE(octet_length(new_pk), 0)
+                    + COALESCE(octet_length(properties::text), 0)
+                    + COALESCE(octet_length(old_row::text), 0)
+                    + COALESCE(octet_length(new_row::text), 0) AS row_bytes
+                 FROM graph._sync_log
+                 WHERE id > $1
+                   AND table_oid::oid::integer = ANY($3::int4[])
+                   AND ($4::bigint IS NULL OR id <= $4)
+                 ORDER BY id
+                 LIMIT $2",
+            &[
+                applied_sync_id.into(),
+                limit.into(),
+                applicable_table_oids.into(),
+                high_watermark.into(),
+            ],
+        );
+        let row_limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let mut ids = Vec::new();
+        let mut raw_payload_bytes = 0usize;
+        let mut metadata_rows = 0usize;
+        while ids.len() < row_limit {
+            let fetch_rows = row_limit
+                .saturating_sub(ids.len())
+                .min(SYNC_INPUT_PREFLIGHT_BATCH_ROWS);
+            let required_ids = ids.len().checked_add(fetch_rows).ok_or_else(|| {
+                safety::GraphError::Internal("sync preflight ID count overflowed".to_string())
+            })?;
+            let projected_id_capacity = projected_vec_capacity(ids.capacity(), required_ids)?;
+            resize_sync_preflight_memory(
+                memory,
+                metadata_rows.checked_add(fetch_rows).ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "sync preflight metadata row count overflowed".to_string(),
+                    )
+                })?,
+                projected_id_capacity,
+                raw_payload_bytes,
+                ids.len(),
+            )?;
+            ids.try_reserve(fetch_rows).map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "sync preflight ID allocation failed after reservation: {err}"
+                ))
+            })?;
+            let rows = cursor
+                .fetch(i64::try_from(fetch_rows).unwrap_or(i64::MAX))
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "sync log byte preflight fetch failed: {err}"
+                    ))
+                })?;
+            if rows.is_empty() {
+                resize_sync_preflight_memory(
+                    memory,
+                    metadata_rows,
+                    ids.capacity(),
+                    raw_payload_bytes,
+                    ids.len(),
+                )?;
+                break;
+            }
+            let fetched_rows = rows.len();
+            for row in rows {
+                let id = required_sync_i64(
+                    row.get::<i64>(1).map_err(|err| {
+                        safety::GraphError::Internal(format!(
+                            "sync preflight id read failed: {err}"
+                        ))
+                    })?,
+                    "id",
+                )?;
+                let raw_bytes = required_sync_i64(
+                    row.get::<i64>(2).map_err(|err| {
+                        safety::GraphError::Internal(format!(
+                            "sync preflight byte count read failed: {err}"
+                        ))
+                    })?,
+                    "row_bytes",
+                )?;
+                let bytes = usize::try_from(raw_bytes).map_err(|_| {
+                    safety::GraphError::Internal(format!(
+                        "sync row {id} has an invalid negative byte count"
+                    ))
+                })?;
+                let next_payload_bytes = raw_payload_bytes.checked_add(bytes).ok_or_else(|| {
+                    sync_input_bytes_limit_error(raw_payload_bytes, bytes, max_bytes)
+                })?;
+                if next_payload_bytes > max_bytes {
+                    return Err(sync_input_bytes_limit_error(
+                        raw_payload_bytes,
+                        bytes,
+                        max_bytes,
+                    ));
+                }
+                let next_rows = ids.len().checked_add(1).ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "sync preflight planned row count overflowed".to_string(),
+                    )
+                })?;
+                resize_sync_preflight_memory(
+                    memory,
+                    metadata_rows.checked_add(fetched_rows).ok_or_else(|| {
+                        safety::GraphError::Internal(
+                            "sync preflight metadata row count overflowed".to_string(),
+                        )
+                    })?,
+                    ids.capacity(),
+                    next_payload_bytes,
+                    next_rows,
+                )?;
+                raw_payload_bytes = next_payload_bytes;
+                ids.push(id);
+            }
+            metadata_rows = metadata_rows.checked_add(fetched_rows).ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "sync preflight metadata row count overflowed".to_string(),
+                )
+            })?;
+            resize_sync_preflight_memory(
+                memory,
+                metadata_rows,
+                ids.capacity(),
+                raw_payload_bytes,
+                ids.len(),
+            )?;
+            if fetched_rows < fetch_rows {
+                break;
+            }
+        }
+        Ok(ids)
+    })
+}
+
+fn projected_vec_capacity(current: usize, required: usize) -> safety::GraphResult<usize> {
+    if required <= current {
+        return Ok(current);
+    }
+    current.checked_mul(2).map_or_else(
+        || {
+            Err(safety::GraphError::Internal(
+                "sync preflight ID capacity overflowed".to_string(),
+            ))
+        },
+        |doubled| {
+            // `RawVec` uses a four-element minimum non-zero allocation for
+            // element sizes up to 1 KiB. Account for that first allocation
+            // before `try_reserve` can ask the allocator for it.
+            Ok(doubled.max(required).max(4))
+        },
+    )
+}
+
+fn resize_sync_preflight_memory(
+    memory: &mut crate::resource::ResourceLease<'_>,
+    metadata_rows: usize,
+    id_capacity: usize,
+    raw_payload_bytes: usize,
+    planned_rows: usize,
+) -> safety::GraphResult<()> {
+    let workspace = metadata_rows
+        .checked_mul(std::mem::size_of::<SyncInputRowSize>())
+        .and_then(|bytes| {
+            id_capacity
+                .checked_mul(std::mem::size_of::<i64>())
+                .and_then(|id_bytes| bytes.checked_add(id_bytes))
+        })
+        .and_then(|bytes| bytes.checked_add(raw_payload_bytes))
+        .and_then(|bytes| {
+            planned_rows
+                .checked_mul(2)
+                .and_then(|count| count.checked_mul(std::mem::size_of::<SyncLogEntry>()))
+                .and_then(|entry_bytes| bytes.checked_add(entry_bytes))
+        })
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal("sync preflight workspace overflowed".to_string())
+        })?;
+    memory
+        .try_resize(workspace)
+        .map_err(crate::safety::resource_limit_error)
+}
+
+#[cfg(test)]
+fn validate_sync_input_row_sizes(
+    rows: &[SyncInputRowSize],
+    max_bytes: usize,
+) -> safety::GraphResult<Vec<i64>> {
+    let mut used = 0usize;
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in rows {
+        let next = used
+            .checked_add(row.bytes)
+            .ok_or_else(|| sync_input_bytes_limit_error(used, row.bytes, max_bytes))?;
+        if next > max_bytes {
+            return Err(sync_input_bytes_limit_error(used, row.bytes, max_bytes));
+        }
+        used = next;
+        ids.push(row.id);
+    }
+    Ok(ids)
+}
+
+fn sync_input_bytes_limit_error(used: usize, requested: usize, limit: usize) -> safety::GraphError {
+    safety::GraphError::ResourceLimit {
+        resource: "input bytes".to_string(),
+        phase: crate::resource::ResourcePhase::SyncIngest
+            .as_str()
+            .to_string(),
+        used: used as u64,
+        requested: requested as u64,
+        limit: limit as u64,
+    }
+}
+
+fn read_sync_log_entries_by_ids(
+    ids: &[i64],
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<Vec<SyncLogEntry>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let entries = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT id, op::text, table_oid::oid::integer, table_name,
+                        old_pk, new_pk, properties::text, old_row::text, new_row::text
+                   FROM graph._sync_log
+                  WHERE id = ANY($1::bigint[])
+                    AND table_oid::oid::integer = ANY($2::int4[])
+                  ORDER BY id",
+                None,
+                &[ids.into(), applicable_table_oids.into()],
+            )
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("bounded sync log read failed: {err}"))
+            })?;
+        let mut entries = Vec::with_capacity(ids.len());
+        for row in rows {
+            let table_oid = row
+                .get::<i32>(3)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!("sync table_oid read failed: {err}"))
+                })?
+                .map(|oid| oid as u32);
+            let id = required_sync_i64(
+                row.get::<i64>(1).map_err(|err| {
+                    safety::GraphError::Internal(format!("sync id read failed: {err}"))
+                })?,
+                "id",
+            )?;
+            let raw_op = required_sync_string(
+                row.get::<String>(2).map_err(|err| {
+                    safety::GraphError::Internal(format!("sync op read failed: {err}"))
+                })?,
+                "op",
+            )?;
+            entries.push(SyncLogEntry {
+                id,
+                op: parse_sync_op(&raw_op)
+                    .map_err(|err| safety::GraphError::Internal(format!("sync row {id}: {err}")))?,
+                table_oid,
+                table_name: required_sync_string(
+                    row.get::<String>(4).map_err(|err| {
+                        safety::GraphError::Internal(format!("sync table_name read failed: {err}"))
+                    })?,
+                    "table_name",
+                )?,
+                old_pk: row.get::<String>(5).map_err(|err| {
+                    safety::GraphError::Internal(format!("sync old_pk read failed: {err}"))
+                })?,
+                new_pk: row.get::<String>(6).map_err(|err| {
+                    safety::GraphError::Internal(format!("sync new_pk read failed: {err}"))
+                })?,
+                properties: row.get::<String>(7).map_err(|err| {
+                    safety::GraphError::Internal(format!("sync properties read failed: {err}"))
+                })?,
+                old_row: row.get::<String>(8).map_err(|err| {
+                    safety::GraphError::Internal(format!("sync old_row read failed: {err}"))
+                })?,
+                new_row: row.get::<String>(9).map_err(|err| {
+                    safety::GraphError::Internal(format!("sync new_row read failed: {err}"))
+                })?,
+            });
+        }
+        Ok::<_, safety::GraphError>(entries)
+    })?;
+    if entries.len() != ids.len()
+        || entries
+            .iter()
+            .zip(ids)
+            .any(|(entry, expected)| entry.id != *expected)
+    {
+        return Err(safety::GraphError::Internal(
+            "sync log changed between byte preflight and bounded payload read".to_string(),
+        ));
+    }
+    Ok(entries)
 }
 
 fn apply_sync_log_entry_with_context(
@@ -2621,9 +3316,12 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 mod tests {
     use super::{
         guard_standalone_endpoint_lifecycle, intern_sync_relationship_identity, parse_sync_op,
-        parse_sync_properties, required_sync_i64, required_sync_string, resolve_unique_endpoint,
-        tenant_change_from_entry, ParsedSyncRows, PreparedProjectionEntry, ProjectionNodePlanner,
-        SyncLogEntry, SyncOp, SyncReplayContext, TenantChange,
+        parse_sync_properties, projected_vec_capacity, required_sync_i64, required_sync_string,
+        resize_sync_preflight_memory, resolve_unique_endpoint, sync_context_bound_from_counts,
+        sync_normalization_memory_upper_bound, tenant_change_from_entry,
+        validate_sync_input_row_sizes, ParsedSyncRows, PreparedProjectionEntry,
+        ProjectionNodePlanner, SyncInputRowSize, SyncLogEntry, SyncOp, SyncReplayContext,
+        TenantChange, SYNC_CONTEXT_BYTES_PER_CATALOG_BYTE, SYNC_CONTEXT_FIXED_BYTES_PER_ROW,
     };
     use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredEdge, RegisteredTable};
     use crate::engine::Engine;
@@ -2738,6 +3436,202 @@ mod tests {
 
         assert!(matches!(err, GraphError::Internal(_)));
         assert!(err.to_string().contains("table_name"));
+    }
+
+    #[test]
+    fn sync_input_byte_plan_accepts_tiny_input_under_a_large_ceiling() {
+        let rows = [SyncInputRowSize { id: 7, bytes: 32 }];
+
+        let ids = validate_sync_input_row_sizes(&rows, 1024 * 1024 * 1024).unwrap();
+
+        assert_eq!(ids, vec![7]);
+    }
+
+    #[test]
+    fn sync_input_byte_plan_rejects_one_oversized_row() {
+        let rows = [SyncInputRowSize { id: 7, bytes: 129 }];
+
+        let error = validate_sync_input_row_sizes(&rows, 128).unwrap_err();
+
+        assert!(matches!(
+            error,
+            GraphError::ResourceLimit {
+                used: 0,
+                requested: 129,
+                limit: 128,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sync_input_byte_plan_rejects_cumulative_rows_crossing_ceiling() {
+        let rows = [
+            SyncInputRowSize { id: 7, bytes: 80 },
+            SyncInputRowSize { id: 8, bytes: 80 },
+        ];
+
+        let error = validate_sync_input_row_sizes(&rows, 128).unwrap_err();
+
+        assert!(matches!(
+            error,
+            GraphError::ResourceLimit {
+                used: 80,
+                requested: 80,
+                limit: 128,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn high_sync_row_cap_rejects_preflight_growth_before_allocating_ids() {
+        let governor =
+            crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+                crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(64)),
+            ));
+        let mut memory = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::SyncIngest,
+                crate::resource::ByteCount::ZERO,
+            )
+            .unwrap();
+
+        let error = resize_sync_preflight_memory(&mut memory, 1_024, 1_024, 0, 0).unwrap_err();
+
+        assert!(matches!(error, GraphError::ResourceLimit { .. }));
+        assert_eq!(memory.amount(), crate::resource::ByteCount::ZERO);
+    }
+
+    #[test]
+    fn sync_id_preflight_accounts_for_vec_minimum_capacity() {
+        assert_eq!(projected_vec_capacity(0, 1).unwrap(), 4);
+        assert_eq!(projected_vec_capacity(4, 5).unwrap(), 8);
+    }
+
+    #[test]
+    fn sync_catalog_context_bound_is_checked_before_allocation() {
+        let expected = 2usize
+            .checked_mul(SYNC_CONTEXT_FIXED_BYTES_PER_ROW)
+            .and_then(|fixed| {
+                128usize
+                    .checked_mul(SYNC_CONTEXT_BYTES_PER_CATALOG_BYTE)
+                    .and_then(|text| fixed.checked_add(text))
+            })
+            .expect("test context bound fits");
+        assert_eq!(
+            sync_context_bound_from_counts(2, 128)
+                .expect("context bound computes")
+                .as_u64(),
+            expected as u64
+        );
+        assert!(matches!(
+            sync_context_bound_from_counts(-1, 0),
+            Err(GraphError::ResourceLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn sync_normalization_preflight_rejects_wide_json_before_parsing() {
+        let entries = [normalization_entry(format!(
+            r#"{{"id":"wide","note":"{}"}}"#,
+            "x".repeat(8 * 1024)
+        ))];
+        let context = normalization_context(Vec::new());
+
+        assert_sync_normalization_exceeds_one_mib(&entries, &context);
+    }
+
+    #[test]
+    fn sync_normalization_preflight_rejects_many_small_json_fields_before_parsing() {
+        let fields = (0..1_000)
+            .map(|index| format!(r#""field_{index}":"x""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let entries = [normalization_entry(format!(r#"{{"id":"many",{fields}}}"#))];
+        let context = normalization_context(Vec::new());
+
+        assert_sync_normalization_exceeds_one_mib(&entries, &context);
+    }
+
+    #[test]
+    fn sync_normalization_preflight_charges_mapping_fanout_before_expansion() {
+        let edge = RegisteredEdge {
+            mapping_id: 1,
+            from_table_oid: 42,
+            from_table: "public.accounts".to_string(),
+            from_column: "parent_id".to_string(),
+            source_key_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
+            to_table_oid: 42,
+            to_table: "public.accounts".to_string(),
+            to_column: "id".to_string(),
+            label: "linked".to_string(),
+            bidirectional: true,
+            weight_column: None,
+            label_column: None,
+        };
+        let edges = (0..300)
+            .map(|mapping_id| RegisteredEdge {
+                mapping_id,
+                ..edge.clone()
+            })
+            .collect();
+        let entries = [normalization_entry(
+            r#"{"id":"child","parent_id":"root"}"#.to_string(),
+        )];
+        let context = normalization_context(edges);
+
+        assert_sync_normalization_exceeds_one_mib(&entries, &context);
+    }
+
+    fn assert_sync_normalization_exceeds_one_mib(
+        entries: &[SyncLogEntry],
+        context: &SyncReplayContext,
+    ) {
+        let bound = sync_normalization_memory_upper_bound(entries, context).unwrap();
+        let governor = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                crate::resource::ByteCount::from_mib(1).unwrap(),
+            )),
+        );
+        let mut memory = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::SyncIngest,
+                crate::resource::ByteCount::ZERO,
+            )
+            .unwrap();
+
+        let error = memory.try_resize(bound).unwrap_err();
+
+        assert!(bound.as_u64() > 1024 * 1024);
+        assert_eq!(error.phase(), crate::resource::ResourcePhase::SyncIngest);
+    }
+
+    fn normalization_entry(new_row: String) -> SyncLogEntry {
+        SyncLogEntry {
+            id: 1,
+            op: SyncOp::Insert,
+            table_oid: Some(42),
+            table_name: "public.accounts".to_string(),
+            old_pk: None,
+            new_pk: Some("child".to_string()),
+            properties: None,
+            old_row: None,
+            new_row: Some(new_row),
+        }
+    }
+
+    fn normalization_context(edges: Vec<RegisteredEdge>) -> SyncReplayContext {
+        SyncReplayContext {
+            tables: Vec::new(),
+            edges,
+            filters: Vec::new(),
+            table_oids: HashMap::from([("public.accounts".to_string(), 42)]),
+            all_table_oids: vec![42],
+            edge_source_tables: HashSet::new(),
+            edge_source_oids: HashSet::new(),
+            edge_source_node_oids: HashMap::new(),
+        }
     }
 
     #[test]

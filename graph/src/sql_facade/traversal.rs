@@ -12,6 +12,15 @@ type DirectNodeRow = (
     name!(node, Option<pgrx::JsonB>),
 );
 
+pub(super) type ShortestPathSqlRow = (
+    i32,
+    pgrx::pg_sys::Oid,
+    String,
+    Option<String>,
+    Option<pgrx::JsonB>,
+    String,
+);
+
 /// BFS traversal from a seed node.
 ///
 /// See: `docs/user_guide/querying.mdx`
@@ -93,7 +102,11 @@ pub(super) fn traverse(
             max_nodes,
             max_frontier,
         };
-        let rows = execute_traverse_rows(&request).unwrap_or_else(|err| err.report());
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let rows =
+            execute_traverse_rows_governed(&request, &governor).unwrap_or_else(|err| err.report());
 
         TableIterator::new(rows)
     })
@@ -263,6 +276,9 @@ fn traverse_many(
         )
         .unwrap_or_else(|err| err.report());
 
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
         let mut candidates = Vec::new();
         for (table, id) in start_tables.into_iter().zip(start_ids) {
             let request = TraverseRequest {
@@ -282,15 +298,18 @@ fn traverse_many(
                 max_nodes,
                 max_frontier,
             };
-            let mut start_candidates =
-                execute_traverse_candidates(&request).unwrap_or_else(|err| err.report());
+            let mut start_candidates = execute_traverse_candidates_governed(&request, &governor)
+                .unwrap_or_else(|err| err.report());
             candidates.append(&mut start_candidates);
         }
-        sort_traverse_candidates_for_many(&mut candidates);
-        apply_traversal_uniqueness(&mut candidates, uniqueness);
-        let rows =
-            paginate_and_format_traverse_candidates(candidates, hydrate, row_offset, max_rows)
-                .unwrap_or_else(|err| err.report());
+        sort_traverse_candidates_for_many_governed(&mut candidates, &governor)
+            .unwrap_or_else(|err| err.report());
+        apply_traversal_uniqueness_governed(&mut candidates, uniqueness, &governor)
+            .unwrap_or_else(|err| err.report());
+        let rows = paginate_and_format_traverse_candidates_governed(
+            candidates, hydrate, row_offset, max_rows, &governor,
+        )
+        .unwrap_or_else(|err| err.report());
 
         TableIterator::new(rows)
     })
@@ -330,40 +349,90 @@ pub(super) fn shortest_path(
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
-        let steps = ENGINE
-            .with(|e| {
-                let eng = e.borrow();
-                eng.shortest_path(
-                    source_table.to_u32(),
-                    source_id,
-                    target_table.to_u32(),
-                    target_id,
-                    max_depth,
-                )
-            })
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-
-        let rows = steps
-            .into_iter()
-            .map(|s| {
-                let node = if hydrate {
-                    hydrate_node(s.node_table.0, &s.node_id).unwrap_or_else(|err| err.report())
-                } else {
-                    None
-                };
-                (
-                    s.step,
-                    pgrx::pg_sys::Oid::from_u32(s.node_table.0),
-                    s.node_id,
-                    s.edge_label,
-                    node,
-                    relation_name(s.node_table.0).unwrap_or_else(|err| err.report()),
-                )
-            })
-            .collect::<Vec<_>>();
+        let rows = shortest_path_rows_governed(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            max_depth,
+            hydrate,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
 
         TableIterator::new(rows)
     })
+}
+
+pub(super) fn shortest_path_rows_governed(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    max_depth: i32,
+    hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
+    let steps = ENGINE.with(|e| {
+        e.borrow().shortest_path_governed(
+            source_table.to_u32(),
+            source_id,
+            target_table.to_u32(),
+            target_id,
+            max_depth,
+            governor,
+        )
+    })?;
+    let output_bytes = steps.iter().try_fold(0usize, |bytes, step| {
+        bytes
+            .checked_add(std::mem::size_of::<ShortestPathSqlRow>())
+            .and_then(|bytes| bytes.checked_add(step.node_id.len()))
+            .and_then(|bytes| bytes.checked_add(step.edge_label.as_ref().map_or(0, String::len)))
+            .and_then(|bytes| bytes.checked_add(512))
+            .ok_or_else(|| {
+                safety::GraphError::Internal("shortest-path output estimate overflowed".to_string())
+            })
+    })?;
+    let output_bytes = crate::resource::ByteCount::from_usize(output_bytes).ok_or_else(|| {
+        safety::GraphError::Internal("shortest-path output estimate does not fit u64".to_string())
+    })?;
+    let output_lease = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryCandidates,
+            output_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(steps.len())
+        .map_err(|_| safety::GraphError::ResourceLimit {
+            resource: "memory bytes".to_string(),
+            phase: crate::resource::ResourcePhase::QueryCandidates
+                .as_str()
+                .to_string(),
+            used: governor.memory_used().as_u64(),
+            requested: output_bytes.as_u64(),
+            limit: governor.memory_limit().as_u64(),
+        })?;
+    for step in steps {
+        let node = if hydrate {
+            hydrate_node_governed(step.node_table.0, &step.node_id, governor)?
+        } else {
+            None
+        };
+        rows.push((
+            step.step,
+            pgrx::pg_sys::Oid::from_u32(step.node_table.0),
+            step.node_id,
+            step.edge_label,
+            node,
+            relation_name(step.node_table.0)?,
+        ));
+    }
+    output_lease.retain_until_governor_drop();
+    Ok(rows)
 }
 
 /// Find weighted shortest path between two nodes using Dijkstra.
@@ -400,13 +469,17 @@ fn weighted_shortest_path(
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
-            eng.weighted_shortest_path(
+            eng.weighted_shortest_path_governed(
                 source_table.to_u32(),
                 source_id,
                 target_table.to_u32(),
                 target_id,
+                &governor,
             )
             .unwrap_or_else(|err| err.report())
             .into_iter()

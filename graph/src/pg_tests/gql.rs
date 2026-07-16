@@ -67,6 +67,42 @@ fn gql_single_directed_match_matches_traverse_fixture() {
 }
 
 #[pg_test]
+fn gql_statement_memory_limit_is_shared_across_read_phases() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         SELECT 'bulk-' || i::text, repeat('x', 512), i
+         FROM generate_series(3, 4000) AS i",
+    )
+    .expect("bulk GQL fixture insert failed");
+    build_friendship_fixture_graph();
+    Spi::run("SET LOCAL graph.query_memory_mb = 1").expect("set query memory limit failed");
+
+    let statement = "SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest) RETURN u',
+        NULL::jsonb,
+        true
+    )";
+    assert_eq!(sqlstate_for_error(statement).as_deref(), Some("54000"));
+    assert_eq!(
+        sql_error_detail(statement).as_deref(),
+        Some("pgGraph diagnostic: PG007")
+    );
+
+    Spi::run("SET LOCAL graph.query_memory_mb = 64").expect("restore query memory limit failed");
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest) RETURN u',
+            NULL::jsonb,
+            false
+        )",
+    )
+    .expect("post-rejection GQL query failed")
+    .unwrap_or_default();
+    assert_eq!(count, 4_000);
+}
+
+#[pg_test]
 fn gql_relationship_expansion_uses_layered_manifest_snapshot() {
     build_persisted_mutable_friendship_graph();
     publish_friendship_segment_and_reload("f-layered-gql", "u2", "u1");

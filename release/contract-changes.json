@@ -146,5 +146,19 @@
     "date": "2026-07-15",
     "new_schema_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0",
     "previous_schema_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0"
+  },
+  {
+    "acknowledgement": "R2C-runtime-resource-governance",
+    "changed_sections": [
+      "diagnostics",
+      "gql_implementation_sha256",
+      "guc_source_sha256",
+      "gucs",
+      "public_sql_functions",
+      "sql_schema"
+    ],
+    "date": "2026-07-15",
+    "new_schema_sha256": "b72933c3d4e7c94c2f1c104a0bd2f1aaef1a1300c71bacfdd03f29b0cb20d336",
+    "previous_schema_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0"
   }
 ]

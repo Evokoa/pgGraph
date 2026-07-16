@@ -5,7 +5,7 @@
 //! instead of discovering segment files directly.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,9 +23,15 @@ pub(crate) const VALIDATION_STATUS_CORRUPT: &str = "corrupt";
 pub(crate) const VALIDATION_STATUS_REPAIRING: &str = "repairing";
 /// Default TTL for backend active-generation heartbeat rows.
 pub(crate) const DEFAULT_ACTIVE_GENERATION_TTL: Duration = Duration::from_secs(300);
+/// Conservative owned decode workspace per persisted manifest JSON byte.
+///
+/// This covers serde map/vector structure, owned strings, collection growth,
+/// and allocator rounding when a manifest is decoded into Rust-owned state.
+pub(crate) const MANIFEST_DECODED_MEMORY_BYTES_PER_JSON_BYTE: usize = 128;
 
 const MANIFEST_FILE_PREFIX: &str = "projection-generation-";
 const MANIFEST_FILE_SUFFIX: &str = ".json";
+const GOVERNED_MANIFEST_IO_WORKSPACE_BYTES: usize = 16 * 1024;
 
 /// Human-readable manifest for one durable projection generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +197,63 @@ impl ProjectionManifest {
         Ok(manifest)
     }
 
+    /// Return the heap storage retained by this manifest.
+    ///
+    /// The estimate uses collection capacities, not lengths, so callers can
+    /// keep a reservation live for the complete owned manifest allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::ResourceLimit`] if the checked size calculation
+    /// overflows the platform address space.
+    pub(crate) fn estimated_heap_bytes(&self) -> GraphResult<usize> {
+        let mut bytes = 0usize;
+        for string in [
+            &self.base_artifact_path,
+            &self.base_artifact_checksum,
+            &self.validation_status,
+        ] {
+            bytes = checked_manifest_bytes(bytes, string.capacity())?;
+        }
+        bytes = checked_manifest_bytes(
+            bytes,
+            self.segments
+                .capacity()
+                .checked_mul(std::mem::size_of::<ManifestSegmentRef>())
+                .ok_or_else(manifest_memory_overflow)?,
+        )?;
+        for reference in &self.segments {
+            bytes = checked_manifest_bytes(bytes, reference.path.capacity())?;
+            bytes = checked_manifest_bytes(bytes, reference.checksum.capacity())?;
+        }
+        bytes = checked_manifest_bytes(
+            bytes,
+            self.base_chunks
+                .capacity()
+                .checked_mul(std::mem::size_of::<ManifestChunkRef>())
+                .ok_or_else(manifest_memory_overflow)?,
+        )?;
+        for reference in &self.base_chunks {
+            bytes = checked_manifest_bytes(bytes, reference.path.capacity())?;
+            bytes = checked_manifest_bytes(bytes, reference.checksum.capacity())?;
+        }
+        bytes = checked_manifest_bytes(
+            bytes,
+            self.obsolete_files
+                .capacity()
+                .checked_mul(std::mem::size_of::<ManifestFileRef>())
+                .ok_or_else(manifest_memory_overflow)?,
+        )?;
+        for reference in &self.obsolete_files {
+            bytes = checked_manifest_bytes(bytes, reference.path.capacity())?;
+        }
+        if let Some(reference) = &self.relationship_identities {
+            bytes = checked_manifest_bytes(bytes, reference.path.capacity())?;
+            bytes = checked_manifest_bytes(bytes, reference.checksum.capacity())?;
+        }
+        Ok(bytes)
+    }
+
     /// Whether this generation references only the base `.pggraph` artifact.
     pub(crate) fn is_base_only(&self) -> bool {
         self.segments.is_empty() && self.base_chunks.is_empty()
@@ -290,6 +353,90 @@ impl ProjectionManifestStore {
         }
         self.validate_active_references(&published)?;
 
+        Ok(final_path)
+    }
+
+    /// Atomically publish a manifest without materializing JSON or a reload
+    /// copy in memory.
+    ///
+    /// JSON is counted before staging, streamed directly to the temporary
+    /// file, and compared byte-for-byte with the published file. The memory
+    /// and staging-disk leases remain charged until validation completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::ResourceLimit`] before staging when the governed
+    /// workspace or encoded manifest exceeds its budget. Returns the same
+    /// validation and filesystem errors as [`ProjectionManifestStore::publish`].
+    pub(crate) fn publish_governed(
+        &self,
+        manifest: &ProjectionManifest,
+        governor: &crate::resource::ResourceGovernor,
+        phase: crate::resource::ResourcePhase,
+        max_memory_bytes: usize,
+    ) -> GraphResult<PathBuf> {
+        manifest.validate()?;
+        let encoded_len = manifest_pretty_json_len(manifest, phase)?;
+        let used = governor.memory_used().as_u64().min(usize::MAX as u64) as usize;
+        let next = used
+            .checked_add(GOVERNED_MANIFEST_IO_WORKSPACE_BYTES)
+            .ok_or_else(|| manifest_resource_limit(phase, used, usize::MAX, max_memory_bytes))?;
+        if next > max_memory_bytes {
+            return Err(manifest_resource_limit(
+                phase,
+                used,
+                GOVERNED_MANIFEST_IO_WORKSPACE_BYTES,
+                max_memory_bytes,
+            ));
+        }
+        let workspace =
+            crate::resource::ByteCount::from_usize(GOVERNED_MANIFEST_IO_WORKSPACE_BYTES)
+                .ok_or_else(|| {
+                    manifest_resource_limit(phase, used, usize::MAX, max_memory_bytes)
+                })?;
+        let _workspace = governor
+            .reserve_memory(phase, workspace)
+            .map_err(crate::safety::resource_limit_error)?;
+        let encoded_bytes = crate::resource::ByteCount::from_usize(encoded_len)
+            .ok_or_else(|| manifest_resource_limit(phase, 0, usize::MAX, usize::MAX))?;
+        let _staging_disk = governor
+            .reserve_disk(phase, encoded_bytes)
+            .map_err(crate::safety::resource_limit_error)?;
+
+        self.validate_active_references(manifest)?;
+        fs::create_dir_all(&self.root)
+            .map_err(|err| manifest_io("create manifest directory", &self.root, err))?;
+        let final_path = self.manifest_path(manifest.generation_id);
+        if final_path.exists() {
+            return Err(manifest_corrupt(format!(
+                "generation {} already has a published manifest",
+                manifest.generation_id
+            )));
+        }
+        let (tmp_path, mut file) = self.create_temp_manifest_file(manifest.generation_id)?;
+        let mut renamed = false;
+        let publication = (|| {
+            serde_json::to_writer_pretty(&mut file, manifest)
+                .map_err(|err| GraphError::Internal(format!("manifest encoding failed: {err}")))?;
+            file.sync_all()
+                .map_err(|err| manifest_io("fsync temp manifest", &tmp_path, err))?;
+            drop(file);
+            sync_directory(&self.root)?;
+            fs::rename(&tmp_path, &final_path)
+                .map_err(|err| manifest_io("rename manifest into place", &final_path, err))?;
+            renamed = true;
+            sync_directory(&self.root)?;
+            verify_manifest_file_matches(&final_path, manifest, encoded_len)?;
+            self.validate_active_references(manifest)
+        })();
+        if publication.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+            if renamed {
+                let _ = fs::remove_file(&final_path);
+                let _ = sync_directory(&self.root);
+            }
+        }
+        publication?;
         Ok(final_path)
     }
 
@@ -610,6 +757,136 @@ fn manifest_corrupt(reason: impl Into<String>) -> GraphError {
     GraphError::CorruptFile {
         reason: format!("projection manifest: {}", reason.into()),
     }
+}
+
+fn checked_manifest_bytes(current: usize, additional: usize) -> GraphResult<usize> {
+    current
+        .checked_add(additional)
+        .ok_or_else(manifest_memory_overflow)
+}
+
+fn manifest_memory_overflow() -> GraphError {
+    manifest_resource_limit(
+        crate::resource::ResourcePhase::CompactionMerge,
+        0,
+        usize::MAX,
+        usize::MAX,
+    )
+}
+
+fn manifest_resource_limit(
+    phase: crate::resource::ResourcePhase,
+    used: usize,
+    requested: usize,
+    limit: usize,
+) -> GraphError {
+    GraphError::ResourceLimit {
+        resource: "memory bytes".to_string(),
+        phase: phase.as_str().to_string(),
+        used: u64::try_from(used).unwrap_or(u64::MAX),
+        requested: u64::try_from(requested).unwrap_or(u64::MAX),
+        limit: u64::try_from(limit).unwrap_or(u64::MAX),
+    }
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(buffer.len())
+            .ok_or_else(|| std::io::Error::other("manifest encoded length overflowed"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn manifest_pretty_json_len(
+    manifest: &ProjectionManifest,
+    phase: crate::resource::ResourcePhase,
+) -> GraphResult<usize> {
+    let mut counter = CountingWriter::default();
+    serde_json::to_writer_pretty(&mut counter, manifest)
+        .map_err(|_| manifest_resource_limit(phase, counter.bytes, usize::MAX, usize::MAX))?;
+    Ok(counter.bytes)
+}
+
+struct ComparingWriter {
+    file: File,
+    matched: usize,
+}
+
+impl Write for ComparingWriter {
+    fn write(&mut self, expected: &[u8]) -> std::io::Result<usize> {
+        let mut offset = 0usize;
+        let mut actual = [0_u8; 8 * 1024];
+        while offset < expected.len() {
+            let take = (expected.len() - offset).min(actual.len());
+            self.file.read_exact(&mut actual[..take])?;
+            if actual[..take] != expected[offset..offset + take] {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "published manifest differs from staged JSON",
+                ));
+            }
+            offset += take;
+        }
+        self.matched = self
+            .matched
+            .checked_add(expected.len())
+            .ok_or_else(|| std::io::Error::other("manifest comparison length overflowed"))?;
+        Ok(expected.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn verify_manifest_file_matches(
+    path: &Path,
+    manifest: &ProjectionManifest,
+    encoded_len: usize,
+) -> GraphResult<()> {
+    let file_bytes = usize::try_from(
+        fs::metadata(path)
+            .map_err(|err| manifest_io("read published manifest metadata", path, err))?
+            .len(),
+    )
+    .map_err(|_| manifest_corrupt("published manifest length exceeds address space"))?;
+    if file_bytes != encoded_len {
+        return Err(manifest_corrupt(format!(
+            "published manifest length changed: expected {encoded_len}, got {file_bytes}"
+        )));
+    }
+    let file = File::open(path)
+        .map_err(|err| manifest_io("open published manifest for validation", path, err))?;
+    let mut writer = ComparingWriter { file, matched: 0 };
+    serde_json::to_writer_pretty(&mut writer, manifest)
+        .map_err(|err| manifest_corrupt(format!("published manifest validation failed: {err}")))?;
+    if writer.matched != encoded_len {
+        return Err(manifest_corrupt(format!(
+            "published manifest validation compared {} bytes; expected {encoded_len}",
+            writer.matched
+        )));
+    }
+    let mut extra = [0_u8; 1];
+    if writer
+        .file
+        .read(&mut extra)
+        .map_err(|err| manifest_io("validate published manifest length", path, err))?
+        != 0
+    {
+        return Err(manifest_corrupt("published manifest has trailing bytes"));
+    }
+    Ok(())
 }
 
 pub(crate) fn manifest_file_name(generation_id: u64) -> String {
@@ -1146,6 +1423,89 @@ mod tests {
             .publish(&manifest)
             .expect_err("missing identity dictionary rejects");
         assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
+    fn governed_large_manifest_rejects_before_staging_and_preserves_current() {
+        let dir = ProjectionArtifactDir::new(
+            "governed_large_manifest_rejects_before_staging_and_preserves_current",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 0, 1);
+        store.publish(&first).expect("first manifest publishes");
+
+        let mut candidate = ProjectionManifest::base_only(2, "base.pggraph", "crc32:base", 1, 0, 2);
+        candidate
+            .obsolete_files
+            .try_reserve_exact(2_048)
+            .expect("test manifest reference allocation succeeds");
+        candidate
+            .obsolete_files
+            .extend((0..2_048).map(|index| ManifestFileRef {
+                path: format!("obsolete-generation-{index:08}.pggraph-delta"),
+                bytes: index,
+            }));
+        let encoded_len =
+            manifest_pretty_json_len(&candidate, crate::resource::ResourcePhase::CompactionMerge)
+                .expect("JSON length preflights");
+        assert!(
+            encoded_len > 100_000,
+            "fixture must exercise a large manifest"
+        );
+
+        let memory_governor =
+            crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::new(
+                crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(
+                    (GOVERNED_MANIFEST_IO_WORKSPACE_BYTES - 1) as u64,
+                )),
+                crate::resource::DiskBudget::UNLIMITED,
+                crate::resource::RowCount::UNLIMITED,
+                crate::resource::WorkUnits::UNLIMITED,
+                crate::resource::ElapsedBudget::new(Duration::from_secs(1)),
+            ));
+        let memory_error = store
+            .publish_governed(
+                &candidate,
+                &memory_governor,
+                crate::resource::ResourcePhase::CompactionMerge,
+                GOVERNED_MANIFEST_IO_WORKSPACE_BYTES - 1,
+            )
+            .expect_err("workspace must reject before staging");
+        assert_eq!(memory_error.diagnostic_code().as_str(), "PG007");
+        assert!(!store.manifest_path(2).exists());
+        assert_eq!(manifest_temp_file_count(dir.path()), 0);
+
+        let disk_governor =
+            crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::new(
+                crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(
+                    GOVERNED_MANIFEST_IO_WORKSPACE_BYTES as u64,
+                )),
+                crate::resource::DiskBudget::new(crate::resource::ByteCount::from_bytes(
+                    u64::try_from(encoded_len - 1).expect("encoded length fits u64"),
+                )),
+                crate::resource::RowCount::UNLIMITED,
+                crate::resource::WorkUnits::UNLIMITED,
+                crate::resource::ElapsedBudget::new(Duration::from_secs(1)),
+            ));
+        let disk_error = store
+            .publish_governed(
+                &candidate,
+                &disk_governor,
+                crate::resource::ResourcePhase::CompactionMerge,
+                GOVERNED_MANIFEST_IO_WORKSPACE_BYTES,
+            )
+            .expect_err("encoded manifest must fit staging disk");
+        assert_eq!(disk_error.diagnostic_code().as_str(), "PG007");
+        assert!(!store.manifest_path(2).exists());
+        assert_eq!(manifest_temp_file_count(dir.path()), 0);
+        assert_eq!(
+            store
+                .load_latest_current()
+                .expect("manifest lookup succeeds")
+                .expect("first generation remains current"),
+            first
+        );
     }
 
     fn write_artifact(path: impl AsRef<Path>, bytes: &[u8]) {

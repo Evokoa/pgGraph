@@ -139,11 +139,18 @@ fn gql(
         let statement =
             build_statement(query).unwrap_or_else(|err| gql_error_to_graph_error(err).report());
         let params = gql_params(params).unwrap_or_else(|err| err.report());
-        let rows: Vec<_> = execute_statement(statement, tenant_scope.as_deref(), &params, hydrate)
-            .unwrap_or_else(|err| err.report())
-            .into_iter()
-            .map(|row| (pgrx::JsonB(row),))
-            .collect();
+        let governor = gql_query_governor().unwrap_or_else(|err| err.report());
+        let rows: Vec<_> = execute_statement_governed(
+            statement,
+            tenant_scope.as_deref(),
+            &params,
+            hydrate,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report())
+        .into_iter()
+        .map(|row| (pgrx::JsonB(row),))
+        .collect();
         TableIterator::new(rows)
     })
 }
@@ -263,71 +270,119 @@ pub(super) fn execute_statement(
     params: &crate::query::value::QueryParams,
     hydrate: bool,
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
+    let governor = gql_query_governor()?;
+    execute_statement_governed(statement, tenant_scope, params, hydrate, &governor)
+}
+
+fn gql_query_governor() -> safety::GraphResult<crate::resource::ResourceGovernor> {
+    let resident = ENGINE
+        .with(|engine| {
+            crate::resource::ByteCount::from_usize(engine.borrow().estimated_memory_used_bytes())
+        })
+        .ok_or_else(|| {
+            safety::GraphError::Internal("engine residency does not fit u64".to_string())
+        })?;
+    Ok(crate::resource::query_governor(resident))
+}
+
+fn execute_statement_governed(
+    statement: crate::query::physical_plan::PhysicalStatement,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<serde_json::Value>> {
     match statement {
         crate::query::physical_plan::PhysicalStatement::Read(plan) => {
             check_plan_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute(&engine.borrow(), &plan, tenant_scope)
+                crate::query::execute::execute_governed(
+                    &engine.borrow(),
+                    &plan,
+                    tenant_scope,
+                    governor,
+                )
             })?;
-            ensure_gql_rows_visible(&matches)?;
-            ensure_gql_relationship_rows_visible(&matches, &plan)?;
-            let hydrated = hydrate_gql_rows(
+            ensure_gql_rows_visible(&matches, governor)?;
+            ensure_gql_relationship_rows_visible(&matches, &plan, governor)?;
+            let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::requires_hydration(&plan, hydrate),
+                governor,
             )?;
-            let hydrated_relationships = hydrate_gql_relationship_rows(&matches, &plan, hydrate)?;
-            crate::query::value::project_rows_with_relationships(
+            let hydrated_relationships =
+                hydrate_gql_relationship_rows_governed(&matches, &plan, hydrate, governor)?;
+            crate::query::value::project_rows_with_relationships_governed(
                 matches,
                 &plan,
                 &hydrated,
                 &hydrated_relationships,
                 params,
                 hydrate,
+                governor,
             )
         }
         crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
             check_node_scan_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_node_scan(
+                crate::query::execute::execute_node_scan_governed(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
                     params,
+                    governor,
                 )
             })?;
-            ensure_gql_node_rows_visible(&matches)?;
-            let hydrated = hydrate_gql_node_rows(
+            ensure_gql_node_rows_visible(&matches, governor)?;
+            let hydrated = hydrate_gql_node_rows_governed(
                 &matches,
                 crate::query::value::node_scan_requires_hydration(&plan, hydrate),
+                governor,
             )?;
-            crate::query::value::project_node_rows(matches, &plan, &hydrated, params, hydrate)
+            crate::query::value::project_node_rows_governed(
+                matches, &plan, &hydrated, params, hydrate, governor,
+            )
         }
         crate::query::physical_plan::PhysicalStatement::JoinRead(plan) => {
             check_join_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_join(&engine.borrow(), &plan, tenant_scope)
+                crate::query::execute::execute_join_governed(
+                    &engine.borrow(),
+                    &plan,
+                    tenant_scope,
+                    governor,
+                )
             })?;
-            ensure_gql_rows_visible(&matches)?;
-            ensure_gql_join_relationship_rows_visible(&matches, &plan)?;
-            let hydrated = hydrate_gql_rows(
+            ensure_gql_rows_visible(&matches, governor)?;
+            ensure_gql_join_relationship_rows_visible(&matches, &plan, governor)?;
+            let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::join_requires_hydration(&plan, hydrate),
+                governor,
             )?;
-            crate::query::value::project_join_rows(matches, &plan, &hydrated, params, hydrate)
+            crate::query::value::project_join_rows_governed(
+                matches, &plan, &hydrated, params, hydrate, governor,
+            )
         }
         crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
             check_wildcard_path_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_wildcard_path(&engine.borrow(), &plan, tenant_scope)
+                crate::query::execute::execute_wildcard_path_governed(
+                    &engine.borrow(),
+                    &plan,
+                    tenant_scope,
+                    governor,
+                )
             })?;
-            ensure_gql_rows_visible(&matches)?;
-            ensure_gql_wildcard_relationship_rows_visible(&matches, &plan)?;
-            let hydrated = hydrate_gql_rows(
+            ensure_gql_rows_visible(&matches, governor)?;
+            ensure_gql_wildcard_relationship_rows_visible(&matches, &plan, governor)?;
+            let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::wildcard_path_requires_hydration(&plan, hydrate),
+                governor,
             )?;
-            crate::query::value::project_wildcard_path_rows(
-                matches, &plan, &hydrated, params, hydrate,
+            crate::query::value::project_wildcard_path_rows_governed(
+                matches, &plan, &hydrated, params, hydrate, governor,
             )
         }
         crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
@@ -3162,6 +3217,15 @@ fn hydrate_gql_rows(
     rows: &[crate::query::execute::GqlRow],
     needed: bool,
 ) -> safety::GraphResult<crate::query::value::HydratedRows> {
+    let governor = gql_query_governor()?;
+    hydrate_gql_rows_governed(rows, needed, &governor)
+}
+
+fn hydrate_gql_rows_governed(
+    rows: &[crate::query::execute::GqlRow],
+    needed: bool,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<crate::query::value::HydratedRows> {
     let mut hydrated = crate::query::value::HydratedRows::new();
     if !needed {
         return Ok(hydrated);
@@ -3176,7 +3240,7 @@ fn hydrate_gql_rows(
             if hydrated.contains_key(&key) {
                 continue;
             }
-            let node = hydrate_required_node(coordinate)?;
+            let node = hydrate_required_node_governed(coordinate, governor)?;
             hydrated.insert(key, node);
         }
     }
@@ -3188,7 +3252,35 @@ fn hydrate_gql_rows(
 /// GQL's projection may be served from the in-memory graph even when callers
 /// request `hydrate := false`. Reusing the PostgreSQL hydration boundary here
 /// makes RLS authoritative for every coordinate-bearing result shape.
-fn ensure_gql_rows_visible(rows: &[crate::query::execute::GqlRow]) -> safety::GraphResult<()> {
+fn ensure_gql_rows_visible(
+    rows: &[crate::query::execute::GqlRow],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<()> {
+    let (coordinate_count, key_bytes) =
+        rows.iter()
+            .try_fold((0usize, 0usize), |(count, bytes), row| {
+                std::iter::once(&row.source)
+                    .chain(row.target.iter())
+                    .chain(row.path_nodes.iter())
+                    .chain(row.join_node_slots.iter().flatten().flatten())
+                    .chain(row.join_path_nodes.iter().flatten().flatten().flatten())
+                    .try_fold((count, bytes), |(count, bytes), coordinate| {
+                        Ok::<_, safety::GraphError>((
+                            count.checked_add(1).ok_or_else(|| {
+                                safety::GraphError::Internal(
+                                    "visibility coordinate count overflowed".to_string(),
+                                )
+                            })?,
+                            bytes.checked_add(coordinate.node_id.len()).ok_or_else(|| {
+                                safety::GraphError::Internal(
+                                    "visibility coordinate bytes overflowed".to_string(),
+                                )
+                            })?,
+                        ))
+                    })
+            })?;
+    let _workspace =
+        crate::sql_hydration::reserve_hydration_workspace(governor, coordinate_count, key_bytes)?;
     let mut ids_by_table = std::collections::HashMap::<u32, Vec<String>>::new();
     for row in rows {
         for coordinate in std::iter::once(&row.source)
@@ -3203,7 +3295,7 @@ fn ensure_gql_rows_visible(rows: &[crate::query::execute::GqlRow]) -> safety::Gr
                 .push(coordinate.node_id.clone());
         }
     }
-    let visible = crate::sql_hydration::visible_node_keys(&ids_by_table)?;
+    let visible = crate::sql_hydration::visible_node_keys_governed(&ids_by_table, governor)?;
     let hidden = ids_by_table
         .into_iter()
         .flat_map(|(table_oid, ids)| ids.into_iter().map(move |node_id| (table_oid, node_id)))
@@ -3219,7 +3311,17 @@ fn ensure_gql_rows_visible(rows: &[crate::query::execute::GqlRow]) -> safety::Gr
 /// Check source-row visibility for node-only GQL scans.
 fn ensure_gql_node_rows_visible(
     rows: &[crate::query::execute::GqlNodeRow],
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<()> {
+    let mut visible_rows = rows.iter().filter(|row| !row.optional_null);
+    let row_count = visible_rows.clone().count();
+    let key_bytes = visible_rows.try_fold(0usize, |bytes, row| {
+        bytes.checked_add(row.node.node_id.len()).ok_or_else(|| {
+            safety::GraphError::Internal("visibility key bytes overflowed".to_string())
+        })
+    })?;
+    let _workspace =
+        crate::sql_hydration::reserve_hydration_workspace(governor, row_count, key_bytes)?;
     let mut ids_by_table = std::collections::HashMap::<u32, Vec<String>>::new();
     for row in rows.iter().filter(|row| !row.optional_null) {
         ids_by_table
@@ -3227,7 +3329,7 @@ fn ensure_gql_node_rows_visible(
             .or_default()
             .push(row.node.node_id.clone());
     }
-    let visible = crate::sql_hydration::visible_node_keys(&ids_by_table)?;
+    let visible = crate::sql_hydration::visible_node_keys_governed(&ids_by_table, governor)?;
     if ids_by_table
         .into_iter()
         .flat_map(|(table_oid, ids)| ids.into_iter().map(move |node_id| (table_oid, node_id)))
@@ -3245,23 +3347,20 @@ fn ensure_gql_node_rows_visible(
 fn ensure_gql_relationship_rows_visible(
     rows: &[crate::query::execute::GqlRow],
     plan: &crate::query::physical_plan::PhysicalPlan,
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<()> {
     let Some(edge_mapping) = &plan.edge_mapping else {
         return Ok(());
     };
-    let relationship_identities = relationship_identity_snapshot();
-    let mut relationship_ids = Vec::new();
+    let _relationship_ids_memory = reserve_relationship_id_workspace(governor, rows.len())?;
+    let mut relationship_ids = Vec::with_capacity(rows.len());
     for row in rows {
         if row.rel_start.is_none() || row.rel_end.is_none() {
             continue;
         }
         relationship_ids.push(row.relationship_id);
     }
-    ensure_relationship_source_keys_visible(
-        edge_mapping,
-        &relationship_identities,
-        relationship_ids,
-    )
+    ensure_relationship_source_keys_visible(edge_mapping, relationship_ids, governor)
 }
 
 fn relationship_identity_snapshot() -> Vec<Option<crate::edge_store::RelationshipIdentity>> {
@@ -3274,10 +3373,28 @@ fn relationship_identity_snapshot() -> Vec<Option<crate::edge_store::Relationshi
     identities
 }
 
+fn reserve_relationship_id_workspace(
+    governor: &crate::resource::ResourceGovernor,
+    count: usize,
+) -> safety::GraphResult<crate::resource::ResourceLease<'_>> {
+    let bytes = count
+        .checked_mul(std::mem::size_of::<Option<crate::edge_store::RelationshipId>>())
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal(
+                "relationship identity list workspace overflowed".to_string(),
+            )
+        })?;
+    governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryHydrate, bytes)
+        .map_err(crate::safety::resource_limit_error)
+}
+
 /// Check mapped relationship source-row visibility for multi-pattern joins.
 fn ensure_gql_join_relationship_rows_visible(
     rows: &[crate::query::execute::GqlRow],
     plan: &crate::query::physical_plan::PhysicalJoinPlan,
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<()> {
     if plan
         .patterns
@@ -3286,12 +3403,28 @@ fn ensure_gql_join_relationship_rows_visible(
     {
         return Ok(());
     }
-    let relationship_identities = relationship_identity_snapshot();
     for (pattern_idx, pattern) in plan.patterns.iter().enumerate() {
         let Some(edge_mapping) = &pattern.edge_mapping else {
             continue;
         };
-        let mut relationship_ids = Vec::new();
+        let relationship_count = rows.iter().try_fold(0usize, |count, row| {
+            let Some(paths) = &row.join_path_relationships else {
+                return Ok(count);
+            };
+            let path = paths.get(pattern_idx).ok_or_else(|| {
+                safety::GraphError::Internal(format!(
+                    "join row is missing relationship path slot {pattern_idx}"
+                ))
+            })?;
+            count
+                .checked_add(path.as_ref().map_or(0, Vec::len))
+                .ok_or_else(|| {
+                    safety::GraphError::Internal("join relationship count overflowed".to_string())
+                })
+        })?;
+        let _relationship_ids_memory =
+            reserve_relationship_id_workspace(governor, relationship_count)?;
+        let mut relationship_ids = Vec::with_capacity(relationship_count);
         for row in rows {
             let Some(paths) = &row.join_path_relationships else {
                 continue;
@@ -3310,11 +3443,7 @@ fn ensure_gql_join_relationship_rows_visible(
                     .map(|relationship| relationship.relationship_id),
             );
         }
-        ensure_relationship_source_keys_visible(
-            edge_mapping,
-            &relationship_identities,
-            relationship_ids,
-        )?;
+        ensure_relationship_source_keys_visible(edge_mapping, relationship_ids, governor)?;
     }
     Ok(())
 }
@@ -3323,21 +3452,33 @@ fn ensure_gql_join_relationship_rows_visible(
 fn ensure_gql_wildcard_relationship_rows_visible(
     rows: &[crate::query::execute::GqlRow],
     plan: &crate::query::physical_plan::PhysicalWildcardPathPlan,
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<()> {
     if plan.edge_mappings_by_id.is_empty() {
         return Ok(());
     }
-    let relationship_identities = relationship_identity_snapshot();
+    let relationship_count = rows.iter().try_fold(0usize, |count, row| {
+        count
+            .checked_add(row.path_relationships.len())
+            .ok_or_else(|| {
+                safety::GraphError::Internal("wildcard relationship count overflowed".to_string())
+            })
+    })?;
+    let mut identity_workspace =
+        crate::sql_hydration::reserve_hydration_workspace(governor, relationship_count, 0)?;
     let mut ids_by_mapping =
         std::collections::BTreeMap::<u64, Vec<Option<crate::edge_store::RelationshipId>>>::new();
 
+    let mut relationship_index = 0usize;
     for row in rows {
         for relationship in &row.path_relationships {
+            check_query_hydrate_progress(governor, relationship_index)?;
+            relationship_index = relationship_index.saturating_add(1);
             let Some((relationship_id, mapping_id)) = wildcard_relationship_mapping(
                 relationship,
-                &relationship_identities,
                 &plan.edge_mappings_by_id,
                 &plan.mapped_rel_types,
+                &mut identity_workspace,
             )?
             else {
                 continue;
@@ -3355,23 +3496,19 @@ fn ensure_gql_wildcard_relationship_rows_visible(
                 "wildcard path relationship mapping {mapping_id} is missing from the physical plan"
             )));
         };
-        ensure_relationship_source_keys_visible(
-            edge_mapping,
-            &relationship_identities,
-            relationship_ids,
-        )?;
+        ensure_relationship_source_keys_visible(edge_mapping, relationship_ids, governor)?;
     }
     Ok(())
 }
 
 fn wildcard_relationship_mapping(
     relationship: &crate::query::execute::GqlPathRelationship,
-    relationship_identities: &[Option<crate::edge_store::RelationshipIdentity>],
     edge_mappings_by_id: &std::collections::BTreeMap<
         u64,
         crate::query::catalog_snapshot::EdgeMappingInfo,
     >,
     mapped_rel_types: &std::collections::BTreeSet<String>,
+    workspace: &mut crate::resource::ResourceLease<'_>,
 ) -> safety::GraphResult<Option<(crate::edge_store::RelationshipId, u64)>> {
     let Some(relationship_id) = relationship.relationship_id else {
         if mapped_rel_types.contains(&relationship.rel_type) {
@@ -3384,14 +3521,7 @@ fn wildcard_relationship_mapping(
         }
         return Ok(None);
     };
-    let Some(identity) = relationship_identities
-        .get(relationship_id as usize)
-        .and_then(Option::as_ref)
-    else {
-        return Err(safety::GraphError::GqlExecution {
-            reason: format!("GQL relationship identity `{relationship_id}` is not available"),
-        });
-    };
+    let identity = relationship_identity_owned(relationship_id, workspace)?;
     if !edge_mappings_by_id.contains_key(&identity.mapping_id) {
         return Err(safety::GraphError::GqlExecution {
             reason: format!(
@@ -3405,23 +3535,49 @@ fn wildcard_relationship_mapping(
 
 fn ensure_relationship_source_keys_visible<I>(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
-    relationship_identities: &[Option<crate::edge_store::RelationshipIdentity>],
     relationship_ids: I,
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<()>
 where
     I: IntoIterator<Item = Option<crate::edge_store::RelationshipId>>,
 {
-    let mut source_keys = Vec::new();
-    for relationship_id in relationship_ids {
+    let relationship_ids = relationship_ids.into_iter().collect::<Vec<_>>();
+    let mut workspace =
+        crate::sql_hydration::reserve_hydration_workspace(governor, relationship_ids.len(), 0)?;
+    let mut source_keys = Vec::with_capacity(relationship_ids.len());
+    for (index, relationship_id) in relationship_ids.into_iter().enumerate() {
+        if index.is_multiple_of(1_024) {
+            crate::resource::check_postgres_interrupts();
+            governor
+                .check_elapsed(crate::resource::ResourcePhase::QueryHydrate)
+                .map_err(crate::safety::resource_limit_error)?;
+        }
         let identity =
-            relationship_source_identity(edge_mapping, relationship_identities, relationship_id)?;
-        source_keys.push(identity.source_key.clone());
+            relationship_source_identity_owned(edge_mapping, relationship_id, &mut workspace)?;
+        source_keys.push(identity.source_key);
     }
     if source_keys.is_empty() {
         return Ok(());
     }
     source_keys.sort();
     source_keys.dedup();
+    let source_key_bytes = source_keys.iter().try_fold(0usize, |bytes, key| {
+        bytes.checked_add(key.len()).ok_or_else(|| {
+            safety::GraphError::Internal("relationship visibility bytes overflowed".to_string())
+        })
+    })?;
+    workspace
+        .try_grow(
+            source_key_bytes
+                .checked_mul(2)
+                .and_then(crate::resource::ByteCount::from_usize)
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "relationship visibility bytes overflowed".to_string(),
+                    )
+                })?,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
 
     acl::check_table_acl(edge_mapping.edge_table_oid)?;
     let table_name = regclass_text(edge_mapping.edge_table_oid)?;
@@ -3429,16 +3585,30 @@ where
     let query = format!(
         "SELECT {source_key_predicate} AS graph_relationship_id
            FROM {table_name} edge_row
-          WHERE {source_key_predicate} = ANY($1::text[])"
+          WHERE {source_key_predicate} = ANY($1::text[])
+          LIMIT $2"
     );
     let mut visible = std::collections::HashSet::new();
     Spi::connect(|client| {
         let result = client
-            .select(&query, None, &[source_keys.clone().into()])
+            .select(
+                &query,
+                None,
+                &[
+                    source_keys.clone().into(),
+                    i64::try_from(source_keys.len()).unwrap_or(i64::MAX).into(),
+                ],
+            )
             .map_err(|err| {
                 safety::GraphError::Internal(format!("relationship visibility check failed: {err}"))
             })?;
-        for row in result {
+        for (index, row) in result.into_iter().enumerate() {
+            if index.is_multiple_of(1_024) {
+                crate::resource::check_postgres_interrupts();
+                governor
+                    .check_elapsed(crate::resource::ResourcePhase::QueryHydrate)
+                    .map_err(crate::safety::resource_limit_error)?;
+            }
             let source_key = row
                 .get::<String>(1)
                 .map_err(|err| {
@@ -3463,12 +3633,22 @@ where
             reason: "GQL relationship source row is not visible to the current role".to_string(),
         });
     }
+    workspace.retain_until_governor_drop();
     Ok(())
 }
 
 fn hydrate_gql_node_rows(
     rows: &[crate::query::execute::GqlNodeRow],
     needed: bool,
+) -> safety::GraphResult<crate::query::value::HydratedRows> {
+    let governor = gql_query_governor()?;
+    hydrate_gql_node_rows_governed(rows, needed, &governor)
+}
+
+fn hydrate_gql_node_rows_governed(
+    rows: &[crate::query::execute::GqlNodeRow],
+    needed: bool,
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<crate::query::value::HydratedRows> {
     let mut hydrated = crate::query::value::HydratedRows::new();
     if !needed {
@@ -3482,16 +3662,17 @@ fn hydrate_gql_node_rows(
         if hydrated.contains_key(&key) {
             continue;
         }
-        let node = hydrate_required_node(&row.node)?;
+        let node = hydrate_required_node_governed(&row.node, governor)?;
         hydrated.insert(key, node);
     }
     Ok(hydrated)
 }
 
-fn hydrate_gql_relationship_rows(
+fn hydrate_gql_relationship_rows_governed(
     rows: &[crate::query::execute::GqlRow],
     plan: &crate::query::physical_plan::PhysicalPlan,
     needed: bool,
+    governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<crate::query::value::HydratedRelationships> {
     let mut hydrated = crate::query::value::HydratedRelationships::new();
     if !needed {
@@ -3500,8 +3681,24 @@ fn hydrate_gql_relationship_rows(
     let Some(edge_mapping) = &plan.edge_mapping else {
         return Ok(hydrated);
     };
-    let relationship_identities = relationship_identity_snapshot();
+    let key_bytes = rows.iter().try_fold(0usize, |total, row| {
+        total
+            .checked_add(row.source.node_id.len())
+            .and_then(|bytes| {
+                row.target.as_ref().map_or(Some(bytes), |target| {
+                    bytes.checked_add(target.node_id.len())
+                })
+            })
+            .ok_or_else(|| {
+                safety::GraphError::Internal(
+                    "relationship hydration key size overflowed".to_string(),
+                )
+            })
+    })?;
+    let mut workspace =
+        crate::sql_hydration::reserve_hydration_workspace(governor, rows.len(), key_bytes)?;
     for row in rows {
+        check_query_hydrate_progress(governor, hydrated.len())?;
         let (Some(start), Some(end)) = (&row.rel_start, &row.rel_end) else {
             continue;
         };
@@ -3514,25 +3711,78 @@ fn hydrate_gql_relationship_rows(
         if hydrated.contains_key(&key) {
             continue;
         }
-        let relationship = hydrate_required_relationship(
-            edge_mapping,
-            &relationship_identities,
-            row.relationship_id,
-        )?;
+        let relationship =
+            hydrate_required_relationship(edge_mapping, row.relationship_id, &mut workspace)?;
         hydrated.insert(key, relationship.0);
     }
+    workspace.retain_until_governor_drop();
     Ok(hydrated)
+}
+
+fn check_query_hydrate_progress(
+    governor: &crate::resource::ResourceGovernor,
+    index: usize,
+) -> safety::GraphResult<()> {
+    if index.is_multiple_of(1_024) {
+        crate::resource::check_postgres_interrupts();
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryHydrate)
+            .map_err(crate::safety::resource_limit_error)?;
+    }
+    Ok(())
 }
 
 fn hydrate_required_relationship(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
-    relationship_identities: &[Option<crate::edge_store::RelationshipIdentity>],
     relationship_id: Option<crate::edge_store::RelationshipId>,
+    workspace: &mut crate::resource::ResourceLease<'_>,
 ) -> safety::GraphResult<pgrx::JsonB> {
-    let identity =
-        relationship_source_identity(edge_mapping, relationship_identities, relationship_id)?;
+    let identity = relationship_source_identity_owned(edge_mapping, relationship_id, workspace)?;
     let table_name = regclass_text(edge_mapping.edge_table_oid)?;
     let source_key_predicate = relationship_source_key_predicate(edge_mapping);
+    let json_sizes = Spi::connect(|client| {
+        let query = format!(
+            "SELECT pg_catalog.pg_column_size(pg_catalog.to_jsonb(edge_row.*))::bigint,
+                    pg_catalog.octet_length(pg_catalog.to_jsonb(edge_row.*)::text)::bigint
+               FROM {table_name} edge_row
+              WHERE {source_key_predicate} = $1
+              LIMIT 1"
+        );
+        let result = client
+            .select(&query, None, &[identity.source_key.as_str().into()])
+            .map_err(|err| {
+                safety::GraphError::Internal(format!(
+                    "relationship hydration size preflight failed: {err}"
+                ))
+            })?;
+        if result.is_empty() {
+            return Ok(None);
+        }
+        let row = result.first();
+        let binary = row.get::<i64>(1).map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "relationship hydration JSONB size read failed: {err}"
+            ))
+        })?;
+        let text = row.get::<i64>(2).map_err(|err| {
+            safety::GraphError::Internal(format!(
+                "relationship hydration JSON text size read failed: {err}"
+            ))
+        })?;
+        Ok::<_, safety::GraphError>(binary.zip(text))
+    })?
+    .ok_or_else(|| safety::GraphError::GqlExecution {
+        reason: format!(
+            "GQL relationship source row `{}` is not visible in edge table OID {}",
+            identity.source_key, edge_mapping.edge_table_oid
+        ),
+    })?;
+    crate::sql_hydration::reserve_jsonb_materialization(
+        workspace,
+        1,
+        u64::try_from(json_sizes.0.max(0)).unwrap_or(0),
+        u64::try_from(json_sizes.1.max(0)).unwrap_or(0),
+    )?;
     let mut sql = format!(
         "SELECT to_jsonb(edge_row.*)
          FROM {table_name} edge_row
@@ -3592,6 +3842,73 @@ fn relationship_source_identity<'a>(
     Ok(identity)
 }
 
+fn relationship_source_identity_owned(
+    edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
+    relationship_id: Option<crate::edge_store::RelationshipId>,
+    workspace: &mut crate::resource::ResourceLease<'_>,
+) -> safety::GraphResult<crate::edge_store::RelationshipIdentity> {
+    let relationship_id = relationship_id.ok_or_else(|| safety::GraphError::GqlExecution {
+        reason: "GQL relationship hydration requires a stable source-row relationship identity"
+            .to_string(),
+    })?;
+    let identity = relationship_identity_owned(relationship_id, workspace)?;
+    if identity.mapping_id != edge_mapping.mapping_id {
+        return Err(safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL relationship identity `{relationship_id}` belongs to mapping {}, not {}",
+                identity.mapping_id, edge_mapping.mapping_id
+            ),
+        });
+    }
+    Ok(identity)
+}
+
+fn relationship_identity_owned(
+    relationship_id: crate::edge_store::RelationshipId,
+    workspace: &mut crate::resource::ResourceLease<'_>,
+) -> safety::GraphResult<crate::edge_store::RelationshipIdentity> {
+    let index = relationship_id as usize;
+    let base_count = ENGINE.with(|engine| engine.borrow().relationship_identities.len());
+    if index < base_count {
+        return ENGINE.with(|engine| {
+            let engine = engine.borrow();
+            clone_charged_relationship_identity(
+                engine
+                    .relationship_identities
+                    .get(index)
+                    .and_then(Option::as_ref),
+                relationship_id,
+                workspace,
+            )
+        });
+    }
+    crate::projection::tx_delta::with_relationship_identity(index - base_count, |identity| {
+        clone_charged_relationship_identity(identity, relationship_id, workspace)
+    })
+}
+
+fn clone_charged_relationship_identity(
+    identity: Option<&crate::edge_store::RelationshipIdentity>,
+    relationship_id: crate::edge_store::RelationshipId,
+    workspace: &mut crate::resource::ResourceLease<'_>,
+) -> safety::GraphResult<crate::edge_store::RelationshipIdentity> {
+    let identity = identity.ok_or_else(|| safety::GraphError::GqlExecution {
+        reason: format!("GQL relationship identity `{relationship_id}` is not available"),
+    })?;
+    let bytes = std::mem::size_of::<crate::edge_store::RelationshipIdentity>()
+        .checked_add(identity.source_key.len())
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| {
+            safety::GraphError::Internal(
+                "relationship identity workspace estimate overflowed".to_string(),
+            )
+        })?;
+    workspace
+        .try_grow(bytes)
+        .map_err(crate::safety::resource_limit_error)?;
+    Ok(identity.clone())
+}
+
 fn relationship_source_key_predicate(
     edge_mapping: &crate::query::catalog_snapshot::EdgeMappingInfo,
 ) -> String {
@@ -3620,14 +3937,26 @@ fn relationship_source_key_predicate_for_alias(
 fn hydrate_required_node(
     coordinate: &crate::query::execute::GqlNodeCoordinate,
 ) -> safety::GraphResult<serde_json::Value> {
-    hydrate_node(coordinate.table_oid, &coordinate.node_id)?
-        .map(|json| json.0)
-        .ok_or_else(|| safety::GraphError::GqlExecution {
-            reason: format!(
-                "GQL could not hydrate node `{}` from table OID {}",
-                coordinate.node_id, coordinate.table_oid
-            ),
-        })
+    let governor = gql_query_governor()?;
+    hydrate_required_node_governed(coordinate, &governor)
+}
+
+fn hydrate_required_node_governed(
+    coordinate: &crate::query::execute::GqlNodeCoordinate,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<serde_json::Value> {
+    crate::sql_hydration::hydrate_node_governed(
+        coordinate.table_oid,
+        &coordinate.node_id,
+        governor,
+    )?
+    .map(|json| json.0)
+    .ok_or_else(|| safety::GraphError::GqlExecution {
+        reason: format!(
+            "GQL could not hydrate node `{}` from table OID {}",
+            coordinate.node_id, coordinate.table_oid
+        ),
+    })
 }
 
 #[cfg(feature = "pg_test")]
@@ -3840,24 +4169,31 @@ mod tests {
             };
         let mappings = [(7, edge_mapping(7))].into();
         let mapped_types = ["friend".to_string()].into();
+        let governor = gql_query_governor().expect("test query governor");
+        let mut workspace = crate::sql_hydration::reserve_hydration_workspace(&governor, 1, 0)
+            .expect("test identity workspace");
 
         let missing = wildcard_relationship_mapping(
             &relationship("friend", None),
-            &[],
             &mappings,
             &mapped_types,
+            &mut workspace,
         )
         .expect_err("mapped relationship without identity must fail closed");
         assert!(missing.to_string().contains("no stable source identity"));
 
+        ENGINE.with(|engine| {
+            engine.borrow_mut().relationship_identities =
+                vec![Some(crate::edge_store::RelationshipIdentity {
+                    mapping_id: 8,
+                    source_key: "edge-1".to_string(),
+                })];
+        });
         let wrong_mapping = wildcard_relationship_mapping(
             &relationship("friend", Some(0)),
-            &[Some(crate::edge_store::RelationshipIdentity {
-                mapping_id: 8,
-                source_key: "edge-1".to_string(),
-            })],
             &mappings,
             &mapped_types,
+            &mut workspace,
         )
         .expect_err("identity outside wildcard mappings must fail closed");
         assert!(wrong_mapping
@@ -3867,9 +4203,9 @@ mod tests {
         assert_eq!(
             wildcard_relationship_mapping(
                 &relationship("unmapped", None),
-                &[],
                 &mappings,
                 &mapped_types,
+                &mut workspace,
             )
             .expect("unmapped relationship type may omit source-row identity"),
             None

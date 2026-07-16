@@ -272,7 +272,15 @@ impl DeltaSegment {
     /// are invalid.
     pub(crate) fn to_bytes(&self) -> GraphResult<Vec<u8>> {
         validate_segment(self)?;
-        let mut sections = EncodedSections::default();
+        let section_lengths = self.encoded_section_lengths()?;
+        let encoded_len = section_lengths
+            .iter()
+            .try_fold(HEADER_SIZE, |total, length| {
+                total
+                    .checked_add(*length)
+                    .ok_or_else(|| segment_corrupt("encoded segment length overflowed"))
+            })?;
+        let mut sections = EncodedSections::with_capacities(section_lengths);
         encode_edges(&mut sections.edge_inserts, &self.edge_inserts);
         encode_edges(&mut sections.edge_deletes, &self.edge_deletes);
         encode_edge_weights(&mut sections.edge_weights, &self.edge_weights);
@@ -285,7 +293,8 @@ impl DeltaSegment {
         let counts = self.section_counts()?;
         let mut offsets = [0_u64; SECTION_COUNT];
         let mut cursor = HEADER_SIZE;
-        let mut bytes = vec![0; HEADER_SIZE];
+        let mut bytes = Vec::with_capacity(encoded_len);
+        bytes.resize(HEADER_SIZE, 0);
         for (idx, section) in section_bytes.iter().enumerate() {
             offsets[idx] = cursor as u64;
             bytes.extend_from_slice(section);
@@ -295,6 +304,26 @@ impl DeltaSegment {
         let checksum = checksum_segment_bytes(&bytes);
         write_u32_at(&mut bytes, CHECKSUM_OFFSET, checksum);
         Ok(bytes)
+    }
+
+    /// Return the exact number of bytes produced by [`Self::to_bytes`].
+    ///
+    /// This performs the same shape and variable-length field validation as
+    /// encoding, but does not allocate serialization buffers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::CorruptFile`] when the segment is invalid or its
+    /// encoded size cannot be represented by `usize`.
+    pub(crate) fn encoded_len(&self) -> GraphResult<usize> {
+        validate_segment(self)?;
+        self.encoded_section_lengths()?
+            .into_iter()
+            .try_fold(HEADER_SIZE, |total, length| {
+                total
+                    .checked_add(length)
+                    .ok_or_else(|| segment_corrupt("encoded segment length overflowed"))
+            })
     }
 
     /// Write this segment to a file path.
@@ -378,6 +407,63 @@ impl DeltaSegment {
         Ok(segment)
     }
 
+    /// Return a conservative upper bound for heap allocated while decoding.
+    ///
+    /// The estimate validates the durable layout without allocating decoded
+    /// rows. Variable-width sections are charged in full, which safely covers
+    /// the strings retained by resolution, filter, and tenant rows.
+    pub(crate) fn decoded_heap_upper_bound(bytes: &[u8]) -> GraphResult<usize> {
+        if bytes.len() < HEADER_SIZE {
+            return Err(segment_corrupt("segment is shorter than header"));
+        }
+        if &bytes[0..8] != MAGIC {
+            return Err(segment_corrupt("invalid segment magic"));
+        }
+        validate_reserved_header_bytes(bytes)?;
+        let version = read_u32(bytes, 8)?;
+        if !matches!(version, 5 | VERSION) {
+            return Err(GraphError::IncompatibleVersion(format!(
+                "projection segment version {version} is unsupported; expected 5 or {VERSION}"
+            )));
+        }
+        let stored_checksum = read_u32(bytes, CHECKSUM_OFFSET)?;
+        if stored_checksum != checksum_segment_bytes(bytes) {
+            return Err(segment_corrupt("segment checksum mismatch"));
+        }
+        let counts = read_counts(bytes)?;
+        let offsets = read_offsets(bytes)?;
+        let ranges = validate_section_ranges(bytes.len(), &counts, &offsets, version)?;
+        let row_sizes = [
+            std::mem::size_of::<SegmentEdge>(),
+            std::mem::size_of::<SegmentEdge>(),
+            std::mem::size_of::<SegmentEdgeWeight>(),
+            std::mem::size_of::<SegmentNodeState>(),
+            std::mem::size_of::<SegmentResolution>(),
+            std::mem::size_of::<SegmentFilterValue>(),
+            std::mem::size_of::<SegmentTenant>(),
+        ];
+        let fixed =
+            counts
+                .into_iter()
+                .zip(row_sizes)
+                .try_fold(0usize, |total, (count, row_size)| {
+                    let bytes = usize::try_from(count)
+                        .ok()
+                        .and_then(|count| count.checked_mul(row_size))
+                        .ok_or_else(|| {
+                            segment_corrupt("decoded segment heap estimate overflowed")
+                        })?;
+                    total
+                        .checked_add(bytes)
+                        .ok_or_else(|| segment_corrupt("decoded segment heap estimate overflowed"))
+                })?;
+        ranges[4..].iter().try_fold(fixed, |total, range| {
+            total
+                .checked_add(range.len())
+                .ok_or_else(|| segment_corrupt("decoded segment heap estimate overflowed"))
+        })
+    }
+
     fn section_counts(&self) -> GraphResult<[u32; SECTION_COUNT]> {
         Ok([
             count_len(self.edge_inserts.len())?,
@@ -387,6 +473,67 @@ impl DeltaSegment {
             count_len(self.resolutions.len())?,
             count_len(self.filters.len())?,
             count_len(self.tenants.len())?,
+        ])
+    }
+
+    fn encoded_section_lengths(&self) -> GraphResult<[usize; SECTION_COUNT]> {
+        self.section_counts()?;
+        let fixed = |count: usize, row_bytes: usize| {
+            count
+                .checked_mul(row_bytes)
+                .ok_or_else(|| segment_corrupt("encoded segment section length overflowed"))
+        };
+        let resolutions = self.resolutions.iter().try_fold(0usize, |total, row| {
+            let primary_key = row
+                .primary_key
+                .as_deref()
+                .ok_or_else(|| segment_corrupt("resolution primary key is missing"))?;
+            u32::try_from(primary_key.len())
+                .map_err(|_| segment_corrupt("resolution primary key exceeds u32"))?;
+            total
+                .checked_add(21)
+                .and_then(|value| value.checked_add(primary_key.len()))
+                .ok_or_else(|| segment_corrupt("encoded resolution section length overflowed"))
+        })?;
+        let filters = self.filters.iter().try_fold(0usize, |total, row| {
+            let payload = match &row.value {
+                PersistedFilterValue::Null => 0,
+                PersistedFilterValue::Numeric(_)
+                | PersistedFilterValue::Date(_)
+                | PersistedFilterValue::Timestamptz(_) => 8,
+                PersistedFilterValue::Boolean(_) => 1,
+                PersistedFilterValue::Text(value) => {
+                    u32::try_from(value.len())
+                        .map_err(|_| segment_corrupt("filter text payload exceeds u32"))?;
+                    value.len()
+                }
+                PersistedFilterValue::Uuid(_) => 16,
+            };
+            total
+                .checked_add(14)
+                .and_then(|value| value.checked_add(payload))
+                .ok_or_else(|| segment_corrupt("encoded filter section length overflowed"))
+        })?;
+        let tenants = self.tenants.iter().try_fold(0usize, |total, row| {
+            let tenant = row
+                .tenant
+                .as_deref()
+                .ok_or_else(|| segment_corrupt("tenant identifier is missing"))?;
+            u32::try_from(tenant.len())
+                .map_err(|_| segment_corrupt("tenant identifier exceeds u32"))?;
+            total
+                .checked_add(17)
+                .and_then(|value| value.checked_add(tenant.len()))
+                .ok_or_else(|| segment_corrupt("encoded tenant section length overflowed"))
+        })?;
+        Ok([
+            fixed(self.edge_inserts.len(), 14)?,
+            fixed(self.edge_deletes.len(), 14)?,
+            fixed(self.edge_weights.len(), 18)?,
+            fixed(self.node_states.len(), 5)?,
+            resolutions,
+            filters,
+            tenants,
         ])
     }
 }
@@ -466,6 +613,20 @@ struct EncodedSections {
 }
 
 impl EncodedSections {
+    fn with_capacities(capacities: [usize; SECTION_COUNT]) -> Self {
+        let [edge_inserts, edge_deletes, edge_weights, node_states, resolutions, filters, tenants] =
+            capacities;
+        Self {
+            edge_inserts: Vec::with_capacity(edge_inserts),
+            edge_deletes: Vec::with_capacity(edge_deletes),
+            edge_weights: Vec::with_capacity(edge_weights),
+            node_states: Vec::with_capacity(node_states),
+            resolutions: Vec::with_capacity(resolutions),
+            filters: Vec::with_capacity(filters),
+            tenants: Vec::with_capacity(tenants),
+        }
+    }
+
     fn as_slices(&self) -> [&[u8]; SECTION_COUNT] {
         [
             &self.edge_inserts,
@@ -1542,6 +1703,38 @@ mod tests {
             .expect_err("source outside source range rejects");
 
         assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
+    fn encoded_len_matches_variable_section_serialization() {
+        let mut segment = DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 2, 1)
+            .expect("segment constructs");
+        segment.resolutions.push(SegmentResolution {
+            table_oid: 1,
+            pk_hash: crate::resolution_index::ResolutionIndexBuilder::hash_pk(
+                "primary-key-with-variable-length",
+            ),
+            primary_key: Some("primary-key-with-variable-length".to_string()),
+            node_idx: 0,
+            tombstone: false,
+        });
+        segment.filters.push(SegmentFilterValue {
+            node_idx: 0,
+            column_id: 3,
+            value: PersistedFilterValue::Text("variable filter payload".to_string()),
+            tombstone: false,
+        });
+        segment.tenants.push(SegmentTenant {
+            node_idx: 0,
+            tenant_hash: xxhash_rust::xxh3::xxh3_64(b"variable-tenant"),
+            tenant: Some("variable-tenant".to_string()),
+            tombstone: false,
+        });
+
+        let expected = segment.encoded_len().expect("encoded length preflights");
+        let bytes = segment.to_bytes().expect("segment serializes");
+
+        assert_eq!(bytes.len(), expected);
     }
 
     #[test]

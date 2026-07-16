@@ -41,6 +41,11 @@
       "variant": "BuildLocked"
     },
     {
+      "diagnostic": "PG007",
+      "sqlstate": "54000",
+      "variant": "ResourceLimit"
+    },
+    {
       "diagnostic": "PG008",
       "sqlstate": "54000",
       "variant": "EdgeBufferFull"
@@ -116,7 +121,7 @@
       "GitHub release archive"
     ]
   },
-  "gql_implementation_sha256": "4d5d4c66a77535e0703e098d79ad030864ea8265bceabbcbfff4dba557e3ef01",
+  "gql_implementation_sha256": "5cc651e1ff81f6d0ffc0268b9915f4b91476f67f4bb5f6e7b35400acd4cd4816",
   "gql_profile": {
     "capabilities": [
       {
@@ -264,7 +269,7 @@
     "full_opencypher": false,
     "public_sql_pgq": false
   },
-  "guc_source_sha256": "d9ce12e234a65b0074bf66b8f3dda78006786800c8fa625df378b373b946a391",
+  "guc_source_sha256": "78dfd03f3547eb41caa5531b43ef9e309667310a8a112c98cb903353114cc803",
   "gucs": [
     "graph.auto_load",
     "graph.build_batch_size",
@@ -282,6 +287,7 @@
     "graph.hot_eager_load",
     "graph.idle_unload_secs",
     "graph.low_memory_build",
+    "graph.maintenance_memory_mb",
     "graph.max_exact_path_count",
     "graph.max_frontier",
     "graph.max_loaded_graphs_per_backend",
@@ -292,9 +298,13 @@
     "graph.memory_limit_mb",
     "graph.mutable_enabled",
     "graph.oom_action",
+    "graph.operation_timeout_ms",
     "graph.persist_on_build",
     "graph.projection_retention_generations",
     "graph.query_freshness",
+    "graph.query_memory_mb",
+    "graph.query_work_limit",
+    "graph.spill_disk_limit_mb",
     "graph.sync_batch_size",
     "graph.sync_mode",
     "graph.tenant_setting",
@@ -428,6 +438,7 @@
     "remove_table_from_graph",
     "rename_edge",
     "reset",
+    "resource_status",
     "revoke_graph",
     "run_due_jobs",
     "run_due_jobs_async",
@@ -455,9 +466,9 @@
   "release_line": "1.x",
   "schema_version": 2,
   "sql_schema": {
-    "entity_block_count": 155,
-    "function_contract_count": 153,
-    "function_contracts_sha256": "f486f9a580abd167e36c8b1b193edb7e38317189661563f33f1bb189e261f732",
-    "normalized_sha256": "dc993ee9456d800e29319394bc1a1299e6479eda6a87a859ac16cd9d669cd3b0"
+    "entity_block_count": 157,
+    "function_contract_count": 155,
+    "function_contracts_sha256": "8dea03b767ce0d5d280d8dcdce3c2f253f7fb55c670a023accb3ee9b0003a798",
+    "normalized_sha256": "b72933c3d4e7c94c2f1c104a0bd2f1aaef1a1300c71bacfdd03f29b0cb20d336"
   }
 }

@@ -76,11 +76,15 @@ pub enum TraversalDepthMap {
 }
 
 impl TraversalDepthMap {
-    fn new(node_count: usize, sparse: bool, expected_visits: usize) -> Self {
+    fn try_new(node_count: usize, sparse: bool, expected_visits: usize) -> GraphResult<Self> {
         if sparse {
-            Self::Sparse(HashMap::with_capacity(expected_visits))
+            let mut depths = HashMap::new();
+            depths
+                .try_reserve(expected_visits)
+                .map_err(traversal_allocation_error)?;
+            Ok(Self::Sparse(depths))
         } else {
-            Self::Dense(vec![-1i32; node_count])
+            Ok(Self::Dense(try_filled_vec(node_count, -1i32)?))
         }
     }
 
@@ -129,11 +133,15 @@ pub enum TraversalParentMap {
 }
 
 impl TraversalParentMap {
-    fn new(node_count: usize, sparse: bool, expected_visits: usize) -> Self {
+    fn try_new(node_count: usize, sparse: bool, expected_visits: usize) -> GraphResult<Self> {
         if sparse {
-            Self::Sparse(HashMap::with_capacity(expected_visits))
+            let mut parents = HashMap::new();
+            parents
+                .try_reserve(expected_visits)
+                .map_err(traversal_allocation_error)?;
+            Ok(Self::Sparse(parents))
         } else {
-            Self::Dense(vec![u32::MAX; node_count])
+            Ok(Self::Dense(try_filled_vec(node_count, u32::MAX)?))
         }
     }
 
@@ -174,11 +182,15 @@ pub enum TraversalParentEdgeTypes {
 }
 
 impl TraversalParentEdgeTypes {
-    fn new(node_count: usize, sparse: bool, expected_visits: usize) -> Self {
+    fn try_new(node_count: usize, sparse: bool, expected_visits: usize) -> GraphResult<Self> {
         if sparse {
-            Self::Sparse(HashMap::with_capacity(expected_visits))
+            let mut edge_types = HashMap::new();
+            edge_types
+                .try_reserve(expected_visits)
+                .map_err(traversal_allocation_error)?;
+            Ok(Self::Sparse(edge_types))
         } else {
-            Self::Dense(vec![0u8; node_count])
+            Ok(Self::Dense(try_filled_vec(node_count, 0u8)?))
         }
     }
 
@@ -199,6 +211,23 @@ impl TraversalParentEdgeTypes {
     }
 }
 
+fn try_filled_vec<T: Clone>(len: usize, value: T) -> GraphResult<Vec<T>> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(traversal_allocation_error)?;
+    values.resize(len, value);
+    Ok(values)
+}
+
+fn traversal_allocation_error(_error: std::collections::TryReserveError) -> GraphError {
+    GraphError::Oom {
+        used_mb: 0,
+        need_mb: 1,
+        limit_mb: crate::config::QUERY_MEMORY_MB.get().max(1) as u64,
+    }
+}
+
 fn expected_visit_capacity(node_count: usize, max_nodes: u32) -> usize {
     usize::try_from(max_nodes)
         .unwrap_or(usize::MAX)
@@ -209,6 +238,37 @@ fn use_sparse_metadata(node_count: usize, max_nodes: u32) -> bool {
     let expected_visits = expected_visit_capacity(node_count, max_nodes);
     node_count >= SPARSE_METADATA_MIN_NODES
         && expected_visits.saturating_mul(SPARSE_METADATA_RATIO) < node_count
+}
+
+/// Estimate the traversal metadata and frontier workspace reserved up front.
+pub(crate) fn estimated_workspace_bytes(
+    node_count: usize,
+    max_nodes: u32,
+    max_frontier: u32,
+) -> GraphResult<crate::resource::ByteCount> {
+    let visits = expected_visit_capacity(node_count, max_nodes);
+    let metadata_per_node = if use_sparse_metadata(node_count, max_nodes) {
+        128usize
+    } else {
+        std::mem::size_of::<i32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u8>()
+    };
+    let metadata_nodes = if use_sparse_metadata(node_count, max_nodes) {
+        visits
+    } else {
+        node_count
+    };
+    metadata_nodes
+        .checked_mul(metadata_per_node)
+        .and_then(|bytes| bytes.checked_add(visits.checked_mul(8)?))
+        .and_then(|bytes| {
+            bytes.checked_add(
+                usize::try_from(max_frontier)
+                    .ok()?
+                    .checked_mul(std::mem::size_of::<u32>())?,
+            )
+        })
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("traversal workspace estimate overflowed".to_string()))
 }
 
 /// Execute BFS traversal from a seed node.
@@ -222,31 +282,59 @@ fn use_sparse_metadata(node_count: usize, max_nodes: u32) -> bool {
 /// # Returns
 /// BfsResult containing visited set, depth map, and parent metadata.
 #[inline]
+#[allow(
+    clippy::expect_used,
+    reason = "legacy test and benchmark wrapper has no resource governor; production uses execute_governed"
+)]
 pub fn execute(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
     filter_index: &FilterIndex,
     config: &BfsConfig,
 ) -> BfsResult {
+    execute_inner(node_store, edge_store, filter_index, config, None)
+        .expect("unbounded traversal accounting should not fail")
+}
+
+pub(crate) fn execute_governed(
+    node_store: &NodeStore,
+    edge_store: &EdgeStore,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<BfsResult> {
+    execute_inner(node_store, edge_store, filter_index, config, Some(governor))
+}
+
+fn execute_inner(
+    node_store: &NodeStore,
+    edge_store: &EdgeStore,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    governor: Option<&crate::resource::ResourceGovernor>,
+) -> GraphResult<BfsResult> {
     let node_count = node_store.node_count() as usize;
     let sparse_metadata = use_sparse_metadata(node_count, config.max_nodes);
     let expected_visits = expected_visit_capacity(node_count, config.max_nodes);
 
     let mut visited = RoaringBitmap::new();
-    let mut depth_map = TraversalDepthMap::new(node_count, sparse_metadata, expected_visits);
-    let mut parent = TraversalParentMap::new(node_count, sparse_metadata, expected_visits);
+    let mut depth_map = TraversalDepthMap::try_new(node_count, sparse_metadata, expected_visits)?;
+    let mut parent = TraversalParentMap::try_new(node_count, sparse_metadata, expected_visits)?;
     let mut parent_edge_type =
-        TraversalParentEdgeTypes::new(node_count, sparse_metadata, expected_visits);
+        TraversalParentEdgeTypes::try_new(node_count, sparse_metadata, expected_visits)?;
     if config.seed_node as usize >= node_count {
-        return BfsResult {
+        return Ok(BfsResult {
             visited,
             depth: depth_map,
             parent,
             parent_edge_type,
-        };
+        });
     }
 
-    let mut frontier = VecDeque::with_capacity(config.max_frontier as usize);
+    let mut frontier = VecDeque::new();
+    frontier
+        .try_reserve(config.max_frontier as usize)
+        .map_err(traversal_allocation_error)?;
     let mut nodes_visited: u32 = 0;
 
     let seed = config.seed_node;
@@ -261,12 +349,12 @@ pub fn execute(
         config.edge_type_filter,
         crate::types::EdgeTypeFilter::NoneMatched
     ) {
-        return BfsResult {
+        return Ok(BfsResult {
             visited,
             depth: depth_map,
             parent,
             parent_edge_type,
-        };
+        });
     }
 
     let has_filters = !config.filter_ops.is_empty();
@@ -284,6 +372,7 @@ pub fn execute(
         }
 
         for neighbor in neighbors.neighbors(current) {
+            consume_expansion(governor)?;
             if !candidate_allowed(
                 node_store,
                 filter_index,
@@ -303,64 +392,92 @@ pub fn execute(
             nodes_visited += 1;
 
             if nodes_visited >= config.max_nodes {
-                return BfsResult {
+                return Ok(BfsResult {
                     visited,
                     depth: depth_map,
                     parent,
                     parent_edge_type,
-                };
+                });
             }
 
             if current_depth + 1 < config.max_depth {
                 frontier.push_back(neighbor.target);
 
                 if frontier.len() as u32 >= config.max_frontier {
-                    return BfsResult {
+                    return Ok(BfsResult {
                         visited,
                         depth: depth_map,
                         parent,
                         parent_edge_type,
-                    };
+                    });
                 }
             }
         }
     }
 
-    BfsResult {
+    Ok(BfsResult {
         visited,
         depth: depth_map,
         parent,
         parent_edge_type,
-    }
+    })
 }
 
 /// Execute BFS traversal over a supplied neighbor source.
 #[inline]
+#[allow(
+    clippy::expect_used,
+    reason = "legacy test and benchmark wrapper has no resource governor; production uses execute_with_neighbors_governed"
+)]
 pub(crate) fn execute_with_neighbors(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
     filter_index: &FilterIndex,
     config: &BfsConfig,
 ) -> BfsResult {
+    execute_with_neighbors_inner(node_store, neighbors, filter_index, config, None)
+        .expect("unbounded traversal accounting should not fail")
+}
+
+pub(crate) fn execute_with_neighbors_governed(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<BfsResult> {
+    execute_with_neighbors_inner(node_store, neighbors, filter_index, config, Some(governor))
+}
+
+fn execute_with_neighbors_inner(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    governor: Option<&crate::resource::ResourceGovernor>,
+) -> GraphResult<BfsResult> {
     let node_count = node_store.node_count() as usize;
     let sparse_metadata = use_sparse_metadata(node_count, config.max_nodes);
     let expected_visits = expected_visit_capacity(node_count, config.max_nodes);
 
     let mut visited = RoaringBitmap::new();
-    let mut depth_map = TraversalDepthMap::new(node_count, sparse_metadata, expected_visits);
-    let mut parent = TraversalParentMap::new(node_count, sparse_metadata, expected_visits);
+    let mut depth_map = TraversalDepthMap::try_new(node_count, sparse_metadata, expected_visits)?;
+    let mut parent = TraversalParentMap::try_new(node_count, sparse_metadata, expected_visits)?;
     let mut parent_edge_type =
-        TraversalParentEdgeTypes::new(node_count, sparse_metadata, expected_visits);
+        TraversalParentEdgeTypes::try_new(node_count, sparse_metadata, expected_visits)?;
     if config.seed_node as usize >= node_count {
-        return BfsResult {
+        return Ok(BfsResult {
             visited,
             depth: depth_map,
             parent,
             parent_edge_type,
-        };
+        });
     }
 
-    let mut frontier = VecDeque::with_capacity(config.max_frontier as usize);
+    let mut frontier = VecDeque::new();
+    frontier
+        .try_reserve(config.max_frontier as usize)
+        .map_err(traversal_allocation_error)?;
     let mut nodes_visited: u32 = 0;
 
     // Seed the BFS
@@ -376,12 +493,12 @@ pub(crate) fn execute_with_neighbors(
         config.edge_type_filter,
         crate::types::EdgeTypeFilter::NoneMatched
     ) {
-        return BfsResult {
+        return Ok(BfsResult {
             visited,
             depth: depth_map,
             parent,
             parent_edge_type,
-        };
+        });
     }
 
     let has_filters = !config.filter_ops.is_empty();
@@ -395,6 +512,7 @@ pub(crate) fn execute_with_neighbors(
         }
 
         for neighbor in neighbors.neighbors(current) {
+            consume_expansion(governor)?;
             if !candidate_allowed(
                 node_store,
                 filter_index,
@@ -415,12 +533,12 @@ pub(crate) fn execute_with_neighbors(
 
             // Circuit breakers
             if nodes_visited >= config.max_nodes {
-                return BfsResult {
+                return Ok(BfsResult {
                     visited,
                     depth: depth_map,
                     parent,
                     parent_edge_type,
-                };
+                });
             }
 
             // Only add to frontier if we haven't hit the depth limit
@@ -429,27 +547,28 @@ pub(crate) fn execute_with_neighbors(
 
                 // Frontier size circuit breaker
                 if frontier.len() as u32 >= config.max_frontier {
-                    return BfsResult {
+                    return Ok(BfsResult {
                         visited,
                         depth: depth_map,
                         parent,
                         parent_edge_type,
-                    };
+                    });
                 }
             }
         }
     }
 
-    BfsResult {
+    Ok(BfsResult {
         visited,
         depth: depth_map,
         parent,
         parent_edge_type,
-    }
+    })
 }
 
 /// Execute depth-first traversal from a seed node.
 #[inline]
+#[cfg(test)]
 pub fn execute_dfs(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
@@ -464,30 +583,67 @@ pub fn execute_dfs(
     execute_dfs_with_neighbors(node_store, &neighbors, filter_index, config)
 }
 
+pub(crate) fn execute_dfs_governed(
+    node_store: &NodeStore,
+    edge_store: &EdgeStore,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<BfsResult> {
+    let neighbors = OverlayNeighbors::new(
+        edge_store,
+        &config.overlay_insert_edges,
+        &config.overlay_deleted_edges,
+    );
+    execute_dfs_with_neighbors_governed(node_store, &neighbors, filter_index, config, governor)
+}
+
 /// Execute DFS traversal over a supplied neighbor source.
 #[inline]
+#[cfg(test)]
 pub(crate) fn execute_dfs_with_neighbors(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
     filter_index: &FilterIndex,
     config: &BfsConfig,
 ) -> BfsResult {
+    execute_dfs_with_neighbors_inner(node_store, neighbors, filter_index, config, None)
+        .expect("unbounded traversal accounting should not fail")
+}
+
+pub(crate) fn execute_dfs_with_neighbors_governed(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<BfsResult> {
+    execute_dfs_with_neighbors_inner(node_store, neighbors, filter_index, config, Some(governor))
+}
+
+fn execute_dfs_with_neighbors_inner(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    governor: Option<&crate::resource::ResourceGovernor>,
+) -> GraphResult<BfsResult> {
     let node_count = node_store.node_count() as usize;
     let sparse_metadata = use_sparse_metadata(node_count, config.max_nodes);
     let expected_visits = expected_visit_capacity(node_count, config.max_nodes);
 
     let mut visited = RoaringBitmap::new();
-    let mut depth_map = TraversalDepthMap::new(node_count, sparse_metadata, expected_visits);
-    let mut parent = TraversalParentMap::new(node_count, sparse_metadata, expected_visits);
+    let mut depth_map = TraversalDepthMap::try_new(node_count, sparse_metadata, expected_visits)?;
+    let mut parent = TraversalParentMap::try_new(node_count, sparse_metadata, expected_visits)?;
     let mut parent_edge_type =
-        TraversalParentEdgeTypes::new(node_count, sparse_metadata, expected_visits);
+        TraversalParentEdgeTypes::try_new(node_count, sparse_metadata, expected_visits)?;
     if config.seed_node as usize >= node_count {
-        return BfsResult {
+        return Ok(BfsResult {
             visited,
             depth: depth_map,
             parent,
             parent_edge_type,
-        };
+        });
     }
 
     let seed = config.seed_node;
@@ -500,15 +656,18 @@ pub(crate) fn execute_dfs_with_neighbors(
         config.edge_type_filter,
         crate::types::EdgeTypeFilter::NoneMatched
     ) {
-        return BfsResult {
+        return Ok(BfsResult {
             visited,
             depth: depth_map,
             parent,
             parent_edge_type,
-        };
+        });
     }
 
-    let mut stack = Vec::with_capacity(config.max_frontier as usize);
+    let mut stack = Vec::new();
+    stack
+        .try_reserve(config.max_frontier as usize)
+        .map_err(traversal_allocation_error)?;
     stack.push(seed);
     let mut nodes_visited: u32 = 1;
     let has_filters = !config.filter_ops.is_empty();
@@ -531,23 +690,24 @@ pub(crate) fn execute_dfs_with_neighbors(
             stack: &mut stack,
             nodes_visited: &mut nodes_visited,
             has_filters,
+            governor,
         };
-        if push.push_neighbors(current, current_depth) {
-            return BfsResult {
+        if push.push_neighbors(current, current_depth)? {
+            return Ok(BfsResult {
                 visited,
                 depth: depth_map,
                 parent,
                 parent_edge_type,
-            };
+            });
         }
     }
 
-    BfsResult {
+    Ok(BfsResult {
         visited,
         depth: depth_map,
         parent,
         parent_edge_type,
-    }
+    })
 }
 
 fn candidate_allowed(
@@ -599,18 +759,20 @@ struct DfsPushContext<'a> {
     stack: &'a mut Vec<u32>,
     nodes_visited: &'a mut u32,
     has_filters: bool,
+    governor: Option<&'a crate::resource::ResourceGovernor>,
 }
 
 impl DfsPushContext<'_> {
-    fn push_neighbors(&mut self, current: u32, current_depth: i32) -> bool {
+    fn push_neighbors(&mut self, current: u32, current_depth: i32) -> GraphResult<bool> {
         for neighbor in self.neighbors.neighbors_reversed(current) {
+            consume_expansion(self.governor)?;
             if self.push_candidate(current, current_depth, neighbor.target, neighbor.type_id) {
                 continue;
             }
-            return true;
+            return Ok(true);
         }
 
-        false
+        Ok(false)
     }
 
     fn push_candidate(
@@ -651,6 +813,25 @@ impl DfsPushContext<'_> {
 
         true
     }
+}
+
+fn consume_expansion(governor: Option<&crate::resource::ResourceGovernor>) -> GraphResult<()> {
+    let Some(governor) = governor else {
+        return Ok(());
+    };
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::QueryExpand,
+            crate::resource::WorkUnits::new(1),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    if governor.work_used().as_u64().is_multiple_of(1_024) {
+        crate::resource::check_postgres_interrupts();
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryExpand)
+            .map_err(crate::safety::resource_limit_error)?;
+    }
+    Ok(())
 }
 
 /// Reconstruct the path from seed to a specific node using parent metadata.
@@ -1280,7 +1461,8 @@ mod tests {
 
     #[test]
     fn path_reconstruction_on_isolated_returns_just_seed() {
-        let mut result_parent = TraversalParentMap::new(1, false, 1);
+        let mut result_parent =
+            TraversalParentMap::try_new(1, false, 1).expect("test parent map should allocate");
         result_parent.set(0, 0);
         let path = reconstruct_path(&result_parent, 0, 0);
         assert_eq!(path, vec![0]);

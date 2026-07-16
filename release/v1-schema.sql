@@ -3816,3 +3816,34 @@ STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'path_count_estimate_wrapper';
 /* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1154
+-- graph::sql_facade::admin::resource_status
+CREATE  FUNCTION graph."resource_status"() RETURNS TABLE (
+	"operation" TEXT,  /* String */
+	"memory_budget_bytes" bigint,  /* i64 */
+	"memory_peak_bytes" bigint,  /* i64 */
+	"memory_peak_phase" TEXT,  /* Option < String > */
+	"disk_peak_bytes" bigint,  /* i64 */
+	"rows" bigint,  /* i64 */
+	"work_units" bigint  /* i64 */
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'resource_status_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1132
+-- graph::sql_facade::admin::build_resource_status
+CREATE  FUNCTION graph."build_resource_status"() RETURNS TABLE (
+	"budget_bytes" bigint,  /* i64 */
+	"peak_bytes" bigint,  /* i64 */
+	"peak_phase" TEXT,  /* Option < String > */
+	"pressure_events" bigint  /* i64 */
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'build_resource_status_wrapper';
+/* </end connected objects> */

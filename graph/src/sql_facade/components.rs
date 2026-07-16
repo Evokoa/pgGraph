@@ -1,7 +1,7 @@
 use super::admin::{check_enabled_result, require_graph_admin_result, with_panic_boundary};
 use super::runtime::{
     component_rows, current_query_freshness, ensure_current_graph_for_query,
-    hydrate_component_page, largest_component_id,
+    hydrate_component_page_governed, largest_component_rows,
 };
 use super::*;
 
@@ -35,13 +35,37 @@ fn connected_components() -> Result<
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
+            let governor = eng
+                .analytics_resource_governor()
+                .unwrap_or_else(|err| err.report());
             let cc_result = eng
-                .connected_components()
+                .connected_components_governed(&governor)
                 .unwrap_or_else(|err| err.report());
 
+            let output_bytes = cc_result
+                .component
+                .len()
+                .checked_mul(
+                    std::mem::size_of::<connected_components::ComponentRow>()
+                        .saturating_add(eng.node_store.max_primary_key_bytes())
+                        .saturating_add(64),
+                )
+                .and_then(crate::resource::ByteCount::from_usize)
+                .unwrap_or_else(|| {
+                    safety::GraphError::Internal("component output estimate overflowed".to_string())
+                        .report()
+                });
+            let output_lease = governor
+                .reserve_memory(
+                    crate::resource::ResourcePhase::QueryCandidates,
+                    output_bytes,
+                )
+                .map_err(crate::safety::resource_limit_error)
+                .unwrap_or_else(|err| err.report());
             let rows = connected_components::to_component_rows(&cc_result, &eng.node_store)
                 .unwrap_or_else(|err| err.report());
-            rows.into_iter()
+            let rows = rows
+                .into_iter()
                 .map(|r| {
                     (
                         pgrx::pg_sys::Oid::from_u32(r.node_table.0),
@@ -50,7 +74,9 @@ fn connected_components() -> Result<
                         r.component_size as i32,
                     )
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            output_lease.retain_until_governor_drop();
+            rows
         });
         Ok(TableIterator::new(rows))
     })
@@ -86,8 +112,11 @@ fn component_stats() -> Result<
 
         let result = ENGINE.with(|e| {
             let eng = e.borrow();
+            let governor = eng
+                .analytics_resource_governor()
+                .unwrap_or_else(|err| err.report());
             let cc_result = eng
-                .connected_components()
+                .connected_components_governed(&governor)
                 .unwrap_or_else(|err| err.report());
 
             // Count isolated nodes (component_size == 1)
@@ -138,14 +167,44 @@ fn components(
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
+            let governor = eng
+                .analytics_resource_governor()
+                .unwrap_or_else(|err| err.report());
             let cc_result = eng
-                .connected_components()
+                .connected_components_governed(&governor)
                 .unwrap_or_else(|err| err.report());
             let row_offset =
                 usize_from_nonnegative(row_offset, "row_offset").unwrap_or_else(|err| err.report());
             let max_rows =
                 usize_from_nonnegative(max_rows, "max_rows").unwrap_or_else(|err| err.report());
-            connected_components::component_size_rows(&cc_result)
+            let blocking_bytes = cc_result
+                .component_sizes
+                .len()
+                .checked_mul(96)
+                .and_then(crate::resource::ByteCount::from_usize)
+                .unwrap_or_else(|| {
+                    safety::GraphError::Internal(
+                        "component ordering estimate overflowed".to_string(),
+                    )
+                    .report()
+                });
+            let blocking_lease = governor
+                .reserve_memory(
+                    crate::resource::ResourcePhase::QueryBlocking,
+                    blocking_bytes,
+                )
+                .map_err(crate::safety::resource_limit_error)
+                .unwrap_or_else(|err| err.report());
+            governor
+                .consume_work(
+                    crate::resource::ResourcePhase::QueryBlocking,
+                    crate::resource::WorkUnits::new(
+                        u64::try_from(cc_result.component_sizes.len()).unwrap_or(u64::MAX),
+                    ),
+                )
+                .map_err(crate::safety::resource_limit_error)
+                .unwrap_or_else(|err| err.report());
+            let rows = connected_components::component_size_rows(&cc_result)
                 .into_iter()
                 .enumerate()
                 .skip(row_offset)
@@ -153,7 +212,9 @@ fn components(
                 .map(|(idx, (component_id, component_size))| {
                     (component_id as i64, component_size as i64, (idx + 1) as i32)
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            blocking_lease.retain_until_governor_drop();
+            rows
         });
 
         Ok(TableIterator::new(rows))
@@ -183,8 +244,7 @@ fn largest_component(
     Box<pgrx::pg_sys::panic::ErrorReport>,
 > {
     with_panic_boundary("largest_component()", || {
-        let component_id = largest_component_id().unwrap_or_else(|err| err.report());
-        let rows = component_rows(component_id, max_rows, row_offset, hydrate)
+        let rows = largest_component_rows(max_rows, row_offset, hydrate)
             .unwrap_or_else(|err| err.report());
         Ok(TableIterator::new(rows))
     })
@@ -252,20 +312,42 @@ fn isolated_nodes(
         let max_rows =
             usize_from_nonnegative(max_rows, "max_rows").unwrap_or_else(|err| err.report());
 
-        let page = ENGINE.with(|e| {
+        let (page, governor) = ENGINE.with(|e| {
             let eng = e.borrow();
-            let cc_result = eng
-                .connected_components()
+            let governor = eng
+                .analytics_resource_governor()
                 .unwrap_or_else(|err| err.report());
-            connected_components::isolated_rows_page(
+            let cc_result = eng
+                .connected_components_governed(&governor)
+                .unwrap_or_else(|err| err.report());
+            let page_bytes = max_rows
+                .checked_mul(
+                    std::mem::size_of::<connected_components::ComponentRow>()
+                        .saturating_add(eng.node_store.max_primary_key_bytes()),
+                )
+                .and_then(crate::resource::ByteCount::from_usize)
+                .unwrap_or_else(|| {
+                    safety::GraphError::Internal(
+                        "isolated-node page estimate overflowed".to_string(),
+                    )
+                    .report()
+                });
+            let page_lease = governor
+                .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, page_bytes)
+                .map_err(crate::safety::resource_limit_error)
+                .unwrap_or_else(|err| err.report());
+            let page = connected_components::isolated_rows_page(
                 &cc_result,
                 &eng.node_store,
                 row_offset,
                 max_rows,
             )
-            .unwrap_or_else(|err| err.report())
+            .unwrap_or_else(|err| err.report());
+            page_lease.retain_until_governor_drop();
+            (page, governor)
         });
-        let rows = hydrate_component_page(page, hydrate).unwrap_or_else(|err| err.report());
+        let rows = hydrate_component_page_governed(page, hydrate, &governor)
+            .unwrap_or_else(|err| err.report());
 
         Ok(TableIterator::new(rows))
     })

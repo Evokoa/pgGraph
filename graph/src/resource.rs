@@ -9,6 +9,13 @@ use std::cell::Cell;
 use std::fmt;
 use std::time::{Duration, Instant};
 
+/// Yield to PostgreSQL cancellation and statement-timeout handling.
+#[inline]
+pub(crate) fn check_postgres_interrupts() {
+    #[cfg(not(test))]
+    pgrx::check_for_interrupts!();
+}
+
 /// Exact byte quantity used for allocation and residency decisions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ByteCount(u64);
@@ -66,6 +73,142 @@ pub(crate) fn adaptive_build_batch_target(available: ByteCount) -> ByteCount {
     )
 }
 
+/// Resolve a query governor after accounting for backend-private graph residency.
+pub(crate) fn query_governor(resident: ByteCount) -> ResourceGovernor {
+    operation_governor(
+        "query",
+        resident,
+        configured_query_memory_mb(),
+        RowCount::UNLIMITED,
+        WorkUnits::new(configured_query_work_limit()),
+    )
+}
+
+/// Resolve the private-memory budget for loading one persisted graph artifact.
+pub(crate) fn load_governor(resident: ByteCount) -> ResourceGovernor {
+    operation_governor(
+        "load",
+        resident,
+        configured_memory_limit_mb(),
+        RowCount::UNLIMITED,
+        WorkUnits::UNLIMITED,
+    )
+}
+
+/// Resolve a maintenance governor after accounting for backend-private graph residency.
+pub(crate) fn maintenance_governor(resident: ByteCount, rows: RowCount) -> ResourceGovernor {
+    operation_governor(
+        "maintenance",
+        resident,
+        configured_maintenance_memory_mb(),
+        rows,
+        WorkUnits::UNLIMITED,
+    )
+}
+
+/// Resolve a whole-graph analytics governor with maintenance memory and query work limits.
+pub(crate) fn analytics_governor(resident: ByteCount) -> ResourceGovernor {
+    operation_governor(
+        "analytics",
+        resident,
+        configured_maintenance_memory_mb(),
+        RowCount::UNLIMITED,
+        WorkUnits::new(configured_query_work_limit()),
+    )
+}
+
+fn operation_governor(
+    operation: &'static str,
+    resident: ByteCount,
+    workspace_mb: i32,
+    rows: RowCount,
+    work: WorkUnits,
+) -> ResourceGovernor {
+    let hard =
+        ByteCount::from_mib(configured_memory_limit_mb().max(1) as u64).unwrap_or(ByteCount::ZERO);
+    let remaining = hard.checked_sub(resident).unwrap_or(ByteCount::ZERO);
+    let workspace = ByteCount::from_mib(workspace_mb.max(1) as u64).unwrap_or(ByteCount::ZERO);
+    let memory = ByteCount::from_bytes(remaining.as_u64().min(workspace.as_u64()));
+    let disk = ByteCount::from_mib(configured_spill_disk_limit_mb().max(1) as u64)
+        .unwrap_or(ByteCount::ZERO);
+    let timeout_ms = configured_operation_timeout_ms();
+    let elapsed = if timeout_ms == 0 {
+        Duration::MAX
+    } else {
+        Duration::from_millis(timeout_ms)
+    };
+    ResourceGovernor::new_named(
+        operation,
+        ResourceLimits::bounded(
+            MemoryBudget::new(memory),
+            DiskBudget::new(disk),
+            rows,
+            work,
+            ElapsedBudget::new(elapsed),
+        ),
+    )
+}
+
+#[cfg(not(test))]
+fn configured_memory_limit_mb() -> i32 {
+    crate::config::MEMORY_LIMIT_MB.get()
+}
+
+#[cfg(test)]
+const fn configured_memory_limit_mb() -> i32 {
+    2_048
+}
+
+#[cfg(not(test))]
+fn configured_query_memory_mb() -> i32 {
+    crate::config::QUERY_MEMORY_MB.get()
+}
+
+#[cfg(test)]
+const fn configured_query_memory_mb() -> i32 {
+    64
+}
+
+#[cfg(not(test))]
+fn configured_maintenance_memory_mb() -> i32 {
+    crate::config::MAINTENANCE_MEMORY_MB.get()
+}
+
+#[cfg(test)]
+const fn configured_maintenance_memory_mb() -> i32 {
+    256
+}
+
+#[cfg(not(test))]
+fn configured_spill_disk_limit_mb() -> i32 {
+    crate::config::SPILL_DISK_LIMIT_MB.get()
+}
+
+#[cfg(test)]
+const fn configured_spill_disk_limit_mb() -> i32 {
+    4_096
+}
+
+#[cfg(not(test))]
+fn configured_query_work_limit() -> u64 {
+    crate::config::QUERY_WORK_LIMIT.get().max(1) as u64
+}
+
+#[cfg(test)]
+const fn configured_query_work_limit() -> u64 {
+    10_000_000
+}
+
+#[cfg(not(test))]
+fn configured_operation_timeout_ms() -> u64 {
+    crate::config::OPERATION_TIMEOUT_MS.get().max(0) as u64
+}
+
+#[cfg(test)]
+const fn configured_operation_timeout_ms() -> u64 {
+    0
+}
+
 /// Maximum private-memory bytes available to one governed operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MemoryBudget(ByteCount);
@@ -76,6 +219,54 @@ impl MemoryBudget {
     }
 
     pub(crate) const fn bytes(self) -> ByteCount {
+        self.0
+    }
+}
+
+/// Maximum spill or temporary artifact bytes available to one operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DiskBudget(ByteCount);
+
+impl DiskBudget {
+    pub(crate) const UNLIMITED: Self = Self(ByteCount::from_bytes(u64::MAX));
+
+    pub(crate) const fn new(bytes: ByteCount) -> Self {
+        Self(bytes)
+    }
+
+    pub(crate) const fn bytes(self) -> ByteCount {
+        self.0
+    }
+}
+
+/// Checked row quantity used by input and output breakers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RowCount(u64);
+
+impl RowCount {
+    pub(crate) const UNLIMITED: Self = Self(u64::MAX);
+
+    pub(crate) const fn new(rows: u64) -> Self {
+        Self(rows)
+    }
+
+    pub(crate) const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// Checked abstract work quantity used for expansions and blocking operators.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct WorkUnits(u64);
+
+impl WorkUnits {
+    pub(crate) const UNLIMITED: Self = Self(u64::MAX);
+
+    pub(crate) const fn new(units: u64) -> Self {
+        Self(units)
+    }
+
+    pub(crate) const fn as_u64(self) -> u64 {
         self.0
     }
 }
@@ -109,6 +300,17 @@ pub(crate) enum ResourcePhase {
     EdgeResolve,
     Csr,
     Persistence,
+    LoadMetadata,
+    LoadInbound,
+    QueryCandidates,
+    QueryExpand,
+    QueryFrontier,
+    QueryPaths,
+    QueryHydrate,
+    QueryBlocking,
+    SyncIngest,
+    CompactionMerge,
+    AnalyticsWorkspace,
 }
 
 impl ResourcePhase {
@@ -126,6 +328,17 @@ impl ResourcePhase {
             Self::EdgeResolve => "build.edge_resolve",
             Self::Csr => "build.csr",
             Self::Persistence => "build.persistence",
+            Self::LoadMetadata => "load.metadata",
+            Self::LoadInbound => "load.inbound",
+            Self::QueryCandidates => "query.candidates",
+            Self::QueryExpand => "query.expand",
+            Self::QueryFrontier => "query.frontier",
+            Self::QueryPaths => "query.paths",
+            Self::QueryHydrate => "query.hydrate",
+            Self::QueryBlocking => "query.blocking",
+            Self::SyncIngest => "sync.ingest",
+            Self::CompactionMerge => "compact.merge",
+            Self::AnalyticsWorkspace => "analytics.workspace",
         }
     }
 }
@@ -214,13 +427,19 @@ impl AdaptiveBatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResourceKind {
     Memory,
+    Disk,
+    Rows,
+    Work,
     Elapsed,
 }
 
 impl ResourceKind {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Memory => "memory bytes",
+            Self::Disk => "disk bytes",
+            Self::Rows => "rows",
+            Self::Work => "work units",
             Self::Elapsed => "elapsed microseconds",
         }
     }
@@ -268,6 +487,10 @@ impl ResourceLimitError {
     pub(crate) const fn limit(self) -> u64 {
         self.limit
     }
+
+    pub(crate) const fn phase(self) -> ResourcePhase {
+        self.phase
+    }
 }
 
 impl fmt::Display for ResourceLimitError {
@@ -290,37 +513,84 @@ impl std::error::Error for ResourceLimitError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResourceLimits {
     memory: MemoryBudget,
+    disk: DiskBudget,
+    rows: RowCount,
+    work: WorkUnits,
     elapsed: ElapsedBudget,
 }
 
 impl ResourceLimits {
-    pub(crate) const fn new(memory: MemoryBudget, elapsed: ElapsedBudget) -> Self {
-        Self { memory, elapsed }
+    pub(crate) const fn new(
+        memory: MemoryBudget,
+        disk: DiskBudget,
+        rows: RowCount,
+        work: WorkUnits,
+        elapsed: ElapsedBudget,
+    ) -> Self {
+        Self {
+            memory,
+            disk,
+            rows,
+            work,
+            elapsed,
+        }
     }
 
     pub(crate) const fn memory_only(memory: MemoryBudget) -> Self {
-        Self::new(memory, ElapsedBudget::new(Duration::MAX))
+        Self::new(
+            memory,
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
+            ElapsedBudget::new(Duration::MAX),
+        )
+    }
+
+    pub(crate) const fn bounded(
+        memory: MemoryBudget,
+        disk: DiskBudget,
+        rows: RowCount,
+        work: WorkUnits,
+        elapsed: ElapsedBudget,
+    ) -> Self {
+        Self::new(memory, disk, rows, work, elapsed)
     }
 }
 
 /// Statement-local resource accountant.
 pub(crate) struct ResourceGovernor {
+    operation: Option<&'static str>,
     limits: ResourceLimits,
     started: Instant,
     memory_used: Cell<u64>,
     memory_peak: Cell<u64>,
     memory_peak_phase: Cell<Option<ResourcePhase>>,
+    disk_used: Cell<u64>,
+    disk_peak: Cell<u64>,
+    rows_used: Cell<u64>,
+    work_used: Cell<u64>,
 }
 
 impl ResourceGovernor {
     pub(crate) fn new(limits: ResourceLimits) -> Self {
         Self {
+            operation: None,
             limits,
             started: Instant::now(),
             memory_used: Cell::new(0),
             memory_peak: Cell::new(0),
             memory_peak_phase: Cell::new(None),
+            disk_used: Cell::new(0),
+            disk_peak: Cell::new(0),
+            rows_used: Cell::new(0),
+            work_used: Cell::new(0),
         }
+    }
+
+    fn new_named(operation: &'static str, limits: ResourceLimits) -> Self {
+        let mut governor = Self::new(limits);
+        governor.operation = Some(operation);
+        governor
     }
 
     pub(crate) fn reserve_memory(
@@ -333,6 +603,62 @@ impl ResourceGovernor {
 
     pub(crate) fn check_elapsed(&self, phase: ResourcePhase) -> Result<(), ResourceLimitError> {
         self.check_elapsed_duration(phase, self.started.elapsed())
+    }
+
+    pub(crate) fn consume_rows(
+        &self,
+        phase: ResourcePhase,
+        rows: RowCount,
+    ) -> Result<(), ResourceLimitError> {
+        consume_counter(
+            &self.rows_used,
+            rows.as_u64(),
+            self.limits.rows.as_u64(),
+            ResourceKind::Rows,
+            phase,
+        )
+    }
+
+    pub(crate) fn consume_work(
+        &self,
+        phase: ResourcePhase,
+        units: WorkUnits,
+    ) -> Result<(), ResourceLimitError> {
+        consume_counter(
+            &self.work_used,
+            units.as_u64(),
+            self.limits.work.as_u64(),
+            ResourceKind::Work,
+            phase,
+        )
+    }
+
+    pub(crate) fn reserve_disk(
+        &self,
+        phase: ResourcePhase,
+        bytes: ByteCount,
+    ) -> Result<DiskLease<'_>, ResourceLimitError> {
+        let used = self.disk_used.get();
+        let requested = bytes.as_u64();
+        let limit = self.limits.disk.bytes().as_u64();
+        let next = used.checked_add(requested).ok_or_else(|| {
+            ResourceLimitError::new(ResourceKind::Disk, phase, used, requested, limit)
+        })?;
+        if next > limit {
+            return Err(ResourceLimitError::new(
+                ResourceKind::Disk,
+                phase,
+                used,
+                requested,
+                limit,
+            ));
+        }
+        self.disk_used.set(next);
+        self.disk_peak.set(self.disk_peak.get().max(next));
+        Ok(DiskLease {
+            governor: self,
+            amount: requested,
+        })
     }
 
     fn check_elapsed_duration(
@@ -364,17 +690,28 @@ impl ResourceGovernor {
         ByteCount::from_bytes(self.memory_peak.get())
     }
 
-    pub(crate) fn memory_limit(&self) -> ByteCount {
-        self.limits.memory.bytes()
-    }
-
-    #[cfg(test)]
     pub(crate) fn memory_used(&self) -> ByteCount {
         ByteCount::from_bytes(self.memory_used.get())
     }
 
+    pub(crate) fn memory_limit(&self) -> ByteCount {
+        self.limits.memory.bytes()
+    }
+
     pub(crate) fn memory_peak_phase(&self) -> Option<ResourcePhase> {
         self.memory_peak_phase.get()
+    }
+
+    pub(crate) fn disk_peak(&self) -> ByteCount {
+        ByteCount::from_bytes(self.disk_peak.get())
+    }
+
+    pub(crate) fn rows_used(&self) -> RowCount {
+        RowCount::new(self.rows_used.get())
+    }
+
+    pub(crate) fn work_used(&self) -> WorkUnits {
+        WorkUnits::new(self.work_used.get())
     }
 
     fn reserve(
@@ -421,6 +758,82 @@ impl ResourceGovernor {
         debug_assert!(amount <= used, "resource lease released more than reserved");
         self.memory_used.set(used.saturating_sub(amount));
     }
+
+    fn release_disk(&self, amount: u64) {
+        let used = self.disk_used.get();
+        debug_assert!(amount <= used, "disk lease released more than reserved");
+        self.disk_used.set(used.saturating_sub(amount));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResourceSnapshot {
+    pub(crate) operation: String,
+    pub(crate) memory_budget_bytes: u64,
+    pub(crate) memory_peak_bytes: u64,
+    pub(crate) memory_peak_phase: Option<String>,
+    pub(crate) disk_peak_bytes: u64,
+    pub(crate) rows: u64,
+    pub(crate) work_units: u64,
+}
+
+std::thread_local! {
+    static LAST_OPERATION: std::cell::RefCell<Option<ResourceSnapshot>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn last_operation_snapshot() -> Option<ResourceSnapshot> {
+    LAST_OPERATION.with(|snapshot| snapshot.borrow().clone())
+}
+
+impl Drop for ResourceGovernor {
+    fn drop(&mut self) {
+        let Some(operation) = self.operation else {
+            return;
+        };
+        let snapshot = ResourceSnapshot {
+            operation: operation.to_string(),
+            memory_budget_bytes: self.memory_limit().as_u64(),
+            memory_peak_bytes: self.memory_peak().as_u64(),
+            memory_peak_phase: self
+                .memory_peak_phase()
+                .map(ResourcePhase::as_str)
+                .map(ToString::to_string),
+            disk_peak_bytes: self.disk_peak().as_u64(),
+            rows: self.rows_used().as_u64(),
+            work_units: self.work_used().as_u64(),
+        };
+        LAST_OPERATION.with(|last| *last.borrow_mut() = Some(snapshot));
+    }
+}
+
+fn consume_counter(
+    current: &Cell<u64>,
+    requested: u64,
+    limit: u64,
+    kind: ResourceKind,
+    phase: ResourcePhase,
+) -> Result<(), ResourceLimitError> {
+    let used = current.get();
+    let next = used
+        .checked_add(requested)
+        .ok_or_else(|| ResourceLimitError::new(kind, phase, used, requested, limit))?;
+    if next > limit {
+        return Err(ResourceLimitError::new(kind, phase, used, requested, limit));
+    }
+    current.set(next);
+    Ok(())
+}
+
+/// RAII reservation for operation-owned spill or staging bytes.
+pub(crate) struct DiskLease<'a> {
+    governor: &'a ResourceGovernor,
+    amount: u64,
+}
+
+impl Drop for DiskLease<'_> {
+    fn drop(&mut self) {
+        self.governor.release_disk(self.amount);
+    }
 }
 
 /// RAII reservation returned by a memory-budget check.
@@ -459,8 +872,32 @@ impl ResourceLease<'_> {
         ByteCount::from_bytes(self.amount)
     }
 
+    /// Resize this lease without leaving live allocations unaccounted.
+    pub(crate) fn try_resize(&mut self, target: ByteCount) -> Result<(), ResourceLimitError> {
+        match target.as_u64().cmp(&self.amount) {
+            std::cmp::Ordering::Greater => self.try_grow(ByteCount::from_bytes(
+                target.as_u64().saturating_sub(self.amount),
+            )),
+            std::cmp::Ordering::Less => {
+                let released = self.amount.saturating_sub(target.as_u64());
+                self.governor.release_memory(released);
+                self.amount = target.as_u64();
+                Ok(())
+            }
+            std::cmp::Ordering::Equal => Ok(()),
+        }
+    }
+
     pub(crate) fn release_all(&mut self) {
         self.governor.release_memory(self.amount);
+        self.amount = 0;
+    }
+
+    /// Keep this reservation charged until the owning governor is dropped.
+    ///
+    /// This is used when a phase returns an allocation that remains live in a
+    /// later phase of the same governed operation.
+    pub(crate) fn retain_until_governor_drop(mut self) {
         self.amount = 0;
     }
 }
@@ -478,6 +915,9 @@ mod tests {
     fn limits(memory: u64) -> ResourceLimits {
         ResourceLimits::new(
             MemoryBudget::new(ByteCount::from_bytes(memory)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
             ElapsedBudget::new(Duration::from_secs(1)),
         )
     }
@@ -566,6 +1006,44 @@ mod tests {
     }
 
     #[test]
+    fn resize_preserves_accounting_while_growing_and_shrinking() {
+        let governor = ResourceGovernor::new(limits(100));
+        let mut workspace = governor
+            .reserve_memory(ResourcePhase::SyncIngest, ByteCount::from_bytes(40))
+            .expect("initial reservation");
+
+        workspace
+            .try_resize(ByteCount::from_bytes(75))
+            .expect("grow reservation");
+        assert_eq!(workspace.amount(), ByteCount::from_bytes(75));
+        assert_eq!(governor.memory_used(), ByteCount::from_bytes(75));
+
+        workspace
+            .try_resize(ByteCount::from_bytes(25))
+            .expect("shrink reservation");
+        assert_eq!(workspace.amount(), ByteCount::from_bytes(25));
+        assert_eq!(governor.memory_used(), ByteCount::from_bytes(25));
+        assert_eq!(governor.memory_peak(), ByteCount::from_bytes(75));
+    }
+
+    #[test]
+    fn retained_lease_reduces_later_phase_headroom() {
+        let governor = ResourceGovernor::new(limits(100));
+        governor
+            .reserve_memory(ResourcePhase::QueryCandidates, ByteCount::from_bytes(40))
+            .expect("reservation")
+            .retain_until_governor_drop();
+
+        assert_eq!(governor.memory_used(), ByteCount::from_bytes(40));
+        let error =
+            match governor.reserve_memory(ResourcePhase::QueryHydrate, ByteCount::from_bytes(61)) {
+                Ok(_) => panic!("retained phase memory must reduce later headroom"),
+                Err(error) => error,
+            };
+        assert_eq!(error.used(), 40);
+    }
+
+    #[test]
     fn lease_growth_records_the_phase_that_crosses_the_peak() {
         let governor = ResourceGovernor::new(limits(100));
         let mut lease = governor
@@ -628,11 +1106,89 @@ mod tests {
     fn elapsed_budget_is_checked_monotonically() {
         let governor = ResourceGovernor::new(ResourceLimits::new(
             MemoryBudget::new(ByteCount::from_bytes(1)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
             ElapsedBudget::new(Duration::ZERO),
         ));
         let error = governor
             .check_elapsed_duration(ResourcePhase::Replacement, Duration::from_micros(1))
             .expect_err("nonzero elapsed time must exceed a zero deadline");
         assert_eq!(error.kind(), ResourceKind::Elapsed);
+    }
+
+    #[test]
+    fn named_governor_publishes_last_operation_telemetry_on_drop() {
+        {
+            let governor = ResourceGovernor::new_named("query", limits(100));
+            governor
+                .consume_rows(ResourcePhase::QueryCandidates, RowCount::new(3))
+                .expect("row accounting should fit");
+            governor
+                .consume_work(ResourcePhase::QueryExpand, WorkUnits::new(7))
+                .expect("work accounting should fit");
+            let _workspace = governor
+                .reserve_memory(ResourcePhase::QueryPaths, ByteCount::from_bytes(40))
+                .expect("workspace should fit");
+        }
+
+        let snapshot = last_operation_snapshot().expect("named operation should be recorded");
+        assert_eq!(snapshot.operation, "query");
+        assert_eq!(snapshot.memory_budget_bytes, 100);
+        assert_eq!(snapshot.memory_peak_bytes, 40);
+        assert_eq!(snapshot.memory_peak_phase.as_deref(), Some("query.paths"));
+        assert_eq!(snapshot.rows, 3);
+        assert_eq!(snapshot.work_units, 7);
+    }
+
+    #[test]
+    fn row_and_work_breakers_stop_before_crossing_the_limit() {
+        let governor = ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1)),
+            DiskBudget::UNLIMITED,
+            RowCount::new(2),
+            WorkUnits::new(3),
+            ElapsedBudget::new(Duration::MAX),
+        ));
+        governor
+            .consume_rows(ResourcePhase::SyncIngest, RowCount::new(2))
+            .expect("row limit should be inclusive");
+        let rows = governor
+            .consume_rows(ResourcePhase::SyncIngest, RowCount::new(1))
+            .expect_err("row limit should reject the next row");
+        assert_eq!(rows.kind(), ResourceKind::Rows);
+        assert_eq!(governor.rows_used().as_u64(), 2);
+
+        governor
+            .consume_work(ResourcePhase::QueryExpand, WorkUnits::new(3))
+            .expect("work limit should be inclusive");
+        let work = governor
+            .consume_work(ResourcePhase::QueryExpand, WorkUnits::new(1))
+            .expect_err("work limit should reject the next unit");
+        assert_eq!(work.kind(), ResourceKind::Work);
+        assert_eq!(governor.work_used().as_u64(), 3);
+    }
+
+    #[test]
+    fn disk_leases_track_peak_and_release_capacity() {
+        let governor = ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1)),
+            DiskBudget::new(ByteCount::from_bytes(10)),
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
+            ElapsedBudget::new(Duration::MAX),
+        ));
+        {
+            let _disk = governor
+                .reserve_disk(ResourcePhase::CompactionMerge, ByteCount::from_bytes(10))
+                .expect("disk limit should be inclusive");
+            assert_eq!(governor.disk_peak().as_u64(), 10);
+            assert!(governor
+                .reserve_disk(ResourcePhase::CompactionMerge, ByteCount::from_bytes(1))
+                .is_err());
+        }
+        governor
+            .reserve_disk(ResourcePhase::SyncIngest, ByteCount::from_bytes(10))
+            .expect("dropped disk lease should release capacity");
     }
 }

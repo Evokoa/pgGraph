@@ -171,6 +171,28 @@ SELECT pg_reload_conf();
 
 Or reduce registered graph scope.
 
+## Query Or Maintenance Hits A Resource Limit
+
+Symptom: SQLSTATE `54000`, diagnostic `PG007`. The error names the phase,
+resource kind, current use, requested amount, and configured limit.
+
+Inspect the most recent completed governed operation in the same backend:
+
+```sql
+SELECT * FROM graph.resource_status();
+SHOW graph.query_memory_mb;
+SHOW graph.maintenance_memory_mb;
+SHOW graph.spill_disk_limit_mb;
+SHOW graph.query_work_limit;
+SHOW graph.operation_timeout_ms;
+```
+
+Reduce result cardinality, depth, wildcard range, hydration width, sync batch,
+or compaction range before raising a limit. If you raise a memory setting,
+remember that `graph.memory_limit_mb` is still the hard backend-private ceiling
+after the loaded graph's residency. PostgreSQL cancellation and
+`statement_timeout` are checked throughout long graph operations.
+
 ## Build Or Vacuum Locked
 
 Symptom: SQLSTATE `55P03`, diagnostic `PG006`.

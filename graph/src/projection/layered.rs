@@ -5,6 +5,7 @@
 //! read adoption is handled by a later phase; this module provides the pure
 //! runtime surface and real segment loading boundary.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,13 +49,235 @@ enum DurableEdgeState {
     Deleted,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct DurableEdges {
     inserts: Vec<LayeredEdge>,
     deletes: HashSet<(u32, u8, bool, Option<RelationshipId>)>,
 }
 
 type MergedEdgeKey = (u32, u8, bool, Option<RelationshipId>);
+
+/// Fully decoded immutable durable state for one projection generation.
+///
+/// The engine builds this once while installing a validated manifest. Serving
+/// queries borrow it, avoiding both segment I/O and repeated map construction.
+pub(crate) struct LayeredSnapshot {
+    base_chunk_ranges: Vec<SourceRange>,
+    base_chunk_out: HashMap<u32, DurableEdges>,
+    base_chunk_in: HashMap<u32, DurableEdges>,
+    durable_out: HashMap<u32, DurableEdges>,
+    durable_in: HashMap<u32, DurableEdges>,
+    active_nodes: HashMap<u32, bool>,
+    tenant_memberships: HashMap<u64, HashSet<u32>>,
+}
+
+/// Allocation preflight for constructing an immutable layered snapshot.
+///
+/// The estimate includes both direction indexes, their temporary merge maps,
+/// output collections, per-segment weight indexes, and node/tenant metadata.
+/// Callers can reserve [`Self::estimated_peak_bytes`] with their operation
+/// governor before invoking [`LayeredSnapshot::try_build_from_refs_with_plan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LayeredSnapshotBuildPlan {
+    base_chunk_ranges: usize,
+    base_chunks: LayeredBuilderCapacity,
+    segments: LayeredBuilderCapacity,
+    estimated_peak_bytes: usize,
+}
+
+impl LayeredSnapshotBuildPlan {
+    /// Return a conservative upper bound for private heap used while building.
+    pub(crate) const fn estimated_peak_bytes(self) -> usize {
+        self.estimated_peak_bytes
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LayeredBuilderCapacity {
+    segment_count: usize,
+    edge_mutations: usize,
+    max_edge_weights: usize,
+    node_states: usize,
+    tenant_rows: usize,
+}
+
+impl LayeredSnapshot {
+    /// Derive the immutable serving snapshot from validated decoded segments.
+    pub(crate) fn build(
+        base: &EdgeStore,
+        base_chunks: &[DeltaSegment],
+        segments: &[DeltaSegment],
+    ) -> Self {
+        let base_chunk_refs = base_chunks.iter().collect::<Vec<_>>();
+        let segment_refs = segments.iter().collect::<Vec<_>>();
+        Self::build_from_refs(base, &base_chunk_refs, &segment_refs)
+    }
+
+    /// Derive a snapshot without cloning already-decoded segment payloads.
+    pub(crate) fn build_from_refs(
+        base: &EdgeStore,
+        base_chunks: &[&DeltaSegment],
+        segments: &[&DeltaSegment],
+    ) -> Self {
+        let base_chunk_ranges = base_chunks
+            .iter()
+            .map(|chunk| SourceRange {
+                start: chunk.header.source_start,
+                end: chunk.header.source_end,
+            })
+            .collect::<Vec<_>>();
+        let mut base_chunk_builder = LayeredBuilder::new(base);
+        base_chunk_builder.apply_segment_refs(base_chunks);
+        let base_chunk_output = base_chunk_builder.finish_replacement();
+        let mut builder = LayeredBuilder::new(base);
+        builder.apply_segment_refs(segments);
+        let output = builder.finish();
+        Self {
+            base_chunk_ranges,
+            base_chunk_out: base_chunk_output.durable_out,
+            base_chunk_in: base_chunk_output.durable_in,
+            durable_out: output.durable_out,
+            durable_in: output.durable_in,
+            active_nodes: output.active_nodes,
+            tenant_memberships: output.tenant_memberships,
+        }
+    }
+
+    /// Preflight all collection capacities required by a layered snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::Internal`] when input counts or the conservative
+    /// heap estimate overflow `usize`.
+    pub(crate) fn build_plan(
+        base_chunks: &[&DeltaSegment],
+        segments: &[&DeltaSegment],
+    ) -> GraphResult<LayeredSnapshotBuildPlan> {
+        let base_capacity = LayeredBuilderCapacity::try_from_segments(base_chunks)?;
+        let segment_capacity = LayeredBuilderCapacity::try_from_segments(segments)?;
+        let range_bytes = checked_bytes(base_chunks.len(), std::mem::size_of::<SourceRange>())?;
+        let base_bytes = base_capacity.estimated_heap_bytes()?;
+        let segment_bytes = segment_capacity.estimated_heap_bytes()?;
+        let estimated_peak_bytes = range_bytes
+            .checked_add(base_bytes)
+            .and_then(|bytes| bytes.checked_add(segment_bytes))
+            .ok_or_else(layered_size_overflow)?;
+        Ok(LayeredSnapshotBuildPlan {
+            base_chunk_ranges: base_chunks.len(),
+            base_chunks: base_capacity,
+            segments: segment_capacity,
+            estimated_peak_bytes,
+        })
+    }
+
+    /// Build a snapshot with fallible, pre-sized backing collections.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed allocation or size-overflow error.
+    pub(crate) fn try_build_from_refs(
+        base: &EdgeStore,
+        base_chunks: &[&DeltaSegment],
+        segments: &[&DeltaSegment],
+    ) -> GraphResult<Self> {
+        let plan = Self::build_plan(base_chunks, segments)?;
+        Self::try_build_from_refs_with_plan(base, base_chunks, segments, plan)
+    }
+
+    /// Build from a previously validated allocation plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the plan no longer matches the inputs,
+    /// or a typed allocation error when a backing allocation fails.
+    pub(crate) fn try_build_from_refs_with_plan(
+        base: &EdgeStore,
+        base_chunks: &[&DeltaSegment],
+        segments: &[&DeltaSegment],
+        plan: LayeredSnapshotBuildPlan,
+    ) -> GraphResult<Self> {
+        let actual = Self::build_plan(base_chunks, segments)?;
+        if actual != plan {
+            return Err(GraphError::Internal(
+                "layered snapshot allocation plan does not match its segment inputs".to_string(),
+            ));
+        }
+        let mut base_chunk_ranges = Vec::new();
+        base_chunk_ranges
+            .try_reserve_exact(plan.base_chunk_ranges)
+            .map_err(layered_allocation_error)?;
+        base_chunk_ranges.extend(base_chunks.iter().map(|chunk| SourceRange {
+            start: chunk.header.source_start,
+            end: chunk.header.source_end,
+        }));
+        let mut base_chunk_builder = LayeredBuilder::try_new(base, plan.base_chunks, base_chunks)?;
+        base_chunk_builder.try_apply_segment_refs(base_chunks)?;
+        let base_chunk_output = base_chunk_builder.try_finish_replacement()?;
+        let mut builder = LayeredBuilder::try_new(base, plan.segments, segments)?;
+        builder.try_apply_segment_refs(segments)?;
+        let output = builder.try_finish()?;
+        Ok(Self {
+            base_chunk_ranges,
+            base_chunk_out: base_chunk_output.durable_out,
+            base_chunk_in: base_chunk_output.durable_in,
+            durable_out: output.durable_out,
+            durable_in: output.durable_in,
+            active_nodes: output.active_nodes,
+            tenant_memberships: output.tenant_memberships,
+        })
+    }
+
+    /// Conservatively estimate backend-private heap retained by this snapshot.
+    pub(crate) fn estimated_heap_bytes(&self) -> usize {
+        fn durable_map_bytes(map: &HashMap<u32, DurableEdges>) -> usize {
+            let buckets = map
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(u32, DurableEdges)>() * 2);
+            let payloads = map.values().fold(0usize, |total, edges| {
+                total
+                    .saturating_add(
+                        edges
+                            .inserts
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<LayeredEdge>()),
+                    )
+                    .saturating_add(edges.deletes.capacity().saturating_mul(
+                        std::mem::size_of::<(u32, u8, bool, Option<RelationshipId>)>() * 2,
+                    ))
+            });
+            buckets.saturating_add(payloads)
+        }
+
+        self.base_chunk_ranges
+            .capacity()
+            .saturating_mul(std::mem::size_of::<SourceRange>())
+            .saturating_add(durable_map_bytes(&self.base_chunk_out))
+            .saturating_add(durable_map_bytes(&self.base_chunk_in))
+            .saturating_add(durable_map_bytes(&self.durable_out))
+            .saturating_add(durable_map_bytes(&self.durable_in))
+            .saturating_add(
+                self.active_nodes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(u32, bool)>() * 2),
+            )
+            .saturating_add(
+                self.tenant_memberships
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(u64, HashSet<u32>)>() * 2),
+            )
+            .saturating_add(
+                self.tenant_memberships
+                    .values()
+                    .fold(0usize, |total, members| {
+                        total.saturating_add(
+                            members
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<u32>() * 2),
+                        )
+                    }),
+            )
+    }
+}
 
 /// Source of decoded durable segments for a layered projection snapshot.
 pub(crate) trait SegmentProvider {
@@ -167,17 +390,17 @@ fn read_manifest_chunk(root: &Path, chunk: &ManifestChunkRef) -> GraphResult<Del
 pub(crate) struct LayeredNeighbors<'a> {
     base: &'a EdgeStore,
     base_in: Option<&'a EdgeStore>,
-    base_chunk_ranges: Vec<SourceRange>,
-    base_chunk_out: HashMap<u32, DurableEdges>,
-    base_chunk_in: HashMap<u32, DurableEdges>,
-    durable_out: HashMap<u32, DurableEdges>,
-    durable_in: HashMap<u32, DurableEdges>,
+    base_chunk_ranges: Cow<'a, [SourceRange]>,
+    base_chunk_out: Cow<'a, HashMap<u32, DurableEdges>>,
+    base_chunk_in: Cow<'a, HashMap<u32, DurableEdges>>,
+    durable_out: Cow<'a, HashMap<u32, DurableEdges>>,
+    durable_in: Cow<'a, HashMap<u32, DurableEdges>>,
     committed_out_inserts: OverlayInserts,
     committed_out_deletes: OverlayDeletes,
     committed_in_inserts: OverlayInserts,
     committed_in_deletes: OverlayDeletes,
-    active_nodes: HashMap<u32, bool>,
-    tenant_memberships: HashMap<u64, HashSet<u32>>,
+    active_nodes: Cow<'a, HashMap<u32, bool>>,
+    tenant_memberships: Cow<'a, HashMap<u64, HashSet<u32>>>,
     tenant_filter: Option<u64>,
 }
 
@@ -225,35 +448,23 @@ impl<'a> LayeredNeighbors<'a> {
         committed_out: Option<EdgeOverlay>,
         committed_in: Option<EdgeOverlay>,
     ) -> Self {
-        let base_chunk_ranges = base_chunks
-            .iter()
-            .map(|chunk| SourceRange {
-                start: chunk.header.source_start,
-                end: chunk.header.source_end,
-            })
-            .collect::<Vec<_>>();
-        let mut base_chunk_builder = LayeredBuilder::new(base);
-        base_chunk_builder.apply_segments(base_chunks);
-        let base_chunk_output = base_chunk_builder.finish_replacement();
-        let mut builder = LayeredBuilder::new(base);
-        builder.apply_segments(segments);
-        let output = builder.finish();
+        let snapshot = LayeredSnapshot::build(base, &base_chunks, &segments);
         let (committed_out_inserts, committed_out_deletes) = committed_out.unwrap_or_default();
         let (committed_in_inserts, committed_in_deletes) = committed_in.unwrap_or_default();
         Self {
             base,
             base_in,
-            base_chunk_ranges,
-            base_chunk_out: base_chunk_output.durable_out,
-            base_chunk_in: base_chunk_output.durable_in,
-            durable_out: output.durable_out,
-            durable_in: output.durable_in,
+            base_chunk_ranges: Cow::Owned(snapshot.base_chunk_ranges),
+            base_chunk_out: Cow::Owned(snapshot.base_chunk_out),
+            base_chunk_in: Cow::Owned(snapshot.base_chunk_in),
+            durable_out: Cow::Owned(snapshot.durable_out),
+            durable_in: Cow::Owned(snapshot.durable_in),
             committed_out_inserts,
             committed_out_deletes,
             committed_in_inserts,
             committed_in_deletes,
-            active_nodes: output.active_nodes,
-            tenant_memberships: output.tenant_memberships,
+            active_nodes: Cow::Owned(snapshot.active_nodes),
+            tenant_memberships: Cow::Owned(snapshot.tenant_memberships),
             tenant_filter,
         }
     }
@@ -299,6 +510,58 @@ impl<'a> LayeredNeighbors<'a> {
             Some(committed_out),
             Some(committed_in),
         ))
+    }
+
+    /// Build a layered source from a generation-pinned derived snapshot.
+    ///
+    /// This is the serving-path constructor. Segment files are validated and
+    /// decoded when the generation is installed; individual queries borrow
+    /// that immutable snapshot and never reopen projection files.
+    pub(crate) fn from_snapshot_with_overlays(
+        base: &'a EdgeStore,
+        base_in: &'a EdgeStore,
+        snapshot: &'a LayeredSnapshot,
+        committed_out: EdgeOverlay,
+        committed_in: EdgeOverlay,
+    ) -> Self {
+        let (committed_out_inserts, committed_out_deletes) = committed_out;
+        let (committed_in_inserts, committed_in_deletes) = committed_in;
+        Self {
+            base,
+            base_in: Some(base_in),
+            base_chunk_ranges: Cow::Borrowed(&snapshot.base_chunk_ranges),
+            base_chunk_out: Cow::Borrowed(&snapshot.base_chunk_out),
+            base_chunk_in: Cow::Borrowed(&snapshot.base_chunk_in),
+            durable_out: Cow::Borrowed(&snapshot.durable_out),
+            durable_in: Cow::Borrowed(&snapshot.durable_in),
+            committed_out_inserts,
+            committed_out_deletes,
+            committed_in_inserts,
+            committed_in_deletes,
+            active_nodes: Cow::Borrowed(&snapshot.active_nodes),
+            tenant_memberships: Cow::Borrowed(&snapshot.tenant_memberships),
+            tenant_filter: None,
+        }
+    }
+
+    /// Borrow a pinned derived snapshot without live overlays.
+    pub(crate) fn from_snapshot(base: &'a EdgeStore, snapshot: &'a LayeredSnapshot) -> Self {
+        Self {
+            base,
+            base_in: None,
+            base_chunk_ranges: Cow::Borrowed(&snapshot.base_chunk_ranges),
+            base_chunk_out: Cow::Borrowed(&snapshot.base_chunk_out),
+            base_chunk_in: Cow::Borrowed(&snapshot.base_chunk_in),
+            durable_out: Cow::Borrowed(&snapshot.durable_out),
+            durable_in: Cow::Borrowed(&snapshot.durable_in),
+            committed_out_inserts: HashMap::new(),
+            committed_out_deletes: HashMap::new(),
+            committed_in_inserts: HashMap::new(),
+            committed_in_deletes: HashMap::new(),
+            active_nodes: Cow::Borrowed(&snapshot.active_nodes),
+            tenant_memberships: Cow::Borrowed(&snapshot.tenant_memberships),
+            tenant_filter: None,
+        }
     }
 
     /// Borrow this layered snapshot as a neighbor source for `direction`.
@@ -820,8 +1083,8 @@ fn merge_committed_overlay_maps(
 
 struct LayeredBuilder<'a> {
     base: &'a EdgeStore,
-    out_edges: BTreeMap<EdgeKey, DurableEdgeState>,
-    in_edges: BTreeMap<EdgeKey, DurableEdgeState>,
+    out_edges: HashMap<EdgeKey, DurableEdgeState>,
+    in_edges: HashMap<EdgeKey, DurableEdgeState>,
     active_nodes: HashMap<u32, bool>,
     tenant_memberships: HashMap<u64, HashSet<u32>>,
 }
@@ -833,19 +1096,179 @@ struct LayeredBuildOutput {
     tenant_memberships: HashMap<u64, HashSet<u32>>,
 }
 
+impl LayeredBuilderCapacity {
+    fn try_from_segments(segments: &[&DeltaSegment]) -> GraphResult<Self> {
+        let mut capacity = Self {
+            segment_count: segments.len(),
+            ..Self::default()
+        };
+        for segment in segments {
+            let mutations = segment
+                .edge_inserts
+                .len()
+                .checked_add(segment.edge_deletes.len())
+                .ok_or_else(layered_size_overflow)?;
+            capacity.edge_mutations = capacity
+                .edge_mutations
+                .checked_add(mutations)
+                .ok_or_else(layered_size_overflow)?;
+            capacity.max_edge_weights = capacity.max_edge_weights.max(segment.edge_weights.len());
+            capacity.node_states = capacity
+                .node_states
+                .checked_add(segment.node_states.len())
+                .ok_or_else(layered_size_overflow)?;
+            capacity.tenant_rows = capacity
+                .tenant_rows
+                .checked_add(segment.tenants.len())
+                .ok_or_else(layered_size_overflow)?;
+        }
+        Ok(capacity)
+    }
+
+    fn estimated_heap_bytes(self) -> GraphResult<usize> {
+        let ordered = checked_bytes(self.segment_count, std::mem::size_of::<&DeltaSegment>())?;
+        let direction_entry = std::mem::size_of::<(EdgeKey, DurableEdgeState)>();
+        let intermediate_edges = checked_bytes(self.edge_mutations, direction_entry)?
+            .checked_mul(4)
+            .ok_or_else(layered_size_overflow)?;
+        let output_map_entry = std::mem::size_of::<(u32, DurableEdges)>();
+        let output_maps = checked_bytes(self.edge_mutations, output_map_entry)?
+            .checked_mul(4)
+            .ok_or_else(layered_size_overflow)?;
+        let insert_payloads =
+            checked_bytes(self.edge_mutations, std::mem::size_of::<LayeredEdge>())?
+                .checked_mul(2)
+                .ok_or_else(layered_size_overflow)?;
+        let delete_payloads = checked_bytes(
+            self.edge_mutations,
+            std::mem::size_of::<(u32, u8, bool, Option<RelationshipId>)>(),
+        )?
+        .checked_mul(4)
+        .ok_or_else(layered_size_overflow)?;
+        let weight_index =
+            checked_bytes(self.max_edge_weights, std::mem::size_of::<(EdgeKey, u32)>())?
+                .checked_mul(2)
+                .ok_or_else(layered_size_overflow)?;
+        let node_index = checked_bytes(self.node_states, std::mem::size_of::<(u32, bool)>())?
+            .checked_mul(2)
+            .ok_or_else(layered_size_overflow)?;
+        let tenant_index =
+            checked_bytes(self.tenant_rows, std::mem::size_of::<(u64, HashSet<u32>)>())?
+                .checked_mul(2)
+                .and_then(|bytes| {
+                    checked_bytes(self.tenant_rows, std::mem::size_of::<u32>())
+                        .ok()?
+                        .checked_mul(2)
+                        .and_then(|members| bytes.checked_add(members))
+                })
+                .ok_or_else(layered_size_overflow)?;
+        [
+            ordered,
+            intermediate_edges,
+            output_maps,
+            insert_payloads,
+            delete_payloads,
+            weight_index,
+            node_index,
+            tenant_index,
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes).ok_or_else(layered_size_overflow)
+        })
+    }
+}
+
+fn checked_bytes(count: usize, item_size: usize) -> GraphResult<usize> {
+    count
+        .checked_mul(item_size)
+        .ok_or_else(layered_size_overflow)
+}
+
+fn layered_size_overflow() -> GraphError {
+    GraphError::Internal("layered snapshot allocation size overflowed usize".to_string())
+}
+
+fn layered_allocation_error(_error: std::collections::TryReserveError) -> GraphError {
+    GraphError::Oom {
+        used_mb: 0,
+        need_mb: 1,
+        limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+    }
+}
+
+fn try_tenant_memberships(
+    segments: &[&DeltaSegment],
+    tenant_rows: usize,
+) -> GraphResult<HashMap<u64, HashSet<u32>>> {
+    let mut counts = HashMap::<u64, usize>::new();
+    counts
+        .try_reserve(tenant_rows)
+        .map_err(layered_allocation_error)?;
+    for tenant in segments.iter().flat_map(|segment| &segment.tenants) {
+        let count = counts.entry(tenant.tenant_hash).or_default();
+        *count = count.checked_add(1).ok_or_else(layered_size_overflow)?;
+    }
+    let mut memberships = HashMap::new();
+    memberships
+        .try_reserve(counts.len())
+        .map_err(layered_allocation_error)?;
+    for (tenant_hash, count) in counts {
+        let mut members = HashSet::new();
+        members
+            .try_reserve(count)
+            .map_err(layered_allocation_error)?;
+        memberships.insert(tenant_hash, members);
+    }
+    Ok(memberships)
+}
+
 impl<'a> LayeredBuilder<'a> {
     fn new(base: &'a EdgeStore) -> Self {
         Self {
             base,
-            out_edges: BTreeMap::new(),
-            in_edges: BTreeMap::new(),
+            out_edges: HashMap::new(),
+            in_edges: HashMap::new(),
             active_nodes: HashMap::new(),
             tenant_memberships: HashMap::new(),
         }
     }
 
-    fn apply_segments(&mut self, mut segments: Vec<DeltaSegment>) {
-        segments.sort_by_key(|segment| {
+    fn try_new(
+        base: &'a EdgeStore,
+        capacity: LayeredBuilderCapacity,
+        segments: &[&DeltaSegment],
+    ) -> GraphResult<Self> {
+        let mut out_edges = HashMap::new();
+        out_edges
+            .try_reserve(capacity.edge_mutations)
+            .map_err(layered_allocation_error)?;
+        let mut in_edges = HashMap::new();
+        in_edges
+            .try_reserve(capacity.edge_mutations)
+            .map_err(layered_allocation_error)?;
+        let mut active_nodes = HashMap::new();
+        active_nodes
+            .try_reserve(capacity.node_states)
+            .map_err(layered_allocation_error)?;
+        let tenant_memberships = try_tenant_memberships(segments, capacity.tenant_rows)?;
+        Ok(Self {
+            base,
+            out_edges,
+            in_edges,
+            active_nodes,
+            tenant_memberships,
+        })
+    }
+
+    fn apply_segments(&mut self, segments: &[DeltaSegment]) {
+        let refs = segments.iter().collect::<Vec<_>>();
+        self.apply_segment_refs(&refs);
+    }
+
+    fn apply_segment_refs(&mut self, segments: &[&DeltaSegment]) {
+        let mut ordered = segments.to_vec();
+        ordered.sort_by_key(|segment| {
             (
                 segment.header.sync_watermark,
                 segment.header.level,
@@ -853,12 +1276,35 @@ impl<'a> LayeredBuilder<'a> {
                 segment.header.source_end,
             )
         });
-        for segment in segments {
+        for segment in ordered {
             match segment.header.kind {
-                SegmentKind::Edge => self.apply_edge_segment(&segment),
-                SegmentKind::Node => self.apply_node_segment(&segment),
+                SegmentKind::Edge => self.apply_edge_segment(segment),
+                SegmentKind::Node => self.apply_node_segment(segment),
             }
         }
+    }
+
+    fn try_apply_segment_refs(&mut self, segments: &[&DeltaSegment]) -> GraphResult<()> {
+        let mut ordered = Vec::new();
+        ordered
+            .try_reserve_exact(segments.len())
+            .map_err(layered_allocation_error)?;
+        ordered.extend_from_slice(segments);
+        ordered.sort_by_key(|segment| {
+            (
+                segment.header.sync_watermark,
+                segment.header.level,
+                segment.header.source_start,
+                segment.header.source_end,
+            )
+        });
+        for segment in ordered {
+            match segment.header.kind {
+                SegmentKind::Edge => self.try_apply_edge_segment(segment)?,
+                SegmentKind::Node => self.apply_node_segment(segment),
+            }
+        }
+        Ok(())
     }
 
     fn apply_edge_segment(&mut self, segment: &DeltaSegment) {
@@ -906,6 +1352,54 @@ impl<'a> LayeredBuilder<'a> {
             };
             self.insert_edge(segment.header.direction, edge.source, layered_edge);
         }
+    }
+
+    fn try_apply_edge_segment(&mut self, segment: &DeltaSegment) -> GraphResult<()> {
+        let mut weights = HashMap::new();
+        weights
+            .try_reserve(segment.edge_weights.len())
+            .map_err(layered_allocation_error)?;
+        weights.extend(segment.edge_weights.iter().map(|row| {
+            (
+                EdgeKey {
+                    source: row.source,
+                    target: row.target,
+                    type_id: row.type_id,
+                    schema_reversed: row.schema_reversed,
+                    relationship_id: row.relationship_id,
+                },
+                row.weight,
+            )
+        }));
+        for edge in &segment.edge_deletes {
+            self.remove_edge(
+                segment.header.direction,
+                edge.source,
+                edge.target,
+                edge.type_id,
+                edge.schema_reversed,
+                edge.relationship_id,
+            );
+        }
+        for edge in &segment.edge_inserts {
+            let layered_edge = LayeredEdge {
+                target: edge.target,
+                type_id: edge.type_id,
+                schema_reversed: edge.schema_reversed,
+                weight: weights
+                    .get(&EdgeKey {
+                        source: edge.source,
+                        target: edge.target,
+                        type_id: edge.type_id,
+                        schema_reversed: edge.schema_reversed,
+                        relationship_id: edge.relationship_id,
+                    })
+                    .copied(),
+                relationship_id: edge.relationship_id,
+            };
+            self.insert_edge(segment.header.direction, edge.source, layered_edge);
+        }
+        Ok(())
     }
 
     fn apply_node_segment(&mut self, segment: &DeltaSegment) {
@@ -1080,6 +1574,33 @@ impl<'a> LayeredBuilder<'a> {
         self.finish_with_base_duplicate_filter(false)
     }
 
+    fn try_finish(self) -> GraphResult<LayeredBuildOutput> {
+        self.try_finish_with_base_duplicate_filter(true)
+    }
+
+    fn try_finish_replacement(self) -> GraphResult<LayeredBuildOutput> {
+        self.try_finish_with_base_duplicate_filter(false)
+    }
+
+    fn try_finish_with_base_duplicate_filter(
+        self,
+        suppress_base_duplicates: bool,
+    ) -> GraphResult<LayeredBuildOutput> {
+        let Self {
+            base,
+            out_edges,
+            in_edges,
+            active_nodes,
+            tenant_memberships,
+        } = self;
+        Ok(LayeredBuildOutput {
+            durable_out: try_finish_direction(base, out_edges, suppress_base_duplicates)?,
+            durable_in: try_finish_direction(base, in_edges, suppress_base_duplicates)?,
+            active_nodes,
+            tenant_memberships,
+        })
+    }
+
     fn finish_with_base_duplicate_filter(
         self,
         suppress_base_duplicates: bool,
@@ -1102,11 +1623,13 @@ impl<'a> LayeredBuilder<'a> {
 
 fn finish_direction(
     base: &EdgeStore,
-    edges: BTreeMap<EdgeKey, DurableEdgeState>,
+    edges: HashMap<EdgeKey, DurableEdgeState>,
     suppress_base_duplicates: bool,
 ) -> HashMap<u32, DurableEdges> {
+    let mut ordered = edges.into_iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(key, _)| *key);
     let mut out = HashMap::<u32, DurableEdges>::new();
-    for (key, state) in edges {
+    for (key, state) in ordered {
         match state {
             DurableEdgeState::Present {
                 weight,
@@ -1139,7 +1662,90 @@ fn finish_direction(
     out
 }
 
-fn record_edge_delete(edges: &mut BTreeMap<EdgeKey, DurableEdgeState>, key: EdgeKey) {
+fn try_finish_direction(
+    base: &EdgeStore,
+    edges: HashMap<EdgeKey, DurableEdgeState>,
+    suppress_base_duplicates: bool,
+) -> GraphResult<HashMap<u32, DurableEdges>> {
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(edges.len())
+        .map_err(layered_allocation_error)?;
+    ordered.extend(edges);
+    ordered.sort_by_key(|(key, _)| *key);
+
+    let mut counts = HashMap::<u32, (usize, usize)>::new();
+    counts
+        .try_reserve(ordered.len())
+        .map_err(layered_allocation_error)?;
+    for (key, state) in &ordered {
+        if suppress_base_duplicates
+            && matches!(state, DurableEdgeState::Present { weight: None, .. })
+            && base_edge_exists(base, *key)
+        {
+            continue;
+        }
+        let count = counts.entry(key.source).or_default();
+        match state {
+            DurableEdgeState::Present { .. } => count.0 += 1,
+            DurableEdgeState::Deleted => count.1 += 1,
+        }
+    }
+    let mut out = HashMap::<u32, DurableEdges>::new();
+    out.try_reserve(counts.len())
+        .map_err(layered_allocation_error)?;
+    for (source, (insert_count, delete_count)) in counts {
+        let mut inserts = Vec::new();
+        inserts
+            .try_reserve_exact(insert_count)
+            .map_err(layered_allocation_error)?;
+        let mut deletes = HashSet::new();
+        deletes
+            .try_reserve(delete_count)
+            .map_err(layered_allocation_error)?;
+        out.insert(source, DurableEdges { inserts, deletes });
+    }
+    for (key, state) in ordered {
+        match state {
+            DurableEdgeState::Present {
+                weight,
+                relationship_id,
+            } => {
+                if suppress_base_duplicates && base_edge_exists(base, key) && weight.is_none() {
+                    continue;
+                }
+                let Some(edges) = out.get_mut(&key.source) else {
+                    return Err(GraphError::Internal(
+                        "layered output preflight omitted an insert source".to_string(),
+                    ));
+                };
+                edges.inserts.push(LayeredEdge {
+                    target: key.target,
+                    type_id: key.type_id,
+                    schema_reversed: key.schema_reversed,
+                    weight,
+                    relationship_id,
+                });
+            }
+            DurableEdgeState::Deleted => {
+                let Some(edges) = out.get_mut(&key.source) else {
+                    return Err(GraphError::Internal(
+                        "layered output preflight omitted a delete source".to_string(),
+                    ));
+                };
+                edges.deletes.insert((
+                    key.target,
+                    key.type_id,
+                    key.schema_reversed,
+                    key.relationship_id,
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn record_edge_delete(edges: &mut HashMap<EdgeKey, DurableEdgeState>, key: EdgeKey) {
     if key.relationship_id.is_none() {
         edges.retain(|existing, _| {
             existing.source != key.source
@@ -1184,6 +1790,60 @@ mod tests {
         ProjectionArtifactDir,
     };
     use proptest::prelude::*;
+
+    #[test]
+    fn fallible_snapshot_plan_preserves_ordered_layered_results() {
+        let base = edge_store_from_tuples(4, &[(0, 1, 1)]);
+        let mut older = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 1)
+            .expect("older segment");
+        older.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 2,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(10),
+        });
+        let mut newer = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 2)
+            .expect("newer segment");
+        newer.edge_deletes.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        newer.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 3,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(11),
+        });
+        let refs = [&newer, &older];
+        let plan = LayeredSnapshot::build_plan(&[], &refs).expect("snapshot plan");
+        assert!(plan.estimated_peak_bytes() > 0);
+        let snapshot = LayeredSnapshot::try_build_from_refs_with_plan(&base, &[], &refs, plan)
+            .expect("bounded snapshot");
+        let layered = LayeredNeighbors::from_snapshot(&base, &snapshot);
+
+        assert_eq!(
+            layered.neighbors(0).collect::<Vec<_>>(),
+            vec![
+                Neighbor {
+                    target: 2,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(10),
+                },
+                Neighbor {
+                    target: 3,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(11),
+                },
+            ]
+        );
+    }
 
     #[test]
     fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {

@@ -190,6 +190,7 @@ operators to distinguish pgGraph conditions that share a standard SQLSTATE.
 | `54000` | `PG004` | Edge type limit exceeded | Reduce distinct edge labels; max user labels are 254 |
 | `22023` | `PG005` | Invalid filter | Register the filter column and use supported operators/types |
 | `55P03` | `PG006` | Build locked | Wait for current build/vacuum/maintenance |
+| `54000` | `PG007` | Resource limit exceeded | Reduce query/work size or raise the relevant query, maintenance, disk, work, or elapsed limit |
 | `54000` | `PG008` | Edge buffer full | Run `graph.vacuum()`/`graph.maintenance()` or increase `graph.edge_buffer_size` |
 | `XX001` | `PG009` | Corrupt graph file | Rebuild persisted artifact |
 | `P0002` | `PG010` | Node not found | Check table/primary key and rebuild/apply sync if data changed |

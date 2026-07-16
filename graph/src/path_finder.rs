@@ -10,11 +10,14 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use roaring::RoaringBitmap;
 
+#[cfg(test)]
 use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
 #[cfg(test)]
 use crate::projection::neighbors::CsrNeighbors;
 use crate::projection::neighbors::{NeighborSource, WeightedNeighborSource};
+use crate::resource::{ResourceGovernor, ResourceLimitError, ResourcePhase, WorkUnits};
+use crate::safety::GraphResult;
 use crate::types::{PathStep, TableOid, WeightedPathStep};
 
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +60,7 @@ pub fn shortest_path(
 }
 
 /// Find the shortest unweighted path over a supplied neighbor source.
+#[cfg(test)]
 pub(crate) fn shortest_path_with_neighbors(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
@@ -66,6 +70,53 @@ pub(crate) fn shortest_path_with_neighbors(
     has_unidirectional_edges: bool,
     edge_type_registry: &[String],
 ) -> Option<Vec<PathStep>> {
+    shortest_path_with_neighbors_inner(
+        node_store,
+        neighbors,
+        UnweightedPathRequest {
+            source,
+            target,
+            max_depth,
+            has_unidirectional_edges,
+            edge_type_registry,
+        },
+        None,
+    )
+}
+
+pub(crate) struct UnweightedPathRequest<'a> {
+    pub(crate) source: u32,
+    pub(crate) target: u32,
+    pub(crate) max_depth: i32,
+    pub(crate) has_unidirectional_edges: bool,
+    pub(crate) edge_type_registry: &'a [String],
+}
+
+/// Find an unweighted path while enforcing expansion and elapsed-time limits.
+pub(crate) fn shortest_path_with_neighbors_governed(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    request: UnweightedPathRequest<'_>,
+    governor: &ResourceGovernor,
+) -> GraphResult<Option<Vec<PathStep>>> {
+    let budget = PathWorkBudget::new(governor);
+    let result = shortest_path_with_neighbors_inner(node_store, neighbors, request, Some(&budget));
+    budget.finish(result)
+}
+
+fn shortest_path_with_neighbors_inner(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    request: UnweightedPathRequest<'_>,
+    budget: Option<&PathWorkBudget<'_>>,
+) -> Option<Vec<PathStep>> {
+    let UnweightedPathRequest {
+        source,
+        target,
+        max_depth,
+        has_unidirectional_edges,
+        edge_type_registry,
+    } = request;
     if source >= node_store.node_count() || target >= node_store.node_count() {
         return None;
     }
@@ -87,6 +138,7 @@ pub(crate) fn shortest_path_with_neighbors(
             target,
             max_depth,
             edge_type_registry,
+            budget,
         );
     }
 
@@ -97,6 +149,7 @@ pub(crate) fn shortest_path_with_neighbors(
         target,
         max_depth,
         edge_type_registry,
+        budget,
     )
 }
 
@@ -107,6 +160,7 @@ fn bidirectional_bfs(
     target: u32,
     max_depth: i32,
     edge_type_registry: &[String],
+    budget: Option<&PathWorkBudget<'_>>,
 ) -> Option<Vec<PathStep>> {
     let mut fwd_visited = RoaringBitmap::new();
     let mut bwd_visited = RoaringBitmap::new();
@@ -146,6 +200,9 @@ fn bidirectional_bfs(
                     break;
                 };
                 for edge in neighbors.neighbors(current) {
+                    if !consume_path_work(budget) {
+                        return None;
+                    }
                     if !node_store.is_active(edge.target)
                         || crate::projection::tx_delta::node_deleted(edge.target)
                     {
@@ -182,6 +239,9 @@ fn bidirectional_bfs(
                     break;
                 };
                 for edge in neighbors.neighbors(current) {
+                    if !consume_path_work(budget) {
+                        return None;
+                    }
                     if !node_store.is_active(edge.target)
                         || crate::projection::tx_delta::node_deleted(edge.target)
                     {
@@ -291,6 +351,7 @@ fn single_direction_bfs(
     target: u32,
     max_depth: i32,
     edge_type_registry: &[String],
+    budget: Option<&PathWorkBudget<'_>>,
 ) -> Option<Vec<PathStep>> {
     let mut visited = RoaringBitmap::new();
     let mut parent = HashMap::new();
@@ -312,6 +373,9 @@ fn single_direction_bfs(
         }
 
         for edge in neighbors.neighbors(current) {
+            if !consume_path_work(budget) {
+                return None;
+            }
             if visited.contains(edge.target)
                 || !node_store.is_active(edge.target)
                 || crate::projection::tx_delta::node_deleted(edge.target)
@@ -374,6 +438,7 @@ fn single_direction_bfs(
 /// Dijkstra's algorithm for weighted shortest path.
 ///
 /// Uses `BinaryHeap<Reverse<(cost, node)>>` for O((V + E) log V).
+#[cfg(test)]
 pub fn weighted_shortest_path(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
@@ -397,6 +462,45 @@ pub(crate) fn weighted_shortest_path_with_neighbors(
     source: u32,
     target: u32,
     edge_type_registry: &[String],
+) -> Option<Vec<WeightedPathStep>> {
+    weighted_shortest_path_with_neighbors_inner(
+        node_store,
+        neighbors,
+        source,
+        target,
+        edge_type_registry,
+        None,
+    )
+}
+
+/// Run Dijkstra while enforcing expansion and elapsed-time limits.
+pub(crate) fn weighted_shortest_path_with_neighbors_governed(
+    node_store: &NodeStore,
+    neighbors: &impl WeightedNeighborSource,
+    source: u32,
+    target: u32,
+    edge_type_registry: &[String],
+    governor: &ResourceGovernor,
+) -> GraphResult<Option<Vec<WeightedPathStep>>> {
+    let budget = PathWorkBudget::new(governor);
+    let result = weighted_shortest_path_with_neighbors_inner(
+        node_store,
+        neighbors,
+        source,
+        target,
+        edge_type_registry,
+        Some(&budget),
+    );
+    budget.finish(result)
+}
+
+fn weighted_shortest_path_with_neighbors_inner(
+    node_store: &NodeStore,
+    neighbors: &impl WeightedNeighborSource,
+    source: u32,
+    target: u32,
+    edge_type_registry: &[String],
+    budget: Option<&PathWorkBudget<'_>>,
 ) -> Option<Vec<WeightedPathStep>> {
     if source >= node_store.node_count() || target >= node_store.node_count() {
         return None;
@@ -431,6 +535,9 @@ pub(crate) fn weighted_shortest_path_with_neighbors(
         }
 
         for edge in neighbors.weighted_neighbors(current) {
+            if !consume_path_work(budget) {
+                return None;
+            }
             let neighbor = edge.target;
             let edge_weight = edge.weight;
             let edge_cost = u64::from(edge_weight);
@@ -503,6 +610,48 @@ pub(crate) fn weighted_shortest_path_with_neighbors(
         .collect()
 }
 
+struct PathWorkBudget<'a> {
+    governor: &'a ResourceGovernor,
+    error: std::cell::Cell<Option<ResourceLimitError>>,
+}
+
+impl<'a> PathWorkBudget<'a> {
+    fn new(governor: &'a ResourceGovernor) -> Self {
+        Self {
+            governor,
+            error: std::cell::Cell::new(None),
+        }
+    }
+
+    fn finish<T>(&self, result: Option<T>) -> GraphResult<Option<T>> {
+        match self.error.get() {
+            Some(error) => Err(crate::safety::resource_limit_error(error)),
+            None => Ok(result),
+        }
+    }
+}
+
+fn consume_path_work(budget: Option<&PathWorkBudget<'_>>) -> bool {
+    let Some(budget) = budget else {
+        return true;
+    };
+    if let Err(error) = budget
+        .governor
+        .consume_work(ResourcePhase::QueryPaths, WorkUnits::new(1))
+    {
+        budget.error.set(Some(error));
+        return false;
+    }
+    if budget.governor.work_used().as_u64().is_multiple_of(1_024) {
+        crate::resource::check_postgres_interrupts();
+        if let Err(error) = budget.governor.check_elapsed(ResourcePhase::QueryPaths) {
+            budget.error.set(Some(error));
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     //! Covers unweighted and weighted path-finding behavior, including directed
@@ -510,6 +659,74 @@ mod tests {
 
     use super::*;
     use crate::edge_store::RawEdge;
+    use crate::resource::{
+        ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceLimits, RowCount, WorkUnits,
+    };
+    use std::time::Duration;
+
+    fn path_governor(work_limit: u64) -> ResourceGovernor {
+        ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1_024 * 1_024)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::new(work_limit),
+            ElapsedBudget::new(Duration::from_secs(1)),
+        ))
+    }
+
+    #[test]
+    fn governed_shortest_path_stops_at_expansion_limit() {
+        let mut nodes = NodeStore::new();
+        for idx in 0..4 {
+            nodes.add_node(100, format!("N-{idx}"));
+        }
+        let edges = EdgeStore::from_edges(
+            4,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 1,
+                    target: 2,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 2,
+                    target: 3,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+            ],
+            false,
+        );
+        let neighbors = CsrNeighbors::new(&edges);
+        let error = shortest_path_with_neighbors_governed(
+            &nodes,
+            &neighbors,
+            UnweightedPathRequest {
+                source: 0,
+                target: 3,
+                max_depth: 4,
+                has_unidirectional_edges: true,
+                edge_type_registry: &["".to_string(), "edge".to_string()],
+            },
+            &path_governor(1),
+        )
+        .expect_err("path should stop before exceeding its work budget");
+
+        assert!(matches!(
+            error,
+            crate::safety::GraphError::ResourceLimit { .. }
+        ));
+    }
 
     #[test]
     fn shortest_path_simple_chain() {

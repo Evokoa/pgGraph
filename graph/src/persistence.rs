@@ -167,10 +167,7 @@ struct PersistedEdgeMetadata {
 }
 
 fn check_for_interrupts() {
-    #[cfg(not(test))]
-    {
-        pgrx::check_for_interrupts!();
-    }
+    crate::resource::check_postgres_interrupts();
 }
 
 struct GraphArtifactWriter {
@@ -977,7 +974,15 @@ pub fn read_projection_mode(path: &Path) -> GraphResult<Option<config::Projectio
 /// another process from invalidating Rust references. Derived and
 /// bincode-backed structures also remain per-backend allocations.
 pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
-    load_graph_file_internal(path, None)
+    load_graph_file_internal(path, None, crate::resource::ByteCount::ZERO)
+}
+
+/// Load while accounting for private state retained until validation finishes.
+pub(crate) fn load_graph_file_with_residency(
+    path: &Path,
+    resident: crate::resource::ByteCount,
+) -> GraphResult<Engine> {
+    load_graph_file_internal(path, None, resident)
 }
 
 /// Load a graph artifact against an unpublished projection candidate.
@@ -985,16 +990,18 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
 /// This is the semantic validation boundary used before an ingestion manifest
 /// becomes current. The candidate's referenced immutable artifacts must
 /// already exist, but the manifest itself need not have been published.
-pub(crate) fn load_graph_file_with_projection_candidate(
+pub(crate) fn load_graph_file_with_projection_candidate_and_residency(
     path: &Path,
     candidate: &ProjectionManifest,
+    resident: crate::resource::ByteCount,
 ) -> GraphResult<Engine> {
-    load_graph_file_internal(path, Some(candidate))
+    load_graph_file_internal(path, Some(candidate), resident)
 }
 
 fn load_graph_file_internal(
     path: &Path,
     projection_candidate: Option<&ProjectionManifest>,
+    resident: crate::resource::ByteCount,
 ) -> GraphResult<Engine> {
     ensure_native_mapped_layout_supported(cfg!(target_endian = "little"))?;
 
@@ -1012,6 +1019,12 @@ fn load_graph_file_internal(
             reason: "file too small for header".to_string(),
         });
     }
+    let load_governor = crate::resource::load_governor(resident);
+    let file_bytes = crate::resource::ByteCount::from_usize(file_len)
+        .ok_or_else(|| GraphError::Internal("graph artifact size does not fit u64".to_string()))?;
+    let _snapshot_memory = load_governor
+        .reserve_memory(crate::resource::ResourcePhase::LoadMetadata, file_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
     let mut snapshot = MmapMut::map_anon(file_len)
         .map_err(|e| GraphError::Internal(format!("anonymous mmap failed: {}", e)))?;
     file.read_exact(&mut snapshot)
@@ -1059,6 +1072,28 @@ fn load_graph_file_internal(
     }
 
     let layout = validate_section_layout(&mmap, &section_offsets, node_count, edge_count)?;
+    let reverse_bytes = reverse_csr_workspace_bytes(node_count, edge_count)?;
+    let _reverse_memory = load_governor
+        .reserve_memory(crate::resource::ResourcePhase::LoadInbound, reverse_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
+    let variable_metadata_bytes = layout.ranges[10]
+        .1
+        .checked_sub(layout.ranges[10].0)
+        .and_then(|filter| {
+            layout.ranges[11]
+                .1
+                .checked_sub(layout.ranges[11].0)
+                .and_then(|metadata| filter.checked_add(metadata))
+        })
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("load metadata estimate overflowed".to_string()))?;
+    let _variable_metadata = load_governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::LoadMetadata,
+            variable_metadata_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
     let artifact = MappedGraphArtifact {
         mmap,
         layout,
@@ -1181,6 +1216,17 @@ fn load_graph_file_internal(
         }
         None => load_projection_manifest(path, computed_crc, &manifest_root)?,
     };
+    let projection_workspace = manifest
+        .as_ref()
+        .map(|manifest| projection_workspace_bytes(&manifest_root, manifest))
+        .transpose()?;
+    let _projection_memory = projection_workspace
+        .map(|bytes| {
+            load_governor
+                .reserve_memory(crate::resource::ResourcePhase::LoadMetadata, bytes)
+                .map_err(crate::safety::resource_limit_error)
+        })
+        .transpose()?;
     if let Some(manifest) = manifest {
         if let Some(reference) = &manifest.relationship_identities {
             let identity_path = manifest_root.join(&reference.path);
@@ -1227,6 +1273,70 @@ fn load_graph_file_internal(
     }
 
     Ok(engine)
+}
+
+fn projection_workspace_bytes(
+    root: &Path,
+    manifest: &ProjectionManifest,
+) -> GraphResult<crate::resource::ByteCount> {
+    let segment_bytes = manifest
+        .segments
+        .iter()
+        .map(|segment| root.join(&segment.path))
+        .chain(
+            manifest
+                .base_chunks
+                .iter()
+                .map(|chunk| root.join(&chunk.path)),
+        )
+        .try_fold(0u64, |total, path| {
+            let bytes = std::fs::metadata(&path)
+                .map_err(|err| GraphError::CorruptFile {
+                    reason: format!(
+                        "projection artifact metadata read failed for {}: {err}",
+                        path.display()
+                    ),
+                })?
+                .len();
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| GraphError::CorruptFile {
+                    reason: "projection artifact byte count overflowed".to_string(),
+                })
+        })?;
+    let identity_bytes = manifest
+        .relationship_identities
+        .as_ref()
+        .map_or(0, |identity| identity.bytes);
+    // Decoding retains row vectors and derives forward/reverse hash maps. The
+    // multiplier includes both representations plus allocator/hash overhead.
+    let identity_workspace =
+        identity_bytes
+            .checked_mul(2)
+            .ok_or_else(|| GraphError::CorruptFile {
+                reason: "projection identity workspace estimate overflowed".to_string(),
+            })?;
+    segment_bytes
+        .checked_mul(8)
+        .and_then(|bytes| bytes.checked_add(identity_workspace))
+        .map(crate::resource::ByteCount::from_bytes)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "projection load workspace estimate overflowed".to_string(),
+        })
+}
+
+fn reverse_csr_workspace_bytes(
+    node_count: u32,
+    edge_count: u32,
+) -> GraphResult<crate::resource::ByteCount> {
+    let offsets = u64::from(node_count)
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(8));
+    let edges = u64::from(edge_count).checked_mul(24);
+    offsets
+        .and_then(|offsets| edges.and_then(|edges| offsets.checked_add(edges)))
+        .map(crate::resource::ByteCount::from_bytes)
+        .ok_or_else(|| GraphError::Internal("reverse CSR load estimate overflowed".to_string()))
 }
 
 fn load_projection_manifest(
@@ -1728,6 +1838,23 @@ mod tests {
         assert_eq!(loaded.edge_store.neighbors_weighted(0).0, &[1]);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn replacement_load_rejects_before_allocation_when_residency_exhausts_budget() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("load-residency-budget");
+        write_graph_file(&engine, &path).expect("fixture writes");
+        let resident =
+            crate::resource::ByteCount::from_mib(2_048).expect("configured test memory fits");
+
+        let error = match load_graph_file_with_residency(&path, resident) {
+            Ok(_) => panic!("no private-memory headroom must reject the replacement"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, GraphError::ResourceLimit { .. }));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

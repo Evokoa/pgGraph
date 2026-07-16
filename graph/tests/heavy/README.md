@@ -54,3 +54,15 @@ For build memory evidence, start with `measure_build_rss.sh`. For opt-in stress
 profiles that cover baseline build, small SPI/spool batches, repeated persisted
 rebuilds, and low-memory rebuilds, use `build_memory_stress.sh` or set
 `RUN_BUILD_MEMORY_STRESS=1` on `run_release_gate.sh`.
+Use `measure_runtime_resources.sh` for repeated load plus representative query,
+hydration, sync-ingest, compaction, and analytics resource evidence. It samples
+backend RSS everywhere and PSS when Linux exposes `smaps_rollup`, verifies the
+stable `PG007` breaker, and enforces positive `MAX_RSS_MB`/`MAX_PSS_MB`
+thresholds (1024 MiB by default). Missing PID, RSS, or Linux PSS samples fail
+the profile. Successful representative queries use an explicit
+`QUERY_MEMORY_MB` budget (256 MiB by default), while the separate work-limit
+case must still return `PG007`. The default evidence shape is 10,000 nodes,
+9,999 edges, and two 500-row sync cycles; telemetry assertions verify the
+reported operation, peak phase, work, row, and disk counters. The full release
+gate runs this profile by default; set
+`RUN_RUNTIME_RESOURCES=0` only when intentionally running a narrower gate.

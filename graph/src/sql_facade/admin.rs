@@ -1150,6 +1150,43 @@ fn build_resource_status() -> TableIterator<
     })
 }
 
+/// Return resource accounting from the most recent governed operation.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn resource_status() -> TableIterator<
+    'static,
+    (
+        name!(operation, String),
+        name!(memory_budget_bytes, i64),
+        name!(memory_peak_bytes, i64),
+        name!(memory_peak_phase, Option<String>),
+        name!(disk_peak_bytes, i64),
+        name!(rows, i64),
+        name!(work_units, i64),
+    ),
+> {
+    with_panic_boundary("resource_status()", || {
+        let rows = crate::resource::last_operation_snapshot()
+            .into_iter()
+            .map(|snapshot| {
+                (
+                    snapshot.operation,
+                    saturating_i64(snapshot.memory_budget_bytes),
+                    saturating_i64(snapshot.memory_peak_bytes),
+                    snapshot.memory_peak_phase,
+                    saturating_i64(snapshot.disk_peak_bytes),
+                    saturating_i64(snapshot.rows),
+                    saturating_i64(snapshot.work_units),
+                )
+            })
+            .collect::<Vec<_>>();
+        TableIterator::new(rows)
+    })
+}
+
 /// Return the number of unexpired active-generation backend heartbeats.
 #[pg_extern(schema = "graph")]
 fn active_generation_count() -> i32 {
@@ -1289,7 +1326,20 @@ fn projection_compact(
             .unwrap_or_else(|err| err.report())
             .unwrap_or_else(|| safety::GraphError::NotBuilt.report());
         reload_persisted_engine_with_projection(&artifact).unwrap_or_else(|err| err.report());
+        let resident_bytes = ENGINE
+            .with(|engine| {
+                crate::resource::ByteCount::from_usize(
+                    engine.borrow().estimated_memory_used_bytes(),
+                )
+            })
+            .unwrap_or_else(|| {
+                safety::GraphError::Internal(
+                    "resident graph bytes do not fit resource accounting".to_string(),
+                )
+                .report()
+            });
         let budgets = crate::projection::compact::CompactionBudgets {
+            resident_bytes,
             max_rows: max_rows as usize,
             max_bytes: max_bytes as usize,
             max_segments: max_segments as usize,
@@ -1502,7 +1552,14 @@ fn projection_recovery_action_text(
 }
 
 fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::GraphResult<()> {
-    let loaded = crate::persistence::load_graph_file(path)?;
+    let resident = ENGINE
+        .with(|engine| {
+            crate::resource::ByteCount::from_usize(engine.borrow().estimated_memory_used_bytes())
+        })
+        .ok_or_else(|| {
+            safety::GraphError::Internal("engine residency does not fit u64".to_string())
+        })?;
+    let loaded = crate::persistence::load_graph_file_with_residency(path, resident)?;
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });

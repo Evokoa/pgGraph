@@ -15,9 +15,12 @@
 //!
 //! See: `docs/contributor_guide/traversal-search-paths.mdx`
 
+#[cfg(test)]
 use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
-use crate::projection::neighbors::{CsrNeighbors, NeighborSource};
+#[cfg(test)]
+use crate::projection::neighbors::CsrNeighbors;
+use crate::projection::neighbors::NeighborSource;
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TableOid;
 use std::collections::HashMap;
@@ -51,10 +54,17 @@ struct UnionFind {
 }
 
 impl UnionFind {
-    fn new(n: usize) -> Self {
-        let parent: Vec<u32> = (0..n as u32).collect();
-        let rank = vec![0u8; n];
-        Self { parent, rank }
+    fn try_new(n: usize) -> GraphResult<Self> {
+        let node_count = u32::try_from(n).map_err(|_| allocation_error())?;
+        let mut parent = Vec::new();
+        parent
+            .try_reserve_exact(n)
+            .map_err(|_| allocation_error())?;
+        parent.extend(0..node_count);
+        let mut rank = Vec::new();
+        rank.try_reserve_exact(n).map_err(|_| allocation_error())?;
+        rank.resize(n, 0);
+        Ok(Self { parent, rank })
     }
 
     /// Find the root of node `x` with path compression.
@@ -97,28 +107,48 @@ impl UnionFind {
 ///
 /// # Returns
 /// ComponentResult with per-node component labels and summary stats.
+#[cfg(test)]
 pub fn compute_components(node_store: &NodeStore, edge_store: &EdgeStore) -> ComponentResult {
     let neighbors = CsrNeighbors::new(edge_store);
     compute_components_with_neighbors(node_store, &neighbors)
 }
 
 /// Compute connected components over a supplied neighbor source.
+#[cfg(test)]
 pub(crate) fn compute_components_with_neighbors(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
 ) -> ComponentResult {
+    compute_components_with_neighbors_inner(node_store, neighbors, None)
+        .expect("unbounded component accounting should not fail")
+}
+
+/// Compute components with hard work and elapsed-time accounting.
+pub(crate) fn compute_components_with_neighbors_governed(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<ComponentResult> {
+    compute_components_with_neighbors_inner(node_store, neighbors, Some(governor))
+}
+
+fn compute_components_with_neighbors_inner(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    governor: Option<&crate::resource::ResourceGovernor>,
+) -> GraphResult<ComponentResult> {
     let node_count = node_store.node_count() as usize;
 
     if node_count == 0 {
-        return ComponentResult {
+        return Ok(ComponentResult {
             component: vec![],
             num_components: 0,
             largest_component_size: 0,
             component_sizes: HashMap::new(),
-        };
+        });
     }
 
-    let mut uf = UnionFind::new(node_count);
+    let mut uf = UnionFind::try_new(node_count)?;
 
     // Iterate through all edges in the CSR — sequential, cache-friendly
     for node in 0..node_count as u32 {
@@ -127,6 +157,7 @@ pub(crate) fn compute_components_with_neighbors(
         }
 
         for edge in neighbors.neighbors(node) {
+            consume_analytics_work(governor)?;
             if node_store.is_active(edge.target)
                 && !crate::projection::tx_delta::node_deleted(edge.target)
             {
@@ -136,10 +167,18 @@ pub(crate) fn compute_components_with_neighbors(
     }
 
     // Finalize: compress all paths and compute stats
-    let mut component = vec![0u32; node_count];
+    let mut component = Vec::new();
+    component
+        .try_reserve_exact(node_count)
+        .map_err(|_| allocation_error())?;
+    component.resize(node_count, 0);
     let mut component_sizes = HashMap::new();
+    component_sizes
+        .try_reserve(node_count)
+        .map_err(|_| allocation_error())?;
 
     for node in 0..node_count as u32 {
+        consume_analytics_work(governor)?;
         if !node_store.is_active(node) || crate::projection::tx_delta::node_deleted(node) {
             component[node as usize] = u32::MAX; // inactive
             continue;
@@ -152,11 +191,38 @@ pub(crate) fn compute_components_with_neighbors(
     let num_components = component_sizes.len() as u32;
     let largest = component_sizes.values().copied().max().unwrap_or(0);
 
-    ComponentResult {
+    Ok(ComponentResult {
         component,
         num_components,
         largest_component_size: largest,
         component_sizes,
+    })
+}
+
+fn consume_analytics_work(governor: Option<&crate::resource::ResourceGovernor>) -> GraphResult<()> {
+    let Some(governor) = governor else {
+        return Ok(());
+    };
+    governor
+        .consume_work(
+            crate::resource::ResourcePhase::AnalyticsWorkspace,
+            crate::resource::WorkUnits::new(1),
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    if governor.work_used().as_u64().is_multiple_of(1_024) {
+        crate::resource::check_postgres_interrupts();
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::AnalyticsWorkspace)
+            .map_err(crate::safety::resource_limit_error)?;
+    }
+    Ok(())
+}
+
+fn allocation_error() -> GraphError {
+    GraphError::Oom {
+        used_mb: 0,
+        need_mb: 1,
+        limit_mb: 0,
     }
 }
 

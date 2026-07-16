@@ -16,7 +16,8 @@ search composition, sync overlays, status reporting, and persistence.
   { name: '_mmap', type: 'Option<Arc<Mmap>>', desc: 'retains the backend-local immutable artifact snapshot' },
   { name: 'edge_buffer', type: 'Vec<EdgeMutation>', desc: 'post-build edge insert/delete overlay' },
   { name: 'projection_mode', type: 'ProjectionMode', desc: 'csr_readonly or mutable_overlay runtime mode' },
-  { name: 'tenant_membership', type: 'HashMap<String, RoaringBitmap>', desc: 'tenant to allowed node set' }
+  { name: 'tenant_membership', type: 'HashMap<String, RoaringBitmap>', desc: 'tenant to allowed node set' },
+  { name: 'projection_snapshot', type: 'Option<LayeredSnapshot>', desc: 'decoded immutable durable segments pinned for the installed generation' }
 ]} />
 
 ## Resolution Backends
@@ -61,12 +62,15 @@ Engine traversal does:
 1. Verify the engine is built.
 2. Resolve the seed table+PK to `node_idx`.
 3. Resolve the requested edge label strings to compact `u8` IDs.
-4. Build the sync and transaction-local edge overlay maps for the chosen
+4. Reserve candidate, overlay, frontier, and result workspace under the query
+   governor.
+5. Borrow the installed generation's pinned layered snapshot and build only
+   sync and transaction-local edge overlay maps for the chosen
    direction.
-5. Build `BfsConfig`.
-6. Choose forward or reverse CSR based on direction.
-7. Run BFS or DFS.
-8. Convert node indices back to source coordinates and edge labels.
+6. Build `BfsConfig`.
+7. Choose forward or reverse CSR based on direction.
+8. Run BFS or DFS with work, elapsed, and PostgreSQL interrupt checks.
+9. Convert node indices back to source coordinates and edge labels.
 
 <PipelineDiagram>
   <PipelineStep title="request" />

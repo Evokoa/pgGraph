@@ -18,7 +18,7 @@ use crate::projection::identity::{
 };
 use crate::projection::manifest::{
     ManifestFileRef, ManifestIdentityRef, ManifestSegmentRef, ProjectionManifest,
-    ProjectionManifestStore,
+    ProjectionManifestStore, MANIFEST_DECODED_MEMORY_BYTES_PER_JSON_BYTE,
 };
 use crate::projection::normalize::{
     normalize_committed_mutations, CommittedMutation, MutationBufferLimits, MutationOperation,
@@ -28,6 +28,7 @@ use crate::projection::segment::{
     DeltaSegment, SegmentFilterValue, SegmentKind, SegmentNodeState, SegmentResolution,
     SegmentTenant,
 };
+use crate::resource::{ByteCount, ResourceGovernor, ResourcePhase};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
@@ -210,6 +211,34 @@ impl ProjectionIngester {
             rows,
             limits,
             base_relationship_identities,
+            None,
+            validate_candidate,
+        )
+    }
+
+    /// Publish committed rows under one statement-local resource governor.
+    ///
+    /// The ingester reserves a conservative peak for its retained maps,
+    /// identity dictionary, segments, serialization buffers, and validation
+    /// reloads before any of those allocations are made. Artifact and staging
+    /// bytes remain charged until manifest publication has completed.
+    pub(crate) fn ingest_committed_rows_with_identities_governed<F, T>(
+        &self,
+        rows: &[ProjectionSyncRow],
+        limits: MutationBufferLimits,
+        base_relationship_identities: &[Option<RelationshipIdentity>],
+        governor: &ResourceGovernor,
+        validate_candidate: F,
+    ) -> GraphResult<(ProjectionIngestResult, Option<T>)>
+    where
+        F: FnOnce(&ProjectionManifest) -> GraphResult<T>,
+    {
+        let _guard = self.lock.try_enter()?;
+        self.ingest_committed_rows_locked(
+            rows,
+            limits,
+            base_relationship_identities,
+            Some(governor),
             validate_candidate,
         )
     }
@@ -219,11 +248,30 @@ impl ProjectionIngester {
         rows: &[ProjectionSyncRow],
         limits: MutationBufferLimits,
         base_relationship_identities: &[Option<RelationshipIdentity>],
+        governor: Option<&ResourceGovernor>,
         validate_candidate: F,
     ) -> GraphResult<(ProjectionIngestResult, Option<T>)>
     where
         F: FnOnce(&ProjectionManifest) -> GraphResult<T>,
     {
+        let _ingest_memory = governor
+            .map(|governor| {
+                // Cover directory iteration and metadata inspection used by
+                // the allocation-free size preflight itself.
+                let mut lease = governor
+                    .reserve_memory(
+                        ResourcePhase::SyncIngest,
+                        ByteCount::from_bytes(1024 * 1024),
+                    )
+                    .map_err(crate::safety::resource_limit_error)?;
+                let peak =
+                    ingestion_memory_upper_bound(&self.root, rows, base_relationship_identities)?;
+                lease
+                    .try_resize(peak)
+                    .map_err(crate::safety::resource_limit_error)?;
+                Ok::<_, GraphError>(lease)
+            })
+            .transpose()?;
         let previous = self.store.load_latest_current()?;
         let previous_watermark = previous
             .as_ref()
@@ -273,20 +321,56 @@ impl ProjectionIngester {
             .max()
             .unwrap_or(previous_watermark);
 
-        let mut new_segment_refs = Vec::new();
-        for edge_segment in self.edge_segments(&committed_rows, limits, &identity_dictionary)? {
+        let mut segments = self.edge_segments(&committed_rows, limits, &identity_dictionary)?;
+        if let Some(node_segment) = node_segment(&committed_rows, limits, sync_watermark)? {
+            segments.push(node_segment);
+        }
+        let identity_artifact_bytes = identity_artifact_encoded_len(&identity_dictionary)?;
+        let initial_artifact_bytes = if identity_artifact_required {
+            identity_artifact_bytes
+        } else {
+            0
+        };
+        let artifact_bytes =
+            segments
+                .iter()
+                .try_fold(initial_artifact_bytes, |total, segment| {
+                    total
+                        .checked_add(segment.encoded_len()?)
+                        .ok_or_else(ingest_resource_size_overflow)
+                })?;
+        let _artifact_disk = governor
+            .map(|governor| {
+                let bytes = ByteCount::from_usize(artifact_bytes)
+                    .ok_or_else(ingest_resource_size_overflow)?;
+                governor
+                    .reserve_disk(ResourcePhase::SyncIngest, bytes)
+                    .map_err(crate::safety::resource_limit_error)
+            })
+            .transpose()?;
+
+        let mut new_segment_refs = Vec::with_capacity(segments.len());
+        for edge_segment in segments {
             let path =
                 self.write_segment(generation_id, new_segment_refs.len() as u32, &edge_segment)?;
             new_segment_refs.push(segment_ref(&self.root, &path, &edge_segment)?);
         }
-        if let Some(node_segment) = node_segment(&committed_rows, limits, sync_watermark)? {
-            let path =
-                self.write_segment(generation_id, new_segment_refs.len() as u32, &node_segment)?;
-            new_segment_refs.push(segment_ref(&self.root, &path, &node_segment)?);
-        }
         let identity_ref = if identity_artifact_required {
             match self.write_identity_dictionary(generation_id, &identity_dictionary) {
-                Ok(reference) => Some(reference),
+                Ok(reference) => {
+                    if reference.bytes != identity_artifact_bytes as u64 {
+                        cleanup_candidate_artifacts(
+                            &self.root,
+                            &new_segment_refs,
+                            Some(&reference),
+                        )?;
+                        return Err(GraphError::CorruptFile {
+                            reason: "relationship identity artifact size changed after resource preflight"
+                                .to_string(),
+                        });
+                    }
+                    Some(reference)
+                }
                 Err(err) => {
                     cleanup_segment_refs(&self.root, &new_segment_refs)?;
                     return Err(err);
@@ -340,7 +424,18 @@ impl ProjectionIngester {
                 return Err(err);
             }
         };
-        if let Err(err) = self.store.publish(&manifest) {
+        let publish_result = governor.map_or_else(
+            || self.store.publish(&manifest),
+            |governor| {
+                self.store.publish_governed(
+                    &manifest,
+                    governor,
+                    ResourcePhase::SyncIngest,
+                    usize::try_from(governor.memory_limit().as_u64()).unwrap_or(usize::MAX),
+                )
+            },
+        );
+        if let Err(err) = publish_result {
             if !self.store.manifest_path(generation_id).exists() {
                 cleanup_candidate_artifacts(
                     &self.root,
@@ -788,6 +883,180 @@ fn validate_ingestion_limits<'a>(
         }
     }
     Ok(())
+}
+
+const INGEST_PREFLIGHT_FIXED_BYTES: usize = 1024 * 1024;
+const INGEST_ROW_PEAK_MULTIPLIER: usize = 32;
+const INGEST_ROW_FIXED_PEAK_BYTES: usize = 4 * 1024;
+const INGEST_IDENTITY_FIXED_PEAK_BYTES: usize = 512;
+const INGEST_IDENTITY_PEAK_COPIES: usize = 8;
+
+/// Bound the simultaneously live ingestion workspace before constructing it.
+///
+/// The row term covers direction partitioning, normalization, node B-trees,
+/// retained segment vectors, exact-capacity serialization, and decoded segment
+/// validation. The identity term covers source-key clones in the cumulative
+/// vector and hash map, sorting, encoding, and validation reload. Existing
+/// manifest JSON receives a deliberately high expansion factor for decoded
+/// strings, vectors, inherited-reference clones, and the next manifest.
+fn ingestion_memory_upper_bound(
+    root: &Path,
+    rows: &[ProjectionSyncRow],
+    base_relationship_identities: &[Option<RelationshipIdentity>],
+) -> GraphResult<ByteCount> {
+    let row_dynamic = rows.iter().try_fold(0usize, |total, row| {
+        INGEST_ROW_BYTES
+            .checked_add(
+                row.filter_value
+                    .as_ref()
+                    .map_or(0, PersistedFilterValue::heap_bytes),
+            )
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    row.relationship_identity
+                        .as_ref()
+                        .map_or(0, |identity| identity.source_key.len()),
+                )
+            })
+            .and_then(|bytes| bytes.checked_add(row.primary_key.as_ref().map_or(0, String::len)))
+            .and_then(|bytes| bytes.checked_add(row.tenant.as_ref().map_or(0, String::len)))
+            .and_then(|bytes| total.checked_add(bytes))
+            .ok_or_else(ingest_resource_size_overflow)
+    })?;
+    let row_peak = row_dynamic
+        .checked_mul(INGEST_ROW_PEAK_MULTIPLIER)
+        .and_then(|bytes| {
+            rows.len()
+                .checked_mul(INGEST_ROW_FIXED_PEAK_BYTES)
+                .and_then(|fixed| bytes.checked_add(fixed))
+        })
+        .ok_or_else(ingest_resource_size_overflow)?;
+
+    let identity_count = base_relationship_identities
+        .len()
+        .checked_add(
+            rows.iter()
+                .filter(|row| row.relationship_identity.is_some())
+                .count(),
+        )
+        .ok_or_else(ingest_resource_size_overflow)?;
+    let identity_strings = base_relationship_identities
+        .iter()
+        .filter_map(Option::as_ref)
+        .chain(
+            rows.iter()
+                .filter_map(|row| row.relationship_identity.as_ref()),
+        )
+        .try_fold(0usize, |total, identity| {
+            total
+                .checked_add(identity.source_key.len())
+                .ok_or_else(ingest_resource_size_overflow)
+        })?;
+    let identity_peak = identity_count
+        .checked_mul(INGEST_IDENTITY_FIXED_PEAK_BYTES)
+        .and_then(|fixed| fixed.checked_add(identity_strings))
+        .and_then(|bytes| bytes.checked_mul(INGEST_IDENTITY_PEAK_COPIES))
+        .ok_or_else(ingest_resource_size_overflow)?;
+
+    let manifest_json_bytes = largest_manifest_file_bytes(root)?;
+    let manifest_peak = manifest_json_bytes
+        .checked_mul(MANIFEST_DECODED_MEMORY_BYTES_PER_JSON_BYTE)
+        .ok_or_else(ingest_resource_size_overflow)?;
+    let total = INGEST_PREFLIGHT_FIXED_BYTES
+        .checked_add(row_peak)
+        .and_then(|bytes| bytes.checked_add(identity_peak))
+        .and_then(|bytes| bytes.checked_add(manifest_peak))
+        .ok_or_else(ingest_resource_size_overflow)?;
+    ByteCount::from_usize(total).ok_or_else(ingest_resource_size_overflow)
+}
+
+fn largest_manifest_file_bytes(root: &Path) -> GraphResult<usize> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => {
+            return Err(GraphError::Internal(format!(
+                "read projection manifest directory during resource preflight: {err}"
+            )))
+        }
+    };
+    let mut largest = 0usize;
+    for entry in entries {
+        crate::resource::check_postgres_interrupts();
+        let entry = entry.map_err(|err| {
+            GraphError::Internal(format!(
+                "read projection manifest entry during resource preflight: {err}"
+            ))
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("projection-generation-") || !name.ends_with(".json") {
+            continue;
+        }
+        let bytes = usize::try_from(
+            entry
+                .metadata()
+                .map_err(|err| {
+                    GraphError::Internal(format!(
+                        "stat projection manifest during resource preflight: {err}"
+                    ))
+                })?
+                .len(),
+        )
+        .map_err(|_| ingest_resource_size_overflow())?;
+        largest = largest.max(bytes);
+    }
+    Ok(largest)
+}
+
+fn identity_artifact_encoded_len(
+    dictionary: &RelationshipIdentityDictionary,
+) -> GraphResult<usize> {
+    let mut counter = CountingWriter::default();
+    bincode::serde::encode_into_std_write(
+        dictionary.identities(),
+        &mut counter,
+        bincode::config::standard(),
+    )
+    .map_err(|err| {
+        GraphError::Internal(format!(
+            "relationship identity resource preflight encoding failed: {err}"
+        ))
+    })?;
+    32usize
+        .checked_add(counter.bytes)
+        .ok_or_else(ingest_resource_size_overflow)
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("encoded identity length overflowed"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn ingest_resource_size_overflow() -> GraphError {
+    GraphError::ResourceLimit {
+        resource: "memory".to_string(),
+        phase: ResourcePhase::SyncIngest.as_str().to_string(),
+        used: 0,
+        requested: u64::MAX,
+        limit: u64::MAX,
+    }
 }
 
 fn segment_ref(
@@ -1272,6 +1541,124 @@ mod tests {
         .expect_err("text heap bytes must count against ingest budget");
 
         assert!(matches!(err, GraphError::OverlayLimit { .. }));
+    }
+
+    #[test]
+    fn governed_ingest_rejects_large_identity_before_publication() {
+        let dir = seeded_artifacts("projection_governed_large_identity");
+        let publisher = ingester(&dir);
+        let mut row = edge_row(1, 0, 1, Some(7), MutationOperation::InsertEdge);
+        row.relationship_identity = Some(RelationshipIdentity {
+            mapping_id: 7,
+            source_key: "identity".repeat(256 * 1024),
+        });
+        let governor = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                ByteCount::from_mib(2).expect("test memory budget fits"),
+            )),
+        );
+
+        let error = publisher
+            .ingest_committed_rows_with_identities_governed(
+                &[row],
+                MutationBufferLimits::new(2, 4 * 1024 * 1024),
+                &[None],
+                &governor,
+                |_| Ok(()),
+            )
+            .expect_err("identity peak exceeds statement memory");
+
+        assert!(matches!(&error, GraphError::ResourceLimit { .. }));
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        let latest = publisher
+            .store
+            .load_latest_current()
+            .expect("current manifest remains readable")
+            .expect("base generation remains current");
+        assert_eq!(latest.generation_id, 1);
+        assert_eq!(latest.sync_watermark, 0);
+    }
+
+    #[test]
+    fn governed_ingest_rejects_large_inherited_manifest_before_clone() {
+        let dir = seeded_artifacts("projection_governed_large_manifest");
+        let mut inherited =
+            ProjectionManifest::base_only(2, "base.pggraph", "crc32:00000000", 1, 0, 2);
+        inherited.previous_generation_id = Some(1);
+        inherited.obsolete_files = (0..256)
+            .map(|index| ManifestFileRef {
+                path: format!("obsolete-{index}-{}", "x".repeat(1024)),
+                bytes: 1,
+            })
+            .collect();
+        ProjectionManifestStore::new(dir.path())
+            .publish(&inherited)
+            .expect("large prior manifest publishes for the regression fixture");
+        let publisher = ingester(&dir);
+        let governor = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                ByteCount::from_mib(4).expect("test memory budget fits"),
+            )),
+        );
+
+        let error = publisher
+            .ingest_committed_rows_with_identities_governed(
+                &[edge_row(1, 0, 1, None, MutationOperation::InsertEdge)],
+                MutationBufferLimits::new(2, 64 * 1024),
+                &[None],
+                &governor,
+                |_| Ok(()),
+            )
+            .expect_err("inherited manifest peak exceeds statement memory");
+
+        assert!(matches!(&error, GraphError::ResourceLimit { .. }));
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        let latest = publisher
+            .store
+            .load_latest_current()
+            .expect("current manifest remains readable")
+            .expect("large prior generation remains current");
+        assert_eq!(latest.generation_id, 2);
+        assert_eq!(latest.sync_watermark, 0);
+    }
+
+    #[test]
+    fn governed_ingest_rejects_artifact_disk_before_writing() {
+        use std::time::Duration;
+
+        let dir = seeded_artifacts("projection_governed_artifact_disk");
+        let publisher = ingester(&dir);
+        let governor =
+            crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::bounded(
+                crate::resource::MemoryBudget::new(
+                    ByteCount::from_mib(32).expect("test memory budget fits"),
+                ),
+                crate::resource::DiskBudget::new(ByteCount::from_bytes(1)),
+                crate::resource::RowCount::UNLIMITED,
+                crate::resource::WorkUnits::UNLIMITED,
+                crate::resource::ElapsedBudget::new(Duration::from_secs(60)),
+            ));
+
+        let error = publisher
+            .ingest_committed_rows_with_identities_governed(
+                &[edge_row(1, 0, 1, Some(7), MutationOperation::InsertEdge)],
+                MutationBufferLimits::new(2, 64 * 1024),
+                &[None],
+                &governor,
+                |_| Ok(()),
+            )
+            .expect_err("artifact exceeds disk allowance");
+
+        assert!(matches!(&error, GraphError::ResourceLimit { .. }));
+        assert_eq!(error.diagnostic_code().as_str(), "PG007");
+        assert!(!dir.path().join(segment_file_name(2, 0)).exists());
+        let latest = publisher
+            .store
+            .load_latest_current()
+            .expect("current manifest remains readable")
+            .expect("base generation remains current");
+        assert_eq!(latest.generation_id, 1);
+        assert_eq!(latest.sync_watermark, 0);
     }
 
     #[test]

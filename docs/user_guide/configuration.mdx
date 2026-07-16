@@ -70,6 +70,11 @@ requires `graph.mutable_enabled = on`.
 | GUC | Type | Default | Context | Range or values | Effect |
 |---|---:|---:|---|---|---|
 | `graph.memory_limit_mb` | int | `2048` | `SUSET` | `64` to `32768` | Pre-build OOM guard and status limit |
+| `graph.query_memory_mb` | int | `64` | `USERSET` | `1` to `32768` | Per-statement graph query workspace cap |
+| `graph.maintenance_memory_mb` | int | `256` | `SUSET` | `1` to `32768` | Per-operation sync, compaction, and analytics workspace cap |
+| `graph.spill_disk_limit_mb` | int | `4096` | `SUSET` | `1` to `1048576` | Per-operation staging and spill-disk cap |
+| `graph.query_work_limit` | int | `10000000` | `USERSET` | `1` to `2000000000` | Expansion and blocking-operator work cap |
+| `graph.operation_timeout_ms` | int | `0` | `USERSET` | `0` to `86400000` | Graph-operation elapsed breaker; `0` uses PostgreSQL cancellation only |
 | `graph.build_batch_size` | int | `10000` | `SUSET` | `1` to `1000000` | Maximum SPI cursor/spool rows; byte pressure can flush a batch earlier |
 | `graph.low_memory_build` | bool | `false` | `SUSET` | `on`, `off` | Allow rebuilds to unload the current backend-local graph before constructing the replacement |
 | `graph.oom_action` | string | `error` | `SUSET` | `error`; deprecated aliases `readonly`, `read_only`, `read-only` | Compatibility setting; every over-budget build is rejected before allocation |
@@ -117,6 +122,32 @@ The result includes each backend's immutable artifact snapshot in private
 memory, then projects an instance total for the supplied backend count. The
 shared-memory columns remain present for 1.x compatibility and currently
 return zero.
+
+Load, query, sync, compaction, and analytics operations also reserve their
+workspaces before growing large graph-owned structures. Their effective memory
+allowance is the smaller of the operation-specific setting and the remaining
+`graph.memory_limit_mb` after the selected graph's backend-private residency.
+Queries count candidate scans, neighbor expansions, path work, hydration, and
+blocking projection work against `graph.query_work_limit`. Maintenance paths
+also enforce row and disk budgets derived from their public operation inputs.
+
+When a breaker is reached, pgGraph cancels the operation with SQLSTATE `54000`
+and diagnostic `PG007`. PostgreSQL statement cancellation and
+`statement_timeout` remain authoritative; `graph.operation_timeout_ms` adds an
+optional graph-local elapsed limit. The failed operation does not publish a
+partially validated graph or projection generation.
+
+```sql
+SET graph.query_memory_mb = 128;
+SET graph.query_work_limit = 20000000;
+SET graph.operation_timeout_ms = 5000;
+
+SELECT * FROM graph.resource_status();
+```
+
+`graph.resource_status()` reports the most recent governed operation in the
+current PostgreSQL backend. It is diagnostic telemetry, not cluster-wide
+accounting.
 
 `graph.max_loaded_graphs_per_backend` is also enforced per backend. The current
 runtime has one backend-local graph engine slot, so the supported range is
@@ -176,6 +207,11 @@ for active sync operations and asks callers to use `manual` or `trigger`.
 shared_preload_libraries = 'graph'
 
 graph.memory_limit_mb = 4096
+graph.query_memory_mb = 64
+graph.maintenance_memory_mb = 256
+graph.spill_disk_limit_mb = 4096
+graph.query_work_limit = 10000000
+graph.operation_timeout_ms = 0
 graph.persist_on_build = on
 graph.auto_load = on
 graph.build_batch_size = 10000

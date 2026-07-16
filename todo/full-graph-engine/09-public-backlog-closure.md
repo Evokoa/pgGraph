@@ -154,13 +154,13 @@ KI-013 remains open until every child is closed:
 
 - [ ] **KI-013A load:** preflight plus mmap inbound/filter metadata; failure
   keeps the old backend engine; repeated loads stay within private-memory cap.
-- [ ] **KI-013B query/path:** candidates, degree, expansions, frontier, paths,
+- [x] **KI-013B query/path:** candidates, degree, expansions, frontier, paths,
   hydration, sort, group, DISTINCT, result bytes, and interrupts are bounded.
 - [ ] **KI-013C sync ingest:** input and normalized deltas obey byte/row/disk
   budgets and preserve watermark/idempotency under crash.
-- [ ] **KI-013D projection reads:** one pinned mapped snapshot per generation;
+- [x] **KI-013D projection reads:** one pinned mapped snapshot per generation;
   no per-query full-file decode/map rebuild.
-- [ ] **KI-013E compaction:** source-range merge stays bounded and equivalent to
+- [x] **KI-013E compaction:** source-range merge stays bounded and equivalent to
   clean rebuild across repeated cycles.
 - [ ] **KI-013F analytics:** whole-graph work is worker-isolated, quota-bound,
   cancellable, observable, and cannot OOM an OLTP query backend.

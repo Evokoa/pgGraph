@@ -10,7 +10,9 @@ use crate::edge_store::{EdgeStore, RelationshipIdentity};
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
-use crate::projection::layered::{LayeredNeighbors, ManifestSegmentProvider, SegmentProvider};
+use crate::projection::layered::{
+    LayeredNeighbors, LayeredSnapshot, ManifestSegmentProvider, SegmentProvider,
+};
 use crate::projection::manifest::ProjectionManifest;
 use crate::projection::neighbors::{
     CsrNeighbors, EdgeOverlay, OverlayDeletes, OverlayInserts, OverlayNeighbors,
@@ -118,6 +120,8 @@ pub struct Engine {
     pub(crate) projection_manifest_full: Option<ProjectionManifest>,
     /// Projection artifact directory for manifest-referenced segment files.
     pub(crate) projection_manifest_root: Option<PathBuf>,
+    /// Fully decoded immutable durable state pinned with the generation.
+    pub(crate) projection_snapshot: Option<LayeredSnapshot>,
 
     /// When true, the engine is in read-only mode.
     /// Sync inserts/updates/deletes are rejected until a rebuild installs a
@@ -263,6 +267,7 @@ impl Engine {
             projection_manifest: None,
             projection_manifest_full: None,
             projection_manifest_root: None,
+            projection_snapshot: None,
             is_read_only: false,
             read_only_reason: None,
             applied_sync_id: 0,
@@ -384,7 +389,9 @@ impl Engine {
         root: PathBuf,
         record_heartbeat: bool,
     ) -> crate::safety::GraphResult<()> {
-        let segments = ManifestSegmentProvider::new(&root, manifest).load_segments()?;
+        let provider = ManifestSegmentProvider::new(&root, manifest);
+        let segments = provider.load_segments()?;
+        let base_chunks = provider.load_base_chunks()?;
         let mut node_store = self.node_store.to_owned_store();
         let mut resolution_delta = ResolutionDeltaIndex::new();
         let mut filter_index = self.filter_index.clone();
@@ -560,6 +567,7 @@ impl Engine {
         if record_heartbeat {
             crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;
         }
+        let projection_snapshot = LayeredSnapshot::build(&self.edge_store, &base_chunks, &segments);
         self.node_store = node_store;
         self.resolution_delta = resolution_delta;
         self.filter_index = filter_index;
@@ -569,6 +577,7 @@ impl Engine {
         self.projection_manifest = Some(ProjectionManifestSnapshot::from(manifest));
         self.projection_manifest_full = Some(manifest.clone());
         self.projection_manifest_root = Some(root);
+        self.projection_snapshot = Some(projection_snapshot);
         Ok(())
     }
 
@@ -589,25 +598,25 @@ impl Engine {
             return None;
         }
         let manifest = self.projection_manifest_full.as_ref()?;
-        if manifest.segments.is_empty() {
+        if manifest.segments.is_empty() && manifest.base_chunks.is_empty() {
             return None;
         }
         Some((manifest, self.projection_manifest_root.as_ref()?))
     }
 
     pub(crate) fn layered_neighbors(&self) -> GraphResult<Option<LayeredNeighbors<'_>>> {
-        let Some((manifest, root)) = self.segment_backed_projection_manifest() else {
+        let Some((_manifest, _root)) = self.segment_backed_projection_manifest() else {
             return Ok(None);
         };
-        let provider = ManifestSegmentProvider::new(root, manifest);
-        LayeredNeighbors::from_provider_with_overlays(
+        Ok(Some(LayeredNeighbors::from_snapshot_with_overlays(
             &self.edge_store,
             &self.reverse_edge_store,
-            &provider,
+            self.projection_snapshot.as_ref().ok_or_else(|| {
+                GraphError::Internal("projection snapshot is missing".to_string())
+            })?,
             self.traversal_edge_overlay(TraversalDirection::Out),
             self.traversal_edge_overlay(TraversalDirection::In),
-        )
-        .map(Some)
+        )))
     }
 
     pub fn record_applied_sync_id(&mut self, sync_id: i64) {
@@ -949,6 +958,7 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code, reason = "compatibility entry point")]
     pub fn traverse_with_filter_ops(
         &self,
         seed_table_oid: u32,
@@ -961,6 +971,41 @@ impl Engine {
         tenant: Option<&str>,
         strategy: TraversalStrategy,
         direction: TraversalDirection,
+    ) -> GraphResult<Vec<TraversalResult>> {
+        let governor = self.query_resource_governor()?;
+        self.traverse_with_filter_ops_governed(
+            seed_table_oid,
+            seed_id,
+            max_depth,
+            max_nodes,
+            max_frontier,
+            edge_types,
+            filter_ops,
+            tenant,
+            strategy,
+            direction,
+            &governor,
+        )
+    }
+
+    /// Traverses with a caller-owned resource governor.
+    ///
+    /// SQL callers use this variant to keep execution, result conversion,
+    /// blocking operators, and hydration inside one operation budget.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn traverse_with_filter_ops_governed(
+        &self,
+        seed_table_oid: u32,
+        seed_id: &str,
+        max_depth: i32,
+        max_nodes: u32,
+        max_frontier: u32,
+        edge_types: Option<Vec<String>>,
+        filter_ops: Vec<FilterOp>,
+        tenant: Option<&str>,
+        strategy: TraversalStrategy,
+        direction: TraversalDirection,
+        governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<Vec<TraversalResult>> {
         if !self.built {
             return Err(GraphError::NotBuilt);
@@ -995,7 +1040,28 @@ impl Engine {
             None => EdgeTypeFilter::All,
         };
 
-        let (overlay_insert_edges, overlay_deleted_edges) = self.traversal_edge_overlay(direction);
+        let traversal_bytes = bfs::estimated_workspace_bytes(
+            self.node_store.node_count() as usize,
+            max_nodes,
+            max_frontier,
+        )?;
+        let _workspace = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryFrontier,
+                traversal_bytes,
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        let overlay_bytes = self.estimated_traversal_overlay_clone_bytes()?;
+        let _overlay_workspace = governor
+            .reserve_memory(crate::resource::ResourcePhase::QueryExpand, overlay_bytes)
+            .map_err(crate::safety::resource_limit_error)?;
+
+        let layered_neighbors = self.layered_neighbors()?;
+        let (overlay_insert_edges, overlay_deleted_edges) = if layered_neighbors.is_some() {
+            (HashMap::new(), HashMap::new())
+        } else {
+            self.traversal_edge_overlay(direction)
+        };
         let config = bfs::BfsConfig {
             seed_node,
             max_depth,
@@ -1015,34 +1081,112 @@ impl Engine {
             TraversalDirection::In => &self.reverse_edge_store,
         };
 
-        let layered_neighbors = self.layered_neighbors()?;
         let bfs_result = match (strategy, layered_neighbors.as_ref()) {
             (TraversalStrategy::Bfs, Some(layered)) => {
                 let neighbors = layered.for_direction(direction);
-                bfs::execute_with_neighbors(
+                bfs::execute_with_neighbors_governed(
                     &self.node_store,
                     &neighbors,
                     &self.filter_index,
                     &config,
-                )
+                    governor,
+                )?
             }
             (TraversalStrategy::Dfs, Some(layered)) => {
                 let neighbors = layered.for_direction(direction);
-                bfs::execute_dfs_with_neighbors(
+                bfs::execute_dfs_with_neighbors_governed(
                     &self.node_store,
                     &neighbors,
                     &self.filter_index,
                     &config,
-                )
+                    governor,
+                )?
             }
-            (TraversalStrategy::Bfs, None) => {
-                bfs::execute(&self.node_store, edge_store, &self.filter_index, &config)
-            }
-            (TraversalStrategy::Dfs, None) => {
-                bfs::execute_dfs(&self.node_store, edge_store, &self.filter_index, &config)
-            }
+            (TraversalStrategy::Bfs, None) => bfs::execute_governed(
+                &self.node_store,
+                edge_store,
+                &self.filter_index,
+                &config,
+                governor,
+            )?,
+            (TraversalStrategy::Dfs, None) => bfs::execute_dfs_governed(
+                &self.node_store,
+                edge_store,
+                &self.filter_index,
+                &config,
+                governor,
+            )?,
         };
-        bfs::to_traversal_results(&bfs_result, &self.node_store, &self.edge_type_registry)
+        let output_bytes = self.traversal_result_upper_bound(&bfs_result, max_depth)?;
+        let output_work = bfs_result
+            .visited
+            .len()
+            .checked_mul(
+                u64::try_from(max_depth.max(0))
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+            )
+            .ok_or_else(|| GraphError::Internal("traversal output work overflowed".to_string()))?;
+        governor
+            .consume_work(
+                crate::resource::ResourcePhase::QueryCandidates,
+                crate::resource::WorkUnits::new(output_work),
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        let output_lease = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryCandidates,
+                output_bytes,
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        let results =
+            bfs::to_traversal_results(&bfs_result, &self.node_store, &self.edge_type_registry)?;
+        output_lease.retain_until_governor_drop();
+        Ok(results)
+    }
+
+    fn traversal_result_upper_bound(
+        &self,
+        bfs_result: &bfs::BfsResult,
+        max_depth: i32,
+    ) -> GraphResult<crate::resource::ByteCount> {
+        let rows = bfs_result.visited.len();
+        let path_width = u64::try_from(max_depth.max(0))
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let primary_key = u64::try_from(self.node_store.max_primary_key_bytes())
+            .map_err(|_| GraphError::Internal("primary-key width does not fit u64".to_string()))?;
+        let edge_label = self
+            .edge_type_registry
+            .iter()
+            .map(String::len)
+            .max()
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| GraphError::Internal("edge-label width does not fit u64".to_string()))?
+            .unwrap_or(3);
+        let row_bytes = u64::try_from(std::mem::size_of::<TraversalResult>())
+            .unwrap_or(u64::MAX)
+            .checked_add(primary_key)
+            .and_then(|bytes| {
+                path_width
+                    .checked_mul(
+                        u64::try_from(std::mem::size_of::<crate::types::PathCoordinate>())
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(primary_key)
+                            .saturating_add(
+                                u64::try_from(std::mem::size_of::<String>()).unwrap_or(u64::MAX),
+                            )
+                            .saturating_add(edge_label),
+                    )
+                    .and_then(|paths| bytes.checked_add(paths))
+            })
+            .ok_or_else(|| {
+                GraphError::Internal("traversal result estimate overflowed".to_string())
+            })?;
+        rows.checked_mul(row_bytes)
+            .map(crate::resource::ByteCount::from_bytes)
+            .ok_or_else(|| GraphError::Internal("traversal result estimate overflowed".to_string()))
     }
 
     pub fn push_edge_mutation(&mut self, mutation: EdgeMutation) -> GraphResult<()> {
@@ -1189,7 +1333,28 @@ impl Engine {
         (insert_map, delete_map)
     }
 
+    pub(crate) fn estimated_traversal_overlay_clone_bytes(
+        &self,
+    ) -> GraphResult<crate::resource::ByteCount> {
+        let tx_stats = tx_delta::stats();
+        let edges = self
+            .edge_buffer
+            .len()
+            .checked_add(tx_stats.added_edges)
+            .and_then(|count| count.checked_add(tx_stats.deleted_edges))
+            .ok_or_else(|| GraphError::Internal("overlay edge count overflow".to_string()))?;
+        // Each logical edge may appear in both orientation maps. The estimate
+        // includes hash buckets, vector/set allocation, and allocator slack.
+        let bytes = edges
+            .checked_mul(2)
+            .and_then(|count| count.checked_mul(160))
+            .ok_or_else(|| GraphError::Internal("overlay workspace overflow".to_string()))?;
+        crate::resource::ByteCount::from_usize(bytes)
+            .ok_or_else(|| GraphError::Internal("overlay workspace does not fit u64".to_string()))
+    }
+
     /// Find shortest path between two nodes.
+    #[allow(dead_code, reason = "compatibility entry point")]
     pub fn shortest_path(
         &self,
         source_table_oid: u32,
@@ -1197,6 +1362,27 @@ impl Engine {
         target_table_oid: u32,
         target_id: &str,
         max_depth: i32,
+    ) -> GraphResult<Vec<PathStep>> {
+        let governor = self.query_resource_governor()?;
+        self.shortest_path_governed(
+            source_table_oid,
+            source_id,
+            target_table_oid,
+            target_id,
+            max_depth,
+            &governor,
+        )
+    }
+
+    /// Finds an unweighted path within a caller-owned operation budget.
+    pub(crate) fn shortest_path_governed(
+        &self,
+        source_table_oid: u32,
+        source_id: &str,
+        target_table_oid: u32,
+        target_id: &str,
+        max_depth: i32,
+        governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<Vec<PathStep>> {
         if !self.built {
             return Err(GraphError::NotBuilt);
@@ -1216,38 +1402,58 @@ impl Engine {
                     pk: target_id.to_string(),
                 })?;
 
+        let workspace = whole_graph_workspace_bytes(self.node_store.node_count(), 80)?;
+        let workspace_lease = governor
+            .reserve_memory(crate::resource::ResourcePhase::QueryPaths, workspace)
+            .map_err(crate::safety::resource_limit_error)?;
+        let _overlay_workspace = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryExpand,
+                self.estimated_traversal_overlay_clone_bytes()?,
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+
         let result = if !self.has_edge_overlay() {
             if let Some(neighbors) = self.layered_neighbors()? {
-                path_finder::shortest_path_with_neighbors(
+                path_finder::shortest_path_with_neighbors_governed(
                     &self.node_store,
                     &neighbors,
-                    source,
-                    target,
-                    max_depth,
-                    true,
-                    &self.edge_type_registry,
+                    path_finder::UnweightedPathRequest {
+                        source,
+                        target,
+                        max_depth,
+                        has_unidirectional_edges: true,
+                        edge_type_registry: &self.edge_type_registry,
+                    },
+                    governor,
                 )
             } else {
                 let neighbors = CsrNeighbors::new(&self.edge_store);
-                path_finder::shortest_path_with_neighbors(
+                path_finder::shortest_path_with_neighbors_governed(
                     &self.node_store,
                     &neighbors,
-                    source,
-                    target,
-                    max_depth,
-                    self.has_unidirectional_edges,
-                    &self.edge_type_registry,
+                    path_finder::UnweightedPathRequest {
+                        source,
+                        target,
+                        max_depth,
+                        has_unidirectional_edges: self.has_unidirectional_edges,
+                        edge_type_registry: &self.edge_type_registry,
+                    },
+                    governor,
                 )
             }
         } else if let Some(neighbors) = self.layered_neighbors()? {
-            path_finder::shortest_path_with_neighbors(
+            path_finder::shortest_path_with_neighbors_governed(
                 &self.node_store,
                 &neighbors,
-                source,
-                target,
-                max_depth,
-                true,
-                &self.edge_type_registry,
+                path_finder::UnweightedPathRequest {
+                    source,
+                    target,
+                    max_depth,
+                    has_unidirectional_edges: true,
+                    edge_type_registry: &self.edge_type_registry,
+                },
+                governor,
             )
         } else {
             let (overlay_insert_edges, overlay_deleted_edges) =
@@ -1257,21 +1463,33 @@ impl Engine {
                 &overlay_insert_edges,
                 &overlay_deleted_edges,
             );
-            path_finder::shortest_path_with_neighbors(
+            path_finder::shortest_path_with_neighbors_governed(
                 &self.node_store,
                 &neighbors,
-                source,
-                target,
-                max_depth,
-                self.has_unidirectional_edges,
-                &self.edge_type_registry,
+                path_finder::UnweightedPathRequest {
+                    source,
+                    target,
+                    max_depth,
+                    has_unidirectional_edges: self.has_unidirectional_edges,
+                    edge_type_registry: &self.edge_type_registry,
+                },
+                governor,
             )
         };
 
-        Ok(result.unwrap_or_default())
+        let path = result?.unwrap_or_default();
+        governor
+            .consume_work(
+                crate::resource::ResourcePhase::QueryPaths,
+                crate::resource::WorkUnits::new(u64::try_from(path.len()).unwrap_or(u64::MAX)),
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        workspace_lease.retain_until_governor_drop();
+        Ok(path)
     }
 
     /// Find weighted shortest path between two nodes.
+    #[allow(dead_code, reason = "compatibility entry point")]
     pub fn weighted_shortest_path(
         &self,
         source_table_oid: u32,
@@ -1279,9 +1497,44 @@ impl Engine {
         target_table_oid: u32,
         target_id: &str,
     ) -> GraphResult<Vec<WeightedPathStep>> {
+        let governor = self.query_resource_governor()?;
+        self.weighted_shortest_path_governed(
+            source_table_oid,
+            source_id,
+            target_table_oid,
+            target_id,
+            &governor,
+        )
+    }
+
+    /// Finds a weighted path within a caller-owned operation budget.
+    pub(crate) fn weighted_shortest_path_governed(
+        &self,
+        source_table_oid: u32,
+        source_id: &str,
+        target_table_oid: u32,
+        target_id: &str,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<Vec<WeightedPathStep>> {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
+        let node_workspace = whole_graph_workspace_bytes(self.node_store.node_count(), 64)?;
+        let neighbor_workspace = whole_graph_workspace_bytes(self.edge_store.edge_count(), 24)?;
+        let workspace = node_workspace
+            .checked_add(neighbor_workspace)
+            .ok_or_else(|| {
+                GraphError::Internal("weighted path workspace estimate overflowed".to_string())
+            })?;
+        let workspace_lease = governor
+            .reserve_memory(crate::resource::ResourcePhase::QueryPaths, workspace)
+            .map_err(crate::safety::resource_limit_error)?;
+        let _overlay_workspace = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryExpand,
+                self.estimated_traversal_overlay_clone_bytes()?,
+            )
+            .map_err(crate::safety::resource_limit_error)?;
         let layered_neighbors = self.layered_neighbors()?;
         if self.has_edge_overlay() && layered_neighbors.is_none() {
             return Err(GraphError::UnsupportedOperation {
@@ -1313,23 +1566,33 @@ impl Engine {
                 })?;
 
         let path = if let Some(neighbors) = layered_neighbors {
-            path_finder::weighted_shortest_path_with_neighbors(
+            path_finder::weighted_shortest_path_with_neighbors_governed(
                 &self.node_store,
                 &neighbors,
                 source,
                 target,
                 &self.edge_type_registry,
+                governor,
             )
         } else {
-            path_finder::weighted_shortest_path(
+            path_finder::weighted_shortest_path_with_neighbors_governed(
                 &self.node_store,
                 &self.edge_store,
                 source,
                 target,
                 &self.edge_type_registry,
+                governor,
             )
         };
-        Ok(path).map(|path| path.unwrap_or_default())
+        let path = path?.unwrap_or_default();
+        governor
+            .consume_work(
+                crate::resource::ResourcePhase::QueryPaths,
+                crate::resource::WorkUnits::new(u64::try_from(path.len()).unwrap_or(u64::MAX)),
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        workspace_lease.retain_until_governor_drop();
+        Ok(path)
     }
 
     /// Get engine status.
@@ -1462,6 +1725,10 @@ impl Engine {
                 .map(String::capacity)
                 .sum::<usize>();
         let tenanted_oid_bytes = self.tenanted_table_oids.capacity() * std::mem::size_of::<u32>();
+        let projection_snapshot_bytes = self
+            .projection_snapshot
+            .as_ref()
+            .map_or(0, LayeredSnapshot::estimated_heap_bytes);
 
         self.node_store.estimated_heap_bytes()
             + self.edge_store.estimated_heap_bytes()
@@ -1473,6 +1740,7 @@ impl Engine {
             + table_membership_bytes
             + tenant_bytes
             + tenanted_oid_bytes
+            + projection_snapshot_bytes
     }
 
     fn estimated_logical_bytes(&self) -> usize {
@@ -1513,40 +1781,93 @@ impl Engine {
     }
 
     /// Compute connected components.
+    #[allow(dead_code, reason = "compatibility entry point")]
     pub fn connected_components(
         &self,
+    ) -> GraphResult<crate::connected_components::ComponentResult> {
+        let governor = self.analytics_resource_governor()?;
+        self.connected_components_governed(&governor)
+    }
+
+    /// Computes connected components within a caller-owned analytics budget.
+    pub(crate) fn connected_components_governed(
+        &self,
+        governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<crate::connected_components::ComponentResult> {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        if let Some(neighbors) = self.layered_neighbors()? {
-            return Ok(
-                crate::connected_components::compute_components_with_neighbors(
-                    &self.node_store,
-                    &neighbors,
-                ),
-            );
-        }
-        if !self.has_edge_overlay() {
-            return Ok(crate::connected_components::compute_components(
-                &self.node_store,
-                &self.edge_store,
-            ));
-        }
-        let (overlay_insert_edges, overlay_deleted_edges) =
-            self.traversal_edge_overlay(TraversalDirection::Out);
-        let neighbors = OverlayNeighbors::new(
-            &self.edge_store,
-            &overlay_insert_edges,
-            &overlay_deleted_edges,
-        );
-        Ok(
-            crate::connected_components::compute_components_with_neighbors(
+        let workspace = whole_graph_workspace_bytes(self.node_store.node_count(), 40)?;
+        let workspace_lease = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::AnalyticsWorkspace,
+                workspace,
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        let _overlay_workspace = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::AnalyticsWorkspace,
+                self.estimated_traversal_overlay_clone_bytes()?,
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        let result = if let Some(neighbors) = self.layered_neighbors()? {
+            crate::connected_components::compute_components_with_neighbors_governed(
                 &self.node_store,
                 &neighbors,
-            ),
-        )
+                governor,
+            )?
+        } else if !self.has_edge_overlay() {
+            let neighbors = CsrNeighbors::new(&self.edge_store);
+            crate::connected_components::compute_components_with_neighbors_governed(
+                &self.node_store,
+                &neighbors,
+                governor,
+            )?
+        } else {
+            let (overlay_insert_edges, overlay_deleted_edges) =
+                self.traversal_edge_overlay(TraversalDirection::Out);
+            let neighbors = OverlayNeighbors::new(
+                &self.edge_store,
+                &overlay_insert_edges,
+                &overlay_deleted_edges,
+            );
+            crate::connected_components::compute_components_with_neighbors_governed(
+                &self.node_store,
+                &neighbors,
+                governor,
+            )?
+        };
+        workspace_lease.retain_until_governor_drop();
+        Ok(result)
     }
+
+    pub(crate) fn query_resource_governor(&self) -> GraphResult<crate::resource::ResourceGovernor> {
+        let resident = crate::resource::ByteCount::from_usize(self.estimated_memory_used_bytes())
+            .ok_or_else(|| {
+            GraphError::Internal("engine residency does not fit u64".to_string())
+        })?;
+        Ok(crate::resource::query_governor(resident))
+    }
+
+    pub(crate) fn analytics_resource_governor(
+        &self,
+    ) -> GraphResult<crate::resource::ResourceGovernor> {
+        let resident = crate::resource::ByteCount::from_usize(self.estimated_memory_used_bytes())
+            .ok_or_else(|| {
+            GraphError::Internal("engine residency does not fit u64".to_string())
+        })?;
+        Ok(crate::resource::analytics_governor(resident))
+    }
+}
+
+fn whole_graph_workspace_bytes(
+    node_count: u32,
+    bytes_per_node: u64,
+) -> GraphResult<crate::resource::ByteCount> {
+    u64::from(node_count)
+        .checked_mul(bytes_per_node)
+        .map(crate::resource::ByteCount::from_bytes)
+        .ok_or_else(|| GraphError::Internal("query workspace estimate overflowed".to_string()))
 }
 
 fn bytes_to_mb(bytes: usize) -> f64 {
@@ -2803,7 +3124,7 @@ mod tests {
     #[test]
     fn shortest_path_uses_layered_manifest_snapshot() {
         let mut eng = build_test_engine();
-        let _dir = install_edge_segment_manifest(&mut eng, "shortest_path_layered", |segment| {
+        let dir = install_edge_segment_manifest(&mut eng, "shortest_path_layered", |segment| {
             segment
                 .edge_inserts
                 .push(crate::projection::segment::SegmentEdge {
@@ -2815,7 +3136,17 @@ mod tests {
                 });
         });
 
+        let segment_path = dir.path().join(
+            &eng.projection_manifest_full
+                .as_ref()
+                .expect("manifest is installed")
+                .segments[0]
+                .path,
+        );
+        std::fs::remove_file(segment_path).expect("installed snapshot releases segment file");
+
         let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+        let repeated = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
 
         assert_eq!(
             steps
@@ -2823,6 +3154,16 @@ mod tests {
                 .map(|step| step.node_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["A", "D"]
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            repeated
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>()
         );
     }
 

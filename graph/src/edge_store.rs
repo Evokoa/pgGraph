@@ -264,10 +264,56 @@ pub struct SortedEdgeStoreBuilder {
     weights: Vec<u32>,
     relationship_ids: Vec<RelationshipId>,
     current_node: u32,
+    edge_capacity: Option<usize>,
 }
 
 impl SortedEdgeStoreBuilder {
+    /// Return the exact element-storage bytes requested by a bounded builder.
+    ///
+    /// This excludes the fixed-size builder and `Vec` headers themselves. A
+    /// caller can add `size_of::<Self>()` when accounting for total private
+    /// heap plus stack state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when a count or byte total cannot be
+    /// represented by the CSR format or the current platform.
+    pub(crate) fn planned_storage_bytes(
+        node_count: u32,
+        edge_capacity: usize,
+        has_weights: bool,
+    ) -> GraphResult<usize> {
+        if edge_capacity > u32::MAX as usize {
+            return Err(GraphError::Internal(
+                "CSR edge count exceeds the u32 offset format".to_string(),
+            ));
+        }
+        let offsets = usize::try_from(node_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_mul(std::mem::size_of::<u32>()))
+            .ok_or_else(|| GraphError::Internal("CSR offset bytes overflowed usize".to_string()))?;
+        let per_edge = std::mem::size_of::<u32>()
+            .checked_add(std::mem::size_of::<u8>())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u8>()))
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<RelationshipId>()))
+            .and_then(|bytes| {
+                bytes.checked_add(if has_weights {
+                    std::mem::size_of::<u32>()
+                } else {
+                    0
+                })
+            })
+            .ok_or_else(|| GraphError::Internal("CSR edge width overflowed usize".to_string()))?;
+        offsets
+            .checked_add(edge_capacity.checked_mul(per_edge).ok_or_else(|| {
+                GraphError::Internal("CSR edge bytes overflowed usize".to_string())
+            })?)
+            .ok_or_else(|| GraphError::Internal("CSR storage bytes overflowed usize".to_string()))
+    }
+
     /// Create a streaming CSR builder for edges sorted by source node.
+    #[cfg(test)]
     pub fn new(node_count: u32, has_weights: bool) -> Self {
         Self {
             node_count,
@@ -279,6 +325,7 @@ impl SortedEdgeStoreBuilder {
             weights: Vec::new(),
             relationship_ids: Vec::new(),
             current_node: 0,
+            edge_capacity: None,
         }
     }
 
@@ -308,6 +355,71 @@ impl SortedEdgeStoreBuilder {
             weights: Vec::new(),
             relationship_ids: Vec::new(),
             current_node: 0,
+            edge_capacity: None,
+        })
+    }
+
+    /// Create a streaming CSR builder with exact storage for a known edge count.
+    ///
+    /// Callers should derive `edge_capacity` during their resource preflight and
+    /// reserve the corresponding bytes with their operation governor before
+    /// constructing the builder. The builder will not grow any edge array beyond
+    /// this capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the offset count cannot fit the current
+    /// platform, or [`GraphError::Oom`] when an initial allocation fails.
+    pub(crate) fn try_new_with_edge_capacity(
+        node_count: u32,
+        edge_capacity: usize,
+        has_weights: bool,
+    ) -> GraphResult<Self> {
+        Self::planned_storage_bytes(node_count, edge_capacity, has_weights)?;
+        let offset_capacity = usize::try_from(node_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| GraphError::Internal("CSR offset count overflowed usize".to_string()))?;
+        let mut edge_offsets = Vec::new();
+        edge_offsets
+            .try_reserve_exact(offset_capacity)
+            .map_err(csr_allocation_error)?;
+        edge_offsets.push(0);
+
+        let mut targets = Vec::new();
+        targets
+            .try_reserve_exact(edge_capacity)
+            .map_err(csr_allocation_error)?;
+        let mut type_ids = Vec::new();
+        type_ids
+            .try_reserve_exact(edge_capacity)
+            .map_err(csr_allocation_error)?;
+        let mut schema_reversed = Vec::new();
+        schema_reversed
+            .try_reserve_exact(edge_capacity)
+            .map_err(csr_allocation_error)?;
+        let mut relationship_ids = Vec::new();
+        relationship_ids
+            .try_reserve_exact(edge_capacity)
+            .map_err(csr_allocation_error)?;
+        let mut weights = Vec::new();
+        if has_weights {
+            weights
+                .try_reserve_exact(edge_capacity)
+                .map_err(csr_allocation_error)?;
+        }
+
+        Ok(Self {
+            node_count,
+            has_weights,
+            edge_offsets,
+            targets,
+            type_ids,
+            schema_reversed,
+            weights,
+            relationship_ids,
+            current_node: 0,
+            edge_capacity: Some(edge_capacity),
         })
     }
 
@@ -332,6 +444,14 @@ impl SortedEdgeStoreBuilder {
     pub(crate) fn try_push_identified(&mut self, identified: IdentifiedRawEdge) -> GraphResult<()> {
         let edge = identified.edge;
         validate_raw_edge(self.node_count, &edge)?;
+        if self
+            .edge_capacity
+            .is_some_and(|capacity| self.targets.len() >= capacity)
+        {
+            return Err(GraphError::Internal(
+                "CSR edge count exceeded its preflight capacity".to_string(),
+            ));
+        }
         self.targets.try_reserve(1).map_err(csr_allocation_error)?;
         self.type_ids.try_reserve(1).map_err(csr_allocation_error)?;
         self.schema_reversed
@@ -983,6 +1103,62 @@ mod tests {
                 edge_count: 1,
             }
         }
+    }
+
+    #[test]
+    fn exact_capacity_builder_rejects_edges_beyond_its_preflight() {
+        assert_eq!(
+            SortedEdgeStoreBuilder::planned_storage_bytes(3, 2, true)
+                .expect("bounded storage bytes"),
+            4 * std::mem::size_of::<u32>()
+                + 2 * (std::mem::size_of::<u32>()
+                    + 2 * std::mem::size_of::<u8>()
+                    + std::mem::size_of::<RelationshipId>()
+                    + std::mem::size_of::<u32>())
+        );
+        let mut builder = SortedEdgeStoreBuilder::try_new_with_edge_capacity(3, 2, true)
+            .expect("bounded builder");
+        let initial_capacities = (
+            builder.targets.capacity(),
+            builder.type_ids.capacity(),
+            builder.schema_reversed.capacity(),
+            builder.weights.capacity(),
+            builder.relationship_ids.capacity(),
+        );
+        for (source, target) in [(0, 1), (1, 2)] {
+            builder
+                .try_push(RawEdge {
+                    source,
+                    target,
+                    type_id: 1,
+                    weight: Some(7),
+                    schema_reversed: false,
+                })
+                .expect("edge inside preflight");
+        }
+        assert_eq!(
+            initial_capacities,
+            (
+                builder.targets.capacity(),
+                builder.type_ids.capacity(),
+                builder.schema_reversed.capacity(),
+                builder.weights.capacity(),
+                builder.relationship_ids.capacity(),
+            )
+        );
+
+        let error = builder
+            .try_push(RawEdge {
+                source: 2,
+                target: 0,
+                type_id: 1,
+                weight: Some(7),
+                schema_reversed: false,
+            })
+            .expect_err("third edge exceeds the preflight");
+        assert!(
+            matches!(error, GraphError::Internal(reason) if reason.contains("preflight capacity"))
+        );
     }
 
     #[test]

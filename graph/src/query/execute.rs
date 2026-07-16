@@ -84,19 +84,49 @@ pub(crate) fn execute(
     plan: &PhysicalPlan,
     tenant: Option<&str>,
 ) -> GraphResult<Vec<GqlRow>> {
+    let governor = execution_governor(engine)?;
+    execute_governed(engine, plan, tenant, &governor)
+}
+
+pub(crate) fn execute_governed(
+    engine: &Engine,
+    plan: &PhysicalPlan,
+    tenant: Option<&str>,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
     let rel_type_id = edge_type_id(engine, &plan.rel_type)?;
-    let neighbors = GqlNeighbors::new(engine)?;
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
+    reserve_execution_rows(
+        governor,
+        engine,
+        row_cap,
+        one_hop_row_shape(plan.hops.max)?,
+        crate::resource::ResourcePhase::QueryCandidates,
+    )?
+    .retain_until_governor_drop();
+    let neighbors = GqlNeighbors::new(engine)?;
     for source_idx in source_nodes(engine, plan.source_table_oid, tenant) {
+        consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
         if !node_active(engine, source_idx) || crate::projection::tx_delta::node_deleted(source_idx)
         {
             continue;
         }
-        let targets = expand_targets(&neighbors, engine, plan, source_idx, rel_type_id, tenant);
+        let targets = expand_targets(
+            &TargetExpansion {
+                neighbors: &neighbors,
+                engine,
+                plan,
+                rel_type_id,
+                tenant,
+                result_cap: row_cap.saturating_sub(rows.len()),
+                governor,
+            },
+            source_idx,
+        )?;
         if targets.is_empty() && plan.optional {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
@@ -136,9 +166,29 @@ pub(crate) fn execute_node_scan(
     tenant: Option<&str>,
     params: &crate::query::value::QueryParams,
 ) -> GraphResult<Vec<GqlNodeRow>> {
+    let governor = execution_governor(engine)?;
+    execute_node_scan_governed(engine, plan, tenant, params, &governor)
+}
+
+pub(crate) fn execute_node_scan_governed(
+    engine: &Engine,
+    plan: &PhysicalNodeScan,
+    tenant: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<GqlNodeRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
+    let row_cap = plan.execution_row_cap();
+    reserve_execution_rows(
+        governor,
+        engine,
+        row_cap,
+        (1, 0),
+        crate::resource::ResourcePhase::QueryCandidates,
+    )?
+    .retain_until_governor_drop();
     if let Some(identity_lookup) = &plan.identity_lookup {
         let Some(node_id) = crate::query::value::identity_lookup_text(identity_lookup, params)?
         else {
@@ -172,9 +222,9 @@ pub(crate) fn execute_node_scan(
         }]);
     }
     let mut rows = Vec::new();
-    let row_cap = plan.execution_row_cap();
     let mut seen = std::collections::HashSet::new();
     for node_idx in source_nodes(engine, plan.table_oid, tenant) {
+        consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
         if !node_active(engine, node_idx) || crate::projection::tx_delta::node_deleted(node_idx) {
             continue;
         }
@@ -198,6 +248,7 @@ pub(crate) fn execute_node_scan(
     for node_id in
         crate::projection::tx_delta::added_node_keys(plan.table_oid, tenant, table_is_tenanted)
     {
+        consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
         if seen.insert(node_id.clone()) {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
@@ -241,10 +292,21 @@ fn optional_node_scan_fallback(plan: &PhysicalNodeScan) -> Vec<GqlNodeRow> {
 ///
 /// Returns [`GraphError`] when the graph is not built, a requested relationship
 /// type is not present, or execution exceeds the plan's cardinality cap.
+#[cfg(test)]
 pub(crate) fn execute_join(
     engine: &Engine,
     plan: &PhysicalJoinPlan,
     tenant: Option<&str>,
+) -> GraphResult<Vec<GqlRow>> {
+    let governor = execution_governor(engine)?;
+    execute_join_governed(engine, plan, tenant, &governor)
+}
+
+pub(crate) fn execute_join_governed(
+    engine: &Engine,
+    plan: &PhysicalJoinPlan,
+    tenant: Option<&str>,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
@@ -254,9 +316,17 @@ pub(crate) fn execute_join(
         .iter()
         .map(|pattern| edge_type_id(engine, &pattern.rel_type))
         .collect::<GraphResult<Vec<_>>>()?;
-    let neighbors = GqlNeighbors::new(engine)?;
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
+    reserve_execution_rows(
+        governor,
+        engine,
+        row_cap,
+        join_row_shape(plan)?,
+        crate::resource::ResourcePhase::QueryBlocking,
+    )?
+    .retain_until_governor_drop();
+    let neighbors = GqlNeighbors::new(engine)?;
     let state = JoinState {
         node_slots: vec![None; plan.node_slots.len()],
         relationships: vec![None; plan.patterns.len()],
@@ -271,6 +341,7 @@ pub(crate) fn execute_join(
         0,
         &mut rows,
         row_cap,
+        governor,
     )?;
     Ok(rows)
 }
@@ -286,6 +357,7 @@ fn expand_join_pattern(
     pattern_idx: usize,
     rows: &mut Vec<GqlRow>,
     row_cap: usize,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
     let Some(pattern) = plan.patterns.get(pattern_idx) else {
         if rows.len() >= row_cap {
@@ -316,6 +388,7 @@ fn expand_join_pattern(
             pattern_idx + 1,
             rows,
             row_cap,
+            governor,
         )?;
         return Ok(());
     }
@@ -324,6 +397,7 @@ fn expand_join_pattern(
     let null_extend_per_source = plan.optional && state.node_slots.iter().all(Option::is_none);
     let mut matched_any_source = false;
     for source_idx in source_candidates {
+        consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
         if !join_node_matches(engine, plan, pattern.source_slot, source_idx, tenant) {
             continue;
         }
@@ -343,6 +417,7 @@ fn expand_join_pattern(
             &mut matched_source,
             rows,
             row_cap,
+            governor,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -359,6 +434,7 @@ fn expand_join_pattern(
                 pattern_idx + 1,
                 rows,
                 row_cap,
+                governor,
             )?;
             if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
                 return Ok(());
@@ -378,6 +454,7 @@ fn expand_join_pattern(
             pattern_idx + 1,
             rows,
             row_cap,
+            governor,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -401,6 +478,7 @@ fn expand_join_pattern_hops(
     matched_source: &mut bool,
     rows: &mut Vec<GqlRow>,
     row_cap: usize,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
     let pattern = &plan.patterns[pattern_idx];
     if hop_count >= pattern.hops.min
@@ -424,6 +502,7 @@ fn expand_join_pattern_hops(
             pattern_idx + 1,
             rows,
             row_cap,
+            governor,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -433,6 +512,7 @@ fn expand_join_pattern_hops(
         return Ok(());
     }
     for target in neighbors.for_direction_any(pattern.direction, current_idx) {
+        consume_query_work(governor, crate::resource::ResourcePhase::QueryExpand)?;
         if target.type_id != rel_type_ids[pattern_idx]
             || !wildcard_node_visible(engine, target.node_idx, tenant)
         {
@@ -461,6 +541,7 @@ fn expand_join_pattern_hops(
             matched_source,
             rows,
             row_cap,
+            governor,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -475,15 +556,25 @@ fn expand_join_pattern_hops(
 ///
 /// Returns [`GraphError`] when the graph is not built or execution exceeds the
 /// plan's cardinality cap.
+#[cfg(test)]
 pub(crate) fn execute_wildcard_path(
     engine: &Engine,
     plan: &PhysicalWildcardPathPlan,
     tenant: Option<&str>,
 ) -> GraphResult<Vec<GqlRow>> {
+    let governor = execution_governor(engine)?;
+    execute_wildcard_path_governed(engine, plan, tenant, &governor)
+}
+
+pub(crate) fn execute_wildcard_path_governed(
+    engine: &Engine,
+    plan: &PhysicalWildcardPathPlan,
+    tenant: Option<&str>,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
-    let neighbors = GqlNeighbors::new(engine)?;
     let segment_filters = plan
         .segments
         .iter()
@@ -496,6 +587,15 @@ pub(crate) fn execute_wildcard_path(
         })
         .collect::<GraphResult<Vec<_>>>()?;
     let row_cap = plan.execution_row_cap();
+    reserve_execution_rows(
+        governor,
+        engine,
+        row_cap,
+        wildcard_row_shape(plan)?,
+        crate::resource::ResourcePhase::QueryPaths,
+    )?
+    .retain_until_governor_drop();
+    let neighbors = GqlNeighbors::new(engine)?;
     let mut rows = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
     let scan_table_oids: Vec<u32> = plan.source_table_filter.map_or_else(
@@ -504,6 +604,7 @@ pub(crate) fn execute_wildcard_path(
     );
     for table_oid in scan_table_oids {
         for source_idx in source_nodes(engine, table_oid, tenant) {
+            consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
             if !node_active(engine, source_idx)
                 || crate::projection::tx_delta::node_deleted(source_idx)
             {
@@ -517,6 +618,7 @@ pub(crate) fn execute_wildcard_path(
                     segment_filters: &segment_filters,
                     tenant,
                     row_cap,
+                    governor,
                 },
                 source_idx,
                 &mut rows,
@@ -534,6 +636,7 @@ struct WildcardExpansion<'a> {
     segment_filters: &'a [std::collections::BTreeSet<u8>],
     tenant: Option<&'a str>,
     row_cap: usize,
+    governor: &'a crate::resource::ResourceGovernor,
 }
 
 type WildcardPathStepKey = (u32, u32, u8, Option<RelationshipId>);
@@ -561,6 +664,7 @@ fn expand_wildcard_segments(
         rows,
         seen_paths,
         expansion.row_cap,
+        expansion.governor,
     )
 }
 
@@ -576,6 +680,7 @@ fn expand_wildcard_segment(
     rows: &mut Vec<GqlRow>,
     seen_paths: &mut SeenWildcardPaths,
     row_cap: usize,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
     let Some(segment) = plan.segments.get(segment_idx) else {
         let path_key = state
@@ -618,6 +723,7 @@ fn expand_wildcard_segment(
         rows,
         seen_paths,
         row_cap,
+        governor,
     )
 }
 
@@ -635,6 +741,7 @@ fn expand_wildcard_segment_hops(
     rows: &mut Vec<GqlRow>,
     seen_paths: &mut SeenWildcardPaths,
     row_cap: usize,
+    governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<()> {
     if hop_count >= segment.hops.min
         && wildcard_segment_endpoint_matches(engine, segment, state.node_idx, tenant)
@@ -650,6 +757,7 @@ fn expand_wildcard_segment_hops(
             rows,
             seen_paths,
             row_cap,
+            governor,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -659,6 +767,7 @@ fn expand_wildcard_segment_hops(
         return Ok(());
     }
     for target in neighbors.for_direction_any(segment.direction, state.node_idx) {
+        consume_query_work(governor, crate::resource::ResourcePhase::QueryPaths)?;
         if !segment_filters[segment_idx].is_empty()
             && !segment_filters[segment_idx].contains(&target.type_id)
         {
@@ -681,6 +790,7 @@ fn expand_wildcard_segment_hops(
             rows,
             seen_paths,
             row_cap,
+            governor,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -718,34 +828,268 @@ fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<u8> {
         })
 }
 
-fn source_nodes(engine: &Engine, table_oid: u32, tenant: Option<&str>) -> Vec<u32> {
-    let mut nodes: Vec<u32> = if let Some(nodes) = engine.table_membership.get(&table_oid) {
-        nodes.iter().collect()
-    } else {
-        (0..engine.node_store.node_count())
-            .filter(|&idx| engine.node_store.table_oid(idx) == Some(table_oid))
-            .collect()
-    };
-    let table_is_tenanted = engine.tenanted_table_oids.contains(&table_oid);
-    nodes.extend(crate::projection::tx_delta::added_node_indexes(
-        table_oid,
-        tenant,
-        table_is_tenanted,
-    ));
-    nodes
-        .into_iter()
-        .filter(|&idx| tenant_allows_node(engine, idx, tenant))
-        .collect()
+fn execution_governor(engine: &Engine) -> GraphResult<crate::resource::ResourceGovernor> {
+    let resident = crate::resource::ByteCount::from_usize(engine.estimated_memory_used_bytes())
+        .ok_or_else(|| GraphError::Internal("engine residency does not fit u64".to_string()))?;
+    Ok(crate::resource::query_governor(resident))
 }
 
-fn expand_targets(
-    neighbors: &GqlNeighbors<'_>,
+fn reserve_execution_rows<'a>(
+    governor: &'a crate::resource::ResourceGovernor,
     engine: &Engine,
-    plan: &PhysicalPlan,
-    source_idx: u32,
+    row_cap: usize,
+    (coordinates_per_row, relationships_per_row): (usize, usize),
+    phase: crate::resource::ResourcePhase,
+) -> GraphResult<crate::resource::ResourceLease<'a>> {
+    let max_primary_key_bytes = engine
+        .node_store
+        .max_primary_key_bytes()
+        .max(crate::projection::tx_delta::max_added_node_primary_key_bytes());
+    let max_relationship_label_bytes = engine
+        .edge_type_registry
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or_default();
+    let coordinate_bytes = std::mem::size_of::<GqlNodeCoordinate>()
+        .checked_add(max_primary_key_bytes)
+        .ok_or_else(|| GraphError::Internal("GQL coordinate estimate overflowed".to_string()))?;
+    let relationship_bytes = std::mem::size_of::<GqlPathRelationship>()
+        .checked_add(max_relationship_label_bytes)
+        .ok_or_else(|| GraphError::Internal("GQL relationship estimate overflowed".to_string()))?;
+    let row_bytes = std::mem::size_of::<GqlRow>()
+        .checked_add(
+            coordinates_per_row
+                .checked_mul(coordinate_bytes)
+                .ok_or_else(|| {
+                    GraphError::Internal("GQL coordinate workspace overflowed".to_string())
+                })?,
+        )
+        .and_then(|bytes| {
+            relationships_per_row
+                .checked_mul(relationship_bytes)
+                .and_then(|relationships| bytes.checked_add(relationships))
+        })
+        .and_then(|bytes| {
+            relationships_per_row
+                .checked_mul(std::mem::size_of::<WildcardPathStepKey>())
+                .and_then(|path_keys| bytes.checked_add(path_keys))
+        })
+        .ok_or_else(|| GraphError::Internal("GQL result row estimate overflowed".to_string()))?;
+    let result_bytes = row_cap
+        .checked_mul(row_bytes)
+        .ok_or_else(|| GraphError::Internal("GQL result workspace overflowed".to_string()))?;
+    // Execution keeps final rows alongside bounded target/frontier state and
+    // duplicate-detection keys. Charge all of those live sets, not just the
+    // returned row representation.
+    let path_node_bytes = relationships_per_row
+        .checked_add(1)
+        .and_then(|nodes| nodes.checked_mul(std::mem::size_of::<u32>()))
+        .ok_or_else(|| GraphError::Internal("GQL path-node estimate overflowed".to_string()))?;
+    let path_state_bytes = std::mem::size_of::<PathState>()
+        .checked_add(path_node_bytes)
+        .and_then(|bytes| {
+            relationships_per_row
+                .checked_mul(std::mem::size_of::<GqlRelationshipStep>())
+                .and_then(|relationships| bytes.checked_add(relationships))
+        })
+        .ok_or_else(|| GraphError::Internal("GQL path-state estimate overflowed".to_string()))?;
+    let target_bytes = std::mem::size_of::<GqlTarget>()
+        .checked_add(path_state_bytes)
+        .ok_or_else(|| GraphError::Internal("GQL target estimate overflowed".to_string()))?;
+    let seen_key_bytes = std::mem::size_of::<String>()
+        .checked_add(max_primary_key_bytes)
+        .and_then(|bytes| bytes.checked_add(3 * std::mem::size_of::<usize>()))
+        .ok_or_else(|| GraphError::Internal("GQL seen-key estimate overflowed".to_string()))?;
+    let intermediate_per_row = target_bytes
+        .checked_add(
+            path_state_bytes.checked_mul(2).ok_or_else(|| {
+                GraphError::Internal("GQL frontier estimate overflowed".to_string())
+            })?,
+        )
+        .and_then(|bytes| bytes.checked_add(seen_key_bytes))
+        .ok_or_else(|| GraphError::Internal("GQL intermediate estimate overflowed".to_string()))?;
+    let bounded_rows = row_cap
+        .checked_add(1)
+        .ok_or_else(|| GraphError::Internal("GQL bounded row count overflowed".to_string()))?;
+    let intermediate_bytes = bounded_rows
+        .checked_mul(intermediate_per_row)
+        .ok_or_else(|| GraphError::Internal("GQL intermediate workspace overflowed".to_string()))?;
+    let join_state_bytes = std::mem::size_of::<JoinState>()
+        .checked_add(
+            coordinates_per_row
+                .checked_mul(std::mem::size_of::<Option<u32>>())
+                .ok_or_else(|| {
+                    GraphError::Internal("GQL join-node state overflowed".to_string())
+                })?,
+        )
+        .and_then(|bytes| {
+            relationships_per_row
+                .checked_mul(
+                    std::mem::size_of::<Option<Vec<GqlRelationshipStep>>>()
+                        + std::mem::size_of::<GqlRelationshipStep>(),
+                )
+                .and_then(|relationships| bytes.checked_add(relationships))
+        })
+        .ok_or_else(|| GraphError::Internal("GQL join-state estimate overflowed".to_string()))?;
+    let recursion_depth = relationships_per_row.max(1);
+    let recursive_bytes = path_state_bytes
+        .checked_add(join_state_bytes)
+        .and_then(|bytes| bytes.checked_mul(recursion_depth))
+        .ok_or_else(|| GraphError::Internal("GQL recursion workspace overflowed".to_string()))?;
+    let tx_nodes = crate::projection::tx_delta::stats().added_nodes;
+    let candidate_count = usize::try_from(engine.node_store.node_count())
+        .ok()
+        .and_then(|count| count.checked_add(tx_nodes))
+        .ok_or_else(|| GraphError::Internal("GQL candidate count overflowed".to_string()))?;
+    let candidate_bytes = candidate_count
+        .checked_mul(std::mem::size_of::<u32>() + 3 * std::mem::size_of::<usize>())
+        .ok_or_else(|| GraphError::Internal("GQL candidate workspace overflowed".to_string()))?;
+    // Recursive join/wildcard expansion retains one sorted neighbor vector at
+    // each path depth while descending. `relationships_per_row` is a
+    // conservative upper bound for that depth for every physical plan shape.
+    let neighbor_depth = relationships_per_row.max(1);
+    let degree_bytes = usize::try_from(engine.edge_store.edge_count())
+        .ok()
+        .and_then(|edges| edges.checked_mul(std::mem::size_of::<GqlStepTarget>() * 2))
+        .and_then(|bytes| bytes.checked_mul(neighbor_depth))
+        .ok_or_else(|| GraphError::Internal("GQL degree workspace overflowed".to_string()))?;
+    let overlay_bytes = engine.estimated_traversal_overlay_clone_bytes()?;
+    let bytes = result_bytes
+        .checked_add(intermediate_bytes)
+        .and_then(|total| total.checked_add(recursive_bytes))
+        .and_then(|total| total.checked_add(candidate_bytes))
+        .and_then(|total| total.checked_add(degree_bytes))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .and_then(|total| total.checked_add(overlay_bytes))
+        .ok_or_else(|| GraphError::Internal("GQL workspace estimate overflowed".to_string()))?;
+    governor
+        .reserve_memory(phase, bytes)
+        .map_err(crate::safety::resource_limit_error)
+}
+
+fn one_hop_row_shape(max_hops: u32) -> GraphResult<(usize, usize)> {
+    let hops = usize::try_from(max_hops)
+        .map_err(|_| GraphError::Internal("GQL hop bound does not fit usize".to_string()))?;
+    let coordinates = hops
+        .checked_mul(3)
+        .and_then(|coordinates| coordinates.checked_add(5))
+        .ok_or_else(|| GraphError::Internal("GQL row shape overflowed".to_string()))?;
+    Ok((coordinates, hops))
+}
+
+fn wildcard_row_shape(plan: &PhysicalWildcardPathPlan) -> GraphResult<(usize, usize)> {
+    let hops = plan.segments.iter().try_fold(0usize, |total, segment| {
+        usize::try_from(segment.hops.max)
+            .ok()
+            .and_then(|hops| total.checked_add(hops))
+            .ok_or_else(|| GraphError::Internal("wildcard path shape overflowed".to_string()))
+    })?;
+    let coordinates = hops
+        .checked_mul(3)
+        .and_then(|coordinates| coordinates.checked_add(5))
+        .ok_or_else(|| GraphError::Internal("wildcard row shape overflowed".to_string()))?;
+    Ok((coordinates, hops))
+}
+
+fn join_row_shape(plan: &PhysicalJoinPlan) -> GraphResult<(usize, usize)> {
+    let (hops, path_nodes) =
+        plan.patterns
+            .iter()
+            .try_fold((0usize, 0usize), |(total_hops, total_nodes), pattern| {
+                let hops = usize::try_from(pattern.hops.max).map_err(|_| {
+                    GraphError::Internal("join hop bound does not fit usize".to_string())
+                })?;
+                Ok::<_, GraphError>((
+                    total_hops.checked_add(hops).ok_or_else(|| {
+                        GraphError::Internal("join relationship shape overflowed".to_string())
+                    })?,
+                    total_nodes
+                        .checked_add(hops.checked_add(1).ok_or_else(|| {
+                            GraphError::Internal("join path shape overflowed".to_string())
+                        })?)
+                        .ok_or_else(|| {
+                            GraphError::Internal("join path shape overflowed".to_string())
+                        })?,
+                ))
+            })?;
+    let relationships = hops
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(plan.patterns.len()))
+        .ok_or_else(|| GraphError::Internal("join row shape overflowed".to_string()))?;
+    let coordinates = plan
+        .node_slots
+        .len()
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(path_nodes))
+        .and_then(|count| count.checked_add(2))
+        .and_then(|count| {
+            relationships
+                .checked_mul(2)
+                .and_then(|endpoints| count.checked_add(endpoints))
+        })
+        .ok_or_else(|| GraphError::Internal("join coordinate shape overflowed".to_string()))?;
+    Ok((coordinates, relationships))
+}
+
+fn source_nodes<'a>(
+    engine: &'a Engine,
+    table_oid: u32,
+    tenant: Option<&'a str>,
+) -> impl Iterator<Item = u32> + 'a {
+    let nodes: Box<dyn Iterator<Item = u32> + 'a> =
+        if let Some(nodes) = engine.table_membership.get(&table_oid) {
+            Box::new(nodes.iter())
+        } else {
+            Box::new(
+                (0..engine.node_store.node_count())
+                    .filter(move |&idx| engine.node_store.table_oid(idx) == Some(table_oid)),
+            )
+        };
+    let table_is_tenanted = engine.tenanted_table_oids.contains(&table_oid);
+    let added =
+        crate::projection::tx_delta::added_node_indexes(table_oid, tenant, table_is_tenanted);
+    nodes
+        .chain(added)
+        .filter(move |&idx| tenant_allows_node(engine, idx, tenant))
+}
+
+fn consume_query_work(
+    governor: &crate::resource::ResourceGovernor,
+    phase: crate::resource::ResourcePhase,
+) -> GraphResult<()> {
+    governor
+        .consume_work(phase, crate::resource::WorkUnits::new(1))
+        .map_err(crate::safety::resource_limit_error)?;
+    if governor.work_used().as_u64().is_multiple_of(1_024) {
+        crate::resource::check_postgres_interrupts();
+        governor
+            .check_elapsed(phase)
+            .map_err(crate::safety::resource_limit_error)?;
+    }
+    Ok(())
+}
+
+struct TargetExpansion<'a> {
+    neighbors: &'a GqlNeighbors<'a>,
+    engine: &'a Engine,
+    plan: &'a PhysicalPlan,
     rel_type_id: u8,
-    tenant: Option<&str>,
-) -> Vec<GqlTarget> {
+    tenant: Option<&'a str>,
+    result_cap: usize,
+    governor: &'a crate::resource::ResourceGovernor,
+}
+
+fn expand_targets(expansion: &TargetExpansion<'_>, source_idx: u32) -> GraphResult<Vec<GqlTarget>> {
+    let TargetExpansion {
+        neighbors,
+        engine,
+        plan,
+        rel_type_id,
+        tenant,
+        result_cap,
+        governor,
+    } = expansion;
     let mut results = Vec::new();
     let preserve_path_matches = plan.hops.variable;
     let mut seen_frontier = std::collections::HashSet::from([source_idx]);
@@ -758,10 +1102,11 @@ fn expand_targets(
         let mut next = Vec::new();
         let mut seen_next = std::collections::HashSet::new();
         for state in current {
-            for target in neighbors.for_direction(plan.direction, state.node_idx, rel_type_id) {
+            for target in neighbors.for_direction(plan.direction, state.node_idx, *rel_type_id) {
+                consume_query_work(governor, crate::resource::ResourcePhase::QueryExpand)?;
                 if !node_active(engine, target.node_idx)
                     || crate::projection::tx_delta::node_deleted(target.node_idx)
-                    || !tenant_allows_node(engine, target.node_idx, tenant)
+                    || !tenant_allows_node(engine, target.node_idx, *tenant)
                 {
                     continue;
                 }
@@ -770,8 +1115,19 @@ fn expand_targets(
                 }
                 let next_state = state.push(target);
                 if depth >= plan.hops.min
-                    && target_matches(engine, target.node_idx, plan.target_table_oid, tenant)
+                    && target_matches(engine, target.node_idx, plan.target_table_oid, *tenant)
                 {
+                    if results.len() >= *result_cap {
+                        if plan.cap_exhaustion_is_error() {
+                            return Err(GraphError::GqlExecution {
+                                reason: format!(
+                                    "GQL result row cap exceeded ({})",
+                                    plan.execution_row_cap()
+                                ),
+                            });
+                        }
+                        return Ok(results);
+                    }
                     results.push(GqlTarget {
                         node_idx: target.node_idx,
                         orientation: target.orientation,
@@ -787,6 +1143,17 @@ fn expand_targets(
                         || (seen_frontier.insert(target.node_idx)
                             && seen_next.insert(target.node_idx)))
                 {
+                    if next.len() >= plan.execution_row_cap() {
+                        return Err(GraphError::ResourceLimit {
+                            resource: "path states".to_string(),
+                            phase: crate::resource::ResourcePhase::QueryPaths
+                                .as_str()
+                                .to_string(),
+                            used: next.len() as u64,
+                            requested: 1,
+                            limit: plan.execution_row_cap() as u64,
+                        });
+                    }
                     next.push(next_state);
                 }
             }
@@ -796,7 +1163,7 @@ fn expand_targets(
             break;
         }
     }
-    results
+    Ok(results)
 }
 
 #[derive(Debug, Clone)]
@@ -870,13 +1237,14 @@ struct GqlNeighbors<'a> {
 
 impl<'a> GqlNeighbors<'a> {
     fn new(engine: &'a Engine) -> GraphResult<Self> {
-        let (out_overlay, in_overlay) = if engine.has_edge_overlay() {
+        let layered = engine.layered_neighbors()?;
+        let (out_overlay, in_overlay) = if layered.is_some() || !engine.has_edge_overlay() {
+            (None, None)
+        } else {
             (
                 Some(engine.traversal_edge_overlay(TraversalDirection::Out)),
                 Some(engine.traversal_edge_overlay(TraversalDirection::In)),
             )
-        } else {
-            (None, None)
         };
 
         Ok(Self {
@@ -884,7 +1252,7 @@ impl<'a> GqlNeighbors<'a> {
             in_store: &engine.reverse_edge_store,
             out_overlay,
             in_overlay,
-            layered: engine.layered_neighbors()?,
+            layered,
         })
     }
 
@@ -1087,7 +1455,7 @@ fn join_source_candidates(
     tenant: Option<&str>,
 ) -> Vec<u32> {
     state.node_slots[slot].map_or_else(
-        || source_nodes(engine, plan.node_slots[slot].table_oid, tenant),
+        || source_nodes(engine, plan.node_slots[slot].table_oid, tenant).collect(),
         |node_idx| vec![node_idx],
     )
 }
@@ -1403,4 +1771,40 @@ fn edge_type_label(engine: &Engine, type_id: u8) -> GraphResult<String> {
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("relationship type id `{type_id}` is not present in the built graph"),
         })
+}
+
+#[cfg(test)]
+mod resource_accounting_tests {
+    use super::*;
+    use crate::resource::{
+        ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
+        RowCount, WorkUnits,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn execution_preflights_long_ids_and_path_vectors() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(10, "x".repeat(4_096));
+        let governor = ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_mib(1).expect("test memory fits")),
+            DiskBudget::new(ByteCount::from_mib(1).expect("test disk fits")),
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
+            ElapsedBudget::new(Duration::MAX),
+        ));
+
+        let error = match reserve_execution_rows(
+            &governor,
+            &engine,
+            10_000,
+            one_hop_row_shape(128).expect("bounded path shape"),
+            crate::resource::ResourcePhase::QueryPaths,
+        ) {
+            Ok(_) => panic!("long path results must not fit a one MiB query budget"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, GraphError::ResourceLimit { .. }));
+    }
 }

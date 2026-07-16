@@ -20,23 +20,26 @@ pub(crate) use crate::sql_build::{
     execute_maintenance_rebuild, execute_vacuum,
 };
 pub(crate) use crate::sql_filters::filter_helper;
-pub(crate) use crate::sql_hydration::{hydrate_node, hydrate_nodes};
+pub(crate) use crate::sql_hydration::{
+    hydrate_node, hydrate_node_governed, hydrate_nodes_governed,
+};
 pub(crate) use crate::sql_jobs::{
     build_job_row, create_build_job, create_maintenance_job, launch_build_worker,
     launch_due_jobs_worker, launch_maintenance_worker, maintenance_job_row, run_build_job,
     run_maintenance_job, update_build_job_failed, update_maintenance_job_failed, JobStatus,
     SchedulerWorkerMetadata, WorkerMetadata,
 };
-pub(crate) use crate::sql_search::{source_table_search_rows, validate_search_request};
+pub(crate) use crate::sql_search::{source_table_search_rows_governed, validate_search_request};
 pub(crate) use crate::sql_sync::{
     apply_sync_internal, apply_sync_to_high_watermark, current_sync_mode,
     disabled_graph_trigger_count, ingest_projection_internal, install_sync_triggers,
     max_sync_log_id, pending_sync_rows, resolve_tenant_scope,
 };
 pub(crate) use crate::sql_traversal::{
-    apply_traversal_uniqueness, canonical_node_ref_string, execute_traverse_candidates,
-    execute_traverse_rows, format_path_value, paginate_and_format_traverse_candidates,
-    sort_traverse_candidates_for_many, usize_from_nonnegative,
+    apply_traversal_uniqueness_governed, canonical_node_ref_string,
+    execute_traverse_candidates_governed, execute_traverse_rows, execute_traverse_rows_governed,
+    format_path_value, paginate_and_format_traverse_candidates_governed,
+    sort_traverse_candidates_for_many_governed, usize_from_nonnegative,
 };
 pub(crate) use crate::{
     acl, builder, catalog, config, connected_components, discover, engine, persistence, safety,
