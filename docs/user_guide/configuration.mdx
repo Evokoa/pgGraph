@@ -52,6 +52,7 @@ SELECT pg_reload_conf();
 | `graph.max_exact_path_count` | int | `100000` | `USERSET` | `1` to `10000000` | `graph.path_count_estimate()`, `graph.aggregate()` |
 | `graph.enforce_tenant_scope` | bool | `true` | `USERSET` | `on`, `off` | Tenanted graph queries |
 | `graph.tenant_setting` | string | empty | `USERSET` | Any session GUC name | Tenant fallback |
+| `graph.allow_rls_tables` | bool | `false` | `USERSET` | `on`, `off` | `graph.build()` row-level security acknowledgment |
 | `graph.build_scan_mode` | string | `select` | `USERSET` | `select`; `copy` is reserved | Build scanner |
 | `graph.default_projection_mode` | string | `csr_readonly` | `USERSET` | `csr_readonly`, `mutable_overlay` | Default `graph.build()` projection mode |
 | `graph.mutable_enabled` | bool | `false` | `USERSET` | `on`, `off` | Allows `mutable_overlay` builds |

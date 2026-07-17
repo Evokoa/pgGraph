@@ -68,6 +68,7 @@ pub(crate) enum GraphDiagnosticCode {
     UnsupportedOperation,
     OverlayLimit,
     Disabled,
+    RlsTopologyBoundary,
 }
 
 impl GraphDiagnosticCode {
@@ -95,6 +96,7 @@ impl GraphDiagnosticCode {
             Self::UnsupportedOperation => "PG018",
             Self::OverlayLimit => "PG019",
             Self::Disabled => "PG020",
+            Self::RlsTopologyBoundary => "PG021",
         }
     }
 }
@@ -187,6 +189,9 @@ pub enum GraphError {
 
     #[error("graph extension is disabled (graph.enabled = off)")]
     Disabled, // ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+
+    #[error("table {table} has row-level security enabled; graph.build() refuses it unless graph.allow_rls_tables = on")]
+    RlsTopologyBoundary { table: String }, // PG021
 
     #[error("Internal error: {0}")]
     Internal(String),
@@ -292,6 +297,11 @@ impl GraphError {
             ),
             GraphError::Disabled => (
                 GraphDiagnosticCode::Disabled,
+                "55000",
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ),
+            GraphError::RlsTopologyBoundary { .. } => (
+                GraphDiagnosticCode::RlsTopologyBoundary,
                 "55000",
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             ),
@@ -404,6 +414,15 @@ impl GraphError {
             }
             GraphError::Disabled => {
                 "SET graph.enabled = on; or remove the setting from postgresql.conf.".to_string()
+            }
+            GraphError::RlsTopologyBoundary { table } => {
+                format!(
+                    "Topology reads (traverse/shortest_path/components) return coordinates and \
+                     adjacency from the builder-scoped graph artifact under table-level ACL only, \
+                     not {table}'s row-level security policies. Review \
+                     docs/user_guide/administration-and-security.mdx#row-level-security-and-topology-reads, \
+                     then set graph.allow_rls_tables = on to build over this table anyway."
+                )
             }
             GraphError::Internal(_) => {
                 "This is a bug. Please report it with the full error message.".to_string()

@@ -194,6 +194,15 @@ pub static PROJECTION_RETENTION_GENERATIONS: GucSetting<i32> = GucSetting::<i32>
 /// Default: true.
 pub static ENFORCE_TENANT_SCOPE: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+/// Whether `graph.build()` may register tables that have row-level security
+/// enabled. Topology-read functions (`traverse()`, `shortest_path()`, the
+/// component functions) return coordinates and adjacency from the
+/// builder-scoped graph artifact under table-level ACL only, not row-level
+/// security, so building over an RLS-enabled table without this explicit
+/// acknowledgment is refused.
+/// Default: false.
+pub static ALLOW_RLS_TABLES: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 // ─── Typed Enums for String GUCs ───
 
 /// Action to take when a build() would exceed `graph.memory_limit_mb`.
@@ -862,6 +871,15 @@ pub fn register_gucs() {
         c"Require tenant scope for tenanted graphs.",
         c"When on, tenanted graph queries without explicit or session tenant fail.",
         &ENFORCE_TENANT_SCOPE,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"graph.allow_rls_tables",
+        c"Allow graph.build() to register tables with row-level security enabled.",
+        c"Off by default: topology reads check table-level ACL only, not row-level security, so building over an RLS-enabled table requires this explicit acknowledgment.",
+        &ALLOW_RLS_TABLES,
         GucContext::Userset,
         GucFlags::default(),
     );

@@ -36,19 +36,28 @@ security policies against the calling role, so a role with table-level
 `SELECT` can receive coordinates, path membership, and reachability for rows
 its own row-level security policy would hide from a direct `SELECT`.
 `graph.search()` re-queries source-table properties as the caller and is not
-affected. See
+affected.
+
+`graph.build()` fails closed on this by default: registering a table with row
+security enabled requires the explicit acknowledgment
+`graph.allow_rls_tables = on` (SQLSTATE `55000`, diagnostic `PG021`, otherwise).
+This turns the boundary above into a deliberate operator decision rather than
+a silent one; it does not add row-level filtering to topology reads. See
 [Row-Level Security And Topology Reads](/user_guide/administration-and-security#row-level-security-and-topology-reads)
 for the full boundary and mitigation guidance.
 
-### Tenant scope is a query filter, not an authorization boundary
+### Tenant scope requires the session-setting path under enforcement
 
 For a graph whose tables are registered with `tenant_column` rather than
-pinned to a single graph-level tenant, the tenant argument and session tenant
-narrow results to a tenant bitmap but are not verified against the calling
-role's identity; any role with graph `read` and the necessary source-table
-privileges can supply any tenant value. See
-[Tenant Scope](/user_guide/administration-and-security#tenant-scope) for
-mitigation guidance.
+pinned to a single graph-level tenant, an explicit tenant argument is a
+caller-supplied value, not one verified against the calling role's identity.
+While `graph.enforce_tenant_scope = on` (the default), pgGraph refuses an
+explicit tenant argument for such a graph and requires the session tenant
+(`graph.tenant_setting`) instead. pgGraph cannot verify that a session's
+tenant setting reflects who is actually connected; that trust boundary
+belongs to whatever sets the session GUC before the caller's own queries run.
+See [Tenant Scope](/user_guide/administration-and-security#tenant-scope) for
+the full boundary and mitigation guidance.
 
 ## Query Compatibility
 

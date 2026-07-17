@@ -3244,6 +3244,23 @@ pub(crate) fn resolve_tenant_scope(
         .map(str::trim)
         .filter(|tenant| !tenant.is_empty())
     {
+        // A graph pinned to one tenant (graph_tenant.is_some()) already has a
+        // real authorization check below: the explicit argument must match
+        // that pinned value or the call fails. For a graph whose tables are
+        // registered with tenant_column but not pinned to a single graph
+        // tenant, there is no such check — any caller-supplied value would
+        // otherwise be accepted verbatim. Under enforcement, require the
+        // tenant to come from the trusted session-setting path instead,
+        // which only a deployment-controlled connection setup (not the
+        // query text itself) can set.
+        if graph_tenant.is_none()
+            && config::ENFORCE_TENANT_SCOPE.get()
+            && graph_has_tenanted_tables()?
+        {
+            return Err(safety::GraphError::InvalidFilter {
+                reason: "explicit tenant arguments are not accepted for tenant_column-registered graphs while graph.enforce_tenant_scope is on; set the trusted session tenant via graph.tenant_setting instead of passing tenant as a query argument".to_string(),
+            });
+        }
         ensure_tenant_matches_graph_scope(tenant, graph_tenant.as_deref())?;
         return Ok(Some(tenant.to_string()));
     }

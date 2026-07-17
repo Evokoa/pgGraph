@@ -12,381 +12,38 @@ CREATE SCHEMA IF NOT EXISTS graph; /* graph::graph */
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/workflow.rs:627
--- graph::sql_facade::workflow::neighborhood
-CREATE  FUNCTION graph."neighborhood"(
-	"property_key" TEXT, /* & str */
-	"property_value" TEXT, /* & str */
-	"source_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"search_mode" TEXT DEFAULT 'contains', /* & str */
-	"search_max_rows" INT DEFAULT 1, /* i32 */
-	"max_depth" INT DEFAULT 4, /* i32 */
-	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"direction" TEXT DEFAULT 'any', /* & str */
-	"tenant" TEXT DEFAULT NULL, /* Option < String > */
-	"sample_k" INT DEFAULT 5, /* i32 */
-	"node_limit" INT DEFAULT 10000 /* i32 */
-) RETURNS TABLE (
-	"depth" INT,  /* i32 */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_table_name" TEXT,  /* String */
-	"node_count" bigint,  /* i64 */
-	"sample_nodes" jsonb,  /* pgrx :: JsonB */
-	"truncated" bool  /* bool */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'neighborhood_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3429
--- graph::sql_facade::admin::remove_edge
-CREATE  FUNCTION graph."remove_edge"(
-	"label" TEXT /* & str */
-) RETURNS void
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'remove_edge_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3455
--- graph::sql_facade::admin::remove_edge_from_graph
-CREATE  FUNCTION graph."remove_edge_from_graph"(
-	"graph_name" TEXT, /* & str */
-	"label" TEXT, /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS void
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'remove_edge_from_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:1382
--- graph::sql_facade::admin::projection_gc
-CREATE  FUNCTION graph."projection_gc"() RETURNS TABLE (
-	"valid_generations_scanned" INT,  /* i32 */
-	"retained_generations" bigint[],  /* Vec < i64 > */
-	"active_generations" bigint[],  /* Vec < i64 > */
-	"obsolete_candidates" INT,  /* i32 */
-	"protected_candidates" INT,  /* i32 */
-	"deleted_files" INT,  /* i32 */
-	"deleted_bytes" bigint  /* i64 */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'projection_gc_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5174
--- graph::sql_facade::admin::sync_policy_status
-CREATE  FUNCTION graph."sync_policy_status"(
-	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL, /* Option < & str > */
-	"max_rows" INT DEFAULT 50 /* i32 */
-) RETURNS TABLE (
-	"policy_id" TEXT,  /* String */
-	"job_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"enabled" bool,  /* bool */
-	"schedule_interval_secs" bigint,  /* i64 */
-	"max_sync_lag_rows" bigint,  /* Option < i64 > */
-	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"last_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"last_status" TEXT,  /* Option < String > */
-	"last_error" TEXT  /* Option < String > */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'sync_policy_status_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3013
--- graph::sql_facade::admin::alter_edge
-CREATE  FUNCTION graph."alter_edge"(
-	"graph_name" TEXT, /* & str */
-	"label" TEXT, /* & str */
-	"bidirectional" bool DEFAULT NULL, /* Option < bool > */
-	"weight_column" TEXT DEFAULT NULL, /* Option < String > */
-	"label_column" TEXT DEFAULT NULL, /* Option < String > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS void
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'alter_edge_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3147
--- graph::sql_facade::admin::neq
-CREATE  FUNCTION graph."neq"(
+-- src/sql_facade/admin.rs:3141
+-- graph::sql_facade::admin::not_equals
+CREATE  FUNCTION graph."not_equals"(
 	"column_name" TEXT, /* & str */
 	"value" jsonb /* pgrx :: JsonB */
 ) RETURNS jsonb /* pgrx :: JsonB */
 STRICT 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'neq_wrapper';
+AS 'MODULE_PATHNAME', 'not_equals_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/search.rs:182
--- graph::sql_facade::search::traverse_search
-CREATE  FUNCTION graph."traverse_search"(
-	"property_key" TEXT, /* & str */
-	"property_value" TEXT, /* & str */
-	"table_filter" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"search_mode" TEXT DEFAULT COALESCE(NULLIF(current_setting('graph.default_search_mode'), ''), 'contains'), /* & str */
-	"case_sensitive" bool DEFAULT current_setting('graph.default_case_sensitive')::boolean, /* bool */
-	"search_max_rows" INT DEFAULT 100, /* i32 */
-	"search_row_offset" INT DEFAULT 0, /* i32 */
-	"max_depth" INT DEFAULT current_setting('graph.default_max_depth')::int, /* i32 */
-	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"direction" TEXT DEFAULT 'any', /* & str */
-	"node_tables" oid[] DEFAULT NULL, /* :: std :: option :: Option < Vec < pgrx :: pg_sys :: Oid > > */
-	"filter" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
-	"tenant" TEXT DEFAULT NULL, /* Option < String > */
-	"strategy" TEXT DEFAULT 'bfs', /* & str */
-	"uniqueness" TEXT DEFAULT 'node_per_root', /* & str */
-	"include_start" bool DEFAULT true, /* bool */
-	"hydrate" bool DEFAULT current_setting('graph.default_hydrate')::boolean, /* bool */
-	"max_rows" INT DEFAULT 1000, /* i32 */
-	"row_offset" INT DEFAULT 0 /* i32 */
-) RETURNS TABLE (
-	"root_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"root_id" TEXT,  /* String */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"depth" INT,  /* i32 */
-	"path" jsonb,  /* pgrx :: JsonB */
-	"edge_path" jsonb,  /* pgrx :: JsonB */
-	"node" jsonb,  /* Option < pgrx :: JsonB > */
-	"root_table_name" TEXT,  /* String */
-	"node_table_name" TEXT,  /* String */
-	"capped" bool  /* bool */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'traverse_search_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/search.rs:10
--- graph::sql_facade::search::search
-CREATE  FUNCTION graph."search"(
-	"property_key" TEXT, /* & str */
-	"property_value" TEXT, /* & str */
-	"table_filter" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"mode" TEXT DEFAULT 'contains', /* & str */
-	"case_sensitive" bool DEFAULT false, /* bool */
-	"max_rows" INT DEFAULT 100, /* i32 */
-	"row_offset" INT DEFAULT 0, /* i32 */
-	"tenant" TEXT DEFAULT NULL, /* Option < String > */
-	"hydrate" bool DEFAULT true /* bool */
-) RETURNS TABLE (
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"match_type" TEXT,  /* String */
-	"score" real,  /* f32 */
-	"verified" bool,  /* bool */
-	"node" jsonb,  /* Option < pgrx :: JsonB > */
-	"node_table_name" TEXT  /* String */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'search_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5667
--- graph::sql_facade::admin::ingest_projection
-CREATE  FUNCTION graph."ingest_projection"(
-	"max_rows" bigint DEFAULT NULL, /* Option < i64 > */
-	"max_bytes" bigint DEFAULT NULL /* Option < i64 > */
-) RETURNS TABLE (
-	"rows_ingested" bigint,  /* i64 */
-	"segments_published" bigint,  /* i64 */
-	"sync_watermark" bigint  /* i64 */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'ingest_projection_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:1705
--- graph::sql_facade::admin::run_scheduled_maintenance
-CREATE  FUNCTION graph."run_scheduled_maintenance"() RETURNS TABLE (
-	"applied_sync" bool,  /* bool */
-	"maintenance_started" bool,  /* bool */
-	"maintenance_job_id" TEXT,  /* Option < String > */
-	"pending_sync_rows" bigint,  /* i64 */
-	"edge_buffer_used" INT,  /* i32 */
-	"message" TEXT  /* String */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'run_scheduled_maintenance_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5759
--- graph::sql_facade::admin::maintenance
-CREATE  FUNCTION graph."maintenance"(
-	"concurrently" bool DEFAULT false /* bool */
-) RETURNS TABLE (
-	"job_id" TEXT,  /* String */
-	"status" TEXT,  /* String */
-	"sync_rows_applied" bigint,  /* Option < i64 > */
-	"nodes_after" bigint,  /* Option < i64 > */
-	"edges_after" bigint,  /* Option < i64 > */
-	"vacuum_time_ms" double precision,  /* Option < f64 > */
-	"error" TEXT  /* Option < String > */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'maintenance_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3326
--- graph::sql_facade::admin::all
-CREATE  FUNCTION graph."all"(
-	"filters" jsonb[] /* Vec < pgrx :: JsonB > */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'all_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3178
--- graph::sql_facade::admin::contains_text
-CREATE  FUNCTION graph."contains_text"(
+-- src/sql_facade/admin.rs:3214
+-- graph::sql_facade::admin::greater_than
+CREATE  FUNCTION graph."greater_than"(
 	"column_name" TEXT, /* & str */
-	"value" TEXT /* & str */
+	"value" jsonb /* pgrx :: JsonB */
 ) RETURNS jsonb /* pgrx :: JsonB */
 STRICT 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'contains_text_wrapper';
+AS 'MODULE_PATHNAME', 'greater_than_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:1154
--- graph::sql_facade::admin::resource_status
-CREATE  FUNCTION graph."resource_status"() RETURNS TABLE (
-	"operation" TEXT,  /* String */
-	"memory_budget_bytes" bigint,  /* i64 */
-	"memory_peak_bytes" bigint,  /* i64 */
-	"memory_peak_phase" TEXT,  /* Option < String > */
-	"disk_peak_bytes" bigint,  /* i64 */
-	"rows" bigint,  /* i64 */
-	"work_units" bigint  /* i64 */
-)
+-- src/sql_facade/cypher.rs:6
+-- graph::sql_facade::cypher::cypher_explain
+CREATE  FUNCTION graph."cypher_explain"(
+	"query" TEXT /* & str */
+) RETURNS TEXT /* String */
 STRICT 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'resource_status_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/traversal.rs:731
--- graph::sql_facade::traversal::path_count_estimate
-CREATE  FUNCTION graph."path_count_estimate"(
-	"traversal" jsonb /* pgrx :: JsonB */
-) RETURNS TABLE (
-	"estimated_paths" bigint,  /* i64 */
-	"exact" bool,  /* bool */
-	"capped" bool  /* bool */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'path_count_estimate_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5125
--- graph::sql_facade::admin::run_sync_policy
-CREATE  FUNCTION graph."run_sync_policy"(
-	"policy_id" TEXT /* & str */
-) RETURNS TABLE (
-	"policy_id" TEXT,  /* String */
-	"job_id" TEXT,  /* String */
-	"run_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"status" TEXT,  /* String */
-	"rows_applied" bigint,  /* Option < i64 > */
-	"error" TEXT,  /* Option < String > */
-	"started_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'run_sync_policy_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/search.rs:118
--- graph::sql_facade::search::search_nodes
-CREATE  FUNCTION graph."search_nodes"(
-	"property_key" TEXT, /* & str */
-	"property_value" TEXT, /* & str */
-	"table_filter" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"mode" TEXT DEFAULT 'contains', /* & str */
-	"case_sensitive" bool DEFAULT false, /* bool */
-	"max_rows" INT DEFAULT 100, /* i32 */
-	"row_offset" INT DEFAULT 0, /* i32 */
-	"tenant" TEXT DEFAULT NULL /* Option < String > */
-) RETURNS TABLE (
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"match_type" TEXT,  /* String */
-	"score" real,  /* f32 */
-	"verified" bool,  /* bool */
-	"node_table_name" TEXT  /* String */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'search_nodes_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/runtime.rs:160
--- graph::sql_facade::runtime::loaded_graphs
-CREATE  FUNCTION graph."loaded_graphs"() RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"residency" TEXT,  /* String */
-	"node_count" bigint,  /* i64 */
-	"edge_count" bigint,  /* i64 */
-	"memory_used_mb" double precision,  /* f64 */
-	"projection_mode" TEXT,  /* String */
-	"last_access_unix_micros" bigint  /* i64 */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'loaded_graphs_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:14
--- graph::sql_facade::admin::_selected_graph_id_for_current_role
-CREATE  FUNCTION graph."_selected_graph_id_for_current_role"() RETURNS TEXT /* String */
-STRICT SECURITY DEFINER  
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'selected_graph_id_for_current_role_wrapper';
+AS 'MODULE_PATHNAME', 'cypher_explain_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -407,6 +64,41 @@ CREATE  FUNCTION graph."build"(
 STRICT  
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'build_with_concurrently_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5830
+-- graph::sql_facade::admin::maintenance_graph
+CREATE  FUNCTION graph."maintenance_graph"(
+	"graph_name" TEXT, /* & str */
+	"concurrently" bool DEFAULT false, /* bool */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"job_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"status" TEXT,  /* String */
+	"sync_rows_applied" bigint,  /* Option < i64 > */
+	"nodes_after" bigint,  /* Option < i64 > */
+	"edges_after" bigint,  /* Option < i64 > */
+	"vacuum_time_ms" double precision,  /* Option < f64 > */
+	"error" TEXT  /* Option < String > */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'maintenance_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3351
+-- graph::sql_facade::admin::remove_table
+CREATE  FUNCTION graph."remove_table"(
+	"table_name" oid /* pgrx :: pg_sys :: Oid */
+) RETURNS void
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'remove_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -440,6 +132,97 @@ AS 'MODULE_PATHNAME', 'create_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- src/sql_facade/admin.rs:3204
+-- graph::sql_facade::admin::is_not_null
+CREATE  FUNCTION graph."is_not_null"(
+	"column_name" TEXT /* & str */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'is_not_null_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3119
+-- graph::sql_facade::admin::equals
+CREATE  FUNCTION graph."equals"(
+	"column_name" TEXT, /* & str */
+	"value" bigint /* i64 */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'equals_i64_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/search.rs:118
+-- graph::sql_facade::search::search_nodes
+CREATE  FUNCTION graph."search_nodes"(
+	"property_key" TEXT, /* & str */
+	"property_value" TEXT, /* & str */
+	"table_filter" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"mode" TEXT DEFAULT 'contains', /* & str */
+	"case_sensitive" bool DEFAULT false, /* bool */
+	"max_rows" INT DEFAULT 100, /* i32 */
+	"row_offset" INT DEFAULT 0, /* i32 */
+	"tenant" TEXT DEFAULT NULL /* Option < String > */
+) RETURNS TABLE (
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"match_type" TEXT,  /* String */
+	"score" real,  /* f32 */
+	"verified" bool,  /* bool */
+	"node_table_name" TEXT  /* String */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'search_nodes_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3429
+-- graph::sql_facade::admin::remove_edge
+CREATE  FUNCTION graph."remove_edge"(
+	"label" TEXT /* & str */
+) RETURNS void
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'remove_edge_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1420
+-- graph::sql_facade::admin::projection_repair
+CREATE  FUNCTION graph."projection_repair"() RETURNS TABLE (
+	"action" TEXT,  /* String */
+	"generation_id" bigint,  /* Option < i64 > */
+	"rebuilt" bool,  /* bool */
+	"chunks_rewritten" INT,  /* i32 */
+	"reason" TEXT  /* Option < String > */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'projection_repair_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1154
+-- graph::sql_facade::admin::resource_status
+CREATE  FUNCTION graph."resource_status"() RETURNS TABLE (
+	"operation" TEXT,  /* String */
+	"memory_budget_bytes" bigint,  /* i64 */
+	"memory_peak_bytes" bigint,  /* i64 */
+	"memory_peak_phase" TEXT,  /* Option < String > */
+	"disk_peak_bytes" bigint,  /* i64 */
+	"rows" bigint,  /* i64 */
+	"work_units" bigint  /* i64 */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'resource_status_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- src/sql_facade/admin.rs:499
 -- graph::sql_facade::admin::graph_quotas
 CREATE  FUNCTION graph."graph_quotas"() RETURNS TABLE (
@@ -459,9 +242,391 @@ AS 'MODULE_PATHNAME', 'graph_quotas_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:223
--- graph::sql_facade::admin::current_graph
-CREATE  FUNCTION graph."current_graph"() RETURNS TABLE (
+-- src/sql_facade/admin.rs:2540
+-- graph::sql_facade::admin::add_table_to_graph
+CREATE  FUNCTION graph."add_table_to_graph"(
+	"graph_name" TEXT, /* & str */
+	"table_name" oid, /* pgrx :: pg_sys :: Oid */
+	"id_column" TEXT, /* & str */
+	"columns" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
+	"tenant_column" TEXT DEFAULT NULL, /* Option < String > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS void
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'add_table_to_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:149
+-- graph::sql_facade::admin::drop_graph
+CREATE  FUNCTION graph."drop_graph"(
+	"graph_name" TEXT, /* & str */
+	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
+	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
+	"tenant" TEXT,  /* Option < String > */
+	"namespace" TEXT,  /* Option < String > */
+	"graph_kind" TEXT,  /* String */
+	"residency" TEXT,  /* String */
+	"materialization" TEXT,  /* String */
+	"projection_mode" TEXT,  /* String */
+	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'drop_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/workflow.rs:627
+-- graph::sql_facade::workflow::neighborhood
+CREATE  FUNCTION graph."neighborhood"(
+	"property_key" TEXT, /* & str */
+	"property_value" TEXT, /* & str */
+	"source_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"search_mode" TEXT DEFAULT 'contains', /* & str */
+	"search_max_rows" INT DEFAULT 1, /* i32 */
+	"max_depth" INT DEFAULT 4, /* i32 */
+	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
+	"direction" TEXT DEFAULT 'any', /* & str */
+	"tenant" TEXT DEFAULT NULL, /* Option < String > */
+	"sample_k" INT DEFAULT 5, /* i32 */
+	"node_limit" INT DEFAULT 10000 /* i32 */
+) RETURNS TABLE (
+	"depth" INT,  /* i32 */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_table_name" TEXT,  /* String */
+	"node_count" bigint,  /* i64 */
+	"sample_nodes" jsonb,  /* pgrx :: JsonB */
+	"truncated" bool  /* bool */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'neighborhood_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3270
+-- graph::sql_facade::admin::at_most
+CREATE  FUNCTION graph."at_most"(
+	"column_name" TEXT, /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'at_most_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3236
+-- graph::sql_facade::admin::at_least
+CREATE  FUNCTION graph."at_least"(
+	"column_name" TEXT, /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'at_least_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:42
+-- graph::sql_facade::admin::_max_sync_log_id_for_current_role
+CREATE  FUNCTION graph."_max_sync_log_id_for_current_role"() RETURNS bigint /* i64 */
+STRICT SECURITY DEFINER  
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'max_sync_log_id_for_current_role_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2411
+-- graph::sql_facade::admin::build_status_for_graph
+CREATE  FUNCTION graph."build_status_for_graph"(
+	"graph_name" TEXT, /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL, /* Option < & str > */
+	"max_rows" INT DEFAULT 50 /* i32 */
+) RETURNS TABLE (
+	"build_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"status" TEXT,  /* String */
+	"nodes_loaded" bigint,  /* Option < i64 > */
+	"edges_loaded" bigint,  /* Option < i64 > */
+	"build_time_ms" double precision,  /* Option < f64 > */
+	"memory_used_mb" double precision,  /* Option < f64 > */
+	"sync_mode" TEXT,  /* String */
+	"projection_mode" TEXT,  /* String */
+	"progress_phase" TEXT,  /* String */
+	"progress_message" TEXT,  /* Option < String > */
+	"started_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"finished_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"error" TEXT  /* Option < String > */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'build_status_for_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/cypher.rs:46
+-- graph::sql_facade::cypher::cypher_compatibility
+CREATE  FUNCTION graph."cypher_compatibility"() RETURNS TABLE (
+	"feature" TEXT,  /* & '_ str */
+	"status" TEXT,  /* & '_ str */
+	"notes" TEXT  /* & '_ str */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'cypher_compatibility_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/pgq.rs:11
+-- graph::sql_facade::pgq::pgq
+CREATE  FUNCTION graph."pgq"(
+	"_query" TEXT /* & str */
+) RETURNS void
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'pgq_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5454
+-- graph::sql_facade::admin::run_due_jobs
+CREATE  FUNCTION graph."run_due_jobs"(
+	"max_jobs" INT DEFAULT 64 /* i32 */
+) RETURNS TABLE (
+	"job_id" TEXT,  /* String */
+	"run_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"policy_kind" TEXT,  /* String */
+	"status" TEXT,  /* String */
+	"rows_applied" bigint,  /* Option < i64 > */
+	"error" TEXT,  /* Option < String > */
+	"started_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'run_due_jobs_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3172
+-- graph::sql_facade::admin::not_in
+CREATE  FUNCTION graph."not_in"(
+	"column_name" TEXT, /* & str */
+	"values" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'not_in_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3281
+-- graph::sql_facade::admin::lte
+CREATE  FUNCTION graph."lte"(
+	"column_name" TEXT, /* & str */
+	"value" bigint /* i64 */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'lte_i64_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2838
+-- graph::sql_facade::admin::registered_edges
+CREATE  FUNCTION graph."registered_edges"() RETURNS TABLE (
+	"from_table" TEXT,  /* String */
+	"from_column" TEXT,  /* String */
+	"to_table" TEXT,  /* String */
+	"to_column" TEXT,  /* String */
+	"label" TEXT,  /* String */
+	"bidirectional" bool,  /* bool */
+	"weight_column" TEXT,  /* Option < String > */
+	"label_column" TEXT  /* Option < String > */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'registered_edges_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5509
+-- graph::sql_facade::admin::alter_job
+CREATE  FUNCTION graph."alter_job"(
+	"job_id" TEXT, /* & str */
+	"enabled" bool DEFAULT NULL, /* Option < bool > */
+	"schedule_interval_secs" bigint DEFAULT NULL, /* Option < i64 > */
+	"max_runtime_secs" bigint DEFAULT NULL, /* Option < i64 > */
+	"max_retries" INT DEFAULT NULL /* Option < i32 > */
+) RETURNS TABLE (
+	"job_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"policy_kind" TEXT,  /* String */
+	"enabled" bool,  /* bool */
+	"schedule_interval_secs" bigint,  /* i64 */
+	"max_runtime_secs" bigint,  /* Option < i64 > */
+	"max_retries" INT,  /* i32 */
+	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"last_status" TEXT  /* Option < String > */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'alter_job_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3111
+-- graph::sql_facade::admin::equals
+CREATE  FUNCTION graph."equals"(
+	"column_name" TEXT, /* & str */
+	"value" TEXT /* & str */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'equals_text_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3225
+-- graph::sql_facade::admin::gt
+CREATE  FUNCTION graph."gt"(
+	"column_name" TEXT, /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'gt_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1191
+-- graph::sql_facade::admin::active_generation_count
+CREATE  FUNCTION graph."active_generation_count"() RETURNS INT /* i32 */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'active_generation_count_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2602
+-- graph::sql_facade::admin::add_edge
+CREATE  FUNCTION graph."add_edge"(
+	"from_table" oid, /* pgrx :: pg_sys :: Oid */
+	"from_column" TEXT, /* & str */
+	"to_table" oid, /* pgrx :: pg_sys :: Oid */
+	"to_column" TEXT, /* & str */
+	"label" TEXT, /* & str */
+	"bidirectional" bool DEFAULT true, /* bool */
+	"weight_column" TEXT DEFAULT NULL, /* Option < String > */
+	"label_column" TEXT DEFAULT NULL /* Option < String > */
+) RETURNS void
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'add_edge_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3106
+-- graph::sql_facade::admin::equals
+CREATE  FUNCTION graph."equals"(
+	"column_name" TEXT, /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'equals_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3253
+-- graph::sql_facade::admin::less_than
+CREATE  FUNCTION graph."less_than"(
+	"column_name" TEXT, /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'less_than_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:29
+-- graph::sql_facade::admin::_pending_sync_rows_for_current_role
+CREATE  FUNCTION graph."_pending_sync_rows_for_current_role"(
+	"applied_sync_id" bigint /* i64 */
+) RETURNS bigint /* i64 */
+STRICT SECURITY DEFINER  
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'pending_sync_rows_for_current_role_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/cypher.rs:17
+-- graph::sql_facade::cypher::cypher
+CREATE  FUNCTION graph."cypher"(
+	"query" TEXT, /* & str */
+	"params" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
+	"hydrate" bool DEFAULT true /* bool */
+) RETURNS TABLE (
+	"row" jsonb  /* pgrx :: JsonB */
+)
+VOLATILE  COST 1000
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'cypher_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:4048
+-- graph::sql_facade::admin::estimate
+CREATE  FUNCTION graph."estimate"() RETURNS TABLE (
+	"estimated_nodes" bigint,  /* i64 */
+	"estimated_edges" bigint,  /* i64 */
+	"estimated_memory_mb" double precision,  /* f64 */
+	"memory_limit_mb" INT,  /* i32 */
+	"fits_in_memory" bool  /* bool */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'estimate_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3125
+-- graph::sql_facade::admin::eq
+CREATE  FUNCTION graph."eq"(
+	"column_name" TEXT, /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'eq_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:191
+-- graph::sql_facade::admin::list_graphs
+CREATE  FUNCTION graph."list_graphs"() RETURNS TABLE (
 	"graph_id" TEXT,  /* String */
 	"graph_name" TEXT,  /* String */
 	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
@@ -478,127 +643,105 @@ CREATE  FUNCTION graph."current_graph"() RETURNS TABLE (
 STRICT SECURITY DEFINER 
 SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'current_graph_wrapper';
+AS 'MODULE_PATHNAME', 'list_graphs_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:1132
--- graph::sql_facade::admin::build_resource_status
-CREATE  FUNCTION graph."build_resource_status"() RETURNS TABLE (
-	"budget_bytes" bigint,  /* i64 */
-	"peak_bytes" bigint,  /* i64 */
-	"peak_phase" TEXT,  /* Option < String > */
-	"pressure_events" bigint  /* i64 */
-)
-STRICT 
+-- src/sql_facade/admin.rs:3247
+-- graph::sql_facade::admin::gte
+CREATE  FUNCTION graph."gte"(
+	"column_name" TEXT, /* & str */
+	"value" bigint /* i64 */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'build_resource_status_wrapper';
+AS 'MODULE_PATHNAME', 'gte_i64_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:2304
--- graph::sql_facade::admin::build_status
-CREATE  FUNCTION graph."build_status"(
-	"build_id" TEXT /* & str */
+-- src/sql_facade/admin.rs:1281
+-- graph::sql_facade::admin::projection_compact
+CREATE  FUNCTION graph."projection_compact"(
+	"max_rows" INT DEFAULT 10000, /* i32 */
+	"max_bytes" bigint DEFAULT NULL, /* Option < i64 > */
+	"max_segments" INT DEFAULT 1000, /* i32 */
+	"dirty_chunk_segment_threshold" INT DEFAULT NULL /* Option < i32 > */
 ) RETURNS TABLE (
-	"build_id" TEXT,  /* String */
-	"status" TEXT,  /* String */
-	"nodes_loaded" bigint,  /* Option < i64 > */
-	"edges_loaded" bigint,  /* Option < i64 > */
-	"build_time_ms" double precision,  /* Option < f64 > */
-	"memory_used_mb" double precision,  /* Option < f64 > */
-	"progress_phase" TEXT,  /* String */
-	"progress_message" TEXT,  /* Option < String > */
-	"started_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"finished_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"error" TEXT  /* Option < String > */
+	"manifest_generation" bigint,  /* i64 */
+	"segments_compacted" INT,  /* i32 */
+	"chunks_rewritten" INT,  /* i32 */
+	"segment_count" INT,  /* i32 */
+	"dirty_chunk_count" INT,  /* i32 */
+	"sync_watermark" bigint  /* i64 */
 )
-STRICT 
+
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'build_status_wrapper';
+AS 'MODULE_PATHNAME', 'projection_compact_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/components.rs:143
--- graph::sql_facade::components::components
-CREATE  FUNCTION graph."components"(
-	"max_rows" INT DEFAULT 100, /* i32 */
-	"row_offset" INT DEFAULT 0 /* i32 */
-) RETURNS TABLE (
-	"component_id" bigint,  /* i64 */
-	"component_size" bigint,  /* i64 */
-	"rank" INT  /* i32 */
+-- src/sql_facade/admin.rs:2732
+-- graph::sql_facade::admin::registered_tables
+CREATE  FUNCTION graph."registered_tables"() RETURNS TABLE (
+	"table_name" TEXT,  /* String */
+	"id_columns" TEXT[],  /* Vec < String > */
+	"columns" TEXT[],  /* Vec < String > */
+	"tenant_column" TEXT  /* Option < String > */
 )
-STRICT 
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'components_wrapper';
+AS 'MODULE_PATHNAME', 'registered_tables_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:5080
--- graph::sql_facade::admin::drop_sync_policy
-CREATE  FUNCTION graph."drop_sync_policy"(
-	"policy_id" TEXT /* & str */
+-- src/sql_facade/admin.rs:326
+-- graph::sql_facade::admin::revoke_graph
+CREATE  FUNCTION graph."revoke_graph"(
+	"graph_name" TEXT, /* & str */
+	"grantee" TEXT, /* & str */
+	"privilege" TEXT, /* & str */
+	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS TABLE (
-	"policy_id" TEXT,  /* String */
-	"job_id" TEXT,  /* String */
 	"graph_id" TEXT,  /* String */
 	"graph_name" TEXT,  /* String */
-	"dropped" bool  /* bool */
+	"grantee" oid,  /* pgrx :: pg_sys :: Oid */
+	"privilege" TEXT,  /* String */
+	"grantor" oid,  /* pgrx :: pg_sys :: Oid */
+	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
-STRICT 
+
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'drop_sync_policy_wrapper';
+AS 'MODULE_PATHNAME', 'revoke_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:3259
--- graph::sql_facade::admin::lt
-CREATE  FUNCTION graph."lt"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'lt_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/gql.rs:124
--- graph::sql_facade::gql::gql
-CREATE  FUNCTION graph."gql"(
-	"query" TEXT, /* & str */
-	"params" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
-	"hydrate" bool DEFAULT true /* bool */
+-- src/sql_facade/admin.rs:255
+-- graph::sql_facade::admin::set_current_graph
+CREATE  FUNCTION graph."set_current_graph"(
+	"graph_name" TEXT, /* & str */
+	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS TABLE (
-	"row" jsonb  /* pgrx :: JsonB */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
+	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
+	"tenant" TEXT,  /* Option < String > */
+	"namespace" TEXT,  /* Option < String > */
+	"graph_kind" TEXT,  /* String */
+	"residency" TEXT,  /* String */
+	"materialization" TEXT,  /* String */
+	"projection_mode" TEXT,  /* String */
+	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
-VOLATILE  COST 1000
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'gql_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5497
--- graph::sql_facade::admin::run_due_jobs_async
-CREATE  FUNCTION graph."run_due_jobs_async"(
-	"max_jobs" INT DEFAULT 64 /* i32 */
-) RETURNS bool /* bool */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'run_due_jobs_async_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3106
--- graph::sql_facade::admin::equals
-CREATE  FUNCTION graph."equals"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'equals_wrapper';
+AS 'MODULE_PATHNAME', 'set_current_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -644,60 +787,17 @@ AS 'MODULE_PATHNAME', 'status_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:3276
--- graph::sql_facade::admin::lte
-CREATE  FUNCTION graph."lte"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'lte_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5728
--- graph::sql_facade::admin::vacuum_graph
-CREATE  FUNCTION graph."vacuum_graph"(
+-- src/sql_facade/discovery.rs:140
+-- graph::sql_facade::discovery::create_row_predicate_subgraph
+CREATE  FUNCTION graph."create_row_predicate_subgraph"(
 	"graph_name" TEXT, /* & str */
+	"row_predicate" jsonb, /* pgrx :: JsonB */
 	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
 	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"nodes_before" bigint,  /* i64 */
-	"nodes_after" bigint,  /* i64 */
-	"tombstones_removed" bigint,  /* i64 */
-	"edges_rebuilt" bigint,  /* i64 */
-	"vacuum_time_ms" double precision  /* f64 */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'vacuum_graph_wrapper';
-/* </end connected objects> */
+) RETURNS void
 
-/* <begin connected objects> */
--- src/sql_facade/traversal.rs:117
--- graph::sql_facade::traversal::get_node
-CREATE  FUNCTION graph."get_node"(
-	"graph_name" TEXT, /* & str */
-	"label" TEXT, /* & str */
-	"id" TEXT, /* & str */
-	"hydrate" bool DEFAULT true, /* bool */
-	"tenant" TEXT DEFAULT NULL, /* Option < String > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_table_name" TEXT,  /* String */
-	"node_id" TEXT,  /* String */
-	"node_idx" bigint,  /* i64 */
-	"node" jsonb  /* Option < pgrx :: JsonB > */
-)
- COST 100
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'get_node_wrapper';
+AS 'MODULE_PATHNAME', 'create_row_predicate_subgraph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -721,6 +821,236 @@ CREATE  FUNCTION graph."weighted_shortest_path"(
 STRICT 
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'weighted_shortest_path_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1201
+-- graph::sql_facade::admin::projection_status
+CREATE  FUNCTION graph."projection_status"() RETURNS TABLE (
+	"manifest_generation" bigint,  /* Option < i64 > */
+	"manifest_watermark" bigint,  /* Option < i64 > */
+	"pending_durable_rows" bigint,  /* i64 */
+	"base_artifact_bytes" bigint,  /* i64 */
+	"manifest_bytes" bigint,  /* i64 */
+	"artifact_bytes" bigint,  /* i64 */
+	"segment_count" INT,  /* i32 */
+	"segment_bytes" bigint,  /* i64 */
+	"segment_fanout" INT,  /* i32 */
+	"read_amplification" INT,  /* i32 */
+	"l0_segment_count" INT,  /* i32 */
+	"l1_segment_count" INT,  /* i32 */
+	"l2_segment_count" INT,  /* i32 */
+	"edge_segment_count" INT,  /* i32 */
+	"node_segment_count" INT,  /* i32 */
+	"dirty_chunk_count" INT,  /* i32 */
+	"dirty_chunk_bytes" bigint,  /* i64 */
+	"tombstone_ratio" double precision,  /* f64 */
+	"compaction_backlog" INT,  /* i32 */
+	"obsolete_file_count" INT,  /* i32 */
+	"obsolete_bytes" bigint,  /* i64 */
+	"active_generation_count" INT,  /* i32 */
+	"artifact_validation_state" TEXT,  /* String */
+	"last_ingestion_unix_micros" bigint,  /* Option < i64 > */
+	"last_compaction_unix_micros" bigint,  /* Option < i64 > */
+	"last_gc_unix_micros" bigint,  /* Option < i64 > */
+	"last_repair_unix_micros" bigint,  /* Option < i64 > */
+	"ingest_recommended" bool,  /* bool */
+	"compaction_recommended" bool,  /* bool */
+	"gc_recommended" bool,  /* bool */
+	"repair_recommended" bool  /* bool */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'projection_status_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:4095
+-- graph::sql_facade::admin::apply_sync
+CREATE  FUNCTION graph."apply_sync"() RETURNS TABLE (
+	"inserts_applied" bigint,  /* i64 */
+	"updates_applied" bigint,  /* i64 */
+	"deletes_applied" bigint  /* i64 */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'apply_sync_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1832
+-- graph::sql_facade::admin::build
+CREATE  FUNCTION graph."build"() RETURNS TABLE (
+	"nodes_loaded" bigint,  /* i64 */
+	"edges_loaded" bigint,  /* i64 */
+	"build_time_ms" double precision,  /* f64 */
+	"memory_used_mb" double precision,  /* f64 */
+	"sync_mode" TEXT,  /* String */
+	"projection_mode" TEXT  /* String */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'build_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5331
+-- graph::sql_facade::admin::job_stats
+CREATE  FUNCTION graph."job_stats"(
+	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"policy_kind" TEXT,  /* String */
+	"job_count" bigint,  /* i64 */
+	"run_count" bigint,  /* i64 */
+	"completed_runs" bigint,  /* i64 */
+	"failed_runs" bigint,  /* i64 */
+	"last_run_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'job_stats_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/workflow.rs:16
+-- graph::sql_facade::workflow::find
+CREATE  FUNCTION graph."find"(
+	"property_key" TEXT, /* & str */
+	"property_value" TEXT, /* & str */
+	"table_name" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"mode" TEXT DEFAULT 'contains', /* & str */
+	"case_sensitive" bool DEFAULT false, /* bool */
+	"max_rows" INT DEFAULT 20, /* i32 */
+	"row_offset" INT DEFAULT 0, /* i32 */
+	"tenant" TEXT DEFAULT NULL /* Option < String > */
+) RETURNS TABLE (
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_table_name" TEXT,  /* String */
+	"node_id" TEXT,  /* String */
+	"match_type" TEXT,  /* String */
+	"score" real,  /* f32 */
+	"verified" bool,  /* bool */
+	"rank" INT,  /* i32 */
+	"node" jsonb  /* Option < pgrx :: JsonB > */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'find_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/components.rs:143
+-- graph::sql_facade::components::components
+CREATE  FUNCTION graph."components"(
+	"max_rows" INT DEFAULT 100, /* i32 */
+	"row_offset" INT DEFAULT 0 /* i32 */
+) RETURNS TABLE (
+	"component_id" bigint,  /* i64 */
+	"component_size" bigint,  /* i64 */
+	"rank" INT  /* i32 */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'components_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/components.rs:284
+-- graph::sql_facade::components::isolated_nodes
+CREATE  FUNCTION graph."isolated_nodes"(
+	"max_rows" INT DEFAULT 100, /* i32 */
+	"row_offset" INT DEFAULT 0, /* i32 */
+	"hydrate" bool DEFAULT true /* bool */
+) RETURNS TABLE (
+	"component_id" bigint,  /* i64 */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"node" jsonb  /* Option < pgrx :: JsonB > */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'isolated_nodes_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:9
+-- graph::sql_facade::admin::test_enabled
+CREATE  FUNCTION graph."test_enabled"() RETURNS bool /* bool */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'test_enabled_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:4975
+-- graph::sql_facade::admin::alter_sync_policy
+CREATE  FUNCTION graph."alter_sync_policy"(
+	"policy_id" TEXT, /* & str */
+	"schedule_interval_secs" bigint DEFAULT NULL, /* Option < i64 > */
+	"max_sync_lag_rows" bigint DEFAULT NULL, /* Option < i64 > */
+	"enabled" bool DEFAULT NULL /* Option < bool > */
+) RETURNS TABLE (
+	"policy_id" TEXT,  /* String */
+	"job_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"enabled" bool,  /* bool */
+	"schedule_interval_secs" bigint,  /* i64 */
+	"max_sync_lag_rows" bigint,  /* Option < i64 > */
+	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"last_status" TEXT  /* Option < String > */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'alter_sync_policy_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/search.rs:182
+-- graph::sql_facade::search::traverse_search
+CREATE  FUNCTION graph."traverse_search"(
+	"property_key" TEXT, /* & str */
+	"property_value" TEXT, /* & str */
+	"table_filter" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"search_mode" TEXT DEFAULT COALESCE(NULLIF(current_setting('graph.default_search_mode'), ''), 'contains'), /* & str */
+	"case_sensitive" bool DEFAULT current_setting('graph.default_case_sensitive')::boolean, /* bool */
+	"search_max_rows" INT DEFAULT 100, /* i32 */
+	"search_row_offset" INT DEFAULT 0, /* i32 */
+	"max_depth" INT DEFAULT current_setting('graph.default_max_depth')::int, /* i32 */
+	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
+	"direction" TEXT DEFAULT 'any', /* & str */
+	"node_tables" oid[] DEFAULT NULL, /* :: std :: option :: Option < Vec < pgrx :: pg_sys :: Oid > > */
+	"filter" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
+	"tenant" TEXT DEFAULT NULL, /* Option < String > */
+	"strategy" TEXT DEFAULT 'bfs', /* & str */
+	"uniqueness" TEXT DEFAULT 'node_per_root', /* & str */
+	"include_start" bool DEFAULT true, /* bool */
+	"hydrate" bool DEFAULT current_setting('graph.default_hydrate')::boolean, /* bool */
+	"max_rows" INT DEFAULT 1000, /* i32 */
+	"row_offset" INT DEFAULT 0 /* i32 */
+) RETURNS TABLE (
+	"root_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"root_id" TEXT,  /* String */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"depth" INT,  /* i32 */
+	"path" jsonb,  /* pgrx :: JsonB */
+	"edge_path" jsonb,  /* pgrx :: JsonB */
+	"node" jsonb,  /* Option < pgrx :: JsonB > */
+	"root_table_name" TEXT,  /* String */
+	"node_table_name" TEXT,  /* String */
+	"capped" bool  /* bool */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'traverse_search_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -749,217 +1079,18 @@ AS 'MODULE_PATHNAME', 'build_async_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:3368
--- graph::sql_facade::admin::remove_table_from_graph
-CREATE  FUNCTION graph."remove_table_from_graph"(
+-- src/sql_facade/admin.rs:2990
+-- graph::sql_facade::admin::rename_edge
+CREATE  FUNCTION graph."rename_edge"(
 	"graph_name" TEXT, /* & str */
-	"table_name" oid, /* pgrx :: pg_sys :: Oid */
+	"old_label" TEXT, /* & str */
+	"new_label" TEXT, /* & str */
 	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
 	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'remove_table_from_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:102
--- graph::sql_facade::admin::alter_graph
-CREATE  FUNCTION graph."alter_graph"(
-	"graph_name" TEXT, /* & str */
-	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"namespace" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_kind" TEXT DEFAULT NULL, /* Option < & str > */
-	"residency" TEXT DEFAULT NULL, /* Option < & str > */
-	"materialization" TEXT DEFAULT NULL, /* Option < & str > */
-	"projection_mode" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
-	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
-	"tenant" TEXT,  /* Option < String > */
-	"namespace" TEXT,  /* Option < String > */
-	"graph_kind" TEXT,  /* String */
-	"residency" TEXT,  /* String */
-	"materialization" TEXT,  /* String */
-	"projection_mode" TEXT,  /* String */
-	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'alter_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/cypher.rs:6
--- graph::sql_facade::cypher::cypher_explain
-CREATE  FUNCTION graph."cypher_explain"(
-	"query" TEXT /* & str */
-) RETURNS TEXT /* String */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'cypher_explain_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5278
--- graph::sql_facade::admin::job_runs
-CREATE  FUNCTION graph."job_runs"(
-	"job_id" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL, /* Option < & str > */
-	"max_rows" INT DEFAULT 50 /* i32 */
-) RETURNS TABLE (
-	"run_id" TEXT,  /* String */
-	"job_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"status" TEXT,  /* String */
-	"rows_applied" bigint,  /* Option < i64 > */
-	"retry_count" INT,  /* i32 */
-	"execution_mode" TEXT,  /* String */
-	"sqlstate" TEXT,  /* Option < String > */
-	"error" TEXT,  /* Option < String > */
-	"started_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'job_runs_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3135
--- graph::sql_facade::admin::eq
-CREATE  FUNCTION graph."eq"(
-	"column_name" TEXT, /* & str */
-	"value" bigint /* i64 */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'eq_i64_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3270
--- graph::sql_facade::admin::at_most
-CREATE  FUNCTION graph."at_most"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'at_most_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:255
--- graph::sql_facade::admin::set_current_graph
-CREATE  FUNCTION graph."set_current_graph"(
-	"graph_name" TEXT, /* & str */
-	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
-	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
-	"tenant" TEXT,  /* Option < String > */
-	"namespace" TEXT,  /* Option < String > */
-	"graph_kind" TEXT,  /* String */
-	"residency" TEXT,  /* String */
-	"materialization" TEXT,  /* String */
-	"projection_mode" TEXT,  /* String */
-	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'set_current_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:6213
--- graph::sql_facade::admin::enable_sync
-CREATE  FUNCTION graph."enable_sync"() RETURNS void
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'enable_sync_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/workflow.rs:221
--- graph::sql_facade::workflow::find_related
-CREATE  FUNCTION graph."find_related"(
-	"property_key" TEXT, /* & str */
-	"property_value" TEXT, /* & str */
-	"source_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"search_mode" TEXT DEFAULT COALESCE(NULLIF(current_setting('graph.default_search_mode'), ''), 'contains'), /* & str */
-	"case_sensitive" bool DEFAULT current_setting('graph.default_case_sensitive')::boolean, /* bool */
-	"search_max_rows" INT DEFAULT 1, /* i32 */
-	"search_row_offset" INT DEFAULT 0, /* i32 */
-	"max_depth" INT DEFAULT current_setting('graph.default_max_depth')::int, /* i32 */
-	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"direction" TEXT DEFAULT 'any', /* & str */
-	"target_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"target_tables" oid[] DEFAULT NULL, /* :: std :: option :: Option < Vec < pgrx :: pg_sys :: Oid > > */
-	"where_node" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
-	"tenant" TEXT DEFAULT NULL, /* Option < String > */
-	"max_rows" INT DEFAULT 20, /* i32 */
-	"row_offset" INT DEFAULT 0, /* i32 */
-	"include_counts" bool DEFAULT false, /* bool */
-	"candidate_limit" INT DEFAULT 10000, /* i32 */
-	"include_start" bool DEFAULT false /* bool */
-) RETURNS TABLE (
-	"root_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"root_id" TEXT,  /* String */
-	"root_table_name" TEXT,  /* String */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_table_name" TEXT,  /* String */
-	"node_id" TEXT,  /* String */
-	"depth" INT,  /* i32 */
-	"score" real,  /* f32 */
-	"rank" INT,  /* i32 */
-	"path" jsonb,  /* pgrx :: JsonB */
-	"edge_path" jsonb,  /* pgrx :: JsonB */
-	"readable_path" TEXT,  /* String */
-	"node" jsonb,  /* Option < pgrx :: JsonB > */
-	"candidate_count" bigint,  /* Option < i64 > */
-	"filtered_count" bigint,  /* Option < i64 > */
-	"truncated" bool  /* bool */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'find_related_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3351
--- graph::sql_facade::admin::remove_table
-CREATE  FUNCTION graph."remove_table"(
-	"table_name" oid /* pgrx :: pg_sys :: Oid */
-) RETURNS void
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'remove_table_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3172
--- graph::sql_facade::admin::not_in
-CREATE  FUNCTION graph."not_in"(
-	"column_name" TEXT, /* & str */
-	"values" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'not_in_wrapper';
+AS 'MODULE_PATHNAME', 'rename_edge_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -1936,535 +2067,59 @@ GRANT SELECT ON TABLE graph._maintenance_jobs       TO PUBLIC;
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/workflow.rs:16
--- graph::sql_facade::workflow::find
-CREATE  FUNCTION graph."find"(
-	"property_key" TEXT, /* & str */
-	"property_value" TEXT, /* & str */
-	"table_name" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"mode" TEXT DEFAULT 'contains', /* & str */
-	"case_sensitive" bool DEFAULT false, /* bool */
-	"max_rows" INT DEFAULT 20, /* i32 */
-	"row_offset" INT DEFAULT 0, /* i32 */
-	"tenant" TEXT DEFAULT NULL /* Option < String > */
-) RETURNS TABLE (
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_table_name" TEXT,  /* String */
-	"node_id" TEXT,  /* String */
-	"match_type" TEXT,  /* String */
-	"score" real,  /* f32 */
-	"verified" bool,  /* bool */
-	"rank" INT,  /* i32 */
-	"node" jsonb  /* Option < pgrx :: JsonB > */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'find_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3214
--- graph::sql_facade::admin::greater_than
-CREATE  FUNCTION graph."greater_than"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'greater_than_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3242
--- graph::sql_facade::admin::gte
-CREATE  FUNCTION graph."gte"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'gte_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3247
--- graph::sql_facade::admin::gte
-CREATE  FUNCTION graph."gte"(
-	"column_name" TEXT, /* & str */
-	"value" bigint /* i64 */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'gte_i64_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3219
--- graph::sql_facade::admin::greater_than
-CREATE  FUNCTION graph."greater_than"(
-	"column_name" TEXT, /* & str */
-	"value" bigint /* i64 */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'greater_than_i64_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3264
--- graph::sql_facade::admin::lt
-CREATE  FUNCTION graph."lt"(
-	"column_name" TEXT, /* & str */
-	"value" bigint /* i64 */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'lt_i64_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/workflow.rs:405
--- graph::sql_facade::workflow::path
-CREATE  FUNCTION graph."path"(
-	"source_table" oid, /* pgrx :: pg_sys :: Oid */
-	"source_id" TEXT, /* & str */
-	"target_table" oid, /* pgrx :: pg_sys :: Oid */
-	"target_id" TEXT, /* & str */
-	"max_depth" INT DEFAULT 20 /* i32 */
-) RETURNS TABLE (
-	"step" INT,  /* i32 */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_table_name" TEXT,  /* String */
-	"node_id" TEXT,  /* String */
-	"edge_label" TEXT,  /* Option < String > */
-	"readable_path" TEXT,  /* String */
-	"node" jsonb  /* Option < pgrx :: JsonB > */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'path_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:466
--- graph::sql_facade::admin::set_graph_quota
-CREATE  FUNCTION graph."set_graph_quota"(
-	"scope_type" TEXT, /* & str */
-	"dimension" TEXT, /* & str */
-	"limit_value" bigint, /* i64 */
-	"scope_key" TEXT DEFAULT NULL, /* Option < & str > */
-	"enforcement" TEXT DEFAULT 'hard' /* & str */
-) RETURNS TABLE (
-	"scope_type" TEXT,  /* String */
-	"scope_key" TEXT,  /* String */
-	"dimension" TEXT,  /* String */
-	"limit_value" bigint,  /* i64 */
-	"enforcement" TEXT,  /* String */
-	"updated_by" oid,  /* pgrx :: pg_sys :: Oid */
-	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'set_graph_quota_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2838
--- graph::sql_facade::admin::registered_edges
-CREATE  FUNCTION graph."registered_edges"() RETURNS TABLE (
-	"from_table" TEXT,  /* String */
-	"from_column" TEXT,  /* String */
-	"to_table" TEXT,  /* String */
-	"to_column" TEXT,  /* String */
-	"label" TEXT,  /* String */
-	"bidirectional" bool,  /* bool */
-	"weight_column" TEXT,  /* Option < String > */
-	"label_column" TEXT  /* Option < String > */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'registered_edges_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3125
--- graph::sql_facade::admin::eq
-CREATE  FUNCTION graph."eq"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'eq_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5454
--- graph::sql_facade::admin::run_due_jobs
-CREATE  FUNCTION graph."run_due_jobs"(
-	"max_jobs" INT DEFAULT 64 /* i32 */
-) RETURNS TABLE (
-	"job_id" TEXT,  /* String */
-	"run_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"policy_kind" TEXT,  /* String */
-	"status" TEXT,  /* String */
-	"rows_applied" bigint,  /* Option < i64 > */
-	"error" TEXT,  /* Option < String > */
-	"started_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'run_due_jobs_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3198
--- graph::sql_facade::admin::is_null
-CREATE  FUNCTION graph."is_null"(
-	"column_name" TEXT /* & str */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'is_null_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/traversal.rs:324
--- graph::sql_facade::traversal::shortest_path
-CREATE  FUNCTION graph."shortest_path"(
-	"source_table" oid, /* pgrx :: pg_sys :: Oid */
-	"source_id" TEXT, /* & str */
-	"target_table" oid, /* pgrx :: pg_sys :: Oid */
-	"target_id" TEXT, /* & str */
-	"max_depth" INT DEFAULT 20, /* i32 */
-	"hydrate" bool DEFAULT true /* bool */
-) RETURNS TABLE (
-	"step" INT,  /* i32 */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"edge_label" TEXT,  /* Option < String > */
-	"node" jsonb,  /* Option < pgrx :: JsonB > */
-	"node_table_name" TEXT  /* String */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'shortest_path_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:9
--- graph::sql_facade::admin::test_enabled
-CREATE  FUNCTION graph."test_enabled"() RETURNS bool /* bool */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'test_enabled_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2578
--- graph::sql_facade::admin::add_table_to_graph
-CREATE  FUNCTION graph."add_table_to_graph"(
-	"graph_name" TEXT, /* & str */
+-- src/sql_facade/admin.rs:2527
+-- graph::sql_facade::admin::add_table
+CREATE  FUNCTION graph."add_table"(
 	"table_name" oid, /* pgrx :: pg_sys :: Oid */
 	"id_columns" TEXT[], /* Vec < String > */
 	"columns" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"tenant_column" TEXT DEFAULT NULL, /* Option < String > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+	"tenant_column" TEXT DEFAULT NULL /* Option < String > */
 ) RETURNS void
 SECURITY DEFINER  
 SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_table_to_graph_with_id_columns_wrapper';
+AS 'MODULE_PATHNAME', 'add_table_with_id_columns_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:5624
--- graph::sql_facade::admin::remove_job
-CREATE  FUNCTION graph."remove_job"(
-	"job_id" TEXT /* & str */
+-- src/sql_facade/admin.rs:5080
+-- graph::sql_facade::admin::drop_sync_policy
+CREATE  FUNCTION graph."drop_sync_policy"(
+	"policy_id" TEXT /* & str */
 ) RETURNS TABLE (
+	"policy_id" TEXT,  /* String */
 	"job_id" TEXT,  /* String */
 	"graph_id" TEXT,  /* String */
 	"graph_name" TEXT,  /* String */
-	"policy_kind" TEXT,  /* String */
-	"removed" bool  /* bool */
+	"dropped" bool  /* bool */
 )
 STRICT 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'remove_job_wrapper';
+AS 'MODULE_PATHNAME', 'drop_sync_policy_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/pgq.rs:11
--- graph::sql_facade::pgq::pgq
-CREATE  FUNCTION graph."pgq"(
-	"_query" TEXT /* & str */
-) RETURNS void
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'pgq_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3130
+-- src/sql_facade/admin.rs:3135
 -- graph::sql_facade::admin::eq
 CREATE  FUNCTION graph."eq"(
-	"column_name" TEXT, /* & str */
-	"value" TEXT /* & str */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'eq_text_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5403
--- graph::sql_facade::admin::run_job
-CREATE  FUNCTION graph."run_job"(
-	"job_id" TEXT /* & str */
-) RETURNS TABLE (
-	"job_id" TEXT,  /* String */
-	"run_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"policy_kind" TEXT,  /* String */
-	"status" TEXT,  /* String */
-	"rows_applied" bigint,  /* Option < i64 > */
-	"error" TEXT,  /* Option < String > */
-	"started_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'run_job_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2756
--- graph::sql_facade::admin::registered_tables_for_graph
-CREATE  FUNCTION graph."registered_tables_for_graph"(
-	"graph_name" TEXT, /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"table_name" TEXT,  /* String */
-	"id_columns" TEXT[],  /* Vec < String > */
-	"columns" TEXT[],  /* Vec < String > */
-	"tenant_column" TEXT  /* Option < String > */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'registered_tables_for_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:42
--- graph::sql_facade::admin::_max_sync_log_id_for_current_role
-CREATE  FUNCTION graph."_max_sync_log_id_for_current_role"() RETURNS bigint /* i64 */
-STRICT SECURITY DEFINER  
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'max_sync_log_id_for_current_role_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:4095
--- graph::sql_facade::admin::apply_sync
-CREATE  FUNCTION graph."apply_sync"() RETURNS TABLE (
-	"inserts_applied" bigint,  /* i64 */
-	"updates_applied" bigint,  /* i64 */
-	"deletes_applied" bigint  /* i64 */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'apply_sync_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3314
--- graph::sql_facade::admin::format_path
-CREATE  FUNCTION graph."format_path"(
-	"path" jsonb, /* pgrx :: JsonB */
-	"edge_path" jsonb, /* pgrx :: JsonB */
-	"separator" TEXT DEFAULT ' | ' /* & str */
-) RETURNS TEXT /* String */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'format_path_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/discovery.rs:140
--- graph::sql_facade::discovery::create_row_predicate_subgraph
-CREATE  FUNCTION graph."create_row_predicate_subgraph"(
-	"graph_name" TEXT, /* & str */
-	"row_predicate" jsonb, /* pgrx :: JsonB */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS void
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'create_row_predicate_subgraph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/runtime.rs:207
--- graph::sql_facade::runtime::graph_runtime_status
-CREATE  FUNCTION graph."graph_runtime_status"() RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"residency" TEXT,  /* String */
-	"loaded" bool,  /* bool */
-	"artifact_exists" bool,  /* bool */
-	"artifact_bytes" bigint,  /* Option < i64 > */
-	"node_count" bigint,  /* Option < i64 > */
-	"edge_count" bigint,  /* Option < i64 > */
-	"memory_used_mb" double precision,  /* Option < f64 > */
-	"projection_mode" TEXT,  /* Option < String > */
-	"last_access_unix_micros" bigint  /* Option < i64 > */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'graph_runtime_status_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3230
--- graph::sql_facade::admin::gt
-CREATE  FUNCTION graph."gt"(
 	"column_name" TEXT, /* & str */
 	"value" bigint /* i64 */
 ) RETURNS jsonb /* pgrx :: JsonB */
 STRICT  
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'gt_i64_wrapper';
+AS 'MODULE_PATHNAME', 'eq_i64_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/gql.rs:10
--- graph::sql_facade::gql::gql_explain
-CREATE  FUNCTION graph."gql_explain"(
-	"query" TEXT /* & str */
-) RETURNS TEXT /* String */
-STRICT 
+-- src/sql_facade/admin.rs:3166
+-- graph::sql_facade::admin::in
+CREATE  FUNCTION graph."in"(
+	"column_name" TEXT, /* & str */
+	"values" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'gql_explain_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/traversal.rs:27
--- graph::sql_facade::traversal::traverse
-CREATE  FUNCTION graph."traverse"(
-	"seed_table" oid, /* pgrx :: pg_sys :: Oid */
-	"seed_id" TEXT, /* & str */
-	"max_depth" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), /* i32 */
-	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"direction" TEXT DEFAULT 'any', /* & str */
-	"node_tables" oid[] DEFAULT NULL, /* :: std :: option :: Option < Vec < pgrx :: pg_sys :: Oid > > */
-	"filter" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
-	"tenant" TEXT DEFAULT NULL, /* Option < String > */
-	"strategy" TEXT DEFAULT 'bfs', /* & str */
-	"uniqueness" TEXT DEFAULT 'node_global', /* & str */
-	"include_start" bool DEFAULT true, /* bool */
-	"hydrate" bool DEFAULT true, /* bool */
-	"max_rows" INT DEFAULT 1000, /* i32 */
-	"row_offset" INT DEFAULT 0, /* i32 */
-	"max_nodes" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), /* i32 */
-	"max_frontier" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) /* i32 */
-) RETURNS TABLE (
-	"root_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"root_id" TEXT,  /* String */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"depth" INT,  /* i32 */
-	"path" jsonb,  /* pgrx :: JsonB */
-	"edge_path" jsonb,  /* pgrx :: JsonB */
-	"node" jsonb,  /* Option < pgrx :: JsonB > */
-	"root_table_name" TEXT,  /* String */
-	"node_table_name" TEXT,  /* String */
-	"capped" bool  /* bool */
-)
-SECURITY DEFINER  COST 1000
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'traverse_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/discovery.rs:84
--- graph::sql_facade::discovery::preview_discover
-CREATE  FUNCTION graph."preview_discover"(
-	"schema_name" TEXT DEFAULT 'public', /* & str */
-	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"item_type" TEXT,  /* String */
-	"item_name" TEXT,  /* String */
-	"details" TEXT  /* String */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'preview_discover_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/runtime.rs:125
--- graph::sql_facade::runtime::unload_graph
-CREATE  FUNCTION graph."unload_graph"(
-	"graph_name" TEXT, /* & str */
-	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"unloaded" bool  /* bool */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'unload_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2411
--- graph::sql_facade::admin::build_status_for_graph
-CREATE  FUNCTION graph."build_status_for_graph"(
-	"graph_name" TEXT, /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL, /* Option < & str > */
-	"max_rows" INT DEFAULT 50 /* i32 */
-) RETURNS TABLE (
-	"build_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"status" TEXT,  /* String */
-	"nodes_loaded" bigint,  /* Option < i64 > */
-	"edges_loaded" bigint,  /* Option < i64 > */
-	"build_time_ms" double precision,  /* Option < f64 > */
-	"memory_used_mb" double precision,  /* Option < f64 > */
-	"sync_mode" TEXT,  /* String */
-	"projection_mode" TEXT,  /* String */
-	"progress_phase" TEXT,  /* String */
-	"progress_message" TEXT,  /* Option < String > */
-	"started_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"finished_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"error" TEXT  /* Option < String > */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'build_status_for_graph_wrapper';
+AS 'MODULE_PATHNAME', 'in_filter_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -2496,512 +2151,38 @@ AS 'MODULE_PATHNAME', 'maintenance_status_for_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:3619
--- graph::sql_facade::admin::graph_map
-CREATE  FUNCTION graph."graph_map"(
-	"graph_name" TEXT, /* & str */
-	"format" TEXT DEFAULT 'json', /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS jsonb /* pgrx :: JsonB */
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'graph_map_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3204
--- graph::sql_facade::admin::is_not_null
-CREATE  FUNCTION graph."is_not_null"(
-	"column_name" TEXT /* & str */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'is_not_null_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2494
--- graph::sql_facade::admin::add_table
-CREATE  FUNCTION graph."add_table"(
-	"table_name" oid, /* pgrx :: pg_sys :: Oid */
-	"id_column" TEXT, /* & str */
-	"columns" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"tenant_column" TEXT DEFAULT NULL /* Option < String > */
-) RETURNS void
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_table_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2527
--- graph::sql_facade::admin::add_table
-CREATE  FUNCTION graph."add_table"(
-	"table_name" oid, /* pgrx :: pg_sys :: Oid */
-	"id_columns" TEXT[], /* Vec < String > */
-	"columns" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"tenant_column" TEXT DEFAULT NULL /* Option < String > */
-) RETURNS void
-SECURITY DEFINER  
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_table_with_id_columns_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2540
--- graph::sql_facade::admin::add_table_to_graph
-CREATE  FUNCTION graph."add_table_to_graph"(
-	"graph_name" TEXT, /* & str */
-	"table_name" oid, /* pgrx :: pg_sys :: Oid */
-	"id_column" TEXT, /* & str */
-	"columns" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"tenant_column" TEXT DEFAULT NULL, /* Option < String > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS void
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_table_to_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:1832
--- graph::sql_facade::admin::build
-CREATE  FUNCTION graph."build"() RETURNS TABLE (
-	"nodes_loaded" bigint,  /* i64 */
-	"edges_loaded" bigint,  /* i64 */
-	"build_time_ms" double precision,  /* f64 */
-	"memory_used_mb" double precision,  /* f64 */
-	"sync_mode" TEXT,  /* String */
-	"projection_mode" TEXT  /* String */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'build_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/cypher.rs:17
--- graph::sql_facade::cypher::cypher
-CREATE  FUNCTION graph."cypher"(
-	"query" TEXT, /* & str */
-	"params" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
-	"hydrate" bool DEFAULT true /* bool */
-) RETURNS TABLE (
-	"row" jsonb  /* pgrx :: JsonB */
-)
-VOLATILE  COST 1000
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'cypher_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/components.rs:12
--- graph::sql_facade::components::connected_components
-CREATE  FUNCTION graph."connected_components"() RETURNS TABLE (
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"component_id" bigint,  /* i64 */
-	"component_size" INT  /* i32 */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'connected_components_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3253
--- graph::sql_facade::admin::less_than
-CREATE  FUNCTION graph."less_than"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'less_than_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/runtime.rs:63
--- graph::sql_facade::runtime::load_graph
-CREATE  FUNCTION graph."load_graph"(
+-- src/sql_facade/runtime.rs:27
+-- graph::sql_facade::runtime::select_graph
+CREATE  FUNCTION graph."select_graph"(
 	"graph_name" TEXT, /* & str */
 	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
 	"namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS TABLE (
 	"graph_id" TEXT,  /* String */
 	"graph_name" TEXT,  /* String */
-	"loaded" bool,  /* bool */
-	"node_count" bigint,  /* Option < i64 > */
-	"edge_count" bigint,  /* Option < i64 > */
-	"memory_used_mb" double precision,  /* Option < f64 > */
-	"projection_mode" TEXT  /* Option < String > */
+	"loaded" bool  /* bool */
 )
 SECURITY DEFINER 
 SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'load_graph_wrapper';
+AS 'MODULE_PATHNAME', 'select_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:5509
--- graph::sql_facade::admin::alter_job
-CREATE  FUNCTION graph."alter_job"(
-	"job_id" TEXT, /* & str */
-	"enabled" bool DEFAULT NULL, /* Option < bool > */
-	"schedule_interval_secs" bigint DEFAULT NULL, /* Option < i64 > */
-	"max_runtime_secs" bigint DEFAULT NULL, /* Option < i64 > */
-	"max_retries" INT DEFAULT NULL /* Option < i32 > */
+-- src/sql_facade/admin.rs:5624
+-- graph::sql_facade::admin::remove_job
+CREATE  FUNCTION graph."remove_job"(
+	"job_id" TEXT /* & str */
 ) RETURNS TABLE (
 	"job_id" TEXT,  /* String */
 	"graph_id" TEXT,  /* String */
 	"graph_name" TEXT,  /* String */
 	"policy_kind" TEXT,  /* String */
-	"enabled" bool,  /* bool */
-	"schedule_interval_secs" bigint,  /* i64 */
-	"max_runtime_secs" bigint,  /* Option < i64 > */
-	"max_retries" INT,  /* i32 */
-	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"last_status" TEXT  /* Option < String > */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'alter_job_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:1586
--- graph::sql_facade::admin::memory_profile
-CREATE  FUNCTION graph."memory_profile"(
-	"concurrent_backends" INT DEFAULT 1 /* i32 */
-) RETURNS TABLE (
-	"active_backend_private_mb" double precision,  /* f64 */
-	"active_backend_shared_mb" double precision,  /* f64 */
-	"active_backend_total_mb" double precision,  /* f64 */
-	"estimated_instance_private_mb" double precision,  /* f64 */
-	"estimated_instance_shared_mb" double precision,  /* f64 */
-	"estimated_instance_total_mb" double precision,  /* f64 */
-	"memory_limit_mb" INT,  /* i32 */
-	"assumed_concurrent_backends" INT  /* i32 */
+	"removed" bool  /* bool */
 )
 STRICT 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'memory_profile_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:326
--- graph::sql_facade::admin::revoke_graph
-CREATE  FUNCTION graph."revoke_graph"(
-	"graph_name" TEXT, /* & str */
-	"grantee" TEXT, /* & str */
-	"privilege" TEXT, /* & str */
-	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"grantee" oid,  /* pgrx :: pg_sys :: Oid */
-	"privilege" TEXT,  /* String */
-	"grantor" oid,  /* pgrx :: pg_sys :: Oid */
-	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'revoke_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:1201
--- graph::sql_facade::admin::projection_status
-CREATE  FUNCTION graph."projection_status"() RETURNS TABLE (
-	"manifest_generation" bigint,  /* Option < i64 > */
-	"manifest_watermark" bigint,  /* Option < i64 > */
-	"pending_durable_rows" bigint,  /* i64 */
-	"base_artifact_bytes" bigint,  /* i64 */
-	"manifest_bytes" bigint,  /* i64 */
-	"artifact_bytes" bigint,  /* i64 */
-	"segment_count" INT,  /* i32 */
-	"segment_bytes" bigint,  /* i64 */
-	"segment_fanout" INT,  /* i32 */
-	"read_amplification" INT,  /* i32 */
-	"l0_segment_count" INT,  /* i32 */
-	"l1_segment_count" INT,  /* i32 */
-	"l2_segment_count" INT,  /* i32 */
-	"edge_segment_count" INT,  /* i32 */
-	"node_segment_count" INT,  /* i32 */
-	"dirty_chunk_count" INT,  /* i32 */
-	"dirty_chunk_bytes" bigint,  /* i64 */
-	"tombstone_ratio" double precision,  /* f64 */
-	"compaction_backlog" INT,  /* i32 */
-	"obsolete_file_count" INT,  /* i32 */
-	"obsolete_bytes" bigint,  /* i64 */
-	"active_generation_count" INT,  /* i32 */
-	"artifact_validation_state" TEXT,  /* String */
-	"last_ingestion_unix_micros" bigint,  /* Option < i64 > */
-	"last_compaction_unix_micros" bigint,  /* Option < i64 > */
-	"last_gc_unix_micros" bigint,  /* Option < i64 > */
-	"last_repair_unix_micros" bigint,  /* Option < i64 > */
-	"ingest_recommended" bool,  /* bool */
-	"compaction_recommended" bool,  /* bool */
-	"gc_recommended" bool,  /* bool */
-	"repair_recommended" bool  /* bool */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'projection_status_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2961
--- graph::sql_facade::admin::list_edges
-CREATE  FUNCTION graph."list_edges"(
-	"graph_name" TEXT, /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"from_table" TEXT,  /* String */
-	"from_column" TEXT,  /* String */
-	"to_table" TEXT,  /* String */
-	"to_column" TEXT,  /* String */
-	"label" TEXT,  /* String */
-	"bidirectional" bool,  /* bool */
-	"weight_column" TEXT,  /* Option < String > */
-	"label_column" TEXT  /* Option < String > */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'list_edges_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/components.rs:89
--- graph::sql_facade::components::component_stats
-CREATE  FUNCTION graph."component_stats"() RETURNS TABLE (
-	"num_components" INT,  /* i32 */
-	"largest_component" INT,  /* i32 */
-	"num_isolated_nodes" INT,  /* i32 */
-	"total_active_nodes" INT  /* i32 */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'component_stats_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/traversal.rs:214
--- graph::sql_facade::traversal::traverse
-CREATE  FUNCTION graph."traverse"(
-	"start_tables" oid[], /* Vec < pgrx :: pg_sys :: Oid > */
-	"start_ids" TEXT[], /* Vec < String > */
-	"max_depth" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), /* i32 */
-	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
-	"direction" TEXT DEFAULT 'any', /* & str */
-	"node_tables" oid[] DEFAULT NULL, /* :: std :: option :: Option < Vec < pgrx :: pg_sys :: Oid > > */
-	"filter" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
-	"tenant" TEXT DEFAULT NULL, /* Option < String > */
-	"strategy" TEXT DEFAULT 'bfs', /* & str */
-	"uniqueness" TEXT DEFAULT 'node_global', /* & str */
-	"include_start" bool DEFAULT true, /* bool */
-	"hydrate" bool DEFAULT true, /* bool */
-	"max_rows" INT DEFAULT 1000, /* i32 */
-	"row_offset" INT DEFAULT 0, /* i32 */
-	"max_nodes" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), /* i32 */
-	"max_frontier" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) /* i32 */
-) RETURNS TABLE (
-	"root_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"root_id" TEXT,  /* String */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"depth" INT,  /* i32 */
-	"path" jsonb,  /* pgrx :: JsonB */
-	"edge_path" jsonb,  /* pgrx :: JsonB */
-	"node" jsonb,  /* Option < pgrx :: JsonB > */
-	"root_table_name" TEXT,  /* String */
-	"node_table_name" TEXT,  /* String */
-	"capped" bool  /* bool */
-)
-  COST 1000
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'traverse_many_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3043
--- graph::sql_facade::admin::add_filter_column
-CREATE  FUNCTION graph."add_filter_column"(
-	"table_name" oid, /* pgrx :: pg_sys :: Oid */
-	"column_name" TEXT, /* & str */
-	"column_type" TEXT DEFAULT 'numeric' /* & str */
-) RETURNS void
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_filter_column_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:149
--- graph::sql_facade::admin::drop_graph
-CREATE  FUNCTION graph."drop_graph"(
-	"graph_name" TEXT, /* & str */
-	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
-	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
-	"tenant" TEXT,  /* Option < String > */
-	"namespace" TEXT,  /* Option < String > */
-	"graph_kind" TEXT,  /* String */
-	"residency" TEXT,  /* String */
-	"materialization" TEXT,  /* String */
-	"projection_mode" TEXT,  /* String */
-	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'drop_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5224
--- graph::sql_facade::admin::jobs
-CREATE  FUNCTION graph."jobs"(
-	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL, /* Option < & str > */
-	"max_rows" INT DEFAULT 50 /* i32 */
-) RETURNS TABLE (
-	"job_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"policy_kind" TEXT,  /* String */
-	"enabled" bool,  /* bool */
-	"schedule_interval_secs" bigint,  /* i64 */
-	"max_runtime_secs" bigint,  /* Option < i64 > */
-	"max_retries" INT,  /* i32 */
-	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"last_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"last_status" TEXT,  /* Option < String > */
-	"last_error" TEXT,  /* Option < String > */
-	"last_sqlstate" TEXT  /* Option < String > */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'jobs_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:1191
--- graph::sql_facade::admin::active_generation_count
-CREATE  FUNCTION graph."active_generation_count"() RETURNS INT /* i32 */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'active_generation_count_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:353
--- graph::sql_facade::admin::graph_privileges
-CREATE  FUNCTION graph."graph_privileges"(
-	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
-	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"grantee" oid,  /* pgrx :: pg_sys :: Oid */
-	"privilege" TEXT,  /* String */
-	"grantor" oid,  /* pgrx :: pg_sys :: Oid */
-	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'graph_privileges_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/components.rs:284
--- graph::sql_facade::components::isolated_nodes
-CREATE  FUNCTION graph."isolated_nodes"(
-	"max_rows" INT DEFAULT 100, /* i32 */
-	"row_offset" INT DEFAULT 0, /* i32 */
-	"hydrate" bool DEFAULT true /* bool */
-) RETURNS TABLE (
-	"component_id" bigint,  /* i64 */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"node" jsonb  /* Option < pgrx :: JsonB > */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'isolated_nodes_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:524
--- graph::sql_facade::admin::graph_quota_usage
-CREATE  FUNCTION graph."graph_quota_usage"() RETURNS TABLE (
-	"scope_type" TEXT,  /* String */
-	"scope_key" TEXT,  /* String */
-	"dimension" TEXT,  /* String */
-	"limit_value" bigint,  /* Option < i64 > */
-	"usage_value" bigint,  /* i64 */
-	"enforcement" TEXT,  /* Option < String > */
-	"exceeded" bool  /* bool */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'graph_quota_usage_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:4048
--- graph::sql_facade::admin::estimate
-CREATE  FUNCTION graph."estimate"() RETURNS TABLE (
-	"estimated_nodes" bigint,  /* i64 */
-	"estimated_edges" bigint,  /* i64 */
-	"estimated_memory_mb" double precision,  /* f64 */
-	"memory_limit_mb" INT,  /* i32 */
-	"fits_in_memory" bool  /* bool */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'estimate_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/discovery.rs:45
--- graph::sql_facade::discovery::auto_discover_tables
-CREATE  FUNCTION graph."auto_discover_tables"(
-	"tables" oid[], /* Vec < pgrx :: pg_sys :: Oid > */
-	"tenant_column" TEXT DEFAULT NULL, /* Option < String > */
-	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
-	"build" bool DEFAULT true, /* bool */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"item_type" TEXT,  /* String */
-	"item_name" TEXT,  /* String */
-	"details" TEXT  /* String */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'auto_discover_tables_wrapper';
+AS 'MODULE_PATHNAME', 'remove_job_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -3028,15 +2209,794 @@ AS 'MODULE_PATHNAME', 'maintenance_status_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:3141
--- graph::sql_facade::admin::not_equals
-CREATE  FUNCTION graph."not_equals"(
+-- src/sql_facade/admin.rs:223
+-- graph::sql_facade::admin::current_graph
+CREATE  FUNCTION graph."current_graph"() RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
+	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
+	"tenant" TEXT,  /* Option < String > */
+	"namespace" TEXT,  /* Option < String > */
+	"graph_kind" TEXT,  /* String */
+	"residency" TEXT,  /* String */
+	"materialization" TEXT,  /* String */
+	"projection_mode" TEXT,  /* String */
+	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'current_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2494
+-- graph::sql_facade::admin::add_table
+CREATE  FUNCTION graph."add_table"(
+	"table_name" oid, /* pgrx :: pg_sys :: Oid */
+	"id_column" TEXT, /* & str */
+	"columns" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
+	"tenant_column" TEXT DEFAULT NULL /* Option < String > */
+) RETURNS void
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'add_table_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2866
+-- graph::sql_facade::admin::registered_edges_for_graph
+CREATE  FUNCTION graph."registered_edges_for_graph"(
+	"graph_name" TEXT, /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"from_table" TEXT,  /* String */
+	"from_column" TEXT,  /* String */
+	"to_table" TEXT,  /* String */
+	"to_column" TEXT,  /* String */
+	"label" TEXT,  /* String */
+	"bidirectional" bool,  /* bool */
+	"weight_column" TEXT,  /* Option < String > */
+	"label_column" TEXT  /* Option < String > */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'registered_edges_for_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2578
+-- graph::sql_facade::admin::add_table_to_graph
+CREATE  FUNCTION graph."add_table_to_graph"(
+	"graph_name" TEXT, /* & str */
+	"table_name" oid, /* pgrx :: pg_sys :: Oid */
+	"id_columns" TEXT[], /* Vec < String > */
+	"columns" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
+	"tenant_column" TEXT DEFAULT NULL, /* Option < String > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS void
+SECURITY DEFINER  
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'add_table_to_graph_with_id_columns_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3326
+-- graph::sql_facade::admin::all
+CREATE  FUNCTION graph."all"(
+	"filters" jsonb[] /* Vec < pgrx :: JsonB > */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'all_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/components.rs:89
+-- graph::sql_facade::components::component_stats
+CREATE  FUNCTION graph."component_stats"() RETURNS TABLE (
+	"num_components" INT,  /* i32 */
+	"largest_component" INT,  /* i32 */
+	"num_isolated_nodes" INT,  /* i32 */
+	"total_active_nodes" INT  /* i32 */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'component_stats_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/gql.rs:10
+-- graph::sql_facade::gql::gql_explain
+CREATE  FUNCTION graph."gql_explain"(
+	"query" TEXT /* & str */
+) RETURNS TEXT /* String */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'gql_explain_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/discovery.rs:84
+-- graph::sql_facade::discovery::preview_discover
+CREATE  FUNCTION graph."preview_discover"(
+	"schema_name" TEXT DEFAULT 'public', /* & str */
+	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"item_type" TEXT,  /* String */
+	"item_name" TEXT,  /* String */
+	"details" TEXT  /* String */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'preview_discover_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/workflow.rs:221
+-- graph::sql_facade::workflow::find_related
+CREATE  FUNCTION graph."find_related"(
+	"property_key" TEXT, /* & str */
+	"property_value" TEXT, /* & str */
+	"source_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"search_mode" TEXT DEFAULT COALESCE(NULLIF(current_setting('graph.default_search_mode'), ''), 'contains'), /* & str */
+	"case_sensitive" bool DEFAULT current_setting('graph.default_case_sensitive')::boolean, /* bool */
+	"search_max_rows" INT DEFAULT 1, /* i32 */
+	"search_row_offset" INT DEFAULT 0, /* i32 */
+	"max_depth" INT DEFAULT current_setting('graph.default_max_depth')::int, /* i32 */
+	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
+	"direction" TEXT DEFAULT 'any', /* & str */
+	"target_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"target_tables" oid[] DEFAULT NULL, /* :: std :: option :: Option < Vec < pgrx :: pg_sys :: Oid > > */
+	"where_node" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
+	"tenant" TEXT DEFAULT NULL, /* Option < String > */
+	"max_rows" INT DEFAULT 20, /* i32 */
+	"row_offset" INT DEFAULT 0, /* i32 */
+	"include_counts" bool DEFAULT false, /* bool */
+	"candidate_limit" INT DEFAULT 10000, /* i32 */
+	"include_start" bool DEFAULT false /* bool */
+) RETURNS TABLE (
+	"root_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"root_id" TEXT,  /* String */
+	"root_table_name" TEXT,  /* String */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_table_name" TEXT,  /* String */
+	"node_id" TEXT,  /* String */
+	"depth" INT,  /* i32 */
+	"score" real,  /* f32 */
+	"rank" INT,  /* i32 */
+	"path" jsonb,  /* pgrx :: JsonB */
+	"edge_path" jsonb,  /* pgrx :: JsonB */
+	"readable_path" TEXT,  /* String */
+	"node" jsonb,  /* Option < pgrx :: JsonB > */
+	"candidate_count" bigint,  /* Option < i64 > */
+	"filtered_count" bigint,  /* Option < i64 > */
+	"truncated" bool  /* bool */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'find_related_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/discovery.rs:111
+-- graph::sql_facade::discovery::preview_discover_tables
+CREATE  FUNCTION graph."preview_discover_tables"(
+	"tables" oid[], /* Vec < pgrx :: pg_sys :: Oid > */
+	"tenant_column" TEXT DEFAULT NULL, /* Option < String > */
+	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"item_type" TEXT,  /* String */
+	"item_name" TEXT,  /* String */
+	"details" TEXT  /* String */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'preview_discover_tables_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3444
+-- graph::sql_facade::admin::remove_edge
+CREATE  FUNCTION graph."remove_edge"(
+	"graph_name" TEXT, /* & str */
+	"label" TEXT, /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS void
+ 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'remove_edge_for_named_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3242
+-- graph::sql_facade::admin::gte
+CREATE  FUNCTION graph."gte"(
 	"column_name" TEXT, /* & str */
 	"value" jsonb /* pgrx :: JsonB */
 ) RETURNS jsonb /* pgrx :: JsonB */
 STRICT 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'not_equals_wrapper';
+AS 'MODULE_PATHNAME', 'gte_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/runtime.rs:63
+-- graph::sql_facade::runtime::load_graph
+CREATE  FUNCTION graph."load_graph"(
+	"graph_name" TEXT, /* & str */
+	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"loaded" bool,  /* bool */
+	"node_count" bigint,  /* Option < i64 > */
+	"edge_count" bigint,  /* Option < i64 > */
+	"memory_used_mb" double precision,  /* Option < f64 > */
+	"projection_mode" TEXT  /* Option < String > */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'load_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:466
+-- graph::sql_facade::admin::set_graph_quota
+CREATE  FUNCTION graph."set_graph_quota"(
+	"scope_type" TEXT, /* & str */
+	"dimension" TEXT, /* & str */
+	"limit_value" bigint, /* i64 */
+	"scope_key" TEXT DEFAULT NULL, /* Option < & str > */
+	"enforcement" TEXT DEFAULT 'hard' /* & str */
+) RETURNS TABLE (
+	"scope_type" TEXT,  /* String */
+	"scope_key" TEXT,  /* String */
+	"dimension" TEXT,  /* String */
+	"limit_value" bigint,  /* i64 */
+	"enforcement" TEXT,  /* String */
+	"updated_by" oid,  /* pgrx :: pg_sys :: Oid */
+	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'set_graph_quota_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3130
+-- graph::sql_facade::admin::eq
+CREATE  FUNCTION graph."eq"(
+	"column_name" TEXT, /* & str */
+	"value" TEXT /* & str */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'eq_text_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/components.rs:225
+-- graph::sql_facade::components::largest_component
+CREATE  FUNCTION graph."largest_component"(
+	"max_rows" INT DEFAULT 100, /* i32 */
+	"row_offset" INT DEFAULT 0, /* i32 */
+	"hydrate" bool DEFAULT true /* bool */
+) RETURNS TABLE (
+	"component_id" bigint,  /* i64 */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"node" jsonb  /* Option < pgrx :: JsonB > */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'largest_component_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5497
+-- graph::sql_facade::admin::run_due_jobs_async
+CREATE  FUNCTION graph."run_due_jobs_async"(
+	"max_jobs" INT DEFAULT 64 /* i32 */
+) RETURNS bool /* bool */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'run_due_jobs_async_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/components.rs:254
+-- graph::sql_facade::components::component
+CREATE  FUNCTION graph."component"(
+	"component_id" bigint, /* i64 */
+	"max_rows" INT DEFAULT 100, /* i32 */
+	"row_offset" INT DEFAULT 0, /* i32 */
+	"hydrate" bool DEFAULT true /* bool */
+) RETURNS TABLE (
+	"component_id" bigint,  /* i64 */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"node" jsonb  /* Option < pgrx :: JsonB > */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'component_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5125
+-- graph::sql_facade::admin::run_sync_policy
+CREATE  FUNCTION graph."run_sync_policy"(
+	"policy_id" TEXT /* & str */
+) RETURNS TABLE (
+	"policy_id" TEXT,  /* String */
+	"job_id" TEXT,  /* String */
+	"run_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"status" TEXT,  /* String */
+	"rows_applied" bigint,  /* Option < i64 > */
+	"error" TEXT,  /* Option < String > */
+	"started_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'run_sync_policy_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3368
+-- graph::sql_facade::admin::remove_table_from_graph
+CREATE  FUNCTION graph."remove_table_from_graph"(
+	"graph_name" TEXT, /* & str */
+	"table_name" oid, /* pgrx :: pg_sys :: Oid */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS void
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'remove_table_from_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:524
+-- graph::sql_facade::admin::graph_quota_usage
+CREATE  FUNCTION graph."graph_quota_usage"() RETURNS TABLE (
+	"scope_type" TEXT,  /* String */
+	"scope_key" TEXT,  /* String */
+	"dimension" TEXT,  /* String */
+	"limit_value" bigint,  /* Option < i64 > */
+	"usage_value" bigint,  /* i64 */
+	"enforcement" TEXT,  /* Option < String > */
+	"exceeded" bool  /* bool */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'graph_quota_usage_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/traversal.rs:710
+-- graph::sql_facade::traversal::aggregate
+CREATE  FUNCTION graph."aggregate"(
+	"traversal" jsonb, /* pgrx :: JsonB */
+	"aggregations" jsonb, /* pgrx :: JsonB */
+	"scope" TEXT DEFAULT 'returned_nodes', /* & str */
+	"path_limit" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_exact_path_count', true), '')::int, 100000) /* i32 */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'aggregate_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3013
+-- graph::sql_facade::admin::alter_edge
+CREATE  FUNCTION graph."alter_edge"(
+	"graph_name" TEXT, /* & str */
+	"label" TEXT, /* & str */
+	"bidirectional" bool DEFAULT NULL, /* Option < bool > */
+	"weight_column" TEXT DEFAULT NULL, /* Option < String > */
+	"label_column" TEXT DEFAULT NULL, /* Option < String > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS void
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'alter_edge_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:4867
+-- graph::sql_facade::admin::add_sync_policy
+CREATE  FUNCTION graph."add_sync_policy"(
+	"graph_name" TEXT, /* & str */
+	"schedule_interval_secs" bigint DEFAULT 60, /* i64 */
+	"max_sync_lag_rows" bigint DEFAULT NULL, /* Option < i64 > */
+	"enabled" bool DEFAULT true, /* bool */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"policy_id" TEXT,  /* String */
+	"job_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"enabled" bool,  /* bool */
+	"schedule_interval_secs" bigint,  /* i64 */
+	"max_sync_lag_rows" bigint,  /* Option < i64 > */
+	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"last_status" TEXT  /* Option < String > */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'add_sync_policy_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/traversal.rs:117
+-- graph::sql_facade::traversal::get_node
+CREATE  FUNCTION graph."get_node"(
+	"graph_name" TEXT, /* & str */
+	"label" TEXT, /* & str */
+	"id" TEXT, /* & str */
+	"hydrate" bool DEFAULT true, /* bool */
+	"tenant" TEXT DEFAULT NULL, /* Option < String > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_table_name" TEXT,  /* String */
+	"node_id" TEXT,  /* String */
+	"node_idx" bigint,  /* i64 */
+	"node" jsonb  /* Option < pgrx :: JsonB > */
+)
+ COST 100
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'get_node_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3264
+-- graph::sql_facade::admin::lt
+CREATE  FUNCTION graph."lt"(
+	"column_name" TEXT, /* & str */
+	"value" bigint /* i64 */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'lt_i64_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3063
+-- graph::sql_facade::admin::add_filter_column_to_graph
+CREATE  FUNCTION graph."add_filter_column_to_graph"(
+	"graph_name" TEXT, /* & str */
+	"table_name" oid, /* pgrx :: pg_sys :: Oid */
+	"column_name" TEXT, /* & str */
+	"column_type" TEXT DEFAULT 'numeric', /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS void
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'add_filter_column_to_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/components.rs:12
+-- graph::sql_facade::components::connected_components
+CREATE  FUNCTION graph."connected_components"() RETURNS TABLE (
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"component_id" bigint,  /* i64 */
+	"component_size" INT  /* i32 */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'connected_components_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5174
+-- graph::sql_facade::admin::sync_policy_status
+CREATE  FUNCTION graph."sync_policy_status"(
+	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL, /* Option < & str > */
+	"max_rows" INT DEFAULT 50 /* i32 */
+) RETURNS TABLE (
+	"policy_id" TEXT,  /* String */
+	"job_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"enabled" bool,  /* bool */
+	"schedule_interval_secs" bigint,  /* i64 */
+	"max_sync_lag_rows" bigint,  /* Option < i64 > */
+	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"last_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"last_status" TEXT,  /* Option < String > */
+	"last_error" TEXT  /* Option < String > */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'sync_policy_status_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3276
+-- graph::sql_facade::admin::lte
+CREATE  FUNCTION graph."lte"(
+	"column_name" TEXT, /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'lte_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3287
+-- graph::sql_facade::admin::between
+CREATE  FUNCTION graph."between"(
+	"column_name" TEXT, /* & str */
+	"lower" jsonb, /* pgrx :: JsonB */
+	"upper" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'between_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1886
+-- graph::sql_facade::admin::build_graph
+CREATE  FUNCTION graph."build_graph"(
+	"graph_name" TEXT, /* & str */
+	"force_persist" bool DEFAULT false, /* bool */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"nodes_loaded" bigint,  /* i64 */
+	"edges_loaded" bigint,  /* i64 */
+	"build_time_ms" double precision,  /* f64 */
+	"memory_used_mb" double precision,  /* f64 */
+	"sync_mode" TEXT,  /* String */
+	"projection_mode" TEXT  /* String */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'build_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2961
+-- graph::sql_facade::admin::list_edges
+CREATE  FUNCTION graph."list_edges"(
+	"graph_name" TEXT, /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"from_table" TEXT,  /* String */
+	"from_column" TEXT,  /* String */
+	"to_table" TEXT,  /* String */
+	"to_column" TEXT,  /* String */
+	"label" TEXT,  /* String */
+	"bidirectional" bool,  /* bool */
+	"weight_column" TEXT,  /* Option < String > */
+	"label_column" TEXT  /* Option < String > */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'list_edges_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3178
+-- graph::sql_facade::admin::contains_text
+CREATE  FUNCTION graph."contains_text"(
+	"column_name" TEXT, /* & str */
+	"value" TEXT /* & str */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'contains_text_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/runtime.rs:160
+-- graph::sql_facade::runtime::loaded_graphs
+CREATE  FUNCTION graph."loaded_graphs"() RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"residency" TEXT,  /* String */
+	"node_count" bigint,  /* i64 */
+	"edge_count" bigint,  /* i64 */
+	"memory_used_mb" double precision,  /* f64 */
+	"projection_mode" TEXT,  /* String */
+	"last_access_unix_micros" bigint  /* i64 */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'loaded_graphs_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3160
+-- graph::sql_facade::admin::neq
+CREATE  FUNCTION graph."neq"(
+	"column_name" TEXT, /* & str */
+	"value" bigint /* i64 */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'neq_i64_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2756
+-- graph::sql_facade::admin::registered_tables_for_graph
+CREATE  FUNCTION graph."registered_tables_for_graph"(
+	"graph_name" TEXT, /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"table_name" TEXT,  /* String */
+	"id_columns" TEXT[],  /* Vec < String > */
+	"columns" TEXT[],  /* Vec < String > */
+	"tenant_column" TEXT  /* Option < String > */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'registered_tables_for_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3043
+-- graph::sql_facade::admin::add_filter_column
+CREATE  FUNCTION graph."add_filter_column"(
+	"table_name" oid, /* pgrx :: pg_sys :: Oid */
+	"column_name" TEXT, /* & str */
+	"column_type" TEXT DEFAULT 'numeric' /* & str */
+) RETURNS void
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'add_filter_column_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/workflow.rs:405
+-- graph::sql_facade::workflow::path
+CREATE  FUNCTION graph."path"(
+	"source_table" oid, /* pgrx :: pg_sys :: Oid */
+	"source_id" TEXT, /* & str */
+	"target_table" oid, /* pgrx :: pg_sys :: Oid */
+	"target_id" TEXT, /* & str */
+	"max_depth" INT DEFAULT 20 /* i32 */
+) RETURNS TABLE (
+	"step" INT,  /* i32 */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_table_name" TEXT,  /* String */
+	"node_id" TEXT,  /* String */
+	"edge_label" TEXT,  /* Option < String > */
+	"readable_path" TEXT,  /* String */
+	"node" jsonb  /* Option < pgrx :: JsonB > */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'path_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:2304
+-- graph::sql_facade::admin::build_status
+CREATE  FUNCTION graph."build_status"(
+	"build_id" TEXT /* & str */
+) RETURNS TABLE (
+	"build_id" TEXT,  /* String */
+	"status" TEXT,  /* String */
+	"nodes_loaded" bigint,  /* Option < i64 > */
+	"edges_loaded" bigint,  /* Option < i64 > */
+	"build_time_ms" double precision,  /* Option < f64 > */
+	"memory_used_mb" double precision,  /* Option < f64 > */
+	"progress_phase" TEXT,  /* String */
+	"progress_message" TEXT,  /* Option < String > */
+	"started_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"finished_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"error" TEXT  /* Option < String > */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'build_status_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3152
+-- graph::sql_facade::admin::neq
+CREATE  FUNCTION graph."neq"(
+	"column_name" TEXT, /* & str */
+	"value" TEXT /* & str */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'neq_text_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5728
+-- graph::sql_facade::admin::vacuum_graph
+CREATE  FUNCTION graph."vacuum_graph"(
+	"graph_name" TEXT, /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"nodes_before" bigint,  /* i64 */
+	"nodes_after" bigint,  /* i64 */
+	"tombstones_removed" bigint,  /* i64 */
+	"edges_rebuilt" bigint,  /* i64 */
+	"vacuum_time_ms" double precision  /* f64 */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'vacuum_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:102
+-- graph::sql_facade::admin::alter_graph
+CREATE  FUNCTION graph."alter_graph"(
+	"graph_name" TEXT, /* & str */
+	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"namespace" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_kind" TEXT DEFAULT NULL, /* Option < & str > */
+	"residency" TEXT DEFAULT NULL, /* Option < & str > */
+	"materialization" TEXT DEFAULT NULL, /* Option < & str > */
+	"projection_mode" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
+	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
+	"tenant" TEXT,  /* Option < String > */
+	"namespace" TEXT,  /* Option < String > */
+	"graph_kind" TEXT,  /* String */
+	"residency" TEXT,  /* String */
+	"materialization" TEXT,  /* String */
+	"projection_mode" TEXT,  /* String */
+	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'alter_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -3076,120 +3036,147 @@ AS 'MODULE_PATHNAME', 'expand_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:3306
--- graph::sql_facade::admin::node_ref_string
-CREATE  FUNCTION graph."node_ref_string"(
-	"table_name" oid, /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT /* & str */
-) RETURNS TEXT /* String */
-STRICT 
+-- src/sql_facade/admin.rs:299
+-- graph::sql_facade::admin::grant_graph
+CREATE  FUNCTION graph."grant_graph"(
+	"graph_name" TEXT, /* & str */
+	"grantee" TEXT, /* & str */
+	"privilege" TEXT, /* & str */
+	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"grantee" oid,  /* pgrx :: pg_sys :: Oid */
+	"privilege" TEXT,  /* String */
+	"grantor" oid,  /* pgrx :: pg_sys :: Oid */
+	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
+)
+
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'node_ref_string_wrapper';
+AS 'MODULE_PATHNAME', 'grant_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:2664
--- graph::sql_facade::admin::add_edge_to_graph
-CREATE  FUNCTION graph."add_edge_to_graph"(
+-- src/sql_facade/admin.rs:3198
+-- graph::sql_facade::admin::is_null
+CREATE  FUNCTION graph."is_null"(
+	"column_name" TEXT /* & str */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'is_null_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5701
+-- graph::sql_facade::admin::vacuum
+CREATE  FUNCTION graph."vacuum"() RETURNS TABLE (
+	"nodes_before" bigint,  /* i64 */
+	"nodes_after" bigint,  /* i64 */
+	"tombstones_removed" bigint,  /* i64 */
+	"edges_rebuilt" bigint,  /* i64 */
+	"vacuum_time_ms" double precision  /* f64 */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'vacuum_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/runtime.rs:207
+-- graph::sql_facade::runtime::graph_runtime_status
+CREATE  FUNCTION graph."graph_runtime_status"() RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"residency" TEXT,  /* String */
+	"loaded" bool,  /* bool */
+	"artifact_exists" bool,  /* bool */
+	"artifact_bytes" bigint,  /* Option < i64 > */
+	"node_count" bigint,  /* Option < i64 > */
+	"edge_count" bigint,  /* Option < i64 > */
+	"memory_used_mb" double precision,  /* Option < f64 > */
+	"projection_mode" TEXT,  /* Option < String > */
+	"last_access_unix_micros" bigint  /* Option < i64 > */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'graph_runtime_status_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3297
+-- graph::sql_facade::admin::on_node
+CREATE  FUNCTION graph."on_node"(
+	"filter" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'on_node_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/traversal.rs:324
+-- graph::sql_facade::traversal::shortest_path
+CREATE  FUNCTION graph."shortest_path"(
+	"source_table" oid, /* pgrx :: pg_sys :: Oid */
+	"source_id" TEXT, /* & str */
+	"target_table" oid, /* pgrx :: pg_sys :: Oid */
+	"target_id" TEXT, /* & str */
+	"max_depth" INT DEFAULT 20, /* i32 */
+	"hydrate" bool DEFAULT true /* bool */
+) RETURNS TABLE (
+	"step" INT,  /* i32 */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"edge_label" TEXT,  /* Option < String > */
+	"node" jsonb,  /* Option < pgrx :: JsonB > */
+	"node_table_name" TEXT  /* String */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'shortest_path_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:14
+-- graph::sql_facade::admin::_selected_graph_id_for_current_role
+CREATE  FUNCTION graph."_selected_graph_id_for_current_role"() RETURNS TEXT /* String */
+STRICT SECURITY DEFINER  
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'selected_graph_id_for_current_role_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:413
+-- graph::sql_facade::admin::set_graph_residency
+CREATE  FUNCTION graph."set_graph_residency"(
 	"graph_name" TEXT, /* & str */
-	"from_table" oid, /* pgrx :: pg_sys :: Oid */
-	"from_column" TEXT, /* & str */
-	"to_table" oid, /* pgrx :: pg_sys :: Oid */
-	"to_column" TEXT, /* & str */
-	"label" TEXT, /* & str */
-	"bidirectional" bool DEFAULT true, /* bool */
-	"weight_column" TEXT DEFAULT NULL, /* Option < String > */
-	"label_column" TEXT DEFAULT NULL, /* Option < String > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS void
+	"residency" TEXT, /* & str */
+	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
+	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
+	"tenant" TEXT,  /* Option < String > */
+	"namespace" TEXT,  /* Option < String > */
+	"graph_kind" TEXT,  /* String */
+	"residency" TEXT,  /* String */
+	"materialization" TEXT,  /* String */
+	"projection_mode" TEXT,  /* String */
+	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
+)
 SECURITY DEFINER 
 SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_edge_to_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:4975
--- graph::sql_facade::admin::alter_sync_policy
-CREATE  FUNCTION graph."alter_sync_policy"(
-	"policy_id" TEXT, /* & str */
-	"schedule_interval_secs" bigint DEFAULT NULL, /* Option < i64 > */
-	"max_sync_lag_rows" bigint DEFAULT NULL, /* Option < i64 > */
-	"enabled" bool DEFAULT NULL /* Option < bool > */
-) RETURNS TABLE (
-	"policy_id" TEXT,  /* String */
-	"job_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"enabled" bool,  /* bool */
-	"schedule_interval_secs" bigint,  /* i64 */
-	"max_sync_lag_rows" bigint,  /* Option < i64 > */
-	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"last_status" TEXT  /* Option < String > */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'alter_sync_policy_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/workflow.rs:473
--- graph::sql_facade::workflow::connection
-CREATE  FUNCTION graph."connection"(
-	"source_key" TEXT, /* & str */
-	"source_value" TEXT, /* & str */
-	"target_key" TEXT, /* & str */
-	"target_value" TEXT, /* & str */
-	"source_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"target_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
-	"source_k" INT DEFAULT 3, /* i32 */
-	"target_k" INT DEFAULT 3, /* i32 */
-	"search_mode" TEXT DEFAULT 'contains', /* & str */
-	"max_depth" INT DEFAULT 6 /* i32 */
-) RETURNS TABLE (
-	"source_table_name" TEXT,  /* String */
-	"source_id" TEXT,  /* String */
-	"target_table_name" TEXT,  /* String */
-	"target_id" TEXT,  /* String */
-	"hop_count" INT,  /* i32 */
-	"step" INT,  /* i32 */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_table_name" TEXT,  /* String */
-	"node_id" TEXT,  /* String */
-	"edge_label" TEXT,  /* Option < String > */
-	"readable_path" TEXT,  /* String */
-	"node" jsonb  /* Option < pgrx :: JsonB > */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'connection_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3281
--- graph::sql_facade::admin::lte
-CREATE  FUNCTION graph."lte"(
-	"column_name" TEXT, /* & str */
-	"value" bigint /* i64 */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'lte_i64_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3444
--- graph::sql_facade::admin::remove_edge
-CREATE  FUNCTION graph."remove_edge"(
-	"graph_name" TEXT, /* & str */
-	"label" TEXT, /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS void
- 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'remove_edge_for_named_graph_wrapper';
+AS 'MODULE_PATHNAME', 'set_graph_residency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -3232,86 +3219,159 @@ AS 'MODULE_PATHNAME', 'sync_health_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/components.rs:225
--- graph::sql_facade::components::largest_component
-CREATE  FUNCTION graph."largest_component"(
-	"max_rows" INT DEFAULT 100, /* i32 */
+-- src/sql_facade/traversal.rs:27
+-- graph::sql_facade::traversal::traverse
+CREATE  FUNCTION graph."traverse"(
+	"seed_table" oid, /* pgrx :: pg_sys :: Oid */
+	"seed_id" TEXT, /* & str */
+	"max_depth" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), /* i32 */
+	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
+	"direction" TEXT DEFAULT 'any', /* & str */
+	"node_tables" oid[] DEFAULT NULL, /* :: std :: option :: Option < Vec < pgrx :: pg_sys :: Oid > > */
+	"filter" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
+	"tenant" TEXT DEFAULT NULL, /* Option < String > */
+	"strategy" TEXT DEFAULT 'bfs', /* & str */
+	"uniqueness" TEXT DEFAULT 'node_global', /* & str */
+	"include_start" bool DEFAULT true, /* bool */
+	"hydrate" bool DEFAULT true, /* bool */
+	"max_rows" INT DEFAULT 1000, /* i32 */
 	"row_offset" INT DEFAULT 0, /* i32 */
-	"hydrate" bool DEFAULT true /* bool */
+	"max_nodes" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), /* i32 */
+	"max_frontier" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) /* i32 */
 ) RETURNS TABLE (
-	"component_id" bigint,  /* i64 */
+	"root_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"root_id" TEXT,  /* String */
 	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
 	"node_id" TEXT,  /* String */
-	"node" jsonb  /* Option < pgrx :: JsonB > */
+	"depth" INT,  /* i32 */
+	"path" jsonb,  /* pgrx :: JsonB */
+	"edge_path" jsonb,  /* pgrx :: JsonB */
+	"node" jsonb,  /* Option < pgrx :: JsonB > */
+	"root_table_name" TEXT,  /* String */
+	"node_table_name" TEXT,  /* String */
+	"capped" bool  /* bool */
 )
-STRICT 
+SECURITY DEFINER  COST 1000
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'largest_component_wrapper';
+AS 'MODULE_PATHNAME', 'traverse_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/discovery.rs:111
--- graph::sql_facade::discovery::preview_discover_tables
-CREATE  FUNCTION graph."preview_discover_tables"(
-	"tables" oid[], /* Vec < pgrx :: pg_sys :: Oid > */
-	"tenant_column" TEXT DEFAULT NULL, /* Option < String > */
-	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
+-- src/sql_facade/admin.rs:2664
+-- graph::sql_facade::admin::add_edge_to_graph
+CREATE  FUNCTION graph."add_edge_to_graph"(
+	"graph_name" TEXT, /* & str */
+	"from_table" oid, /* pgrx :: pg_sys :: Oid */
+	"from_column" TEXT, /* & str */
+	"to_table" oid, /* pgrx :: pg_sys :: Oid */
+	"to_column" TEXT, /* & str */
+	"label" TEXT, /* & str */
+	"bidirectional" bool DEFAULT true, /* bool */
+	"weight_column" TEXT DEFAULT NULL, /* Option < String > */
+	"label_column" TEXT DEFAULT NULL, /* Option < String > */
 	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
 	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"item_type" TEXT,  /* String */
-	"item_name" TEXT,  /* String */
-	"details" TEXT  /* String */
-)
-
+) RETURNS void
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'preview_discover_tables_wrapper';
+AS 'MODULE_PATHNAME', 'add_edge_to_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:1420
--- graph::sql_facade::admin::projection_repair
-CREATE  FUNCTION graph."projection_repair"() RETURNS TABLE (
-	"action" TEXT,  /* String */
-	"generation_id" bigint,  /* Option < i64 > */
-	"rebuilt" bool,  /* bool */
-	"chunks_rewritten" INT,  /* i32 */
-	"reason" TEXT  /* Option < String > */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'projection_repair_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/components.rs:254
--- graph::sql_facade::components::component
-CREATE  FUNCTION graph."component"(
-	"component_id" bigint, /* i64 */
-	"max_rows" INT DEFAULT 100, /* i32 */
-	"row_offset" INT DEFAULT 0, /* i32 */
-	"hydrate" bool DEFAULT true /* bool */
-) RETURNS TABLE (
-	"component_id" bigint,  /* i64 */
-	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
-	"node_id" TEXT,  /* String */
-	"node" jsonb  /* Option < pgrx :: JsonB > */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'component_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3111
--- graph::sql_facade::admin::equals
-CREATE  FUNCTION graph."equals"(
+-- src/sql_facade/admin.rs:3147
+-- graph::sql_facade::admin::neq
+CREATE  FUNCTION graph."neq"(
 	"column_name" TEXT, /* & str */
-	"value" TEXT /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'neq_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/traversal.rs:731
+-- graph::sql_facade::traversal::path_count_estimate
+CREATE  FUNCTION graph."path_count_estimate"(
+	"traversal" jsonb /* pgrx :: JsonB */
+) RETURNS TABLE (
+	"estimated_paths" bigint,  /* i64 */
+	"exact" bool,  /* bool */
+	"capped" bool  /* bool */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'path_count_estimate_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3230
+-- graph::sql_facade::admin::gt
+CREATE  FUNCTION graph."gt"(
+	"column_name" TEXT, /* & str */
+	"value" bigint /* i64 */
 ) RETURNS jsonb /* pgrx :: JsonB */
 STRICT  
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'equals_text_wrapper';
+AS 'MODULE_PATHNAME', 'gt_i64_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3314
+-- graph::sql_facade::admin::format_path
+CREATE  FUNCTION graph."format_path"(
+	"path" jsonb, /* pgrx :: JsonB */
+	"edge_path" jsonb, /* pgrx :: JsonB */
+	"separator" TEXT DEFAULT ' | ' /* & str */
+) RETURNS TEXT /* String */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'format_path_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5224
+-- graph::sql_facade::admin::jobs
+CREATE  FUNCTION graph."jobs"(
+	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL, /* Option < & str > */
+	"max_rows" INT DEFAULT 50 /* i32 */
+) RETURNS TABLE (
+	"job_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"policy_kind" TEXT,  /* String */
+	"enabled" bool,  /* bool */
+	"schedule_interval_secs" bigint,  /* i64 */
+	"max_runtime_secs" bigint,  /* Option < i64 > */
+	"max_retries" INT,  /* i32 */
+	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"last_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
+	"last_status" TEXT,  /* Option < String > */
+	"last_error" TEXT,  /* Option < String > */
+	"last_sqlstate" TEXT  /* Option < String > */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'jobs_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1132
+-- graph::sql_facade::admin::build_resource_status
+CREATE  FUNCTION graph."build_resource_status"() RETURNS TABLE (
+	"budget_bytes" bigint,  /* i64 */
+	"peak_bytes" bigint,  /* i64 */
+	"peak_phase" TEXT,  /* Option < String > */
+	"pressure_events" bigint  /* i64 */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'build_resource_status_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -3333,222 +3393,29 @@ AS 'MODULE_PATHNAME', 'build_with_mode_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:3297
--- graph::sql_facade::admin::on_node
-CREATE  FUNCTION graph."on_node"(
-	"filter" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'on_node_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/runtime.rs:27
--- graph::sql_facade::runtime::select_graph
-CREATE  FUNCTION graph."select_graph"(
+-- src/sql_facade/runtime.rs:125
+-- graph::sql_facade::runtime::unload_graph
+CREATE  FUNCTION graph."unload_graph"(
 	"graph_name" TEXT, /* & str */
 	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
 	"namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS TABLE (
 	"graph_id" TEXT,  /* String */
 	"graph_name" TEXT,  /* String */
-	"loaded" bool  /* bool */
+	"unloaded" bool  /* bool */
 )
 SECURITY DEFINER 
 SET search_path TO pg_catalog, pg_temp
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'select_graph_wrapper';
+AS 'MODULE_PATHNAME', 'unload_graph_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:5701
--- graph::sql_facade::admin::vacuum
-CREATE  FUNCTION graph."vacuum"() RETURNS TABLE (
-	"nodes_before" bigint,  /* i64 */
-	"nodes_after" bigint,  /* i64 */
-	"tombstones_removed" bigint,  /* i64 */
-	"edges_rebuilt" bigint,  /* i64 */
-	"vacuum_time_ms" double precision  /* f64 */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'vacuum_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:1281
--- graph::sql_facade::admin::projection_compact
-CREATE  FUNCTION graph."projection_compact"(
-	"max_rows" INT DEFAULT 10000, /* i32 */
-	"max_bytes" bigint DEFAULT NULL, /* Option < i64 > */
-	"max_segments" INT DEFAULT 1000, /* i32 */
-	"dirty_chunk_segment_threshold" INT DEFAULT NULL /* Option < i32 > */
-) RETURNS TABLE (
-	"manifest_generation" bigint,  /* i64 */
-	"segments_compacted" INT,  /* i32 */
-	"chunks_rewritten" INT,  /* i32 */
-	"segment_count" INT,  /* i32 */
-	"dirty_chunk_count" INT,  /* i32 */
-	"sync_watermark" bigint  /* i64 */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'projection_compact_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:29
--- graph::sql_facade::admin::_pending_sync_rows_for_current_role
-CREATE  FUNCTION graph."_pending_sync_rows_for_current_role"(
-	"applied_sync_id" bigint /* i64 */
-) RETURNS bigint /* i64 */
-STRICT SECURITY DEFINER  
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'pending_sync_rows_for_current_role_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2866
--- graph::sql_facade::admin::registered_edges_for_graph
-CREATE  FUNCTION graph."registered_edges_for_graph"(
+-- src/sql_facade/admin.rs:379
+-- graph::sql_facade::admin::transfer_graph_ownership
+CREATE  FUNCTION graph."transfer_graph_ownership"(
 	"graph_name" TEXT, /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"from_table" TEXT,  /* String */
-	"from_column" TEXT,  /* String */
-	"to_table" TEXT,  /* String */
-	"to_column" TEXT,  /* String */
-	"label" TEXT,  /* String */
-	"bidirectional" bool,  /* bool */
-	"weight_column" TEXT,  /* Option < String > */
-	"label_column" TEXT  /* Option < String > */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'registered_edges_for_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3160
--- graph::sql_facade::admin::neq
-CREATE  FUNCTION graph."neq"(
-	"column_name" TEXT, /* & str */
-	"value" bigint /* i64 */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'neq_i64_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2990
--- graph::sql_facade::admin::rename_edge
-CREATE  FUNCTION graph."rename_edge"(
-	"graph_name" TEXT, /* & str */
-	"old_label" TEXT, /* & str */
-	"new_label" TEXT, /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS void
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'rename_edge_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3225
--- graph::sql_facade::admin::gt
-CREATE  FUNCTION graph."gt"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'gt_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2602
--- graph::sql_facade::admin::add_edge
-CREATE  FUNCTION graph."add_edge"(
-	"from_table" oid, /* pgrx :: pg_sys :: Oid */
-	"from_column" TEXT, /* & str */
-	"to_table" oid, /* pgrx :: pg_sys :: Oid */
-	"to_column" TEXT, /* & str */
-	"label" TEXT, /* & str */
-	"bidirectional" bool DEFAULT true, /* bool */
-	"weight_column" TEXT DEFAULT NULL, /* Option < String > */
-	"label_column" TEXT DEFAULT NULL /* Option < String > */
-) RETURNS void
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_edge_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3287
--- graph::sql_facade::admin::between
-CREATE  FUNCTION graph."between"(
-	"column_name" TEXT, /* & str */
-	"lower" jsonb, /* pgrx :: JsonB */
-	"upper" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'between_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3119
--- graph::sql_facade::admin::equals
-CREATE  FUNCTION graph."equals"(
-	"column_name" TEXT, /* & str */
-	"value" bigint /* i64 */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'equals_i64_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:2732
--- graph::sql_facade::admin::registered_tables
-CREATE  FUNCTION graph."registered_tables"() RETURNS TABLE (
-	"table_name" TEXT,  /* String */
-	"id_columns" TEXT[],  /* Vec < String > */
-	"columns" TEXT[],  /* Vec < String > */
-	"tenant_column" TEXT  /* Option < String > */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'registered_tables_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3236
--- graph::sql_facade::admin::at_least
-CREATE  FUNCTION graph."at_least"(
-	"column_name" TEXT, /* & str */
-	"value" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'at_least_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:413
--- graph::sql_facade::admin::set_graph_residency
-CREATE  FUNCTION graph."set_graph_residency"(
-	"graph_name" TEXT, /* & str */
-	"residency" TEXT, /* & str */
+	"new_owner" TEXT, /* & str */
 	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
 	"namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS TABLE (
@@ -3565,94 +3432,49 @@ CREATE  FUNCTION graph."set_graph_residency"(
 	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
 	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
+
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'set_graph_residency_wrapper';
+AS 'MODULE_PATHNAME', 'transfer_graph_ownership_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/traversal.rs:710
--- graph::sql_facade::traversal::aggregate
-CREATE  FUNCTION graph."aggregate"(
-	"traversal" jsonb, /* pgrx :: JsonB */
-	"aggregations" jsonb, /* pgrx :: JsonB */
-	"scope" TEXT DEFAULT 'returned_nodes', /* & str */
-	"path_limit" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_exact_path_count', true), '')::int, 100000) /* i32 */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'aggregate_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3166
--- graph::sql_facade::admin::in
-CREATE  FUNCTION graph."in"(
-	"column_name" TEXT, /* & str */
-	"values" jsonb /* pgrx :: JsonB */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'in_filter_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:4867
--- graph::sql_facade::admin::add_sync_policy
-CREATE  FUNCTION graph."add_sync_policy"(
-	"graph_name" TEXT, /* & str */
-	"schedule_interval_secs" bigint DEFAULT 60, /* i64 */
-	"max_sync_lag_rows" bigint DEFAULT NULL, /* Option < i64 > */
-	"enabled" bool DEFAULT true, /* bool */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+-- src/sql_facade/workflow.rs:473
+-- graph::sql_facade::workflow::connection
+CREATE  FUNCTION graph."connection"(
+	"source_key" TEXT, /* & str */
+	"source_value" TEXT, /* & str */
+	"target_key" TEXT, /* & str */
+	"target_value" TEXT, /* & str */
+	"source_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"target_table" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"source_k" INT DEFAULT 3, /* i32 */
+	"target_k" INT DEFAULT 3, /* i32 */
+	"search_mode" TEXT DEFAULT 'contains', /* & str */
+	"max_depth" INT DEFAULT 6 /* i32 */
 ) RETURNS TABLE (
-	"policy_id" TEXT,  /* String */
-	"job_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"enabled" bool,  /* bool */
-	"schedule_interval_secs" bigint,  /* i64 */
-	"max_sync_lag_rows" bigint,  /* Option < i64 > */
-	"next_run_at" timestamp with time zone,  /* Option < TimestampWithTimeZone > */
-	"last_status" TEXT  /* Option < String > */
+	"source_table_name" TEXT,  /* String */
+	"source_id" TEXT,  /* String */
+	"target_table_name" TEXT,  /* String */
+	"target_id" TEXT,  /* String */
+	"hop_count" INT,  /* i32 */
+	"step" INT,  /* i32 */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_table_name" TEXT,  /* String */
+	"node_id" TEXT,  /* String */
+	"edge_label" TEXT,  /* Option < String > */
+	"readable_path" TEXT,  /* String */
+	"node" jsonb  /* Option < pgrx :: JsonB > */
 )
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
+
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_sync_policy_wrapper';
+AS 'MODULE_PATHNAME', 'connection_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:1886
--- graph::sql_facade::admin::build_graph
-CREATE  FUNCTION graph."build_graph"(
-	"graph_name" TEXT, /* & str */
-	"force_persist" bool DEFAULT false, /* bool */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"nodes_loaded" bigint,  /* i64 */
-	"edges_loaded" bigint,  /* i64 */
-	"build_time_ms" double precision,  /* f64 */
-	"memory_used_mb" double precision,  /* f64 */
-	"sync_mode" TEXT,  /* String */
-	"projection_mode" TEXT  /* String */
-)
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'build_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:299
--- graph::sql_facade::admin::grant_graph
-CREATE  FUNCTION graph."grant_graph"(
-	"graph_name" TEXT, /* & str */
-	"grantee" TEXT, /* & str */
-	"privilege" TEXT, /* & str */
+-- src/sql_facade/admin.rs:353
+-- graph::sql_facade::admin::graph_privileges
+CREATE  FUNCTION graph."graph_privileges"(
+	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
 	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
 	"namespace" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS TABLE (
@@ -3664,9 +3486,210 @@ CREATE  FUNCTION graph."grant_graph"(
 	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
 	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
 )
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'graph_privileges_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3306
+-- graph::sql_facade::admin::node_ref_string
+CREATE  FUNCTION graph."node_ref_string"(
+	"table_name" oid, /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT /* & str */
+) RETURNS TEXT /* String */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'node_ref_string_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1382
+-- graph::sql_facade::admin::projection_gc
+CREATE  FUNCTION graph."projection_gc"() RETURNS TABLE (
+	"valid_generations_scanned" INT,  /* i32 */
+	"retained_generations" bigint[],  /* Vec < i64 > */
+	"active_generations" bigint[],  /* Vec < i64 > */
+	"obsolete_candidates" INT,  /* i32 */
+	"protected_candidates" INT,  /* i32 */
+	"deleted_files" INT,  /* i32 */
+	"deleted_bytes" bigint  /* i64 */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'projection_gc_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/search.rs:10
+-- graph::sql_facade::search::search
+CREATE  FUNCTION graph."search"(
+	"property_key" TEXT, /* & str */
+	"property_value" TEXT, /* & str */
+	"table_filter" oid DEFAULT NULL, /* Option < pgrx :: pg_sys :: Oid > */
+	"mode" TEXT DEFAULT 'contains', /* & str */
+	"case_sensitive" bool DEFAULT false, /* bool */
+	"max_rows" INT DEFAULT 100, /* i32 */
+	"row_offset" INT DEFAULT 0, /* i32 */
+	"tenant" TEXT DEFAULT NULL, /* Option < String > */
+	"hydrate" bool DEFAULT true /* bool */
+) RETURNS TABLE (
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"match_type" TEXT,  /* String */
+	"score" real,  /* f32 */
+	"verified" bool,  /* bool */
+	"node" jsonb,  /* Option < pgrx :: JsonB > */
+	"node_table_name" TEXT  /* String */
+)
 
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'grant_graph_wrapper';
+AS 'MODULE_PATHNAME', 'search_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5759
+-- graph::sql_facade::admin::maintenance
+CREATE  FUNCTION graph."maintenance"(
+	"concurrently" bool DEFAULT false /* bool */
+) RETURNS TABLE (
+	"job_id" TEXT,  /* String */
+	"status" TEXT,  /* String */
+	"sync_rows_applied" bigint,  /* Option < i64 > */
+	"nodes_after" bigint,  /* Option < i64 > */
+	"edges_after" bigint,  /* Option < i64 > */
+	"vacuum_time_ms" double precision,  /* Option < f64 > */
+	"error" TEXT  /* Option < String > */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'maintenance_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3259
+-- graph::sql_facade::admin::lt
+CREATE  FUNCTION graph."lt"(
+	"column_name" TEXT, /* & str */
+	"value" jsonb /* pgrx :: JsonB */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'lt_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1705
+-- graph::sql_facade::admin::run_scheduled_maintenance
+CREATE  FUNCTION graph."run_scheduled_maintenance"() RETURNS TABLE (
+	"applied_sync" bool,  /* bool */
+	"maintenance_started" bool,  /* bool */
+	"maintenance_job_id" TEXT,  /* Option < String > */
+	"pending_sync_rows" bigint,  /* i64 */
+	"edge_buffer_used" INT,  /* i32 */
+	"message" TEXT  /* String */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'run_scheduled_maintenance_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:6213
+-- graph::sql_facade::admin::enable_sync
+CREATE  FUNCTION graph."enable_sync"() RETURNS void
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'enable_sync_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5403
+-- graph::sql_facade::admin::run_job
+CREATE  FUNCTION graph."run_job"(
+	"job_id" TEXT /* & str */
+) RETURNS TABLE (
+	"job_id" TEXT,  /* String */
+	"run_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"policy_kind" TEXT,  /* String */
+	"status" TEXT,  /* String */
+	"rows_applied" bigint,  /* Option < i64 > */
+	"error" TEXT,  /* Option < String > */
+	"started_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
+)
+STRICT SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'run_job_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3455
+-- graph::sql_facade::admin::remove_edge_from_graph
+CREATE  FUNCTION graph."remove_edge_from_graph"(
+	"graph_name" TEXT, /* & str */
+	"label" TEXT, /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS void
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'remove_edge_from_graph_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/discovery.rs:45
+-- graph::sql_facade::discovery::auto_discover_tables
+CREATE  FUNCTION graph."auto_discover_tables"(
+	"tables" oid[], /* Vec < pgrx :: pg_sys :: Oid > */
+	"tenant_column" TEXT DEFAULT NULL, /* Option < String > */
+	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
+	"build" bool DEFAULT true, /* bool */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS TABLE (
+	"item_type" TEXT,  /* String */
+	"item_name" TEXT,  /* String */
+	"details" TEXT  /* String */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'auto_discover_tables_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:5278
+-- graph::sql_facade::admin::job_runs
+CREATE  FUNCTION graph."job_runs"(
+	"job_id" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL, /* Option < & str > */
+	"max_rows" INT DEFAULT 50 /* i32 */
+) RETURNS TABLE (
+	"run_id" TEXT,  /* String */
+	"job_id" TEXT,  /* String */
+	"graph_id" TEXT,  /* String */
+	"graph_name" TEXT,  /* String */
+	"status" TEXT,  /* String */
+	"rows_applied" bigint,  /* Option < i64 > */
+	"retry_count" INT,  /* i32 */
+	"execution_mode" TEXT,  /* String */
+	"sqlstate" TEXT,  /* Option < String > */
+	"error" TEXT,  /* Option < String > */
+	"started_at" timestamp with time zone,  /* TimestampWithTimeZone */
+	"finished_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
+)
+SECURITY DEFINER 
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'job_runs_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -3680,42 +3703,41 @@ AS 'MODULE_PATHNAME', 'reset_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:3063
--- graph::sql_facade::admin::add_filter_column_to_graph
-CREATE  FUNCTION graph."add_filter_column_to_graph"(
-	"graph_name" TEXT, /* & str */
-	"table_name" oid, /* pgrx :: pg_sys :: Oid */
-	"column_name" TEXT, /* & str */
-	"column_type" TEXT DEFAULT 'numeric', /* & str */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS void
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'add_filter_column_to_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:5331
--- graph::sql_facade::admin::job_stats
-CREATE  FUNCTION graph."job_stats"(
-	"graph_name" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+-- src/sql_facade/traversal.rs:214
+-- graph::sql_facade::traversal::traverse
+CREATE  FUNCTION graph."traverse"(
+	"start_tables" oid[], /* Vec < pgrx :: pg_sys :: Oid > */
+	"start_ids" TEXT[], /* Vec < String > */
+	"max_depth" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), /* i32 */
+	"edge_types" TEXT[] DEFAULT NULL, /* :: std :: option :: Option < Vec < String > > */
+	"direction" TEXT DEFAULT 'any', /* & str */
+	"node_tables" oid[] DEFAULT NULL, /* :: std :: option :: Option < Vec < pgrx :: pg_sys :: Oid > > */
+	"filter" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
+	"tenant" TEXT DEFAULT NULL, /* Option < String > */
+	"strategy" TEXT DEFAULT 'bfs', /* & str */
+	"uniqueness" TEXT DEFAULT 'node_global', /* & str */
+	"include_start" bool DEFAULT true, /* bool */
+	"hydrate" bool DEFAULT true, /* bool */
+	"max_rows" INT DEFAULT 1000, /* i32 */
+	"row_offset" INT DEFAULT 0, /* i32 */
+	"max_nodes" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), /* i32 */
+	"max_frontier" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) /* i32 */
 ) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"policy_kind" TEXT,  /* String */
-	"job_count" bigint,  /* i64 */
-	"run_count" bigint,  /* i64 */
-	"completed_runs" bigint,  /* i64 */
-	"failed_runs" bigint,  /* i64 */
-	"last_run_at" timestamp with time zone  /* Option < TimestampWithTimeZone > */
+	"root_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"root_id" TEXT,  /* String */
+	"node_table" oid,  /* pgrx :: pg_sys :: Oid */
+	"node_id" TEXT,  /* String */
+	"depth" INT,  /* i32 */
+	"path" jsonb,  /* pgrx :: JsonB */
+	"edge_path" jsonb,  /* pgrx :: JsonB */
+	"node" jsonb,  /* Option < pgrx :: JsonB > */
+	"root_table_name" TEXT,  /* String */
+	"node_table_name" TEXT,  /* String */
+	"capped" bool  /* bool */
 )
-SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
+  COST 1000
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'job_stats_wrapper';
+AS 'MODULE_PATHNAME', 'traverse_many_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -3751,6 +3773,68 @@ AS 'MODULE_PATHNAME', 'get_neighbors_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- src/sql_facade/admin.rs:5667
+-- graph::sql_facade::admin::ingest_projection
+CREATE  FUNCTION graph."ingest_projection"(
+	"max_rows" bigint DEFAULT NULL, /* Option < i64 > */
+	"max_bytes" bigint DEFAULT NULL /* Option < i64 > */
+) RETURNS TABLE (
+	"rows_ingested" bigint,  /* i64 */
+	"segments_published" bigint,  /* i64 */
+	"sync_watermark" bigint  /* i64 */
+)
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'ingest_projection_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3619
+-- graph::sql_facade::admin::graph_map
+CREATE  FUNCTION graph."graph_map"(
+	"graph_name" TEXT, /* & str */
+	"format" TEXT DEFAULT 'json', /* & str */
+	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
+	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+) RETURNS jsonb /* pgrx :: JsonB */
+
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'graph_map_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:3219
+-- graph::sql_facade::admin::greater_than
+CREATE  FUNCTION graph."greater_than"(
+	"column_name" TEXT, /* & str */
+	"value" bigint /* i64 */
+) RETURNS jsonb /* pgrx :: JsonB */
+STRICT  
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'greater_than_i64_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/admin.rs:1586
+-- graph::sql_facade::admin::memory_profile
+CREATE  FUNCTION graph."memory_profile"(
+	"concurrent_backends" INT DEFAULT 1 /* i32 */
+) RETURNS TABLE (
+	"active_backend_private_mb" double precision,  /* f64 */
+	"active_backend_shared_mb" double precision,  /* f64 */
+	"active_backend_total_mb" double precision,  /* f64 */
+	"estimated_instance_private_mb" double precision,  /* f64 */
+	"estimated_instance_shared_mb" double precision,  /* f64 */
+	"estimated_instance_total_mb" double precision,  /* f64 */
+	"memory_limit_mb" INT,  /* i32 */
+	"assumed_concurrent_backends" INT  /* i32 */
+)
+STRICT 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'memory_profile_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- src/sql_facade/admin.rs:3188
 -- graph::sql_facade::admin::prefix_text
 CREATE  FUNCTION graph."prefix_text"(
@@ -3763,101 +3847,17 @@ AS 'MODULE_PATHNAME', 'prefix_text_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- src/sql_facade/admin.rs:5830
--- graph::sql_facade::admin::maintenance_graph
-CREATE  FUNCTION graph."maintenance_graph"(
-	"graph_name" TEXT, /* & str */
-	"concurrently" bool DEFAULT false, /* bool */
-	"graph_tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"graph_namespace" TEXT DEFAULT NULL /* Option < & str > */
+-- src/sql_facade/gql.rs:124
+-- graph::sql_facade::gql::gql
+CREATE  FUNCTION graph."gql"(
+	"query" TEXT, /* & str */
+	"params" jsonb DEFAULT NULL, /* Option < pgrx :: JsonB > */
+	"hydrate" bool DEFAULT true /* bool */
 ) RETURNS TABLE (
-	"job_id" TEXT,  /* String */
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"status" TEXT,  /* String */
-	"sync_rows_applied" bigint,  /* Option < i64 > */
-	"nodes_after" bigint,  /* Option < i64 > */
-	"edges_after" bigint,  /* Option < i64 > */
-	"vacuum_time_ms" double precision,  /* Option < f64 > */
-	"error" TEXT  /* Option < String > */
+	"row" jsonb  /* pgrx :: JsonB */
 )
-
+VOLATILE  COST 1000
 LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'maintenance_graph_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:3152
--- graph::sql_facade::admin::neq
-CREATE  FUNCTION graph."neq"(
-	"column_name" TEXT, /* & str */
-	"value" TEXT /* & str */
-) RETURNS jsonb /* pgrx :: JsonB */
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'neq_text_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:191
--- graph::sql_facade::admin::list_graphs
-CREATE  FUNCTION graph."list_graphs"() RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
-	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
-	"tenant" TEXT,  /* Option < String > */
-	"namespace" TEXT,  /* Option < String > */
-	"graph_kind" TEXT,  /* String */
-	"residency" TEXT,  /* String */
-	"materialization" TEXT,  /* String */
-	"projection_mode" TEXT,  /* String */
-	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
-)
-STRICT SECURITY DEFINER 
-SET search_path TO pg_catalog, pg_temp
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'list_graphs_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/admin.rs:379
--- graph::sql_facade::admin::transfer_graph_ownership
-CREATE  FUNCTION graph."transfer_graph_ownership"(
-	"graph_name" TEXT, /* & str */
-	"new_owner" TEXT, /* & str */
-	"tenant" TEXT DEFAULT NULL, /* Option < & str > */
-	"namespace" TEXT DEFAULT NULL /* Option < & str > */
-) RETURNS TABLE (
-	"graph_id" TEXT,  /* String */
-	"graph_name" TEXT,  /* String */
-	"owner_role" oid,  /* pgrx :: pg_sys :: Oid */
-	"created_by" oid,  /* pgrx :: pg_sys :: Oid */
-	"tenant" TEXT,  /* Option < String > */
-	"namespace" TEXT,  /* Option < String > */
-	"graph_kind" TEXT,  /* String */
-	"residency" TEXT,  /* String */
-	"materialization" TEXT,  /* String */
-	"projection_mode" TEXT,  /* String */
-	"created_at" timestamp with time zone,  /* TimestampWithTimeZone */
-	"updated_at" timestamp with time zone  /* TimestampWithTimeZone */
-)
-
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'transfer_graph_ownership_wrapper';
-/* </end connected objects> */
-
-/* <begin connected objects> */
--- src/sql_facade/cypher.rs:46
--- graph::sql_facade::cypher::cypher_compatibility
-CREATE  FUNCTION graph."cypher_compatibility"() RETURNS TABLE (
-	"feature" TEXT,  /* & '_ str */
-	"status" TEXT,  /* & '_ str */
-	"notes" TEXT  /* & '_ str */
-)
-STRICT 
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'cypher_compatibility_wrapper';
+AS 'MODULE_PATHNAME', 'gql_wrapper';
 /* </end connected objects> */
 

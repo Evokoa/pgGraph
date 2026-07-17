@@ -4754,6 +4754,10 @@ fn gql_create_node_preserves_source_table_rls() {
             )",
     )
     .expect("add rls create table failed");
+    // This test's purpose is exercising RLS on the write path (GQL CREATE
+    // routes through PostgreSQL DML, which enforces RLS WITH CHECK/USING),
+    // not the topology-read boundary graph.build() gates by default.
+    Spi::run("SET graph.allow_rls_tables = on").expect("acknowledge rls table build failed");
     Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
         .expect("build mutable rls graph failed");
     create_error_capture_helper();
@@ -4815,6 +4819,7 @@ fn gql_create_node_preserves_source_table_rls() {
     Spi::run("RESET app.graph_gql_rls_tenant").expect("reset rls tenant failed");
     Spi::run("RESET graph.tenant_setting").expect("reset tenant setting failed");
     Spi::run("SET graph.enforce_tenant_scope = off").expect("disable tenant enforcement failed");
+    Spi::run("RESET graph.allow_rls_tables").expect("reset allow_rls_tables failed");
 
     assert_eq!(allowed_id, "a4");
     assert!(denied);

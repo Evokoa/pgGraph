@@ -355,7 +355,11 @@ fn auto_discover_tables_stores_shared_tenant_column_and_enforces_scope() {
                 hydrate := false
              )",
     );
-    let cross_tenant_rows = Spi::get_one::<i64>(
+    // An explicit tenant argument is no longer accepted for a
+    // tenant_column-registered graph under enforcement: only the trusted
+    // session-setting path may supply the tenant, since a caller-supplied
+    // SQL argument is not verified against the calling role's identity.
+    let explicit_tenant_argument_rejected = sql_raises(
         "SELECT count(*)
              FROM graph.traverse(
                 'graph_test_targeted_accounts_pgtest'::regclass,
@@ -363,16 +367,32 @@ fn auto_discover_tables_stores_shared_tenant_column_and_enforces_scope() {
                 2,
                 tenant := 'tenant-a',
                 hydrate := false
+             )",
+    );
+
+    Spi::run("SET graph.tenant_setting = 'graph_test.tenant'")
+        .expect("set tenant_setting name failed");
+    Spi::run("SET graph_test.tenant = 'tenant-a'").expect("set session tenant failed");
+    let cross_tenant_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_targeted_accounts_pgtest'::regclass,
+                'a1',
+                2,
+                hydrate := false
              )
              WHERE node_id LIKE 'b%'",
     )
-    .expect("tenant traverse failed")
+    .expect("session-tenant traverse failed")
     .unwrap_or(-1);
 
+    Spi::run("RESET graph_test.tenant").expect("reset session tenant failed");
+    Spi::run("RESET graph.tenant_setting").expect("reset tenant_setting name failed");
     Spi::run("RESET graph.enforce_tenant_scope").expect("reset tenant enforcement failed");
 
     assert_eq!(tenant_columns, vec!["account_id", "account_id"]);
     assert!(missing_tenant_rejected);
+    assert!(explicit_tenant_argument_rejected);
     assert_eq!(cross_tenant_rows, 0);
 }
 

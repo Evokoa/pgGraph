@@ -981,6 +981,42 @@ pub(crate) fn check_build_acls_result(
         acl::check_table_acl(from_oid)?;
         acl::check_table_acl(to_oid)?;
     }
+    check_build_rls_boundary(tables, edges)?;
+    Ok(())
+}
+
+/// Refuses to build over a table with row-level security enabled unless
+/// `graph.allow_rls_tables = on`. Topology-read functions return
+/// coordinates and adjacency from the builder-scoped graph artifact under
+/// table-level ACL only; they do not evaluate row-level security per
+/// calling role. See
+/// `docs/user_guide/administration-and-security.mdx#row-level-security-and-topology-reads`.
+fn check_build_rls_boundary(
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+) -> safety::GraphResult<()> {
+    if crate::config::ALLOW_RLS_TABLES.get() {
+        return Ok(());
+    }
+    for table in tables {
+        if acl::table_has_row_security(table.table_oid)? {
+            return Err(safety::GraphError::RlsTopologyBoundary {
+                table: table.table_name.clone(),
+            });
+        }
+    }
+    for edge in edges {
+        if acl::table_has_row_security(edge.from_table_oid)? {
+            return Err(safety::GraphError::RlsTopologyBoundary {
+                table: edge.from_table.clone(),
+            });
+        }
+        if acl::table_has_row_security(edge.to_table_oid)? {
+            return Err(safety::GraphError::RlsTopologyBoundary {
+                table: edge.to_table.clone(),
+            });
+        }
+    }
     Ok(())
 }
 

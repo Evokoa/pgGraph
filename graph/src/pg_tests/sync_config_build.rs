@@ -138,6 +138,91 @@ fn sync_mode_wal_fails_with_reserved_message() {
 }
 
 #[pg_test]
+fn build_refuses_rls_enabled_table_without_explicit_allow() {
+    reset_and_create_fixtures();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_rls_pgtest CASCADE")
+        .expect("drop rls table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_rls_pgtest (
+                id TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create rls table failed");
+    Spi::run("ALTER TABLE public.graph_test_rls_pgtest ENABLE ROW LEVEL SECURITY")
+        .expect("enable row level security failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_rls_pgtest (id, owner, name)
+             VALUES ('a1', 'alice', 'Alice Row')",
+    )
+    .expect("insert rls row failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_rls_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add rls table failed");
+
+    let refused = sql_raises("SELECT * FROM graph.build()");
+
+    Spi::run("SET graph.allow_rls_tables = on").expect("enable allow_rls_tables failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build should succeed once acknowledged");
+    let node_count = Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+        .expect("status query failed")
+        .unwrap_or(0);
+
+    Spi::run("RESET graph.allow_rls_tables").expect("reset allow_rls_tables failed");
+
+    assert!(refused, "build over an RLS-enabled table must fail closed by default");
+    assert_eq!(node_count, 1);
+}
+
+#[pg_test]
+fn build_refuses_rls_enabled_edge_endpoint_table() {
+    reset_and_create_fixtures();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_rls_edge_pgtest CASCADE")
+        .expect("drop rls edge table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_rls_edge_pgtest (
+                id TEXT PRIMARY KEY,
+                friend_id TEXT REFERENCES public.graph_test_rls_edge_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create rls edge table failed");
+    Spi::run("ALTER TABLE public.graph_test_rls_edge_pgtest ENABLE ROW LEVEL SECURITY")
+        .expect("enable row level security failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_rls_edge_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add rls edge table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_rls_edge_pgtest'::regclass,
+                'friend_id',
+                'graph_test_rls_edge_pgtest'::regclass,
+                'id',
+                'friend'
+            )",
+    )
+    .expect("add rls edge failed");
+
+    let refused = sql_raises("SELECT * FROM graph.build()");
+
+    assert!(
+        refused,
+        "build over an edge referencing an RLS-enabled table must fail closed by default"
+    );
+}
+
+#[pg_test]
 fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
@@ -148,6 +233,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     Spi::run("RESET graph.default_projection_mode").expect("reset default_projection_mode failed");
     Spi::run("RESET graph.mutable_enabled").expect("reset mutable_enabled failed");
     Spi::run("RESET graph.enforce_tenant_scope").expect("reset enforce_tenant_scope failed");
+    Spi::run("RESET graph.allow_rls_tables").expect("reset allow_rls_tables failed");
     Spi::run("RESET graph.max_exact_path_count").expect("reset max_exact_path_count failed");
     Spi::run("RESET graph.build_batch_size").expect("reset build_batch_size failed");
     Spi::run("RESET graph.max_loaded_graphs_per_backend")

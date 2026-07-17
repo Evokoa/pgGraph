@@ -109,6 +109,11 @@
       "diagnostic": "PG020",
       "sqlstate": "55000",
       "variant": "Disabled"
+    },
+    {
+      "diagnostic": "PG021",
+      "sqlstate": "55000",
+      "variant": "RlsTopologyBoundary"
     }
   ],
   "distribution": {
@@ -121,7 +126,7 @@
       "GitHub release archive"
     ]
   },
-  "gql_implementation_sha256": "c6a651bda6b067969afc573cdef85b0bf3ee14ee58c269355b15fe18c7367d1d",
+  "gql_implementation_sha256": "512ed6932e03345e87ccba38fd3c63bcd7d9a07542c5f6510a7c3a0fa7c95baa",
   "gql_profile": {
     "assurance_profiles": {
       "read": {
@@ -421,8 +426,9 @@
     "public_sql_pgq": false,
     "unsupported_corpus": "release/v1-gql-unsupported.json"
   },
-  "guc_source_sha256": "78dfd03f3547eb41caa5531b43ef9e309667310a8a112c98cb903353114cc803",
+  "guc_source_sha256": "7a0573d08e1ee261a654afa03d75d082f0d79de59b08648fab025586a4e49ffb",
   "gucs": [
+    "graph.allow_rls_tables",
     "graph.auto_load",
     "graph.build_batch_size",
     "graph.build_scan_mode",

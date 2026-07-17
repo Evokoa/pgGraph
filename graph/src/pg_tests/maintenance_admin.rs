@@ -1665,7 +1665,12 @@ fn tenant_scope_filters_search_and_traversal() {
     .expect("add tenant edge failed");
     Spi::run("SELECT * FROM graph.build()").expect("build failed");
 
-    let tenant_a_search = Spi::get_one::<i64>(
+    // Explicit tenant arguments are no longer accepted for a
+    // tenant_column-registered graph under enforcement: only the trusted
+    // session-setting path below may supply the tenant, since a
+    // caller-supplied SQL argument is not verified against the calling
+    // role's identity.
+    let explicit_tenant_search_rejected = sql_raises(
         "SELECT count(*)
              FROM graph.search(
                 'name',
@@ -1675,10 +1680,8 @@ fn tenant_scope_filters_search_and_traversal() {
                 tenant := 'tenant-a',
                 hydrate := false
              )",
-    )
-    .expect("tenant search failed")
-    .unwrap_or(0);
-    let tenant_a_traverse = Spi::get_one::<i64>(
+    );
+    let explicit_tenant_traverse_rejected = sql_raises(
         "SELECT count(*)
              FROM graph.traverse(
                 'graph_test_tenant_pgtest'::regclass,
@@ -1686,11 +1689,8 @@ fn tenant_scope_filters_search_and_traversal() {
                 2,
                 tenant := 'tenant-a',
                 hydrate := false
-             )
-             WHERE node_id LIKE 'b%'",
-    )
-    .expect("tenant traverse failed")
-    .unwrap_or(0);
+             )",
+    );
     let missing_tenant_rejected = sql_raises(
         "SELECT count(*)
              FROM graph.search(
@@ -1731,8 +1731,8 @@ fn tenant_scope_filters_search_and_traversal() {
     Spi::run("RESET graph.tenant_setting").expect("reset tenant_setting failed");
     Spi::run("RESET app.tenant_id").expect("reset app tenant failed");
 
-    assert_eq!(tenant_a_search, 1);
-    assert_eq!(tenant_a_traverse, 0);
+    assert!(explicit_tenant_search_rejected);
+    assert!(explicit_tenant_traverse_rejected);
     assert!(missing_tenant_rejected);
     assert_eq!(session_tenant_search, 1);
     assert_eq!(session_tenant_traverse, 0);
@@ -2903,6 +2903,11 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
     reset_and_create_fixtures();
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
     Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    // Explicit tenant arguments are rejected under graph.enforce_tenant_scope
+    // for tenant_column-registered graphs; use the trusted session-setting
+    // path instead, matching the production-recommended pattern.
+    Spi::run("SET graph.tenant_setting = 'graph_test.tenant'")
+        .expect("set tenant_setting name failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_ingest_pgtest CASCADE")
         .expect("drop projection ingest table failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_ingest_edges_pgtest CASCADE")
@@ -3057,6 +3062,7 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
         ))
     })
     .expect("ingest_projection row read failed");
+    Spi::run("SET graph_test.tenant = 'tenant-a'").expect("set session tenant-a failed");
     let child_reaches_root = Spi::get_one::<i64>(
         "SELECT count(*)::bigint
            FROM graph.traverse(
@@ -3064,7 +3070,6 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
              'child',
              1,
              direction := 'any',
-             tenant := 'tenant-a',
              hydrate := false
            )
           WHERE node_id = 'root'",
@@ -3078,7 +3083,6 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
              'child',
              0,
              filter := '{\"node\":{\"where\":{\"score\":{\"eq\":99}}}}'::jsonb,
-             tenant := 'tenant-a',
              hydrate := false
            )",
     )
@@ -3208,6 +3212,7 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
         Spi::get_one::<i64>("SELECT segments_published FROM graph.ingest_projection()")
             .expect("ingest second projection batch failed")
             .unwrap_or_default();
+    Spi::run("SET graph_test.tenant = 'tenant-b'").expect("set session tenant-b failed");
     let grandchild_filter_match = Spi::get_one::<i64>(
         "SELECT count(*)::bigint
            FROM graph.traverse(
@@ -3215,12 +3220,13 @@ fn ingest_projection_publishes_committed_sync_log_rows() {
              'grandchild',
              0,
              filter := '{\"node\":{\"where\":{\"score\":{\"eq\":101}}}}'::jsonb,
-             tenant := 'tenant-b',
              hydrate := false
            )",
     )
     .expect("second-batch node reload query failed")
     .unwrap_or_default();
+    Spi::run("RESET graph_test.tenant").expect("reset session tenant failed");
+    Spi::run("RESET graph.tenant_setting").expect("reset tenant_setting name failed");
     assert!(second_batch_segments >= 2);
     assert_eq!(grandchild_filter_match, 1);
     Spi::run("SET CONSTRAINTS ALL DEFERRED").expect("defer projection foreign keys failed");

@@ -263,5 +263,17 @@
     "date": "2026-07-16",
     "new_schema_sha256": "f2140bbeb4ce5116b4096208f9417cbc06b75ea8095cca8123a5bec0e443707f",
     "previous_schema_sha256": "106b59c3229478e07d9c1613ff5da43d9763755b5569b83ed4fd1155a9998346"
+  },
+  {
+    "acknowledgement": "C4/C5: RLS build-time topology gate (graph.allow_rls_tables, PG021) and tenant-scope explicit-argument enforcement",
+    "changed_sections": [
+      "diagnostics",
+      "gql_implementation_sha256",
+      "guc_source_sha256",
+      "gucs"
+    ],
+    "date": "2026-07-17",
+    "new_schema_sha256": "f2140bbeb4ce5116b4096208f9417cbc06b75ea8095cca8123a5bec0e443707f",
+    "previous_schema_sha256": "f2140bbeb4ce5116b4096208f9417cbc06b75ea8095cca8123a5bec0e443707f"
   }
 ]

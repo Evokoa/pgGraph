@@ -45,11 +45,28 @@ Still-open, verified items first:
 1. ~~**C2** — bidirectional BFS minimal-meeting fix.~~ **Done 2026-07-17.**
 2. ~~**O3** — truncation/`capped` signal on bounded traversal results.~~
    **Done 2026-07-17** (breaking SQL change; release contract regenerated;
-   live `cargo pgrx test` run and fresh full-matrix evidence capture still
-   owed before this can be folded into a release-gate re-run).
-3. ~~**C4/C5 audit** — RLS topology boundary and tenant-scope semantics.~~
-   **Done 2026-07-17** (documentation-only, no behavior change, per explicit
-   decision).
+   live-verified — see item 3's full pgrx run, which superseded the
+   originally-deferred "pgrx test run owed" note).
+3. ~~**C4/C5** — RLS topology boundary and tenant-scope semantics.~~
+   **Fixed (behavior change) 2026-07-17**, superseding the earlier
+   documentation-only decision at the user's explicit request:
+   `graph.build()` now refuses tables with row-level security enabled unless
+   `graph.allow_rls_tables = on` (new GUC, diagnostic `PG021`), and
+   `resolve_tenant_scope()` now rejects an explicit tenant SQL argument for
+   non-pinned tenant_column-registered graphs while
+   `graph.enforce_tenant_scope = on`, forcing the trusted session-setting
+   path instead. Three existing pgrx tests were updated to the new behavior
+   and two new ones added. Also fixed a local pgrx-test blocker
+   (`LC_ALL=C LANG=C` works around a macOS `postmaster became multithreaded`
+   startup failure) that had been silently preventing all live pgrx
+   verification this session. With it fixed, ran the complete pg17 pgrx
+   suite (`--features "pg17 development"`, matching the release-gate
+   convention): **1143 passed, 0 failed, 1 ignored** — live confirmation of
+   both this change and O3. True per-row RLS-aware topology filtering (vs.
+   this build-time acknowledgment gate) remains unimplemented; it would
+   require a panic-safe temporary PostgreSQL security-context switch to the
+   outer caller, judged too risky to hand-roll in this pass. See
+   `todo/progress.md` 2026-07-17 entry.
 4. **C3** — `_sync_log` retention. **Design complete 2026-07-17:**
    `todo/full-graph-engine/12-sync-log-retention-plan.md` specifies a
    `graph._sync_watermarks` heartbeat table (mirroring the existing

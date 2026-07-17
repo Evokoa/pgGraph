@@ -427,3 +427,71 @@ backend, which is exactly the class of bug this review program exists to
 prevent, so it warrants its own dedicated implementation and TDD cycle
 rather than being rushed alongside the C2/O3 work already landed today.
 Implementation remains the next open item.
+
+2026-07-17 RLS/tenant enforcement fix (C4/C5, superseding the earlier
+documentation-only decision) — The user asked to actually fix, not just
+document, the two access-control gaps: topology reads not respecting RLS,
+and tenant scope being caller-suppliable rather than enforced.
+
+RLS fix: graph.build() now refuses to register a table with row-level
+security enabled (relrowsecurity or relforcerowsecurity) unless
+graph.allow_rls_tables = on (new GUC, default off). This applies to both
+node tables and edge endpoint tables (check_build_rls_boundary in
+sql_build.rs, called from check_build_acls_result). New diagnostic PG021
+(SQLSTATE 55000), acl::table_has_row_security() introspects pg_class. This
+does not retrofit per-row RLS filtering into topology reads -- that would
+require temporarily switching the effective PostgreSQL user to the outer
+caller for the duration of a check, which is unsafe to hand-roll correctly
+in this pass -- it converts the previously silent exposure into a deliberate,
+documented, explicitly-acknowledged operator decision, which is the
+tractable, safe fix.
+
+Tenant fix: resolve_tenant_scope() now rejects an explicit tenant SQL
+argument for a tenant_column-registered graph that is not pinned to a single
+graph-level tenant, while graph.enforce_tenant_scope = on (the default).
+Tenant scope must then come from the session-setting path
+(graph.tenant_setting), which only a trusted connection-pooler or login
+hook -- not the caller's own query text -- can set. The existing pinned-graph
+tenant check (explicit argument must match the graph's own tenant) is
+unaffected. Docs are explicit that this does not itself authenticate the
+session-setting value; that trust boundary remains a deployment concern.
+
+This is a real behavior change and broke three existing pgrx test
+expectations that relied on the old caller-suppliable-tenant and
+build-over-RLS-tables behavior:
+tenant_scope_filters_search_and_traversal and
+auto_discover_tables_stores_shared_tenant_column_and_enforces_scope now
+assert the explicit-tenant-argument path is rejected and exercise the
+session-setting path instead; ingest_projection_publishes_committed_sync_log_rows
+switched its three tenant-scoped traverse() calls to the session-setting
+path; gql_create_node_preserves_source_table_rls (whose actual purpose is
+verifying GQL writes respect source-table RLS, a different and unaffected
+code path) now sets graph.allow_rls_tables = on before its build() call.
+Added two new pgrx tests: build_refuses_rls_enabled_table_without_explicit_allow
+and build_refuses_rls_enabled_edge_endpoint_table.
+
+Fixed a local pgrx-test environment blocker unrelated to this change:
+`postmaster became multithreaded during startup` on macOS is resolved by
+running with LC_ALL=C LANG=C; this was blocking all live pgrx testing in
+this session until found. With it, ran the complete pg17 pgrx suite with
+the standard release-gate feature set (`--features "pg17 development"`,
+matching graph/tests/heavy/run_release_gate.sh): 1143 passed, 0 failed, 1
+ignored -- a full live confirmation of both this change and the O3 change
+from earlier today, superseding the "pgrx test run owed" note left after O3.
+cargo fmt --check and cargo clippy --features "pg17 development" --all-targets
+-- -D warnings are clean. Regenerated the release contract a second time
+(release/v1-schema.sql, release/v1-contract.json, release/contract-changes.json)
+for the new GUC and diagnostic code via
+scripts/check_release_contract.py --write --acknowledge; docs-drift and
+release-contract checks pass clean.
+
+Updated docs/user_guide/administration-and-security.mdx's RLS and Tenant
+Scope sections (written a few hours earlier as documentation-only) to
+describe the new enforced behavior instead, docs/known-issues.mdx's Access
+Control section, docs/user_guide/configuration.mdx's GUC table, and the
+PG021 error-code row.
+
+Still not implemented: true per-row RLS-aware topology filtering (would need
+a panic-safe, carefully-reviewed temporary PostgreSQL security-context
+switch to the outer caller -- flagged as future work, not attempted here
+given the risk of getting manual user-id switching subtly wrong).

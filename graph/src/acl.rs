@@ -5,7 +5,15 @@
 //! `check_table_update_acl()`, or `check_table_delete_acl()` before modifying
 //! mapped rows.
 //!
+//! `table_has_row_security()` backs the build-time RLS topology boundary
+//! gate: topology-read functions (`graph.traverse()`, `shortest_path()`,
+//! the component functions) return coordinates and adjacency from the
+//! builder-scoped graph artifact under table-level ACL only, not row-level
+//! security, so `graph.build()` refuses tables with row security enabled
+//! unless `graph.allow_rls_tables` is explicitly set.
+//!
 //! See: `docs/contributor_guide/safety-security.mdx`
+//! See: `docs/user_guide/administration-and-security.mdx`
 
 use crate::safety::{GraphError, GraphResult};
 
@@ -47,6 +55,26 @@ pub fn check_table_update_acl(table_oid: u32) -> GraphResult<()> {
 /// Returns `GraphError::AclDenied` if the user lacks DELETE on the table.
 pub fn check_table_delete_acl(table_oid: u32) -> GraphResult<()> {
     check_table_acl_mode(table_oid, pgrx::pg_sys::ACL_DELETE as pgrx::pg_sys::AclMode)
+}
+
+/// Returns `true` when the given table has row-level security enabled
+/// (`relrowsecurity`) or forced even for the table owner
+/// (`relforcerowsecurity`).
+///
+/// # Errors
+///
+/// Returns `GraphError::Internal` if the table's `pg_class` row cannot be
+/// read, which should not happen for an OID already resolved through
+/// registration.
+pub fn table_has_row_security(table_oid: u32) -> GraphResult<bool> {
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT relrowsecurity OR relforcerowsecurity
+         FROM pg_catalog.pg_class
+         WHERE oid = $1",
+        &[pgrx::pg_sys::Oid::from_u32(table_oid).into()],
+    )
+    .map_err(|err| GraphError::Internal(format!("row-security lookup failed: {err}")))?
+    .ok_or_else(|| GraphError::Internal(format!("table OID {table_oid} has no pg_class row")))
 }
 
 fn check_table_acl_mode(table_oid: u32, mode: pgrx::pg_sys::AclMode) -> GraphResult<()> {

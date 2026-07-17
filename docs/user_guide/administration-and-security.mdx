@@ -147,16 +147,23 @@ Resolution order is:
 
 <Callout type="warning">
 For a graph whose tables are registered with `tenant_column` rather than
-pinned to a single graph-level tenant, the explicit tenant argument and the
-session tenant from `graph.tenant_setting` are used to *narrow* results to a
-tenant bitmap; they are not verified against the calling role's own identity.
-Any role with graph `read` and the necessary source-table `SELECT` privileges
-can supply any tenant value and receive that tenant's subgraph. Tenant scope
-here is a query-shaping filter, not an authorization boundary. If different
-tenants must not be able to read each other's data, enforce that with
-PostgreSQL row-level security policies on the underlying tables keyed to
-session context, or register separate graphs per tenant with separate graph
-grants.
+pinned to a single graph-level tenant, an explicit tenant argument is a
+caller-supplied value, not one verified against the calling role's own
+identity. While `graph.enforce_tenant_scope = on` (the default), pgGraph
+refuses an explicit tenant argument for such a graph with SQLSTATE `22023`
+instead of accepting it: tenant scope must come from the session tenant
+(`graph.tenant_setting`) instead of a per-query argument. This closes the
+most direct form of self-service tenant selection, but pgGraph still cannot
+verify that a session's tenant setting reflects who is actually connected;
+that trust boundary belongs to whatever sets the session GUC (a connection
+pooler, a `SECURITY DEFINER` login trigger, or another trusted middle tier)
+before the caller's own queries run. If different tenants must not be able to
+read each other's data regardless of session state, also enforce it with
+PostgreSQL row-level security policies on the underlying tables, or register
+separate graphs per tenant with separate graph grants. Setting
+`graph.enforce_tenant_scope = off` removes this check entirely and restores
+the caller-suppliable-argument behavior; do not disable it for a
+tenant-sensitive deployment.
 </Callout>
 
 <Callout type="info">
@@ -180,23 +187,35 @@ functions check table-level `SELECT` privilege (`PG002`) before returning
 results, but they do not evaluate row-level security policies against the
 calling role.
 
+By default (`graph.allow_rls_tables = off`), `graph.build()` refuses to
+register any table that has row-level security enabled
+(`relrowsecurity`/`relforcerowsecurity`) with SQLSTATE `55000` and diagnostic
+`PG021`, for both node tables and edge endpoint tables. This makes the
+exposure above a deliberate, acknowledged operator decision instead of a
+silent one: building over an RLS-enabled table requires explicitly setting
+`graph.allow_rls_tables = on` first.
+
 <Callout type="warning">
-A role with table-level `SELECT` but no row-level access to a specific row can
-still receive that row's `node_id`/`node_table` coordinate, its position in a
-traversal or path, and whether it is reachable from another node, through
-`graph.traverse()`, `graph.shortest_path()`, `graph.weighted_shortest_path()`,
-and the component functions. Requesting `hydrate := true` re-checks the source
-row through SQL as the caller and omits or nulls the hydrated payload when
-row-level security denies it, but the coordinate itself is still returned by
-these functions.
+Setting `graph.allow_rls_tables = on` does not add row-level filtering to
+topology reads — it only lets `graph.build()` proceed over an RLS-enabled
+table. Once acknowledged, a role with table-level `SELECT` but no row-level
+access to a specific row can still receive that row's `node_id`/`node_table`
+coordinate, its position in a traversal or path, and whether it is reachable
+from another node, through `graph.traverse()`, `graph.shortest_path()`,
+`graph.weighted_shortest_path()`, and the component functions. Requesting
+`hydrate := true` re-checks the source row through SQL as the caller and
+omits or nulls the hydrated payload when row-level security denies it, but
+the coordinate itself is still returned by these functions.
 </Callout>
 
 If your access-control model requires row-level security to extend to graph
-topology, do not grant `EXECUTE` on `graph.traverse()`, `graph.shortest_path()`,
-`graph.weighted_shortest_path()`, or the component functions to roles that
-should not see the full topology the graph was built from. Treat a built graph
-as a single artifact reflecting the builder's row visibility, not a
-per-caller-filtered view, and restrict which roles can query it accordingly.
+topology, keep `graph.allow_rls_tables = off` and do not register RLS-enabled
+tables. If you do acknowledge and build over one, do not grant `EXECUTE` on
+`graph.traverse()`, `graph.shortest_path()`, `graph.weighted_shortest_path()`,
+or the component functions to roles that should not see the full topology the
+graph was built from. Treat a built graph as a single artifact reflecting the
+builder's row visibility, not a per-caller-filtered view, and restrict which
+roles can query it accordingly.
 
 ## Internal Catalog Tables
 
@@ -276,6 +295,7 @@ operators to distinguish pgGraph conditions that share a standard SQLSTATE.
 | `0A000` | `PG018` | Unsupported graph operation | Use a supported query shape or merge pending overlays before retrying |
 | `54000` | `PG019` | Overlay limit exceeded | Commit or roll back the transaction, or raise the relevant overlay GUC |
 | `55000` | `PG020` | Extension disabled | `SET graph.enabled = on` |
+| `55000` | `PG021` | Row-level security topology boundary | Review the RLS/topology boundary, then `SET graph.allow_rls_tables = on` to acknowledge and build anyway |
 | `XX000` | `PG000` | Internal error | Report with full message and reproduction |
 
 ## Disable Query Functions
