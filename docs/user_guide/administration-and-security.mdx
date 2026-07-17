@@ -145,11 +145,58 @@ Resolution order is:
 4. no tenant, unless `graph.enforce_tenant_scope = on` and registered tables
    have `tenant_column`.
 
+<Callout type="warning">
+For a graph whose tables are registered with `tenant_column` rather than
+pinned to a single graph-level tenant, the explicit tenant argument and the
+session tenant from `graph.tenant_setting` are used to *narrow* results to a
+tenant bitmap; they are not verified against the calling role's own identity.
+Any role with graph `read` and the necessary source-table `SELECT` privileges
+can supply any tenant value and receive that tenant's subgraph. Tenant scope
+here is a query-shaping filter, not an authorization boundary. If different
+tenants must not be able to read each other's data, enforce that with
+PostgreSQL row-level security policies on the underlying tables keyed to
+session context, or register separate graphs per tenant with separate graph
+grants.
+</Callout>
+
 <Callout type="info">
 The graph artifact contains source primary keys and topology. ACL checks are
 part of query execution so a role cannot use graph queries to bypass source
 table `SELECT` permissions.
 </Callout>
+
+## Row-Level Security And Topology Reads
+
+`graph.search()` re-queries source-table properties through SQL as the calling
+role, so row-level security policies on the underlying tables apply exactly as
+they would to a direct `SELECT`.
+
+`graph.traverse()`, `graph.shortest_path()`, `graph.weighted_shortest_path()`,
+and the connected-component functions read the built graph artifact instead of
+issuing a fresh SQL scan. That artifact is constructed once by whoever ran
+`graph.build()` — typically an owning or elevated role — from every row the
+builder could see, and it is not re-filtered per calling role afterward. These
+functions check table-level `SELECT` privilege (`PG002`) before returning
+results, but they do not evaluate row-level security policies against the
+calling role.
+
+<Callout type="warning">
+A role with table-level `SELECT` but no row-level access to a specific row can
+still receive that row's `node_id`/`node_table` coordinate, its position in a
+traversal or path, and whether it is reachable from another node, through
+`graph.traverse()`, `graph.shortest_path()`, `graph.weighted_shortest_path()`,
+and the component functions. Requesting `hydrate := true` re-checks the source
+row through SQL as the caller and omits or nulls the hydrated payload when
+row-level security denies it, but the coordinate itself is still returned by
+these functions.
+</Callout>
+
+If your access-control model requires row-level security to extend to graph
+topology, do not grant `EXECUTE` on `graph.traverse()`, `graph.shortest_path()`,
+`graph.weighted_shortest_path()`, or the component functions to roles that
+should not see the full topology the graph was built from. Treat a built graph
+as a single artifact reflecting the builder's row visibility, not a
+per-caller-filtered view, and restrict which roles can query it accordingly.
 
 ## Internal Catalog Tables
 

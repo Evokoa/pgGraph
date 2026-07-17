@@ -24,6 +24,32 @@ overlay compaction, and cleanup do not run automatically. Follow the setup,
 health, retry, and failure guidance in
 [Sync And Maintenance](/user_guide/sync-and-maintenance#scheduled-maintenance).
 
+## Access Control
+
+### Topology reads are builder-scoped, not row-level-security-filtered
+
+`graph.traverse()`, `graph.shortest_path()`, `graph.weighted_shortest_path()`,
+and the connected-component functions read the built graph artifact rather
+than issuing a fresh SQL scan per call. They check table-level `SELECT`
+privilege before returning results, but they do not evaluate row-level
+security policies against the calling role, so a role with table-level
+`SELECT` can receive coordinates, path membership, and reachability for rows
+its own row-level security policy would hide from a direct `SELECT`.
+`graph.search()` re-queries source-table properties as the caller and is not
+affected. See
+[Row-Level Security And Topology Reads](/user_guide/administration-and-security#row-level-security-and-topology-reads)
+for the full boundary and mitigation guidance.
+
+### Tenant scope is a query filter, not an authorization boundary
+
+For a graph whose tables are registered with `tenant_column` rather than
+pinned to a single graph-level tenant, the tenant argument and session tenant
+narrow results to a tenant bitmap but are not verified against the calling
+role's identity; any role with graph `read` and the necessary source-table
+privileges can supply any tenant value. See
+[Tenant Scope](/user_guide/administration-and-security#tenant-scope) for
+mitigation guidance.
+
 ## Query Compatibility
 
 ### GQL and openCypher support are bounded profiles

@@ -337,3 +337,19 @@ docs/contributor_guide/traversal-search-paths.mdx to describe the
 level-complete minimum-selection behavior. Native test count: 862 -> 864 (2
 new tests). cargo fmt --check and cargo clippy --all-targets -- -D warnings
 are clean for graph/src/path_finder.rs.
+
+2026-07-17 RLS/tenant boundary documentation (C4/C5) — Documented, without
+behavior change, that graph.traverse(), graph.shortest_path(),
+graph.weighted_shortest_path(), and the connected-component functions read
+the builder-scoped graph artifact and check only table-level SELECT ACL, not
+row-level security, before returning coordinates, path membership, and
+reachability; graph.search() is unaffected since it re-queries source
+properties as the caller. Also documented that tenant scope for
+tenant_column-registered (non-pinned) graphs is a query-shaping filter, not
+an authorization boundary: any role with graph read and source-table
+privileges can supply any tenant value. Added a "Row-Level Security And
+Topology Reads" section and a tenant-scope callout to
+docs/user_guide/administration-and-security.mdx, plus a new "Access Control"
+category in docs/known-issues.mdx cross-referencing both. No SQL/behavior
+change; docs-drift local-reference and SQL/GUC/source-map/contract checks
+pass.
