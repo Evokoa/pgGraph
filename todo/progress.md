@@ -287,3 +287,7 @@ reserved for the release-owner handoff.
 the exact concurrent job within a bounded five-minute window; all 40 CSR
 playground examples pass in the rebuilt PostgreSQL 17 image without racing the
 active worker during test teardown.
+
+2026-07-16 R7 sandbox cleanup closure — Playground container recreation and
+cleanup now remove the container's anonymous PostgreSQL volume, preventing
+repeated release runs from leaking multi-gigabyte disposable databases.

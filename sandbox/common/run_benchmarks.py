@@ -200,7 +200,7 @@ def cleanup_docker(container: str, image: str, remove_image: bool, dry_run: bool
         if dry_run:
             print(f"Would remove Docker container: {container}")
         else:
-            completed = run(["docker", "rm", "-f", container], timeout=120)
+            completed = run(["docker", "rm", "-f", "-v", container], timeout=120)
             if completed.returncode != 0:
                 raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
             print(f"Removed Docker container: {container}")

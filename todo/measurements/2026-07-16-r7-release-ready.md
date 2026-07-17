@@ -42,6 +42,8 @@ Results:
 - the rebuilt PostgreSQL 17 image passed all 40 Panama CSR playground examples,
   including an exact-ID concurrent build that exceeded the former 30-second
   test bound;
+- sandbox cleanup regression coverage verifies disposable container removal
+  also removes its anonymous PostgreSQL data volume;
 - the probe left no login role behind and restored `graph.sync_mode`;
 - formatting, Clippy with warnings denied, rustdoc, public docs, script
   contracts, bundle tests, and the PR tier passed;

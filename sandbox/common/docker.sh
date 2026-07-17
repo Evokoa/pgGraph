@@ -62,7 +62,7 @@ ensure_pggraph_container() {
 
   if [[ "${PGGRAPH_RECREATE_CONTAINER:-0}" == "1" ]] \
     && docker ps -a --format '{{.Names}}' | grep -Fxq "${container_name}"; then
-    docker rm -f "${container_name}" >/dev/null
+    docker rm -f -v "${container_name}" >/dev/null
   fi
 
   if docker ps --format '{{.Names}}' | grep -Fxq "${container_name}"; then
