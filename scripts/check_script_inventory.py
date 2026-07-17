@@ -31,13 +31,20 @@ MAINTAINER = {
 
 
 def maintained_scripts() -> list[Path]:
+    tracked = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    prefixes = tuple(f"{root.relative_to(ROOT).as_posix()}/" for root in SEARCH_ROOTS)
     return sorted(
-        path
-        for root in SEARCH_ROOTS
-        for path in root.rglob("*")
-        if path.is_file()
-        and path.suffix in {".sh", ".py"}
-        and "__pycache__" not in path.parts
+        ROOT / relative
+        for relative in tracked
+        if relative.startswith(prefixes)
+        and Path(relative).suffix in {".sh", ".py"}
+        and "__pycache__" not in Path(relative).parts
     )
 
 
