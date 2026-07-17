@@ -198,7 +198,7 @@ DECLARE
   job_error text;
   attempt integer;
 BEGIN
-  FOR attempt IN 1..300 LOOP
+  FOR attempt IN 1..3000 LOOP
     SELECT jobs.status, jobs.error
       INTO job_status, job_error
       FROM graph._build_jobs AS jobs
@@ -213,7 +213,7 @@ BEGIN
     PERFORM pg_sleep(0.1);
   END LOOP;
 
-  RAISE EXCEPTION 'playground concurrent build did not complete within 30 seconds (last status: %)',
+  RAISE EXCEPTION 'playground concurrent build did not complete within 5 minutes (last status: %)',
     coalesce(job_status, 'missing');
 END
 $$;

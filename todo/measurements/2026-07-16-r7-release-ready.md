@@ -39,6 +39,9 @@ Results:
 - all five background-worker metadata boundary tests passed;
 - the PostgreSQL 17 concurrency profile passed exact build, maintenance,
   due-job scheduler, and non-superuser forced-RLS worker checks;
+- the rebuilt PostgreSQL 17 image passed all 40 Panama CSR playground examples,
+  including an exact-ID concurrent build that exceeded the former 30-second
+  test bound;
 - the probe left no login role behind and restored `graph.sync_mode`;
 - formatting, Clippy with warnings denied, rustdoc, public docs, script
   contracts, bundle tests, and the PR tier passed;

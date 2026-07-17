@@ -282,3 +282,8 @@ packaged examples, compatibility and migration proofs, security/resource/crash
 gates, deterministic source bundle, and independent reviews are complete;
 pgGraph 1.0.0 is release-ready but unpublished, with signed tag and publication
 reserved for the release-owner handoff.
+
+2026-07-16 R7 packaged-worker closure — The packaged Panama gate now waits for
+the exact concurrent job within a bounded five-minute window; all 40 CSR
+playground examples pass in the rebuilt PostgreSQL 17 image without racing the
+active worker during test teardown.
