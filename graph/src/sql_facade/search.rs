@@ -224,6 +224,7 @@ pub(super) fn traverse_search(
         name!(node, Option<pgrx::JsonB>),
         name!(root_table_name, String),
         name!(node_table_name, String),
+        name!(capped, bool),
     ),
 > {
     with_panic_boundary("traverse_search()", || {

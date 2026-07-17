@@ -169,7 +169,7 @@ fn expand(
         };
         let rows =
             execute_traverse_rows_governed(&request, &governor).unwrap_or_else(|err| err.report());
-        let truncated = max_rows > 0 && rows.len() == max_rows as usize;
+        let mut truncated = max_rows > 0 && rows.len() == max_rows as usize;
         let mut workspace = workflow_workspace(&governor).unwrap_or_else(|err| err.report());
         let mut output = Vec::new();
         reserve_workflow_vector(&mut workspace, &mut output, rows.len())
@@ -187,9 +187,11 @@ fn expand(
                 node,
                 root_table_name,
                 node_table_name,
+                capped,
             ),
         ) in rows.into_iter().enumerate()
         {
+            truncated |= capped;
             workflow_step(&governor, 1).unwrap_or_else(|err| err.report());
             let readable_path =
                 readable_path_governed(&path, &edge_path, &governor, &mut workspace)
@@ -338,7 +340,8 @@ fn find_related(
             None
         };
         let filtered_count = include_counts.then_some(filtered.len() as i64);
-        let truncated = candidate_limit > 0 && filtered.len() == candidate_limit as usize;
+        let truncated = (candidate_limit > 0 && filtered.len() == candidate_limit as usize)
+            || filtered.iter().any(|row| row.10);
         let page_len = filtered
             .len()
             .saturating_sub(row_offset_usize)
@@ -360,6 +363,7 @@ fn find_related(
                 _node,
                 root_table_name,
                 node_table_name,
+                _capped,
             ),
         ) in filtered
             .into_iter()
@@ -683,7 +687,8 @@ fn neighborhood(
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let truncated = node_limit > 0 && rows.len() == node_limit as usize;
+        let truncated =
+            (node_limit > 0 && rows.len() == node_limit as usize) || rows.iter().any(|row| row.10);
         let mut workspace = workflow_workspace(&governor).unwrap_or_else(|err| err.report());
         let mut entries = Vec::new();
         reserve_workflow_vector(&mut workspace, &mut entries, rows.len())
@@ -699,6 +704,7 @@ fn neighborhood(
             _node,
             _root_table_name,
             node_table_name,
+            _capped,
         ) in rows
         {
             workflow_step(&governor, 1).unwrap_or_else(|err| err.report());

@@ -989,7 +989,7 @@ impl Engine {
         tenant: Option<&str>,
         strategy: TraversalStrategy,
         direction: TraversalDirection,
-    ) -> GraphResult<Vec<TraversalResult>> {
+    ) -> GraphResult<TraverseOutcome> {
         if filter_condition.is_some() {
             return Err(GraphError::InvalidFilter {
                 reason: "legacy raw traversal filters have been removed; use structured JSONB filters through SQL traversal helpers".to_string(),
@@ -1025,7 +1025,7 @@ impl Engine {
         tenant: Option<&str>,
         strategy: TraversalStrategy,
         direction: TraversalDirection,
-    ) -> GraphResult<Vec<TraversalResult>> {
+    ) -> GraphResult<TraverseOutcome> {
         let governor = self.query_resource_governor()?;
         self.traverse_with_filter_ops_governed(
             seed_table_oid,
@@ -1060,7 +1060,7 @@ impl Engine {
         strategy: TraversalStrategy,
         direction: TraversalDirection,
         governor: &crate::resource::ResourceGovernor,
-    ) -> GraphResult<Vec<TraversalResult>> {
+    ) -> GraphResult<TraverseOutcome> {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
@@ -1196,8 +1196,12 @@ impl Engine {
             .map_err(crate::safety::resource_limit_error)?;
         let results =
             bfs::to_traversal_results(&bfs_result, &self.node_store, &self.edge_type_registry)?;
+        let truncated = bfs_result.truncated;
         output_lease.retain_until_governor_drop();
-        Ok(results)
+        Ok(TraverseOutcome {
+            rows: results,
+            truncated,
+        })
     }
 
     fn traversal_result_upper_bound(

@@ -781,6 +781,7 @@ fn expand_rows_to_parent_path_governed(
                 node,
                 row.8.clone(),
                 crate::catalog::relation_name(table_oid)?,
+                row.10,
             ));
         }
     }

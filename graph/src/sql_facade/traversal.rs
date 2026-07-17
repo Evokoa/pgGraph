@@ -70,6 +70,7 @@ pub(super) fn traverse(
         name!(node, Option<pgrx::JsonB>),
         name!(root_table_name, String),
         name!(node_table_name, String),
+        name!(capped, bool),
     ),
 > {
     with_panic_boundary("traverse()", || {
@@ -184,6 +185,7 @@ fn get_neighbors(
         name!(node, Option<pgrx::JsonB>),
         name!(root_table_name, String),
         name!(node_table_name, String),
+        name!(capped, bool),
     ),
 > {
     with_panic_boundary("get_neighbors()", || {
@@ -254,6 +256,7 @@ fn traverse_many(
         name!(node, Option<pgrx::JsonB>),
         name!(root_table_name, String),
         name!(node_table_name, String),
+        name!(capped, bool),
     ),
 > {
     with_panic_boundary("traverse_many()", || {

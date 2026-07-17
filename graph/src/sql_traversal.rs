@@ -17,6 +17,9 @@ pub(crate) struct TraverseCandidate {
     pub(crate) root_table_name: String,
     row: types::TraversalResult,
     pre_hydrated: Option<serde_json::Value>,
+    /// Whether this root's own traversal was stopped early by `max_nodes` or
+    /// `max_frontier` before the frontier was naturally exhausted.
+    capped: bool,
 }
 
 pub(crate) fn validate_traverse_options(
@@ -119,7 +122,7 @@ pub(crate) fn execute_traverse_candidates_governed(
             hydration_filters: Vec::new(),
         });
 
-    let results = ENGINE.with(|e| {
+    let outcome = ENGINE.with(|e| {
         let eng = e.borrow();
         let mut filter_ops = Vec::with_capacity(structured_filter.pushdown_filters.len());
         for filter in &structured_filter.pushdown_filters {
@@ -140,14 +143,16 @@ pub(crate) fn execute_traverse_candidates_governed(
             governor,
         )
     })?;
+    let capped = outcome.truncated;
 
     let page_lease = reserve_traversal_rows(
         governor,
         crate::resource::ResourcePhase::QueryBlocking,
-        &results,
+        &outcome.rows,
         2,
     )?;
-    let mut page = results
+    let mut page = outcome
+        .rows
         .into_iter()
         .filter(|r| request.include_start || r.depth != 0)
         .filter(|r| table_filter.is_empty() || table_filter.contains(&r.node_table.0))
@@ -195,6 +200,7 @@ pub(crate) fn execute_traverse_candidates_governed(
                 root_table_name: root_table_name.clone(),
                 row,
                 pre_hydrated,
+                capped,
             }
         })
         .collect();
@@ -386,6 +392,7 @@ pub(crate) fn paginate_and_format_traverse_candidates_governed(
                 node,
                 candidate.root_table_name,
                 relation_name(candidate.row.node_table.0)?,
+                candidate.capped,
             ))
         })
         .collect::<safety::GraphResult<Vec<_>>>()?;

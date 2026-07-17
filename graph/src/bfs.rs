@@ -67,6 +67,11 @@ pub struct BfsResult {
     pub parent: TraversalParentMap,
     /// Edge type used by `parent[i] -> i`.
     pub parent_edge_type: TraversalParentEdgeTypes,
+    /// `true` when `max_nodes` or `max_frontier` stopped expansion before the
+    /// frontier was naturally exhausted, meaning nodes reachable within
+    /// `max_depth` may not have been visited. `false` for an empty seed, a
+    /// filter that matched no edge types, or natural exhaustion.
+    pub truncated: bool,
 }
 
 /// Traversal depth metadata.
@@ -330,6 +335,7 @@ fn execute_inner(
             depth: depth_map,
             parent,
             parent_edge_type,
+            truncated: false,
         });
     }
 
@@ -356,6 +362,7 @@ fn execute_inner(
             depth: depth_map,
             parent,
             parent_edge_type,
+            truncated: false,
         });
     }
 
@@ -399,6 +406,7 @@ fn execute_inner(
                     depth: depth_map,
                     parent,
                     parent_edge_type,
+                    truncated: true,
                 });
             }
 
@@ -411,6 +419,7 @@ fn execute_inner(
                         depth: depth_map,
                         parent,
                         parent_edge_type,
+                        truncated: true,
                     });
                 }
             }
@@ -422,6 +431,7 @@ fn execute_inner(
         depth: depth_map,
         parent,
         parent_edge_type,
+        truncated: false,
     })
 }
 
@@ -473,6 +483,7 @@ fn execute_with_neighbors_inner(
             depth: depth_map,
             parent,
             parent_edge_type,
+            truncated: false,
         });
     }
 
@@ -500,6 +511,7 @@ fn execute_with_neighbors_inner(
             depth: depth_map,
             parent,
             parent_edge_type,
+            truncated: false,
         });
     }
 
@@ -540,6 +552,7 @@ fn execute_with_neighbors_inner(
                     depth: depth_map,
                     parent,
                     parent_edge_type,
+                    truncated: true,
                 });
             }
 
@@ -554,6 +567,7 @@ fn execute_with_neighbors_inner(
                         depth: depth_map,
                         parent,
                         parent_edge_type,
+                        truncated: true,
                     });
                 }
             }
@@ -565,6 +579,7 @@ fn execute_with_neighbors_inner(
         depth: depth_map,
         parent,
         parent_edge_type,
+        truncated: false,
     })
 }
 
@@ -645,6 +660,7 @@ fn execute_dfs_with_neighbors_inner(
             depth: depth_map,
             parent,
             parent_edge_type,
+            truncated: false,
         });
     }
 
@@ -663,6 +679,7 @@ fn execute_dfs_with_neighbors_inner(
             depth: depth_map,
             parent,
             parent_edge_type,
+            truncated: false,
         });
     }
 
@@ -700,6 +717,7 @@ fn execute_dfs_with_neighbors_inner(
                 depth: depth_map,
                 parent,
                 parent_edge_type,
+                truncated: true,
             });
         }
     }
@@ -709,6 +727,7 @@ fn execute_dfs_with_neighbors_inner(
         depth: depth_map,
         parent,
         parent_edge_type,
+        truncated: false,
     })
 }
 
@@ -1298,6 +1317,10 @@ mod tests {
 
         let result = execute(&ns, &es, &fi, &config);
         assert!(result.visited.len() <= 2);
+        assert!(
+            result.truncated,
+            "max_nodes stopping expansion before natural exhaustion must report truncated"
+        );
     }
 
     #[test]
@@ -1442,6 +1465,108 @@ mod tests {
             "frontier=1 should limit expansion, got {}",
             result.visited.len()
         );
+        assert!(
+            result.truncated,
+            "max_frontier stopping expansion before natural exhaustion must report truncated"
+        );
+    }
+
+    #[test]
+    fn natural_completion_is_not_truncated() {
+        let (ns, es) = build_test_graph();
+        let fi = FilterIndex::new();
+        let config = BfsConfig {
+            seed_node: 0,
+            max_depth: 10,
+            max_nodes: 100000,
+            max_frontier: 100000,
+            edge_type_filter: crate::types::EdgeTypeFilter::All,
+            filter_ops: vec![],
+            tenant: None,
+            tenanted_table_oids: HashSet::new(),
+            tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
+            overlay_insert_edges: std::collections::HashMap::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
+        };
+
+        let result = execute(&ns, &es, &fi, &config);
+        assert!(
+            !result.truncated,
+            "generous max_nodes/max_frontier limits should let the frontier exhaust naturally"
+        );
+    }
+
+    #[test]
+    fn depth_limit_alone_is_not_truncated() {
+        let (ns, es) = build_test_graph();
+        let fi = FilterIndex::new();
+        let config = BfsConfig {
+            seed_node: 0,
+            max_depth: 0,
+            max_nodes: 100000,
+            max_frontier: 100000,
+            edge_type_filter: crate::types::EdgeTypeFilter::All,
+            filter_ops: vec![],
+            tenant: None,
+            tenanted_table_oids: HashSet::new(),
+            tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
+            overlay_insert_edges: std::collections::HashMap::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
+        };
+
+        let result = execute(&ns, &es, &fi, &config);
+        // Stopping at a caller-requested max_depth is a complete, correct
+        // answer for that depth bound, not a resource-driven truncation.
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn dfs_max_nodes_circuit_breaker_reports_truncated() {
+        let (ns, es) = build_test_graph();
+        let fi = FilterIndex::new();
+        let config = BfsConfig {
+            seed_node: 0,
+            max_depth: 10,
+            max_nodes: 2,
+            max_frontier: 100000,
+            edge_type_filter: crate::types::EdgeTypeFilter::All,
+            filter_ops: vec![],
+            tenant: None,
+            tenanted_table_oids: HashSet::new(),
+            tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
+            overlay_insert_edges: std::collections::HashMap::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
+        };
+
+        let result = execute_dfs(&ns, &es, &fi, &config);
+        assert!(result.visited.len() <= 2);
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn dfs_natural_completion_is_not_truncated() {
+        let (ns, es) = build_test_graph();
+        let fi = FilterIndex::new();
+        let config = BfsConfig {
+            seed_node: 0,
+            max_depth: 10,
+            max_nodes: 100000,
+            max_frontier: 100000,
+            edge_type_filter: crate::types::EdgeTypeFilter::All,
+            filter_ops: vec![],
+            tenant: None,
+            tenanted_table_oids: HashSet::new(),
+            tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
+            overlay_insert_edges: std::collections::HashMap::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
+        };
+
+        let result = execute_dfs(&ns, &es, &fi, &config);
+        assert!(!result.truncated);
     }
 
     #[test]

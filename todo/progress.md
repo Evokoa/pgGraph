@@ -353,3 +353,59 @@ docs/user_guide/administration-and-security.mdx, plus a new "Access Control"
 category in docs/known-issues.mdx cross-referencing both. No SQL/behavior
 change; docs-drift local-reference and SQL/GUC/source-map/contract checks
 pass.
+
+2026-07-17 traversal truncation signal (O3) — Added a `capped boolean` output
+column to graph.traverse() (both overloads), graph.get_neighbors(), and
+graph.traverse_search(), true when max_nodes/max_frontier stopped BFS/DFS
+expansion before the frontier was naturally exhausted, false for an empty
+seed, a no-match edge-type filter, reaching max_depth, or full exhaustion.
+This closes the silent-truncation gap the July 2026 secondary review flagged:
+callers previously could not distinguish a complete result from one cut short
+by a resource circuit breaker. graph.shortest_path()/weighted_shortest_path()
+were separately confirmed already safe against this class of issue: they run
+through the resource-governed path-search budget (PathWorkBudget::finish),
+which converts budget exhaustion into a SQLSTATE error rather than a silent
+"no path" — that mechanism predates this change and needed no fix.
+
+Implementation: BfsResult (bfs.rs) gained a truncated field set at all 14
+construction sites across the CSR, layered-neighbor, and DFS execute_*_inner
+variants; Engine::traverse_with_filter_ops_governed now returns a new
+TraverseOutcome{rows, truncated} (with Deref/IntoIterator to Vec<TraversalResult>
+so existing call sites needed no changes) instead of a bare Vec; the flag
+threads through TraverseCandidate.capped in sql_traversal.rs into the new
+trailing TraverseRow column. Three sql_facade/workflow.rs helpers
+(expand/find_related/neighborhood) that already exposed their own
+pagination-based `truncated` column now OR in this signal too, so those
+columns are strictly more accurate than before with no signature change.
+
+This is an intentional breaking SQL change on top of the dev@fe546b4 release
+candidate, accepted after explicit confirmation. Updated
+graph/sql/bootstrap.sql's hand-authored graph.traverse(node_ref[]) wrapper,
+docs/user_guide/api-reference.mdx (3 RETURNS TABLE blocks) and
+docs/user_guide/querying.mdx (return-columns table plus a clarifying callout
+and cross-reference for the three workflow functions). Regenerated the
+release contract from a live `cargo pgrx schema` output (no live PostgreSQL
+connection required): release/v1-schema.sql, release/v1-contract.json,
+release/contract-changes.json, and the auto-derived
+docs/user_guide/sql-signatures.mdx, via
+`scripts/check_release_contract.py --write --acknowledge`. Both
+`scripts/check_release_contract.py` and `scripts/check_docs_drift.sh` pass
+clean against the new schema.
+
+Added regression coverage in bfs.rs: max_nodes_circuit_breaker and
+max_frontier_limits_exploration now assert truncated=true;
+natural_completion_is_not_truncated and depth_limit_alone_is_not_truncated
+assert truncated=false (confirming max_depth alone is a complete answer, not
+a truncation); dfs_max_nodes_circuit_breaker_reports_truncated and
+dfs_natural_completion_is_not_truncated cover the DFS path. Native test
+count: 863 -> 867. cargo fmt --check and cargo clippy --all-targets -- -D
+warnings are clean.
+
+Owed before this can be folded into a fresh full-matrix run: cargo pgrx test
+against a live PostgreSQL cluster to exercise the new column through actual
+SQL execution (the pgrx test files that call graph.traverse()/get_neighbors()
+were manually reviewed and use named-column or SELECT * error-only patterns
+that are backward compatible with a new trailing column, but this has not
+been confirmed by an actual pgrx test run in this environment), and
+regenerating release/evidence/full-matrix.json since the SQL contract changed
+after that evidence was recorded.

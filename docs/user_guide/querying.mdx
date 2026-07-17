@@ -665,6 +665,15 @@ Return columns:
 | `edge_path` | JSONB array of edge labels along the path |
 | `node` | Hydrated source row when requested |
 | `root_table_name`, `node_table_name` | Regclass text names |
+| `capped` | `true` when `max_nodes` or `max_frontier` stopped expansion for that root before the frontier was naturally exhausted |
+
+<Callout type="warning">
+`capped := true` means nodes reachable within `max_depth` may be missing from
+the result for that root, not just from `row_offset`/`max_rows` pagination.
+Reaching `max_depth` itself is a complete, correct answer and does not set
+`capped`. Raise `max_nodes`/`max_frontier` and retry, or treat the result as a
+partial neighborhood rather than the full one.
+</Callout>
 
 Traversal applies graph traversal limits first, then table filters and
 hydration filters, then sorts by depth, node table, and node ID for a single
@@ -783,7 +792,12 @@ FROM graph.expand(
 );
 ```
 
-Adds `rank`, `readable_path`, and `truncated`.
+Adds `rank`, `readable_path`, and `truncated`. `truncated` is `true` when
+`max_rows` capped the returned page or when the underlying traversal's
+`max_nodes`/`max_frontier` circuit breaker stopped expansion early, so the
+neighborhood searched may be incomplete beyond `max_depth`. The same
+`truncated` semantics apply to `graph.find_related()` and
+`graph.neighborhood()` below.
 
 ### `graph.find_related()`
 

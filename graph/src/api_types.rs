@@ -14,6 +14,7 @@ pub(crate) type TraverseRow = (
     name!(node, Option<pgrx::JsonB>),
     name!(root_table_name, String),
     name!(node_table_name, String),
+    name!(capped, bool),
 );
 
 #[derive(Debug, Clone)]

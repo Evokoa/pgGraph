@@ -48,7 +48,8 @@ RETURNS TABLE (
     edge_path  JSONB,
     node       JSONB,
     root_table_name TEXT,
-    node_table_name TEXT
+    node_table_name TEXT,
+    capped     BOOLEAN
 )
 LANGUAGE sql
 STABLE
@@ -64,7 +65,8 @@ AS $$
            t.edge_path,
            t.node,
            t.root_table_name,
-           t.node_table_name
+           t.node_table_name,
+           t.capped
     FROM graph.traverse(
         ARRAY(SELECT start_ref.node_table::oid FROM unnest($1) AS start_ref),
         ARRAY(SELECT start_ref.node_id FROM unnest($1) AS start_ref),

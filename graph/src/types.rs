@@ -74,6 +74,33 @@ pub struct TraversalResult {
     pub edge_path: Vec<String>,
 }
 
+/// Whole-traversal outcome: discovered rows plus whether resource circuit
+/// breakers stopped expansion before the frontier was naturally exhausted.
+/// A `true` `truncated` flag means nodes reachable within the requested
+/// `max_depth` may be missing from `rows`, not just from later pagination.
+#[derive(Debug, Clone)]
+pub struct TraverseOutcome {
+    pub rows: Vec<TraversalResult>,
+    pub truncated: bool,
+}
+
+impl std::ops::Deref for TraverseOutcome {
+    type Target = Vec<TraversalResult>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
+}
+
+impl IntoIterator for TraverseOutcome {
+    type Item = TraversalResult;
+    type IntoIter = std::vec::IntoIter<TraversalResult>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.into_iter()
+    }
+}
+
 /// A node coordinate in a traversal path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathCoordinate {
