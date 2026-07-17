@@ -601,3 +601,23 @@ the existing graph.sync_mode handling) since the async build worker starts a
 fresh session that does not inherit a session-level SET. Verified standalone
 (bash concurrency_stress.sh -> "Concurrency stress passed") before
 committing as 48b18dd and relaunching the full-matrix run a 6th time.
+
+Separately, fixed a long-standing script-contracts flakiness bug while the
+6th full-matrix iteration was still running (it had already passed
+script-contracts, so this was safe to land mid-run):
+scripts/check_script_inventory.py walked SEARCH_ROOTS with Path.rglob,
+which does not know about .gitignore, so a populated
+sandbox/benchmark/.venv or sandbox/playground/.venv (both gitignored,
+created by sandbox/run_benchmarks.sh and the playground tooling) pulled
+hundreds of incidental pip package files into the scan and made the gate
+fail with "release/scripts.json is stale" for no real reason. Rewrote
+maintained_scripts() to source its file list from `git ls-files --cached
+--others --exclude-standard`, which already respects .gitignore. Verified
+by creating a real venv under sandbox/benchmark/.venv (395 stray .py
+files) and confirming the check still passes; release/scripts.json needed
+no regeneration since it was already venv-free. Committed as 6370497. This
+had also been spawned as a separate background task (task_18d8e919,
+titled "Fix check_script_inventory.py scanning gitignored venvs"); that
+task turned out to already be running in another session by the time this
+fix landed here, so there is a small chance of a second, redundant/
+conflicting commit touching the same file from that other session.
