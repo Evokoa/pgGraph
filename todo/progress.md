@@ -291,3 +291,23 @@ active worker during test teardown.
 2026-07-16 R7 sandbox cleanup closure — Playground container recreation and
 cleanup now remove the container's anonymous PostgreSQL volume, preventing
 repeated release runs from leaking multi-gigabyte disposable databases.
+
+2026-07-17 full-matrix validation closure — The full-matrix release tier
+completed on the clean dev worktree at 4edabea: 16 of 17 gates pass, including
+script contracts, docs drift/render, external links, Rust static and
+checked-cast gates, Miri mapped-memory checks, legacy release, crash recovery,
+transaction-delta crash recovery, read latency, the supported-majors matrix,
+Linux runtime resources, the pg_upgrade matrix, and the PostgreSQL 14-18
+package-install matrix. The postgres-sanitizer gate fails closed on this macOS
+workstation because valgrind is unavailable here; it is deferred to the Linux
+release-operator environment with the other environment-specific gates. Local
+evidence: release/evidence/full-matrix.json and its logs directory.
+
+2026-07-17 Dockerfile sfw decision — The previously proposed change to prefix
+the production Dockerfile's cargo install with the local sfw wrapper is
+rejected: sfw is a workstation safety wrapper for agent-executed package
+installs and does not exist inside Docker build containers, so shipping it
+would break every user image build. The Dockerfile is correct as written, no
+new commit or evidence regeneration is required for this item, and dev@4edabea
+remains the validated release candidate. Remaining work is release-owner
+action only: the Linux sanitizer gate, signing/tagging, and publication.
