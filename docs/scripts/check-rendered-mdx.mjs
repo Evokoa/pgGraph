@@ -4,8 +4,9 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import * as runtime from 'react/jsx-runtime';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = new URL('..', import.meta.url).pathname;
+const root = fileURLToPath(new URL('..', import.meta.url));
 
 async function mdxFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
