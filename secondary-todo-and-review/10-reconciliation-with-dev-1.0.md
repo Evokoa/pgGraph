@@ -20,7 +20,7 @@ for the descriptions, not live register IDs.
 |---|---|---|
 | S0 automated PR CI (KI-017) | **Done** | `.github/workflows/ci.yml` exists (R6) |
 | C1 ingest/manifest publication race (KI-012) | **Fixed, different mechanism** | Manifest publish uses `create_new` (O_EXCL) no-overwrite CAS; test `projection_manifest_stale_publisher_loses_compare_and_swap` (`projection/manifest.rs`). The process-local mutex remains as a fast-path guard, no longer the only protection. Verify-only item: confirm loser-retry behavior surfaces to `apply_sync()` callers |
-| C2 bidirectional BFS minimality (KI-015) | **Still open** | `path_finder.rs` on dev still breaks on the first frontier intersection (`meeting_node = Some(..); break`) instead of completing the level and taking the minimal combined-distance meeting node |
+| C2 bidirectional BFS minimality (KI-015) | **Fixed 2026-07-17** | `path_finder.rs` now tracks per-node hop depth in `ParentStep` and fully scans each BFS level before selecting the minimum-combined-distance meeting node, instead of breaking on the first candidate found. Regression: `bidirectional_bfs_selects_minimal_combined_distance_meeting_node` (deterministic) + `bidirectional_bfs_matches_single_direction_bfs` (differential proptest, 20k cases). See `todo/progress.md` 2026-07-17 entry |
 | C3 `_sync_log` retention (KI-016) | **Likely still open — re-verify** | No pruning path found on dev (`DELETE FROM graph._sync_log` absent). R3 "bounded storage" covered snapshot/watermark and compaction crash-safety; log retention was not located |
 | C4 RLS topology boundary (KI-013) | **Likely still open — re-verify** | Dev user docs still frame RLS as a source-table concern; no topology-read RLS boundary section found in `querying.mdx`/`limitations-and-fit.mdx`. R1 "RLS green" evidence should be audited to see which paths it covered |
 | C5 tenant filter-vs-isolation (KI-014) | **Re-verify** | Artifact v6 added a tenant dictionary and dense per-node tenant tokens (R3C); semantics of caller-supplied tenant scope need re-checking against the new representation |
@@ -42,8 +42,7 @@ for the descriptions, not live register IDs.
 
 Still-open, verified items first:
 
-1. **C2** — bidirectional BFS minimal-meeting fix + two-meeting-point
-   regression (gates any published benchmark).
+1. ~~**C2** — bidirectional BFS minimal-meeting fix.~~ **Done 2026-07-17.**
 2. **O3** — truncation/`capped` signal on bounded traversal results (gates
    benchmark publication and closes the false-"no path" hole).
 3. **C4/C5 audit** — RLS topology boundary and tenant-scope semantics against

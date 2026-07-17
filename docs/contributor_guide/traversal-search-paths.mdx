@@ -116,6 +116,19 @@ Shortest-path parent metadata is sparse: unweighted path search records only
 visited parent links, and weighted path search records parent edge metadata only
 for relaxed nodes.
 
+Bidirectional search tracks each visited node's hop distance from its own root
+(source for the forward side, target for the backward side) and fully scans
+every candidate meeting node discovered within the current BFS level before
+selecting a meeting point, keeping the one with the smallest combined
+distance. A single level can expose more than one candidate with different
+combined distances, since the opposite side's recorded distance for any given
+candidate reflects whenever that node was first visited, not necessarily the
+shallowest distance available. Selecting the first candidate found instead of
+the minimum-distance one within the level can return a path longer than the
+true shortest path; `path_finder::tests::bidirectional_bfs_matches_single_direction_bfs`
+differentially checks bidirectional results against the always-correct
+single-direction BFS across randomized graphs to guard against regressing this.
+
 ## Weighted Shortest Path
 
 Weighted paths use registered edge weights and Dijkstra-style cost expansion.

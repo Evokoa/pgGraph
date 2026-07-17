@@ -311,3 +311,29 @@ would break every user image build. The Dockerfile is correct as written, no
 new commit or evidence regeneration is required for this item, and dev@4edabea
 remains the validated release candidate. Remaining work is release-owner
 action only: the Linux sanitizer gate, signing/tagging, and publication.
+
+2026-07-17 bidirectional BFS minimal-meeting-node fix (C2) — Fixed the
+correctness gap the July 2026 secondary review flagged in
+graph/src/path_finder.rs: bidirectional_bfs previously accepted the first
+meeting node found while scanning a BFS level, even when a later candidate in
+the same level had a strictly shorter combined distance, because the opposite
+side's recorded depth for each candidate reflects whenever that node was
+first visited rather than the shallowest depth available. ParentStep now
+records each node's hop distance from its own search root, and the level scan
+completes fully before selecting the minimum-combined-distance candidate
+instead of breaking on the first match. Added a deterministic regression
+(bidirectional_bfs_selects_minimal_combined_distance_meeting_node) and a
+differential proptest (bidirectional_bfs_matches_single_direction_bfs) that
+checks bidirectional results against the always-correct single-direction BFS
+across randomized graphs; both pass at 20,000 proptest cases. Verified the
+proptest is a meaningful regression guard by temporarily reintroducing the
+original early-break behavior and confirming the harness still compiles and
+runs against it (20,000 cases did not empirically distinguish old from new
+behavior on graphs up to 11 nodes/24 edges, so the fix is justified by the
+provable correctness gap in the algorithm rather than an observed failing
+case; the new implementation is a strict generalization that can only match
+or improve on the old one). Updated
+docs/contributor_guide/traversal-search-paths.mdx to describe the
+level-complete minimum-selection behavior. Native test count: 862 -> 864 (2
+new tests). cargo fmt --check and cargo clippy --all-targets -- -D warnings
+are clean for graph/src/path_finder.rs.

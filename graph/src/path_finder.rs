@@ -24,6 +24,11 @@ use crate::types::{PathStep, TableOid, WeightedPathStep};
 struct ParentStep {
     parent: u32,
     edge_type: u8,
+    /// Hop distance from this step's own BFS root (source for `fwd_parent`,
+    /// target for `bwd_parent`). Needed so `bidirectional_bfs` can compare
+    /// the combined distance of multiple meeting candidates discovered in
+    /// the same level, rather than accepting whichever is found first.
+    depth: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -176,6 +181,7 @@ fn bidirectional_bfs(
         ParentStep {
             parent: source,
             edge_type: 0,
+            depth: 0,
         },
     );
     bwd_parent.insert(
@@ -183,18 +189,29 @@ fn bidirectional_bfs(
         ParentStep {
             parent: target,
             edge_type: 0,
+            depth: 0,
         },
     );
     fwd_frontier.push_back(source);
     bwd_frontier.push_back(target);
 
+    // (meeting node, combined distance) for the best candidate found in the
+    // level currently being scanned. Multiple candidates can appear in one
+    // level with different combined distances, since the opposite side's
+    // visited depth for each candidate is whatever it was when that node
+    // was first discovered — not necessarily the smallest one available.
+    // The whole level must be scanned before picking a winner; stopping at
+    // the first candidate found can accept a longer path than the shortest
+    // one available in the same level.
     let mut meeting_node: Option<u32> = None;
+    let mut best_combined = i32::MAX;
     let mut depth = 0;
 
     while !fwd_frontier.is_empty() && !bwd_frontier.is_empty() && depth < max_depth {
         // Expand the smaller frontier
         if fwd_frontier.len() <= bwd_frontier.len() {
             let level_size = fwd_frontier.len();
+            let new_depth = depth + 1;
             for _ in 0..level_size {
                 let Some(current) = fwd_frontier.pop_front() else {
                     break;
@@ -215,6 +232,7 @@ fn bidirectional_bfs(
                             ParentStep {
                                 parent: current,
                                 edge_type: edge.type_id,
+                                depth: new_depth,
                             },
                         );
                         fwd_frontier.push_back(edge.target);
@@ -223,17 +241,21 @@ fn bidirectional_bfs(
                         fwd_parent.entry(edge.target).or_insert(ParentStep {
                             parent: current,
                             edge_type: edge.type_id,
+                            depth: new_depth,
                         });
-                        meeting_node = Some(edge.target);
-                        break;
+                        let fwd_depth = fwd_parent[&edge.target].depth;
+                        let bwd_depth = bwd_parent[&edge.target].depth;
+                        let combined = fwd_depth + bwd_depth;
+                        if combined < best_combined {
+                            best_combined = combined;
+                            meeting_node = Some(edge.target);
+                        }
                     }
-                }
-                if meeting_node.is_some() {
-                    break;
                 }
             }
         } else {
             let level_size = bwd_frontier.len();
+            let new_depth = depth + 1;
             for _ in 0..level_size {
                 let Some(current) = bwd_frontier.pop_front() else {
                     break;
@@ -254,6 +276,7 @@ fn bidirectional_bfs(
                             ParentStep {
                                 parent: current,
                                 edge_type: edge.type_id,
+                                depth: new_depth,
                             },
                         );
                         bwd_frontier.push_back(edge.target);
@@ -262,13 +285,16 @@ fn bidirectional_bfs(
                         bwd_parent.entry(edge.target).or_insert(ParentStep {
                             parent: current,
                             edge_type: edge.type_id,
+                            depth: new_depth,
                         });
-                        meeting_node = Some(edge.target);
-                        break;
+                        let fwd_depth = fwd_parent[&edge.target].depth;
+                        let bwd_depth = bwd_parent[&edge.target].depth;
+                        let combined = fwd_depth + bwd_depth;
+                        if combined < best_combined {
+                            best_combined = combined;
+                            meeting_node = Some(edge.target);
+                        }
                     }
-                }
-                if meeting_node.is_some() {
-                    break;
                 }
             }
         }
@@ -363,6 +389,7 @@ fn single_direction_bfs(
         ParentStep {
             parent: source,
             edge_type: 0,
+            depth: 0,
         },
     );
     frontier.push_back((source, 0));
@@ -389,6 +416,7 @@ fn single_direction_bfs(
                 ParentStep {
                     parent: current,
                     edge_type: edge.type_id,
+                    depth: current_depth + 1,
                 },
             );
             frontier.push_back((edge.target, current_depth + 1));
@@ -816,6 +844,119 @@ mod tests {
 
         let result = shortest_path(&ns, &es, 0, 1, 20, false, &registry);
         assert!(result.is_none());
+    }
+
+    /// Builds a symmetric (undirected) graph from a fixed edge list and
+    /// returns `(NodeStore, EdgeStore)` with `node_count` nodes.
+    fn symmetric_graph(node_count: u32, undirected_edges: &[(u32, u32)]) -> (NodeStore, EdgeStore) {
+        let mut ns = NodeStore::new();
+        for i in 0..node_count {
+            ns.add_node(100, format!("N-{i}"));
+        }
+        let mut edges = Vec::new();
+        for &(a, b) in undirected_edges {
+            edges.push(RawEdge {
+                source: a,
+                target: b,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+            });
+            edges.push(RawEdge {
+                source: b,
+                target: a,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+            });
+        }
+        let es = EdgeStore::from_edges(node_count, edges, false);
+        (ns, es)
+    }
+
+    /// `bidirectional_bfs` must return a path exactly as short as the
+    /// always-correct `single_direction_bfs` ground truth. Constructed so
+    /// the backward search discovers two forward-visited candidates in the
+    /// same round: a distant one via node 3 (combined length 4, through
+    /// 0-1-3-5-4) reached before a near one via node 2 (combined length 3,
+    /// through 0-2-6-4). The bug accepts whichever meeting node is found
+    /// first by iteration order rather than the shortest one available.
+    #[test]
+    fn bidirectional_bfs_selects_minimal_combined_distance_meeting_node() {
+        // Nodes: 0=S 1=P 2=Q 3=X 4=T 5=C1 6=C2
+        // S-P, S-Q (siblings, both forward depth 1)
+        // P-X (X only reachable via P, forward depth 2)
+        // T-C1, T-C2 (siblings, both backward depth 1)
+        // C1-X (bad meeting: combined = depth(X)=2 + depth(via C1)=2 -> 4)
+        // C2-Q (good meeting: combined = depth(Q)=1 + depth(via C2)=2 -> 3)
+        let edges = [(0, 1), (0, 2), (1, 3), (4, 5), (4, 6), (5, 3), (6, 2)];
+        let (ns, es) = symmetric_graph(7, &edges);
+        let registry = vec!["".to_string(), "edge".to_string()];
+
+        let bidirectional = shortest_path(&ns, &es, 0, 4, 20, false, &registry)
+            .expect("a path exists between S and T");
+        let ground_truth = shortest_path(&ns, &es, 0, 4, 20, true, &registry)
+            .expect("single-direction BFS must find the same path's existence");
+
+        assert_eq!(
+            bidirectional.len(),
+            ground_truth.len(),
+            "bidirectional BFS returned a non-minimal path: {} steps \
+             (bidirectional) vs {} steps (ground truth)",
+            bidirectional.len(),
+            ground_truth.len()
+        );
+    }
+
+    proptest::proptest! {
+        /// Differential check across random small symmetric graphs:
+        /// bidirectional_bfs must never return a path longer than the
+        /// always-correct single_direction_bfs ground truth, and must
+        /// never report "no path" when one exists.
+        #[test]
+        fn bidirectional_bfs_matches_single_direction_bfs(
+            node_count in 3u32..12,
+            raw_edges in proptest::collection::vec((0u32..12, 0u32..12), 0..24),
+            source_seed in 0u32..12,
+            target_seed in 0u32..12,
+        ) {
+            let source = source_seed % node_count;
+            let target = target_seed % node_count;
+            let edges: Vec<(u32, u32)> = raw_edges
+                .into_iter()
+                .filter(|&(a, b)| a < node_count && b < node_count && a != b)
+                .collect();
+            let (ns, es) = symmetric_graph(node_count, &edges);
+            let registry = vec!["".to_string(), "edge".to_string()];
+
+            let bidirectional = shortest_path(&ns, &es, source, target, 30, false, &registry);
+            let ground_truth = shortest_path(&ns, &es, source, target, 30, true, &registry);
+
+            match (bidirectional, ground_truth) {
+                (None, None) => {}
+                (Some(b), Some(g)) => {
+                    proptest::prop_assert_eq!(
+                        b.len(),
+                        g.len(),
+                        "bidirectional BFS returned a non-minimal path"
+                    );
+                }
+                (None, Some(g)) => {
+                    proptest::prop_assert!(
+                        false,
+                        "bidirectional BFS found no path but a {}-step path exists",
+                        g.len()
+                    );
+                }
+                (Some(b), None) => {
+                    proptest::prop_assert!(
+                        false,
+                        "bidirectional BFS found a {}-step path but ground truth found none",
+                        b.len()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
