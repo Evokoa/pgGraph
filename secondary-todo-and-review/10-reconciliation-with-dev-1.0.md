@@ -93,7 +93,12 @@ Still-open, verified items first:
    (`docs-render`, `external-links`, `crash-recovery`, `pg-upgrade-matrix`,
    `package-install-matrix`); the Linux `postgres-sanitizer` gate remains
    unavailable in this environment; signing/tagging/publication remain
-   release-owner actions.
+   release-owner actions. In progress: re-run iteration 5 hit a genuine
+   regression from C4 itself — `graph/tests/heavy/concurrency_stress.sh`'s
+   RLS-worker-identity probe legitimately enables RLS and now needs the new
+   `graph.allow_rls_tables` opt-in, same as the earlier `gql.rs` pgrx test
+   fix. Fixed, live-verified standalone, committed `48b18dd`; matrix
+   relaunched as iteration 6.
 
 ## Release-takeover record (2026-07-17)
 

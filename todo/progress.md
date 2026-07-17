@@ -584,3 +584,20 @@ release/evidence/full-matrix.json evidence at 4edabea predates all of
 today's changes; the Linux sanitizer gate remains unavailable in this
 environment; and signing/tagging/publication remain release-owner actions
 this takeover does not perform.
+
+Full-matrix re-run, iteration 5 of 5 (commit 324f21d): script-contracts,
+docs-drift, docs-render, external-links, rust-static, and checked-casts all
+passed (the checked-casts baseline refresh from the prior iteration held).
+miri-mapped and rust-docs passed. legacy-release failed at the concurrency
+stress probe: graph/tests/heavy/concurrency_stress.sh deliberately enables
+RLS on graph_concurrency_nodes to prove a dynamic background build worker's
+effective role only sees its own RLS-filtered rows -- a legitimate,
+pre-existing scenario the new C4 build-time RLS gate (graph.allow_rls_tables)
+now blocks by default. This is the same "existing test needs an explicit
+opt-in" pattern already hit once for
+gql_create_node_preserves_source_table_rls; fixed the same way here, plus a
+database-level ALTER DATABASE ... SET graph.allow_rls_tables = on (mirroring
+the existing graph.sync_mode handling) since the async build worker starts a
+fresh session that does not inherit a session-level SET. Verified standalone
+(bash concurrency_stress.sh -> "Concurrency stress passed") before
+committing as 48b18dd and relaunching the full-matrix run a 6th time.
