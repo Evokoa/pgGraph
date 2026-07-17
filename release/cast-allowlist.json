@@ -2,5 +2,5 @@
   "schema_version": 1,
   "policy": "The Rust 1.96 Clippy narrowing/sign-loss diagnostic set is frozen for 1.0. New or changed diagnostics require an explicit conversion review.",
   "diagnostic_count": 172,
-  "diagnostic_sha256": "789e6060c8030e57912999422e067a243221ad96fee4fba0794bf572fbca1e73"
+  "diagnostic_sha256": "a1217e5464a2da0330f39182d69891813579fc5c8b1fb3bfaae61b144bb85b85"
 }
