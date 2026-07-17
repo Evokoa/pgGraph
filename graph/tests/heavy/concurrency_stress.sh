@@ -69,6 +69,10 @@ SELECT format(
     current_database(),
     'trigger'
 ) \gexec
+SELECT format(
+    'ALTER DATABASE %I SET graph.allow_rls_tables = off',
+    current_database()
+) \gexec
 SQL
 }
 
@@ -444,6 +448,14 @@ SELECT format(
     'manual'
 ) \gexec
 SET graph.sync_mode = 'manual';
+-- The whole point of this probe is an RLS-enabled source table, so
+-- acknowledge graph.build()'s RLS boundary gate the same way, as a database
+-- default so the dynamic worker's fresh session inherits it too.
+SELECT format(
+    'ALTER DATABASE %I SET graph.allow_rls_tables = on',
+    current_database()
+) \gexec
+SET graph.allow_rls_tables = on;
 SET ROLE :"probe_role";
 CREATE TEMP TABLE graph_role_worker_target ON COMMIT PRESERVE ROWS AS
 SELECT build_job.build_id,
