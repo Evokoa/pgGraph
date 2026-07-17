@@ -409,3 +409,21 @@ that are backward compatible with a new trailing column, but this has not
 been confirmed by an actual pgrx test run in this environment), and
 regenerating release/evidence/full-matrix.json since the SQL contract changed
 after that evidence was recorded.
+
+2026-07-17 sync-log retention design (C3) — Wrote
+todo/full-graph-engine/12-sync-log-retention-plan.md: a cross-backend
+heartbeat registry (graph._sync_watermarks, mirroring the existing
+graph._projection_generations pattern used by durable projections) so
+csr_readonly backends' applied_sync_id replay progress becomes centrally
+visible, enabling a safe prune floor for graph._sync_log. The plan specifies
+the exact hook points (refreshed_engine_status() in sql_facade/admin.rs,
+already called by graph.status()/sync_health(); the apply_pending_sync
+freshness auto-apply path), an explicit bootstrap safety rule (zero
+registered heartbeats means prune nothing, never default to pruning
+everything), new sync_health() diagnostic columns, and a full unit/pgrx/soak
+test plan. Deliberately scoped as design-only in this pass: the failure mode
+of a wrong implementation is silent sync-log data loss for a lagging
+backend, which is exactly the class of bug this review program exists to
+prevent, so it warrants its own dedicated implementation and TDD cycle
+rather than being rushed alongside the C2/O3 work already landed today.
+Implementation remains the next open item.

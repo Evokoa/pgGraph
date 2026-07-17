@@ -50,10 +50,18 @@ Still-open, verified items first:
 3. ~~**C4/C5 audit** — RLS topology boundary and tenant-scope semantics.~~
    **Done 2026-07-17** (documentation-only, no behavior change, per explicit
    decision).
-4. **C3** — `_sync_log` retention. **Scoping decision made 2026-07-17:
-   design a full cross-backend heartbeat registry** (not scoped to
-   mutable_overlay only) so `csr_readonly` backends' replay progress becomes
-   centrally visible too. Not yet implemented — this is the next open item.
+4. **C3** — `_sync_log` retention. **Design complete 2026-07-17:**
+   `todo/full-graph-engine/12-sync-log-retention-plan.md` specifies a
+   `graph._sync_watermarks` heartbeat table (mirroring the existing
+   `_projection_generations` pattern), the exact hook points
+   (`refreshed_engine_status()` in `sql_facade/admin.rs`, the
+   `apply_pending_sync` freshness path), the safe-floor algorithm with an
+   explicit bootstrap safety rule (zero heartbeats ⇒ prune nothing, never
+   default to pruning everything), new `sync_health()` diagnostics, and a
+   full test plan. **Not yet implemented** — deliberately deferred as a
+   separate implementation pass given the failure mode (silent sync-log data
+   loss) warrants its own dedicated TDD cycle rather than being rushed in the
+   same pass as the design.
 5. **Stage 2P** — fold doc 09's P1/P2 specifics into
    `todo/full-graph-engine/08-postgresql-19-property-graphs.md`; keep P2's
    LDBC + GRAPH_TABLE comparison and the PG19-GA clock.

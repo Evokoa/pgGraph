@@ -78,6 +78,7 @@ items rather than tasks in this archive.
 | [Public backlog closure](./09-public-backlog-closure.md) | One disposition and closure gate for every Roadmap and Known Issues item. |
 | [Rust type safety and pgrx boundaries](./10-rust-type-safety-pgrx-boundaries.md) | Enums, newtypes, exact values, safe mmap/FFI, and pgrx-first integration. |
 | [Schema-flexible dynamic graphs](./11-schema-flexible-dynamic-graphs.md) | Late work package for data-driven labels and JSONB properties after the current backlog is clear. |
+| [Sync-log retention plan](./12-sync-log-retention-plan.md) | Cross-backend heartbeat registry design so `graph._sync_log` can be pruned safely in `csr_readonly` mode without risking silent data loss for a lagging backend. Not yet implemented. |
 | [Progress](./progress.md) | Living status and next checkpoint. |
 
 The earlier [out-of-core build plan](../out-of-core-build-plan.md) is a useful
