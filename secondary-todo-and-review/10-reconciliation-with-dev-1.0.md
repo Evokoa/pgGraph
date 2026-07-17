@@ -99,6 +99,14 @@ Still-open, verified items first:
    `graph.allow_rls_tables` opt-in, same as the earlier `gql.rs` pgrx test
    fix. Fixed, live-verified standalone, committed `48b18dd`; matrix
    relaunched as iteration 6.
+   **Iteration 6 result: 16/17 gates pass** (only the expected
+   `postgres-sanitizer` macOS/valgrind gap fails), but two docs/tooling-only
+   commits landed on the tree mid-run so the evidence's commit stamp
+   (`48b18dd`) trails actual `HEAD` by two commits; neither touches
+   Rust/SQL so gate outcomes are unaffected, but a 7th, final iteration was
+   relaunched against a static, confirmed-clean tree at `84cba5b` for a
+   pristine single-commit evidence bundle. See `todo/progress.md`
+   2026-07-17 entries for the full blow-by-blow.
 
 ## Release-takeover record (2026-07-17)
 

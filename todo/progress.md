@@ -621,3 +621,20 @@ titled "Fix check_script_inventory.py scanning gitignored venvs"); that
 task turned out to already be running in another session by the time this
 fix landed here, so there is a small chance of a second, redundant/
 conflicting commit touching the same file from that other session.
+
+Full-matrix re-run, iteration 6, completed: **16/17 gates pass**
+(`versions.git_commit` recorded as `48b18dd`). script-contracts through
+package-install-matrix all pass, including the full PostgreSQL 14-18
+matrix (supported-majors), crash-recovery, tx-delta-crash-recovery,
+linux-runtime-resources, and pg-upgrade-matrix. The only failure is
+postgres-sanitizer, which fails closed in the same way it always has on
+this macOS workstation because valgrind is unavailable -- the expected,
+previously-documented environment gap, not a regression. Caveat: two
+docs/tooling-only commits (6370497, 84cba5b) landed on the working tree
+while this run's later Docker-based gates were still executing, so the
+evidence's commit stamp is technically one commit behind actual HEAD by
+the time it finished; neither commit touches Rust/SQL/extension code so
+gate outcomes are unaffected, but the evidence bundle doesn't correspond
+to a single clean commit. Relaunched a 7th, final iteration against a
+confirmed-clean tree at HEAD `84cba5b` with no further edits planned
+during the run, to get a pristine single-commit evidence bundle.
