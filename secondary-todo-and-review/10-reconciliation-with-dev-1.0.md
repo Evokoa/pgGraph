@@ -26,7 +26,7 @@ for the descriptions, not live register IDs.
 | C5 tenant filter-vs-isolation (KI-014) | **Re-verify** | Artifact v6 added a tenant dictionary and dense per-node tenant tokens (R3C); semantics of caller-supplied tenant scope need re-checking against the new representation |
 | O1 poison-row dead-lettering (KI-018) | Re-verify (R2/R3 job retry work may cover it) | — |
 | O2 atomic artifact+sidecar commit (KI-019) | **Probably obsolete — re-verify** | Persistence moved to a 26-section artifact v6 with generation-CAS publication and pinned generation-specific bases; the `.sync`/`.projection_mode` sidecar-window finding was against the v0.1.8 format |
-| O3 truncation signal (KI-020) | **Still open** | No `truncated`/`capped` result signal in dev `bfs.rs`/`engine.rs` |
+| O3 truncation signal (KI-020) | **Fixed 2026-07-17** | Added a trailing `capped boolean` column to `graph.traverse()`, `graph.get_neighbors()`, and `graph.traverse_search()`, true only when `max_nodes`/`max_frontier` cut expansion short. Confirmed `shortest_path()`/`weighted_shortest_path()` were already safe via `PathWorkBudget` erroring on budget exhaustion instead of returning a silent "no path". Intentional breaking SQL change; release contract regenerated. See `todo/progress.md` 2026-07-17 entry |
 | O4 mutable-overlay production caveat (KI-021) | **Superseded** | 1.0 promotes durable projections as a supported, gated surface (R3 evidence); the alpha caveat no longer applies as written |
 | O5 README_zh parity (KI-024) | **Done** | README_zh on dev is at 1.0.0 |
 | Stage 3 live mode (L1–L4) | **Largely delivered by R2/R3 — re-scope** | Bounded builds, governed external runs, generation CAS, retained serving generation, durable projection profiles all landed. Remaining from doc 09: weighted-paths-over-overlays (L3) — re-verify; auto-maintenance beyond packaged pg_cron remains a documented operational boundary (dev known-issues "External scheduling is required") |
@@ -43,16 +43,25 @@ for the descriptions, not live register IDs.
 Still-open, verified items first:
 
 1. ~~**C2** — bidirectional BFS minimal-meeting fix.~~ **Done 2026-07-17.**
-2. **O3** — truncation/`capped` signal on bounded traversal results (gates
-   benchmark publication and closes the false-"no path" hole).
-3. **C4/C5 audit** — RLS topology boundary and tenant-scope semantics against
-   dev's 1.0 surfaces; document or gate.
-4. **C3** — `_sync_log` retention (verify absence first).
+2. ~~**O3** — truncation/`capped` signal on bounded traversal results.~~
+   **Done 2026-07-17** (breaking SQL change; release contract regenerated;
+   live `cargo pgrx test` run and fresh full-matrix evidence capture still
+   owed before this can be folded into a release-gate re-run).
+3. ~~**C4/C5 audit** — RLS topology boundary and tenant-scope semantics.~~
+   **Done 2026-07-17** (documentation-only, no behavior change, per explicit
+   decision).
+4. **C3** — `_sync_log` retention. **Scoping decision made 2026-07-17:
+   design a full cross-backend heartbeat registry** (not scoped to
+   mutable_overlay only) so `csr_readonly` backends' replay progress becomes
+   centrally visible too. Not yet implemented — this is the next open item.
 5. **Stage 2P** — fold doc 09's P1/P2 specifics into
    `todo/full-graph-engine/08-postgresql-19-property-graphs.md`; keep P2's
    LDBC + GRAPH_TABLE comparison and the PG19-GA clock.
-6. Re-verification sweep for the "re-verify" rows above before scheduling any
-   of them.
+6. Re-verification sweep for the remaining "re-verify" rows above before
+   scheduling any of them.
+7. **Release-gate re-run owed**: a live `cargo pgrx test` pass and a fresh
+   `release/evidence/full-matrix.json` capture, since the O3 SQL contract
+   change post-dates the recorded full-matrix evidence at 4edabea.
 
 ## Release-takeover record (2026-07-17)
 
