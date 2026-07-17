@@ -69,6 +69,7 @@ pub(crate) enum GraphDiagnosticCode {
     OverlayLimit,
     Disabled,
     RlsTopologyBoundary,
+    SyncLogPruned,
 }
 
 impl GraphDiagnosticCode {
@@ -97,6 +98,7 @@ impl GraphDiagnosticCode {
             Self::OverlayLimit => "PG019",
             Self::Disabled => "PG020",
             Self::RlsTopologyBoundary => "PG021",
+            Self::SyncLogPruned => "PG022",
         }
     }
 }
@@ -192,6 +194,12 @@ pub enum GraphError {
 
     #[error("table {table} has row-level security enabled; graph.build() refuses it unless graph.allow_rls_tables = on")]
     RlsTopologyBoundary { table: String }, // PG021
+
+    #[error("this backend's sync replay position ({applied_sync_id}) predates a sync-log pruning pass (pruned below {pruned_before_id}); rebuild or vacuum to catch up")]
+    SyncLogPruned {
+        applied_sync_id: i64,
+        pruned_before_id: i64,
+    }, // PG022
 
     #[error("Internal error: {0}")]
     Internal(String),
@@ -302,6 +310,11 @@ impl GraphError {
             ),
             GraphError::RlsTopologyBoundary { .. } => (
                 GraphDiagnosticCode::RlsTopologyBoundary,
+                "55000",
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ),
+            GraphError::SyncLogPruned { .. } => (
+                GraphDiagnosticCode::SyncLogPruned,
                 "55000",
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             ),
@@ -423,6 +436,13 @@ impl GraphError {
                      docs/user_guide/administration-and-security.mdx#row-level-security-and-topology-reads, \
                      then set graph.allow_rls_tables = on to build over this table anyway."
                 )
+            }
+            GraphError::SyncLogPruned { .. } => {
+                "This backend went idle long enough for its sync-log watermark heartbeat to \
+                 expire, and graph.maintenance() has since pruned rows it had not replayed yet. \
+                 Incremental catch-up is no longer safe from this position; run graph.build() or \
+                 graph.vacuum() to get a fresh consistent base, then resume normal sync."
+                    .to_string()
             }
             GraphError::Internal(_) => {
                 "This is a bug. Please report it with the full error message.".to_string()

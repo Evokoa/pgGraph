@@ -232,6 +232,7 @@ graph._job_runs
 graph._sync_policies
 graph._sync_log
 graph._projection_generations
+graph._sync_watermarks
 graph._sync_buffer
 ```
 
@@ -296,6 +297,7 @@ operators to distinguish pgGraph conditions that share a standard SQLSTATE.
 | `54000` | `PG019` | Overlay limit exceeded | Commit or roll back the transaction, or raise the relevant overlay GUC |
 | `55000` | `PG020` | Extension disabled | `SET graph.enabled = on` |
 | `55000` | `PG021` | Row-level security topology boundary | Review the RLS/topology boundary, then `SET graph.allow_rls_tables = on` to acknowledge and build anyway |
+| `55000` | `PG022` | Sync replay position predates a prune | Run `graph.build()` or `graph.vacuum()` for a fresh consistent base, then resume normal sync |
 | `XX000` | `PG000` | Internal error | Report with full message and reproduction |
 
 ## Disable Query Functions

@@ -132,7 +132,8 @@ ALTER TABLE graph._graphs
     ADD COLUMN IF NOT EXISTS materialization TEXT,
     ADD COLUMN IF NOT EXISTS projection_mode TEXT,
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS sync_log_pruned_before_id BIGINT;
 
 UPDATE graph._graphs
 SET namespace = COALESCE(namespace, 'public'),
@@ -141,7 +142,8 @@ SET namespace = COALESCE(namespace, 'public'),
     materialization = COALESCE(materialization, 'shared'),
     projection_mode = COALESCE(projection_mode, 'csr_readonly'),
     created_at = COALESCE(created_at, now()),
-    updated_at = COALESCE(updated_at, now());
+    updated_at = COALESCE(updated_at, now()),
+    sync_log_pruned_before_id = COALESCE(sync_log_pruned_before_id, 0);
 
 ALTER TABLE graph._graphs
     ALTER COLUMN graph_kind SET NOT NULL,
@@ -151,7 +153,9 @@ ALTER TABLE graph._graphs
     ALTER COLUMN created_at SET DEFAULT now(),
     ALTER COLUMN created_at SET NOT NULL,
     ALTER COLUMN updated_at SET DEFAULT now(),
-    ALTER COLUMN updated_at SET NOT NULL;
+    ALTER COLUMN updated_at SET NOT NULL,
+    ALTER COLUMN sync_log_pruned_before_id SET DEFAULT 0,
+    ALTER COLUMN sync_log_pruned_before_id SET NOT NULL;
 
 DO $$
 BEGIN
@@ -194,6 +198,16 @@ BEGIN
         ALTER TABLE graph._graphs
             ADD CONSTRAINT _graphs_projection_mode_check
             CHECK (projection_mode IN ('csr_readonly', 'mutable_overlay'));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'graph._graphs'::regclass
+          AND conname = '_graphs_sync_log_pruned_before_id_check'
+    ) THEN
+        ALTER TABLE graph._graphs
+            ADD CONSTRAINT _graphs_sync_log_pruned_before_id_check
+            CHECK (sync_log_pruned_before_id >= 0);
     END IF;
 END $$;
 
@@ -869,6 +883,25 @@ CREATE INDEX IF NOT EXISTS idx_projection_generations_active
     ON graph._projection_generations (graph_id, database_oid, expires_at)
     WHERE backend_pid <> 0;
 
+-- Per-backend, per-graph replay-progress heartbeat. Backend-local
+-- applied_sync_id (csr_readonly mode) is otherwise invisible to other
+-- backends and maintenance jobs, so graph._sync_log cannot be pruned safely
+-- without it: a slower or idle backend that has not replayed a row yet
+-- would silently diverge from PostgreSQL if that row were deleted. Mirrors
+-- graph._projection_generations' heartbeat shape and lifecycle.
+CREATE TABLE IF NOT EXISTS graph._sync_watermarks (
+    graph_id         UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'::uuid,
+    backend_pid      INTEGER NOT NULL,
+    database_oid     OID NOT NULL,
+    applied_sync_id  BIGINT NOT NULL DEFAULT 0 CHECK (applied_sync_id >= 0),
+    heartbeat_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (graph_id, backend_pid, database_oid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_watermarks_active
+    ON graph._sync_watermarks (graph_id, expires_at);
+
 CREATE TABLE IF NOT EXISTS graph._sync_buffer (
     id         BIGSERIAL PRIMARY KEY,
     op         CHAR(1) NOT NULL,
@@ -903,6 +936,7 @@ SELECT pg_catalog.pg_extension_config_dump('graph._sync_policies', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_log_id_seq', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._projection_generations', '');
+SELECT pg_catalog.pg_extension_config_dump('graph._sync_watermarks', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_buffer', '');
 SELECT pg_catalog.pg_extension_config_dump('graph._sync_buffer_id_seq', '');
 
@@ -933,6 +967,7 @@ REVOKE ALL ON TABLE graph._job_runs               FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_policies          FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_log               FROM PUBLIC;
 REVOKE ALL ON TABLE graph._projection_generations FROM PUBLIC;
+REVOKE ALL ON TABLE graph._sync_watermarks        FROM PUBLIC;
 REVOKE ALL ON TABLE graph._sync_buffer            FROM PUBLIC;
 REVOKE ALL ON SEQUENCE graph._sync_log_id_seq     FROM PUBLIC;
 REVOKE ALL ON SEQUENCE graph._sync_buffer_id_seq  FROM PUBLIC;

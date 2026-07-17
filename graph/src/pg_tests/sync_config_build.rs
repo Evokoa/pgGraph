@@ -222,6 +222,233 @@ fn build_refuses_rls_enabled_edge_endpoint_table() {
     );
 }
 
+fn setup_sync_log_retention_fixture() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run("DELETE FROM graph._sync_watermarks").expect("clear stale watermarks failed");
+    Spi::run("UPDATE graph._graphs SET sync_log_pruned_before_id = 0")
+        .expect("reset prune watermark failed");
+}
+
+#[pg_test]
+fn sync_health_reports_retention_diagnostics_columns() {
+    setup_sync_log_retention_fixture();
+
+    let (floor, prune_recommended, active_backends) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT sync_log_retention_floor, sync_log_prune_recommended,
+                        active_sync_watermark_backends
+                   FROM graph.sync_health()",
+                None,
+                &[],
+            )
+            .expect("sync_health query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1).expect("floor read failed"),
+            row.get::<bool>(2)
+                .expect("prune_recommended read failed")
+                .unwrap_or(false),
+            row.get::<i32>(3)
+                .expect("active_backends read failed")
+                .unwrap_or(-1),
+        ))
+    })
+    .expect("sync_health diagnostics query failed");
+
+    // Calling sync_health() itself registers this backend's heartbeat.
+    assert!(active_backends >= 1);
+    // A fresh graph has applied everything it has seen; the floor may be
+    // Some(0) (nothing to prune yet) or None, but must never be negative.
+    assert!(floor.is_none_or(|value| value >= 0));
+    let _ = prune_recommended;
+}
+
+#[pg_test]
+fn maintenance_prunes_sync_log_when_this_backend_is_the_only_heartbeat() {
+    setup_sync_log_retention_fixture();
+
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name) VALUES ('u10', 'Ten')",
+    )
+    .expect("insert sync row failed");
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("apply_sync failed");
+    let before_prune = Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_log")
+        .expect("sync log count query failed")
+        .unwrap_or(0);
+    assert!(before_prune > 0, "fixture must have produced sync log rows");
+
+    Spi::run("SELECT * FROM graph.maintenance(concurrently := false)")
+        .expect("maintenance failed");
+
+    let after_prune = Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_log")
+        .expect("sync log count query failed")
+        .unwrap_or(-1);
+
+    assert!(
+        after_prune < before_prune,
+        "maintenance should prune applied rows when this backend is the only heartbeat: before={before_prune} after={after_prune}"
+    );
+}
+
+#[pg_test]
+fn maintenance_does_not_prune_past_a_lagging_backend_heartbeat() {
+    setup_sync_log_retention_fixture();
+
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name) VALUES ('u11', 'Eleven')",
+    )
+    .expect("insert sync row failed");
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("apply_sync failed");
+
+    // Simulate a second, lagging backend that has applied nothing yet, still
+    // within its heartbeat TTL.
+    let graph_id = Spi::get_one::<String>(
+        "SELECT graph_id::text FROM graph._graphs WHERE graph_name = 'default'",
+    )
+    .expect("graph id query failed")
+    .unwrap_or_default();
+    Spi::run_with_args(
+        "INSERT INTO graph._sync_watermarks (
+             graph_id, backend_pid, database_oid, applied_sync_id, heartbeat_at, expires_at
+         )
+         VALUES ($1::uuid, -4242, (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()),
+                 0, now(), now() + interval '5 minutes')",
+        &[graph_id.clone().into()],
+    )
+    .expect("simulate lagging backend heartbeat failed");
+
+    let before_prune = Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_log")
+        .expect("sync log count query failed")
+        .unwrap_or(0);
+
+    Spi::run("SELECT * FROM graph.maintenance(concurrently := false)")
+        .expect("maintenance failed");
+
+    let after_prune = Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_log")
+        .expect("sync log count query failed")
+        .unwrap_or(-1);
+
+    assert_eq!(
+        after_prune, before_prune,
+        "maintenance must not prune past a lagging backend's applied_sync_id=0 heartbeat"
+    );
+
+    Spi::run("DELETE FROM graph._sync_watermarks WHERE backend_pid = -4242")
+        .expect("cleanup simulated heartbeat failed");
+}
+
+#[pg_test]
+fn expired_backend_heartbeat_does_not_block_pruning() {
+    setup_sync_log_retention_fixture();
+
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name) VALUES ('u12', 'Twelve')",
+    )
+    .expect("insert sync row failed");
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("apply_sync failed");
+
+    // An expired heartbeat from a backend that never cleaned up must be
+    // excluded from the floor computation once its TTL has passed.
+    let graph_id = Spi::get_one::<String>(
+        "SELECT graph_id::text FROM graph._graphs WHERE graph_name = 'default'",
+    )
+    .expect("graph id query failed")
+    .unwrap_or_default();
+    Spi::run_with_args(
+        "INSERT INTO graph._sync_watermarks (
+             graph_id, backend_pid, database_oid, applied_sync_id, heartbeat_at, expires_at
+         )
+         VALUES ($1::uuid, -4243, (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()),
+                 0, now() - interval '1 hour', now() - interval '55 minutes')",
+        &[graph_id.into()],
+    )
+    .expect("simulate expired backend heartbeat failed");
+
+    let before_prune = Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_log")
+        .expect("sync log count query failed")
+        .unwrap_or(0);
+
+    Spi::run("SELECT * FROM graph.maintenance(concurrently := false)")
+        .expect("maintenance failed");
+
+    let after_prune = Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_log")
+        .expect("sync log count query failed")
+        .unwrap_or(-1);
+
+    assert!(
+        after_prune < before_prune,
+        "an expired heartbeat must not block pruning: before={before_prune} after={after_prune}"
+    );
+}
+
+#[pg_test]
+fn stale_replay_position_fails_closed_after_a_prune() {
+    setup_sync_log_retention_fixture();
+
+    // Capture an intermediate, definitely-positive watermark this backend
+    // fully applied, before a second row exists that also gets applied and
+    // pruned. Captured explicitly rather than derived from
+    // sync_log_pruned_before_id - 1, so this test does not depend on
+    // incidental global _sync_log sequence state from other tests sharing
+    // this backend's session.
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name) VALUES ('u13', 'Thirteen')",
+    )
+    .expect("insert first sync row failed");
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("first apply_sync failed");
+    let intermediate_applied_sync_id =
+        crate::ENGINE.with(|engine| engine.borrow().applied_sync_id);
+    assert!(
+        intermediate_applied_sync_id > 0,
+        "first apply_sync() must advance applied_sync_id past 0"
+    );
+
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name) VALUES ('u14', 'Fourteen')",
+    )
+    .expect("insert second sync row failed");
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("second apply_sync failed");
+    Spi::run("SELECT * FROM graph.maintenance(concurrently := false)")
+        .expect("maintenance failed");
+
+    let pruned_before_id = Spi::get_one::<i64>(
+        "SELECT sync_log_pruned_before_id FROM graph._graphs WHERE graph_name = 'default'",
+    )
+    .expect("prune watermark query failed")
+    .unwrap_or(0);
+    assert!(
+        pruned_before_id > intermediate_applied_sync_id,
+        "maintenance must have pruned past the intermediate watermark: pruned_before_id={pruned_before_id} intermediate={intermediate_applied_sync_id}"
+    );
+
+    // Roll this backend's own applied_sync_id back to simulate resuming
+    // after a long idle period whose heartbeat has since expired and been
+    // pruned past.
+    crate::ENGINE.with(|engine| {
+        engine
+            .borrow_mut()
+            .record_applied_sync_id(intermediate_applied_sync_id);
+    });
+
+    let denied = sql_raises("SELECT * FROM graph.apply_sync()");
+    assert!(
+        denied,
+        "apply_sync() must fail closed when applied_sync_id predates a completed prune"
+    );
+}
+
 #[pg_test]
 fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")

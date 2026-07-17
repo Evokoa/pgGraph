@@ -63,6 +63,14 @@ graph._projection_generations
   published_at timestamptz
   retained_until timestamptz
 
+graph._sync_watermarks
+  graph_id uuid
+  backend_pid integer
+  database_oid oid
+  applied_sync_id bigint
+  heartbeat_at timestamptz
+  expires_at timestamptz
+
 graph._jobs
   job_id uuid primary key
   graph_id uuid
@@ -438,6 +446,54 @@ folds:
 | Filter changes | Fresh FilterIndex |
 | Tenant membership | Fresh tenant bitmaps |
 
+## Sync-Log Retention
+
+`graph._sync_log` rows are never deleted outside of `sql_sync::prune_sync_log`
+and `sql_sync::prune_sync_log_if_safe`, called only from
+`sql_build::execute_maintenance_rebuild_with_progress` (both the foreground
+`graph.maintenance()` path and the background maintenance worker path).
+`graph.apply_sync()` never deletes rows.
+
+Backend-local `applied_sync_id` (`csr_readonly` mode's replay progress) is
+otherwise invisible outside the owning backend, so a naive
+`DELETE ... WHERE id < X` could remove a row a slower or idle backend has not
+replayed yet. `sql_sync::record_sync_watermark_heartbeat` registers each
+backend's `applied_sync_id` into `graph._sync_watermarks` (TTL
+`SYNC_WATERMARK_HEARTBEAT_TTL`, currently 300s) whenever
+`sql_facade::admin::refreshed_engine_status` runs — the shared path behind
+`graph.status()` and `graph.sync_health()` — and only when
+`current_sync_mode() == SyncMode::Trigger`, since a `manual`-mode graph's
+`applied_sync_id` never advances past 0.
+
+`sql_sync::sync_watermark_diagnostics` computes the safe floor as the minimum
+of the durable projection's own `sync_watermark` (for a persisted
+`mutable_overlay` graph) and the minimum `applied_sync_id` across all
+currently unexpired heartbeats. `compute_sync_log_retention_floor` (a pure
+function, unit- and proptest-covered independent of SPI) implements the
+bootstrap safety rule: `(None, None) => None`, never a default floor of `0`
+or any other guess. `sql_sync::prune_sync_log` deletes
+`graph._sync_log` rows with `id <= floor` (inclusive: a row exactly at the
+floor is, by construction, already applied by everyone counted in the
+computation) scoped to the selected graph's registered table oids via
+`SyncReplayContext::applicable_table_oids`, matching the same scoping
+`read_sync_log_entries_after` already uses.
+
+Every successful prune records its floor into
+`graph._graphs.sync_log_pruned_before_id` as a running maximum
+(`sql_sync::record_sync_log_prune_floor`). `apply_sync_to_high_watermark`
+checks `sql_sync::ensure_sync_replay_not_pruned(applied_sync_id)` before
+doing any work — the single shared entry point for both explicit
+`graph.apply_sync()` (via `apply_sync_internal`) and the `apply_pending_sync`
+query-freshness auto-apply path (`sql_facade::runtime::ensure_current_graph_for_query`).
+A backend whose `applied_sync_id` predates a completed prune fails closed
+with `GraphError::SyncLogPruned` (`PG022`) instead of silently replaying past
+a gap. `applied_sync_id == 0` is exempt from this check — a backend that has
+never applied anything is not blocked by a prior prune.
+
+See: `todo/full-graph-engine/12-sync-log-retention-plan.md` for the original
+design and `todo/progress.md`'s 2026-07-17 entry for the implementation
+record.
+
 ## Status Interaction
 
 Runtime status and graph validation refresh:
@@ -458,3 +514,4 @@ Runtime status and graph validation refresh:
 | Query-time hidden catch-up | Queries do not silently apply all pending durable sync rows |
 | CSR mutation | Not supported; use overlays then rebuild |
 | Cross-backend engine sync | Backend-local; persisted files and source tables coordinate state |
+| Sync-log retention | Pruned only from `graph.maintenance()`/`run_scheduled_maintenance()`, only below a floor backed by active backend heartbeats or the durable projection watermark; never by `graph.apply_sync()` |

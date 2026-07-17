@@ -114,6 +114,11 @@
       "diagnostic": "PG021",
       "sqlstate": "55000",
       "variant": "RlsTopologyBoundary"
+    },
+    {
+      "diagnostic": "PG022",
+      "sqlstate": "55000",
+      "variant": "SyncLogPruned"
     }
   ],
   "distribution": {
@@ -932,8 +937,8 @@
   "sql_schema": {
     "entity_block_count": 157,
     "function_contract_count": 155,
-    "function_contracts_sha256": "f0bef7ba25409a5d1c5e6f64893b687896de8a624a4b15ba0eb01ef232831da0",
-    "normalized_sha256": "f2140bbeb4ce5116b4096208f9417cbc06b75ea8095cca8123a5bec0e443707f"
+    "function_contracts_sha256": "62fc32cfc44fe3084f36d8516b39e9eb81088932044961645eb435939046afff",
+    "normalized_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e"
   },
   "sql_signatures": [
     {
@@ -1501,7 +1506,7 @@
       "name": "status"
     },
     {
-      "declaration": "-- graph::sql_facade::admin::sync_health CREATE FUNCTION graph.\"sync_health\"() RETURNS TABLE ( \"sync_mode\" TEXT, \"query_freshness\" TEXT, \"sync_batch_size\" INT, \"applied_sync_id\" bigint, \"max_sync_log_id\" bigint, \"pending_sync_rows\" bigint, \"disabled_trigger_count\" INT, \"edge_buffer_used\" INT, \"edge_buffer_size\" INT, \"needs_vacuum\" bool, \"needs_rebuild\" bool, \"read_only\" bool, \"read_only_reason\" TEXT, \"projection_mode\" TEXT, \"overlay_tombstone_count\" INT, \"overlay_memory_bytes\" bigint, \"compaction_recommended\" bool, \"tx_delta_dirty\" bool, \"tx_delta_added_nodes\" INT, \"tx_delta_deleted_nodes\" INT, \"tx_delta_added_edges\" INT, \"tx_delta_deleted_edges\" INT, \"tx_delta_memory_bytes\" bigint, \"apply_sync_recommended\" bool, \"maintenance_recommended\" bool, \"durable_ingest_recommended\" bool, \"durable_compaction_recommended\" bool, \"durable_gc_recommended\" bool, \"durable_repair_recommended\" bool ) STRICT LANGUAGE c;",
+      "declaration": "-- graph::sql_facade::admin::sync_health CREATE FUNCTION graph.\"sync_health\"() RETURNS TABLE ( \"sync_mode\" TEXT, \"query_freshness\" TEXT, \"sync_batch_size\" INT, \"applied_sync_id\" bigint, \"max_sync_log_id\" bigint, \"pending_sync_rows\" bigint, \"disabled_trigger_count\" INT, \"edge_buffer_used\" INT, \"edge_buffer_size\" INT, \"needs_vacuum\" bool, \"needs_rebuild\" bool, \"read_only\" bool, \"read_only_reason\" TEXT, \"projection_mode\" TEXT, \"overlay_tombstone_count\" INT, \"overlay_memory_bytes\" bigint, \"compaction_recommended\" bool, \"tx_delta_dirty\" bool, \"tx_delta_added_nodes\" INT, \"tx_delta_deleted_nodes\" INT, \"tx_delta_added_edges\" INT, \"tx_delta_deleted_edges\" INT, \"tx_delta_memory_bytes\" bigint, \"apply_sync_recommended\" bool, \"maintenance_recommended\" bool, \"durable_ingest_recommended\" bool, \"durable_compaction_recommended\" bool, \"durable_gc_recommended\" bool, \"durable_repair_recommended\" bool, \"sync_log_retention_floor\" bigint, \"sync_log_prune_recommended\" bool, \"active_sync_watermark_backends\" INT ) STRICT LANGUAGE c;",
       "name": "sync_health"
     },
     {

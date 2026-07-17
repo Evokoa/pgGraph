@@ -192,6 +192,50 @@ FROM graph.sync_health();
 | `durable_compaction_recommended` | Durable segment fanout exceeds the configured compaction threshold |
 | `durable_gc_recommended` | Manifest-declared obsolete projection files can be evaluated by GC |
 | `durable_repair_recommended` | Active projection artifacts need targeted repair or full rebuild |
+| `sync_log_retention_floor` | Computed safe floor to prune `graph._sync_log` below, or `NULL` when no active backend heartbeat or durable projection watermark makes a floor safe yet |
+| `sync_log_prune_recommended` | `true` when a floor exists and `graph._sync_log` has grown far enough past it that pruning would meaningfully shrink it |
+| `active_sync_watermark_backends` | Count of currently active (unexpired) sync-watermark heartbeats for this graph; a lagging or crashed-without-cleanup backend holding an unexpired heartbeat is the usual reason pruning is blocked |
+
+## Sync-Log Retention
+
+`graph._sync_log` durable rows accumulate as trigger-captured changes are
+written. `graph.maintenance()` and `graph.run_scheduled_maintenance()` prune
+applied rows below a safe floor as part of the existing rebuild; nothing
+prunes the log outside of maintenance, and `graph.apply_sync()` never deletes
+rows.
+
+Backend-local `applied_sync_id` (the replay progress `csr_readonly` mode
+tracks) is otherwise invisible to other backends, so pruning cannot safely
+use just the calling backend's own progress: a slower or idle backend that
+has not replayed a row yet would silently diverge from PostgreSQL if that row
+were deleted. Each backend registers a durable heartbeat of its own
+`applied_sync_id` in `graph._sync_watermarks` (a five-minute TTL, refreshed
+whenever `graph.status()` or `graph.sync_health()` runs) whenever the graph
+uses trigger sync. The safe floor for a maintenance pass is the minimum of:
+
+- the durable projection's own sync watermark, for a persisted
+  `mutable_overlay` graph;
+- the minimum `applied_sync_id` across all currently active (unexpired)
+  backend heartbeats for the graph.
+
+If neither is available — for example, a freshly built graph nobody has
+queried since, or every backend that ever touched it has gone idle past its
+heartbeat TTL — no floor is considered safe and pruning is skipped for that
+pass. The log grows a little longer on an idle graph rather than the
+alternative of guessing a floor is safe.
+
+<Callout type="info">
+A backend that goes long-lived and idle without calling `graph.status()`,
+`graph.sync_health()`, or applying sync will eventually have its heartbeat
+expire, after which pruning can proceed past its last-known watermark.
+`graph._graphs` tracks the highest floor ever pruned to
+(`sync_log_pruned_before_id`); if that backend later resumes and its own
+`applied_sync_id` predates that watermark, `graph.apply_sync()` and
+query-freshness catch-up both fail with SQLSTATE `55000` and diagnostic
+`PG022` instead of silently skipping the rows that are now gone. Run
+`graph.build()` or `graph.vacuum()` to get a fresh consistent base, then
+resume normal sync.
+</Callout>
 
 ## Scheduled Maintenance
 

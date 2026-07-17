@@ -275,5 +275,16 @@
     "date": "2026-07-17",
     "new_schema_sha256": "f2140bbeb4ce5116b4096208f9417cbc06b75ea8095cca8123a5bec0e443707f",
     "previous_schema_sha256": "f2140bbeb4ce5116b4096208f9417cbc06b75ea8095cca8123a5bec0e443707f"
+  },
+  {
+    "acknowledgement": "C3: sync-log retention (graph._sync_watermarks heartbeat registry, sync_health() diagnostics, PG022 stale-replay guard)",
+    "changed_sections": [
+      "diagnostics",
+      "sql_schema",
+      "sql_signatures"
+    ],
+    "date": "2026-07-17",
+    "new_schema_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e",
+    "previous_schema_sha256": "f2140bbeb4ce5116b4096208f9417cbc06b75ea8095cca8123a5bec0e443707f"
   }
 ]

@@ -495,3 +495,92 @@ Still not implemented: true per-row RLS-aware topology filtering (would need
 a panic-safe, carefully-reviewed temporary PostgreSQL security-context
 switch to the outer caller -- flagged as future work, not attempted here
 given the risk of getting manual user-id switching subtly wrong).
+
+2026-07-17 sync-log retention implementation (C3) — Implemented the design
+from todo/full-graph-engine/12-sync-log-retention-plan.md: graph._sync_log
+can now be pruned safely.
+
+New durable table graph._sync_watermarks (graph_id, backend_pid,
+database_oid, applied_sync_id, heartbeat_at, expires_at) mirrors the existing
+graph._projection_generations heartbeat pattern. Each backend registers its
+applied_sync_id (5-minute TTL) whenever sql_facade::admin::refreshed_engine_status
+runs -- the shared path behind graph.status()/graph.sync_health() -- but only
+when sync_mode is trigger, so manual-mode graphs never register a meaningless
+heartbeat at 0. sql_sync::compute_sync_log_retention_floor (pure, unit- and
+proptest-covered) implements the bootstrap safety rule: the floor is the
+minimum of the durable projection watermark and the minimum active-backend
+heartbeat, and is None -- pruning skipped entirely -- when neither is
+available. sql_sync::prune_sync_log_if_safe is called only from
+graph.maintenance()'s rebuild path (both foreground and the background
+worker), never from graph.apply_sync().
+
+Closed a real gap found while writing this changelog entry, before any code
+existed to back it: a resumed backend whose applied_sync_id predates a
+completed prune would otherwise silently skip the missing rows and diverge,
+exactly the failure this feature exists to prevent. Added
+graph._graphs.sync_log_pruned_before_id (a running maximum recorded on every
+successful prune) and sql_sync::ensure_sync_replay_not_pruned, checked once
+in apply_sync_to_high_watermark -- the single shared entry point for both
+explicit graph.apply_sync() and the apply_pending_sync query-freshness
+auto-apply path. A stale backend now fails closed with SQLSTATE 55000 and
+new diagnostic PG022 instead of silently diverging.
+
+Found and fixed a real off-by-one during live pgrx testing: the initial
+prune query used `id < floor` (exclusive), but `floor` is itself an
+already-applied, already-safe-to-delete id, so a graph with exactly one
+fully-applied sync row could never have that row pruned. Fixed to `id <=
+floor` (inclusive), consistent with the pruned_before_id/replay-guard
+semantics. Also found and fixed two flawed test simulations during the same
+live run: a "stale backend" test that accidentally used applied_sync_id=0
+(the same value the guard intentionally exempts for genuinely fresh
+backends) and a robustness issue where a test relied on incidental global
+_sync_log sequence state instead of capturing its own intermediate
+watermark. Neither was a production bug, but both would have been false
+negatives (tests that pass without proving what they claim) in a suite that
+was never actually executed. This is exactly why the earlier compile-only
+verification pattern used for O3/C4/C5 was insufficient on its own; running
+every new test live against a real PostgreSQL backend, not just compiling
+it, is what actually validates this class of feature.
+
+Added graph.sync_health() diagnostic columns sync_log_retention_floor,
+sync_log_prune_recommended, active_sync_watermark_backends (breaking SQL
+signature change; release contract regenerated). Added
+graph._sync_watermarks to the revoked-PUBLIC-access internal catalog list
+and pg_extension_config_dump (matching graph._projection_generations).
+Updated docs/contributor_guide/sync-internals.mdx (new table, a full
+Sync-Log Retention section with exact function/field references, a Current
+Boundaries row), docs/user_guide/sync-and-maintenance.mdx (sync_health()
+column table, a full Sync-Log Retention section, a fail-closed callout
+naming PG022), docs/user_guide/api-reference.mdx and the auto-generated
+docs/user_guide/sql-signatures.mdx, and docs/user_guide/administration-and-security.mdx
+(internal catalog table, PG022 error-code row).
+
+Test coverage: 8 new native unit tests (pure floor/recommendation logic,
+including a proptest asserting the floor never exceeds either available
+input) and 6 new pgrx integration tests, all run live against a real
+PostgreSQL 17 backend: sync_health() reports the new columns;
+graph.maintenance() prunes when this backend is the only heartbeat; does NOT
+prune past a simulated lagging backend's heartbeat (the core safety
+property this feature exists for); an expired heartbeat does not block
+pruning; a stale backend's apply_sync() fails closed with PG022 after a
+completed prune. Fixed an existing hardcoded SQL-signature contract test
+(sync_health_exposes_operator_contract_field_names in
+pg_tests/maintenance_admin.rs) for the 3 new columns.
+
+Full live pg17 pgrx suite (--features "pg17 development", matching the
+release-gate convention): 1156 passed, 0 failed, 1 ignored (up from 1143
+before this entry). cargo fmt --check and cargo clippy --all-targets -- -D
+warnings are clean. Regenerated the release contract a third time this
+session for the new GUC-free but SQL-signature-changing sync_health()
+columns and the new PG022 diagnostic.
+
+C3 is now implemented, not just designed. The four items from the
+2026-07-17 secondary review takeover (C2, O3, C4/C5, C3) are all complete
+and live-verified. Remaining before this can be folded into a fresh release
+determination: a full multi-version PostgreSQL 14-18 matrix re-run and the
+non-pgrx release-gate checks (docs-render, external-links, crash-recovery,
+pg-upgrade-matrix, package-install-matrix), since the previously recorded
+release/evidence/full-matrix.json evidence at 4edabea predates all of
+today's changes; the Linux sanitizer gate remains unavailable in this
+environment; and signing/tagging/publication remain release-owner actions
+this takeover does not perform.

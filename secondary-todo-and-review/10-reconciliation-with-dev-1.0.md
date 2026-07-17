@@ -67,26 +67,33 @@ Still-open, verified items first:
    require a panic-safe temporary PostgreSQL security-context switch to the
    outer caller, judged too risky to hand-roll in this pass. See
    `todo/progress.md` 2026-07-17 entry.
-4. **C3** — `_sync_log` retention. **Design complete 2026-07-17:**
-   `todo/full-graph-engine/12-sync-log-retention-plan.md` specifies a
-   `graph._sync_watermarks` heartbeat table (mirroring the existing
-   `_projection_generations` pattern), the exact hook points
-   (`refreshed_engine_status()` in `sql_facade/admin.rs`, the
-   `apply_pending_sync` freshness path), the safe-floor algorithm with an
-   explicit bootstrap safety rule (zero heartbeats ⇒ prune nothing, never
-   default to pruning everything), new `sync_health()` diagnostics, and a
-   full test plan. **Not yet implemented** — deliberately deferred as a
-   separate implementation pass given the failure mode (silent sync-log data
-   loss) warrants its own dedicated TDD cycle rather than being rushed in the
-   same pass as the design.
+4. ~~**C3** — `_sync_log` retention.~~ **Implemented and live-verified
+   2026-07-17**, following the design in
+   `todo/full-graph-engine/12-sync-log-retention-plan.md`:
+   `graph._sync_watermarks` heartbeat table, the safe-floor computation (pure,
+   unit- and proptest-covered), pruning wired into `graph.maintenance()` only,
+   3 new `sync_health()` diagnostic columns (breaking SQL change; release
+   contract regenerated), and — a gap found and closed during implementation
+   that the original design didn't specify — a `graph._graphs.sync_log_pruned_before_id`
+   watermark plus a new `PG022` guard so a resumed stale backend fails closed
+   instead of silently replaying past pruned rows. 6 new pgrx tests (found
+   and fixed a real off-by-one and two flawed test simulations by actually
+   running them live, not just compiling). Full pg17 pgrx suite:
+   **1156/1156**. See `todo/progress.md` 2026-07-17 entry.
 5. **Stage 2P** — fold doc 09's P1/P2 specifics into
    `todo/full-graph-engine/08-postgresql-19-property-graphs.md`; keep P2's
    LDBC + GRAPH_TABLE comparison and the PG19-GA clock.
 6. Re-verification sweep for the remaining "re-verify" rows above before
    scheduling any of them.
-7. **Release-gate re-run owed**: a live `cargo pgrx test` pass and a fresh
-   `release/evidence/full-matrix.json` capture, since the O3 SQL contract
-   change post-dates the recorded full-matrix evidence at 4edabea.
+7. **Release-gate re-run owed**: the live pg17 `cargo pgrx test` pass is now
+   done (1156/1156, covering O3/C4/C5/C3 together), but the full-matrix
+   evidence at `release/evidence/full-matrix.json` (recorded at `4edabea`)
+   still predates all four changes and has not been regenerated. Remaining:
+   the multi-version PostgreSQL 14–18 matrix and the non-pgrx gates
+   (`docs-render`, `external-links`, `crash-recovery`, `pg-upgrade-matrix`,
+   `package-install-matrix`); the Linux `postgres-sanitizer` gate remains
+   unavailable in this environment; signing/tagging/publication remain
+   release-owner actions.
 
 ## Release-takeover record (2026-07-17)
 

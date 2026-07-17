@@ -1659,6 +1659,9 @@ fn sync_health() -> TableIterator<
         name!(durable_compaction_recommended, bool),
         name!(durable_gc_recommended, bool),
         name!(durable_repair_recommended, bool),
+        name!(sync_log_retention_floor, Option<i64>),
+        name!(sync_log_prune_recommended, bool),
+        name!(active_sync_watermark_backends, i32),
     ),
 > {
     with_panic_boundary("sync_health()", || {
@@ -1667,6 +1670,11 @@ fn sync_health() -> TableIterator<
         let edge_buffer_size = config::EDGE_BUFFER_SIZE.get();
         let decision = scheduled_maintenance_decision((&s).into());
         let projection = projection_metadata_status_snapshot().unwrap_or_else(|err| err.report());
+        let watermarks = crate::sql_sync::sync_watermark_diagnostics(
+            projection.manifest_watermark,
+            max_sync_log_id,
+        )
+        .unwrap_or_else(|err| err.report());
 
         TableIterator::new(vec![(
             s.sync_mode,
@@ -1698,6 +1706,9 @@ fn sync_health() -> TableIterator<
             projection.compaction_recommended,
             projection.gc_recommended,
             projection.repair_recommended,
+            watermarks.retention_floor,
+            watermarks.prune_recommended,
+            watermarks.active_backends,
         )])
     })
 }
@@ -1780,12 +1791,19 @@ fn run_scheduled_maintenance() -> TableIterator<
 
 fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> {
     crate::projection::manifest::expire_stale_generation_heartbeats()?;
+    crate::sql_sync::expire_stale_sync_watermarks()?;
     let graph = catalog::selected_or_default_graph_metadata()?;
     super::runtime::clear_loaded_graph_if_mismatched(&graph.graph_id);
     let disabled_trigger_count = disabled_graph_trigger_count()?;
     let catalog_state = current_catalog_state();
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
     let pending = pending_sync_rows(applied_sync_id)?;
+    // Only register a watermark heartbeat when the graph actually
+    // participates in trigger sync; a manual-mode graph's applied_sync_id
+    // never advances past 0, and a heartbeat there would be meaningless.
+    if crate::sql_sync::current_sync_mode()? == config::SyncMode::Trigger {
+        crate::sql_sync::record_sync_watermark_heartbeat(applied_sync_id)?;
+    }
 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();

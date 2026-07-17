@@ -734,7 +734,10 @@ RETURNS TABLE (
   durable_ingest_recommended boolean,
   durable_compaction_recommended boolean,
   durable_gc_recommended boolean,
-  durable_repair_recommended boolean
+  durable_repair_recommended boolean,
+  sync_log_retention_floor bigint,
+  sync_log_prune_recommended boolean,
+  active_sync_watermark_backends int
 )
 ```
 
@@ -745,7 +748,10 @@ decide when overlay/read-only/rebuild state should be folded back into the base
 graph. The `durable_*_recommended` columns mirror `graph.projection_status()`
 for projection ingestion, compaction, GC, and persisted repair pressure without
 decoding projection artifacts. Use `graph.projection_status()` when you need
-full artifact validation.
+full artifact validation. `sync_log_retention_floor`,
+`sync_log_prune_recommended`, and `active_sync_watermark_backends` report
+`graph._sync_log` pruning state; see
+[Sync-Log Retention](/user_guide/sync-and-maintenance#sync-log-retention).
 
 ### `graph.reset()`
 

@@ -544,6 +544,11 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
         let mut eng = e.borrow_mut();
         eng.mark_vacuum_complete(Some(pgrx::datetime::transaction_timestamp()));
     });
+    // Best-effort: a pruning failure should not fail an otherwise-successful
+    // maintenance rebuild. sync_log_retention_floor's bootstrap safety rule
+    // (no evidence => no prune) means a failed or skipped prune never risks
+    // data loss, only leaves the log a little larger until the next pass.
+    let _ = crate::sql_sync::prune_sync_log_if_safe();
     Ok(MaintenanceExecutionResult {
         sync_rows_applied: after.saturating_sub(previous_applied_sync_id),
         nodes_after: build.nodes_loaded,

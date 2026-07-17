@@ -499,6 +499,8 @@ pub(crate) fn apply_sync_to_high_watermark(
     target_sync_id: i64,
 ) -> safety::GraphResult<SyncApplyStats> {
     ensure_engine_loaded_for_apply_sync()?;
+    let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
+    ensure_sync_replay_not_pruned(applied_sync_id)?;
     if should_apply_sync_via_durable_projection() {
         return apply_sync_via_durable_projection(target_sync_id);
     }
@@ -3319,6 +3321,275 @@ pub(crate) fn graph_has_tenanted_tables() -> safety::GraphResult<bool> {
     Ok(tables.iter().any(|table| table.tenant_column.is_some()))
 }
 
+// ─── Sync-log retention ──────────────────────────────────────────────
+//
+// `graph._sync_log` durable rows are never pruned by any other path in this
+// file. In `csr_readonly` mode, `applied_sync_id` is backend-local heap
+// state (`Engine::applied_sync_id`) that no other backend or maintenance job
+// can see, so it is not by itself a safe floor to prune below: a slower or
+// idle backend that has not replayed a row yet would silently diverge from
+// PostgreSQL if that row were deleted out from under it. `_sync_watermarks`
+// closes that gap with a per-backend, per-graph heartbeat, mirroring the
+// existing `_projection_generations` pattern
+// (`projection/manifest.rs::record_active_generation_heartbeat`).
+//
+// See: `todo/full-graph-engine/12-sync-log-retention-plan.md`
+
+/// How long a registered sync watermark heartbeat remains valid without a
+/// refresh. Matches `projection::manifest::DEFAULT_ACTIVE_GENERATION_TTL`;
+/// kept as an independent constant because sync-log retention and
+/// projection-generation retention are different failure domains that may
+/// need different staleness windows in the future.
+const SYNC_WATERMARK_HEARTBEAT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Prune is only worth recommending once the log has grown meaningfully
+/// past what has been safely applied everywhere; a handful of pending rows
+/// is normal steady-state, not something an operator needs to act on.
+const SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS: i64 = 10_000;
+
+/// Registers or refreshes this backend's `applied_sync_id` heartbeat for the
+/// selected graph. Safe to call whenever `applied_sync_id` is read for
+/// diagnostics (`graph.status()`, `graph.sync_health()`) or advances via
+/// sync replay; the heartbeat only needs to be current enough that
+/// `sync_log_retention_floor` does not treat this backend as gone.
+pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::GraphResult<()> {
+    let graph_id = selected_or_default_graph_metadata()?.graph_id;
+    let ttl_micros = i64::try_from(SYNC_WATERMARK_HEARTBEAT_TTL.as_micros()).map_err(|_| {
+        safety::GraphError::Internal("sync watermark heartbeat TTL is too large".to_string())
+    })?;
+    Spi::run_with_args(
+        "INSERT INTO graph._sync_watermarks (
+             graph_id, backend_pid, database_oid, applied_sync_id, heartbeat_at, expires_at
+         )
+         VALUES (
+             $3::uuid, pg_backend_pid(),
+             (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()),
+             $1, now(), now() + ($2::double precision * interval '1 microsecond')
+         )
+         ON CONFLICT (graph_id, backend_pid, database_oid)
+         DO UPDATE SET
+             applied_sync_id = EXCLUDED.applied_sync_id,
+             heartbeat_at = EXCLUDED.heartbeat_at,
+             expires_at = EXCLUDED.expires_at",
+        &[applied_sync_id.into(), ttl_micros.into(), graph_id.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync watermark heartbeat update failed: {err}"))
+    })
+}
+
+/// Deletes expired sync-watermark heartbeats for the selected graph. A
+/// backend that disconnected without cleanup stops blocking pruning once
+/// its heartbeat's `expires_at` has passed.
+pub(crate) fn expire_stale_sync_watermarks() -> safety::GraphResult<()> {
+    let graph_id = selected_or_default_graph_metadata()?.graph_id;
+    Spi::run_with_args(
+        "DELETE FROM graph._sync_watermarks
+         WHERE graph_id = $1::uuid
+           AND expires_at <= now()",
+        &[graph_id.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync watermark heartbeat expiration failed: {err}"))
+    })
+}
+
+/// Scheduler/diagnostic-facing summary of sync-log retention state for the
+/// selected graph.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SyncWatermarkDiagnostics {
+    /// Safe floor to prune `graph._sync_log` below, or `None` when no
+    /// evidence (durable projection watermark or an active backend
+    /// heartbeat) makes any floor safe yet.
+    pub(crate) retention_floor: Option<i64>,
+    /// `true` when a floor exists and the log has grown far enough past it
+    /// that pruning would meaningfully shrink `graph._sync_log`.
+    pub(crate) prune_recommended: bool,
+    /// Count of currently active (unexpired) sync-watermark heartbeats for
+    /// this graph, so operators can see whether a lagging backend is
+    /// blocking pruning.
+    pub(crate) active_backends: i32,
+}
+
+/// Pure bootstrap-safety-rule decision: the safe prune floor is the minimum
+/// of whichever of `durable_watermark`/`heartbeat_floor` are available, or
+/// `None` when neither is — pruning must never proceed on the strength of
+/// one input being merely absent, only on positive evidence from at least
+/// one.
+fn compute_sync_log_retention_floor(
+    durable_watermark: Option<i64>,
+    heartbeat_floor: Option<i64>,
+) -> Option<i64> {
+    match (durable_watermark, heartbeat_floor) {
+        (None, None) => None,
+        (Some(floor), None) | (None, Some(floor)) => Some(floor),
+        (Some(durable), Some(heartbeat)) => Some(durable.min(heartbeat)),
+    }
+}
+
+/// Pure decision: whether a computed floor represents enough prunable
+/// backlog to be worth an operator's attention.
+fn is_sync_log_prune_recommended(retention_floor: Option<i64>, max_sync_log_id: i64) -> bool {
+    retention_floor.is_some_and(|floor| {
+        floor > 0
+            && max_sync_log_id.saturating_sub(floor) > SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS
+    })
+}
+
+/// Computes the sync-log retention floor and related diagnostics for the
+/// selected graph.
+///
+/// `durable_watermark` is the durable projection manifest's sync watermark
+/// (already computed by callers such as `graph.sync_health()` from
+/// `projection::status`), or `None` when the graph has no durable
+/// mutable-overlay projection. Bootstrap safety rule: if neither the durable
+/// watermark nor any active backend heartbeat is available, the floor is
+/// `None` and pruning must not proceed — the log growing a little longer on
+/// an idle, never-queried graph is preferable to guessing a floor is safe.
+pub(crate) fn sync_watermark_diagnostics(
+    durable_watermark: Option<i64>,
+    max_sync_log_id: i64,
+) -> safety::GraphResult<SyncWatermarkDiagnostics> {
+    let graph_id = selected_or_default_graph_metadata()?.graph_id;
+    let (heartbeat_floor, active_backends) = Spi::connect(|client| {
+        let result = client.select(
+            "SELECT min(applied_sync_id), count(*)::int
+             FROM graph._sync_watermarks
+             WHERE graph_id = $1::uuid
+               AND expires_at > now()",
+            None,
+            &[graph_id.into()],
+        )?;
+        let row = result.first();
+        Ok::<_, pgrx::spi::SpiError>((row.get::<i64>(1)?, row.get::<i32>(2)?.unwrap_or(0)))
+    })
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync watermark diagnostics query failed: {err}"))
+    })?;
+
+    let retention_floor = compute_sync_log_retention_floor(durable_watermark, heartbeat_floor);
+    let prune_recommended = is_sync_log_prune_recommended(retention_floor, max_sync_log_id);
+
+    Ok(SyncWatermarkDiagnostics {
+        retention_floor,
+        prune_recommended,
+        active_backends,
+    })
+}
+
+/// Deletes `graph._sync_log` rows below the given floor, scoped to the
+/// selected graph's registered tables. Returns the number of rows removed.
+/// A `None` or non-positive floor is a no-op: callers must only pass a
+/// floor produced by `sync_watermark_diagnostics`, which already applies
+/// the bootstrap safety rule.
+///
+/// Records the floor into `graph._graphs.sync_log_pruned_before_id` (as a
+/// running maximum) whenever rows are actually removed, so a backend that
+/// resumes after its own watermark heartbeat expired can be detected by
+/// `ensure_sync_replay_not_pruned` and fails closed instead of silently
+/// skipping the gap.
+pub(crate) fn prune_sync_log(floor: Option<i64>) -> safety::GraphResult<i64> {
+    let Some(floor) = floor else {
+        return Ok(0);
+    };
+    if floor <= 0 {
+        return Ok(0);
+    }
+    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    if applicable_table_oids.is_empty() {
+        return Ok(0);
+    }
+    // `floor` is an already-applied id (everyone counted in its computation
+    // has applied up to and including it), so it is itself safe to delete:
+    // the comparison is inclusive, not exclusive.
+    let removed = Spi::get_one_with_args::<i64>(
+        "WITH deleted AS (
+             DELETE FROM graph._sync_log
+             WHERE table_oid::oid::integer = ANY($1::int4[])
+               AND id <= $2
+             RETURNING 1
+         )
+         SELECT count(*)::bigint FROM deleted",
+        &[applicable_table_oids.into(), floor.into()],
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("sync log prune failed: {err}")))?
+    .ok_or_else(|| safety::GraphError::Internal("sync log prune count was null".to_string()))?;
+    if removed > 0 {
+        record_sync_log_prune_floor(floor)?;
+    }
+    Ok(removed)
+}
+
+/// Records `floor` as a new lower bound on how far `graph._sync_log` has
+/// been pruned for the selected graph, as a running maximum (never moves
+/// backwards).
+fn record_sync_log_prune_floor(floor: i64) -> safety::GraphResult<()> {
+    let graph_id = selected_or_default_graph_metadata()?.graph_id;
+    Spi::run_with_args(
+        "UPDATE graph._graphs
+         SET sync_log_pruned_before_id = GREATEST(sync_log_pruned_before_id, $2),
+             updated_at = now()
+         WHERE graph_id = $1::uuid",
+        &[graph_id.into(), floor.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync log prune watermark update failed: {err}"))
+    })
+}
+
+/// Returns the highest floor ever successfully pruned to for the selected
+/// graph, or `0` if `graph._sync_log` has never been pruned for it.
+fn sync_log_pruned_before_id() -> safety::GraphResult<i64> {
+    let graph_id = selected_or_default_graph_metadata()?.graph_id;
+    Spi::get_one_with_args::<i64>(
+        "SELECT sync_log_pruned_before_id
+         FROM graph._graphs
+         WHERE graph_id = $1::uuid",
+        &[graph_id.into()],
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync log prune watermark read failed: {err}"))
+    })
+    .map(|value| value.unwrap_or(0))
+}
+
+/// Fails closed when `applied_sync_id` predates a completed sync-log prune:
+/// replaying from this position would silently skip rows that have since
+/// been deleted, exactly the divergence sync-log retention exists to
+/// prevent. A fresh backend (`applied_sync_id == 0` that has never applied
+/// anything) is not blocked by this check on its first build/load.
+pub(crate) fn ensure_sync_replay_not_pruned(applied_sync_id: i64) -> safety::GraphResult<()> {
+    let pruned_before_id = sync_log_pruned_before_id()?;
+    if applied_sync_id > 0 && applied_sync_id < pruned_before_id {
+        return Err(safety::GraphError::SyncLogPruned {
+            applied_sync_id,
+            pruned_before_id,
+        });
+    }
+    Ok(())
+}
+
+/// Resolves the durable projection watermark (when one exists), computes the
+/// safe sync-log retention floor, and prunes `graph._sync_log` below it.
+/// Returns the number of rows removed. Intended for `graph.maintenance()`
+/// and `graph.run_scheduled_maintenance()`, which already fold accumulated
+/// sync/overlay state into a clean base; this is not called from
+/// `graph.apply_sync()`, which is the interactive, non-destructive path.
+pub(crate) fn prune_sync_log_if_safe() -> safety::GraphResult<i64> {
+    expire_stale_sync_watermarks()?;
+    let artifact = crate::persistence::graph_file_path_uncreated()?;
+    let root = crate::persistence::projection_manifest_root(&artifact);
+    let projection = crate::projection::status::collect_projection_metadata_status(
+        &root,
+        max_sync_log_id()?,
+        crate::projection::manifest::active_generation_count()?,
+        config::compaction_threshold(),
+    )?;
+    let diagnostics =
+        sync_watermark_diagnostics(projection.manifest_watermark, max_sync_log_id()?)?;
+    prune_sync_log(diagnostics.retention_floor)
+}
+
 pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> {
     let Some(raw) = raw else {
         return Vec::new();
@@ -3339,13 +3610,15 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::{
-        guard_standalone_endpoint_lifecycle, intern_sync_relationship_identity, parse_sync_op,
+        compute_sync_log_retention_floor, guard_standalone_endpoint_lifecycle,
+        intern_sync_relationship_identity, is_sync_log_prune_recommended, parse_sync_op,
         parse_sync_properties, projected_vec_capacity, required_sync_i64, required_sync_string,
         resize_sync_preflight_memory, resolve_unique_endpoint, sync_context_bound_from_counts,
         sync_normalization_memory_upper_bound, tenant_change_from_entry,
         validate_sync_input_row_sizes, ParsedSyncRows, PreparedProjectionEntry,
         ProjectionNodePlanner, SyncInputRowSize, SyncLogEntry, SyncOp, SyncReplayContext,
         TenantChange, SYNC_CONTEXT_BYTES_PER_CATALOG_BYTE, SYNC_CONTEXT_FIXED_BYTES_PER_ROW,
+        SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS,
     };
     use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredEdge, RegisteredTable};
     use crate::engine::Engine;
@@ -3368,6 +3641,85 @@ mod tests {
 
         assert!(matches!(err, GraphError::Internal(_)));
         assert!(err.to_string().contains("unsupported operation 'X'"));
+    }
+
+    #[test]
+    fn retention_floor_is_none_with_no_evidence() {
+        assert_eq!(compute_sync_log_retention_floor(None, None), None);
+    }
+
+    #[test]
+    fn retention_floor_uses_whichever_single_input_is_available() {
+        assert_eq!(compute_sync_log_retention_floor(Some(500), None), Some(500));
+        assert_eq!(compute_sync_log_retention_floor(None, Some(300)), Some(300));
+    }
+
+    #[test]
+    fn retention_floor_prefers_the_lower_of_both_inputs() {
+        assert_eq!(
+            compute_sync_log_retention_floor(Some(900), Some(400)),
+            Some(400)
+        );
+        assert_eq!(
+            compute_sync_log_retention_floor(Some(400), Some(900)),
+            Some(400)
+        );
+        assert_eq!(
+            compute_sync_log_retention_floor(Some(500), Some(500)),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn prune_not_recommended_without_a_floor() {
+        assert!(!is_sync_log_prune_recommended(None, 1_000_000));
+    }
+
+    #[test]
+    fn prune_not_recommended_below_threshold() {
+        let floor = Some(100);
+        let max_id = 100 + SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS;
+        assert!(!is_sync_log_prune_recommended(floor, max_id));
+    }
+
+    #[test]
+    fn prune_recommended_once_backlog_exceeds_threshold() {
+        let floor = Some(100);
+        let max_id = 100 + SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS + 1;
+        assert!(is_sync_log_prune_recommended(floor, max_id));
+    }
+
+    #[test]
+    fn prune_not_recommended_for_a_zero_floor() {
+        // A floor of exactly 0 means "prune everything up to but not
+        // including row 0", which is a no-op; do not recommend it even if
+        // max_sync_log_id happens to be huge.
+        assert!(!is_sync_log_prune_recommended(Some(0), 1_000_000));
+    }
+
+    proptest! {
+        /// The computed floor must never exceed either available input: a
+        /// prune must never be recommended, or ever executed, past what
+        /// either the durable projection or the slowest active backend has
+        /// actually confirmed as applied.
+        #[test]
+        fn retention_floor_never_exceeds_either_available_input(
+            durable in proptest::option::of(0i64..1_000_000),
+            heartbeat in proptest::option::of(0i64..1_000_000),
+        ) {
+            let floor = compute_sync_log_retention_floor(durable, heartbeat);
+            if let Some(floor) = floor {
+                if let Some(durable) = durable {
+                    prop_assert!(floor <= durable);
+                }
+                if let Some(heartbeat) = heartbeat {
+                    prop_assert!(floor <= heartbeat);
+                }
+            } else {
+                // A None floor is only valid when there was no evidence at all.
+                prop_assert!(durable.is_none() && heartbeat.is_none());
+            }
+        }
     }
 
     #[test]
