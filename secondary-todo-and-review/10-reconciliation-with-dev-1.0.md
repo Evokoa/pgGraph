@@ -105,8 +105,16 @@ Still-open, verified items first:
    (`48b18dd`) trails actual `HEAD` by two commits; neither touches
    Rust/SQL so gate outcomes are unaffected, but a 7th, final iteration was
    relaunched against a static, confirmed-clean tree at `84cba5b` for a
-   pristine single-commit evidence bundle. See `todo/progress.md`
-   2026-07-17 entries for the full blow-by-blow.
+   pristine single-commit evidence bundle.
+   **Iteration 7 failed** at `legacy-release`'s playground gate: a
+   pre-existing, non-regression race between the sandbox container's
+   periodic scheduled-maintenance worker and `graph.build()`'s advisory
+   build lock (PG006), which `sandbox/common/run_benchmarks.py` already
+   retries around but `playground_release_gate.py` did not. Root-caused
+   and live-verified against the real advisory lock (not just read from
+   source); fixed with the same retry precedent, committed `d150c64`. An
+   8th full-matrix iteration is owed but not yet relaunched. See
+   `todo/progress.md` 2026-07-17 entries for the full blow-by-blow.
 
 ## Release-takeover record (2026-07-17)
 

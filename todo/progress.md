@@ -638,3 +638,48 @@ gate outcomes are unaffected, but the evidence bundle doesn't correspond
 to a single clean commit. Relaunched a 7th, final iteration against a
 confirmed-clean tree at HEAD `84cba5b` with no further edits planned
 during the run, to get a pristine single-commit evidence bundle.
+
+Iteration 7 failed at `legacy-release`'s playground gate: every one of the
+~38 playground queries reported "no summary produced". Root-caused, not a
+regression from today's C2/O3/C4/C5/C3 changes: the Docker sandbox
+container runs a periodic scheduled-maintenance worker that can transiently
+hold the same per-graph build advisory lock `graph.build()` needs
+(`acquire_build_lock()` in `sql_build.rs`, via `pg_try_advisory_xact_lock`,
+diagnostic PG006). `sandbox/common/run_benchmarks.py` already retries
+around this exact collision (`GRAPH_BUSY_DIAGNOSTIC` /
+`build_graph_with_retry`), but `graph/tests/heavy/playground_release_gate.py`
+had no equivalent -- it runs its whole setup+queries script as one psql
+invocation, and any single "ERROR:" line anywhere in stderr makes its
+`run_psql` helper raise, which `main()` catches by discarding every
+already-parsed result (`actual = {}`), turning one transient PG006 into a
+100%-failure report. Fixed by wrapping the combined-script `run_psql` call
+in a retry loop mirroring the existing `run_benchmarks.py` precedent
+(commit `d150c64`).
+
+Verified live against the running `pggraph-sandbox` container rather than
+just by inspection: computed the exact `pg_try_advisory_xact_lock`
+class/key `acquire_build_lock()` uses (`graph_build_lock_object_id`'s
+FNV-1a hash of the default graph's UUID) and held that exact lock in one
+session -- confirmed a plain `graph.build()` in another session fails in
+~0.6s with PG006, matching the production mechanism exactly; separately
+raced a genuine `graph.build(concurrently := true)` against a synchronous
+`graph.build()` and confirmed the loser fails with the identical PG006;
+confirmed the new retry wrapper detects PG006 and retries with the
+expected 1s/2s/3s/4s backoff. Note: this live testing itself generated
+significant load on the shared sandbox container (multiple overlapping
+builds, a couple of client-side-timed-out-but-still-server-side-running
+backends that needed manual `pg_terminate_backend` cleanup) -- container
+was confirmed idle and reset before moving on; this was test-harness noise
+from manual reproduction, not a defect in the fix.
+
+Status after this fix: five real, independent release-gate/tooling bugs
+found and fixed this session (concurrency_stress.sh RLS opt-in,
+check_script_inventory.py gitignore handling, check_public_docs.py
+import, two check-*.mjs URL-decoding scripts, and now this PG006 retry
+gap), on top of the four substantive engine fixes (C2/O3/C4/C5/C3). An
+8th full-matrix iteration is still owed to get one clean, complete
+evidence bundle reflecting all of today's commits -- not yet relaunched,
+since the host was busy with manual live-reproduction testing when this
+entry was written. postgres-sanitizer remains an expected, unfixable-here
+environment gap; signing/tagging/publishing remain release-owner actions
+out of scope for this takeover.
