@@ -706,3 +706,33 @@ existing fragility (not fixed here, out of scope for a one-off
 environmental blip): this gate's lack of an isolated disposable cluster
 means it can spuriously fail if the host's ambient default-socket Postgres
 is touched by anything outside the release-gate run.
+
+Iteration 9 reached much further (past read-latency, supported-majors,
+linux-runtime-resources, pg-upgrade-matrix) before failing inside
+`package-install-matrix`'s `source_archive_smoke.sh` playground gate --
+the exact same "no summary produced" cascade as iteration 7, but this
+time in a *different* place: the very first `graph.build()` succeeded
+cleanly, and the PG006 collisions hit later, at the
+`SAME_SESSION_SETUP_LABELS` mid-script rebuilds (Apply Sync, Scheduled
+Maintenance, Vacuum Graph, Maintenance) -- proving the scheduled-
+maintenance contention isn't a one-time startup blip but can recur
+throughout a gate's run, exactly the scenario the retry fix was meant to
+cover. Except the retry never fired: found a real bug in the `d150c64`
+fix itself. `run_psql`'s `stop_on_error=False` branch (the only branch
+`summarize_catalog_session` actually calls) raises a RuntimeError with a
+*hardcoded generic message*, not the captured stderr -- so
+`run_psql_with_busy_retry`'s `GRAPH_BUSY_DIAGNOSTIC not in str(error)`
+check could never match, making the retry dead code on the one path that
+matters. My original live verification of `d150c64` had exercised
+`stop_on_error=True` (a different branch that does propagate real
+stderr), which is why it looked correct at the time but didn't actually
+cover the real call site. Fixed by including the actual stderr in the
+raised message (commit `04338c3`); re-verified live against the real
+advisory lock this time using `stop_on_error=False` specifically --
+confirmed the retry now fires with correct backoff and succeeds once the
+lock clears. Relaunched a 10th full-matrix iteration.
+
+Lesson for future verification in this codebase: when live-testing a
+fix by calling an internal helper directly, match every keyword argument
+the *actual* call site uses, not just a convenient default -- a passing
+manual test through the wrong branch of a function proved nothing here.
