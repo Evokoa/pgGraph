@@ -683,3 +683,26 @@ since the host was busy with manual live-reproduction testing when this
 entry was written. postgres-sanitizer remains an expected, unfixable-here
 environment gap; signing/tagging/publishing remain release-owner actions
 out of scope for this takeover.
+
+Iteration 8, relaunched at HEAD `0e097ac`: `legacy-release` passed cleanly
+(the PG006 retry fix held, including its own playground gate), as did
+`crash-recovery` and `tx-delta-crash-recovery`. Failed at `read-latency`:
+`psql`/`pgbench` got "FATAL: the database system is shutting down" then
+"is starting up" against the plain default local socket
+(`/tmp/.s.PGSQL.5432`). Root-caused as environmental, not a pgGraph bug:
+`read_latency_under_sync.sh` is the one heavy gate that does not provision
+its own isolated disposable cluster via `scripts/with_disposable_postgres.sh`
+(unlike crash-recovery/tx-delta-crash-recovery) -- it connects to whatever
+ambient local PostgreSQL is already listening on the default socket, which
+on this workstation is a Homebrew-managed `postgresql@17` service
+(`/opt/homebrew/opt/postgresql@17`, PID observed to (re)start at the exact
+moment this gate failed). That service is unrelated to pgGraph's own test
+infra and not something this takeover's changes touch; confirmed it was
+back up and stable within seconds, and a standalone re-run of
+`read_latency_under_sync.sh` immediately afterward passed cleanly with no
+code changes. Relaunched a 9th full-matrix iteration at the same HEAD
+`0e097ac` (no new commit needed for this one). Worth flagging as an
+existing fragility (not fixed here, out of scope for a one-off
+environmental blip): this gate's lack of an isolated disposable cluster
+means it can spuriously fail if the host's ambient default-socket Postgres
+is touched by anything outside the release-gate run.
