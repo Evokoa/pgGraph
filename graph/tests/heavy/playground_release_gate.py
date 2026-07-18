@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 
@@ -18,6 +19,14 @@ sys.path.insert(0, str(PLAYGROUND_DIR))
 
 from catalog import query_catalog  # noqa: E402
 
+
+# The container also runs a periodic scheduled-maintenance worker, which can
+# transiently hold the same build lock graph.build() needs. sandbox/common/
+# run_benchmarks.py already retries around this exact collision; mirror that
+# here since the whole setup script (which starts with the idempotent
+# graph.reset()) is safe to retry wholesale.
+GRAPH_BUSY_DIAGNOSTIC = "pgGraph diagnostic: PG006"
+GRAPH_BUILD_WAIT_SECONDS = 600
 
 EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "Status + Catalog": [
@@ -186,6 +195,33 @@ def run_psql(
     return proc.stdout.strip()
 
 
+def run_psql_with_busy_retry(
+    dsn: str,
+    sql: str,
+    timeout: int,
+    *,
+    stop_on_error: bool,
+) -> str:
+    """Run a psql script, retrying the whole thing on transient PG006 contention."""
+    deadline = time.monotonic() + GRAPH_BUILD_WAIT_SECONDS
+    attempt = 0
+    while True:
+        try:
+            return run_psql(dsn, sql, timeout, stop_on_error=stop_on_error)
+        except RuntimeError as error:
+            if GRAPH_BUSY_DIAGNOSTIC not in str(error) or time.monotonic() >= deadline:
+                raise
+            delay = min(5, 1 + attempt)
+            print(
+                f"playground release gate hit transient scheduled-maintenance "
+                f"contention; retrying in {delay}s...",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
+            attempt += 1
+
+
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -267,7 +303,7 @@ FROM __pggraph_numbered;
     # Each wrapped query is an independent autocommit statement. Keep running
     # after SQL errors so one release-gate invocation reports every failing
     # playground example; missing summaries below still make the gate fail.
-    raw = run_psql(dsn, "\n".join(chunks), timeout, stop_on_error=False)
+    raw = run_psql_with_busy_retry(dsn, "\n".join(chunks), timeout, stop_on_error=False)
     actual: dict[str, list[dict[str, object]]] = {}
     for line in raw.splitlines():
         if not line:
