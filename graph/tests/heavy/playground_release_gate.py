@@ -190,7 +190,8 @@ def run_psql(
         print(proc.stderr, end="", file=sys.stderr)
         if any("ERROR:" in line for line in proc.stderr.splitlines()):
             raise RuntimeError(
-                "one or more playground SQL statements failed; the complete psql error stream is shown above"
+                "one or more playground SQL statements failed; the complete psql "
+                f"error stream is shown above\n{proc.stderr}"
             )
     return proc.stdout.strip()
 
