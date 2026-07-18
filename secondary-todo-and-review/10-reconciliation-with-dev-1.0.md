@@ -85,7 +85,7 @@ Still-open, verified items first:
    LDBC + GRAPH_TABLE comparison and the PG19-GA clock.
 6. Re-verification sweep for the remaining "re-verify" rows above before
    scheduling any of them.
-7. **Release-gate re-run owed**: the live pg17 `cargo pgrx test` pass is now
+7. **Release-gate re-run — DONE.** The live pg17 `cargo pgrx test` pass is now
    done (1156/1156, covering O3/C4/C5/C3 together), but the full-matrix
    evidence at `release/evidence/full-matrix.json` (recorded at `4edabea`)
    still predates all four changes and has not been regenerated. Remaining:
@@ -112,9 +112,25 @@ Still-open, verified items first:
    build lock (PG006), which `sandbox/common/run_benchmarks.py` already
    retries around but `playground_release_gate.py` did not. Root-caused
    and live-verified against the real advisory lock (not just read from
-   source); fixed with the same retry precedent, committed `d150c64`. An
-   8th full-matrix iteration is owed but not yet relaunched. See
-   `todo/progress.md` 2026-07-17 entries for the full blow-by-blow.
+   source); fixed with the same retry precedent, committed `d150c64`.
+   **Iteration 8 failed** at `read-latency` -- a genuine environmental blip
+   (an unrelated ambient Homebrew Postgres service restarting), confirmed
+   not a pgGraph bug by an immediate clean standalone re-run; no fix
+   needed. **Iteration 9** reached `package-install-matrix` before hitting
+   the same PG006 cascade again, this time proving `d150c64`'s retry
+   itself had a bug: `run_psql`'s `stop_on_error=False` branch (the only
+   branch the playground gate actually uses) raised a generic hardcoded
+   message instead of the real stderr, so the retry's PG006 substring
+   check could never match. My original verification of `d150c64` had
+   exercised the *other* branch (`stop_on_error=True`), so it looked
+   correct without actually covering the real call path. Fixed by
+   including the real stderr in the raised message (commit `04338c3`),
+   re-verified live using the correct branch this time.
+   **Iteration 10: clean pass, 16/17 gates, `git_commit = ff96701`, no
+   commits mid-run.** Every gate passes except the expected
+   `postgres-sanitizer` macOS/no-valgrind gap. This closes out the
+   release-gate re-validation owed since the takeover. See
+   `todo/progress.md` 2026-07-17/18 entries for the full blow-by-blow.
 
 ## Release-takeover record (2026-07-17)
 

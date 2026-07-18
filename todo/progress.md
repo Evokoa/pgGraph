@@ -736,3 +736,29 @@ Lesson for future verification in this codebase: when live-testing a
 fix by calling an internal helper directly, match every keyword argument
 the *actual* call site uses, not just a convenient default -- a passing
 manual test through the wrong branch of a function proved nothing here.
+
+**Iteration 10: clean pass, 16/17 gates, `versions.git_commit = ff96701`**
+(`release/evidence/full-matrix.json`, completed 2026-07-18T03:36:06Z, no
+commits landed mid-run). Every gate from `script-contracts` through
+`package-install-matrix` passed, including the full PostgreSQL 14-18
+matrix, `crash-recovery`, `tx-delta-crash-recovery`, `read-latency`,
+`linux-runtime-resources`, `pg-upgrade-matrix`, and -- the one this whole
+loop was chasing -- `package-install-matrix`'s `source_archive_smoke.sh`
+playground gate, which now completes cleanly through both csr and mutable
+modes with no PG006 cascade. The only failure is `postgres-sanitizer`
+("valgrind is required for the PostgreSQL-process sanitizer gate"), the
+same expected macOS environment gap this repo has documented since before
+this takeover began.
+
+This closes out the release-gate re-validation owed since the 2026-07-17
+takeover. Total tally for today: four substantive engine fixes (C2 BFS
+minimality, O3 traversal truncation signal, C4/C5 RLS build gate + tenant
+scope enforcement, C3 sync-log retention), all live pgrx-tested
+(1156/1156) and documented; seven independent release-tooling/test bugs
+found and fixed (concurrency_stress.sh RLS opt-in, check_script_inventory.py
+gitignore handling, check_public_docs.py import, two check-*.mjs
+URL-decoding scripts, the cast-diagnostic baseline refresh, and the
+two-part PG006 playground-gate retry fix); one environmental non-bug
+correctly identified and not "fixed" (the ambient-Postgres read-latency
+blip). Remaining, explicitly out of scope for this takeover: signing,
+tagging, and publishing 1.0 -- release-owner actions.
