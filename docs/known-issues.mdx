@@ -61,6 +61,40 @@ the full boundary and mitigation guidance.
 
 ## Query Compatibility
 
+### GQL writes accept one parameter object per call
+
+The 1.0 mapped GQL write profile creates, merges, updates, or deletes one node
+or relationship per `graph.gql()` call. It does not expose a multi-row mutation
+or `UNWIND` write surface. An adapter that calls `graph.gql()` once per item
+therefore pays repeated client round trips and parse, bind, ACL, and SPI work.
+
+For bulk ingestion in 1.0, write registered PostgreSQL source tables directly
+with set-based DML, commit, and apply sync once:
+
+```sql
+BEGIN;
+
+INSERT INTO app.entities (id, name)
+VALUES
+  ('n-1', 'Ada'),
+  ('n-2', 'Grace')
+ON CONFLICT (id) DO UPDATE
+SET name = EXCLUDED.name;
+
+COMMIT;
+
+SELECT * FROM graph.apply_sync();
+```
+
+PostgreSQL remains authoritative for constraints, triggers, ACLs, RLS, MVCC,
+and partition routing. In persisted `mutable_overlay` mode, committed edge
+changes become durable projection segments after sync without a full graph
+rebuild. Applications with the default pending-sync query freshness may let the
+next topology read catch up instead of calling `graph.apply_sync()` explicitly.
+
+A bounded, set-based graph mutation API is the proposed
+[1.1 roadmap focus](/roadmap#proposed-1-1-focus-bounded-batched-mutations).
+
 ### GQL and openCypher support are bounded profiles
 
 `graph.gql()` implements the generated [GQL 1.0 profile](/user_guide/gql-profile),

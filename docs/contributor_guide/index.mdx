@@ -96,10 +96,11 @@ invalidate typed views.
 3. [Memory Model](/contributor_guide/memory-model) for owned vs mmap-backed vs per-backend heap state.
 4. [Persistence Format](/contributor_guide/persistence-format) before changing `.pggraph` layout or loader validation.
 5. [Safety And Security](/contributor_guide/safety-security) before touching unsafe code, ACLs, SQLSTATEs, or dynamic SQL.
-6. [SQL Tests](/contributor_guide/sql-tests) before adding or changing SQL-facing behavior.
-7. [Scripts](/contributor_guide/scripts) before using or changing repository automation.
-8. [Benchmarking](/contributor_guide/benchmarking) before interpreting benchmark or release-evidence timing.
-9. [Testing And Release](/contributor_guide/testing-release) before preparing a PR or release gate.
+6. [Batched Graph Mutations](/contributor_guide/batched-graph-mutations) before implementing the proposed 1.1 batch-write surface.
+7. [SQL Tests](/contributor_guide/sql-tests) before adding or changing SQL-facing behavior.
+8. [Scripts](/contributor_guide/scripts) before using or changing repository automation.
+9. [Benchmarking](/contributor_guide/benchmarking) before interpreting benchmark or release-evidence timing.
+10. [Testing And Release](/contributor_guide/testing-release) before preparing a PR or release gate.
 
 <Callout type="warning">
 This crate already enables `missing_docs`, `broken_intra_doc_links`,

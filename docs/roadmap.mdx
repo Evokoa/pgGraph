@@ -50,10 +50,43 @@ The 1.0 release program established these permanent release outcomes:
 Future 1.x work does not weaken these outcomes. New query syntax, analytics
 breadth, and architecture expansion remain post-1.0 directions.
 
+## Proposed 1.1 Focus: Bounded Batched Mutations
+
+The first proposed 1.1 delivery track is a set-based batch-write surface for
+ingestion adapters. The 1.0 projection can already apply committed source
+changes incrementally; this work removes the need for adapters to call
+`graph.gql()` once per node or relationship.
+
+The contract-review target is `gql_batch(query, param_sets, hydrate)` in the
+`graph` schema.
+One static mapped write is parsed and bound once, while a JSONB array of
+parameter objects becomes a typed input relation that preserves input order.
+PostgreSQL then performs set-based DML per mapping group and operation phase. A
+Rust loop that still issues one SPI statement per input row does not satisfy
+the delivery track.
+
+| 1.1 gate | Required outcome |
+|---|---|
+| Ingestion operations | Batched mapped node and relationship `CREATE`/`MERGE` ship first; relationship `MERGE` uses registered source identity, while `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE` reuse the same batch relation and resource contract. |
+| PostgreSQL authority | Constraints, triggers, ACLs, RLS, MVCC, partition routing, tenant scope, and registered source identity match the single-row write behavior. |
+| Atomicity and concurrency | A batch is all-or-nothing, savepoint-safe, bounded before DML, duplicate identities are deterministic, affected rows lock in stable order, and replayed `MERGE` batches are idempotent. |
+| Projection freshness | Transaction-local results and committed trigger sync become visible without a per-batch full rebuild; durable mutable-overlay segments, reload, and compaction are covered. |
+| Resource governance | Batch input rows and bytes, transaction deltas, returned rows, memory, work, cancellation, and elapsed time are bounded with stable diagnostics. |
+| Performance evidence | Source DML statement count scales with mapping groups and operation phases rather than rows, with a published comparison against repeated `graph.gql()` calls. |
+| Release evidence | Parser/binder, SQL integration, ACL/RLS, transaction, concurrency, sync/reload, fuzz/property, documentation, packaging, and PostgreSQL 14–18 matrix evidence are complete. |
+
+The detailed design, delivery slices, and acceptance criteria are in
+[Batched Graph Mutations](/contributor_guide/batched-graph-mutations).
+This work does not make pgGraph an embedding/vector index; vector maintenance
+remains outside the pgGraph graph-projection boundary. For vector and embedding
+indexing, search, and hybrid retrieval inside PostgreSQL, see
+[pgContext](https://github.com/evokoa/pgcontext).
+
 ## Post-1.0 Direction
 
 | Area | Direction |
 |---|---|
+| Batched writes | Add bounded, set-based mapped mutations for ingestion adapters without weakening PostgreSQL source-of-truth, security, transaction, or resource contracts. |
 | ISO GQL | Add applicable ISO/IEC 39075:2024 features in vertical slices, each with parser, binder, executor, conformance, ACL/RLS, transaction, resource, and documentation evidence. |
 | Costed streaming runtime | Develop canonical typed binding-table IR, statistics, cost/resource planning, alternative physical plans, streaming operators, and spillable blocking work. |
 | PostgreSQL 19 and SQL/PGQ | Consume native property-graph definitions without duplicate registration and maintain a separate SQL/PGQ conformance matrix for `GRAPH_TABLE`. |

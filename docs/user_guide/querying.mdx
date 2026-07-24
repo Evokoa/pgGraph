@@ -511,6 +511,13 @@ subtransactions: releasing a savepoint retains its transaction-local graph
 overlay, while rolling it back restores the overlay visible before that
 savepoint. Multi-row graph writes and creating new
 PostgreSQL schema objects from GQL are not part of this release's GQL subset.
+For bulk ingestion in 1.0, use set-based DML against the registered PostgreSQL
+source tables, commit, and call `graph.apply_sync()` once. This avoids
+application-level one-row call loops while retaining PostgreSQL constraints,
+triggers, ACLs, RLS, MVCC, and incremental mutable-overlay sync. See the
+[current limitation and workaround](/known-issues#gql-writes-accept-one-parameter-object-per-call)
+and the proposed
+[batched mutation design](/contributor_guide/batched-graph-mutations).
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
 planning stages without executing the query. Node-only matches constrained by

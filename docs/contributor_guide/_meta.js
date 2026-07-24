@@ -9,6 +9,7 @@ export default {
   'traversal-search-paths': 'Traversal And Paths',
   'persistence-format': 'Persistence Format',
   'sync-internals': 'Sync Internals',
+  'batched-graph-mutations': 'Batched Graph Mutations',
   'safety-security': 'Safety And Security',
   'sql-tests': 'SQL Tests',
   scripts: 'Scripts',
