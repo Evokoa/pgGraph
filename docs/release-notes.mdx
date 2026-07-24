@@ -26,9 +26,8 @@ so these sections remain explicit.
 ## v1.0.0: Production Contract
 
 `v1.0.0` freezes pgGraph's first production contract for PostgreSQL 14 through
-18. The source tree is release-ready but unpublished. PostgreSQL source tables
-remain authoritative, while graph artifacts and mutable projection generations
-remain validated, rebuildable derived state.
+18. PostgreSQL source tables remain authoritative, while graph artifacts and
+mutable projection generations remain validated, rebuildable derived state.
 
 ### Supported Surface
 
@@ -80,14 +79,14 @@ package; source rows are authoritative, and derived graph state is rebuilt.
 
 ### Release Validation And Distribution
 
-Release readiness requires retained RC/full-matrix evidence, clean PostgreSQL
+The release was validated with retained RC/full-matrix evidence, clean PostgreSQL
 14–18 source-package installation, the signed alpha migration fixture,
 backup/restore and crash recovery, concurrency and transaction gates, resource
 measurements, sanitizers, fuzz/Miri checks, and packaged quickstart and
 playground examples. The source bundle contains one commit-bound PGXN ZIP,
 SPDX 2.3 SBOM, provenance, manifest, and complete SHA-256 set. Publication must
-consume those exact prepared bytes after signed-tag verification; it must not
-rebuild the archive.
+consumed those exact prepared bytes after signed-tag verification without
+rebuilding the archive.
 
 ## v0.1.8: Named Graphs And Production Release Hardening
 

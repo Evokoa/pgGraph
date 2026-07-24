@@ -23,10 +23,9 @@ or from WSL2/Git Bash on Windows. They are not native PowerShell or Command
 Prompt scripts.
 
 <Callout type="info">
-  The `1.0.0` source is release-ready but unpublished. The repository quickstart
-  builds the reviewed source locally. After publication, Docker tags cover PostgreSQL
-  14 through 18; tags without a PostgreSQL major use PostgreSQL 17. pgGraph
-  supports PostgreSQL 14 through 18.
+  pgGraph `1.0.0` Docker release images are published for PostgreSQL 14 through
+  18; tags without a PostgreSQL major use PostgreSQL 17. pgGraph supports
+  PostgreSQL 14 through 18.
   PostgreSQL 13 has reached upstream EOL and is only best-effort through the
   legacy pgrx feature. The PostgreSQL major version of the extension package
   must match the target server. See
@@ -71,8 +70,8 @@ Use `setup` when you want an empty scratch database with pgGraph installed. Use
 
 | Path | Use when | Start here |
 |---|---|---|
-| Pre-built Docker image | After 1.0.0 publication, you want the fastest start without building from source | [Installation](/user_guide/installation#pre-built-docker-image) |
-| PGXN | After 1.0.0 publication, you want the verified source bundle through `pgxn-client` | [Installation](/user_guide/installation#pgxn-source-install-after-publication) |
+| Pre-built Docker image | You want the fastest start without building from source | [Installation](/user_guide/installation#pre-built-docker-image) |
+| PGXN | You want the verified 1.0.0 source bundle through `pgxn-client` | [Installation](/user_guide/installation#pgxn-source-install) |
 | Quickstart script | You want the fastest local trial | `scripts/quickstart.sh` |
 | Docker Compose scratch database | You want a disposable pgGraph database and will run SQL yourself | `docker compose up --build -d` |
 | Streamlit playground | You want a browser SQL inspector with a real dataset | [Playground](/user_guide/playground) |

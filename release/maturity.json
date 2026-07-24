@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "state": "release_ready",
-  "published_version": "0.1.8",
-  "candidate_version": "1.0.0",
-  "production_version": null,
+  "state": "published",
+  "published_version": "1.0.0",
+  "candidate_version": null,
+  "production_version": "1.0.0",
   "promotion_gate": "docs/contributor_guide/release-gate-checklist.mdx"
 }

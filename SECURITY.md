@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-The active pre-1.0 branch is the only supported security target.
+The current 1.0.x release line is the supported security target.
 
 | Version | Supported |
 |---|---|
-| `main` / pre-1.0 | Yes |
-| Older unreleased commits | No |
+| `1.0.x` | Yes |
+| `0.x` and unreleased commits | No |
 
 ## Reporting A Vulnerability
 
