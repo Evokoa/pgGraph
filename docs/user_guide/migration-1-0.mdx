@@ -1,9 +1,8 @@
 # pgGraph 1.0 Migration Guide
 
-This guide covers the supported transition from the final 0.1.x alpha line to
-pgGraph 1.0. PostgreSQL source tables remain authoritative. Alpha graph
-catalogs and projection artifacts are derived state and are not an in-place
-1.0 compatibility promise.
+Upgrading from the final 0.1.x alpha release to pgGraph 1.0 preserves your
+PostgreSQL tables but requires a clean pgGraph installation and a graph
+rebuild. Do not reuse alpha catalogs or graph files.
 
 ## Before The Maintenance Window
 
@@ -95,15 +94,6 @@ search, traversal, path, GQL, ACL/RLS, and tenant-scoped queries. Confirm:
 - backup, maintenance scheduling, monitoring, and recovery procedures point to
   the new installation.
 
-The release fixture at `release/fixtures/alpha-to-v1.0/` is bound to the
-annotated, SSH-signature-bearing `v0.1.8` producer tag and an immutable SHA-256
-manifest. Trusted-signer verification is a release-infrastructure policy; the
-repository gate checks the tag object, signature presence, producer commit, and
-fixture checksums. The clean source-archive
-gate installs that alpha package, drops the alpha extension without dropping
-the source table, installs 1.0, reapplies registration, and verifies the source
-checksum and rebuilt graph.
-
 ## Roll Back
 
 Do not install an alpha binary over 1.0 catalogs or artifacts. If validation
@@ -111,9 +101,9 @@ fails, stop application traffic, restore `pggraph-before-1.0.dump` into a clean
 database with the matching alpha package, and direct traffic back only after
 the old source and graph checks pass.
 
-If the failure is limited to derived 1.0 projection state, keep the source
-tables and 1.0 catalog, correct the cause, and run `graph.build()` again. A
-failed generation publication retains the last validated generation; use
+If only pgGraph's persisted index is affected, keep the source tables and 1.0
+catalog, correct the cause, and run `graph.build()` again. If publishing a
+replacement index fails, pgGraph keeps the last valid index. Use
 `graph.projection_status()` and `graph.projection_repair()` only as documented.
 
 ## Later 1.x Upgrades

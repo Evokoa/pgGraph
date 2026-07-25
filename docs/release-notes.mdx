@@ -12,7 +12,7 @@ so these sections remain explicit.
 
 | Release history |
 |---|
-| [v1.0.0](#v1-0-0-production-contract) |
+| [v1.0.0](#v1-0-0-pggraph-production-release) |
 | [v0.1.8](#v0-1-8-named-graphs-and-production-release-hardening) |
 | [v0.1.7](#v0-1-7-durable-projection-operations) |
 | [v0.1.6](#v0-1-6-gql-path-patterns-and-release-reliability) |
@@ -23,12 +23,11 @@ so these sections remain explicit.
 | [v0.1.1](#v0-1-1-alpha-hardening-critical-paths) |
 | [v0.1.0](#v0-1-0-initial-alpha) |
 
-## v1.0.0: Production Contract
+## v1.0.0: pgGraph Production Release
 
-`v1.0.0` freezes pgGraph's first production contract for PostgreSQL 14 through
-18. The source tree is release-ready but unpublished. PostgreSQL source tables
-remain authoritative, while graph artifacts and mutable projection generations
-remain validated, rebuildable derived state.
+`v1.0.0` is pgGraph's first production release and supports PostgreSQL 14
+through 18. PostgreSQL tables remain the source of truth, and pgGraph's graph
+indexes and projections can be validated and rebuilt from them.
 
 ### Supported Surface
 
@@ -80,14 +79,14 @@ package; source rows are authoritative, and derived graph state is rebuilt.
 
 ### Release Validation And Distribution
 
-Release readiness requires retained RC/full-matrix evidence, clean PostgreSQL
+The release was validated with retained RC/full-matrix evidence, clean PostgreSQL
 14–18 source-package installation, the signed alpha migration fixture,
 backup/restore and crash recovery, concurrency and transaction gates, resource
 measurements, sanitizers, fuzz/Miri checks, and packaged quickstart and
 playground examples. The source bundle contains one commit-bound PGXN ZIP,
 SPDX 2.3 SBOM, provenance, manifest, and complete SHA-256 set. Publication must
-consume those exact prepared bytes after signed-tag verification; it must not
-rebuild the archive.
+consumed those exact prepared bytes after signed-tag verification without
+rebuilding the archive.
 
 ## v0.1.8: Named Graphs And Production Release Hardening
 

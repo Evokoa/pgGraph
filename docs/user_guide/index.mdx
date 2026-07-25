@@ -11,7 +11,7 @@ bounded traversal, path reconstruction, persistence, and maintenance behind the
 <Callout type="info">
 The current public API is PostgreSQL SQL functions in the `graph` schema,
 including a documented GQL-compatible subset through `graph.gql()`. SQL/PGQ is
-not part of the PostgreSQL 14–18 contract.
+not supported by pgGraph 1.0 on PostgreSQL 14 through 18.
 </Callout>
 
 ## What It Does For You
@@ -99,37 +99,35 @@ registered graph definition
       |
       | graph.build()
       v
-validated derived projection
+graph index
       |
       | graph.persist_on_build = true
       v
-generation artifacts under PostgreSQL-managed storage
+persisted graph files in PostgreSQL-managed storage
       |
       | graph.auto_load = true
       v
 bounded SQL and GQL results
 ```
 
-Within that graph-specific artifact root, `main.pggraph` is the logical
-compatibility path. Current persisted builds publish immutable generation base
-files and select one through `projection-current.json` plus its checksummed
-manifest. Loaders follow that selected generation, while stores without
-projection metadata can still use the compatibility path.
+When persistence is enabled, pgGraph stores the index in PostgreSQL-managed
+storage so later backends can load it without rebuilding. See
+[Build And Persistence](/user_guide/build-and-persistence) for file layout,
+validation, and compatibility details.
 
-For day-to-day SQL use, that is the whole model: authoritative source tables,
-a registered graph definition, a rebuildable derived projection, and ordinary
-SQL results. Implementation details are documented in the
+For day-to-day SQL use, that is the whole model: PostgreSQL source tables, a
+registered graph definition, a rebuildable graph index, and ordinary SQL
+results. Implementation details are documented in the
 [Contributor Architecture](/contributor_guide/architecture).
 
 ```mermaid
 flowchart TD
-  A["Source tables"] --> B["graph catalog"]
+  A["Source tables"] --> B["Registered graph"]
   B --> C["graph.build()"]
-  C --> D["Active Engine"]
-  D --> E["SQL queries"]
-  D --> F[".pggraph artifact"]
-  F --> G["mmap auto-load"]
-  G --> E
+  C --> D["Graph index"]
+  D --> E["SQL and GQL queries"]
+  D --> F["Persisted graph files"]
+  F --> D
 ```
 
 ## Recommended Reading Order

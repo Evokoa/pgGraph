@@ -18,7 +18,7 @@ for the descriptions, not live register IDs.
 
 | Doc 09 slice | Status on dev | Evidence |
 |---|---|---|
-| S0 automated PR CI (KI-017) | **Done** | `.github/workflows/ci.yml` exists (R6) |
+| S0 automated PR CI (KI-017) | **Removed** | Release gates run locally; the self-hosted GitHub Actions workflow was removed. |
 | C1 ingest/manifest publication race (KI-012) | **Fixed, different mechanism** | Manifest publish uses `create_new` (O_EXCL) no-overwrite CAS; test `projection_manifest_stale_publisher_loses_compare_and_swap` (`projection/manifest.rs`). The process-local mutex remains as a fast-path guard, no longer the only protection. Verify-only item: confirm loser-retry behavior surfaces to `apply_sync()` callers |
 | C2 bidirectional BFS minimality (KI-015) | **Fixed 2026-07-17** | `path_finder.rs` now tracks per-node hop depth in `ParentStep` and fully scans each BFS level before selecting the minimum-combined-distance meeting node, instead of breaking on the first candidate found. Regression: `bidirectional_bfs_selects_minimal_combined_distance_meeting_node` (deterministic) + `bidirectional_bfs_matches_single_direction_bfs` (differential proptest, 20k cases). See `todo/progress.md` 2026-07-17 entry |
 | C3 `_sync_log` retention (KI-016) | **Likely still open — re-verify** | No pruning path found on dev (`DELETE FROM graph._sync_log` absent). R3 "bounded storage" covered snapshot/watermark and compaction crash-safety; log retention was not located |

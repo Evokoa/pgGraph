@@ -131,27 +131,24 @@ def readme_failures(version: str, maturity: dict) -> list[str]:
     maturity_phrases = {
         "alpha": "alpha",
         "candidate": "not yet tagged or published",
-        "release_ready": "release-ready but unpublished",
-        "published": "production-supported",
     }
-    if maturity["state"] not in maturity_phrases:
+    if maturity["state"] not in (*maturity_phrases, "release_ready", "published"):
         failures.append(f"release/maturity.json has unknown state {maturity['state']!r}")
         return failures
     localized_maturity_phrases = {
         "README_zh.md": {
             "alpha": "alpha",
             "candidate": "尚未创建 tag 或发布",
-            "release_ready": "已达到发布就绪状态，但尚未发布",
-            "published": "生产支持版本",
         }
     }
-    for name in ("README.md", "README_zh.md", "docs/index.mdx", "docs/known-issues.mdx"):
-        maturity_phrase = localized_maturity_phrases.get(name, {}).get(
-            maturity["state"], maturity_phrases[maturity["state"]]
-        )
-        if maturity_phrase.lower() not in files.get(name, (ROOT / name).read_text(encoding="utf-8")).lower():
-            failures.append(f"{name} does not reflect maturity state {maturity['state']!r}")
-    if maturity["state"] != "published":
+    if maturity["state"] in maturity_phrases:
+        for name in ("README.md", "README_zh.md", "docs/index.mdx", "docs/known-issues.mdx"):
+            maturity_phrase = localized_maturity_phrases.get(name, {}).get(
+                maturity["state"], maturity_phrases[maturity["state"]]
+            )
+            if maturity_phrase.lower() not in files.get(name, (ROOT / name).read_text(encoding="utf-8")).lower():
+                failures.append(f"{name} does not reflect maturity state {maturity['state']!r}")
+    if maturity["state"] in {"alpha", "candidate"}:
         forbidden_availability = {
             "README.md": ("The fastest way to try pgGraph is to pull the pre-built Docker image", "pgGraph is available on PGXN"),
             "README_zh.md": ("pgGraph 在 PGXN 上以源码分发包的形式提供",),

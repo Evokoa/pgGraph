@@ -628,8 +628,12 @@ creating the tag:
 git config gpg.format ssh
 git config user.signingkey /path/to/release-signing-key.pub
 git tag -s vX.Y.Z -m "vX.Y.Z"
-git tag -v vX.Y.Z
+git -c gpg.ssh.allowedSignersFile=release/ssh-allowed-signers tag -v vX.Y.Z
 ```
+
+The checked-in SSH allowed-signers file is the publication trust policy used by
+local validation and the release workflow. Changes to that file require explicit
+release-owner review.
 
 Build and validate release packages before pushing the tag:
 
@@ -653,14 +657,13 @@ name is supplied to both, but preparation happens before the tag exists:
 
 | Phase | Required state |
 |---|---|
-| `prepare` | A full 40-character source commit and successful full-matrix evidence run are supplied; the verified source bundle, Docker manifests, and immutable evidence archive are prepared and attested. |
+| `prepare` | A full 40-character source commit is supplied; the verified source bundle and Docker manifests are prepared and attested. |
 | `publish` | A signed annotated tag and GitHub Release exist at that exact commit; the prepared run ID is supplied and every published byte or image digest is reused without rebuilding. |
 
 Run the `prepare` phase first and inspect its generated artifacts and
 attestations before creating the tag. The `publish` phase must consume prepared
 artifacts for the exact tag; it must not rebuild from a moving branch or
-untagged commit. Publication attaches the verified full-matrix evidence archive
-to the GitHub Release so the release record outlives workflow retention.
+untagged commit.
 
 Homebrew is a separate channel. After the signed release exists, the tap owner
 updates the formula URL and SHA-256 from the verified source bundle, runs

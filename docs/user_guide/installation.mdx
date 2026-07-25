@@ -6,10 +6,8 @@ officially supports PostgreSQL 14 through 18 and defaults to `pg17`. A legacy
 still exposes it, but PostgreSQL 13 has reached upstream EOL and is not part of
 the release support matrix.
 
-<Callout type="warning">
-The pgGraph 1.0.0 source tree is release-ready but unpublished. Build from the
-reviewed source commit until signed PGXN and GHCR artifacts and the matching
-Homebrew formula are announced.
+<Callout type="info">
+Official pgGraph 1.0.0 packages support PostgreSQL 14 through 18.
 </Callout>
 
 ## Source Build Requirements
@@ -31,13 +29,10 @@ Install with the PostgreSQL major that matches the target server. A `pg17`
 build should not be installed into a PostgreSQL 16 server.
 </Callout>
 
-## Homebrew Install After Publication
+## Homebrew Install
 
-After 1.0.0 publication, the
-[Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) provides the
-PostgreSQL 17 convenience formula. Before installing, verify that its version
-and checksum match the signed release bundle; until then, the tap may still
-resolve to the alpha line.
+The [Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) provides the
+PostgreSQL 17 convenience formula.
 
 ```bash
 brew tap Evokoa/tap
@@ -53,13 +48,11 @@ psql -d postgres -c "CREATE EXTENSION graph;"
 psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';"
 ```
 
-Use Homebrew after its formula version and checksum match the signed 1.0.0
-release bundle. Before publication, build the repository's Compose
-image locally.
+The formula installs pgGraph 1.0.0 from the signed release bundle.
 
-The Homebrew formula is a convenience channel for PostgreSQL 17. After
-publication, the complete 1.0 package matrix is the checksummed PGXN/source
-archive and attested GHCR images for PostgreSQL 14 through 18.
+The Homebrew formula is a convenience channel for PostgreSQL 17. The complete
+1.0 package matrix is the checksummed PGXN/source archive and attested GHCR
+images for PostgreSQL 14 through 18.
 
 Homebrew is maintained through the separate Evokoa tap, not published by this
 repository's protected PGXN/GHCR workflow. The tap owner updates its source URL
@@ -88,11 +81,11 @@ For PostgreSQL 13, use the legacy `pg13` pgrx feature only as best-effort
 compatibility. It is not covered by release gates after PostgreSQL 13 upstream
 EOL.
 
-## PGXN Source Install After Publication
+## PGXN Source Install
 
-After publication, PGXN serves the exact checksummed source ZIP from the signed
-1.0.0 release bundle. Because pgGraph is a Rust/pgrx extension, source
-installation requires Rust and `cargo-pgrx` before running `pgxn install`.
+PGXN serves the exact checksummed source ZIP from the signed 1.0.0 release
+bundle. Because pgGraph is a Rust/pgrx extension, source installation requires
+Rust and `cargo-pgrx` before running `pgxn install`.
 
 ```bash
 cargo install cargo-pgrx --version 0.19.1 --locked
@@ -161,29 +154,20 @@ to retain registrations, jobs, and synchronization state. Treat every
 underscore-prefixed object as internal; applications should use documented
 public functions rather than reading or writing those catalogs directly.
 
-<Callout type="warning">
-Pre-release catalog schema changes require recreating development and test
-databases. Drop and recreate the extension with `DROP EXTENSION graph CASCADE;`
-followed by `CREATE EXTENSION graph;` instead of relying on runtime migrations.
-</Callout>
-
 ## Docker Install Options
 
 pgGraph supports three Docker installation paths:
 
 | Path | Use when |
 |---|---|
-| Pull the pre-built image from GHCR after publication | You want the fastest start with no build step |
+| Pull the pre-built image from GHCR | You want the fastest start with no build step |
 | Build a PostgreSQL image with pgGraph already installed | You want a new container image for Evokoa or local evaluation |
 | Install into an existing running PostgreSQL container | You already have a PostgreSQL container and want to add pgGraph to it |
 
 ### Pre-built Docker Image
 
-After 1.0.0 publication, attested images are available on GitHub Container
-Registry for PostgreSQL 14 through 18 and support **linux/amd64** and
-**linux/arm64**. Until then, use the local image-build instructions below; the
-candidate tags shown here are post-publication commands, not current
-availability claims.
+Attested images are available on GitHub Container Registry for PostgreSQL 14
+through 18 and support **linux/amd64** and **linux/arm64**.
 
 ```bash
 docker pull ghcr.io/evokoa/pggraph:1.0.0

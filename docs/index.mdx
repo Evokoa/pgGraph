@@ -20,7 +20,7 @@ Graph database superpowers for your existing Postgres data.
     icon={<img src="/images/evokoa-ek-logo.svg" alt="Evokoa logo" className="badge-evokoa-logo" />}
   />
   <Badge label="License" value="Apache-2.0" color="blue" href="https://github.com/Evokoa/pggraph/blob/main/LICENSE" />
-  <Badge label="version" value="1.0.0 release-ready" color="orange" href="https://github.com/Evokoa/pggraph/blob/main/graph/Cargo.toml" />
+  <Badge label="version" value="1.0.0" color="green" href="https://github.com/Evokoa/pggraph/releases" />
   <Badge label="PostgreSQL" value="14-18" color="blue" href="https://www.postgresql.org/" />
 </ProjectBadges>
 
@@ -46,13 +46,6 @@ data the exact same way it always has. Postgres remains your single source of tr
 </Cards>
 
 
-<Callout type="warning">
-  The published line remains v0.1.8 alpha. This source contains pgGraph 1.0.0,
-  which is release-ready but unpublished. Its SQL/GQL, resource, persistence,
-  migration, and package contracts are frozen. Build the reviewed source commit
-  until signed artifacts are announced.
-</Callout>
-
 ## Evokoa
 pgGraph is built by [Evokoa](https://evokoa.com).
 We are building the missing infrastructure for widespread AI adoption.
@@ -68,16 +61,15 @@ Star our repo to help us reach more developers, and follow our journey below:
 />
 
 ## How it Works
-pgGraph builds a compact, derived graph index over selected relational tables for
-repeated bounded traversal workloads. Because Postgres stays the system of
-record, all standard tables, constraints, WAL, MVCC, backups, ACLs, and RLS still
-apply to application writes.
+pgGraph builds a compact graph index over selected relational tables to make
+repeated traversal queries faster. Because Postgres remains the system of
+record, its tables, constraints, WAL, MVCC, backups, ACLs, and RLS still apply
+to application writes.
 
-Persisted graphs are published as immutable generations. A small checksummed
-current pointer selects one validated manifest and base artifact, so backends
-load either the previous complete generation or the new complete generation,
-never a partially written replacement. The graph index remains rebuildable
-derived state; PostgreSQL tables remain authoritative.
+pgGraph can persist the graph index for faster startup. It updates persisted
+indexes atomically, so a backend loads either the previous complete index or
+the new one, never a partial update. If an index is missing or invalid, pgGraph
+can rebuild it from the PostgreSQL tables.
 
 <HowItWorksSection />
 

@@ -38,6 +38,16 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_release_dependencies_are_immutable(self) -> None:
         validate_release.validate_release_dependencies()
 
+    def test_pgxn_verification_uses_canonical_archive_url(self) -> None:
+        workflow = validate_release.read_text(".github/workflows/release.yml")
+        self.assertIn(
+            "https://master.pgxn.org/dist/pggraph/"
+            "${{ needs.validate.outputs.version }}/"
+            "pggraph-${{ needs.validate.outputs.version }}.zip",
+            workflow,
+        )
+        self.assertIn("Verify published PGXN archive contents", workflow)
+
     def test_moving_release_action_fails(self) -> None:
         original = validate_release.read_text
 
@@ -70,6 +80,37 @@ class ReleaseMetadataTests(unittest.TestCase):
             with redirect_stderr(stderr), self.assertRaises(SystemExit):
                 validate_release.validate_release_dependencies()
             self.assertIn("PostgreSQL image is not pinned by digest", stderr.getvalue())
+
+    def test_ssh_tag_verification_uses_release_allowlist(self) -> None:
+        with (
+            patch.object(
+                validate_release,
+                "run_git",
+                return_value="-----BEGIN SSH SIGNATURE-----",
+            ),
+            patch.object(validate_release.subprocess, "run") as run,
+        ):
+            validate_release.verify_release_tag_signature("v1.0.0")
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "git")
+        self.assertIn(
+            f"gpg.ssh.allowedSignersFile={validate_release.SSH_ALLOWED_SIGNERS}",
+            command,
+        )
+        self.assertEqual(command[-2:], ["verify-tag", "v1.0.0"])
+
+    def test_non_ssh_tag_verification_uses_git_defaults(self) -> None:
+        with (
+            patch.object(validate_release, "run_git", return_value="GPG signature"),
+            patch.object(validate_release.subprocess, "run") as run,
+        ):
+            validate_release.verify_release_tag_signature("v1.0.0")
+
+        self.assertEqual(
+            run.call_args.args[0],
+            ["git", "verify-tag", "v1.0.0"],
+        )
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
