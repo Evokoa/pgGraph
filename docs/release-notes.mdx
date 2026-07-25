@@ -12,7 +12,7 @@ so these sections remain explicit.
 
 | Release history |
 |---|
-| [v1.0.0](#v1-0-0-production-contract) |
+| [v1.0.0](#v1-0-0-pggraph-production-release) |
 | [v0.1.8](#v0-1-8-named-graphs-and-production-release-hardening) |
 | [v0.1.7](#v0-1-7-durable-projection-operations) |
 | [v0.1.6](#v0-1-6-gql-path-patterns-and-release-reliability) |
@@ -23,11 +23,11 @@ so these sections remain explicit.
 | [v0.1.1](#v0-1-1-alpha-hardening-critical-paths) |
 | [v0.1.0](#v0-1-0-initial-alpha) |
 
-## v1.0.0: Production Contract
+## v1.0.0: pgGraph Production Release
 
-`v1.0.0` freezes pgGraph's first production contract for PostgreSQL 14 through
-18. PostgreSQL source tables remain authoritative, while graph artifacts and
-mutable projection generations remain validated, rebuildable derived state.
+`v1.0.0` is pgGraph's first production release and supports PostgreSQL 14
+through 18. PostgreSQL tables remain the source of truth, and pgGraph's graph
+indexes and projections can be validated and rebuilt from them.
 
 ### Supported Surface
 

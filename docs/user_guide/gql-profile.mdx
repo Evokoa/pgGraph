@@ -6,8 +6,8 @@ description: "The exact GQL read and PostgreSQL-backed write capabilities suppor
 {/* Generated from release/v1-gql-profile.json; do not edit by hand. */}
 
 pgGraph 1.0 implements the documented subset below. It does not claim full ISO GQL,
-full openCypher, or SQL/PGQ conformance. PostgreSQL source tables remain authoritative
-for every mapped write.
+full openCypher, or SQL/PGQ conformance. Every supported GQL write updates its mapped
+PostgreSQL tables first.
 
 | Capability ID | Profile | Positive executable evidence |
 |---|---|---|
@@ -27,12 +27,11 @@ for every mapped write.
 | `mapped_single_node_detach_delete` | write | `gql_detach_delete_removes_incident_edges_before_node` |
 | `mapped_single_node_merge` | write | `gql_merge_node_inserts_then_updates_mapped_row` |
 
-Each read capability inherits parser, binder, governed executor, negative diagnostic,
-ACL/RLS, resource, and documentation evidence. Each write capability additionally
-inherits transaction, rollback/resource, and PostgreSQL source-of-truth evidence.
-The release contract checker verifies every referenced implementation marker and test.
+Each listed capability is covered by parser, planning, execution, error, access-control,
+resource, and documentation tests. Write capabilities also include transaction and
+rollback tests that verify PostgreSQL tables are updated first. The release checker
+verifies every referenced implementation marker and test.
 
-Unsupported and compatibility syntax is covered by
-`release/v1-gql-unsupported.json`. Those examples must fail before execution with
-their recorded SQLSTATE and stable guidance fragment; they are not silently accepted
-as a broader compatibility promise.
+`release/v1-gql-unsupported.json` lists unsupported and compatibility syntax. These
+examples are rejected before execution with the documented SQLSTATE and guidance;
+pgGraph does not interpret them as supported syntax.

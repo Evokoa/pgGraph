@@ -1,31 +1,29 @@
 # Roadmap
 
 <Callout type="info">
-This roadmap is directional rather than a dated release commitment. PostgreSQL
-source tables remain authoritative in every direction described here.
+This roadmap describes future direction, not dated release commitments. Future
+features will continue to use PostgreSQL tables as the source of truth.
 </Callout>
 
 ## Current Baseline
 
-pgGraph supports PostgreSQL 14 through 18 with a frozen SQL 1.0 surface and a
-bounded, explicitly generated GQL read/write profile. The current engine
-provides:
+pgGraph supports PostgreSQL 14 through 18 with a stable documented SQL API and
+a defined subset of GQL reads and writes. The current engine provides:
 
 - manual and discovered table/relationship registration, named graphs, grants,
   quotas, and tenant scoping;
 - bounded search, traversal, paths, workflows, filters, aggregation, and
   connected-component analytics;
-- PostgreSQL-backed mapped GQL writes that preserve constraints, triggers,
-  ACLs, RLS, MVCC, and source-row identity;
-- trigger-log synchronization, transaction/savepoint overlays, scheduler-safe
-  maintenance, compaction, repair, and garbage collection;
-- coherent snapshot builds, governed external runs, artifact format v6,
-  mmap-backed projection sections, generation compare-and-swap, reader pins,
-  and last-good-generation retention;
+- supported GQL writes that update mapped PostgreSQL tables first, preserving
+  constraints, triggers, ACLs, RLS, MVCC, and row identity;
+- trigger-log synchronization and scheduled maintenance with compaction,
+  repair, and cleanup;
+- atomic, validated persisted indexes with crash recovery and retention of the
+  last valid index;
 - enforced byte, row, work, disk, file, and elapsed-time policies with stable
   resource diagnostics;
-- generated SQL/GQL profiles, script and unsafe inventories, packaged
-  playground examples, and PostgreSQL 14–18 release-matrix evidence.
+- published SQL and GQL feature profiles, packaged playground examples, and
+  verified support for PostgreSQL 14 through 18.
 
 The exact supported surfaces are documented in the
 [SQL 1.0 profile](/user_guide/sql-profile),
@@ -34,15 +32,15 @@ The exact supported surfaces are documented in the
 
 ## 1.0 Production Baseline
 
-The 1.0 release program established these permanent release outcomes:
+The 1.0 release established these ongoing release requirements:
 
 | Area | Release outcome |
 |---|---|
-| Documentation | Coherent quickstart, migration, operations, API, compatibility, limitations, and translated critical commands with drift checks. |
-| Packaging | Clean source/PGXN and PostgreSQL 14–18 package-install evidence, matching checksums, SBOMs, provenance, and license/dependency validation. |
-| Release gates | Local release tiers with retained logs and reproducible evidence. |
-| Operations | Fresh install, alpha-to-1.0 source-preserving migration, rebuild, rollback, backup/restore, crash recovery, cancellation, resource, and cleanup proofs. |
-| Release evidence | One reviewed evidence bundle tied to a clean immutable commit before any tag or publication action. |
+| Documentation | Public quickstart, migration, operations, API, compatibility, and limitations guidance, checked for drift. |
+| Packaging | Verified source and PGXN packages for PostgreSQL 14–18, with matching checksums, SBOMs, provenance, and license checks. |
+| Release gates | Repeatable release checks with retained logs. |
+| Operations | Verified procedures for installation, alpha-to-1.0 migration, rebuild, rollback, backup and restore, crash recovery, cancellation, resource limits, and cleanup. |
+| Release evidence | Reviewed evidence tied to the exact release commit before tagging or publication. |
 
 Future 1.x work does not weaken these outcomes. New query syntax, analytics
 breadth, and architecture expansion remain post-1.0 directions.
@@ -56,9 +54,9 @@ breadth, and architecture expansion remain post-1.0 directions.
 | PostgreSQL 19 and SQL/PGQ | Consume native property-graph definitions without duplicate registration and maintain a separate SQL/PGQ conformance matrix for `GRAPH_TABLE`. |
 | Compatibility frontends | Keep openCypher bounded unless a separately measured and maintained compatibility surface is justified. |
 | Selective residency and caching | Investigate plan caching, selective projection residency, and workload-aware artifact placement within explicit PostgreSQL resource budgets. |
-| Synchronization | Evaluate optional WAL-driven synchronization only with source-of-truth, recovery, privilege, ordering, and bounded-retention proofs. |
+| Synchronization | Evaluate optional WAL-driven synchronization only if it preserves PostgreSQL as the source of truth and provides safe recovery, privileges, ordering, and bounded retention. |
 | Analytics | Move broader whole-graph algorithms into quota-controlled execution with cancellation, progress, and reproducible scorecards. |
-| Semantic guidance | Explore pgVector-assisted candidate ranking without placing embedding work in the traversal hot path or artifact authority boundary. |
+| Semantic guidance | Explore pgVector-assisted candidate ranking without placing embedding work in the traversal hot path or making embeddings authoritative. |
 | Refactoring | Revisit module or core-crate extraction only when dependency and ownership evidence shows a concrete reliability or maintainability benefit. |
 | Distributed execution | Remain research-driven until a PostgreSQL-consistent ownership, transaction, recovery, and operations model is demonstrated. |
 

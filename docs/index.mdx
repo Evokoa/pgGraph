@@ -61,16 +61,15 @@ Star our repo to help us reach more developers, and follow our journey below:
 />
 
 ## How it Works
-pgGraph builds a compact, derived graph index over selected relational tables for
-repeated bounded traversal workloads. Because Postgres stays the system of
-record, all standard tables, constraints, WAL, MVCC, backups, ACLs, and RLS still
-apply to application writes.
+pgGraph builds a compact graph index over selected relational tables to make
+repeated traversal queries faster. Because Postgres remains the system of
+record, its tables, constraints, WAL, MVCC, backups, ACLs, and RLS still apply
+to application writes.
 
-Persisted graphs are published as immutable generations. A small checksummed
-current pointer selects one validated manifest and base artifact, so backends
-load either the previous complete generation or the new complete generation,
-never a partially written replacement. The graph index remains rebuildable
-derived state; PostgreSQL tables remain authoritative.
+pgGraph can persist the graph index for faster startup. It updates persisted
+indexes atomically, so a backend loads either the previous complete index or
+the new one, never a partial update. If an index is missing or invalid, pgGraph
+can rebuild it from the PostgreSQL tables.
 
 <HowItWorksSection />
 

@@ -1,9 +1,9 @@
 # Versioning And Compatibility
 
 pgGraph 1.x uses semantic versioning for its documented SQL API, configuration,
-diagnostics, packaging, and operational behavior. PostgreSQL source tables stay
-authoritative across every upgrade; graph artifacts and projection segments are
-derived state and can be rebuilt.
+diagnostics, packages, and operational behavior. PostgreSQL tables remain the
+source of truth across upgrades, and pgGraph can rebuild its graph indexes from
+those tables.
 
 ## Supported Release Matrix
 
@@ -37,16 +37,18 @@ users to edit them directly.
 
 ## Artifacts And Rebuilds
 
-The 1.0 contract requires every artifact reader to validate its format and
-feature version before mapping data. Compatible artifacts load normally. An
-incompatible, future, corrupt, or incomplete artifact must fail closed with an
-actionable rebuild error and must never be silently reinterpreted. Cross-backend
-validation-before-publication and last-good-generation retention are permanent
-release gates.
+Before loading a persisted graph index, pgGraph checks its format, version, and
+completeness. Compatible indexes load normally. An index that is corrupt,
+incomplete, or from an incompatible version is rejected with instructions to
+rebuild it; pgGraph never guesses how to interpret the file.
 
-Because PostgreSQL tables are the source of truth, rebuilding derived graph
-state is the compatibility fallback. Release notes identify any release that
-requires a rebuild and provide the exact build, validation, and rollback steps.
+pgGraph publishes a replacement index only after validating it and retains the
+last valid index so other backends do not see a partial update. These guarantees
+apply to every 1.x release.
+
+If a release cannot reuse an existing graph index, rebuild it from the
+PostgreSQL tables. Release notes identify releases that require a rebuild and
+provide the exact build, validation, and rollback steps.
 
 ## Deprecation
 
@@ -77,11 +79,11 @@ SELECT extversion FROM pg_extension WHERE extname = 'graph';
 SELECT * FROM graph.status();
 ```
 
-The alpha-to-1.0 transition is intentionally rebuild-based: preserve or restore
-the PostgreSQL source tables, install 1.0 cleanly, reapply reviewed graph
-registration, and run `graph.build()`. Alpha extension-owned catalogs and graph
-artifacts are not an in-place compatibility promise. The repository's signed
-`v0.1.8` migration fixture exercises this source-preserving path.
+To move from an alpha release to 1.0, preserve or restore the PostgreSQL source
+tables, install 1.0 cleanly, reapply the reviewed graph registration, and run
+`graph.build()`. Do not reuse alpha extension catalogs or graph files. The
+repository's signed `v0.1.8` migration fixture verifies this source-preserving
+path.
 
 Installing an older binary over 1.0 catalogs or artifacts is unsupported.
 Binary downgrade is supported only when the target release notes say its
