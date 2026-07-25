@@ -38,6 +38,16 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_release_dependencies_are_immutable(self) -> None:
         validate_release.validate_release_dependencies()
 
+    def test_pgxn_verification_uses_canonical_archive_url(self) -> None:
+        workflow = validate_release.read_text(".github/workflows/release.yml")
+        self.assertIn(
+            "https://master.pgxn.org/dist/pggraph/"
+            "${{ needs.validate.outputs.version }}/"
+            "pggraph-${{ needs.validate.outputs.version }}.zip",
+            workflow,
+        )
+        self.assertIn("Verify published PGXN archive contents", workflow)
+
     def test_moving_release_action_fails(self) -> None:
         original = validate_release.read_text
 

@@ -333,13 +333,57 @@ jobs:
               raise SystemExit(f"Expected PGXN version {expected}, got {actual!r}")
           PY
 
-      - name: Verify published PGXN archive bytes
+      - name: Verify published PGXN archive contents
         run: |
-          url="https://api.pgxn.org/dist/pggraph/${{ needs.validate.outputs.version }}/pgGraph-${{ needs.validate.outputs.version }}.zip"
+          url="https://master.pgxn.org/dist/pggraph/${{ needs.validate.outputs.version }}/pggraph-${{ needs.validate.outputs.version }}.zip"
           curl --fail --silent --show-error --location "$url" --output /tmp/pggraph-published.zip
-          expected="$(sha256sum "dist/pgGraph-${{ needs.validate.outputs.version }}.zip" | awk '{print $1}')"
-          actual="$(sha256sum /tmp/pggraph-published.zip | awk '{print $1}')"
-          test "$actual" = "$expected"
+          python3 - <<'PY'
+          from pathlib import PurePosixPath
+          from zipfile import ZipFile
+
+          version = "${{ needs.validate.outputs.version }}"
+
+          def inventory(path):
+              root = None
+              members = {}
+              with ZipFile(path) as archive:
+                  for info in archive.infolist():
+                      parts = PurePosixPath(info.filename).parts
+                      if not parts or ".." in parts:
+                          raise SystemExit(f"Unsafe ZIP member in {path}: {info.filename!r}")
+                      if root is None:
+                          root = parts[0]
+                      elif parts[0] != root:
+                          raise SystemExit(f"Multiple top-level paths in {path}")
+                      relative = "/".join(parts[1:])
+                      if not relative:
+                          continue
+                      if relative in members:
+                          raise SystemExit(f"Duplicate ZIP member in {path}: {relative}")
+                      members[relative] = (
+                          info.is_dir(),
+                          (info.external_attr >> 16) & 0o7777,
+                          archive.read(info) if not info.is_dir() else b"",
+                      )
+              if root is None:
+                  raise SystemExit(f"Empty ZIP archive: {path}")
+              return members
+
+          expected = inventory(f"dist/pgGraph-{version}.zip")
+          actual = inventory("/tmp/pggraph-published.zip")
+          if actual != expected:
+              missing = sorted(expected.keys() - actual.keys())
+              extra = sorted(actual.keys() - expected.keys())
+              changed = sorted(
+                  name
+                  for name in expected.keys() & actual.keys()
+                  if expected[name] != actual[name]
+              )
+              raise SystemExit(
+                  "Published PGXN archive differs from the prepared package: "
+                  f"missing={missing}, extra={extra}, changed={changed}"
+              )
+          PY
 
   attach-pgxn-artifact:
     name: Attach PGXN artifact to GitHub Release
