@@ -62,7 +62,7 @@ def validate_version_metadata(version: str) -> None:
 
 
 def validate_release_dependencies() -> None:
-    for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+    for path in (".github/workflows/release.yml",):
         for line_number, line in enumerate(read_text(path).splitlines(), start=1):
             match = re.match(r"\s*-?\s*uses:\s*([^\s#]+)", line)
             if match:

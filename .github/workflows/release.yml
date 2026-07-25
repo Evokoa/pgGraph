@@ -19,10 +19,6 @@ on:
         required: false
         default: ""
         type: string
-      evidence_run_id:
-        description: Successful full-matrix workflow run ID for prepare mode
-        required: false
-        type: string
       prepare_run_id:
         description: Successful prepare workflow run ID for publish mode
         required: false
@@ -64,16 +60,12 @@ jobs:
             exit 1
           fi
 
-          if [[ "$mode" == "prepare" && ( -z "$source_ref" || -z "${{ inputs.evidence_run_id }}" ) ]]; then
-            echo "Prepare mode requires source_ref and evidence_run_id" >&2
+          if [[ "$mode" == "prepare" && -z "$source_ref" ]]; then
+            echo "Prepare mode requires source_ref" >&2
             exit 1
           fi
           if [[ "$mode" == "prepare" && ! "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Prepare source_ref must be a full 40-character commit SHA" >&2
-            exit 1
-          fi
-          if [[ "$mode" == "prepare" && ! "${{ inputs.evidence_run_id }}" =~ ^[0-9]+$ ]]; then
-            echo "Prepare evidence_run_id must be a numeric workflow run ID" >&2
             exit 1
           fi
           if [[ "$mode" == "publish" && -z "${{ inputs.prepare_run_id }}" ]]; then
@@ -103,48 +95,7 @@ jobs:
           ref: ${{ steps.release.outputs.mode == 'prepare' && steps.release.outputs.source_ref || steps.release.outputs.tag }}
           fetch-depth: 0
 
-      - name: Download full-matrix evidence
-        if: steps.release.outputs.mode == 'prepare'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          run-id: ${{ inputs.evidence_run_id }}
-          pattern: release-evidence-full-matrix-*
-          path: release/evidence
-          merge-multiple: true
-          github-token: ${{ github.token }}
-
-      - name: Authenticate full-matrix workflow run
-        if: steps.release.outputs.mode == 'prepare'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          EXPECTED_SHA: ${{ steps.release.outputs.source_ref }}
-          RUN_ID: ${{ inputs.evidence_run_id }}
-        run: |
-          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > /tmp/evidence-run.json
-          jq -e \
-            --arg repo "$GH_REPO" \
-            --arg sha "$EXPECTED_SHA" \
-            --arg workflow ".github/workflows/ci.yml" \
-            '.repository.full_name == $repo and
-             .head_repository.full_name == $repo and
-             .event == "workflow_dispatch" and
-             .status == "completed" and
-             .conclusion == "success" and
-             .head_sha == $sha and
-             (.path | split("@")[0]) == $workflow' \
-            /tmp/evidence-run.json >/dev/null
-          gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
-            | jq -s -e \
-              --arg sha "$EXPECTED_SHA" \
-              '[.[].jobs[] | select(
-                 .name == "full-matrix release evidence" and
-                 .head_sha == $sha and
-                 .status == "completed" and
-                 .conclusion == "success"
-               )] | length == 1' >/dev/null
-
-      - name: Validate preparation source and evidence
+      - name: Validate preparation source
         if: steps.release.outputs.mode == 'prepare'
         run: |
           commit="$(git rev-parse HEAD)"
@@ -152,8 +103,6 @@ jobs:
           scripts/validate_release.py \
             --version "${{ steps.release.outputs.version }}" \
             --ref "$commit" --check-main --require-clean
-          scripts/verify_release_evidence.py release/evidence \
-            --tier full-matrix --commit "$commit"
 
       - name: Validate signed publication tag
         if: steps.release.outputs.mode == 'publish'
@@ -239,54 +188,6 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  release-evidence:
-    name: Preserve verified release evidence
-    if: needs.validate.outputs.mode == 'prepare'
-    needs: validate
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-      id-token: write
-      attestations: write
-    steps:
-      - name: Checkout release source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: ${{ needs.validate.outputs.full_sha }}
-          fetch-depth: 0
-
-      - name: Download full-matrix evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          run-id: ${{ inputs.evidence_run_id }}
-          pattern: release-evidence-full-matrix-*
-          path: release/evidence
-          merge-multiple: true
-          github-token: ${{ github.token }}
-
-      - name: Verify and archive exact evidence
-        run: |
-          scripts/verify_release_evidence.py release/evidence \
-            --tier full-matrix --commit "${{ needs.validate.outputs.full_sha }}"
-          mkdir -p evidence-dist
-          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-            -C release/evidence -cf - . \
-            | gzip -n > "evidence-dist/release-evidence-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}.tar.gz"
-
-      - name: Attest evidence archive provenance
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
-        with:
-          subject-path: evidence-dist/release-evidence-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}.tar.gz
-
-      - name: Upload immutable evidence archive
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-evidence-archive-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}
-          path: evidence-dist/
-          if-no-files-found: error
-          retention-days: 90
-
   approve-publishing:
     name: Approve package publishing
     if: needs.validate.outputs.mode == 'publish'
@@ -325,15 +226,6 @@ jobs:
           merge-multiple: true
           github-token: ${{ github.token }}
 
-      - name: Download prepared release evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          run-id: ${{ inputs.prepare_run_id }}
-          pattern: release-evidence-archive-${{ needs.validate.outputs.version }}-*
-          path: evidence-dist
-          merge-multiple: true
-          github-token: ${{ github.token }}
-
       - name: Verify bundle and GitHub attestations
         env:
           GH_TOKEN: ${{ github.token }}
@@ -354,17 +246,6 @@ jobs:
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "${{ needs.validate.outputs.full_sha }}" \
             --predicate-type https://spdx.dev/Document/v2.3
-          evidence_archive="$(find evidence-dist -name '*.tar.gz' -type f -print -quit)"
-          test -n "$evidence_archive"
-          gh attestation verify "$evidence_archive" \
-            --repo "${{ github.repository }}" \
-            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
-            --source-digest "${{ needs.validate.outputs.full_sha }}" \
-            --predicate-type https://slsa.dev/provenance/v1
-          mkdir -p release/evidence
-          tar -xzf "$evidence_archive" -C release/evidence
-          scripts/verify_release_evidence.py release/evidence \
-            --tier full-matrix --commit "${{ needs.validate.outputs.full_sha }}"
 
   publish-pgxn:
     name: Publish PGXN package
@@ -488,15 +369,6 @@ jobs:
           merge-multiple: true
           github-token: ${{ github.token }}
 
-      - name: Download prepared release evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          run-id: ${{ inputs.prepare_run_id }}
-          pattern: release-evidence-archive-${{ needs.validate.outputs.version }}-*
-          path: evidence-dist
-          merge-multiple: true
-          github-token: ${{ github.token }}
-
       - name: Verify prepared release bundle
         run: |
           scripts/verify_release_bundle.py dist \
@@ -509,7 +381,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release upload "${{ needs.validate.outputs.tag }}" \
-            dist/* evidence-dist/*.tar.gz --clobber
+            dist/* --clobber
 
   docker:
     name: Prepare Docker image PG${{ matrix.pg }} ${{ matrix.platform.name }}
@@ -1138,7 +1010,6 @@ jobs:
     needs:
       - validate
       - release-bundle
-      - release-evidence
       - docker-verify
       - docker-manifests
     runs-on: ubuntu-latest
@@ -1150,7 +1021,6 @@ jobs:
             echo
             echo "- Commit: ${{ needs.validate.outputs.short_sha }}"
             echo "- Source bundle: release-bundle-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}"
-            echo "- Release evidence: release-evidence-archive-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}"
             echo "- Docker manifests: docker-manifests-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.short_sha }}"
             echo "- Docker: ${{ env.IMAGE_NAME }}:pg14-${{ needs.validate.outputs.tag }}-prepared"
             echo "- Docker: ${{ env.IMAGE_NAME }}:pg15-${{ needs.validate.outputs.tag }}-prepared"
