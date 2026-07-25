@@ -628,8 +628,12 @@ creating the tag:
 git config gpg.format ssh
 git config user.signingkey /path/to/release-signing-key.pub
 git tag -s vX.Y.Z -m "vX.Y.Z"
-git tag -v vX.Y.Z
+git -c gpg.ssh.allowedSignersFile=release/ssh-allowed-signers tag -v vX.Y.Z
 ```
+
+The checked-in SSH allowed-signers file is the publication trust policy used by
+local validation and the release workflow. Changes to that file require explicit
+release-owner review.
 
 Build and validate release packages before pushing the tag:
 

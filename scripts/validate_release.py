@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SSH_ALLOWED_SIGNERS = ROOT / "release" / "ssh-allowed-signers"
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CARGO_PACKAGE_RE = re.compile(r"^\[package\]\s*(.*?)(?=^\[|\Z)", re.MULTILINE | re.DOTALL)
 CARGO_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
@@ -99,6 +100,22 @@ def validate_release_dependencies() -> None:
         )
 
 
+def verify_release_tag_signature(tag: str) -> None:
+    command = ["git"]
+    tag_object = run_git(["cat-file", "-p", tag])
+    if "-----BEGIN SSH SIGNATURE-----" in tag_object:
+        if not SSH_ALLOWED_SIGNERS.is_file():
+            fail(f"SSH allowed-signers file is missing: {SSH_ALLOWED_SIGNERS}")
+        command.extend(
+            ["-c", f"gpg.ssh.allowedSignersFile={SSH_ALLOWED_SIGNERS}"]
+        )
+    command.extend(["verify-tag", tag])
+    try:
+        subprocess.run(command, cwd=ROOT, check=True)
+    except subprocess.CalledProcessError:
+        fail(f"signature verification failed for {tag}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -127,10 +144,7 @@ def main() -> None:
         if run_git(["cat-file", "-t", args.tag]) != "tag":
             fail(f"{args.tag} must be an annotated tag")
         if args.require_signed_tag:
-            try:
-                subprocess.run(["git", "verify-tag", args.tag], cwd=ROOT, check=True)
-            except subprocess.CalledProcessError:
-                fail(f"signature verification failed for {args.tag}")
+            verify_release_tag_signature(args.tag)
 
     release_commit = run_git(["rev-parse", "--verify", f"{release_ref}^{{commit}}"])
     head_commit = run_git(["rev-parse", "HEAD"])
