@@ -38,6 +38,28 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_release_dependencies_are_immutable(self) -> None:
         validate_release.validate_release_dependencies()
 
+    def test_unqualified_dockerfile_base_image_fails(self) -> None:
+        original = validate_release.read_text
+
+        for image in ("rust", "postgres"):
+            with self.subTest(image=image):
+                def read_text(path: str) -> str:
+                    value = original(path)
+                    if path == "Dockerfile":
+                        return value.replace(
+                            f"docker.io/library/{image}:",
+                            f"{image}:",
+                        )
+                    return value
+
+                with patch.object(
+                    validate_release, "read_text", side_effect=read_text
+                ):
+                    stderr = StringIO()
+                    with redirect_stderr(stderr), self.assertRaises(SystemExit):
+                        validate_release.validate_release_dependencies()
+                    self.assertIn("fully qualified Docker Hub", stderr.getvalue())
+
     def test_pgxn_verification_uses_canonical_archive_url(self) -> None:
         workflow = validate_release.read_text(".github/workflows/release.yml")
         self.assertIn(
