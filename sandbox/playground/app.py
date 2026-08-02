@@ -356,9 +356,6 @@ def main() -> None:
     with right:
         if run_clicked:
             with st.spinner("Running SQL..."):
-                config, client = runtime()
-                connection = client.connection()
-                ensure_graph_loaded(connection, config)
                 statements = st.session_state.statements if editor_sql == st.session_state.catalog_sql else (editor_sql,)
                 st.session_state.result = run_with_error_handling(connection, statements, config)
             st.rerun()

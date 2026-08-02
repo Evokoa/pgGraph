@@ -14,20 +14,26 @@ def run_statements(connection: Any, statements: Iterable[str], config: Playgroun
     result_sets: list[dict] = []
     messages: list[str] = []
     with connection.cursor() as cursor:
-        cursor.execute("SELECT set_config('statement_timeout', %s, false);", (str(config.statement_timeout_ms),))
-        cursor.fetchone()
-        for statement in statements:
-            cursor.execute(statement)
-            while True:
-                if cursor.description:
-                    rows = [dict(row) for row in cursor.fetchmany(config.max_result_rows + 1)]
-                    truncated = len(rows) > config.max_result_rows
-                    rows = rows[: config.max_result_rows]
-                    result_sets.append({"index": len(result_sets) + 1, "row_count": len(rows), "rows": rows, "truncated": truncated})
-                elif cursor.statusmessage:
-                    messages.append(cursor.statusmessage)
-                if not cursor.nextset():
-                    break
+        timeout_set = False
+        try:
+            cursor.execute("SELECT set_config('statement_timeout', %s, false);", (str(config.statement_timeout_ms),))
+            timeout_set = True
+            cursor.fetchone()
+            for statement in statements:
+                cursor.execute(statement)
+                while True:
+                    if cursor.description:
+                        rows = [dict(row) for row in cursor.fetchmany(config.max_result_rows + 1)]
+                        truncated = len(rows) > config.max_result_rows
+                        rows = rows[: config.max_result_rows]
+                        result_sets.append({"index": len(result_sets) + 1, "row_count": len(rows), "rows": rows, "truncated": truncated})
+                    elif cursor.statusmessage:
+                        messages.append(cursor.statusmessage)
+                    if not cursor.nextset():
+                        break
+        finally:
+            if timeout_set:
+                cursor.execute("RESET statement_timeout;")
     elapsed = time.perf_counter() - started
     return {"ok": True, "elapsed_seconds": elapsed, "elapsed": format_elapsed(elapsed), "result_sets": result_sets, "messages": messages or ["Query completed."]}
 
