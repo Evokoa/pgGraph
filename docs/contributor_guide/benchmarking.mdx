@@ -107,10 +107,18 @@ read both build time and the cold query timings.
 
 ### Panama Papers
 
-The Panama loader uses the real public ICIJ Offshore Leaks CSV export. It loads
-all `nodes-*.csv` files and `relationships.csv`, creates normalized
-`panama.nodes` and `panama.edges` tables, enforces endpoint foreign keys, and
-registers the graph with dynamic edge labels from the source relationship type.
+The Panama loader uses the real public ICIJ Offshore Leaks CSV export generated
+on 2026-07-29. pgGraph mirrors the unchanged ZIP and the applicable ICIJ data
+license notices in a tag-pinned benchmark release, then verifies the archive's
+SHA-256 checksum before extraction. It loads all `nodes-*.csv` files and
+`relationships.csv`, creates normalized `panama.nodes` and `panama.edges`
+tables, enforces endpoint foreign keys, and registers the graph with dynamic
+edge labels from the source relationship type.
+
+ICIJ may repeat a node ID across category files when the same record has more
+than one role. The normalizer uses a fixed category precedence, emits one row
+when the projected values agree, and fails rather than silently choosing a row
+when the values conflict.
 
 The normalized table intentionally keeps a compact set of fields needed for
 graph search and traversal: label, name, countries, country codes, source ID,
