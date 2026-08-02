@@ -71,7 +71,7 @@ def render_result(result: dict) -> None:
         label = f"Result {result_set['index']} - {result_set['row_count']:,} rows"
         st.caption(label)
         if rows:
-            st.dataframe(rows, use_container_width=True, hide_index=True)
+            st.dataframe(rows, width="stretch", hide_index=True)
         else:
             st.info("No rows returned.")
 
