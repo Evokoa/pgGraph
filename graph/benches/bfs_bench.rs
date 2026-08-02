@@ -22,8 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::hint::black_box;
 use std::time::Duration;
 
-// ─── Scale parameters approximating Panama Papers size ───
-// Panama: 2,016,523 nodes / 5,792,334 edges ≈ avg degree 2.87
+// ─── Scale parameters approximating the pinned ICIJ snapshot ───
+// Snapshot: 2,016,523 nodes / 6,678,534 directed edges ≈ avg degree 3.31
 const SEED: u64 = 42;
 
 // Scale tiers for benchmarking
@@ -32,6 +32,7 @@ const SMALL: u32 = 100_000;
 const MEDIUM: u32 = 500_000;
 const PANAMA: u32 = 2_000_000;
 const AVG_DEGREE: u32 = 3;
+const DEEP_CHAIN_NODES: u32 = 100_000;
 
 fn traversal_config(seed_node: u32, max_depth: i32) -> BfsConfig {
     BfsConfig {
@@ -162,6 +163,35 @@ fn bench_bfs_traverse(c: &mut Criterion) {
                 })
             },
         );
+    }
+
+    group.finish();
+}
+
+/// Deep BFS traversal over a narrow graph.
+///
+/// The power-law cases above measure realistic frontier growth and generally
+/// saturate within a few levels. A chain isolates the cost of walking many
+/// levels while keeping the frontier width at one node.
+fn bench_bfs_deep_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bfs_deep_chain");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+
+    let graph = graph_gen::build_chain_graph(DEEP_CHAIN_NODES);
+    for depth in [16, 64, 256, 1024] {
+        let config = traversal_config(0, depth);
+        group.throughput(Throughput::Elements((depth + 1) as u64));
+        group.bench_with_input(BenchmarkId::new("depth", depth), &config, |b, config| {
+            b.iter(|| {
+                black_box(bfs_execute(
+                    black_box(&graph.node_store),
+                    black_box(&graph.edge_store),
+                    black_box(&graph.filter_index),
+                    black_box(config),
+                ))
+            })
+        });
     }
 
     group.finish();
@@ -408,6 +438,7 @@ fn bench_synthetic_dataset_alternation(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_bfs_traverse,
+    bench_bfs_deep_chain,
     bench_graph_construction,
     bench_bfs_overlay_paths,
     bench_bfs_filter_index_paths,

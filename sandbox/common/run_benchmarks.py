@@ -30,6 +30,11 @@ DOCKER_HELP = """If you need to install Docker, see:
 GRAPH_BUSY_DIAGNOSTIC = "pgGraph diagnostic: PG006"
 GRAPH_BUILD_WAIT_SECONDS = 600
 PANAMA_TRANSFORM_VERSION = 2
+PANAMA_DEEP_TRAVERSAL_SEED = "240210352"
+PANAMA_DEEP_TRAVERSAL_DEPTH = 19
+PANAMA_DEEP_PATH_TARGET = "240470265"
+PANAMA_DEEP_PATH_LENGTH = 45
+PANAMA_DEEP_PATH_MAX_DEPTH = 48
 PANAMA_NODE_LABEL_PRIORITY = {
     "entities": 0,
     "officers": 1,
@@ -1102,6 +1107,37 @@ FROM warm, graph.status() s
             WorkloadQuery("entity_search", "Which Panama entities mention Mossack in a registered searchable field?", "SELECT * FROM graph.search('name', 'Mossack', table_filter := 'panama.nodes'::regclass, mode := 'contains', max_rows := 25, hydrate := false)"),
             WorkloadQuery("traverse_depth_2", "What is the two-hop neighborhood around a high-degree Panama node?", f"SELECT * FROM graph.traverse('panama.nodes'::regclass, {sql_literal(seed)}, 2, hydrate := false, max_rows := 500)"),
             WorkloadQuery("shortest_path", "Can pgGraph find the direct path between a high-degree Panama seed and one adjacent target?", f"SELECT * FROM graph.shortest_path('panama.nodes'::regclass, {sql_literal(seed)}, 'panama.nodes'::regclass, {sql_literal(target)}, max_depth := 4, hydrate := false)"),
+            WorkloadQuery(
+                "traverse_depth_19",
+                "How quickly can pgGraph traverse all 19 levels of a sparse Panama investigation path without hitting a work cap?",
+                f"""SELECT depth,
+       count(*) AS nodes_at_depth,
+       bool_or(capped) AS capped
+FROM graph.traverse(
+  'panama.nodes'::regclass,
+  {sql_literal(PANAMA_DEEP_TRAVERSAL_SEED)},
+  {PANAMA_DEEP_TRAVERSAL_DEPTH},
+  hydrate := false,
+  max_rows := 1000,
+  max_nodes := 1000,
+  max_frontier := 500
+)
+GROUP BY depth
+ORDER BY depth""",
+            ),
+            WorkloadQuery(
+                "shortest_path_depth_45",
+                f"How quickly can pgGraph recover a verified {PANAMA_DEEP_PATH_LENGTH}-hop path across a 91,168-node Panama component?",
+                f"""SELECT *
+FROM graph.shortest_path(
+  'panama.nodes'::regclass,
+  {sql_literal(PANAMA_DEEP_TRAVERSAL_SEED)},
+  'panama.nodes'::regclass,
+  {sql_literal(PANAMA_DEEP_PATH_TARGET)},
+  max_depth := {PANAMA_DEEP_PATH_MAX_DEPTH},
+  hydrate := false
+)""",
+            ),
             WorkloadQuery(
                 "gql_one_hop_scalar",
                 "What is the GQL overhead for a one-hop scalar projection over the built graph?",

@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,6 +77,27 @@ class DatasetTests(unittest.TestCase):
             dataset.expected_sha256,
             "34475194b6a8c2d683fddc55cca02f88f08f0a538521fb13a324975221624380",
         )
+        self.assertEqual(dataset.expected_sha256, release_dataset["archive_sha256"])
+
+    def test_panama_workload_includes_verified_deep_traversals(self) -> None:
+        with mock.patch.object(
+            RUNNER,
+            "scalar",
+            side_effect=["high-degree", "adjacent", "gql-seed", "gql-target"],
+        ):
+            queries = {query.name: query for query in RUNNER.workload("panama", "test-container")}
+
+        deep_traversal = queries["traverse_depth_19"]
+        self.assertIn("'240210352'", deep_traversal.sql)
+        self.assertIn("19", deep_traversal.sql)
+        self.assertIn("max_rows := 1000", deep_traversal.sql)
+        self.assertIn("max_nodes := 1000", deep_traversal.sql)
+        self.assertIn("max_frontier := 500", deep_traversal.sql)
+
+        deep_path = queries["shortest_path_depth_45"]
+        self.assertIn("'240210352'", deep_path.sql)
+        self.assertIn("'240470265'", deep_path.sql)
+        self.assertIn("max_depth := 48", deep_path.sql)
 
     def test_transform_deduplicates_identical_cross_category_nodes(self) -> None:
         with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
