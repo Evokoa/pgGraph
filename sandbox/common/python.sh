@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+pggraph_resolve_python() {
+  local candidate="$1"
+
+  "${candidate}" -c 'import os, sys; print(os.path.realpath(sys.executable))'
+}
+
 pggraph_venv_pip() {
   local venv_dir="$1"
   shift

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,6 +53,19 @@ class ShellEntrypointTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "sfw:pip install -r requirements.txt")
             self.assertNotIn("using the sandbox virtualenv", result.stderr)
+
+    def test_python_resolution_follows_executable_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
+            shim = Path(temporary_dir) / "python3.12"
+            shim.symlink_to(sys.executable)
+
+            result = run_helper(
+                f'pggraph_resolve_python "{shim}"',
+                path="/usr/bin:/bin",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(Path(result.stdout.strip()), Path(sys.executable).resolve())
 
     def test_venv_pip_falls_back_when_sfw_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
