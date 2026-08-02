@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,9 @@ from client import DatabaseClient
 from config import PlaygroundConfig
 from execution import run_with_error_handling
 from results import format_elapsed
+
+
+APP_PATH = Path(__file__).with_name("app.py")
 
 
 class FakeCursor:
@@ -75,8 +79,36 @@ class CatalogTests(unittest.TestCase):
         connections = [FakeConnection(fail_health=True), FakeConnection()]
         client = DatabaseClient(config, connector=lambda **_kwargs: connections.pop(0))
         first = client.connection()
+        self.assertEqual(client.connection_generation, 1)
         self.assertIsNot(first, client.connection())
+        self.assertEqual(client.connection_generation, 2)
         self.assertTrue(first.closed)
+
+    def test_graph_initialization_is_cached_per_connection(self) -> None:
+        module = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+        initializer = next(
+            node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "initialize_graph"
+        )
+        decorators = [ast.unparse(decorator) for decorator in initializer.decorator_list]
+
+        self.assertTrue(any(decorator.startswith("st.cache_resource(") for decorator in decorators))
+        self.assertEqual(initializer.args.args[0].arg, "connection_generation")
+
+    def test_main_does_not_render_placeholder_metrics(self) -> None:
+        module = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+        main = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        placeholder_calls = [
+            node
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "render_metric_strip"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value is None
+        ]
+
+        self.assertEqual(placeholder_calls, [])
 
     def test_execution_returns_bounded_error_shape(self) -> None:
         config = PlaygroundConfig("postgresql://example", "csr", Path("assets"))

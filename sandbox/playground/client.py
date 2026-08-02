@@ -21,6 +21,12 @@ class DatabaseClient:
         self.config = config
         self._connector = connector
         self._connection: Any | None = None
+        self._connection_generation = 0
+
+    @property
+    def connection_generation(self) -> int:
+        """Return a stable cache key that changes after every reconnect."""
+        return self._connection_generation
 
     def connection(self) -> Any:
         connection = self._connection
@@ -36,6 +42,7 @@ class DatabaseClient:
             autocommit=True,
             connect_timeout=10,
         )
+        self._connection_generation += 1
         return self._connection
 
     def close(self) -> None:

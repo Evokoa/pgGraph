@@ -115,16 +115,11 @@ def render_metric_strip(status: dict | None) -> None:
     )
 
 
-def initialize_graph() -> tuple[object, dict]:
-    with st.status("Preparing Panama graph...", expanded=True) as status_box:
-        st.write("Connecting to PostgreSQL and checking the loaded dataset.")
-        config, client = runtime()
-        conn = client.connection()
-        ensure_graph_loaded(conn, config)
-        st.write("Verifying graph catalog registration and build status.")
-        graph_status = fetch_one(conn, "SELECT * FROM graph.status();")
-        status_box.update(label="Panama graph is ready.", state="complete", expanded=False)
-    return conn, graph_status
+@st.cache_resource(show_spinner="Preparing Panama graph...")
+def initialize_graph(connection_generation: int, _connection: object, _config: PlaygroundConfig) -> dict:
+    """Prepare and inspect one PostgreSQL backend connection once."""
+    ensure_graph_loaded(_connection, _config)
+    return fetch_one(_connection, "SELECT * FROM graph.status();")
 
 
 def apply_css() -> None:
@@ -337,18 +332,16 @@ def main() -> None:
         st.session_state.result = {}
 
     render_main_top()
-    metrics_slot = st.empty()
-    with metrics_slot.container():
-        render_metric_strip(None)
 
     try:
-        _, status = initialize_graph()
+        config, client = runtime()
+        connection = client.connection()
+        status = initialize_graph(client.connection_generation, connection, config)
     except Exception as exc:
         st.error(f"Could not prepare the playground graph: {type(exc).__name__}: {exc}")
         st.stop()
 
-    with metrics_slot.container():
-        render_metric_strip(status)
+    render_metric_strip(status)
 
     st.subheader(st.session_state.question)
     st.caption(PLAYGROUND_CONTEXT)
