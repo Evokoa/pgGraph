@@ -53,11 +53,11 @@ DATASETS = {
     "panama": DatasetSpec(
         key="panama",
         name="Panama Papers / ICIJ Offshore Leaks",
-        url="https://offshoreleaks-data.icij.org/offshoreleaks/csv/full-oldb.LATEST.zip",
-        archive_name="full-oldb.LATEST.zip",
-        compressed_size="73 MB",
+        url="https://github.com/Evokoa/pgGraph/releases/download/benchmark-data-icij-2026-07-29/icij-offshore-leaks-2026-07-29.zip",
+        archive_name="icij-offshore-leaks-2026-07-29.zip",
+        compressed_size="72 MB",
         uncompressed_size="626 MB",
-        expected_sha256="a2e37e8b878c12fb8f946d4e85026a4ae9026dc866b1aa925730bc1b50e52914",
+        expected_sha256="34475194b6a8c2d683fddc55cca02f88f08f0a538521fb13a324975221624380",
     ),
     "ldbc": DatasetSpec(
         key="ldbc",

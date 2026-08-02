@@ -426,9 +426,10 @@ hashes; operational examples with volatile job IDs or timings compare row
 counts. Independent query failures do not stop the catalog sweep, so one run
 reports every example that needs attention.
 
-The gate verifies the 2025-03-31 Panama archive checksum and uses the
-playground's documented 512 MiB query-memory profile. An upstream dataset change
-therefore fails at preparation instead of silently rewriting expected hashes.
+The gate verifies the tag-pinned 2026-07-29 Panama benchmark archive checksum
+and uses the playground's documented 512 MiB query-memory profile. An archive
+replacement therefore fails at preparation instead of silently rewriting
+expected hashes.
 
 ```bash
 cd graph

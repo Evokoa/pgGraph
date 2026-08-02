@@ -56,13 +56,15 @@ installation links for macOS, Windows, and Linux.
 
 The playground currently loads Panama Papers / ICIJ Offshore Leaks data. It is
 intended as a quick inspector and SQL demo environment, not a full benchmark
-runner. The prepared snapshot is the upstream export generated on 2025-03-31;
-the loader verifies its SHA-256 checksum before import so an upstream `LATEST`
-change cannot silently alter examples or release-gate expectations.
-The data is published by the International Consortium of Investigative
-Journalists under the Offshore Leaks Database terms. The loader prints the
-download size and requires approval, retries through a temporary file, and can
-reuse a previously downloaded archive only after verifying its checksum.
+runner. The prepared snapshot is the upstream export generated on 2026-07-29
+and mirrored unchanged in pgGraph's
+[tag-pinned benchmark release](https://github.com/Evokoa/pgGraph/releases/tag/benchmark-data-icij-2026-07-29).
+The loader verifies its SHA-256 checksum before import so an upstream update or
+release-asset replacement cannot silently alter examples or release-gate
+expectations. The release includes the ICIJ attribution, database and contents
+licenses, and data disclaimer alongside the ZIP. The loader prints the download
+size and requires approval, retries through a temporary file, and can reuse a
+previously downloaded archive only after verifying its checksum.
 
 The sandbox sets `graph.query_memory_mb = 512` and
 `graph.maintenance_memory_mb = 1024` for this disposable session. The Panama
