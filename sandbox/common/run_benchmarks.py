@@ -38,6 +38,11 @@ PANAMA_NODE_LABEL_PRIORITY = {
     "others": 4,
 }
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_RELEASE_DATASETS = json.loads(
+    (REPOSITORY_ROOT / "release" / "gates.json").read_text(encoding="utf-8")
+)["datasets"]
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -61,11 +66,11 @@ DATASETS = {
     "panama": DatasetSpec(
         key="panama",
         name="Panama Papers / ICIJ Offshore Leaks",
-        url="https://github.com/Evokoa/pgGraph/releases/download/benchmark-data-icij-2026-07-29/icij-offshore-leaks-2026-07-29.zip",
+        url=_RELEASE_DATASETS["panama"]["source"],
         archive_name="icij-offshore-leaks-2026-07-29.zip",
         compressed_size="72 MB",
         uncompressed_size="626 MB",
-        expected_sha256="34475194b6a8c2d683fddc55cca02f88f08f0a538521fb13a324975221624380",
+        expected_sha256=_RELEASE_DATASETS["panama"]["archive_sha256"],
     ),
     "ldbc": DatasetSpec(
         key="ldbc",

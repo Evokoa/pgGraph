@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -61,11 +62,15 @@ class DatasetTests(unittest.TestCase):
 
     def test_panama_snapshot_uses_fixed_benchmark_release(self) -> None:
         dataset = RUNNER.DATASETS["panama"]
+        gates = json.loads((ROOT / "release" / "gates.json").read_text(encoding="utf-8"))
+        release_dataset = gates["datasets"]["panama"]
+
         self.assertEqual(
             dataset.url,
             "https://github.com/Evokoa/pgGraph/releases/download/"
             "benchmark-data-icij-2026-07-29/icij-offshore-leaks-2026-07-29.zip",
         )
+        self.assertEqual(dataset.url, release_dataset["source"])
         self.assertNotIn("LATEST", dataset.url)
         self.assertEqual(
             dataset.expected_sha256,

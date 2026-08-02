@@ -2,9 +2,9 @@
   "schema_version": 1,
   "datasets": {
     "panama": {
-      "source": "https://offshoreleaks-data.icij.org/offshoreleaks/csv/full-oldb.LATEST.zip",
+      "source": "https://github.com/Evokoa/pgGraph/releases/download/benchmark-data-icij-2026-07-29/icij-offshore-leaks-2026-07-29.zip",
       "license": "ICIJ Offshore Leaks Database terms",
-      "archive_sha256": "a2e37e8b878c12fb8f946d4e85026a4ae9026dc866b1aa925730bc1b50e52914",
+      "archive_sha256": "34475194b6a8c2d683fddc55cca02f88f08f0a538521fb13a324975221624380",
       "download_bytes": 73000000,
       "offline_behavior": "Reuse the verified local archive; otherwise request explicit download approval."
     }
