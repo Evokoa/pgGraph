@@ -16,9 +16,10 @@ sandbox/start_playground.sh
 ```
 
 The script creates a Python virtualenv under `sandbox/playground/.venv` when
-needed and installs the pinned playground dependencies there through `sfw`.
-The script never falls back to an unwrapped package installation. It also
-starts or reuses the `pggraph-sandbox` PostgreSQL container.
+needed and installs the pinned playground dependencies there. When `sfw` is on
+`PATH`, the script uses it as the package-install safety wrapper; otherwise it
+uses the virtualenv's pip directly. It also starts or reuses the
+`pggraph-sandbox` PostgreSQL container.
 
 By default, the playground starts in `csr_readonly` mode. To start the same
 dataset with mutable GQL writes enabled:
@@ -37,7 +38,7 @@ scripts/quickstart.sh playground panama mutable
 The first run may take time because it downloads and prepares the Panama Papers
 dataset:
 
-- compressed archive: 73 MB;
+- compressed archive: 72 MB;
 - extracted source data: 626 MB.
 
 ## Requirements
@@ -46,8 +47,10 @@ You need:
 
 - Docker or Docker Desktop;
 - Python 3.10 or newer;
-- `sfw` when the pinned virtual environment must be created or refreshed;
 - network access for the first dataset download.
+
+`sfw` is optional. When installed, it is always used for playground dependency
+installation.
 
 If Docker is missing or the daemon is not running, the script prints direct
 installation links for macOS, Windows, and Linux.

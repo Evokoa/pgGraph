@@ -7,6 +7,8 @@ VENV_DIR="${SANDBOX_DIR}/benchmark/.venv"
 
 # shellcheck source=common/docker.sh
 source "${SANDBOX_DIR}/common/docker.sh"
+# shellcheck source=common/python.sh
+source "${SANDBOX_DIR}/common/python.sh"
 
 DATASET="${1:-all}"
 PG_PORT="${PGGRAPH_PG_PORT:-55432}"
@@ -72,18 +74,7 @@ if [ ! -d "${VENV_DIR}" ]; then
   "${BENCHMARK_PYTHON}" -m venv "${VENV_DIR}"
 fi
 
-if ! command -v sfw >/dev/null 2>&1; then
-  echo "Error: sfw is required before benchmark dependencies can be installed." >&2
-  echo "Install sfw, or provision sandbox/benchmark/.venv from requirements.txt ahead of time." >&2
-  exit 1
-fi
-
-run_venv_pip() {
-  PATH="${VENV_DIR}/bin:${PATH}" sfw pip "$@"
-}
-
-run_venv_pip install --upgrade pip >/dev/null
-run_venv_pip install -r "${SANDBOX_DIR}/benchmark/requirements.txt"
+pggraph_venv_pip "${VENV_DIR}" install -r "${SANDBOX_DIR}/benchmark/requirements.txt"
 
 "${VENV_DIR}/bin/python" "${SANDBOX_DIR}/common/run_benchmarks.py" \
   --dataset "${DATASET}" \

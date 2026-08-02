@@ -34,6 +34,10 @@ Use `--yes` for non-interactive dataset download approval:
 sandbox/run_benchmarks.sh all --yes
 ```
 
+The harness installs its pinned Python dependencies through `sfw` when the
+wrapper is available and otherwise uses the benchmark virtualenv's pip
+directly.
+
 The script prints the known download sizes before fetching data:
 
 | Dataset | Source | Compressed | Uncompressed |

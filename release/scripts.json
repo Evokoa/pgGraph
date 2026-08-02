@@ -1287,6 +1287,31 @@
       "decision": "keep"
     },
     {
+      "path": "sandbox/common/python.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
       "path": "sandbox/common/run_benchmarks.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -1563,6 +1588,31 @@
     },
     {
       "path": "sandbox/playground/test_datasets.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "sandbox/playground/test_shell_entrypoints.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
       "tier": "pr",
