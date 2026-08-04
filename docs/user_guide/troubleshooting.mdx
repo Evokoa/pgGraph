@@ -2,6 +2,27 @@
 
 Use this page to map symptoms to status checks and recovery actions.
 
+## Function Does Not Exist (Type Cast Error)
+
+Symptom:
+
+```text
+ERROR:  function graph.add_table(unknown, unknown) does not exist
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+```
+
+Check:
+
+Are you passing a table name as a plain string, such as `'public.users'`?
+
+Fix:
+
+pgGraph's table registration functions require PostgreSQL Object Identifiers (OIDs), not plain text strings. Add the `::regclass` cast to the table name argument:
+
+```sql
+SELECT graph.add_table('public.users'::regclass, 'id');
+```
+
 ## Graph Not Built
 
 Symptom:
