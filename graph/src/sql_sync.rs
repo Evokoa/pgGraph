@@ -150,17 +150,25 @@ pub(crate) fn disabled_graph_trigger_count() -> safety::GraphResult<i32> {
     .map_err(|e| safety::GraphError::Internal(format!("trigger status check failed: {}", e)))
 }
 
-pub(crate) fn pending_sync_rows(applied_sync_id: i64) -> safety::GraphResult<i64> {
+pub(crate) fn pending_sync_rows(
+    applied_sync_id: i64,
+    applicable_table_oids: &[u32],
+) -> safety::GraphResult<i64> {
+    if applicable_table_oids.is_empty() {
+        return Ok(0);
+    }
     Spi::get_one_with_args::<i64>(
-        "SELECT graph._pending_sync_rows_for_current_role($1)",
-        &[applied_sync_id.into()],
+        "SELECT graph._pending_sync_rows_for_current_role($1, $2)",
+        &[applied_sync_id.into(), applicable_table_oids.into()],
     )
     .map_err(|e| safety::GraphError::Internal(format!("sync status check failed: {}", e)))?
     .ok_or_else(|| safety::GraphError::Internal("pending sync row count was null".to_string()))
 }
 
-pub(crate) fn pending_sync_rows_direct(applied_sync_id: i64) -> safety::GraphResult<i64> {
-    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+pub(crate) fn pending_sync_rows_direct(
+    applied_sync_id: i64,
+    applicable_table_oids: Vec<u32>,
+) -> safety::GraphResult<i64> {
     if applicable_table_oids.is_empty() {
         return Ok(0);
     }
