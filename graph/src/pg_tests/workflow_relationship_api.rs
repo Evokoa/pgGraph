@@ -275,3 +275,58 @@ fn public_workflows_share_the_low_query_memory_budget_end_to_end() {
 
     Spi::run("SET LOCAL graph.query_memory_mb = 64").expect("restore workflow query budget failed");
 }
+
+#[pg_test]
+fn expand_hydrate_false_drops_node_payload_without_changing_rows() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let statement = "SELECT count(*)::bigint,
+                            count(node)::bigint,
+                            array_agg(node_id ORDER BY node_id)
+                       FROM graph.expand(
+                            'graph_test_users_pgtest'::regclass,
+                            'u1',
+                            max_depth := 2,
+                            hydrate := $1
+                       )";
+
+    let read = |hydrate: bool| {
+        Spi::connect(|client| {
+            let result = client
+                .select(statement, None, &[hydrate.into()])
+                .expect("expand with hydrate flag failed");
+            let row = result.first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<i64>(1)?.unwrap_or_default(),
+                row.get::<i64>(2)?.unwrap_or_default(),
+                row.get::<Vec<String>>(3)?.unwrap_or_default(),
+            ))
+        })
+        .expect("expand hydrate result read failed")
+    };
+
+    let (hydrated_rows, hydrated_nodes, hydrated_ids) = read(true);
+    let (plain_rows, plain_nodes, plain_ids) = read(false);
+
+    assert!(
+        hydrated_rows > 0,
+        "fixture produced no rows to compare hydration against"
+    );
+    assert_eq!(
+        hydrated_rows, plain_rows,
+        "hydrate flag changed the number of returned rows"
+    );
+    assert_eq!(
+        hydrated_ids, plain_ids,
+        "hydrate flag changed which nodes were returned"
+    );
+    assert_eq!(
+        hydrated_nodes, hydrated_rows,
+        "hydrate := true left node payloads unset"
+    );
+    assert_eq!(
+        plain_nodes, 0,
+        "hydrate := false still built node payloads"
+    );
+}

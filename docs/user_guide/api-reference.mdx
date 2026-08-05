@@ -2371,7 +2371,8 @@ graph.expand(
   tenant text DEFAULT NULL,
   max_rows int DEFAULT 50,
   row_offset int DEFAULT 0,
-  include_start boolean DEFAULT false
+  include_start boolean DEFAULT false,
+  hydrate boolean DEFAULT true
 )
 RETURNS TABLE (
   root_table oid,
@@ -2389,6 +2390,10 @@ RETURNS TABLE (
   truncated boolean
 )
 ```
+
+Set `hydrate := false` to skip building the `node` JSONB payload when only
+identifiers and path shape are needed. The `node` column is `NULL` in that
+case; every other column is unchanged.
 
 ### `graph.find_related()`
 

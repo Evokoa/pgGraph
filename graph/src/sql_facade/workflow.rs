@@ -111,6 +111,7 @@ fn expand(
     max_rows: default!(i32, 50),
     row_offset: default!(i32, 0),
     include_start: default!(bool, "false"),
+    hydrate: default!(bool, "true"),
 ) -> TableIterator<
     'static,
     (
@@ -161,7 +162,7 @@ fn expand(
             direction,
             strategy,
             include_start,
-            hydrate: true,
+            hydrate,
             limit: max_rows,
             offset: row_offset,
             max_nodes: config::MAX_NODES.get(),
