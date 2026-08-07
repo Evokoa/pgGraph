@@ -143,6 +143,9 @@ pub(crate) fn execute_traverse_candidates_governed(
             governor,
         )
     })?;
+    acl::check_table_acls(outcome.rows.iter().flat_map(|row| {
+        std::iter::once(row.node_table.0).chain(row.path.iter().map(|coord| coord.table_oid.0))
+    }))?;
     let capped = outcome.truncated;
 
     let page_lease = reserve_traversal_rows(

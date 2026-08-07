@@ -1,9 +1,9 @@
 //! # ACL — Access Control List pre-flight checks
 //!
-//! Query helpers call `check_table_acl()` before reading source-table rows or
-//! returning hydrated data. Write helpers call `check_table_insert_acl()`,
-//! `check_table_update_acl()`, or `check_table_delete_acl()` before modifying
-//! mapped rows.
+//! Query helpers call `check_table_acl()` or `check_table_acls()` before
+//! reading source-table rows or returning graph coordinates and hydrated data.
+//! Write helpers call `check_table_insert_acl()`, `check_table_update_acl()`,
+//! or `check_table_delete_acl()` before modifying mapped rows.
 //!
 //! `table_has_row_security()` backs the build-time RLS topology boundary
 //! gate: topology-read functions (`graph.traverse()`, `shortest_path()`,
@@ -16,6 +16,7 @@
 //! See: `docs/user_guide/administration-and-security.mdx`
 
 use crate::safety::{GraphError, GraphResult};
+use std::collections::BTreeSet;
 
 /// Check if the current user has SELECT privilege on the given table OID.
 ///
@@ -25,6 +26,22 @@ use crate::safety::{GraphError, GraphResult};
 /// Returns `GraphError::AclDenied` if the user lacks SELECT on the table.
 pub fn check_table_acl(table_oid: u32) -> GraphResult<()> {
     check_table_acl_mode(table_oid, pgrx::pg_sys::ACL_SELECT as pgrx::pg_sys::AclMode)
+}
+
+/// Check SELECT privilege on every distinct table OID.
+///
+/// Sorting the OIDs keeps the first reported denial deterministic when a
+/// graph result references more than one inaccessible table.
+///
+/// # Errors
+///
+/// Returns [`GraphError::AclDenied`] if the current role lacks `SELECT` on any
+/// referenced table.
+pub(crate) fn check_table_acls(table_oids: impl IntoIterator<Item = u32>) -> GraphResult<()> {
+    for table_oid in table_oids.into_iter().collect::<BTreeSet<_>>() {
+        check_table_acl(table_oid)?;
+    }
+    Ok(())
 }
 
 /// Check if the current user has INSERT privilege on the given table OID.

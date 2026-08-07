@@ -405,6 +405,7 @@ pub(super) fn hydrate_component_page_governed(
     hydrate: bool,
     governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<Vec<ComponentNodeRow>> {
+    acl::check_table_acls(page.iter().map(|row| row.node_table.0))?;
     let page_bytes = page.iter().try_fold(0usize, |bytes, row| {
         bytes
             .checked_add(std::mem::size_of::<types::TraversalResult>())

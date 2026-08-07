@@ -389,6 +389,7 @@ pub(super) fn shortest_path_rows_governed(
             governor,
         )
     })?;
+    acl::check_table_acls(steps.iter().map(|step| step.node_table.0))?;
     let output_bytes = steps.iter().try_fold(0usize, |bytes, step| {
         bytes
             .checked_add(std::mem::size_of::<ShortestPathSqlRow>())
@@ -475,7 +476,7 @@ fn weighted_shortest_path(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let rows = ENGINE.with(|e| {
+        let steps = ENGINE.with(|e| {
             let eng = e.borrow();
             eng.weighted_shortest_path_governed(
                 source_table.to_u32(),
@@ -485,6 +486,10 @@ fn weighted_shortest_path(
                 &governor,
             )
             .unwrap_or_else(|err| err.report())
+        });
+        acl::check_table_acls(steps.iter().map(|step| step.node_table.0))
+            .unwrap_or_else(|err| err.report());
+        let rows = steps
             .into_iter()
             .map(|step| {
                 (
@@ -498,8 +503,7 @@ fn weighted_shortest_path(
                     u64_to_bigint(step.total_cost).unwrap_or_else(|err| err.report()),
                 )
             })
-            .collect::<Vec<_>>()
-        });
+            .collect::<Vec<_>>();
         TableIterator::new(rows)
     })
 }
