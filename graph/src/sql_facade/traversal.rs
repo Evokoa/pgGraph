@@ -24,8 +24,7 @@ pub(super) type ShortestPathSqlRow = (
 /// BFS traversal from a seed node.
 ///
 /// See: `docs/user_guide/querying.mdx`
-#[pg_extern(schema = "graph", cost = 1000, security_definer)]
-#[search_path(pg_catalog, pg_temp)]
+#[pg_extern(schema = "graph", cost = 1000)]
 #[allow(
     clippy::too_many_arguments,
     clippy::type_complexity,

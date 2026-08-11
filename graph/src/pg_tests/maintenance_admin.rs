@@ -1,4 +1,53 @@
 #[pg_test]
+fn topology_query_entry_points_run_as_invoker() {
+    let unexpected_definers = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM pg_catalog.pg_proc AS proc
+           JOIN pg_catalog.pg_namespace AS namespace
+             ON namespace.oid = proc.pronamespace
+          WHERE namespace.nspname = 'graph'
+            AND proc.proname IN ('traverse', 'connected_components', 'component_stats')
+            AND proc.prosecdef",
+    )
+    .expect("read topology function security metadata failed")
+    .unwrap_or(-1);
+    let unpinned_mediators = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM pg_catalog.pg_proc AS proc
+           JOIN pg_catalog.pg_namespace AS namespace
+             ON namespace.oid = proc.pronamespace
+          WHERE namespace.nspname = 'graph'
+            AND proc.proname IN (
+                '_selected_graph_id_for_current_role',
+                '_active_generation_count_for_current_role',
+                '_enforce_loaded_graph_quota_for_current_role',
+                '_require_selected_graph_privilege_for_current_role',
+                '_graph_id_for_current_role_with_privilege',
+                '_expire_projection_heartbeats_for_current_role',
+                '_expire_sync_watermarks_for_current_role',
+                '_record_sync_watermark_for_current_role',
+                '_record_projection_heartbeat_for_current_role',
+                'build_status',
+                'build_status_for_graph',
+                'maintenance_status',
+                'maintenance_status_for_graph'
+            )
+            AND (
+                NOT proc.prosecdef
+                OR NOT (
+                    COALESCE(proc.proconfig, ARRAY[]::text[])
+                    @> ARRAY['search_path=pg_catalog, pg_temp']
+                )
+            )",
+    )
+    .expect("read catalog mediator security metadata failed")
+    .unwrap_or(-1);
+
+    assert_eq!(unexpected_definers, 0);
+    assert_eq!(unpinned_mediators, 0);
+}
+
+#[pg_test]
 fn sql_trigger_sync_handles_primary_key_changes() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");

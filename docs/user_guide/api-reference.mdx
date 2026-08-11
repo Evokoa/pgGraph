@@ -80,6 +80,9 @@ such as `edge_buffer_full`. `projection_mode` is
 memory, and durable compaction policy; `edge_buffer_used` plus `tx_delta_dirty`
 show whether pending sync or transaction-local overlays exist.
 
+Requires read access to the selected graph. Counts describe the physical
+backend projection and are not filtered by source-table RLS.
+
 ### `graph.build_resource_status()`
 
 ```sql
@@ -93,6 +96,9 @@ residency and the safety reserve from the configured limit. The peak measures
 replacement construction and persistence against that budget. Pressure events
 count adaptive byte-triggered batch flushes; row-ceiling flushes remain
 controlled by `graph.build_batch_size`.
+
+Requires `admin` access to the selected graph. Values are physical build
+telemetry, not RLS-filtered query results.
 
 ### `graph.resource_status()`
 
@@ -113,6 +119,9 @@ rows bigint,
 work_units bigint
 ```
 
+Requires graph-schema administrator privileges. Values describe the physical
+backend operation and are not RLS-filtered.
+
 Operations include `load`, `query`, `maintenance`, and `analytics`. The row is
 backend-local diagnostic telemetry. It is replaced when the next governed
 operation completes and is not an aggregate across sessions.
@@ -125,7 +134,9 @@ RETURNS int
 ```
 
 Returns the number of unexpired backend heartbeats currently retaining durable
-projection generations for generation-aware cleanup.
+projection generations for generation-aware cleanup. Requires graph-schema
+administrator privileges. The count is physical telemetry and is not
+RLS-filtered.
 
 ### `graph.ingest_projection()`
 
@@ -212,6 +223,8 @@ RETURNS TABLE (
 
 Reports durable projection manifest, segment, chunk, GC, heartbeat, validation,
 storage, fanout, read-amplification, and recommendation state.
+Requires `admin` access to the selected graph. Its values describe physical
+projection state and are not source-table-RLS-filtered query results.
 `artifact_validation_state` is `healthy`, `targeted_chunk_repair`,
 `full_rebuild`, or `no_projection`. `artifact_bytes` is the active base,
 manifest, segment, and replacement-chunk footprint for the selected graph.
@@ -674,7 +687,8 @@ RETURNS TABLE (
 
 Reports the graph currently loaded in this backend. The current implementation
 returns zero or one row because each PostgreSQL backend has one graph engine
-slot.
+slot. The row is omitted unless the caller has read access to that graph.
+Counts are physical projection totals and are not RLS-filtered.
 
 ### `graph.graph_runtime_status()`
 
@@ -699,7 +713,8 @@ Lists visible graphs with their runtime residency, backend-local loaded state,
 persisted artifact presence, and loaded-engine metrics when that graph is
 active in the current backend. This is the primary inspection API for deciding
 whether a graph is cold, missing an artifact, blocked by quota, or already
-loaded.
+loaded. Only graphs for which the caller has read access are returned. Artifact
+and count fields describe physical state and are not RLS-filtered.
 
 ### `graph.sync_health()`
 
@@ -1333,7 +1348,7 @@ RETURNS TABLE (
 ```
 
 Reads durable build job state, or returns `completed`/`not_found` for the
-special synchronous zero UUID path.
+special synchronous zero UUID path. Requires read access to the selected graph.
 
 ### `graph.build_status_for_graph()`
 
@@ -1348,6 +1363,7 @@ graph.build_status_for_graph(
 
 Returns the latest durable build jobs for the named graph, newest first. Rows
 include graph metadata, progress fields, timestamps, and any recorded error.
+Requires read access to the named graph.
 
 ## Sync And Maintenance
 
@@ -1672,7 +1688,7 @@ RETURNS TABLE (
 ```
 
 With `NULL`, returns the latest 50 jobs. With a job ID, returns that job or a
-single `not_found` row.
+single `not_found` row. Requires read access to the selected graph.
 
 ### `graph.maintenance_status_for_graph()`
 
@@ -1687,7 +1703,7 @@ graph.maintenance_status_for_graph(
 
 Returns the latest durable maintenance jobs for the named graph, newest first.
 Rows include graph metadata, progress fields, timestamps, and any recorded
-error.
+error. Requires read access to the named graph.
 
 ## GQL
 

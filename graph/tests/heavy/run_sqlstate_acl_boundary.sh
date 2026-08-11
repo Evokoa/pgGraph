@@ -80,6 +80,20 @@ SQL
   fi
 }
 
+expect_value_as_login() {
+  local role="$1"
+  local expected="$2"
+  local sql="$3"
+  local out
+
+  out="$(psql -X -q -v ON_ERROR_STOP=1 -tA -U "$role" -d "$DBNAME" -c "$sql")"
+  if [[ "$out" != "$expected" ]]; then
+    echo "Expected value '$expected' for login $role but got:"
+    echo "$out"
+    exit 1
+  fi
+}
+
 has_gql_facade() {
   local out
 
@@ -99,14 +113,17 @@ run_sql "DROP TABLE IF EXISTS public.graph_boundary_nodes CASCADE;"
 run_sql "DROP TABLE IF EXISTS public.graph_boundary_public_nodes CASCADE;"
 run_sql "DROP TABLE IF EXISTS public.graph_boundary_secret_nodes CASCADE;"
 run_sql "DROP TABLE IF EXISTS public.graph_boundary_output_nodes CASCADE;"
+run_sql "DROP TABLE IF EXISTS public.graph_boundary_identity_nodes CASCADE;"
 run_sql "CREATE TABLE public.graph_boundary_nodes (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, age INT NOT NULL, friend_id TEXT REFERENCES public.graph_boundary_nodes(id));"
 run_sql "CREATE TABLE public.graph_boundary_edges (id BIGSERIAL PRIMARY KEY, from_id TEXT NOT NULL REFERENCES public.graph_boundary_nodes(id), to_id TEXT NOT NULL REFERENCES public.graph_boundary_nodes(id));"
 run_sql "CREATE TABLE public.graph_boundary_output_nodes (id TEXT PRIMARY KEY);"
+run_sql "CREATE TABLE public.graph_boundary_identity_nodes (id TEXT PRIMARY KEY, visible_to NAME NOT NULL, name TEXT NOT NULL);"
 run_sql "CREATE TABLE public.graph_boundary_secret_nodes (id TEXT PRIMARY KEY, output_id TEXT REFERENCES public.graph_boundary_output_nodes(id), edge_weight INT NOT NULL);"
 run_sql "CREATE TABLE public.graph_boundary_public_nodes (id TEXT PRIMARY KEY, secret_id TEXT REFERENCES public.graph_boundary_secret_nodes(id), edge_weight INT NOT NULL);"
 run_sql "INSERT INTO public.graph_boundary_nodes VALUES ('b', 't2', 'Bob', 20, NULL), ('a', 't1', 'Alice', 10, 'b');"
 run_sql "INSERT INTO public.graph_boundary_edges (from_id, to_id) VALUES ('a', 'b');"
 run_sql "INSERT INTO public.graph_boundary_output_nodes VALUES ('o1');"
+run_sql "INSERT INTO public.graph_boundary_identity_nodes VALUES ('visible', '$ROLE_NAME', 'Visible'), ('hidden', 'graph_boundary_other', 'Hidden');"
 run_sql "INSERT INTO public.graph_boundary_secret_nodes VALUES ('s1', 'o1', 1);"
 run_sql "INSERT INTO public.graph_boundary_public_nodes VALUES ('p1', 's1', 1);"
 
@@ -118,6 +135,7 @@ run_sql "SELECT graph.add_filter_column('public.graph_boundary_nodes'::regclass,
 run_sql "SELECT graph.add_table('public.graph_boundary_public_nodes'::regclass, 'id');"
 run_sql "SELECT graph.add_table('public.graph_boundary_secret_nodes'::regclass, 'id');"
 run_sql "SELECT graph.add_table('public.graph_boundary_output_nodes'::regclass, 'id');"
+run_sql "SELECT graph.add_table('public.graph_boundary_identity_nodes'::regclass, 'id', ARRAY['visible_to', 'name']);"
 run_sql "SELECT graph.add_edge('public.graph_boundary_public_nodes'::regclass, 'secret_id', 'public.graph_boundary_secret_nodes'::regclass, 'id', 'hidden_link', bidirectional := false, weight_column := 'edge_weight');"
 run_sql "SELECT graph.add_edge('public.graph_boundary_secret_nodes'::regclass, 'output_id', 'public.graph_boundary_output_nodes'::regclass, 'id', 'visible_link', bidirectional := false, weight_column := 'edge_weight');"
 run_sql "SELECT * FROM graph.build();"
@@ -139,11 +157,17 @@ fi
 expect_sqlstate "55000" "SET graph.enabled = off; SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1);"
 
 run_sql "DROP ROLE IF EXISTS $ROLE_NAME;"
-run_sql "CREATE ROLE $ROLE_NAME;"
+run_sql "CREATE ROLE $ROLE_NAME LOGIN;"
 run_sql "GRANT USAGE ON SCHEMA graph TO $ROLE_NAME;"
 run_sql "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graph TO $ROLE_NAME;"
 run_sql "GRANT SELECT ON public.graph_boundary_nodes TO $ROLE_NAME;"
 run_sql "GRANT SELECT ON public.graph_boundary_public_nodes, public.graph_boundary_output_nodes TO $ROLE_NAME;"
+run_sql "ALTER TABLE public.graph_boundary_identity_nodes ENABLE ROW LEVEL SECURITY;"
+run_sql "CREATE POLICY graph_boundary_identity_rls ON public.graph_boundary_identity_nodes FOR SELECT TO $ROLE_NAME USING (visible_to = current_user);"
+run_sql "GRANT SELECT ON public.graph_boundary_identity_nodes TO $ROLE_NAME;"
+
+expect_value_as_login "$ROLE_NAME" "1" "SELECT count(*) FROM graph.traverse('public.graph_boundary_identity_nodes'::regclass, 'visible', 0, hydrate := true) WHERE node->>'name' = 'Visible';"
+expect_value_as_login "$ROLE_NAME" "1" "SELECT count(*) FROM graph.traverse('public.graph_boundary_identity_nodes'::regclass, 'hidden', 0, hydrate := true) WHERE node IS NULL;"
 
 expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT * FROM public.graph_boundary_secret_nodes;"
 expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT * FROM graph.traverse('public.graph_boundary_public_nodes'::regclass, 'p1', 2, hydrate := false);"

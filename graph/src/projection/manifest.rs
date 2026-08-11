@@ -37,6 +37,20 @@ const CURRENT_POINTER_VERSION: u32 = 1;
 const MAX_CURRENT_POINTER_BYTES: usize = 4 * 1024;
 const GOVERNED_MANIFEST_IO_WORKSPACE_BYTES: usize = 16 * 1024;
 
+#[cfg(not(test))]
+thread_local! {
+    static PENDING_HEARTBEAT: std::cell::RefCell<Option<PendingHeartbeat>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(not(test))]
+struct PendingHeartbeat {
+    caller_oid: pgrx::pg_sys::Oid,
+    generation_id: u64,
+    sync_watermark: i64,
+    validation_status: String,
+}
+
 #[cfg(test)]
 thread_local! {
     static FAIL_AFTER_POINTER_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1117,12 +1131,117 @@ impl ProjectionGenerationHeartbeat {
     }
 }
 
+#[cfg(not(test))]
 pub(crate) fn record_loaded_generation_heartbeat(manifest: &ProjectionManifest) -> GraphResult<()> {
-    record_active_generation_heartbeat(
+    validate_status(&manifest.validation_status)?;
+    let caller_oid = crate::catalog::current_role_oid()?;
+    let result = with_pending_generation_heartbeat(
+        PendingHeartbeat {
+            caller_oid,
+            generation_id: manifest.generation_id,
+            sync_watermark: manifest.sync_watermark,
+            validation_status: manifest.validation_status.clone(),
+        },
+        || {
+            pgrx::Spi::get_one::<bool>(
+                "SELECT graph._record_projection_heartbeat_for_current_role()",
+            )
+        },
+    )
+    .map_err(|err| GraphError::Internal(format!("projection heartbeat update failed: {err}")));
+    result?.filter(|recorded| *recorded).ok_or_else(|| {
+        GraphError::Internal("projection heartbeat mediator returned null or false".into())
+    })?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn with_pending_generation_heartbeat<R, F>(pending: PendingHeartbeat, operation: F) -> R
+where
+    F: FnOnce() -> R + std::panic::UnwindSafe,
+{
+    PENDING_HEARTBEAT.with(|slot| {
+        slot.replace(Some(pending));
+    });
+    pgrx::pg_sys::PgTryBuilder::new(operation)
+        .finally(|| {
+            PENDING_HEARTBEAT.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        })
+        .execute()
+}
+
+#[cfg(not(test))]
+pub(crate) fn take_pending_generation_heartbeat(
+) -> GraphResult<(pgrx::pg_sys::Oid, u64, i64, String)> {
+    PENDING_HEARTBEAT
+        .with(|slot| slot.borrow_mut().take())
+        .map(|pending| {
+            (
+                pending.caller_oid,
+                pending.generation_id,
+                pending.sync_watermark,
+                pending.validation_status,
+            )
+        })
+        .ok_or_else(|| GraphError::AclDenied {
+            table: "internal projection heartbeat mediator".to_string(),
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn take_pending_generation_heartbeat(
+) -> GraphResult<(pgrx::pg_sys::Oid, u64, i64, String)> {
+    Err(GraphError::AclDenied {
+        table: "internal projection heartbeat mediator".to_string(),
+    })
+}
+
+#[cfg(all(not(test), feature = "development"))]
+pub(crate) fn test_generation_heartbeat_error_after_arming() -> bool {
+    let caller_oid = crate::catalog::current_role_oid().unwrap_or_else(|err| err.report());
+    pgrx::pg_sys::PgTryBuilder::new(|| {
+        with_pending_generation_heartbeat(
+            PendingHeartbeat {
+                caller_oid,
+                generation_id: u64::MAX,
+                sync_watermark: i64::MAX,
+                validation_status: VALIDATION_STATUS_VALID.to_string(),
+            },
+            || {
+                pgrx::ereport!(
+                    ERROR,
+                    pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                    "injected projection heartbeat cancellation"
+                );
+            },
+        );
+        true
+    })
+    .catch_when(pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |_| false)
+    .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn record_loaded_generation_heartbeat(manifest: &ProjectionManifest) -> GraphResult<()> {
+    record_loaded_generation_heartbeat_direct(
         manifest.generation_id,
-        DEFAULT_ACTIVE_GENERATION_TTL,
         manifest.sync_watermark,
         &manifest.validation_status,
+    )
+}
+
+pub(crate) fn record_loaded_generation_heartbeat_direct(
+    generation_id: u64,
+    sync_watermark: i64,
+    validation_status: &str,
+) -> GraphResult<()> {
+    record_active_generation_heartbeat(
+        generation_id,
+        DEFAULT_ACTIVE_GENERATION_TTL,
+        sync_watermark,
+        validation_status,
     )
 }
 
@@ -1390,6 +1509,13 @@ pub(crate) fn active_generation_count() -> GraphResult<i32> {
 
 #[cfg(not(test))]
 pub(crate) fn active_generation_count() -> GraphResult<i32> {
+    pgrx::Spi::get_one::<i32>("SELECT graph._active_generation_count_for_current_role()")
+        .map_err(|err| GraphError::Internal(format!("projection heartbeat count failed: {err}")))?
+        .ok_or_else(|| GraphError::Internal("projection heartbeat count was null".to_string()))
+}
+
+#[cfg(not(test))]
+pub(crate) fn active_generation_count_direct() -> GraphResult<i32> {
     let graph_id = current_graph_id()?;
     let count = pgrx::Spi::get_one_with_args::<i64>(
         "SELECT count(*)::bigint
@@ -1403,6 +1529,11 @@ pub(crate) fn active_generation_count() -> GraphResult<i32> {
     .map_err(|err| GraphError::Internal(format!("projection heartbeat count failed: {err}")))?
     .unwrap_or(0);
     Ok(count.min(i32::MAX as i64) as i32)
+}
+
+#[cfg(test)]
+pub(crate) fn active_generation_count_direct() -> GraphResult<i32> {
+    Ok(0)
 }
 
 #[cfg(not(test))]
@@ -1468,6 +1599,15 @@ pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
 
 #[cfg(not(test))]
 pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
+    pgrx::Spi::get_one::<bool>("SELECT graph._expire_projection_heartbeats_for_current_role()")
+        .map_err(|err| {
+            GraphError::Internal(format!("projection heartbeat expiration failed: {err}"))
+        })?;
+    Ok(())
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+pub(crate) fn expire_stale_generation_heartbeats_direct() -> GraphResult<()> {
     let graph_id = current_graph_id()?;
     pgrx::Spi::run_with_args(
         "DELETE FROM graph._projection_generations
@@ -1479,13 +1619,18 @@ pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
     .map_err(|err| GraphError::Internal(format!("projection heartbeat expiration failed: {err}")))
 }
 
-#[cfg(not(test))]
+#[cfg(any(not(test), feature = "pg_test"))]
 fn current_graph_id() -> GraphResult<String> {
     crate::catalog::selected_or_default_graph_metadata().map(|graph| graph.graph_id)
 }
 
 #[cfg(test)]
 pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
+    Ok(())
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+pub(crate) fn expire_stale_generation_heartbeats_direct() -> GraphResult<()> {
     Ok(())
 }
 

@@ -3348,6 +3348,19 @@ pub(crate) fn graph_has_tenanted_tables() -> safety::GraphResult<bool> {
 /// need different staleness windows in the future.
 const SYNC_WATERMARK_HEARTBEAT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+#[cfg(not(test))]
+thread_local! {
+    static PENDING_SYNC_WATERMARK: std::cell::Cell<Option<PendingSyncWatermark>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct PendingSyncWatermark {
+    caller_oid: pgrx::pg_sys::Oid,
+    applied_sync_id: i64,
+}
+
 /// Prune is only worth recommending once the log has grown meaningfully
 /// past what has been safely applied everywhere; a handful of pending rows
 /// is normal steady-state, not something an operator needs to act on.
@@ -3358,7 +3371,86 @@ const SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS: i64 = 10_000;
 /// diagnostics (`graph.status()`, `graph.sync_health()`) or advances via
 /// sync replay; the heartbeat only needs to be current enough that
 /// `sync_log_retention_floor` does not treat this backend as gone.
+#[cfg(not(test))]
 pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::GraphResult<()> {
+    let caller_oid = crate::catalog::current_role_oid()?;
+    let result = with_pending_sync_watermark(
+        PendingSyncWatermark {
+            caller_oid,
+            applied_sync_id,
+        },
+        || Spi::get_one::<bool>("SELECT graph._record_sync_watermark_for_current_role()"),
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync watermark heartbeat update failed: {err}"))
+    });
+    result?.filter(|recorded| *recorded).ok_or_else(|| {
+        safety::GraphError::Internal(
+            "sync watermark heartbeat mediator returned null or false".to_string(),
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn with_pending_sync_watermark<R, F>(pending: PendingSyncWatermark, operation: F) -> R
+where
+    F: FnOnce() -> R + std::panic::UnwindSafe,
+{
+    PENDING_SYNC_WATERMARK.with(|slot| slot.set(Some(pending)));
+    pgrx::pg_sys::PgTryBuilder::new(operation)
+        .finally(|| PENDING_SYNC_WATERMARK.with(|slot| slot.set(None)))
+        .execute()
+}
+
+#[cfg(not(test))]
+pub(crate) fn take_pending_sync_watermark() -> safety::GraphResult<(pgrx::pg_sys::Oid, i64)> {
+    PENDING_SYNC_WATERMARK
+        .with(std::cell::Cell::take)
+        .map(|pending| (pending.caller_oid, pending.applied_sync_id))
+        .ok_or_else(|| safety::GraphError::AclDenied {
+            table: "internal sync watermark mediator".to_string(),
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn take_pending_sync_watermark() -> safety::GraphResult<(pgrx::pg_sys::Oid, i64)> {
+    Err(safety::GraphError::AclDenied {
+        table: "internal sync watermark mediator".to_string(),
+    })
+}
+
+#[cfg(all(not(test), feature = "development"))]
+pub(crate) fn test_sync_watermark_error_after_arming() -> bool {
+    let caller_oid = crate::catalog::current_role_oid().unwrap_or_else(|err| err.report());
+    pgrx::pg_sys::PgTryBuilder::new(|| {
+        with_pending_sync_watermark(
+            PendingSyncWatermark {
+                caller_oid,
+                applied_sync_id: i64::MAX,
+            },
+            || {
+                pgrx::ereport!(
+                    ERROR,
+                    pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                    "injected sync watermark cancellation"
+                );
+            },
+        );
+        true
+    })
+    .catch_when(pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |_| false)
+    .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::GraphResult<()> {
+    record_sync_watermark_heartbeat_direct(applied_sync_id)
+}
+
+pub(crate) fn record_sync_watermark_heartbeat_direct(
+    applied_sync_id: i64,
+) -> safety::GraphResult<()> {
     let graph_id = selected_or_default_graph_metadata()?.graph_id;
     let ttl_micros = i64::try_from(SYNC_WATERMARK_HEARTBEAT_TTL.as_micros()).map_err(|_| {
         safety::GraphError::Internal("sync watermark heartbeat TTL is too large".to_string())
@@ -3388,6 +3480,17 @@ pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::G
 /// backend that disconnected without cleanup stops blocking pruning once
 /// its heartbeat's `expires_at` has passed.
 pub(crate) fn expire_stale_sync_watermarks() -> safety::GraphResult<()> {
+    Spi::get_one::<bool>("SELECT graph._expire_sync_watermarks_for_current_role()").map_err(
+        |err| {
+            safety::GraphError::Internal(format!(
+                "sync watermark heartbeat expiration failed: {err}"
+            ))
+        },
+    )?;
+    Ok(())
+}
+
+pub(crate) fn expire_stale_sync_watermarks_direct() -> safety::GraphResult<()> {
     let graph_id = selected_or_default_graph_metadata()?.graph_id;
     Spi::run_with_args(
         "DELETE FROM graph._sync_watermarks

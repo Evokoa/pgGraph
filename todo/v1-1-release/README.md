@@ -616,8 +616,8 @@ caller-row boundary, not a replacement.
 | `graph.active_generation_count()` | Invoker; no selected-graph or privilege check today | Phase 3 restricts cluster-wide generation telemetry to graph administrators | Reports physical unexpired generation heartbeats; not RLS-row-filtered | 3 | Public/reader execution is denied and an administrator receives the physical count |
 | `graph.build_resource_status()` | Invoker; selected graph is resolved through status helpers | Phase 3 adds explicit selected-graph admin authorization | Reports physical resource use for the latest build | 3 | Reader/admin roles prove the grant boundary; a failed replacement cannot change the active generation |
 | `graph.resource_status()` | Invoker; no direct graph privilege check today | Phase 3 restricts backend-local operation telemetry to graph administrators | Reports the physical last-operation resource snapshot | 3 | Public/reader execution is denied and an administrator receives the physical snapshot |
-| `graph.build_status()`, `graph.build_status_for_graph()` | Invoker with selected/named-graph resolution | Phase 3 makes build-job read authorization explicit | Reports synchronous/backend-local or durable build-job outcomes | 3 | Cancelled build is failed/cancelled while generation A remains current; cross-graph status is denied or not found |
-| `graph.maintenance_status()`, `graph.maintenance_status_for_graph()` | Invoker with selected/named-graph resolution | Phase 3 makes maintenance-job read authorization explicit | Reports durable maintenance-job outcomes | 3 | Cancelled maintenance is failed/cancelled while generation A remains current; cross-graph status is denied or not found |
+| `graph.build_status()`, `graph.build_status_for_graph()` | Pinned definer catalog mediators that capture and authorize the outer caller | Phase 3 makes build-job read authorization explicit | Reports synchronous/backend-local or durable build-job outcomes | 3 | Raw job tables deny public reads; cancelled build is failed/cancelled while generation A remains current; cross-graph status is denied or not found |
+| `graph.maintenance_status()`, `graph.maintenance_status_for_graph()` | Pinned definer catalog mediators that capture and authorize the outer caller | Phase 3 makes maintenance-job read authorization explicit | Reports durable maintenance-job outcomes | 3 | Raw job tables deny public reads; cancelled maintenance is failed/cancelled while generation A remains current; cross-graph status is denied or not found |
 | `graph.current_graph()` | Definer with explicit caller-role checks | Named-graph read authorization | Reports session-selected metadata without loading or publishing an artifact | 2 | A low-privilege role sees only graph metadata granted to that role |
 | `graph.set_current_graph()` | Definer with explicit caller-role checks | Named-graph read authorization | Selects graph metadata without changing the published generation | 2 | A low-privilege role cannot select an ungranted graph |
 | `graph.select_graph()` | Definer with explicit caller-role checks | Named-graph read authorization | Selects a graph and may eager-load its published artifact | 2 | Low-privilege selection cannot expose another graph; cancelled eager load leaves the prior published generation usable |
@@ -756,7 +756,7 @@ when its evidence and exit gate are both satisfied.
 | 0 | Complete | Scope, non-goals, compatibility direction, phase ownership, and supported-feature tracking are locked. |
 | 1 | Complete | Reported fixes, policy-compliant virtualenv reuse, full Panama/Docker evidence, docs gates, and independent review are complete. |
 | 2 | Complete | Cancellation-safe replacement, repair recovery, heavy cancellation/concurrency evidence, full pg17 suite, and independent Rust review pass. |
-| 3 | Not started | Depends on cancellation-safe build replacement from Phase 2. |
+| 3 | Complete | Invoker query modes, caller-preserving catalog mediators, telemetry authorization, update SQL, real-login evidence, and independent Rust review pass. |
 | 4 | Not started | Depends on caller identity and security-mode contract from Phase 3. |
 | 5 | Not started | Depends on the authoritative query-start seam and optimized baseline from Phase 4. |
 | 6 | Not started | Depends on the accepted traverse/BFS vertical slice from Phase 5. |
@@ -1016,6 +1016,46 @@ application caller before visibility logic is introduced.
 
 **Evidence:** real-login role results, function metadata diff, fresh-install
 test, and packaged update smoke test.
+
+**Recorded Phase 3 evidence (2026-08-10):**
+
+- `graph.traverse()`, `graph.connected_components()`, and
+  `graph.component_stats()` now run as invokers. Eight narrow catalog,
+  heartbeat, and quota mediators retain `SECURITY DEFINER` with a pinned
+  `pg_catalog, pg_temp` search path and capture the outer caller before
+  authorization.
+- A real login role protected by a `current_user` RLS policy hydrates only its
+  visible source row. A minimally privileged named-graph reader can traverse,
+  inspect authorized graph-local status, and cannot observe an ungranted graph
+  through `status()`, `loaded_graphs()`, `graph_runtime_status()`, or named job
+  status.
+- Graph-local telemetry now requires selected or named read/admin grants as
+  appropriate. Cluster-wide generation and backend resource telemetry require
+  graph-schema administration. These remain physical operational totals and
+  are explicitly documented as not row-filtered RLS query results.
+- Raw build and maintenance job tables deny public reads. Their four status
+  functions are pinned definer catalog mediators that authorize the captured
+  outer caller, and the mutable heartbeat mediators consume backend-private
+  one-shot state rather than accepting caller-supplied generations or
+  watermarks. The one-shot values are bound to the originating caller and
+  cleared through `PgTryBuilder::finally`, including after PostgreSQL errors,
+  Rust panics, and query cancellation; injected-cancellation regressions prove
+  a later direct mediator call still fails with `42501`.
+- The legacy `build_status()` fallback recognizes only the synchronous zero
+  UUID and only when the backend's loaded graph matches the caller's selected
+  graph. A two-graph low-privilege regression proves that a hidden loaded graph
+  cannot make a different selected graph report a completed build.
+- `graph--1.0.0--1.1.0.sql` changes the three topology entry points to invoker
+  mode and installs the pinned mediators. The exact update smoke preserves the
+  registered source table, a custom traversal grant, and the traversal
+  function owner across `ALTER EXTENSION graph UPDATE TO '1.1.0'`.
+- The function metadata audit, real-login SQLSTATE/ACL boundary gate, SQL API
+  release contract, documentation drift checks, MDX render/spell checks,
+  formatting, Clippy with warnings denied, and 891-test Rust suite pass.
+- The serial PostgreSQL 17 pgrx suite passes with 1,178 tests passed, one
+  intentionally ignored, and zero failures. Four tests that intentionally
+  contend for the graph maintenance lock were also rerun independently after
+  confirming that a parallel suite reports the expected `PG006` exclusion.
 
 **Exit gate:** source SQL sees the outer caller without manual identity
 switching, named-graph authorization still works for low-privilege roles, and

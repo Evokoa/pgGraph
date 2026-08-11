@@ -179,27 +179,37 @@ fn loaded_graphs() -> TableIterator<
 > {
     with_panic_boundary("loaded_graphs()", || {
         let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
-        let row = ENGINE.with(|engine| {
-            crate::runtime_state::loaded_graph_snapshot(&engine.borrow()).map(|mut snapshot| {
-                if let Ok(graphs) = catalog::list_graph_metadata_for_role(caller_oid) {
-                    if let Some(graph) = graphs
-                        .into_iter()
-                        .find(|graph| graph.graph_id == snapshot.graph_id)
-                    {
-                        snapshot.residency = graph.residency;
-                    }
-                }
-                (
-                    snapshot.graph_id,
-                    snapshot.graph_name,
-                    snapshot.residency,
-                    snapshot.node_count,
-                    snapshot.edge_count,
-                    snapshot.memory_used_mb,
-                    snapshot.projection_mode,
-                    snapshot.last_access_unix_micros,
+        let visible_graphs = catalog::list_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report())
+            .into_iter()
+            .filter(|graph| {
+                catalog::require_graph_privilege_for_role(
+                    graph,
+                    catalog::GraphPrivilege::Read,
+                    caller_oid,
                 )
+                .is_ok()
             })
+            .collect::<Vec<_>>();
+        let row = ENGINE.with(|engine| {
+            crate::runtime_state::loaded_graph_snapshot(&engine.borrow()).and_then(
+                |mut snapshot| {
+                    let graph = visible_graphs
+                        .iter()
+                        .find(|graph| graph.graph_id == snapshot.graph_id)?;
+                    snapshot.residency.clone_from(&graph.residency);
+                    Some((
+                        snapshot.graph_id,
+                        snapshot.graph_name,
+                        snapshot.residency,
+                        snapshot.node_count,
+                        snapshot.edge_count,
+                        snapshot.memory_used_mb,
+                        snapshot.projection_mode,
+                        snapshot.last_access_unix_micros,
+                    ))
+                },
+            )
         });
         TableIterator::new(row.into_iter().collect::<Vec<_>>())
     })
@@ -234,6 +244,14 @@ fn graph_runtime_status() -> TableIterator<
         let rows = catalog::list_graph_metadata_for_role(caller_oid)
             .unwrap_or_else(|err| err.report())
             .into_iter()
+            .filter(|graph| {
+                catalog::require_graph_privilege_for_role(
+                    graph,
+                    catalog::GraphPrivilege::Read,
+                    caller_oid,
+                )
+                .is_ok()
+            })
             .map(|graph| {
                 let logical_artifact =
                     persistence::graph_file_path_for_uncreated(&graph.graph_id).ok();
@@ -653,10 +671,9 @@ pub(crate) fn reconcile_interrupted_replacement(
 }
 
 pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
-    let role_oid = catalog::current_role_oid()?;
     let graph = catalog::selected_or_default_graph_metadata_via_definer()?;
     clear_loaded_graph_if_mismatched(&graph.graph_id);
-    catalog::require_graph_privilege_for_role(&graph, catalog::GraphPrivilege::Read, role_oid)?;
+    catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Read)?;
     reconcile_interrupted_replacement(&graph)?;
     maybe_auto_load();
 

@@ -12,6 +12,7 @@ so these sections remain explicit.
 
 | Release history |
 |---|
+| [v1.1.0 (unreleased)](#v1-1-0-unreleased) |
 | [v1.0.0](#v1-0-0-pggraph-production-release) |
 | [v0.1.8](#v0-1-8-named-graphs-and-production-release-hardening) |
 | [v0.1.7](#v0-1-7-durable-projection-operations) |
@@ -22,6 +23,32 @@ so these sections remain explicit.
 | [v0.1.2](#v0-1-2-alpha-hardening-follow-up) |
 | [v0.1.1](#v0-1-1-alpha-hardening-critical-paths) |
 | [v0.1.0](#v0-1-0-initial-alpha) |
+
+## v1.1.0: Unreleased
+
+This section is a working release-note draft and is extended as the 1.1 phases
+land.
+
+### Security Changes
+
+- `graph.traverse()`, `graph.connected_components()`, and
+  `graph.component_stats()` now execute as `SECURITY INVOKER`. Hydration and
+  later source-table visibility probes see the outer application role.
+- Selected/named-graph catalog access remains behind pinned, caller-authorizing
+  `SECURITY DEFINER` mediators. No Rust user-ID switching is used.
+- Runtime status rows are filtered to readable graphs. Selected-graph artifact
+  and build-resource telemetry requires graph `admin`; cluster generation and
+  backend resource telemetry requires graph-schema administration.
+- Raw build and maintenance job tables no longer grant `PUBLIC` reads. Their
+  status APIs use pinned caller-authorizing mediators, and heartbeat mediators
+  no longer accept caller-supplied generations or watermarks.
+- Status counts remain physical projection totals. They are not
+  source-table-RLS-filtered query results.
+
+The `1.0.0 -> 1.1.0` extension update changes the three query functions in
+place, preserving their owners and explicit `EXECUTE` grants. The final 1.1
+release notes will document the complete compatibility, artifact, rollback,
+and RLS contract after the remaining phases finish.
 
 ## v1.0.0: pgGraph Production Release
 

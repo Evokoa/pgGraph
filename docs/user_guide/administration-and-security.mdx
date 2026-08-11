@@ -217,6 +217,29 @@ graph was built from. Treat a built graph as a single artifact reflecting the
 builder's row visibility, not a per-caller-filtered view, and restrict which
 roles can query it accordingly.
 
+## Query Identity And Telemetry Authorization
+
+In pgGraph 1.1 query entry points execute as the PostgreSQL caller. Source-table
+SQL used for hydration and visibility checks therefore sees the application
+role and its normal ACL/RLS environment. pgGraph does not switch Rust user IDs.
+Selected-graph resolution and private catalog maintenance use small
+`SECURITY DEFINER` mediators that capture the outer role, pin `search_path` to
+`pg_catalog, pg_temp`, and enforce graph grants before accessing internal
+catalogs.
+
+Operational status reports physical projection state; their counts are not
+RLS-filtered query results. `graph.status()`, build/maintenance job status,
+`graph.loaded_graphs()`, and `graph.graph_runtime_status()` require read access
+to every graph row they expose. `graph.projection_status()` and
+`graph.build_resource_status()` require selected-graph `admin` access.
+Cluster-wide generation counts and backend-local resource telemetry require a
+graph-schema administrator (superuser or a role with `CREATE` on schema
+`graph`).
+
+Build and maintenance job status uses pinned catalog-only mediators that
+capture the outer caller and authorize the selected or named graph. The raw
+job tables are not a supported authorization bypass.
+
 ## Internal Catalog Tables
 
 Internal catalog tables are implementation details. Bootstrap SQL revokes
@@ -227,6 +250,8 @@ job, sync, and projection metadata tables:
 graph._graphs
 graph._graph_grants
 graph._graph_quotas
+graph._build_jobs
+graph._maintenance_jobs
 graph._jobs
 graph._job_runs
 graph._sync_policies

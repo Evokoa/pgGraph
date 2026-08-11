@@ -474,8 +474,16 @@
     "graph.vacuum_interval_secs"
   ],
   "internal_sql_functions": [
+    "_active_generation_count_for_current_role",
+    "_enforce_loaded_graph_quota_for_current_role",
+    "_expire_projection_heartbeats_for_current_role",
+    "_expire_sync_watermarks_for_current_role",
+    "_graph_id_for_current_role_with_privilege",
     "_max_sync_log_id_for_current_role",
     "_pending_sync_rows_for_current_role",
+    "_record_projection_heartbeat_for_current_role",
+    "_record_sync_watermark_for_current_role",
+    "_require_selected_graph_privilege_for_current_role",
     "_selected_graph_id_for_current_role",
     "test_enabled"
   ],

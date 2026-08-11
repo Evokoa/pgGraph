@@ -974,8 +974,6 @@ REVOKE ALL ON SEQUENCE graph._sync_buffer_id_seq  FROM PUBLIC;
 GRANT SELECT ON TABLE graph._registered_tables       TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_edges        TO PUBLIC;
 GRANT SELECT ON TABLE graph._registered_filter_columns TO PUBLIC;
-GRANT SELECT ON TABLE graph._build_jobs             TO PUBLIC;
-GRANT SELECT ON TABLE graph._maintenance_jobs       TO PUBLIC;
 
 -- Catalog mutation, build/vacuum, sync apply, reset, and global analytics are
 -- protected in Rust by graph-admin checks. Production deployments should still

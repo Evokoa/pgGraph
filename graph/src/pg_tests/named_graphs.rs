@@ -330,6 +330,8 @@ fn unprivileged_roles_cannot_read_named_graph_internal_catalogs() {
         "SELECT count(*) FROM graph._graphs",
         "SELECT count(*) FROM graph._graph_grants",
         "SELECT count(*) FROM graph._graph_quotas",
+        "SELECT count(*) FROM graph._build_jobs",
+        "SELECT count(*) FROM graph._maintenance_jobs",
         "SELECT count(*) FROM graph._jobs",
         "SELECT count(*) FROM graph._job_runs",
         "SELECT count(*) FROM graph._sync_policies",
@@ -387,6 +389,7 @@ fn unprivileged_roles_cannot_read_named_graph_internal_catalogs() {
 fn graph_grants_gate_visibility_queries_and_builds() {
     reset_and_create_fixtures();
     create_error_sqlstate_helper();
+    create_error_message_helper();
     Spi::run(
         "DROP ROLE IF EXISTS graph_phase7_reader;
          DROP ROLE IF EXISTS graph_phase7_no_graph;
@@ -467,6 +470,10 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     )
     .expect("graph admin set_graph_residency failed")
     .expect("graph admin residency row missing");
+    let admin_projection_sqlstate =
+        sqlstate_for_prepared_helper("SELECT * FROM graph.projection_status()");
+    let admin_build_resource_sqlstate =
+        sqlstate_for_prepared_helper("SELECT * FROM graph.build_resource_status()");
     Spi::run("RESET ROLE").expect("reset graph admin role failed");
 
     Spi::run("SET ROLE graph_phase7_reader").expect("set reader role failed");
@@ -476,17 +483,67 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     )
     .expect("reader set_current_graph failed")
     .expect("reader selected graph missing");
-    let reader_nodes = Spi::get_one::<i64>(
-        "SELECT count(*)
-           FROM graph.traverse(
-               'graph_test_users_pgtest'::regclass,
-               'u1',
-               1,
-               hydrate := true
-           )",
+    let reader_traverse_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT * FROM graph.traverse(
+            'graph_test_users_pgtest'::regclass,
+            'u1',
+            1,
+            hydrate := true
+        )",
+    );
+    let reader_expire_projection_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._expire_projection_heartbeats_for_current_role()",
+    );
+    let reader_expire_sync_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._expire_sync_watermarks_for_current_role()",
+    );
+    let reader_record_sync_sqlstate =
+        sqlstate_for_prepared_helper("SELECT graph._record_sync_watermark_for_current_role() ");
+    let reader_record_projection_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._record_projection_heartbeat_for_current_role()",
+    );
+    let reader_sync_cancel_observed = Spi::get_one::<bool>(
+        "SELECT graph._test_sync_heartbeat_error_after_arming()",
     )
-    .expect("reader traverse failed")
+    .expect("sync heartbeat cancellation probe failed")
+    .unwrap_or(true);
+    let reader_record_sync_after_cancel_sqlstate =
+        sqlstate_for_prepared_helper("SELECT graph._record_sync_watermark_for_current_role()");
+    let reader_projection_cancel_observed = Spi::get_one::<bool>(
+        "SELECT graph._test_projection_heartbeat_error_after_arming()",
+    )
+    .expect("projection heartbeat cancellation probe failed")
+    .unwrap_or(true);
+    let reader_record_projection_after_cancel_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._record_projection_heartbeat_for_current_role()",
+    );
+    let reader_pending_sync_sqlstate = sqlstate_for_prepared_helper(
+        "SELECT graph._pending_sync_rows_for_current_role(0)",
+    );
+    let reader_status_sqlstate = sqlstate_for_prepared_helper("SELECT * FROM graph.status()");
+    let reader_status_error = sql_error_message_for_prepared_helper("SELECT * FROM graph.status()");
+    let _reader_build_job_rows = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.build_status_for_graph(
+            'secure_graph', graph_namespace := 'app'
+        )",
+    )
+    .expect("reader build status failed")
     .unwrap_or(0);
+    let _reader_maintenance_job_rows = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.maintenance_status_for_graph(
+            'secure_graph', graph_namespace := 'app'
+        )",
+    )
+    .expect("reader maintenance status failed")
+    .unwrap_or(0);
+    let reader_projection_sqlstate =
+        sqlstate_for_prepared_helper("SELECT * FROM graph.projection_status()");
+    let reader_build_resource_sqlstate =
+        sqlstate_for_prepared_helper("SELECT * FROM graph.build_resource_status()");
+    let reader_resource_sqlstate =
+        sqlstate_for_prepared_helper("SELECT * FROM graph.resource_status()");
+    let reader_generation_sqlstate =
+        sqlstate_for_prepared_helper("SELECT graph.active_generation_count()");
     let reader_residency_sqlstate = sqlstate_for_prepared_helper(
         "SELECT * FROM graph.set_graph_residency('secure_graph', 'cold', namespace := 'app')",
     );
@@ -495,6 +552,17 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     Spi::run("SET ROLE graph_phase7_no_graph").expect("set no_graph role failed");
     let no_graph_sqlstate =
         sqlstate_for_prepared_helper("SELECT * FROM graph.set_current_graph('secure_graph', namespace := 'app')");
+    let hidden_loaded_rows = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.loaded_graphs() WHERE graph_name = 'secure_graph'",
+    )
+    .expect("restricted loaded_graphs failed")
+    .unwrap_or(-1);
+    let hidden_runtime_rows = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.graph_runtime_status() WHERE graph_name = 'secure_graph'",
+    )
+    .expect("restricted graph_runtime_status failed")
+    .unwrap_or(-1);
+    let hidden_status_sqlstate = sqlstate_for_prepared_helper("SELECT * FROM graph.status()");
     Spi::run("RESET ROLE").expect("reset no_graph role failed");
 
     Spi::run("SET ROLE graph_phase7_no_source").expect("set no_source role failed");
@@ -516,12 +584,41 @@ fn graph_grants_gate_visibility_queries_and_builds() {
 
     assert_eq!(owner_grant_rows, 4);
     assert_eq!(reader_current, "secure_graph");
-    assert!(reader_nodes >= 1);
+    assert_eq!(reader_traverse_sqlstate, None);
+    assert_eq!(reader_expire_projection_sqlstate, None);
+    assert_eq!(reader_expire_sync_sqlstate, None);
+    assert_eq!(reader_record_sync_sqlstate, Some("42501".to_string()));
+    assert_eq!(
+        reader_record_projection_sqlstate,
+        Some("42501".to_string())
+    );
+    assert!(!reader_sync_cancel_observed);
+    assert_eq!(
+        reader_record_sync_after_cancel_sqlstate,
+        Some("42501".to_string())
+    );
+    assert!(!reader_projection_cancel_observed);
+    assert_eq!(
+        reader_record_projection_after_cancel_sqlstate,
+        Some("42501".to_string())
+    );
+    assert_eq!(reader_pending_sync_sqlstate, None);
+    assert_eq!(reader_status_error, None);
+    assert_eq!(reader_status_sqlstate, None);
     assert_eq!(admin_residency, "warm");
+    assert_eq!(admin_projection_sqlstate, None);
+    assert_eq!(admin_build_resource_sqlstate, None);
     assert_eq!(no_graph_sqlstate, Some("22023".to_string()));
+    assert_eq!(hidden_loaded_rows, 0);
+    assert_eq!(hidden_runtime_rows, 0);
+    assert_eq!(hidden_status_sqlstate, Some("22023".to_string()));
     assert_eq!(no_source_current, "secure_graph");
     assert_eq!(no_source_sqlstate, Some("42501".to_string()));
     assert_eq!(reader_residency_sqlstate, Some("42501".to_string()));
+    assert_eq!(reader_projection_sqlstate, Some("42501".to_string()));
+    assert_eq!(reader_build_resource_sqlstate, Some("42501".to_string()));
+    assert_eq!(reader_resource_sqlstate, Some("42501".to_string()));
+    assert_eq!(reader_generation_sqlstate, Some("42501".to_string()));
     assert_eq!(builder_nodes, 2);
     assert!(admin_unloaded);
     assert_eq!(admin_loaded_nodes, 2);
@@ -1971,6 +2068,34 @@ fn runtime_selection_does_not_reuse_previous_graph_engine() {
     Spi::run("SELECT graph.build_graph('runtime_b', force_persist := true, graph_namespace := 'app')")
         .expect("runtime_b build failed");
 
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_runtime_status_reader;
+         CREATE ROLE graph_runtime_status_reader;
+         GRANT USAGE ON SCHEMA graph TO graph_runtime_status_reader;
+         SELECT graph.grant_graph(
+             'runtime_a',
+             'graph_runtime_status_reader',
+             'read',
+             namespace := 'app'
+         )",
+    )
+    .expect("create runtime status reader failed");
+    Spi::run("SET ROLE graph_runtime_status_reader").expect("set runtime status reader failed");
+    Spi::run("SELECT graph.set_current_graph('runtime_a', namespace := 'app')")
+        .expect("runtime status reader select runtime_a failed");
+    let stale_synchronous_build_status = Spi::get_one::<String>(
+        "SELECT status
+           FROM graph.build_status('00000000-0000-0000-0000-000000000000')",
+    )
+    .expect("stale synchronous build status failed")
+    .expect("stale synchronous build status row missing");
+    let arbitrary_missing_build_status = Spi::get_one::<String>(
+        "SELECT status FROM graph.build_status('missing-runtime-build')",
+    )
+    .expect("arbitrary missing build status failed")
+    .expect("arbitrary missing build status row missing");
+    Spi::run("RESET ROLE").expect("reset runtime status reader failed");
+
     let loaded_b_nodes =
         Spi::get_one::<i64>("SELECT node_count FROM graph.loaded_graphs()")
             .expect("loaded_graphs after runtime_b failed")
@@ -2039,6 +2164,8 @@ fn runtime_selection_does_not_reuse_previous_graph_engine() {
             .unwrap_or(-1);
 
     assert_eq!(loaded_b_nodes, 1);
+    assert_eq!(stale_synchronous_build_status, "not_found");
+    assert_eq!(arbitrary_missing_build_status, "not_found");
     assert!(!select_a_loaded);
     assert_eq!(loaded_after_select_a, 0);
     assert_eq!(load_a_nodes, 2);
