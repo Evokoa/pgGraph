@@ -1061,6 +1061,39 @@ impl Engine {
         direction: TraversalDirection,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<TraverseOutcome> {
+        self.traverse_with_filter_ops_in_context(
+            seed_table_oid,
+            seed_id,
+            max_depth,
+            max_nodes,
+            max_frontier,
+            edge_types,
+            filter_ops,
+            tenant,
+            strategy,
+            direction,
+            &crate::visibility::QueryExecutionContext::new(
+                governor,
+                &crate::visibility::VisibilityScope::Unrestricted,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn traverse_with_filter_ops_in_context(
+        &self,
+        seed_table_oid: u32,
+        seed_id: &str,
+        max_depth: i32,
+        max_nodes: u32,
+        max_frontier: u32,
+        edge_types: Option<Vec<String>>,
+        filter_ops: Vec<FilterOp>,
+        tenant: Option<&str>,
+        strategy: TraversalStrategy,
+        direction: TraversalDirection,
+        context: &crate::visibility::QueryExecutionContext<'_>,
+    ) -> GraphResult<TraverseOutcome> {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
@@ -1072,6 +1105,12 @@ impl Engine {
                     table: format!("{}", seed_table_oid),
                     pk: seed_id.to_string(),
                 })?;
+        if !context.visibility.allows_node(seed_node) {
+            return Ok(TraverseOutcome {
+                rows: Vec::new(),
+                truncated: false,
+            });
+        }
 
         // Resolve edge type filter
         let edge_type_filter = match edge_types {
@@ -1099,14 +1138,16 @@ impl Engine {
             max_nodes,
             max_frontier,
         )?;
-        let _workspace = governor
+        let _workspace = context
+            .governor
             .reserve_memory(
                 crate::resource::ResourcePhase::QueryFrontier,
                 traversal_bytes,
             )
             .map_err(crate::safety::resource_limit_error)?;
         let overlay_bytes = self.estimated_traversal_overlay_clone_bytes()?;
-        let _overlay_workspace = governor
+        let _overlay_workspace = context
+            .governor
             .reserve_memory(crate::resource::ResourcePhase::QueryExpand, overlay_bytes)
             .map_err(crate::safety::resource_limit_error)?;
 
@@ -1139,12 +1180,12 @@ impl Engine {
         let bfs_result = match (strategy, layered_neighbors.as_ref()) {
             (TraversalStrategy::Bfs, Some(layered)) => {
                 let neighbors = layered.for_direction(direction);
-                bfs::execute_with_neighbors_governed(
+                bfs::execute_with_neighbors_governed_with_context(
                     &self.node_store,
                     &neighbors,
                     &self.filter_index,
                     &config,
-                    governor,
+                    context,
                 )?
             }
             (TraversalStrategy::Dfs, Some(layered)) => {
@@ -1154,22 +1195,22 @@ impl Engine {
                     &neighbors,
                     &self.filter_index,
                     &config,
-                    governor,
+                    context.governor,
                 )?
             }
-            (TraversalStrategy::Bfs, None) => bfs::execute_governed(
+            (TraversalStrategy::Bfs, None) => bfs::execute_governed_with_context(
                 &self.node_store,
                 edge_store,
                 &self.filter_index,
                 &config,
-                governor,
+                context,
             )?,
             (TraversalStrategy::Dfs, None) => bfs::execute_dfs_governed(
                 &self.node_store,
                 edge_store,
                 &self.filter_index,
                 &config,
-                governor,
+                context.governor,
             )?,
         };
         let output_bytes = self.traversal_result_upper_bound(&bfs_result, max_depth)?;
@@ -1182,13 +1223,15 @@ impl Engine {
                     .saturating_add(1),
             )
             .ok_or_else(|| GraphError::Internal("traversal output work overflowed".to_string()))?;
-        governor
+        context
+            .governor
             .consume_work(
                 crate::resource::ResourcePhase::QueryCandidates,
                 crate::resource::WorkUnits::new(output_work),
             )
             .map_err(crate::safety::resource_limit_error)?;
-        let output_lease = governor
+        let output_lease = context
+            .governor
             .reserve_memory(
                 crate::resource::ResourcePhase::QueryCandidates,
                 output_bytes,

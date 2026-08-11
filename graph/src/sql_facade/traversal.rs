@@ -110,9 +110,16 @@ pub(super) fn traverse(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let rows = execute_traverse_rows_governed(
-            &request,
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
             &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let rows = execute_traverse_rows_in_context(
+            &request,
+            &context,
             &query_start.tables,
             &query_start.filter_columns,
         )

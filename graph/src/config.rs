@@ -146,6 +146,11 @@ pub static SYNC_MODE: GucSetting<Option<std::ffi::CString>> =
 pub static QUERY_FRESHNESS: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
+/// Caller-scoped topology RLS policy: `enforce` or `legacy_bypass`.
+/// Default: `enforce`.
+pub static RLS_MODE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
 /// OOM action: 'error' (return SQL error) or 'readonly' (degrade gracefully).
 /// Default: "error".
 pub static OOM_ACTION: GucSetting<Option<std::ffi::CString>> =
@@ -194,13 +199,9 @@ pub static PROJECTION_RETENTION_GENERATIONS: GucSetting<i32> = GucSetting::<i32>
 /// Default: true.
 pub static ENFORCE_TENANT_SCOPE: GucSetting<bool> = GucSetting::<bool>::new(true);
 
-/// Whether `graph.build()` may register tables that have row-level security
-/// enabled. Topology-read functions (`traverse()`, `shortest_path()`, the
-/// component functions) return coordinates and adjacency from the
-/// builder-scoped graph artifact under table-level ACL only, not row-level
-/// security, so building over an RLS-enabled table without this explicit
-/// acknowledgment is refused.
-/// Default: false.
+/// Deprecated compatibility setting retained for 1.0 configuration files.
+/// Builds accept RLS-enabled source tables regardless of this value; query
+/// behavior is controlled by `graph.rls_mode`.
 pub static ALLOW_RLS_TABLES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 // ─── Typed Enums for String GUCs ───
@@ -246,6 +247,16 @@ pub enum QueryFreshness {
     ApplyPendingSync,
     /// Return an error instead of reading while pending trigger sync rows exist.
     ErrorOnPending,
+}
+
+/// Query-time source-table RLS behavior for projected topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RlsMode {
+    /// Intersect projected topology with source rows visible to the outer caller.
+    #[default]
+    Enforce,
+    /// Compatibility mode retaining the pre-1.1 builder-scoped topology.
+    LegacyBypass,
 }
 
 /// Runtime projection mode selected for a built graph.
@@ -367,6 +378,24 @@ pub fn parsed_query_freshness() -> Option<QueryFreshness> {
     parse_query_freshness(raw)
 }
 
+pub fn rls_mode() -> String {
+    RLS_MODE
+        .get()
+        .as_ref()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("enforce")
+        .to_string()
+}
+
+pub fn parsed_rls_mode() -> Option<RlsMode> {
+    let binding = RLS_MODE.get();
+    let raw = binding
+        .as_ref()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("enforce");
+    parse_rls_mode(raw)
+}
+
 /// Return the configured default projection mode.
 pub fn default_projection_mode() -> Option<ProjectionMode> {
     let binding = DEFAULT_PROJECTION_MODE.get();
@@ -462,6 +491,17 @@ fn parse_query_freshness(raw: &str) -> Option<QueryFreshness> {
         "apply_pending_sync" | "apply" | "auto" | "on" => Some(QueryFreshness::ApplyPendingSync),
         "error_on_pending" | "error" => Some(QueryFreshness::ErrorOnPending),
         _ => None,
+    }
+}
+
+fn parse_rls_mode(raw: &str) -> Option<RlsMode> {
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("enforce") {
+        Some(RlsMode::Enforce)
+    } else if raw.eq_ignore_ascii_case("legacy_bypass") {
+        Some(RlsMode::LegacyBypass)
+    } else {
+        None
     }
 }
 
@@ -767,6 +807,15 @@ pub fn register_gucs() {
     );
 
     GucRegistry::define_string_guc(
+        c"graph.rls_mode",
+        c"Caller-scoped row-level-security behavior for projected topology.",
+        c"Default enforce: intersect topology with caller-visible source rows. legacy_bypass: retain pre-1.1 builder-scoped topology.",
+        &RLS_MODE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
         c"graph.oom_action",
         c"Action on OOM: 'error' or 'readonly'.",
         c"'error': return SQL ERROR. 'readonly': degrade to read-only mode.",
@@ -877,8 +926,8 @@ pub fn register_gucs() {
 
     GucRegistry::define_bool_guc(
         c"graph.allow_rls_tables",
-        c"Allow graph.build() to register tables with row-level security enabled.",
-        c"Off by default: topology reads check table-level ACL only, not row-level security, so building over an RLS-enabled table requires this explicit acknowledgment.",
+        c"Deprecated compatibility setting; RLS-enabled source tables are accepted.",
+        c"This setting is a no-op in 1.1. Use graph.rls_mode to control topology enforcement.",
         &ALLOW_RLS_TABLES,
         GucContext::Userset,
         GucFlags::default(),
@@ -892,7 +941,8 @@ mod tests {
 
     use super::{
         parse_build_scan_mode, parse_oom_action, parse_projection_mode, parse_query_freshness,
-        parse_sync_mode, BuildScanMode, OomAction, ProjectionMode, QueryFreshness, SyncMode,
+        parse_rls_mode, parse_sync_mode, BuildScanMode, OomAction, ProjectionMode, QueryFreshness,
+        RlsMode, SyncMode,
     };
 
     #[test]
@@ -958,6 +1008,13 @@ mod tests {
     fn parse_query_freshness_rejects_unknown_modes() {
         assert_eq!(parse_query_freshness("fresh"), None);
         assert_eq!(parse_query_freshness(""), None);
+    }
+
+    #[test]
+    fn parse_rls_mode_accepts_only_enforced_and_compatibility_values() {
+        assert_eq!(parse_rls_mode(" enforce "), Some(RlsMode::Enforce));
+        assert_eq!(parse_rls_mode("LEGACY_BYPASS"), Some(RlsMode::LegacyBypass));
+        assert_eq!(parse_rls_mode("bypass"), None);
     }
 
     #[test]

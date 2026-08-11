@@ -138,7 +138,7 @@ fn sync_mode_wal_fails_with_reserved_message() {
 }
 
 #[pg_test]
-fn build_refuses_rls_enabled_table_without_explicit_allow() {
+fn build_accepts_rls_enabled_table_without_acknowledgement() {
     reset_and_create_fixtures();
     Spi::run("DROP TABLE IF EXISTS public.graph_test_rls_pgtest CASCADE")
         .expect("drop rls table failed");
@@ -166,22 +166,23 @@ fn build_refuses_rls_enabled_table_without_explicit_allow() {
     )
     .expect("add rls table failed");
 
-    let refused = sql_raises("SELECT * FROM graph.build()");
-
-    Spi::run("SET graph.allow_rls_tables = on").expect("enable allow_rls_tables failed");
-    Spi::run("SELECT * FROM graph.build()").expect("build should succeed once acknowledged");
+    Spi::run("SELECT * FROM graph.build()")
+        .expect("build should accept an RLS-enabled source table by default");
     let node_count = Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
         .expect("status query failed")
         .unwrap_or(0);
 
+    Spi::run("SET graph.allow_rls_tables = on").expect("set deprecated compatibility GUC failed");
+    Spi::run("SELECT * FROM graph.build()")
+        .expect("deprecated allow_rls_tables value must not change build acceptance");
+
     Spi::run("RESET graph.allow_rls_tables").expect("reset allow_rls_tables failed");
 
-    assert!(refused, "build over an RLS-enabled table must fail closed by default");
     assert_eq!(node_count, 1);
 }
 
 #[pg_test]
-fn build_refuses_rls_enabled_edge_endpoint_table() {
+fn build_accepts_rls_enabled_edge_endpoint_table() {
     reset_and_create_fixtures();
     Spi::run("DROP TABLE IF EXISTS public.graph_test_rls_edge_pgtest CASCADE")
         .expect("drop rls edge table failed");
@@ -193,6 +194,11 @@ fn build_refuses_rls_enabled_edge_endpoint_table() {
             )",
     )
     .expect("create rls edge table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_rls_edge_pgtest (id, friend_id, name)
+             VALUES ('b', NULL, 'Bob'), ('a', 'b', 'Alice')",
+    )
+    .expect("insert rls edge rows failed");
     Spi::run("ALTER TABLE public.graph_test_rls_edge_pgtest ENABLE ROW LEVEL SECURITY")
         .expect("enable row level security failed");
     Spi::run(
@@ -214,12 +220,12 @@ fn build_refuses_rls_enabled_edge_endpoint_table() {
     )
     .expect("add rls edge failed");
 
-    let refused = sql_raises("SELECT * FROM graph.build()");
-
-    assert!(
-        refused,
-        "build over an edge referencing an RLS-enabled table must fail closed by default"
-    );
+    Spi::run("SELECT * FROM graph.build()")
+        .expect("build should accept an edge mapping sourced from an RLS-enabled table");
+    let edge_count = Spi::get_one::<i64>("SELECT edge_count FROM graph.status()")
+        .expect("status query failed")
+        .unwrap_or(0);
+    assert_eq!(edge_count, 2);
 }
 
 fn setup_sync_log_retention_fixture() {
@@ -461,6 +467,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     Spi::run("RESET graph.mutable_enabled").expect("reset mutable_enabled failed");
     Spi::run("RESET graph.enforce_tenant_scope").expect("reset enforce_tenant_scope failed");
     Spi::run("RESET graph.allow_rls_tables").expect("reset allow_rls_tables failed");
+    Spi::run("RESET graph.rls_mode").expect("reset rls_mode failed");
     Spi::run("RESET graph.max_exact_path_count").expect("reset max_exact_path_count failed");
     Spi::run("RESET graph.build_batch_size").expect("reset build_batch_size failed");
     Spi::run("RESET graph.max_loaded_graphs_per_backend")
@@ -485,6 +492,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert!(!crate::config::MUTABLE_ENABLED.get());
     assert_eq!(crate::config::tenant_setting(), "");
     assert!(crate::config::ENFORCE_TENANT_SCOPE.get());
+    assert_eq!(crate::config::parsed_rls_mode(), Some(crate::config::RlsMode::Enforce));
     assert_eq!(crate::config::MAX_EXACT_PATH_COUNT.get(), 100_000);
     assert_eq!(crate::config::BUILD_BATCH_SIZE.get(), 10_000);
     assert_eq!(crate::config::MAX_TX_DELTA_NODES.get(), 100_000);
@@ -515,7 +523,8 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                     ('graph.projection_retention_generations', 'user', '1', '1000'),
                     ('graph.max_loaded_graphs_per_backend', 'superuser', '0', '1'),
                     ('graph.idle_unload_secs', 'superuser', '0', '86400'),
-                    ('graph.low_memory_build', 'superuser', NULL, NULL)
+                    ('graph.low_memory_build', 'superuser', NULL, NULL),
+                    ('graph.rls_mode', 'superuser', NULL, NULL)
              ),
              matched AS (
                 SELECT e.name,
@@ -525,7 +534,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                 FROM expected e
                 JOIN pg_settings s ON s.name = e.name
              )
-             SELECT count(*) = 16 AND bool_and(ok)
+             SELECT count(*) = 17 AND bool_and(ok)
              FROM matched",
     )
     .expect("pg_settings inspection failed")
@@ -542,6 +551,9 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert!(sql_raises("SET graph.projection_retention_generations = 0"));
     assert!(sql_raises("SET graph.max_loaded_graphs_per_backend = 2"));
     assert!(sql_raises("SET graph.idle_unload_secs = 86401"));
+    Spi::run("SET graph.rls_mode = 'unsupported'").expect("set unsupported rls_mode failed");
+    assert_eq!(crate::config::parsed_rls_mode(), None);
+    Spi::run("RESET graph.rls_mode").expect("reset rls_mode after invalid value failed");
 }
 
 #[pg_test]

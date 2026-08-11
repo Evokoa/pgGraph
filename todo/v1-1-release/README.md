@@ -760,8 +760,8 @@ when its evidence and exit gate are both satisfied.
 | 2 | Complete | Cancellation-safe replacement, repair recovery, heavy cancellation/concurrency evidence, full pg17 suite, and independent Rust review pass. |
 | 3 | Complete | Invoker query modes, caller-preserving catalog mediators, telemetry authorization, update SQL, real-login evidence, and independent Rust review pass. |
 | 4 | Complete | Query-start composition, catalog/pending-sync deduplication, drift/freshness and recovery regressions, fixed-work benchmark evidence, and independent Rust review are complete. |
-| 5 | Not started | Depends on the authoritative query-start seam and optimized baseline from Phase 4. |
-| 6 | Not started | Depends on the accepted traverse/BFS vertical slice from Phase 5. |
+| 5 | Complete | The complete traverse/BFS vertical slice, retained evidence, and independent Rust security review pass. |
+| 6 | In progress | The accepted traverse/BFS visibility seam is being extended to direct traversal and path APIs. |
 | 7 | Not started | Depends on complete direct-algorithm visibility from Phase 6. |
 | 8 | Not started | Depends on stable direct and derived admission behavior from Phases 6 and 7. |
 | 9 | Not started | Depends on the Phase 8 security-complete checkpoint. |
@@ -1185,10 +1185,44 @@ admission, edge admission, result coordinates, and optional hydration.
 tests for cursor scans, diagnostic audit, and unrestricted/RLS-active benchmark
 split.
 
+Implementation evidence recorded on 2026-08-11:
+
+- Pure Rust visibility/configuration/diagnostic tests pass as part of 897
+  passing unit tests (one scale test intentionally ignored).
+- Focused pgrx tests prove RLS-enabled node and edge tables build without an
+  acknowledgement and `graph.rls_mode` is a `SUSET` contract with the expected
+  default and values.
+- `tests/heavy/run_sqlstate_acl_boundary.sh` passes against PostgreSQL 17 with
+  real login roles. It covers a hidden seed, hidden intermediate, hidden
+  relationship with visible endpoints, hydration parity, unrestricted and
+  `BYPASSRLS` callers, non-superuser GUC denial, injected cancellation cleanup,
+  and the `55000`/`PG023` rebuild-required legacy-identity failure.
+- The warm 40-sample, five-warmup unrestricted fixed-work run measured
+  0.623 ms median and 0.709 ms p95, compared with the clean Phase 4 baseline of
+  0.635 ms and 0.785 ms. The SQL-only control measured 0.002/0.005 ms. The
+  unrestricted path therefore remains inside the 5% median and 10% p95 budget.
+- Active-policy fixtures record two visible and one hidden node for the tenant
+  chain, one hidden relationship row with two visible endpoints, and prove the
+  visibility cursor is interruptible without retaining its graph-sized slot.
+- A 1,000-row sparse-policy fixture records visibility separately from total
+  traversal time. Sparse-allow (10 visible rows) measured 2.541/3.332 ms total
+  median/p95 and 0.478/0.629 ms visibility build; sparse-deny (990 visible rows)
+  measured 3.090/3.186 ms total and 1.570/1.603 ms visibility build. Both
+  returned one visible seed, reported 994 versus 14 hidden projected nodes
+  across the complete fixture, three hidden relationships, and a 426,436-byte
+  governed query peak.
+
 **Exit gate:** the complete traverse/BFS vertical slice satisfies the RLS
 intersection contract, the no-RLS path performs no visibility scan or
 graph-sized allocation, and its regression stays inside the Phase 0 budget.
 Do not expand to other algorithms until this gate is green.
+
+Independent Rust review completed on 2026-08-11 with no blockers or requested
+changes for the bounded single-seed BFS checkpoint. The review confirmed
+outer-caller identity, execution-time bypass authorization, governed scan
+ownership and cancellation cleanup, pre-accounting seed/candidate admission,
+and the unrestricted fast path. DFS, reverse traversal, path algorithms, and
+transaction-delta semantics remain explicitly owned by Phase 6.
 
 ### Phase 6: Complete direct traversal and path APIs
 

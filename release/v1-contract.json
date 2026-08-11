@@ -119,6 +119,11 @@
       "diagnostic": "PG022",
       "sqlstate": "55000",
       "variant": "SyncLogPruned"
+    },
+    {
+      "diagnostic": "PG023",
+      "sqlstate": "55000",
+      "variant": "RlsRelationshipIdentityMissing"
     }
   ],
   "distribution": {
@@ -431,7 +436,7 @@
     "public_sql_pgq": false,
     "unsupported_corpus": "release/v1-gql-unsupported.json"
   },
-  "guc_source_sha256": "7a0573d08e1ee261a654afa03d75d082f0d79de59b08648fab025586a4e49ffb",
+  "guc_source_sha256": "eca1e59bd152d5ae913ce602b801c5031b64f6fa4ae4e03358ab7a12559eb607",
   "gucs": [
     "graph.allow_rls_tables",
     "graph.auto_load",
@@ -467,6 +472,7 @@
     "graph.query_freshness",
     "graph.query_memory_mb",
     "graph.query_work_limit",
+    "graph.rls_mode",
     "graph.spill_disk_limit_mb",
     "graph.sync_batch_size",
     "graph.sync_mode",

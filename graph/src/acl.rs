@@ -5,12 +5,9 @@
 //! Write helpers call `check_table_insert_acl()`, `check_table_update_acl()`,
 //! or `check_table_delete_acl()` before modifying mapped rows.
 //!
-//! `table_has_row_security()` backs the build-time RLS topology boundary
-//! gate: topology-read functions (`graph.traverse()`, `shortest_path()`,
-//! the component functions) return coordinates and adjacency from the
-//! builder-scoped graph artifact under table-level ACL only, not row-level
-//! security, so `graph.build()` refuses tables with row security enabled
-//! unless `graph.allow_rls_tables` is explicitly set.
+//! `row_security_applies_to_outer_caller()` is the single unsafe adapter to
+//! PostgreSQL's policy-enablement decision. Query-time visibility scans use it
+//! before projected topology can influence results.
 //!
 //! See: `docs/contributor_guide/safety-security.mdx`
 //! See: `docs/user_guide/administration-and-security.mdx`
@@ -74,24 +71,74 @@ pub fn check_table_delete_acl(table_oid: u32) -> GraphResult<()> {
     check_table_acl_mode(table_oid, pgrx::pg_sys::ACL_DELETE as pgrx::pg_sys::AclMode)
 }
 
-/// Returns `true` when the given table has row-level security enabled
-/// (`relrowsecurity`) or forced even for the table owner
-/// (`relforcerowsecurity`).
+/// Return whether PostgreSQL RLS applies to the outer caller for this relation.
 ///
-/// # Errors
+/// `noError = false` deliberately preserves PostgreSQL's normal error when
+/// `row_security = off` cannot be honored safely. `RLS_NONE_ENV` means the
+/// caller currently bypasses policies through ownership or `BYPASSRLS` and is
+/// therefore unrestricted for this statement.
+pub(crate) fn row_security_applies_to_outer_caller(table_oid: u32) -> bool {
+    let caller_oid = unsafe {
+        // SAFETY: This code runs inside a PostgreSQL backend. GetOuterUserId
+        // returns the identity outside SECURITY DEFINER frames and retains no
+        // Rust-managed memory.
+        pgrx::pg_sys::GetOuterUserId()
+    };
+    let result = unsafe {
+        // SAFETY: `table_oid` comes from validated registered catalog state;
+        // `caller_oid` is the current backend's outer role. PostgreSQL owns the
+        // active snapshot and policy caches. `noError = false` requests normal
+        // PostgreSQL error behavior instead of suppressing unsafe environments.
+        pgrx::pg_sys::check_enable_rls(pgrx::pg_sys::Oid::from_u32(table_oid), caller_oid, false)
+    };
+    result == pgrx::pg_sys::CheckEnableRlsResult::RLS_ENABLED as i32
+}
+
+/// Require the outer caller to hold PostgreSQL's real privilege for the
+/// `graph.rls_mode` compatibility bypass.
 ///
-/// Returns `GraphError::Internal` if the table's `pg_class` row cannot be
-/// read, which should not happen for an OID already resolved through
-/// registration.
-pub fn table_has_row_security(table_oid: u32) -> GraphResult<bool> {
-    pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT relrowsecurity OR relforcerowsecurity
-         FROM pg_catalog.pg_class
-         WHERE oid = $1",
-        &[pgrx::pg_sys::Oid::from_u32(table_oid).into()],
-    )
-    .map_err(|err| GraphError::Internal(format!("row-security lookup failed: {err}")))?
-    .ok_or_else(|| GraphError::Internal(format!("table OID {table_oid} has no pg_class row")))
+/// This check is repeated at execution because PostgreSQL accepts unknown
+/// dotted names as placeholder GUCs before an extension is first loaded. A
+/// non-superuser must not turn such a pre-load placeholder into a security
+/// bypass merely by causing `_PG_init()` to register the real `SUSET` GUC.
+pub(crate) fn require_rls_bypass_privilege() -> GraphResult<()> {
+    let caller_oid = unsafe {
+        // SAFETY: This code runs inside a PostgreSQL backend and retains no
+        // pointer returned by PostgreSQL.
+        pgrx::pg_sys::GetOuterUserId()
+    };
+    let allowed = if unsafe {
+        // SAFETY: `caller_oid` is a backend-owned role OID and superuser_arg
+        // performs a catalog lookup without retaining Rust memory.
+        pgrx::pg_sys::superuser_arg(caller_oid)
+    } {
+        true
+    } else {
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17", feature = "pg18"))]
+        {
+            unsafe {
+                // SAFETY: The parameter name is a static NUL-terminated C
+                // string; caller_oid is valid for this backend. PostgreSQL 15+
+                // owns and evaluates parameter ACLs.
+                pgrx::pg_sys::pg_parameter_aclcheck(
+                    c"graph.rls_mode".as_ptr(),
+                    caller_oid,
+                    pgrx::pg_sys::ACL_SET as pgrx::pg_sys::AclMode,
+                ) == pgrx::pg_sys::AclResult::ACLCHECK_OK
+            }
+        }
+        #[cfg(any(feature = "pg13", feature = "pg14"))]
+        {
+            false
+        }
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(GraphError::AclDenied {
+            table: "configuration parameter graph.rls_mode".to_string(),
+        })
+    }
 }
 
 fn check_table_acl_mode(table_oid: u32, mode: pgrx::pg_sys::AclMode) -> GraphResult<()> {

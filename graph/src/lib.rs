@@ -66,9 +66,11 @@ mod sql_jobs;
 mod sql_search;
 mod sql_sync;
 mod sql_traversal;
+mod sql_visibility;
 mod sync;
 mod tenant_store;
 mod types;
+mod visibility;
 
 use engine::Engine;
 

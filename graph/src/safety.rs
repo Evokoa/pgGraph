@@ -70,6 +70,7 @@ pub(crate) enum GraphDiagnosticCode {
     Disabled,
     RlsTopologyBoundary,
     SyncLogPruned,
+    RlsRelationshipIdentityMissing,
 }
 
 impl GraphDiagnosticCode {
@@ -99,6 +100,7 @@ impl GraphDiagnosticCode {
             Self::Disabled => "PG020",
             Self::RlsTopologyBoundary => "PG021",
             Self::SyncLogPruned => "PG022",
+            Self::RlsRelationshipIdentityMissing => "PG023",
         }
     }
 }
@@ -200,6 +202,11 @@ pub enum GraphError {
         applied_sync_id: i64,
         pruned_before_id: i64,
     }, // PG022
+
+    #[error(
+        "RLS enforcement found a projected relationship without a durable source-row identity"
+    )]
+    RlsRelationshipIdentityMissing, // PG023
 
     #[error("Internal error: {0}")]
     Internal(String),
@@ -315,6 +322,11 @@ impl GraphError {
             ),
             GraphError::SyncLogPruned { .. } => (
                 GraphDiagnosticCode::SyncLogPruned,
+                "55000",
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ),
+            GraphError::RlsRelationshipIdentityMissing => (
+                GraphDiagnosticCode::RlsRelationshipIdentityMissing,
                 "55000",
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             ),
@@ -442,6 +454,10 @@ impl GraphError {
                  expire, and graph.maintenance() has since pruned rows it had not replayed yet. \
                  Incremental catch-up is no longer safe from this position; run graph.build() or \
                  graph.vacuum() to get a fresh consistent base, then resume normal sync."
+                    .to_string()
+            }
+            GraphError::RlsRelationshipIdentityMissing => {
+                "Run graph.build() to rebuild the projection with durable relationship identities before retrying with graph.rls_mode = 'enforce'."
                     .to_string()
             }
             GraphError::Internal(_) => {
@@ -661,6 +677,14 @@ mod tests {
     fn disabled_maps_to_55000() {
         assert_eq!(GraphError::Disabled.sqlstate(), "55000");
         assert_eq!(GraphError::Disabled.diagnostic_code().as_str(), "PG020");
+    }
+
+    #[test]
+    fn missing_rls_relationship_identity_requires_rebuild() {
+        let error = GraphError::RlsRelationshipIdentityMissing;
+        assert_eq!(error.sqlstate(), "55000");
+        assert_eq!(error.diagnostic_code().as_str(), "PG023");
+        assert!(error.hint().contains("graph.build()"));
     }
 
     #[test]

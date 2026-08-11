@@ -25,6 +25,7 @@ use crate::projection::neighbors::{
 };
 use crate::safety::{GraphError, GraphResult};
 use crate::types::{FilterOp, PathCoordinate, TableOid, TraversalResult};
+use crate::visibility::{QueryExecutionContext, VisibilityScope};
 
 const SPARSE_METADATA_MIN_NODES: usize = 4_096;
 const SPARSE_METADATA_RATIO: usize = 16;
@@ -299,10 +300,18 @@ pub fn execute(
     filter_index: &FilterIndex,
     config: &BfsConfig,
 ) -> BfsResult {
-    execute_inner(node_store, edge_store, filter_index, config, None)
-        .expect("unbounded traversal accounting should not fail")
+    execute_inner(
+        node_store,
+        edge_store,
+        filter_index,
+        config,
+        None,
+        &VisibilityScope::Unrestricted,
+    )
+    .expect("unbounded traversal accounting should not fail")
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn execute_governed(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
@@ -310,7 +319,31 @@ pub(crate) fn execute_governed(
     config: &BfsConfig,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<BfsResult> {
-    execute_inner(node_store, edge_store, filter_index, config, Some(governor))
+    execute_inner(
+        node_store,
+        edge_store,
+        filter_index,
+        config,
+        Some(governor),
+        &VisibilityScope::Unrestricted,
+    )
+}
+
+pub(crate) fn execute_governed_with_context(
+    node_store: &NodeStore,
+    edge_store: &EdgeStore,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    context: &QueryExecutionContext<'_>,
+) -> GraphResult<BfsResult> {
+    execute_inner(
+        node_store,
+        edge_store,
+        filter_index,
+        config,
+        Some(context.governor),
+        context.visibility,
+    )
 }
 
 fn execute_inner(
@@ -319,6 +352,7 @@ fn execute_inner(
     filter_index: &FilterIndex,
     config: &BfsConfig,
     governor: Option<&crate::resource::ResourceGovernor>,
+    visibility: &VisibilityScope,
 ) -> GraphResult<BfsResult> {
     let node_count = node_store.node_count() as usize;
     let sparse_metadata = use_sparse_metadata(node_count, config.max_nodes);
@@ -329,7 +363,7 @@ fn execute_inner(
     let mut parent = TraversalParentMap::try_new(node_count, sparse_metadata, expected_visits)?;
     let mut parent_edge_type =
         TraversalParentEdgeTypes::try_new(node_count, sparse_metadata, expected_visits)?;
-    if config.seed_node as usize >= node_count {
+    if config.seed_node as usize >= node_count || !visibility.allows_node(config.seed_node) {
         return Ok(BfsResult {
             visited,
             depth: depth_map,
@@ -388,9 +422,11 @@ fn execute_inner(
                 config,
                 neighbor.target,
                 neighbor.type_id,
+                neighbor.relationship_id,
                 &visited,
                 has_filters,
-            ) {
+                visibility,
+            )? {
                 continue;
             }
 
@@ -447,10 +483,18 @@ pub(crate) fn execute_with_neighbors(
     filter_index: &FilterIndex,
     config: &BfsConfig,
 ) -> BfsResult {
-    execute_with_neighbors_inner(node_store, neighbors, filter_index, config, None)
-        .expect("unbounded traversal accounting should not fail")
+    execute_with_neighbors_inner(
+        node_store,
+        neighbors,
+        filter_index,
+        config,
+        None,
+        &VisibilityScope::Unrestricted,
+    )
+    .expect("unbounded traversal accounting should not fail")
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn execute_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
@@ -458,7 +502,31 @@ pub(crate) fn execute_with_neighbors_governed(
     config: &BfsConfig,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<BfsResult> {
-    execute_with_neighbors_inner(node_store, neighbors, filter_index, config, Some(governor))
+    execute_with_neighbors_inner(
+        node_store,
+        neighbors,
+        filter_index,
+        config,
+        Some(governor),
+        &VisibilityScope::Unrestricted,
+    )
+}
+
+pub(crate) fn execute_with_neighbors_governed_with_context(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    context: &QueryExecutionContext<'_>,
+) -> GraphResult<BfsResult> {
+    execute_with_neighbors_inner(
+        node_store,
+        neighbors,
+        filter_index,
+        config,
+        Some(context.governor),
+        context.visibility,
+    )
 }
 
 fn execute_with_neighbors_inner(
@@ -467,6 +535,7 @@ fn execute_with_neighbors_inner(
     filter_index: &FilterIndex,
     config: &BfsConfig,
     governor: Option<&crate::resource::ResourceGovernor>,
+    visibility: &VisibilityScope,
 ) -> GraphResult<BfsResult> {
     let node_count = node_store.node_count() as usize;
     let sparse_metadata = use_sparse_metadata(node_count, config.max_nodes);
@@ -477,7 +546,7 @@ fn execute_with_neighbors_inner(
     let mut parent = TraversalParentMap::try_new(node_count, sparse_metadata, expected_visits)?;
     let mut parent_edge_type =
         TraversalParentEdgeTypes::try_new(node_count, sparse_metadata, expected_visits)?;
-    if config.seed_node as usize >= node_count {
+    if config.seed_node as usize >= node_count || !visibility.allows_node(config.seed_node) {
         return Ok(BfsResult {
             visited,
             depth: depth_map,
@@ -533,9 +602,11 @@ fn execute_with_neighbors_inner(
                 config,
                 neighbor.target,
                 neighbor.type_id,
+                neighbor.relationship_id,
                 &visited,
                 has_filters,
-            ) {
+                visibility,
+            )? {
                 continue;
             }
 
@@ -731,25 +802,36 @@ fn execute_dfs_with_neighbors_inner(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared admission gate needs topology, filter, traversal, edge, visited, and visibility state"
+)]
 fn candidate_allowed(
     node_store: &NodeStore,
     filter_index: &FilterIndex,
     config: &BfsConfig,
     neighbor: u32,
     edge_type: u8,
+    relationship_id: Option<crate::edge_store::RelationshipId>,
     visited: &RoaringBitmap,
     has_filters: bool,
-) -> bool {
-    if visited.contains(neighbor) {
-        return false;
-    }
+    visibility: &VisibilityScope,
+) -> GraphResult<bool> {
     if let crate::types::EdgeTypeFilter::Only(ref allowed) = config.edge_type_filter {
         if !allowed.contains(&edge_type) {
-            return false;
+            return Ok(false);
         }
     }
+    if !visibility.allows_relationship(edge_type, relationship_id)?
+        || !visibility.allows_node(neighbor)
+    {
+        return Ok(false);
+    }
+    if visited.contains(neighbor) {
+        return Ok(false);
+    }
     if !node_store.is_active(neighbor) || crate::projection::tx_delta::node_deleted(neighbor) {
-        return false;
+        return Ok(false);
     }
     if let Some(tenant) = config.tenant.as_deref() {
         if node_store.table_oid(neighbor).is_some_and(|table_oid| {
@@ -764,13 +846,13 @@ fn candidate_allowed(
                             .get(tenant)
                             .is_some_and(|bitmap| bitmap.contains(neighbor))))
         }) {
-            return false;
+            return Ok(false);
         }
     }
     if has_filters && !filter_index.check_filters(neighbor, &config.filter_ops) {
-        return false;
+        return Ok(false);
     }
-    true
+    Ok(true)
 }
 
 struct DfsPushContext<'a> {
@@ -792,7 +874,13 @@ impl DfsPushContext<'_> {
     fn push_neighbors(&mut self, current: u32, current_depth: i32) -> GraphResult<bool> {
         for neighbor in self.neighbors.neighbors_reversed(current) {
             consume_expansion(self.governor)?;
-            if self.push_candidate(current, current_depth, neighbor.target, neighbor.type_id) {
+            if self.push_candidate(
+                current,
+                current_depth,
+                neighbor.target,
+                neighbor.type_id,
+                neighbor.relationship_id,
+            )? {
                 continue;
             }
             return Ok(true);
@@ -807,17 +895,20 @@ impl DfsPushContext<'_> {
         current_depth: i32,
         neighbor: u32,
         edge_type: u8,
-    ) -> bool {
+        relationship_id: Option<crate::edge_store::RelationshipId>,
+    ) -> GraphResult<bool> {
         if !candidate_allowed(
             self.node_store,
             self.filter_index,
             self.config,
             neighbor,
             edge_type,
+            relationship_id,
             self.visited,
             self.has_filters,
-        ) {
-            return true;
+            &VisibilityScope::Unrestricted,
+        )? {
+            return Ok(true);
         }
 
         self.visited.insert(neighbor);
@@ -827,17 +918,17 @@ impl DfsPushContext<'_> {
         *self.nodes_visited += 1;
 
         if *self.nodes_visited >= self.config.max_nodes {
-            return false;
+            return Ok(false);
         }
 
         if current_depth + 1 < self.config.max_depth {
             self.stack.push(neighbor);
             if self.stack.len() as u32 >= self.config.max_frontier {
-                return false;
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 }
 

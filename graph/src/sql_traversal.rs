@@ -72,14 +72,29 @@ pub(crate) fn execute_traverse_rows_governed(
     tables: &[crate::builder::RegisteredTable],
     filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<Vec<TraverseRow>> {
+    let visibility = crate::visibility::VisibilityScope::Unrestricted;
+    execute_traverse_rows_in_context(
+        request,
+        &crate::visibility::QueryExecutionContext::new(governor, &visibility),
+        tables,
+        filter_columns,
+    )
+}
+
+pub(crate) fn execute_traverse_rows_in_context(
+    request: &TraverseRequest<'_>,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
+) -> safety::GraphResult<Vec<TraverseRow>> {
     let candidates =
-        execute_traverse_candidates_governed(request, governor, tables, filter_columns)?;
+        execute_traverse_candidates_in_context(request, context, tables, filter_columns)?;
     paginate_and_format_traverse_candidates_governed(
         candidates,
         request.hydrate,
         request.offset,
         request.limit,
-        governor,
+        context.governor,
         tables,
     )
 }
@@ -100,6 +115,22 @@ pub(crate) fn execute_traverse_candidates_governed(
     tables: &[crate::builder::RegisteredTable],
     filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<Vec<TraverseCandidate>> {
+    let visibility = crate::visibility::VisibilityScope::Unrestricted;
+    execute_traverse_candidates_in_context(
+        request,
+        &crate::visibility::QueryExecutionContext::new(governor, &visibility),
+        tables,
+        filter_columns,
+    )
+}
+
+pub(crate) fn execute_traverse_candidates_in_context(
+    request: &TraverseRequest<'_>,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
+) -> safety::GraphResult<Vec<TraverseCandidate>> {
+    let governor = context.governor;
     let request_bytes = traversal_request_workspace_upper_bound(request)?;
     let _request_workspace = governor
         .reserve_memory(
@@ -140,7 +171,7 @@ pub(crate) fn execute_traverse_candidates_governed(
             filter_ops.push(typed_pushdown_filter_op(&eng.filter_index, filter)?);
         }
 
-        eng.traverse_with_filter_ops_governed(
+        eng.traverse_with_filter_ops_in_context(
             request.root_table.to_u32(),
             request.root_id,
             request.max_depth,
@@ -151,7 +182,7 @@ pub(crate) fn execute_traverse_candidates_governed(
             request.tenant,
             request.strategy,
             request.direction,
-            governor,
+            context,
         )
     })?;
     acl::check_table_acls(outcome.rows.iter().flat_map(|row| {

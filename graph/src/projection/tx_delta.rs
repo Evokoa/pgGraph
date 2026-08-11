@@ -551,6 +551,44 @@ pub(crate) fn with_relationship_identity<R>(
     })
 }
 
+/// Visit transaction-local relationship identities with their projection IDs.
+pub(crate) fn for_each_relationship_identity(
+    base_identity_count: usize,
+    mut visit: impl FnMut(RelationshipId, &RelationshipIdentity),
+) {
+    TX_DELTA.with(|delta| {
+        let borrowed = delta.borrow();
+        let Some(delta) = borrowed.as_ref() else {
+            return;
+        };
+        for (offset, identity) in delta.relationship_identities.iter().enumerate() {
+            let Some(index) = base_identity_count.checked_add(offset) else {
+                continue;
+            };
+            let Ok(id) = RelationshipId::try_from(index) else {
+                continue;
+            };
+            visit(id, identity);
+        }
+    });
+}
+
+/// Resolve a transaction-local relationship source identity.
+pub(crate) fn find_relationship_identity_id(
+    base_identity_count: usize,
+    mapping_id: u64,
+    source_key: &str,
+) -> Option<RelationshipId> {
+    let mut found = None;
+    for_each_relationship_identity(base_identity_count, |id, identity| {
+        if found.is_none() && identity.mapping_id == mapping_id && identity.source_key == source_key
+        {
+            found = Some(id);
+        }
+    });
+    found
+}
+
 /// Record a transaction-local edge deletion.
 #[allow(
     dead_code,
