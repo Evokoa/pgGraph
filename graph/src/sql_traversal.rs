@@ -1,12 +1,12 @@
 //! SQL-layer traversal request validation, execution, and path formatting.
 
 use crate::api_types::{TraverseRequest, TraverseRow};
-use crate::catalog::{regclass_text, relation_name, table_oid_from_name};
+use crate::catalog::{read_catalog, regclass_text, relation_name, table_oid_from_name};
 use crate::sql_filters::{
-    hydration_filters_match, parse_structured_filter, typed_pushdown_filter_op,
+    hydration_filters_match, parse_structured_filter_from_catalog, typed_pushdown_filter_op,
     ParsedStructuredFilter,
 };
-use crate::sql_hydration::hydrate_nodes_governed;
+use crate::sql_hydration::hydrate_nodes_governed_with_tables;
 use crate::{acl, safety, types, ENGINE};
 use std::collections::{HashMap, HashSet};
 
@@ -56,25 +56,31 @@ pub(crate) fn validate_traverse_options(
     Ok((direction, strategy, uniqueness))
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn execute_traverse_rows(
     request: &TraverseRequest<'_>,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let governor = query_governor()?;
-    execute_traverse_rows_governed(request, &governor)
+    let (tables, _edges, filter_columns) = read_catalog()?;
+    execute_traverse_rows_governed(request, &governor, &tables, &filter_columns)
 }
 
 /// Executes and materializes one traversal under a single operation budget.
 pub(crate) fn execute_traverse_rows_governed(
     request: &TraverseRequest<'_>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<Vec<TraverseRow>> {
-    let candidates = execute_traverse_candidates_governed(request, governor)?;
+    let candidates =
+        execute_traverse_candidates_governed(request, governor, tables, filter_columns)?;
     paginate_and_format_traverse_candidates_governed(
         candidates,
         request.hydrate,
         request.offset,
         request.limit,
         governor,
+        tables,
     )
 }
 
@@ -83,13 +89,16 @@ pub(crate) fn execute_traverse_candidates(
     request: &TraverseRequest<'_>,
 ) -> safety::GraphResult<Vec<TraverseCandidate>> {
     let governor = query_governor()?;
-    execute_traverse_candidates_governed(request, &governor)
+    let (tables, _edges, filter_columns) = read_catalog()?;
+    execute_traverse_candidates_governed(request, &governor, &tables, &filter_columns)
 }
 
 /// Executes a traversal while preserving the caller's work and elapsed clocks.
 pub(crate) fn execute_traverse_candidates_governed(
     request: &TraverseRequest<'_>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<Vec<TraverseCandidate>> {
     let request_bytes = traversal_request_workspace_upper_bound(request)?;
     let _request_workspace = governor
@@ -115,7 +124,9 @@ pub(crate) fn execute_traverse_candidates_governed(
         .unwrap_or_default();
     let structured_filter = request
         .filter
-        .map(|filter| parse_structured_filter(filter, &table_filter))
+        .map(|filter| {
+            parse_structured_filter_from_catalog(filter, &table_filter, tables, filter_columns)
+        })
         .transpose()?
         .unwrap_or(ParsedStructuredFilter {
             pushdown_filters: Vec::new(),
@@ -173,7 +184,7 @@ pub(crate) fn execute_traverse_candidates_governed(
     let root_table_name = relation_name(request.root_table.to_u32())?;
     let needs_hydration_verification = !structured_filter.hydration_filters.is_empty();
     let mut hydrated = if needs_hydration_verification {
-        hydrate_nodes_governed(&page, governor)?
+        hydrate_nodes_governed_with_tables(&page, governor, tables)?
     } else {
         HashMap::new()
     };
@@ -309,7 +320,10 @@ pub(crate) fn paginate_and_format_traverse_candidates(
     limit: i32,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let governor = query_governor()?;
-    paginate_and_format_traverse_candidates_governed(candidates, hydrate, offset, limit, &governor)
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    paginate_and_format_traverse_candidates_governed(
+        candidates, hydrate, offset, limit, &governor, &tables,
+    )
 }
 
 /// Pages, hydrates, and formats candidates under the execution governor.
@@ -319,6 +333,7 @@ pub(crate) fn paginate_and_format_traverse_candidates_governed(
     offset: i32,
     limit: i32,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
@@ -343,7 +358,7 @@ pub(crate) fn paginate_and_format_traverse_candidates_governed(
             .filter(|candidate| candidate.pre_hydrated.is_none())
             .map(|candidate| candidate.row.clone())
             .collect::<Vec<_>>();
-        hydrate_nodes_governed(&rows_to_hydrate, governor)?
+        hydrate_nodes_governed_with_tables(&rows_to_hydrate, governor, tables)?
     } else {
         HashMap::new()
     };

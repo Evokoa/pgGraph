@@ -77,6 +77,33 @@ fn cypher_matches_gql_for_supported_read_subset() {
     assert_eq!(cypher_explain, gql_explain);
 }
 
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_and_cypher_binding_reuse_query_start_catalog() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    for function_name in ["gql", "cypher"] {
+        super::sql_facade::reset_query_start_probe_counts();
+        let row_count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*)
+               FROM graph.{function_name}(
+                    'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                     RETURN v.name AS name'
+               )"
+        ))
+        .unwrap_or_else(|err| panic!("{function_name} query failed: {err}"))
+        .unwrap_or_default();
+
+        assert_eq!(row_count, 1, "unexpected {function_name} row count");
+        assert_eq!(
+            super::sql_facade::query_start_probe_counts(),
+            (1, 1),
+            "{function_name} must reuse query-start catalog rows during binding"
+        );
+    }
+}
+
 #[pg_test]
 fn cypher_write_uses_shared_mutable_overlay_execution() {
     reset_and_create_fixtures();

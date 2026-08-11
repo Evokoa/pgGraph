@@ -131,7 +131,7 @@
       "GitHub release archive"
     ]
   },
-  "gql_implementation_sha256": "512ed6932e03345e87ccba38fd3c63bcd7d9a07542c5f6510a7c3a0fa7c95baa",
+  "gql_implementation_sha256": "848089a65553a5db3f536f55638742c097d5f76507f176bad82ee58f14dbaf72",
   "gql_profile": {
     "assurance_profiles": {
       "read": {
@@ -480,6 +480,7 @@
     "_expire_sync_watermarks_for_current_role",
     "_graph_id_for_current_role_with_privilege",
     "_max_sync_log_id_for_current_role",
+    "_max_sync_log_id_for_query_state",
     "_pending_sync_rows_for_current_role",
     "_record_projection_heartbeat_for_current_role",
     "_record_sync_watermark_for_current_role",

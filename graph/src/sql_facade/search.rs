@@ -37,7 +37,7 @@ pub(super) fn search(
 > {
     with_panic_boundary("search()", || {
         check_enabled();
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let query_start = ensure_current_graph().unwrap_or_else(|err| err.report());
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
@@ -52,6 +52,7 @@ pub(super) fn search(
             tenant.as_deref(),
             hydrate,
             &governor,
+            &query_start,
         )
         .unwrap_or_else(|err| err.report());
         TableIterator::new(rows)
@@ -70,12 +71,18 @@ pub(super) fn search_rows_governed(
     tenant: Option<&str>,
     hydrate: bool,
     governor: &crate::resource::ResourceGovernor,
+    query_start: &super::runtime::QueryStartState,
 ) -> safety::GraphResult<Vec<crate::api_types::SearchOutputRow>> {
-    let tenant_scope = resolve_tenant_scope(tenant)?;
-    validate_search_request(
+    let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+        tenant,
+        &query_start.graph,
+        &query_start.tables,
+    )?;
+    validate_search_request_with_tables(
         property_key,
         table_filter.map(|oid| oid.to_u32()),
         tenant_scope.as_deref(),
+        &query_start.tables,
     )?;
     let mode = types::SearchMode::parse(mode).ok_or_else(|| safety::GraphError::InvalidFilter {
         reason: format!(
@@ -85,7 +92,7 @@ pub(super) fn search_rows_governed(
     })?;
     let row_offset = usize_from_nonnegative(row_offset, "row_offset")?;
     let max_rows = usize_from_nonnegative(max_rows, "max_rows")?;
-    source_table_search_rows_governed(
+    source_table_search_rows_governed_with_tables(
         property_key,
         property_value,
         table_filter.map(|oid| oid.to_u32()),
@@ -96,6 +103,7 @@ pub(super) fn search_rows_governed(
         row_offset,
         max_rows,
         governor,
+        Some(&query_start.tables),
     )
 }
 
@@ -139,7 +147,7 @@ fn search_nodes(
 > {
     with_panic_boundary("search_nodes()", || {
         check_enabled();
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let query_start = ensure_current_graph().unwrap_or_else(|err| err.report());
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
@@ -154,6 +162,7 @@ fn search_nodes(
             tenant.as_deref(),
             false,
             &governor,
+            &query_start,
         )
         .unwrap_or_else(|err| err.report());
         let output_lease =
@@ -230,7 +239,8 @@ pub(super) fn traverse_search(
     with_panic_boundary("traverse_search()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
@@ -255,6 +265,7 @@ pub(super) fn traverse_search(
             max_rows,
             row_offset,
             &governor,
+            &query_start,
         )
         .unwrap_or_else(|err| err.report());
         TableIterator::new(rows)
@@ -283,10 +294,14 @@ pub(super) fn traverse_search_rows_governed(
     max_rows: i32,
     row_offset: i32,
     governor: &crate::resource::ResourceGovernor,
+    query_start: &super::runtime::QueryStartState,
 ) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
     check_enabled_result()?;
-    ensure_current_graph_for_query(current_query_freshness()?)?;
-    let tenant_scope = resolve_tenant_scope(tenant)?;
+    let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+        tenant,
+        &query_start.graph,
+        &query_start.tables,
+    )?;
     let (direction, strategy, uniqueness) = crate::sql_traversal::validate_traverse_options(
         direction,
         tenant_scope.as_deref(),
@@ -318,6 +333,7 @@ pub(super) fn traverse_search_rows_governed(
         tenant_scope.as_deref(),
         false,
         governor,
+        query_start,
     )?;
     let mut candidates = Vec::new();
     for (root_table, root_id, _match_type, _score, verified, _node, _node_table_name) in starts {
@@ -341,12 +357,22 @@ pub(super) fn traverse_search_rows_governed(
             max_nodes: config::MAX_NODES.get(),
             max_frontier: config::MAX_FRONTIER.get(),
         };
-        let mut start_candidates = execute_traverse_candidates_governed(&request, governor)?;
+        let mut start_candidates = execute_traverse_candidates_governed(
+            &request,
+            governor,
+            &query_start.tables,
+            &query_start.filter_columns,
+        )?;
         candidates.append(&mut start_candidates);
     }
     sort_traverse_candidates_for_many_governed(&mut candidates, governor)?;
     apply_traversal_uniqueness_governed(&mut candidates, uniqueness, governor)?;
     paginate_and_format_traverse_candidates_governed(
-        candidates, hydrate, row_offset, max_rows, governor,
+        candidates,
+        hydrate,
+        row_offset,
+        max_rows,
+        governor,
+        &query_start.tables,
     )
 }

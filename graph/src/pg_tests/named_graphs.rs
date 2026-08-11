@@ -517,8 +517,13 @@ fn graph_grants_gate_visibility_queries_and_builds() {
     let reader_record_projection_after_cancel_sqlstate = sqlstate_for_prepared_helper(
         "SELECT graph._record_projection_heartbeat_for_current_role()",
     );
+    let reader_pending_sync_cancel_observed = Spi::get_one::<bool>(
+        "SELECT graph._test_pending_sync_row_probe_error_after_arming()",
+    )
+    .expect("pending sync row probe cancellation test failed")
+    .unwrap_or(true);
     let reader_pending_sync_sqlstate = sqlstate_for_prepared_helper(
-        "SELECT graph._pending_sync_rows_for_current_role(0)",
+        "SELECT graph._pending_sync_rows_for_current_role()",
     );
     let reader_status_sqlstate = sqlstate_for_prepared_helper("SELECT * FROM graph.status()");
     let reader_status_error = sql_error_message_for_prepared_helper("SELECT * FROM graph.status()");
@@ -602,7 +607,8 @@ fn graph_grants_gate_visibility_queries_and_builds() {
         reader_record_projection_after_cancel_sqlstate,
         Some("42501".to_string())
     );
-    assert_eq!(reader_pending_sync_sqlstate, None);
+    assert!(!reader_pending_sync_cancel_observed);
+    assert_eq!(reader_pending_sync_sqlstate, Some("42501".to_string()));
     assert_eq!(reader_status_error, None);
     assert_eq!(reader_status_sqlstate, None);
     assert_eq!(admin_residency, "warm");

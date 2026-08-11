@@ -833,11 +833,19 @@ fn replacement_faults_preserve_or_reconcile_the_published_generation() {
     Spi::run("SELECT graph._test_arm_replacement_fault('source_scan')")
         .expect("arm low-memory source-scan fault failed");
     assert!(sql_raises("SELECT * FROM graph.build()"));
+    #[cfg(feature = "development")]
+    super::sql_facade::reset_query_start_probe_counts();
     assert_eq!(
         Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
             .expect("low-memory recovery status failed"),
         Some(1),
         "status must reload generation A after cancellation-style eviction"
+    );
+    #[cfg(feature = "development")]
+    assert_eq!(
+        super::sql_facade::query_start_probe_counts(),
+        (1, 1),
+        "replacement recovery must reuse the authoritative query-start catalog fingerprint"
     );
     assert_eq!(
         Spi::get_one::<i64>(
@@ -1258,6 +1266,70 @@ fn catalog_drift_requires_rebuild() {
     assert!(result.is_err());
 }
 
+#[cfg(feature = "development")]
+#[pg_test]
+fn query_start_state_reads_catalog_and_pending_sync_once() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_users_pgtest'::regclass,
+            id_column := 'id',
+            columns := ARRAY['name']
+         )",
+    )
+    .expect("add query-start table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+            'graph_test_friendships_pgtest'::regclass,
+            'user_id',
+            'graph_test_users_pgtest'::regclass,
+            'friend_id',
+            'friend'
+         )",
+    )
+    .expect("add query-start edge failed");
+    Spi::run("SELECT * FROM graph.build() ").expect("build query-start fixture failed");
+
+    super::sql_facade::reset_query_start_probe_counts();
+    let row_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass,
+                'u1',
+                0,
+                hydrate := false
+           )",
+    )
+    .expect("public fixed-work traversal failed")
+    .unwrap_or(0);
+    let counts = super::sql_facade::query_start_probe_counts();
+
+    assert_eq!(row_count, 1);
+    assert_eq!(counts, (1, 1));
+
+    super::sql_facade::reset_query_start_probe_counts();
+    let hydrated_filtered_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass,
+                'u1',
+                0,
+                filter := '{\"where\": {\"age\": {\"gte\": 0}}}'::jsonb,
+                hydrate := true
+           )
+          WHERE node IS NOT NULL",
+    )
+    .expect("public hydrated filtered traversal failed")
+    .unwrap_or(0);
+
+    assert_eq!(hydrated_filtered_count, 1);
+    assert_eq!(
+        super::sql_facade::query_start_probe_counts(),
+        (1, 1),
+        "hydration and unindexed filter resolution must reuse query-start catalog rows"
+    );
+}
+
 #[pg_test]
 fn persisted_direct_build_matches_owned_build_for_public_queries() {
     reset_and_create_fixtures();
@@ -1447,6 +1519,42 @@ fn schema_drift_detects_live_ddl_changes() {
     .unwrap_or_default();
 
     assert!(reason.contains("filter column"));
+}
+
+#[pg_test]
+fn status_reports_dropped_registered_relation_as_invalid_schema() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.persist_on_build = off").expect("disable persistence failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_dropped_relation_pgtest CASCADE")
+        .expect("drop prior relation fixture failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_dropped_relation_pgtest (
+            id text PRIMARY KEY,
+            name text NOT NULL
+        );
+        INSERT INTO public.graph_test_dropped_relation_pgtest VALUES ('n1', 'Node')",
+    )
+    .expect("create relation fixture failed");
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_dropped_relation_pgtest'::regclass,
+            id_column := 'id',
+            columns := ARRAY['name']
+        )",
+    )
+    .expect("register relation fixture failed");
+    Spi::run("SELECT * FROM graph.build() ").expect("build relation fixture failed");
+    Spi::run("DROP TABLE public.graph_test_dropped_relation_pgtest CASCADE")
+        .expect("drop registered relation failed");
+
+    let status = Spi::get_two::<bool, String>(
+        "SELECT needs_rebuild, schema_status
+           FROM graph.status()",
+    )
+    .expect("inspect dropped-relation status failed");
+
+    assert_eq!(status.0, Some(true));
+    assert_eq!(status.1.as_deref(), Some("invalid"));
 }
 
 #[pg_test]

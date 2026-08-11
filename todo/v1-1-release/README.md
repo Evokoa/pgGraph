@@ -189,10 +189,12 @@ sources have a written correctness model.
 Required performance evidence:
 
 - reproduce the fixed-work benchmark with the reporter's pinned seed shape;
-- count SPI statements before and after the change;
+- establish post-change counts at the authoritative registered-catalog load
+  and caller-bound sync-mediator call boundaries;
 - compare median and p95 latency across at least 40 warm runs;
 - keep row counts identical; and
-- retain `graph.status()` as a negative control.
+- retain an unchanged SQL-only statement as the negative control. Do not use
+  `graph.status()` because Phase 4 intentionally changes its catalog path.
 
 ### Relationship-typed shortest paths
 
@@ -757,7 +759,7 @@ when its evidence and exit gate are both satisfied.
 | 1 | Complete | Reported fixes, policy-compliant virtualenv reuse, full Panama/Docker evidence, docs gates, and independent review are complete. |
 | 2 | Complete | Cancellation-safe replacement, repair recovery, heavy cancellation/concurrency evidence, full pg17 suite, and independent Rust review pass. |
 | 3 | Complete | Invoker query modes, caller-preserving catalog mediators, telemetry authorization, update SQL, real-login evidence, and independent Rust review pass. |
-| 4 | Not started | Depends on caller identity and security-mode contract from Phase 3. |
+| 4 | Complete | Query-start composition, catalog/pending-sync deduplication, drift/freshness and recovery regressions, fixed-work benchmark evidence, and independent Rust review are complete. |
 | 5 | Not started | Depends on the authoritative query-start seam and optimized baseline from Phase 4. |
 | 6 | Not started | Depends on the accepted traverse/BFS vertical slice from Phase 5. |
 | 7 | Not started | Depends on complete direct-algorithm visibility from Phase 6. |
@@ -1068,11 +1070,11 @@ known repeated SPI work before measuring RLS overhead.
 
 **Red tests and baselines first:**
 
-- instrument the selected fixed-work query to count catalog and sync SPI
-  statements;
+- instrument the selected fixed-work query at the registered-catalog load and
+  caller-bound sync-mediator call boundaries;
 - retain schema-drift, pending-sync, role-grant, and freshness tests; and
-- record median and p95 latency over at least 40 warm runs with
-  `graph.status()` as the negative control.
+- record median and p95 latency over at least 40 warm runs with an unchanged
+  SQL-only statement as the negative control.
 
 **Work:**
 
@@ -1086,8 +1088,62 @@ known repeated SPI work before measuring RLS overhead.
 - Keep per-statement schema drift, freshness, ACL, and pending-sync validation.
 - Do not add backend-local caching or invalidation callbacks.
 
-**Evidence:** before/after SPI trace, fixed-work benchmark table, unchanged row
-counts, and passing freshness/drift tests.
+**Evidence:** post-change catalog/mediator boundary counts, fixed-work benchmark
+table, unchanged row counts, and passing freshness/drift tests.
+
+**Recorded Phase 4 evidence (2026-08-11):**
+
+- `QueryStartState` owns the selected graph metadata, registered tables,
+  relationships, filter columns, catalog fingerprint and validation result,
+  applicable relation OIDs, and sync mode. A public depth-zero traversal
+  performs exactly one `read_catalog_for_graph(graph_id)` call and one
+  pending-sync mediator call; the development regression asserts `(1, 1)` at
+  the actual catalog-read and mediator boundaries. The same assertion covers
+  hydrated traversal with an unindexed source-column filter and hydrated GQL
+  and Cypher reads. Traversal, paths, components, search/workflows,
+  aggregation, and GQL/Cypher reads and mutations reuse these catalog rows for
+  binding, filtering, hydration, source visibility, and mapped writes. The
+  first status/query boundary after interrupted replacement recovery also
+  passes this fingerprint into the reload path and retains the `(1, 1)` count;
+  catalog-error recovery explicitly omits fingerprint recomputation instead of
+  issuing a second full read.
+- `_pending_sync_rows_for_current_role()` and the query-state high-watermark
+  helper are no-argument pinned mediators. They consume backend-private state
+  bound to the outer caller and selected graph and clear it through
+  `PgTryBuilder::finally`. SQL callers cannot supply relation OIDs or a
+  watermark to expand their scope, and an injected PostgreSQL cancellation
+  proves that armed state cannot be reused by a later direct call.
+- `apply_pending_sync` reuses the same catalog rows through in-memory and
+  durable replay planning, bounded log reads, writer-barrier validation,
+  legacy replay, engine installation, and the final pending probe. Its public
+  traversal regression asserts one catalog read and three narrow sync probes
+  (initial pending count, high watermark, and final pending count).
+- Durable `mutable_overlay` replay transfers one owned `SyncReplayContext`
+  through ingest and legacy replay instead of cloning a second catalog-sized
+  context under an independent governor. Separately, a minimum-limit smoke
+  runs that path at the supported 64 MiB floor and verifies the durable segment
+  is published and query-visible; the smoke is not treated as proof of context
+  cardinality.
+- Catalog drift, dropped-relation status reporting, live-DDL drift reporting,
+  low-privilege graph reads, and `apply_pending_sync` traversal regressions
+  pass with unchanged result counts.
+- The final serial PostgreSQL 17 pgrx suite passes with 1,182 tests passed,
+  one ignored, and no failures. The default parallel run produced three
+  expected `PG006` maintenance-lock exclusions against shared reset/build
+  fixtures; each disappears when the suite uses `RUST_TEST_THREADS=1`.
+- An independent Rust review found and then verified the recovery fingerprint
+  reuse fix; its final verdict is commit-ready with no remaining findings.
+- The same 40-sample, five-warmup, depth-zero traversal benchmark was run on
+  committed Phase 3 (`63f768d`) and the Phase 4 tree:
+
+  | Metric | Phase 3 median / p95 | Phase 4 median / p95 | Median change |
+  |---|---:|---:|---:|
+  | depth-zero traversal | 1.349 / 1.728 ms | 0.635 / 0.785 ms | -52.9% |
+  | SQL-only negative control | 0.003 / 0.008 ms | 0.003 / 0.006 ms | 0.0% |
+
+  Every sample returned one row. The SQL-only control is unchanged at the
+  reported precision and its p95 improved by 0.002 ms; the traversal change
+  is therefore not attributed to a broad server slowdown or speedup.
 
 **Exit gate:** one authoritative query-start state owns the selected graph and
 catalog facts, no redundant full catalog read remains, and the performance

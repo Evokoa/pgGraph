@@ -5,7 +5,7 @@ use crate::api_types::{
     TraverseRequest, TraverseRow,
 };
 use crate::catalog::{table_oid_from_name, validate_column_exists};
-use crate::sql_hydration::{hydrate_node_governed, hydrate_nodes_governed};
+use crate::sql_hydration::{hydrate_node_governed_with_tables, hydrate_nodes_governed_with_tables};
 use crate::sql_traversal::{
     execute_traverse_rows_governed, json_i32_field, json_number_as_f64, json_number_from_f64,
     optional_string_array, parse_node_ref_json_string, path_node_field, required_string_field,
@@ -40,6 +40,8 @@ pub(crate) fn aggregate_impl(
     aggregations: &serde_json::Value,
     scope: &str,
     path_limit: i32,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<serde_json::Value> {
     check_enabled_result()?;
     let request = parse_aggregation_traversal_request(traversal)?;
@@ -60,17 +62,23 @@ pub(crate) fn aggregate_impl(
                     ),
                 });
             }
-            return aggregate_indexed_paths_governed(&paths, specs, &governor);
+            return aggregate_indexed_paths_governed(&paths, specs, &governor, tables);
         }
     }
 
-    let rows = execute_aggregation_traversal_governed(&request, path_limit, &governor)?;
+    let rows = execute_aggregation_traversal_governed(
+        &request,
+        path_limit,
+        &governor,
+        tables,
+        filter_columns,
+    )?;
     let rows = rows
         .into_iter()
         .filter(|row| row.4 >= request.min_depth)
         .collect::<Vec<_>>();
     let aggregate_rows = if scope.expands_parent_path() {
-        expand_rows_to_parent_path_governed(rows, &governor)?
+        expand_rows_to_parent_path_governed(rows, &governor, tables)?
     } else {
         rows
     };
@@ -543,16 +551,18 @@ pub(crate) fn aggregate_indexed_paths(
     specs: Vec<AggregateSpec>,
 ) -> safety::GraphResult<serde_json::Value> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    aggregate_indexed_paths_governed(paths, specs, &governor)
+    let (tables, _edges, _filter_columns) = crate::catalog::read_catalog()?;
+    aggregate_indexed_paths_governed(paths, specs, &governor, &tables)
 }
 
 fn aggregate_indexed_paths_governed(
     paths: &[IndexedPath],
     specs: Vec<AggregateSpec>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<serde_json::Value> {
     let coordinates_by_idx = indexed_path_coordinates(paths)?;
-    let hydrated = hydrate_indexed_path_nodes_governed(&coordinates_by_idx, governor)?;
+    let hydrated = hydrate_indexed_path_nodes_governed(&coordinates_by_idx, governor, tables)?;
     let mut accumulators = specs
         .iter()
         .map(|spec| (spec.alias.clone(), AggregateAccumulator::default()))
@@ -596,12 +606,14 @@ fn hydrate_indexed_path_nodes(
     coordinates_by_idx: &HashMap<u32, types::PathCoordinate>,
 ) -> safety::GraphResult<HashMap<u32, HashMap<String, pgrx::JsonB>>> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    hydrate_indexed_path_nodes_governed(coordinates_by_idx, &governor)
+    let (tables, _edges, _filter_columns) = crate::catalog::read_catalog()?;
+    hydrate_indexed_path_nodes_governed(coordinates_by_idx, &governor, &tables)
 }
 
 fn hydrate_indexed_path_nodes_governed(
     coordinates_by_idx: &HashMap<u32, types::PathCoordinate>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<HashMap<u32, HashMap<String, pgrx::JsonB>>> {
     let unique_rows = coordinates_by_idx
         .values()
@@ -613,7 +625,8 @@ fn hydrate_indexed_path_nodes_governed(
             edge_path: Vec::new(),
         })
         .collect::<Vec<_>>();
-    hydrate_nodes_governed(&unique_rows, governor).map(group_hydrated_nodes_by_table)
+    hydrate_nodes_governed_with_tables(&unique_rows, governor, tables)
+        .map(group_hydrated_nodes_by_table)
 }
 
 fn group_hydrated_nodes_by_table(
@@ -668,13 +681,16 @@ pub(crate) fn execute_aggregation_traversal(
     limit: usize,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    execute_aggregation_traversal_governed(request, limit, &governor)
+    let (tables, _edges, filter_columns) = crate::catalog::read_catalog()?;
+    execute_aggregation_traversal_governed(request, limit, &governor, &tables, &filter_columns)
 }
 
 fn execute_aggregation_traversal_governed(
     request: &AggregationTraversalRequest,
     limit: usize,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let node_tables = request
         .node_tables
@@ -706,7 +722,8 @@ fn execute_aggregation_traversal_governed(
             max_nodes: crate::config::MAX_NODES.get(),
             max_frontier: crate::config::MAX_FRONTIER.get(),
         };
-        let mut start_rows = execute_traverse_rows_governed(&traverse_request, governor)?;
+        let mut start_rows =
+            execute_traverse_rows_governed(&traverse_request, governor, tables, filter_columns)?;
         rows.append(&mut start_rows);
     }
     Ok(rows)
@@ -717,12 +734,14 @@ pub(crate) fn expand_rows_to_parent_path(
     rows: Vec<TraverseRow>,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    expand_rows_to_parent_path_governed(rows, &governor)
+    let (tables, _edges, _filter_columns) = crate::catalog::read_catalog()?;
+    expand_rows_to_parent_path_governed(rows, &governor, &tables)
 }
 
 fn expand_rows_to_parent_path_governed(
     rows: Vec<TraverseRow>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let output_count = rows.iter().try_fold(0usize, |count, row| {
         let width = row.5 .0.as_array().map_or(0, Vec::len);
@@ -768,7 +787,7 @@ fn expand_rows_to_parent_path_governed(
             let node = if let Some(node) = by_coord.get(&(table_oid, id)) {
                 Some(pgrx::JsonB(node.0.clone()))
             } else {
-                hydrate_node_governed(table_oid, id, governor)?
+                hydrate_node_governed_with_tables(table_oid, id, governor, tables)?
             };
             expanded.push((
                 row.0,

@@ -1,6 +1,38 @@
 use super::admin::{check_enabled_result, require_graph_admin_result, with_panic_boundary};
 use super::*;
 
+#[cfg(feature = "development")]
+thread_local! {
+    static QUERY_START_PROBE_COUNTS: std::cell::Cell<(u32, u32)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(feature = "development")]
+pub(crate) fn reset_query_start_probe_counts() {
+    QUERY_START_PROBE_COUNTS.set((0, 0));
+}
+
+#[cfg(feature = "development")]
+pub(crate) fn query_start_probe_counts() -> (u32, u32) {
+    QUERY_START_PROBE_COUNTS.get()
+}
+
+#[cfg(feature = "development")]
+pub(crate) fn record_query_start_catalog_read() {
+    QUERY_START_PROBE_COUNTS.with(|counts| {
+        let (catalog_reads, pending_probes) = counts.get();
+        counts.set((catalog_reads.saturating_add(1), pending_probes));
+    });
+}
+
+#[cfg(feature = "development")]
+pub(crate) fn record_query_start_pending_probe() {
+    QUERY_START_PROBE_COUNTS.with(|counts| {
+        let (catalog_reads, pending_probes) = counts.get();
+        counts.set((catalog_reads, pending_probes.saturating_add(1)));
+    });
+}
+
 /// Reset the engine — clear graph and remove persisted files.
 #[pg_extern(schema = "graph", security_definer)]
 #[search_path(pg_catalog, pg_temp)]
@@ -52,7 +84,9 @@ fn select_graph(
             crate::runtime_state::clear_loaded_graph();
         }
         if !loaded && graph.residency == "hot" && config::HOT_EAGER_LOAD.get() {
-            if let Err(err) = load_selected_graph_from_disk(&graph, true) {
+            if let Err(err) =
+                load_selected_graph_from_disk(&graph, true, CatalogFingerprintForLoad::Resolve)
+            {
                 pgrx::warning!("graph: hot eager-load skipped: {}", err);
             }
             loaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
@@ -94,7 +128,8 @@ fn load_graph(
         )
         .unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
-        load_selected_graph_from_disk(&graph, false).unwrap_or_else(|err| err.report());
+        load_selected_graph_from_disk(&graph, false, CatalogFingerprintForLoad::Resolve)
+            .unwrap_or_else(|err| err.report());
         let snapshot =
             ENGINE.with(|engine| crate::runtime_state::loaded_graph_snapshot(&engine.borrow()));
         let row = snapshot
@@ -326,7 +361,7 @@ pub(super) fn largest_component_rows(
 ) -> safety::GraphResult<Vec<ComponentNodeRow>> {
     check_enabled_result()?;
     require_graph_admin_result()?;
-    ensure_current_graph_for_query(current_query_freshness()?)?;
+    let query_start = ensure_current_graph_for_query(current_query_freshness()?)?;
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
     let (page, governor) = ENGINE.with(|e| {
@@ -361,7 +396,7 @@ pub(super) fn largest_component_rows(
         page_lease.retain_until_governor_drop();
         Ok::<_, safety::GraphError>((page, governor))
     })?;
-    hydrate_component_page_governed(page, hydrate, &governor)
+    hydrate_component_page_governed(page, hydrate, &governor, &query_start.tables)
 }
 
 pub(super) fn component_rows(
@@ -377,7 +412,7 @@ pub(super) fn component_rows(
     }
     check_enabled_result()?;
     require_graph_admin_result()?;
-    ensure_current_graph_for_query(current_query_freshness()?)?;
+    let query_start = ensure_current_graph_for_query(current_query_freshness()?)?;
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
 
@@ -408,7 +443,7 @@ pub(super) fn component_rows(
         Ok::<_, safety::GraphError>((page, governor))
     })?;
 
-    hydrate_component_page_governed(page, hydrate, &governor)
+    hydrate_component_page_governed(page, hydrate, &governor, &query_start.tables)
 }
 
 pub(super) fn hydrate_component_page(
@@ -416,13 +451,15 @@ pub(super) fn hydrate_component_page(
     hydrate: bool,
 ) -> safety::GraphResult<Vec<ComponentNodeRow>> {
     let governor = ENGINE.with(|engine| engine.borrow().analytics_resource_governor())?;
-    hydrate_component_page_governed(page, hydrate, &governor)
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    hydrate_component_page_governed(page, hydrate, &governor, &tables)
 }
 
 pub(super) fn hydrate_component_page_governed(
     page: Vec<connected_components::ComponentRow>,
     hydrate: bool,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<ComponentNodeRow>> {
     acl::check_table_acls(page.iter().map(|row| row.node_table.0))?;
     let page_bytes = page.iter().try_fold(0usize, |bytes, row| {
@@ -461,7 +498,7 @@ pub(super) fn hydrate_component_page_governed(
         })
         .collect::<Vec<_>>();
     let mut hydrated = if hydrate {
-        hydrate_nodes_governed(&traversal_rows, governor)?
+        crate::sql_hydration::hydrate_nodes_governed_with_tables(&traversal_rows, governor, tables)?
     } else {
         HashMap::new()
     };
@@ -489,22 +526,18 @@ pub(super) fn hydrate_component_page_governed(
 /// FilterIndex and the edge type registry are bincode-deserialized into
 /// backend-local heap, and the reverse EdgeStore CSR is rebuilt into heap for
 /// inbound traversal.
-pub(super) fn maybe_auto_load() {
-    let graph = match catalog::selected_or_default_graph_metadata_via_definer() {
-        Ok(graph) => graph,
-        Err(err) => {
-            pgrx::warning!("graph: auto-load skipped: {}", err);
-            return;
-        }
-    };
-
+pub(super) fn maybe_auto_load(graph: &catalog::GraphMetadata, catalog_fingerprint: u64) {
     clear_loaded_graph_if_mismatched(&graph.graph_id);
 
     if !config::AUTO_LOAD.get() {
         return;
     }
 
-    if let Err(err) = load_selected_graph_from_disk(&graph, true) {
+    if let Err(err) = load_selected_graph_from_disk(
+        graph,
+        true,
+        CatalogFingerprintForLoad::Known(catalog_fingerprint),
+    ) {
         pgrx::warning!("graph: auto-load skipped: {}", err);
     }
 }
@@ -520,9 +553,17 @@ pub(super) fn clear_loaded_graph_if_mismatched(graph_id: &str) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CatalogFingerprintForLoad {
+    Resolve,
+    Known(u64),
+    Omit,
+}
+
 fn load_selected_graph_from_disk(
     graph: &catalog::GraphMetadata,
     quiet_missing: bool,
+    catalog_fingerprint: CatalogFingerprintForLoad,
 ) -> safety::GraphResult<bool> {
     if quiet_missing && graph.residency == "cold" {
         return Ok(false);
@@ -563,9 +604,18 @@ fn load_selected_graph_from_disk(
         pgrx::log!("graph: loading from {} (mmap)", path.display());
         match persistence::load_graph_file(&path) {
             Ok(mut loaded_engine) => {
-                if let Ok((tables, edges, filters)) = read_catalog() {
-                    loaded_engine
-                        .set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filters));
+                match catalog_fingerprint {
+                    CatalogFingerprintForLoad::Known(catalog_fingerprint) => {
+                        loaded_engine.set_catalog_fingerprint(catalog_fingerprint);
+                    }
+                    CatalogFingerprintForLoad::Resolve => {
+                        if let Ok((tables, edges, filters)) = read_catalog() {
+                            loaded_engine.set_catalog_fingerprint(super::catalog_fingerprint(
+                                &tables, &edges, &filters,
+                            ));
+                        }
+                    }
+                    CatalogFingerprintForLoad::Omit => {}
                 }
                 let nc = loaded_engine.node_store.node_count();
                 let ec = loaded_engine.edge_store.edge_count();
@@ -598,6 +648,16 @@ fn load_selected_graph_from_disk(
 /// serving another graph operation.
 pub(crate) fn reconcile_interrupted_replacement(
     graph: &catalog::GraphMetadata,
+) -> safety::GraphResult<()> {
+    reconcile_interrupted_replacement_with_catalog_fingerprint(
+        graph,
+        CatalogFingerprintForLoad::Resolve,
+    )
+}
+
+fn reconcile_interrupted_replacement_with_catalog_fingerprint(
+    graph: &catalog::GraphMetadata,
+    catalog_fingerprint: CatalogFingerprintForLoad,
 ) -> safety::GraphResult<()> {
     // Snapshot ownership is independent of graph selection and no interrupted
     // stack can still use it. Release it at the first recovery boundary even
@@ -654,7 +714,7 @@ pub(crate) fn reconcile_interrupted_replacement(
                 *engine.borrow_mut() = Engine::new();
             });
             crate::runtime_state::clear_loaded_graph();
-            load_selected_graph_from_disk(graph, false)?;
+            load_selected_graph_from_disk(graph, false, catalog_fingerprint)?;
         }
         crate::runtime_state::ReplacementRecoveryAction::MissingPublished => {
             return Err(safety::GraphError::Internal(format!(
@@ -670,23 +730,76 @@ pub(crate) fn reconcile_interrupted_replacement(
     Ok(())
 }
 
-pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
+#[derive(Debug)]
+pub(crate) struct QueryStartState {
+    pub(crate) graph: catalog::GraphMetadata,
+    pub(crate) tables: Vec<builder::RegisteredTable>,
+    pub(crate) edges: Vec<builder::RegisteredEdge>,
+    pub(crate) filter_columns: Vec<builder::RegisteredFilterColumn>,
+    pub(crate) catalog_fingerprint: u64,
+    pub(crate) catalog_state: safety::GraphResult<(u64, Option<String>)>,
+    pub(crate) applicable_table_oids: Vec<i32>,
+    pub(crate) sync_mode: config::SyncMode,
+}
+
+fn load_query_start_state(graph: catalog::GraphMetadata) -> safety::GraphResult<QueryStartState> {
+    let (tables, edges, filter_columns) = catalog::read_catalog_for_graph(&graph.graph_id)?;
+    let catalog_fingerprint = catalog::catalog_fingerprint(&tables, &edges, &filter_columns);
+    let catalog_state = catalog::current_catalog_state_from_rows(&tables, &edges, &filter_columns);
+    let applicable_table_oids =
+        crate::sql_sync::applicable_table_oids_from_catalog(&tables, &edges);
+    let sync_mode = current_sync_mode()?;
+    Ok(QueryStartState {
+        graph,
+        tables,
+        edges,
+        filter_columns,
+        catalog_fingerprint,
+        catalog_state,
+        applicable_table_oids,
+        sync_mode,
+    })
+}
+
+fn prepare_current_graph(
+    require_valid_schema: bool,
+    allow_auto_load: bool,
+) -> safety::GraphResult<QueryStartState> {
     let graph = catalog::selected_or_default_graph_metadata_via_definer()?;
     clear_loaded_graph_if_mismatched(&graph.graph_id);
     catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Read)?;
-    reconcile_interrupted_replacement(&graph)?;
-    maybe_auto_load();
-
-    let sync_mode = current_sync_mode()?;
+    let query_start = match load_query_start_state(graph.clone()) {
+        Ok(query_start) => query_start,
+        Err(err) => {
+            // Recovery still owns cancellation cleanup when catalog validation
+            // fails, but successful query startup must never load the same
+            // catalog twice merely to fingerprint a recovered artifact.
+            reconcile_interrupted_replacement_with_catalog_fingerprint(
+                &graph,
+                CatalogFingerprintForLoad::Omit,
+            )?;
+            return Err(err);
+        }
+    };
+    reconcile_interrupted_replacement_with_catalog_fingerprint(
+        &query_start.graph,
+        CatalogFingerprintForLoad::Known(query_start.catalog_fingerprint),
+    )?;
+    if allow_auto_load {
+        maybe_auto_load(&query_start.graph, query_start.catalog_fingerprint);
+    }
 
     let disabled = disabled_graph_trigger_count()?;
-    let catalog_state = current_catalog_state()?;
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
-    let pending = pending_sync_rows(applied_sync_id)?;
+    let pending = crate::sql_sync::pending_sync_rows_for_query_state(
+        applied_sync_id,
+        &query_start.graph.graph_id,
+        &query_start.applicable_table_oids,
+    )?;
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
-        eng.refresh_observed_state(disabled, pending, &Ok(catalog_state));
-        if matches!(eng.schema_state, engine::SchemaState::Invalid) {
+        eng.refresh_observed_state(disabled, pending, &query_start.catalog_state);
+        if require_valid_schema && matches!(eng.schema_state, engine::SchemaState::Invalid) {
             return Err(safety::GraphError::Internal(
                 eng.invalid_reason
                     .clone()
@@ -696,13 +809,56 @@ pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
         Ok::<_, safety::GraphError>(())
     })?;
 
-    if matches!(sync_mode, config::SyncMode::Trigger) && pending > 0 {
+    if matches!(query_start.sync_mode, config::SyncMode::Trigger) && pending > 0 {
         ENGINE.with(|e| {
             let mut eng = e.borrow_mut();
             eng.mark_syncing();
         });
     }
-    Ok(())
+    Ok(query_start)
+}
+
+pub(crate) fn ensure_current_graph() -> safety::GraphResult<QueryStartState> {
+    prepare_current_graph(true, true)
+}
+
+pub(super) fn refresh_current_graph_status() -> safety::GraphResult<config::SyncMode> {
+    let graph = catalog::selected_or_default_graph_metadata_via_definer()?;
+    clear_loaded_graph_if_mismatched(&graph.graph_id);
+    catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Read)?;
+    let disabled = disabled_graph_trigger_count()?;
+    let query_start = match load_query_start_state(graph.clone()) {
+        Ok(query_start) => query_start,
+        Err(err) => {
+            reconcile_interrupted_replacement_with_catalog_fingerprint(
+                &graph,
+                CatalogFingerprintForLoad::Omit,
+            )?;
+            let sync_mode = current_sync_mode()?;
+            ENGINE.with(|engine| {
+                engine
+                    .borrow_mut()
+                    .refresh_observed_state(disabled, 0, &Err(err));
+            });
+            return Ok(sync_mode);
+        }
+    };
+    reconcile_interrupted_replacement_with_catalog_fingerprint(
+        &query_start.graph,
+        CatalogFingerprintForLoad::Known(query_start.catalog_fingerprint),
+    )?;
+    let applied_sync_id = ENGINE.with(|engine| engine.borrow().applied_sync_id);
+    let pending = crate::sql_sync::pending_sync_rows_for_query_state(
+        applied_sync_id,
+        &query_start.graph.graph_id,
+        &query_start.applicable_table_oids,
+    )?;
+    ENGINE.with(|engine| {
+        engine
+            .borrow_mut()
+            .refresh_observed_state(disabled, pending, &query_start.catalog_state);
+    });
+    Ok(query_start.sync_mode)
 }
 
 pub(super) fn current_query_freshness() -> safety::GraphResult<config::QueryFreshness> {
@@ -716,20 +872,20 @@ pub(super) fn current_query_freshness() -> safety::GraphResult<config::QueryFres
 
 pub(super) fn ensure_current_graph_for_query(
     freshness: config::QueryFreshness,
-) -> safety::GraphResult<()> {
-    ensure_current_graph()?;
+) -> safety::GraphResult<QueryStartState> {
+    let query_start = ensure_current_graph()?;
 
-    if !matches!(current_sync_mode()?, config::SyncMode::Trigger) {
-        return Ok(());
+    if !matches!(query_start.sync_mode, config::SyncMode::Trigger) {
+        return Ok(query_start);
     }
 
     let pending = ENGINE.with(|e| e.borrow().pending_sync_rows);
     if pending <= 0 {
-        return Ok(());
+        return Ok(query_start);
     }
 
     match freshness {
-        config::QueryFreshness::Off => Ok(()),
+        config::QueryFreshness::Off => Ok(query_start),
         config::QueryFreshness::ErrorOnPending => Err(safety::GraphError::InvalidFilter {
             reason: format!(
                 "topology read has {pending} pending sync row(s); call graph.apply_sync() or set graph.query_freshness = 'apply_pending_sync'"
@@ -740,12 +896,23 @@ pub(super) fn ensure_current_graph_for_query(
             // Applying pending sync here would fold uncommitted trigger rows into
             // the backend-local base projection and make rollback leak until reset.
             if crate::projection::tx_delta::stats().dirty {
-                return Ok(());
+                return Ok(query_start);
             }
 
-            let high_watermark = max_sync_log_id()?;
-            apply_sync_to_high_watermark(high_watermark)?;
-            let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;
+            let high_watermark = crate::sql_sync::max_sync_log_id_for_query_state(
+                &query_start.graph.graph_id,
+                &query_start.applicable_table_oids,
+            )?;
+            crate::sql_sync::apply_sync_to_high_watermark_for_query(
+                high_watermark,
+                &query_start.graph,
+                &query_start.tables,
+                &query_start.edges,
+                &query_start.filter_columns,
+                query_start.catalog_fingerprint,
+                &query_start.applicable_table_oids,
+            )?;
+            let pending = ENGINE.with(|e| e.borrow().pending_sync_rows);
             ENGINE.with(|e| {
                 let mut eng = e.borrow_mut();
                 eng.record_pending_sync_rows(pending);
@@ -753,7 +920,7 @@ pub(super) fn ensure_current_graph_for_query(
                     eng.mark_idle_if_writable();
                 }
             });
-            Ok(())
+            Ok(query_start)
         }
     }
 }

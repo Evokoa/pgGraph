@@ -11,6 +11,26 @@ ALTER FUNCTION graph.traverse(
 ALTER FUNCTION graph.connected_components() SECURITY INVOKER;
 ALTER FUNCTION graph.component_stats() SECURITY INVOKER;
 
+-- Query start now passes catalog-derived table OIDs through backend-private
+-- one-shot state. Remove the 1.0 helper that accepted a caller-supplied
+-- watermark and replace it with a no-argument mediator.
+DROP FUNCTION IF EXISTS graph._pending_sync_rows_for_current_role(bigint);
+CREATE OR REPLACE FUNCTION graph._pending_sync_rows_for_current_role()
+RETURNS bigint
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'pending_sync_rows_for_current_role_wrapper';
+GRANT EXECUTE ON FUNCTION graph._pending_sync_rows_for_current_role() TO PUBLIC;
+
+CREATE OR REPLACE FUNCTION graph._max_sync_log_id_for_query_state()
+RETURNS bigint
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'max_sync_log_id_for_query_state_wrapper';
+GRANT EXECUTE ON FUNCTION graph._max_sync_log_id_for_query_state() TO PUBLIC;
+
 -- Job status remains callable by readers, but executes through a pinned
 -- catalog-only boundary after raw job-table access is revoked.
 ALTER FUNCTION graph.build_status(text) SECURITY DEFINER

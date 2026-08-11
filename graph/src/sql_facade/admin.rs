@@ -82,9 +82,26 @@ fn graph_id_for_current_role_with_privilege(
     security_definer
 )]
 #[search_path(pg_catalog, pg_temp)]
-fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
+fn pending_sync_rows_for_current_role() -> i64 {
     with_panic_boundary("_pending_sync_rows_for_current_role()", || {
-        crate::sql_sync::pending_sync_rows_direct(applied_sync_id)
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        let (pending_caller_oid, pending_graph_id, applied_sync_id, applicable_table_oids) =
+            crate::sql_sync::take_pending_sync_row_probe().unwrap_or_else(|err| err.report());
+        if pending_caller_oid != caller_oid || pending_graph_id != graph.graph_id {
+            safety::GraphError::AclDenied {
+                table: "internal pending-sync mediator".to_string(),
+            }
+            .report();
+        }
+        crate::sql_sync::pending_sync_rows_direct(applied_sync_id, &applicable_table_oids)
             .unwrap_or_else(|err| err.report())
     })
 }
@@ -98,6 +115,36 @@ fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
 fn max_sync_log_id_for_current_role() -> i64 {
     with_panic_boundary("_max_sync_log_id_for_current_role()", || {
         crate::sql_sync::max_sync_log_id_direct().unwrap_or_else(|err| err.report())
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_max_sync_log_id_for_query_state",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn max_sync_log_id_for_query_state() -> i64 {
+    with_panic_boundary("_max_sync_log_id_for_query_state()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        let (pending_caller_oid, pending_graph_id, _applied_sync_id, applicable_table_oids) =
+            crate::sql_sync::take_pending_sync_row_probe().unwrap_or_else(|err| err.report());
+        if pending_caller_oid != caller_oid || pending_graph_id != graph.graph_id {
+            safety::GraphError::AclDenied {
+                table: "internal sync-checkpoint mediator".to_string(),
+            }
+            .report();
+        }
+        crate::sql_sync::max_sync_log_id_direct_for_oids(&applicable_table_oids)
+            .unwrap_or_else(|err| err.report())
     })
 }
 
@@ -2046,24 +2093,17 @@ fn run_scheduled_maintenance() -> TableIterator<
 fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> {
     crate::projection::manifest::expire_stale_generation_heartbeats()?;
     crate::sql_sync::expire_stale_sync_watermarks()?;
-    catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Read)?;
-    let graph = catalog::selected_or_default_graph_metadata_via_definer()?;
-    super::runtime::clear_loaded_graph_if_mismatched(&graph.graph_id);
-    super::runtime::reconcile_interrupted_replacement(&graph)?;
-    let disabled_trigger_count = disabled_graph_trigger_count()?;
-    let catalog_state = current_catalog_state();
+    let sync_mode = super::runtime::refresh_current_graph_status()?;
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
-    let pending = pending_sync_rows(applied_sync_id)?;
     // Only register a watermark heartbeat when the graph actually
     // participates in trigger sync; a manual-mode graph's applied_sync_id
     // never advances past 0, and a heartbeat there would be meaningless.
-    if crate::sql_sync::current_sync_mode()? == config::SyncMode::Trigger {
+    if sync_mode == config::SyncMode::Trigger {
         crate::sql_sync::record_sync_watermark_heartbeat(applied_sync_id)?;
     }
 
     ENGINE.with(|e| {
-        let mut eng = e.borrow_mut();
-        eng.refresh_observed_state(disabled_trigger_count, pending, &catalog_state);
+        let eng = e.borrow();
         if let Some(manifest) = eng.projection_manifest_full.as_ref() {
             crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;
         }
@@ -2656,6 +2696,15 @@ fn build_status(
 #[pg_extern(schema = "graph", name = "_test_sync_heartbeat_error_after_arming")]
 fn test_sync_heartbeat_error_after_arming() -> bool {
     crate::sql_sync::test_sync_watermark_error_after_arming()
+}
+
+#[cfg(all(not(test), feature = "development"))]
+#[pg_extern(
+    schema = "graph",
+    name = "_test_pending_sync_row_probe_error_after_arming"
+)]
+fn test_pending_sync_row_probe_error_after_arming() -> bool {
+    crate::sql_sync::test_pending_sync_row_probe_error_after_arming()
 }
 
 #[cfg(all(not(test), feature = "development"))]

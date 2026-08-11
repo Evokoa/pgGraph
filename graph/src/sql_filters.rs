@@ -1,6 +1,6 @@
 //! Structured SQL filter parsing and conversion into in-memory filter operations.
 
-use crate::catalog::{read_catalog, selected_or_default_graph_metadata};
+use crate::catalog::read_catalog;
 use crate::{acl, filter_index, safety, types};
 use pgrx::prelude::*;
 use std::collections::HashSet;
@@ -61,9 +61,20 @@ pub(crate) struct FilterColumnResolution {
     pub(crate) column_type: Option<String>,
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn parse_structured_filter(
     filter: &pgrx::JsonB,
     requested_table_oids: &HashSet<u32>,
+) -> safety::GraphResult<ParsedStructuredFilter> {
+    let (tables, _edges, filter_columns) = read_catalog()?;
+    parse_structured_filter_from_catalog(filter, requested_table_oids, &tables, &filter_columns)
+}
+
+pub(crate) fn parse_structured_filter_from_catalog(
+    filter: &pgrx::JsonB,
+    requested_table_oids: &HashSet<u32>,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<ParsedStructuredFilter> {
     let filter_object = filter
         .0
@@ -127,7 +138,12 @@ pub(crate) fn parse_structured_filter(
     let mut hydration_filters = Vec::new();
     for (column, predicate) in predicates {
         validate_filter_identifier(column)?;
-        let resolved = resolve_structured_filter_column(column, requested_table_oids)?;
+        let resolved = resolve_structured_filter_column_from_catalog(
+            column,
+            requested_table_oids,
+            tables,
+            filter_columns,
+        )?;
         let operators = predicate
             .as_object()
             .ok_or_else(|| safety::GraphError::InvalidFilter {
@@ -166,47 +182,34 @@ pub(crate) fn parse_structured_filter(
     })
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn resolve_structured_filter_column(
     column: &str,
     requested_table_oids: &HashSet<u32>,
 ) -> safety::GraphResult<FilterColumnResolution> {
-    let graph = selected_or_default_graph_metadata()?;
-    let registered = Spi::connect(|client| {
-        let result = client
-            .select(
-                "SELECT table_oid::integer, column_type
-             FROM graph._registered_filter_columns
-             WHERE graph_id = $1::uuid
-               AND column_name = $2
-             ORDER BY table_name",
-                None,
-                &[graph.graph_id.as_str().into(), column.into()],
-            )
-            .map_err(|err| {
-                safety::GraphError::Internal(format!("filter catalog validation failed: {}", err))
-            })?;
-        let mut rows = Vec::new();
-        for row in result {
-            let table_oid = row
-                .get::<i32>(1)
-                .map_err(|err| safety::GraphError::Internal(err.to_string()))?
-                .map(|oid| oid as u32);
-            let column_type = row
-                .get::<String>(2)
-                .map_err(|err| safety::GraphError::Internal(err.to_string()))?
-                .unwrap_or_default();
-            if let Some(table_oid) = table_oid {
-                rows.push((table_oid, column_type));
-            }
-        }
-        Ok::<_, safety::GraphError>(rows)
-    })?;
+    let (tables, _edges, filter_columns) = read_catalog()?;
+    resolve_structured_filter_column_from_catalog(
+        column,
+        requested_table_oids,
+        &tables,
+        &filter_columns,
+    )
+}
 
-    let registrations = registered
-        .into_iter()
-        .filter(|(table_oid, _column_type)| {
-            requested_table_oids.is_empty() || requested_table_oids.contains(table_oid)
+pub(crate) fn resolve_structured_filter_column_from_catalog(
+    column: &str,
+    requested_table_oids: &HashSet<u32>,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
+) -> safety::GraphResult<FilterColumnResolution> {
+    let registrations = filter_columns
+        .iter()
+        .filter(|registered| {
+            registered.column_name == column
+                && (requested_table_oids.is_empty()
+                    || requested_table_oids.contains(&registered.table_oid))
         })
+        .map(|registered| (registered.table_oid, registered.column_type.clone()))
         .collect::<Vec<_>>();
 
     if registrations.len() > 1 {
@@ -224,7 +227,7 @@ pub(crate) fn resolve_structured_filter_column(
         });
     }
 
-    let candidates = source_tables_with_column(column, requested_table_oids)?;
+    let candidates = source_tables_with_column_from_tables(column, requested_table_oids, tables)?;
     if candidates.is_empty() {
         return Err(safety::GraphError::InvalidFilter {
             reason: format!(
@@ -248,11 +251,20 @@ pub(crate) fn resolve_structured_filter_column(
     })
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn source_tables_with_column(
     column: &str,
     requested_table_oids: &HashSet<u32>,
 ) -> safety::GraphResult<Vec<u32>> {
     let (tables, _edges, _filter_columns) = read_catalog()?;
+    source_tables_with_column_from_tables(column, requested_table_oids, &tables)
+}
+
+pub(crate) fn source_tables_with_column_from_tables(
+    column: &str,
+    requested_table_oids: &HashSet<u32>,
+    tables: &[crate::builder::RegisteredTable],
+) -> safety::GraphResult<Vec<u32>> {
     let mut candidates = Vec::new();
     for table in tables {
         let table_oid = table.table_oid;

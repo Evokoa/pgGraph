@@ -286,5 +286,15 @@
     "date": "2026-07-17",
     "new_schema_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e",
     "previous_schema_sha256": "f2140bbeb4ce5116b4096208f9417cbc06b75ea8095cca8123a5bec0e443707f"
+  },
+  {
+    "acknowledgement": "phase4-query-start-state",
+    "changed_sections": [
+      "gql_implementation_sha256",
+      "internal_sql_functions"
+    ],
+    "date": "2026-08-11",
+    "new_schema_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e",
+    "previous_schema_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e"
   }
 ]

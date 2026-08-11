@@ -46,7 +46,7 @@ fn find(
         let row_offset_usize =
             validate_nonnegative_arg(row_offset, "row_offset").unwrap_or_else(|err| err.report());
         check_enabled_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let query_start = ensure_current_graph().unwrap_or_else(|err| err.report());
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
@@ -61,6 +61,7 @@ fn find(
             tenant.as_deref(),
             true,
             &governor,
+            &query_start,
         )
         .unwrap_or_else(|err| err.report());
         let output_lease =
@@ -137,9 +138,14 @@ fn expand(
             workflow_target_tables(target_table, target_tables).unwrap_or_else(|err| err.report());
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let tenant_scope =
-            resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+            tenant.as_deref(),
+            &query_start.graph,
+            &query_start.tables,
+        )
+        .unwrap_or_else(|err| err.report());
         let (direction, strategy, _uniqueness) = crate::sql_traversal::validate_traverse_options(
             direction,
             tenant_scope.as_deref(),
@@ -167,8 +173,13 @@ fn expand(
             max_nodes: config::MAX_NODES.get(),
             max_frontier: config::MAX_FRONTIER.get(),
         };
-        let rows =
-            execute_traverse_rows_governed(&request, &governor).unwrap_or_else(|err| err.report());
+        let rows = execute_traverse_rows_governed(
+            &request,
+            &governor,
+            &query_start.tables,
+            &query_start.filter_columns,
+        )
+        .unwrap_or_else(|err| err.report());
         let mut truncated = max_rows > 0 && rows.len() == max_rows as usize;
         let mut workspace = workflow_workspace(&governor).unwrap_or_else(|err| err.report());
         let mut output = Vec::new();
@@ -282,7 +293,7 @@ fn find_related(
         let node_tables =
             workflow_target_tables(target_table, target_tables).unwrap_or_else(|err| err.report());
         check_enabled_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let query_start = ensure_current_graph().unwrap_or_else(|err| err.report());
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
@@ -307,6 +318,7 @@ fn find_related(
             candidate_limit,
             0,
             &governor,
+            &query_start,
         )
         .unwrap_or_else(|err| err.report());
         let broad_count = if include_counts {
@@ -332,6 +344,7 @@ fn find_related(
                     candidate_limit,
                     0,
                     &governor,
+                    &query_start,
                 )
                 .unwrap_or_else(|err| err.report())
                 .len() as i64,
@@ -372,8 +385,13 @@ fn find_related(
             .enumerate()
         {
             workflow_step(&governor, 1).unwrap_or_else(|err| err.report());
-            let node = hydrate_node_governed(node_table.to_u32(), &node_id, &governor)
-                .unwrap_or_else(|err| err.report());
+            let node = crate::sql_hydration::hydrate_node_governed_with_tables(
+                node_table.to_u32(),
+                &node_id,
+                &governor,
+                &query_start.tables,
+            )
+            .unwrap_or_else(|err| err.report());
             let readable_path =
                 readable_path_governed(&path, &edge_path, &governor, &mut workspace)
                     .unwrap_or_else(|err| err.report());
@@ -430,7 +448,8 @@ fn path(
         acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
         acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
@@ -442,6 +461,7 @@ fn path(
             max_depth,
             true,
             &governor,
+            &query_start.tables,
         )
         .unwrap_or_else(|err| err.report());
         let mut workspace = workflow_workspace(&governor).unwrap_or_else(|err| err.report());
@@ -508,7 +528,7 @@ fn connection(
         validate_nonnegative_arg(source_k, "source_k").unwrap_or_else(|err| err.report());
         validate_nonnegative_arg(target_k, "target_k").unwrap_or_else(|err| err.report());
         check_enabled_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let query_start = ensure_current_graph().unwrap_or_else(|err| err.report());
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
@@ -523,6 +543,7 @@ fn connection(
             None,
             false,
             &governor,
+            &query_start,
         )
         .unwrap_or_else(|err| err.report());
         let targets = search_rows_governed(
@@ -536,6 +557,7 @@ fn connection(
             None,
             false,
             &governor,
+            &query_start,
         )
         .unwrap_or_else(|err| err.report());
 
@@ -559,6 +581,7 @@ fn connection(
                     max_depth,
                     true,
                     &governor,
+                    &query_start.tables,
                 )
                 .unwrap_or_else(|err| err.report());
                 if path_rows.is_empty() {
@@ -660,7 +683,7 @@ fn neighborhood(
             validate_nonnegative_arg(sample_k, "sample_k").unwrap_or_else(|err| err.report());
         validate_nonnegative_arg(node_limit, "node_limit").unwrap_or_else(|err| err.report());
         check_enabled_result().unwrap_or_else(|err| err.report());
-        ensure_current_graph().unwrap_or_else(|err| err.report());
+        let query_start = ensure_current_graph().unwrap_or_else(|err| err.report());
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
@@ -685,6 +708,7 @@ fn neighborhood(
             node_limit,
             0,
             &governor,
+            &query_start,
         )
         .unwrap_or_else(|err| err.report());
         let truncated =

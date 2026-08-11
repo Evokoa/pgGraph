@@ -84,14 +84,14 @@ impl<'a> SearchValueMatcher<'a> {
     }
 }
 
-pub(crate) fn validate_search_request(
+pub(crate) fn validate_search_request_with_tables(
     property_key: &str,
     table_filter: Option<u32>,
     _tenant: Option<&str>,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<()> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let mut saw_registered_property = false;
-    for table in &tables {
+    for table in tables {
         if !table.columns.iter().any(|column| column == property_key) {
             continue;
         }
@@ -124,8 +124,17 @@ fn source_table_search_statements(
     hydrate: bool,
     candidate_limit: Option<usize>,
     mut workspace: Option<&mut crate::resource::ResourceLease<'_>>,
+    catalog_tables: Option<&[crate::builder::RegisteredTable]>,
 ) -> safety::GraphResult<Vec<SourceSearchStatement>> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let owned_tables;
+    let tables = match catalog_tables {
+        Some(tables) => tables,
+        None => {
+            let (tables, _edges, _filter_columns) = read_catalog()?;
+            owned_tables = tables;
+            &owned_tables
+        }
+    };
     let mut statements = Vec::new();
 
     for table in tables {
@@ -303,6 +312,7 @@ pub(crate) fn source_table_search_sql_and_params_for_test(
         hydrate,
         None,
         None,
+        None,
     )?
     .into_iter()
     .map(|statement| (statement.query, statement.params))
@@ -328,6 +338,7 @@ pub(crate) fn source_table_search_sql_for_test(
         case_sensitive,
         tenant,
         hydrate,
+        None,
         None,
         None,
     )?
@@ -378,6 +389,35 @@ pub(crate) fn source_table_search_rows_governed(
     limit: usize,
     governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<Vec<SearchOutputRow>> {
+    source_table_search_rows_governed_with_tables(
+        property_key,
+        property_value,
+        table_filter,
+        mode,
+        case_sensitive,
+        tenant,
+        hydrate,
+        offset,
+        limit,
+        governor,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_table_search_rows_governed_with_tables(
+    property_key: &str,
+    property_value: &str,
+    table_filter: Option<u32>,
+    mode: types::SearchMode,
+    case_sensitive: bool,
+    tenant: Option<&str>,
+    hydrate: bool,
+    offset: usize,
+    limit: usize,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: Option<&[crate::builder::RegisteredTable]>,
+) -> safety::GraphResult<Vec<SearchOutputRow>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -408,6 +448,7 @@ pub(crate) fn source_table_search_rows_governed(
         hydrate,
         Some(candidate_limit),
         Some(&mut workspace),
+        catalog_tables,
     )?;
     let mut rows = Vec::new();
     let matcher = SearchValueMatcher::new(property_value, mode, case_sensitive);

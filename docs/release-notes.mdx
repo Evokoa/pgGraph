@@ -45,6 +45,18 @@ land.
 - Status counts remain physical projection totals. They are not
   source-table-RLS-filtered query results.
 
+### Query Startup
+
+- Query initialization now returns one owned state containing selected-graph
+  metadata, registered tables and relationships, filter columns, catalog
+  fingerprint and drift status, sync mode, and applicable source relation
+  OIDs.
+- Pending-sync and high-watermark checks consume that state through
+  caller/graph-bound, cancellation-safe mediators. Automatic pending-sync
+  replay also reuses it for log reads, durable ingestion, legacy replay, and
+  fingerprint installation instead of loading the registration catalog again.
+  Per-statement ACL, schema-drift, freshness, and sync checks remain enabled.
+
 The `1.0.0 -> 1.1.0` extension update changes the three query functions in
 place, preserving their owners and explicit `EXECUTE` grants. The final 1.1
 release notes will document the complete compatibility, artifact, rollback,

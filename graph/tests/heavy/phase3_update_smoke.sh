@@ -57,6 +57,16 @@ ALTER FUNCTION graph.maintenance_status_for_graph(text, text, text, integer) RES
 GRANT SELECT ON TABLE graph._build_jobs TO PUBLIC;
 GRANT SELECT ON TABLE graph._maintenance_jobs TO PUBLIC;
 
+ALTER EXTENSION graph DROP FUNCTION graph._pending_sync_rows_for_current_role();
+DROP FUNCTION graph._pending_sync_rows_for_current_role();
+CREATE FUNCTION graph._pending_sync_rows_for_current_role(applied_sync_id bigint)
+RETURNS bigint
+STRICT SECURITY DEFINER
+SET search_path TO pg_catalog, pg_temp
+LANGUAGE c
+AS '$libdir/graph', 'pending_sync_rows_for_current_role_wrapper';
+ALTER EXTENSION graph ADD FUNCTION graph._pending_sync_rows_for_current_role(bigint);
+
 ALTER EXTENSION graph DROP FUNCTION graph._require_selected_graph_privilege_for_current_role(text);
 ALTER EXTENSION graph DROP FUNCTION graph._graph_id_for_current_role_with_privilege(text, text, text, text);
 ALTER EXTENSION graph DROP FUNCTION graph._expire_projection_heartbeats_for_current_role();
@@ -122,6 +132,7 @@ BEGIN
         ('_expire_sync_watermarks_for_current_role'),
         ('_record_sync_watermark_for_current_role'),
         ('_record_projection_heartbeat_for_current_role'),
+        ('_max_sync_log_id_for_query_state'),
         ('_active_generation_count_for_current_role'),
         ('_enforce_loaded_graph_quota_for_current_role')
     ) AS expected(proname)
@@ -138,6 +149,11 @@ BEGIN
     IF missing_helpers <> 0 THEN
         RAISE EXCEPTION 'one or more pinned catalog mediators are missing';
     END IF;
+    IF pg_catalog.to_regprocedure(
+        'graph._pending_sync_rows_for_current_role()'
+    ) IS NULL THEN
+        RAISE EXCEPTION 'no-argument pending-sync mediator is missing';
+    END IF;
 END
 $$;
 
@@ -147,6 +163,16 @@ WHERE extname = 'graph';
 SELECT 1 / CASE WHEN count(*) = 1 THEN 1 ELSE 0 END
 FROM graph.registered_tables()
 WHERE table_name = 'phase3_update_nodes';
+SELECT 1 / CASE WHEN count(*) = 1 THEN 1 ELSE 0 END
+FROM graph.status();
+DO $$
+BEGIN
+    PERFORM graph._max_sync_log_id_for_query_state();
+    RAISE EXCEPTION 'query-state max-sync mediator accepted a direct SQL call';
+EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+END
+$$;
 SELECT 1 / CASE WHEN has_function_privilege(
     'phase3_update_reader',
     'graph.traverse(oid,text,integer,text[],text,oid[],jsonb,text,text,text,boolean,boolean,integer,integer,integer,integer)',

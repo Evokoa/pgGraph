@@ -304,7 +304,8 @@ fn isolated_nodes(
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let row_offset =
             usize_from_nonnegative(row_offset, "row_offset").unwrap_or_else(|err| err.report());
         let max_rows =
@@ -344,7 +345,7 @@ fn isolated_nodes(
             page_lease.retain_until_governor_drop();
             (page, governor)
         });
-        let rows = hydrate_component_page_governed(page, hydrate, &governor)
+        let rows = hydrate_component_page_governed(page, hydrate, &governor, &query_start.tables)
             .unwrap_or_else(|err| err.report());
 
         Ok(TableIterator::new(rows))

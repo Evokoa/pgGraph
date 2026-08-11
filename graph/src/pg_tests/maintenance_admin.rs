@@ -905,6 +905,8 @@ fn traverse_auto_sync_opt_in_applies_pending_edge_insert() {
     )
     .expect("insert pending child failed");
 
+    #[cfg(feature = "development")]
+    super::sql_facade::reset_query_start_probe_counts();
     let reaches_root = Spi::get_one::<i64>(
         "SELECT count(*)
              FROM graph.traverse(
@@ -917,11 +919,15 @@ fn traverse_auto_sync_opt_in_applies_pending_edge_insert() {
     )
     .expect("auto-sync traversal failed")
     .unwrap_or(0);
+    #[cfg(feature = "development")]
+    let query_start_counts = super::sql_facade::query_start_probe_counts();
     let pending = Spi::get_one::<i64>("SELECT pending_sync_rows FROM graph.status()")
         .expect("status failed")
         .unwrap_or(-1);
 
     assert_eq!(reaches_root, 1);
+    #[cfg(feature = "development")]
+    assert_eq!(query_start_counts, (1, 3));
     assert_eq!(pending, 0);
     Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
 }
@@ -1022,7 +1028,7 @@ fn cross_backend_committed_write_visible_without_full_rebuild() {
 }
 
 #[pg_test]
-fn topology_auto_sync_uses_durable_segments_for_mutable_overlay() {
+fn topology_auto_sync_durable_replay_runs_at_minimum_memory_limit() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable overlay failed");
     Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
@@ -1066,6 +1072,8 @@ fn topology_auto_sync_uses_durable_segments_for_mutable_overlay() {
     Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
         .expect("build durable auto sync graph failed");
     Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run("SET graph.memory_limit_mb = 64")
+        .expect("set minimum supported memory limit failed");
     Spi::run(
         "UPDATE public.graph_test_durable_auto_sync_pgtest
             SET parent_id = 'root'
@@ -1106,6 +1114,7 @@ fn topology_auto_sync_uses_durable_segments_for_mutable_overlay() {
     assert_eq!(reaches_root, 1);
     assert_eq!(edge_buffer_used, 0);
     assert!(segment_count > 0);
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
     Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
     Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
     Spi::run("SET graph.persist_on_build = off").expect("reset persistence failed");
