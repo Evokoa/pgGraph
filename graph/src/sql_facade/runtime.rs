@@ -15,6 +15,7 @@ fn reset() {
         let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
         let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
             .unwrap_or_else(|err| err.report());
+        crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
         persistence::remove_graph_artifacts_for(&graph.graph_id).unwrap_or_else(|err| err.report());
         pgrx::notice!(
             "graph: removed persisted files for graph {} ({})",
@@ -571,11 +572,92 @@ fn load_selected_graph_from_disk(
     })
 }
 
+/// Reconcile a replacement interrupted by a PostgreSQL error or cancellation.
+///
+/// The manifest pointer is the publication boundary. If it did not move, the
+/// old resident engine remains valid. If it moved, or a low-memory replacement
+/// evicted the resident engine, reload the currently published artifact before
+/// serving another graph operation.
+pub(crate) fn reconcile_interrupted_replacement(
+    graph: &catalog::GraphMetadata,
+) -> safety::GraphResult<()> {
+    // Snapshot ownership is independent of graph selection and no interrupted
+    // stack can still use it. Release it at the first recovery boundary even
+    // when the caller switched graphs or a newer replacement overwrote state.
+    crate::runtime_state::clear_replacement_edge_snapshot();
+    let Some(recovery) = crate::runtime_state::replacement_recovery_for(&graph.graph_id) else {
+        return Ok(());
+    };
+    let path = persistence::graph_file_path_for_uncreated(&graph.graph_id)?;
+    let root = persistence::projection_manifest_root(&path);
+    let store = crate::projection::manifest::ProjectionManifestStore::new(&root);
+    let mut current_generation = store.current_generation_id_for_recovery()?;
+    let mut cleanup_complete = current_generation != recovery.expected_generation;
+    if current_generation == recovery.expected_generation {
+        // Candidate generation ids are reused until publication advances the
+        // manifest pointer. Serialize cancellation cleanup with every writer
+        // before deleting exact-generation artifacts, otherwise a stale
+        // backend could remove a different backend's live candidate.
+        match crate::sql_build::acquire_build_lock() {
+            Ok(()) => {
+                crate::projection::recovery::cleanup_interrupted_replacement(
+                    &root,
+                    recovery.expected_generation,
+                    recovery.candidate_generation,
+                )?;
+                // Publication may have won between the first pointer read and
+                // lock acquisition. Decide from the serialized observation.
+                current_generation = store.current_generation_id_for_recovery()?;
+                cleanup_complete = true;
+            }
+            Err(safety::GraphError::BuildLocked) => {
+                // A remains a valid query snapshot while another backend
+                // constructs B. Defer candidate cleanup and retain the marker;
+                // ordinary reads must not inherit publisher lock contention.
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let persisted_available = persistence::persisted_graph_exists(&path)?;
+    let resident_matches = ENGINE.with(|engine| {
+        engine.borrow().built
+            && crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id)
+    });
+
+    match crate::runtime_state::replacement_recovery_action(
+        recovery.expected_generation,
+        current_generation,
+        resident_matches,
+        persisted_available,
+    ) {
+        crate::runtime_state::ReplacementRecoveryAction::PreserveResident => {}
+        crate::runtime_state::ReplacementRecoveryAction::ReloadPublished => {
+            ENGINE.with(|engine| {
+                *engine.borrow_mut() = Engine::new();
+            });
+            crate::runtime_state::clear_loaded_graph();
+            load_selected_graph_from_disk(graph, false)?;
+        }
+        crate::runtime_state::ReplacementRecoveryAction::MissingPublished => {
+            return Err(safety::GraphError::Internal(format!(
+                "graph replacement recovery for '{}' found no resident or published generation; rebuild the graph with persistence enabled",
+                graph.graph_name
+            )));
+        }
+    }
+
+    if cleanup_complete {
+        crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
     let role_oid = catalog::current_role_oid()?;
     let graph = catalog::selected_or_default_graph_metadata_via_definer()?;
     clear_loaded_graph_if_mismatched(&graph.graph_id);
     catalog::require_graph_privilege_for_role(&graph, catalog::GraphPrivilege::Read, role_oid)?;
+    reconcile_interrupted_replacement(&graph)?;
     maybe_auto_load();
 
     let sync_mode = current_sync_mode()?;

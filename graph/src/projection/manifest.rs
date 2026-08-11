@@ -370,7 +370,12 @@ impl ProjectionManifestStore {
         self.prepare_current_pointer(expected_current)?;
         let json = manifest.to_pretty_json()?;
         let final_path = self.stage_manifest_file(manifest, json.as_bytes())?;
-        if let Err(err) = self.switch_current_generation(manifest.generation_id, expected_current) {
+        let publication = (|| {
+            crate::runtime_state::inject_replacement_fault("before_publication")?;
+            self.switch_current_generation(manifest.generation_id, expected_current)?;
+            crate::runtime_state::inject_replacement_fault("after_publication")
+        })();
+        if let Err(err) = publication {
             self.remove_uncommitted_manifest(&final_path, manifest.generation_id);
             return Err(err);
         }
@@ -395,9 +400,12 @@ impl ProjectionManifestStore {
         let expected_pointer_token = self.current_pointer_token()?;
         let json = manifest.to_pretty_json()?;
         let final_path = self.stage_manifest_file(manifest, json.as_bytes())?;
-        if let Err(err) =
-            self.switch_recovery_generation(manifest.generation_id, expected_pointer_token)
-        {
+        let publication = (|| {
+            crate::runtime_state::inject_replacement_fault("before_publication")?;
+            self.switch_recovery_generation(manifest.generation_id, expected_pointer_token)?;
+            crate::runtime_state::inject_replacement_fault("after_publication")
+        })();
+        if let Err(err) = publication {
             self.remove_uncommitted_manifest(&final_path, manifest.generation_id);
             return Err(err);
         }
@@ -533,7 +541,10 @@ impl ProjectionManifestStore {
             sync_directory(&self.root)?;
             verify_manifest_file_matches(&final_path, manifest, encoded_len)?;
             self.validate_active_references(manifest)?;
-            self.switch_current_generation(manifest.generation_id, expected_current)
+            crate::runtime_state::inject_replacement_fault("before_publication")?;
+            self.switch_current_generation(manifest.generation_id, expected_current)?;
+            crate::runtime_state::inject_replacement_fault("after_publication")?;
+            Ok(())
         })();
         if publication.is_err() {
             let _ = fs::remove_file(&tmp_path);
@@ -622,6 +633,37 @@ impl ProjectionManifestStore {
         }
         self.latest_manifest_path()
             .map(|latest| latest.map(|(generation_id, _)| generation_id))
+    }
+
+    /// Read only the publication generation needed to recover damaged state.
+    ///
+    /// Unlike [`Self::current_generation_id`], this accepts a pointer whose
+    /// referenced manifest is missing or checksum-corrupt. The generation is
+    /// still authoritative for exact candidate cleanup and lets
+    /// `projection_repair()` reach its corruption planner. Callers must not use
+    /// this method to treat the referenced manifest as loadable.
+    pub(crate) fn current_generation_id_for_recovery(&self) -> GraphResult<Option<u64>> {
+        let path = self.current_pointer_path();
+        let Some(raw) = read_bounded_optional_file(
+            &path,
+            MAX_CURRENT_POINTER_BYTES,
+            "read current pointer for recovery",
+        )?
+        else {
+            return self
+                .latest_manifest_path()
+                .map(|latest| latest.map(|(generation_id, _)| generation_id));
+        };
+        let pointer = serde_json::from_slice::<ProjectionCurrentPointer>(&raw).map_err(|err| {
+            manifest_corrupt(format!("current pointer recovery decoding failed: {err}"))
+        })?;
+        if pointer.version != CURRENT_POINTER_VERSION || pointer.generation_id == 0 {
+            return Err(manifest_corrupt(format!(
+                "current pointer is invalid: version={}, generation_id={}",
+                pointer.version, pointer.generation_id
+            )));
+        }
+        Ok(Some(pointer.generation_id))
     }
 
     fn current_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {
@@ -1634,6 +1676,82 @@ mod tests {
             .expect("current manifest exists");
 
         assert_eq!(loaded, second);
+    }
+
+    #[cfg(feature = "development")]
+    #[test]
+    fn publication_faults_remove_losers_and_preserve_a_pointer_winner() {
+        let dir = ProjectionArtifactDir::new(
+            "publication_faults_remove_losers_and_preserve_a_pointer_winner",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        store.publish(&first).expect("first publishes");
+
+        let loser = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:loser", 2, 20, 2);
+        crate::runtime_state::arm_replacement_fault("before_publication")
+            .expect("pre-publication fault arms");
+        store
+            .publish_if_current(&loser, Some(1))
+            .expect_err("pre-publication fault rejects");
+        assert!(!store.manifest_path(2).exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(1)
+        );
+
+        let winner = ProjectionManifest::base_only(3, "base.pggraph", "xxh3:winner", 2, 30, 3);
+        crate::runtime_state::arm_replacement_fault("after_publication")
+            .expect("post-publication fault arms");
+        store
+            .publish_if_current(&winner, Some(1))
+            .expect_err("post-publication fault reports ambiguity");
+        assert!(store.manifest_path(3).exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(3)
+        );
+    }
+
+    #[cfg(feature = "development")]
+    #[test]
+    fn governed_prepublication_fault_removes_staged_manifest() {
+        let dir =
+            ProjectionArtifactDir::new("governed_prepublication_fault_removes_staged_manifest");
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        store.publish(&first).expect("first publishes");
+        let candidate = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:next", 2, 20, 2);
+        let governor =
+            crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::new(
+                crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(
+                    1_048_576,
+                )),
+                crate::resource::DiskBudget::UNLIMITED,
+                crate::resource::RowCount::UNLIMITED,
+                crate::resource::WorkUnits::UNLIMITED,
+                crate::resource::ElapsedBudget::new(Duration::from_secs(1)),
+            ));
+        crate::runtime_state::arm_replacement_fault("before_publication")
+            .expect("pre-publication fault arms");
+
+        store
+            .publish_governed_if_current(
+                &candidate,
+                Some(1),
+                &governor,
+                crate::resource::ResourcePhase::CompactionMerge,
+                1_048_576,
+            )
+            .expect_err("governed publication fault rejects");
+
+        assert!(!store.manifest_path(2).exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(1)
+        );
     }
 
     #[test]

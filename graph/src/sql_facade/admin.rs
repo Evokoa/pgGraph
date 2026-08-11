@@ -1301,6 +1301,7 @@ fn projection_compact(
 > {
     with_panic_boundary("projection_compact()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
+        crate::sql_build::acquire_build_lock_for_replacement().unwrap_or_else(|err| err.report());
         let max_rows =
             validate_positive_i32(max_rows, "max_rows").unwrap_or_else(|err| err.report());
         let max_segments =
@@ -1325,6 +1326,8 @@ fn projection_compact(
             .load_latest_current()
             .unwrap_or_else(|err| err.report())
             .unwrap_or_else(|| safety::GraphError::NotBuilt.report());
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
         reload_persisted_engine_with_projection(&artifact).unwrap_or_else(|err| err.report());
         let resident_bytes = ENGINE
             .with(|engine| {
@@ -1346,20 +1349,36 @@ fn projection_compact(
             max_elapsed: Duration::from_secs(60),
             dirty_chunk_segment_threshold,
         };
-        let result = ENGINE
-            .with(|engine| {
-                let eng = engine.borrow();
-                crate::projection::compact::compact_generation(
-                    &root,
-                    &previous,
-                    &eng.edge_store,
-                    budgets,
+        crate::runtime_state::mark_replacement_in_progress(
+            &graph.graph_id,
+            Some(previous.generation_id),
+            previous.generation_id.checked_add(1),
+        );
+        // `compact_generation` polls PostgreSQL interrupts. Keep no RefCell
+        // guard alive across that boundary: a PostgreSQL ERROR may bypass Rust
+        // destructors, leaving the backend-local ENGINE permanently borrowed.
+        let base = ENGINE
+            .with(|engine| engine.borrow().edge_store.mapped_snapshot())
+            .unwrap_or_else(|| {
+                safety::GraphError::Internal(
+                    "projection compaction requires the reloaded mmap-backed edge store"
+                        .to_string(),
                 )
+                .report()
+            });
+        // SAFETY: `compact_generation` only reads the snapshot and projection
+        // files. It does not mutate graph runtime state or clear/replace the
+        // backend-local snapshot slot that owns `base`.
+        let result = unsafe {
+            crate::runtime_state::with_replacement_edge_snapshot(base, |base| {
+                crate::projection::compact::compact_generation(&root, &previous, base, budgets)
             })
-            .unwrap_or_else(|err| err.report());
+        }
+        .unwrap_or_else(|err| err.report());
         if result.manifest.generation_id != previous.generation_id {
             reload_persisted_engine_with_projection(&artifact).unwrap_or_else(|err| err.report());
         }
+        crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
         TableIterator::new(vec![(
             saturating_i64(result.manifest.generation_id),
             saturating_i32(result.segments_compacted),
@@ -1434,7 +1453,9 @@ fn projection_repair() -> TableIterator<
 > {
     with_panic_boundary("projection_repair()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        crate::sql_build::acquire_build_lock().unwrap_or_else(|err| err.report());
+        crate::sql_build::acquire_build_lock_for_repair().unwrap_or_else(|err| err.report());
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
         let artifact = crate::persistence::graph_file_path().unwrap_or_else(|err| err.report());
         let root = crate::persistence::projection_manifest_root(&artifact);
         let plan = crate::projection::recovery::plan_projection_recovery_for_artifact(
@@ -1448,6 +1469,16 @@ fn projection_repair() -> TableIterator<
         let mut rebuilt = false;
         let mut chunks_rewritten = 0;
         let reason = plan.reason.clone();
+
+        if plan.action == crate::projection::recovery::ProjectionRecoveryAction::TargetedChunkRepair
+        {
+            crate::runtime_state::mark_replacement_in_progress(
+                &graph.graph_id,
+                plan.generation_id,
+                plan.generation_id
+                    .and_then(|generation| generation.checked_add(1)),
+            );
+        }
 
         match plan.action {
             crate::projection::recovery::ProjectionRecoveryAction::NoProjection
@@ -1486,6 +1517,8 @@ fn projection_repair() -> TableIterator<
             }
         }
 
+        crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
+
         TableIterator::new(vec![(
             projection_recovery_action_text(action).to_string(),
             generation_id.map(saturating_i64),
@@ -1505,6 +1538,12 @@ fn run_full_projection_rebuild_repair(
     execute_maintenance_rebuild(true)?;
     let store = crate::projection::manifest::ProjectionManifestStore::new(root);
     if !store.manifest_path(next_generation).is_file() {
+        let graph = catalog::selected_or_default_graph_metadata()?;
+        crate::runtime_state::mark_replacement_in_progress(
+            &graph.graph_id,
+            store.current_generation_id()?,
+            Some(next_generation),
+        );
         crate::projection::recovery::publish_rebuilt_base_manifest(artifact, max_sync_log_id()?)?;
     }
     let manifest = store.load_latest_current()?.ok_or_else(|| {
@@ -1552,6 +1591,7 @@ fn projection_recovery_action_text(
 }
 
 fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::GraphResult<()> {
+    let graph = catalog::selected_or_default_graph_metadata()?;
     let resident = ENGINE
         .with(|engine| {
             crate::resource::ByteCount::from_usize(engine.borrow().estimated_memory_used_bytes())
@@ -1563,6 +1603,7 @@ fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::Gr
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });
+    crate::runtime_state::mark_loaded_graph(&graph);
     Ok(())
 }
 
@@ -1794,6 +1835,7 @@ fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> 
     crate::sql_sync::expire_stale_sync_watermarks()?;
     let graph = catalog::selected_or_default_graph_metadata()?;
     super::runtime::clear_loaded_graph_if_mismatched(&graph.graph_id);
+    super::runtime::reconcile_interrupted_replacement(&graph)?;
     let disabled_trigger_count = disabled_graph_trigger_count()?;
     let catalog_state = current_catalog_state();
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
@@ -6159,6 +6201,15 @@ fn test_error_unwind() -> bool {
 #[pg_extern(schema = "graph", name = "_test_error_unwind_observed")]
 fn test_error_unwind_observed() -> bool {
     safety::test_error_unwind_observed()
+}
+
+#[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_arm_replacement_fault")]
+fn test_arm_replacement_fault(stage: &str) -> bool {
+    with_panic_boundary("_test_arm_replacement_fault()", || {
+        crate::runtime_state::arm_replacement_fault(stage).unwrap_or_else(|err| err.report());
+        true
+    })
 }
 
 #[cfg(feature = "development")]

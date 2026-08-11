@@ -1868,6 +1868,84 @@ fn projection_compact_exposes_operator_contract_field_names() {
 }
 
 #[pg_test]
+fn durable_ingest_apply_sync_and_compaction_reconcile_failed_publication() {
+    build_persisted_mutable_friendship_graph();
+    Spi::run("SELECT graph.enable_sync()").expect("enable durable sync failed");
+    let generation_a = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_status()",
+    )
+    .expect("baseline generation query failed")
+    .expect("baseline generation missing");
+    Spi::run(
+        "UPDATE public.graph_test_users_pgtest
+            SET parent_id = 'u1'
+          WHERE id = 'u2'",
+    )
+    .expect("create pending durable edge failed");
+
+    for statement in [
+        "SELECT * FROM graph.ingest_projection()",
+        "SELECT * FROM graph.apply_sync()",
+    ] {
+        Spi::run("SELECT graph._test_arm_replacement_fault('before_publication')")
+            .expect("arm durable publisher fault failed");
+        assert!(sql_raises(statement), "{statement} should fail before publication");
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+                .expect("durable publisher recovery status failed"),
+            Some(2)
+        );
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT manifest_generation FROM graph.projection_status()",
+            )
+            .expect("durable publisher generation query failed"),
+            Some(generation_a),
+            "{statement} must leave generation A current"
+        );
+    }
+
+    let segments = Spi::get_one::<i64>(
+        "SELECT segments_published FROM graph.ingest_projection()",
+    )
+    .expect("successful durable ingest failed")
+    .unwrap_or(0);
+    assert!(segments > 0);
+    let generation_b = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_status()",
+    )
+    .expect("ingested generation query failed")
+    .expect("ingested generation missing");
+    assert!(generation_b > generation_a);
+
+    Spi::run("SELECT graph._test_arm_replacement_fault('before_publication')")
+        .expect("arm compaction publisher fault failed");
+    assert!(sql_raises("SELECT * FROM graph.projection_compact()"));
+    assert_eq!(
+        Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+            .expect("compaction recovery status failed"),
+        Some(2),
+        "compaction failure must not poison the ENGINE borrow state"
+    );
+    assert_eq!(
+        Spi::get_one::<i64>(
+            "SELECT manifest_generation FROM graph.projection_status()",
+        )
+        .expect("compaction generation query failed"),
+        Some(generation_b)
+    );
+    let compacted_generation = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_compact()",
+    )
+    .expect("successful compaction retry failed")
+    .expect("compaction generation missing");
+    assert!(compacted_generation > generation_b);
+
+    Spi::run("SET graph.persist_on_build = off").expect("restore persistence failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable mode failed");
+}
+
+#[pg_test]
 fn sync_health_distinguishes_tx_delta_edge_buffer_and_durable_projection_pressure() {
     let fixture = setup_projection_status_pressure_fixture(
         "graph_test_projection_sync_health_pressure_pgtest",
@@ -2233,6 +2311,11 @@ fn full_rebuild_restores_valid_projection_generation() {
         .expect("corrupt-generation pointer publishes");
     std::fs::write(&corrupt_manifest, b"{not json").expect("current manifest corruption writes");
 
+    Spi::run("SELECT graph._test_arm_replacement_fault('source_scan')")
+        .expect("arm full-repair source fault failed");
+    assert!(sql_raises("SELECT * FROM graph.projection_repair()"));
+    assert!(!repaired_manifest.exists());
+
     let repaired = Spi::get_one::<bool>(
         "SELECT action = 'full_rebuild'
                 AND generation_id = 9300002
@@ -2356,6 +2439,23 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
         });
     store.publish(&manifest).expect("chunk manifest publishes");
     std::fs::write(&chunk_path, b"corrupt chunk").expect("chunk corruption writes");
+
+    Spi::run("SELECT graph._test_arm_replacement_fault('before_publication')")
+        .expect("arm targeted repair publication fault failed");
+    assert!(sql_raises("SELECT * FROM graph.projection_repair()"));
+    assert_eq!(
+        Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+            .expect("targeted repair recovery status failed"),
+        Some(2)
+    );
+    assert_eq!(
+        Spi::get_one::<i64>(
+            "SELECT manifest_generation FROM graph.projection_status()",
+        )
+        .expect("targeted repair generation query failed"),
+        Some(chunk_generation as i64)
+    );
+    assert!(!repaired_manifest.exists());
 
     let repaired = Spi::get_one::<bool>(
         "SELECT action = 'targeted_chunk_repair'

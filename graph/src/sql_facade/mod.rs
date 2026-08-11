@@ -65,3 +65,4 @@ mod workflow;
 pub(crate) use admin::check_enabled_result;
 #[cfg(feature = "pg_test")]
 pub(crate) use runtime::ensure_current_graph;
+pub(crate) use runtime::reconcile_interrupted_replacement;

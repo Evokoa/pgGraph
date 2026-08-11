@@ -755,7 +755,7 @@ when its evidence and exit gate are both satisfied.
 |---|---|---|
 | 0 | Complete | Scope, non-goals, compatibility direction, phase ownership, and supported-feature tracking are locked. |
 | 1 | Complete | Reported fixes, policy-compliant virtualenv reuse, full Panama/Docker evidence, docs gates, and independent review are complete. |
-| 2 | Not started | Depends on the Phase 1 playground reproduction and baseline. |
+| 2 | Complete | Cancellation-safe replacement, repair recovery, heavy cancellation/concurrency evidence, full pg17 suite, and independent Rust review pass. |
 | 3 | Not started | Depends on cancellation-safe build replacement from Phase 2. |
 | 4 | Not started | Depends on caller identity and security-mode contract from Phase 3. |
 | 5 | Not started | Depends on the authoritative query-start seam and optimized baseline from Phase 4. |
@@ -915,6 +915,61 @@ reconcile backend residency from it after an interrupted statement.
 `pg_cancel_backend()` heavy tests, old/new generation and row-count assertions,
 candidate cleanup inspection, fresh-backend verification, and successful build
 immediately after each failure case.
+
+**Recorded Phase 2 evidence (2026-08-10):**
+
+- Development-only forced faults at source scan, candidate write, validation,
+  immediately before publication, and immediately after publication prove that
+  pre-publication failures retain generation A while a post-publication failure
+  preserves and reloads generation B.
+- The PostgreSQL regression covers low-memory eviction, same-backend
+  `graph.status()` reconciliation, nonrecoverable and checksum-corrupt
+  persisted-generation rejection before eviction, including full checksum and
+  decode validation of the relationship-identity sidecar, and generation/count
+  assertions.
+- `build_lock_regression.sh` cancels a persisted low-memory replacement with
+  both `statement_timeout` and `pg_cancel_backend()` after loading A in the
+  same backend and observing the low-memory unload. The building backend and a
+  fresh backend both retain A, orphan base/manifest counts return to their
+  baseline, and an immediate publisher retry reconciles its pending marker and
+  publishes the three pending source rows as generation A+1. The same gate
+  inventories every generation-scoped candidate/identity/temp/sidecar file and
+  delivers a real `statement_timeout` from inside
+  compaction and proves the backend `ENGINE` remains usable.
+- Every candidate publisher, including compaction, shares the per-graph
+  PostgreSQL advisory lock. Interrupted cleanup acquires that lock before
+  deleting a reusable candidate generation; if another publisher owns it,
+  cleanup is deferred while ordinary reads continue serving generation A and
+  retain the recovery marker for a later statement.
+- Compaction keeps its mmap snapshot in backend-local recovery ownership, not
+  on a Rust stack whose `Arc` destructor can be skipped by PostgreSQL longjmp.
+  Normal completion releases it immediately; cancellation releases it at the
+  next query or `graph.status()` recovery boundary, graph switch/unload, reset,
+  or replacement start.
+- The recovery marker records the exact candidate generation. Cleanup unit
+  tests remove only that unpublished generation's manifest, base, segment,
+  chunk, relationship-identity, sidecar, and temporary artifacts while
+  protecting files referenced by every other manifest and retaining a
+  candidate that won publication.
+- Compatibility ingestion without an existing projection manifest records the
+  committed source generation selected by the ingester, so segment and
+  relationship-identity candidates remain exactly recoverable.
+- PostgreSQL failure/retry regressions cover vacuum, foreground and background
+  maintenance, durable ingestion, durable `apply_sync`, compaction, targeted
+  repair, and full repair. Projection GC remains a non-publisher and its
+  existing crash/idempotency tests prove it never moves or invalidates the
+  current generation.
+- Full-repair reconciliation reads only the raw publication generation needed
+  for exact candidate cleanup when the current manifest checksum is already
+  corrupt; serving and reload paths still require full manifest validation.
+  The interrupted full-repair regression proves the next repair can publish
+  the intended replacement generation.
+- The final serial pg17 pgrx suite passes with 1,177 tests passed, one
+  intentionally ignored, and zero failures. The heavy writer-lock and real
+  cancellation gate also passes against PostgreSQL 17.
+- Independent Rust review found no remaining High, Medium, or Low findings
+  after rechecking lock serialization, longjmp ownership, exact cleanup,
+  corrupt-manifest repair, and per-graph recovery-marker isolation.
 
 **Exit gate:** every supported replacement path is publish-on-success; a
 failure or cancellation leaves generation A queryable with unchanged results,

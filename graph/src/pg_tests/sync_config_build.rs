@@ -736,8 +736,8 @@ fn low_memory_build_unloads_existing_backend_graph_before_rebuild() {
         .expect("test fixture lock failed");
     Spi::run("SELECT graph.reset()").expect("reset failed");
     Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
-    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
-    Spi::run("SET graph.memory_limit_mb = 65").expect("set memory limit failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("set initial memory limit failed");
     Spi::run("SET graph.oom_action = 'error'").expect("set oom error failed");
     Spi::run("SET graph.low_memory_build = on").expect("enable low memory build failed");
     clear_graph_catalog_for_test();
@@ -760,6 +760,9 @@ fn low_memory_build_unloads_existing_backend_graph_before_rebuild() {
             )",
     )
     .expect("add low memory table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("persisted baseline build failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
+    Spi::run("SET graph.memory_limit_mb = 65").expect("set low memory limit failed");
 
     crate::ENGINE.with(|e| {
         let mut eng = crate::engine::Engine::new();
@@ -783,6 +786,301 @@ fn low_memory_build_unloads_existing_backend_graph_before_rebuild() {
 
     assert_eq!(nodes, 1);
     assert!(!read_only);
+}
+
+#[pg_test]
+fn replacement_faults_preserve_or_reconcile_the_published_generation() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SET graph.sync_mode = manual").expect("set manual sync failed");
+    Spi::run("SET graph.low_memory_build = off").expect("disable low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("set memory limit failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_replacement_fault_pgtest CASCADE")
+        .expect("drop replacement table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_replacement_fault_pgtest (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )",
+    )
+    .expect("create replacement table failed");
+    Spi::run("INSERT INTO public.graph_test_replacement_fault_pgtest VALUES ('one', 'One')")
+        .expect("insert baseline row failed");
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_replacement_fault_pgtest'::regclass,
+            id_column := 'id',
+            columns := ARRAY['name']
+        )",
+    )
+    .expect("register replacement table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("baseline build failed");
+
+    let generation_a = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_status()",
+    )
+    .expect("baseline generation query failed")
+    .expect("baseline generation missing");
+    Spi::run("INSERT INTO public.graph_test_replacement_fault_pgtest VALUES ('two', 'Two')")
+        .expect("insert replacement row failed");
+
+    Spi::run("SET graph.low_memory_build = on").expect("enable low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 65").expect("set low memory limit failed");
+    Spi::run("SELECT graph._test_arm_replacement_fault('source_scan')")
+        .expect("arm low-memory source-scan fault failed");
+    assert!(sql_raises("SELECT * FROM graph.build()"));
+    assert_eq!(
+        Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+            .expect("low-memory recovery status failed"),
+        Some(1),
+        "status must reload generation A after cancellation-style eviction"
+    );
+    assert_eq!(
+        Spi::get_one::<i64>(
+            "SELECT manifest_generation FROM graph.projection_status()",
+        )
+        .expect("generation A verification failed"),
+        Some(generation_a)
+    );
+
+    Spi::run("SET graph.low_memory_build = off").expect("disable low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
+    for stage in [
+        "candidate_write",
+        "validation",
+        "before_publication",
+    ] {
+        Spi::run(&format!(
+            "SELECT graph._test_arm_replacement_fault('{}')",
+            stage
+        ))
+        .expect("arm pre-publication fault failed");
+        assert!(sql_raises("SELECT * FROM graph.build()"));
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+                .expect("pre-publication recovery status failed"),
+            Some(1),
+            "pre-publication fault at {stage} must preserve generation A"
+        );
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT manifest_generation FROM graph.projection_status()",
+            )
+            .expect("pre-publication generation query failed"),
+            Some(generation_a)
+        );
+    }
+
+    Spi::run("SELECT graph._test_arm_replacement_fault('after_publication')")
+        .expect("arm post-publication fault failed");
+    assert!(sql_raises("SELECT * FROM graph.build()"));
+    assert_eq!(
+        Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+            .expect("post-publication recovery status failed"),
+        Some(2),
+        "status must reconcile to generation B after publication"
+    );
+    let generation_b = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_status()",
+    )
+    .expect("generation B query failed")
+    .expect("generation B missing");
+    assert!(generation_b > generation_a);
+    Spi::run("SET graph.low_memory_build = off").expect("restore low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
+}
+
+#[pg_test]
+fn low_memory_build_rejects_unrecoverable_resident_replacement() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persistence failed");
+    Spi::run("SET graph.low_memory_build = off").expect("disable low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("set memory limit failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_unrecoverable_build_pgtest CASCADE")
+        .expect("drop unrecoverable table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_unrecoverable_build_pgtest (
+            id TEXT PRIMARY KEY
+        )",
+    )
+    .expect("create unrecoverable table failed");
+    Spi::run("INSERT INTO public.graph_test_unrecoverable_build_pgtest VALUES ('one')")
+        .expect("insert unrecoverable row failed");
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_unrecoverable_build_pgtest'::regclass,
+            id_column := 'id'
+        )",
+    )
+    .expect("register unrecoverable table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("resident baseline build failed");
+
+    Spi::run("SET graph.low_memory_build = on").expect("enable low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 65").expect("set low memory limit failed");
+    let message = sql_error_message("SELECT * FROM graph.build()")
+        .expect("unrecoverable low-memory build should fail");
+    assert!(message.contains("no recoverable persisted generation exists"));
+    assert_eq!(
+        Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+            .expect("resident status failed"),
+        Some(1),
+        "validation must reject before evicting the resident graph"
+    );
+    Spi::run("SET graph.low_memory_build = off").expect("restore low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
+}
+
+#[pg_test]
+fn low_memory_build_rejects_corrupt_persisted_recovery_before_eviction() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SET graph.low_memory_build = off").expect("disable low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("set memory limit failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_corrupt_recovery_pgtest CASCADE")
+        .expect("drop corrupt recovery table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_corrupt_recovery_pgtest (
+            id TEXT PRIMARY KEY
+        );
+        INSERT INTO public.graph_test_corrupt_recovery_pgtest VALUES ('one');
+        SELECT graph.add_table(
+            'graph_test_corrupt_recovery_pgtest'::regclass,
+            id_column := 'id'
+        )",
+    )
+    .expect("create corrupt recovery fixture failed");
+    Spi::run("SELECT * FROM graph.build()").expect("persisted baseline build failed");
+
+    let graph_path = crate::persistence::graph_file_path().expect("graph path resolves");
+    let current_base = crate::persistence::current_base_artifact_path(&graph_path)
+        .expect("current base resolves")
+        .expect("current base exists");
+    let original = std::fs::read(&current_base).expect("current base reads");
+    std::fs::write(&current_base, b"truncated").expect("current base corruption writes");
+
+    Spi::run("SET graph.low_memory_build = on").expect("enable low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 65").expect("set low memory limit failed");
+    let message = sql_error_message("SELECT * FROM graph.build()")
+        .expect("corrupt recovery low-memory build should fail");
+    let resident_count = Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+        .expect("resident status failed");
+    std::fs::write(&current_base, original).expect("current base restores");
+
+    assert!(message.contains("no recoverable persisted generation exists"));
+    assert_eq!(
+        resident_count,
+        Some(1),
+        "corrupt persisted recovery must be rejected before resident eviction"
+    );
+    Spi::run("SET graph.low_memory_build = off").expect("restore low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
+    Spi::run("SET graph.persist_on_build = off").expect("restore persistence failed");
+}
+
+#[pg_test]
+fn rebuild_publishers_reconcile_prepublication_failures_and_retry() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SET graph.low_memory_build = off").expect("disable low memory build failed");
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("set memory limit failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_rebuild_publishers_pgtest CASCADE")
+        .expect("drop rebuild publishers table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_rebuild_publishers_pgtest (
+            id TEXT PRIMARY KEY
+        );
+        INSERT INTO public.graph_test_rebuild_publishers_pgtest VALUES ('baseline');
+        SELECT graph.add_table(
+            'graph_test_rebuild_publishers_pgtest'::regclass,
+            id_column := 'id'
+        );
+        SELECT * FROM graph.build()",
+    )
+    .expect("create rebuild publisher fixture failed");
+    let generation_a = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_status()",
+    )
+    .expect("baseline generation query failed")
+    .expect("baseline generation missing");
+
+    for (id, statement) in [
+        ("vacuum-row", "SELECT * FROM graph.vacuum()"),
+        (
+            "maintenance-row",
+            "SELECT * FROM graph.maintenance(concurrently := false)",
+        ),
+    ] {
+        Spi::run(&format!(
+            "INSERT INTO public.graph_test_rebuild_publishers_pgtest VALUES ('{id}')"
+        ))
+        .expect("insert replacement source row failed");
+        Spi::run("SELECT graph._test_arm_replacement_fault('before_publication')")
+            .expect("arm rebuild publisher fault failed");
+        assert!(sql_raises(statement), "{statement} should fail before publication");
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+                .expect("rebuild publisher recovery status failed"),
+            Some(1),
+            "{statement} must keep generation A resident"
+        );
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT manifest_generation FROM graph.projection_status()",
+            )
+            .expect("rebuild publisher generation query failed"),
+            Some(generation_a),
+            "{statement} must not publish its candidate"
+        );
+    }
+
+    Spi::run(
+        "INSERT INTO public.graph_test_rebuild_publishers_pgtest VALUES ('background-row')",
+    )
+    .expect("insert background replacement row failed");
+    let job_id = super::create_maintenance_job().expect("create maintenance job failed");
+    Spi::run("SELECT graph._test_arm_replacement_fault('before_publication')")
+        .expect("arm background maintenance fault failed");
+    let worker_error = Spi::get_one::<String>(&format!(
+        "SELECT graph._test_run_maintenance_job('{}')",
+        job_id.replace('\'', "''")
+    ))
+    .expect("run background maintenance test job failed");
+    assert!(worker_error.is_some(), "background maintenance should record failure");
+    assert_eq!(
+        Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+            .expect("background recovery status failed"),
+        Some(1)
+    );
+    assert_eq!(
+        Spi::get_one::<i64>(
+            "SELECT manifest_generation FROM graph.projection_status()",
+        )
+        .expect("background generation query failed"),
+        Some(generation_a)
+    );
+
+    let nodes = Spi::get_one::<i64>(
+        "SELECT nodes_after FROM graph.maintenance(concurrently := false)",
+    )
+    .expect("successful maintenance retry failed");
+    assert_eq!(nodes, Some(4));
+    Spi::run("SET graph.persist_on_build = off").expect("restore persistence failed");
 }
 
 #[pg_test]

@@ -603,7 +603,7 @@ fn ingest_projection_until_internal(
     // Serialize the read-current -> allocate -> publish sequence across PostgreSQL
     // backends. Sharing the build/vacuum lock also prevents artifact replacement
     // while a projection generation is being prepared.
-    crate::sql_build::acquire_build_lock()?;
+    crate::sql_build::acquire_build_lock_for_replacement()?;
     let graph = selected_or_default_graph_metadata()?;
     let graph_path = graph_file_path()?;
     if !persisted_graph_exists(&graph_path)? {
@@ -786,6 +786,11 @@ fn ingest_projection_until_internal(
         .ok_or_else(|| {
             safety::GraphError::Internal("sync candidate residency overflowed".to_string())
         })?;
+    crate::runtime_state::mark_replacement_in_progress(
+        &graph.graph_id,
+        previous.as_ref().map(|manifest| manifest.generation_id),
+        crate::projection::ingest::candidate_generation_id(previous.as_ref(), &rows)?,
+    );
     let (result, validated_engine) = ingester.ingest_committed_rows_with_identities_governed(
         &rows,
         MutationBufferLimits::new(row_limit, byte_limit),
@@ -809,6 +814,7 @@ fn ingest_projection_until_internal(
         validated_engine.record_applied_sync_id(stats.sync_watermark);
         install_loaded_engine_for_selected_graph(&graph, validated_engine)?;
     }
+    crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
     Ok(stats)
 }
 

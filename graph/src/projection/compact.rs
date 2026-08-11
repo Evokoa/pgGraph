@@ -72,6 +72,7 @@ pub(crate) fn compact_generation(
     base: &EdgeStore,
     budgets: CompactionBudgets,
 ) -> GraphResult<CompactionResult> {
+    crate::runtime_state::wait_on_replacement_fault("compaction_wait")?;
     let started = Instant::now();
     let row_budget =
         crate::resource::RowCount::new(u64::try_from(budgets.max_rows).map_err(|_| {
