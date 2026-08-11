@@ -850,6 +850,7 @@ fn aggregate(
             scope,
             path_limit,
             &query_start.tables,
+            &query_start.edges,
             &query_start.filter_columns,
         )
         .map(pgrx::JsonB)
@@ -872,10 +873,15 @@ fn path_count_estimate(
     with_panic_boundary("path_count_estimate()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let (count, exact, capped) =
-            path_count_estimate_impl(&traversal.0, crate::config::MAX_EXACT_PATH_COUNT.get())
-                .unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let (count, exact, capped) = path_count_estimate_impl(
+            &traversal.0,
+            crate::config::MAX_EXACT_PATH_COUNT.get(),
+            &query_start.tables,
+            &query_start.edges,
+        )
+        .unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(count, exact, capped)])
     })
 }

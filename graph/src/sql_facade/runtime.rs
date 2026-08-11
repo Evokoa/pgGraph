@@ -362,12 +362,25 @@ pub(super) fn largest_component_rows(
     check_enabled_result()?;
     require_graph_admin_result()?;
     let query_start = ensure_current_graph_for_query(current_query_freshness()?)?;
+    acl::check_table_acls(
+        query_start
+            .tables
+            .iter()
+            .map(|table| table.table_oid)
+            .chain(query_start.edges.iter().map(|edge| edge.from_table_oid)),
+    )?;
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
-    let (page, governor) = ENGINE.with(|e| {
+    let governor = ENGINE.with(|e| e.borrow().analytics_resource_governor())?;
+    let visibility = crate::sql_visibility::build_visibility_scope(
+        &query_start.tables,
+        &query_start.edges,
+        &governor,
+    )?;
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let page = ENGINE.with(|e| {
         let eng = e.borrow();
-        let governor = eng.analytics_resource_governor()?;
-        let cc_result = eng.connected_components_governed(&governor)?;
+        let cc_result = eng.connected_components_governed_in_context(&context)?;
         let component_id = cc_result
             .component_sizes
             .iter()
@@ -394,7 +407,7 @@ pub(super) fn largest_component_rows(
             limit,
         )?;
         page_lease.retain_until_governor_drop();
-        Ok::<_, safety::GraphError>((page, governor))
+        Ok::<_, safety::GraphError>(page)
     })?;
     hydrate_component_page_governed(page, hydrate, &governor, &query_start.tables)
 }
@@ -413,13 +426,26 @@ pub(super) fn component_rows(
     check_enabled_result()?;
     require_graph_admin_result()?;
     let query_start = ensure_current_graph_for_query(current_query_freshness()?)?;
+    acl::check_table_acls(
+        query_start
+            .tables
+            .iter()
+            .map(|table| table.table_oid)
+            .chain(query_start.edges.iter().map(|edge| edge.from_table_oid)),
+    )?;
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
 
-    let (page, governor) = ENGINE.with(|e| {
+    let governor = ENGINE.with(|e| e.borrow().analytics_resource_governor())?;
+    let visibility = crate::sql_visibility::build_visibility_scope(
+        &query_start.tables,
+        &query_start.edges,
+        &governor,
+    )?;
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let page = ENGINE.with(|e| {
         let eng = e.borrow();
-        let governor = eng.analytics_resource_governor()?;
-        let cc_result = eng.connected_components_governed(&governor)?;
+        let cc_result = eng.connected_components_governed_in_context(&context)?;
         let page_bytes = limit
             .checked_mul(
                 std::mem::size_of::<connected_components::ComponentRow>()
@@ -440,7 +466,7 @@ pub(super) fn component_rows(
             limit,
         )?;
         page_lease.retain_until_governor_drop();
-        Ok::<_, safety::GraphError>((page, governor))
+        Ok::<_, safety::GraphError>(page)
     })?;
 
     hydrate_component_page_governed(page, hydrate, &governor, &query_start.tables)

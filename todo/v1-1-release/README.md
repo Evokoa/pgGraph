@@ -762,7 +762,7 @@ when its evidence and exit gate are both satisfied.
 | 4 | Complete | Query-start composition, catalog/pending-sync deduplication, drift/freshness and recovery regressions, fixed-work benchmark evidence, and independent Rust review are complete. |
 | 5 | Complete | The complete traverse/BFS vertical slice, retained evidence, and independent Rust security review pass. |
 | 6 | Complete | Direct traversal/path visibility, semantic tests, real-login transaction/savepoint evidence, benchmarks, and independent Rust review pass. |
-| 7 | In progress | Derived component, aggregation, estimate, and raw-adjacency surfaces are being moved onto visible topology. |
+| 7 | Complete | Component unions, statistics, pagination, exact-path aggregation, and path estimates use caller-visible topology; retained evidence and independent Rust review pass. |
 | 8 | Not started | Depends on stable direct and derived admission behavior from Phases 6 and 7. |
 | 9 | Not started | Depends on the Phase 8 security-complete checkpoint. |
 | 10 | Not started | Depends on all implementation phases and their retained evidence. |
@@ -1308,6 +1308,40 @@ pagination/count consistency, and production-shaped memory/runtime evidence.
 
 **Exit gate:** components, component statistics, aggregation, and path-count
 surfaces cannot observe or be influenced by hidden topology.
+
+**Recorded Phase 7 evidence (2026-08-11):**
+
+- Component outer scans, edge unions, final membership, sizes, isolated counts,
+  ranks, pagination, and total-active counts now admit only caller-visible nodes
+  and relationship identities. All registered source tables also retain their
+  table-level `SELECT` boundary.
+- Exact-path enumeration now uses the engine's identity-preserving overlay
+  iterators, including transaction-local identities, and checks node and
+  relationship visibility before recursion. Hidden JSON start coordinates
+  produce an empty visible path set rather than resolving into projected state.
+- Focused Rust tests pass: 13 connected-component tests and 7 SQL-aggregation
+  tests, including hidden node bridges, hidden relationship unions, committed
+  segment insertion/deletion with relationship identity, transaction-deleted
+  targets, and raw exact-path relationship rejection. Strict development
+  clippy is clean.
+- Focused PostgreSQL tests pass: 18 aggregate-related tests and the exact/capped
+  path-count test. The PostgreSQL 17 real-login fixture passes all six component
+  surfaces, component count/rank/page consistency, hidden relationship bridges,
+  exact path counts, all-path aggregation, hidden JSON seeds, and deterministic
+  denial after `SELECT` is removed from either a registered node table or a
+  dedicated relationship source table.
+- The 50,000-node/150,988-edge synthetic release smoke completed with a
+  4,974 ms build and an 80 ms representative query bundle. Component analytics
+  reported one 50,000-node component, 2,000,000 peak governed bytes in
+  `analytics.workspace`, and 200,988 work units.
+
+Independent Rust review completed on 2026-08-11 after relationship-source ACL,
+committed layered-segment parity, transaction-deleted target, and allocation
+ordering findings were fixed. The final review confirmed that all component
+and analytics entry points enforce node and dedicated edge-source ACLs, exact
+paths preserve caller-visible relationship identities across retained and
+transaction-local topology, and governed memory is reserved before neighbor
+sources are materialized. No blockers or requested changes remain.
 
 ### Phase 8: Enforce RLS in GQL, Cypher, workflows, and write matching
 

@@ -119,23 +119,46 @@ pub(crate) fn compute_components_with_neighbors(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
 ) -> ComponentResult {
-    compute_components_with_neighbors_inner(node_store, neighbors, None)
-        .expect("unbounded component accounting should not fail")
+    compute_components_with_neighbors_inner(
+        node_store,
+        neighbors,
+        None,
+        &crate::visibility::VisibilityScope::Unrestricted,
+    )
+    .expect("unbounded component accounting should not fail")
 }
 
 /// Compute components with hard work and elapsed-time accounting.
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn compute_components_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<ComponentResult> {
-    compute_components_with_neighbors_inner(node_store, neighbors, Some(governor))
+    let visibility = crate::visibility::VisibilityScope::Unrestricted;
+    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    compute_components_with_neighbors_in_context(node_store, neighbors, &context)
+}
+
+/// Compute caller-visible components with hard work and elapsed-time accounting.
+pub(crate) fn compute_components_with_neighbors_in_context(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+) -> GraphResult<ComponentResult> {
+    compute_components_with_neighbors_inner(
+        node_store,
+        neighbors,
+        Some(context.governor),
+        context.visibility,
+    )
 }
 
 fn compute_components_with_neighbors_inner(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
     governor: Option<&crate::resource::ResourceGovernor>,
+    visibility: &crate::visibility::VisibilityScope,
 ) -> GraphResult<ComponentResult> {
     let node_count = node_store.node_count() as usize;
 
@@ -152,13 +175,18 @@ fn compute_components_with_neighbors_inner(
 
     // Iterate through all edges in the CSR — sequential, cache-friendly
     for node in 0..node_count as u32 {
-        if !node_store.is_active(node) || crate::projection::tx_delta::node_deleted(node) {
+        if !node_store.is_active(node)
+            || crate::projection::tx_delta::node_deleted(node)
+            || !visibility.allows_node(node)
+        {
             continue;
         }
 
         for edge in neighbors.neighbors(node) {
             consume_analytics_work(governor)?;
-            if node_store.is_active(edge.target)
+            if visibility.allows_relationship(edge.type_id, edge.relationship_id)?
+                && visibility.allows_node(edge.target)
+                && node_store.is_active(edge.target)
                 && !crate::projection::tx_delta::node_deleted(edge.target)
             {
                 uf.union(node, edge.target);
@@ -179,7 +207,10 @@ fn compute_components_with_neighbors_inner(
 
     for node in 0..node_count as u32 {
         consume_analytics_work(governor)?;
-        if !node_store.is_active(node) || crate::projection::tx_delta::node_deleted(node) {
+        if !node_store.is_active(node)
+            || crate::projection::tx_delta::node_deleted(node)
+            || !visibility.allows_node(node)
+        {
             component[node as usize] = u32::MAX; // inactive
             continue;
         }
@@ -396,7 +427,22 @@ mod tests {
     //! cardinality, isolation, and representative-selection invariants.
 
     use super::*;
-    use crate::edge_store::RawEdge;
+    use crate::edge_store::{IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder};
+    use crate::resource::{
+        ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
+        RowCount, WorkUnits,
+    };
+    use std::time::Duration;
+
+    fn component_governor() -> ResourceGovernor {
+        ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1_024 * 1_024)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::new(10_000),
+            ElapsedBudget::new(Duration::from_secs(1)),
+        ))
+    }
 
     #[test]
     fn single_component() {
@@ -444,6 +490,91 @@ mod tests {
         let c0 = result.component[0];
         assert_eq!(result.component[1], c0);
         assert_eq!(result.component[2], c0);
+    }
+
+    #[test]
+    fn caller_hidden_bridge_splits_components_before_union_and_counting() {
+        let mut nodes = NodeStore::new();
+        for id in ["A", "hidden", "C"] {
+            nodes.add_node(100, id.to_string());
+        }
+        let edges = EdgeStore::from_edges(
+            3,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 1,
+                    target: 2,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+            ],
+            false,
+        );
+        let neighbors = CsrNeighbors::new(&edges);
+        let mut hidden_nodes = roaring::RoaringBitmap::new();
+        hidden_nodes.insert(1);
+        let visibility = crate::visibility::VisibilityScope::enforced(
+            hidden_nodes,
+            roaring::RoaringBitmap::new(),
+            roaring::RoaringBitmap::new(),
+        );
+        let governor = component_governor();
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+
+        let result =
+            compute_components_with_neighbors_in_context(&nodes, &neighbors, &context).unwrap();
+
+        assert_eq!(result.component[1], u32::MAX);
+        assert_eq!(result.num_components, 2);
+        assert_eq!(result.largest_component_size, 1);
+        assert_eq!(result.component_sizes.values().copied().sum::<u32>(), 2);
+    }
+
+    #[test]
+    fn caller_hidden_relationship_is_not_unioned() {
+        let mut nodes = NodeStore::new();
+        nodes.add_node(100, "A".to_string());
+        nodes.add_node(100, "B".to_string());
+        let mut builder = SortedEdgeStoreBuilder::new(2, false);
+        builder
+            .try_push_identified(IdentifiedRawEdge {
+                edge: RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                relationship_id: 7,
+            })
+            .unwrap();
+        let edges = builder.finish();
+        let neighbors = CsrNeighbors::new(&edges);
+        let mut hidden_relationships = roaring::RoaringBitmap::new();
+        hidden_relationships.insert(7);
+        let mut relationship_rls_edge_types = roaring::RoaringBitmap::new();
+        relationship_rls_edge_types.insert(1);
+        let visibility = crate::visibility::VisibilityScope::enforced(
+            roaring::RoaringBitmap::new(),
+            hidden_relationships,
+            relationship_rls_edge_types,
+        );
+        let governor = component_governor();
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+
+        let result =
+            compute_components_with_neighbors_in_context(&nodes, &neighbors, &context).unwrap();
+
+        assert_eq!(result.num_components, 2);
+        assert_eq!(result.largest_component_size, 1);
     }
 
     #[test]

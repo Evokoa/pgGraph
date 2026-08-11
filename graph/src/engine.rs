@@ -1455,6 +1455,29 @@ impl Engine {
             .ok_or_else(|| GraphError::Internal("overlay workspace does not fit u64".to_string()))
     }
 
+    pub(crate) fn analytics_additional_neighbor_upper_bound(
+        &self,
+        direction: TraversalDirection,
+    ) -> usize {
+        let durable = if self.segment_backed_projection_manifest().is_some() {
+            self.projection_snapshot.as_ref().map_or(0, |snapshot| {
+                snapshot.additional_neighbor_upper_bound(direction)
+            })
+        } else {
+            0
+        };
+        let mutable = self
+            .edge_buffer
+            .len()
+            .saturating_add(tx_delta::stats().added_edges);
+        let mutable = if matches!(direction, TraversalDirection::Any) {
+            mutable.saturating_mul(2)
+        } else {
+            mutable
+        };
+        durable.saturating_add(mutable)
+    }
+
     /// Find shortest path between two nodes.
     #[allow(dead_code, reason = "compatibility entry point")]
     pub fn shortest_path(
@@ -1959,9 +1982,20 @@ impl Engine {
         &self,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<crate::connected_components::ComponentResult> {
+        let visibility = crate::visibility::VisibilityScope::Unrestricted;
+        let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+        self.connected_components_governed_in_context(&context)
+    }
+
+    /// Computes caller-visible connected components within a caller-owned budget.
+    pub(crate) fn connected_components_governed_in_context(
+        &self,
+        context: &crate::visibility::QueryExecutionContext<'_>,
+    ) -> GraphResult<crate::connected_components::ComponentResult> {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
+        let governor = context.governor;
         let workspace = whole_graph_workspace_bytes(self.node_store.node_count(), 40)?;
         let workspace_lease = governor
             .reserve_memory(
@@ -1976,17 +2010,17 @@ impl Engine {
             )
             .map_err(crate::safety::resource_limit_error)?;
         let result = if let Some(neighbors) = self.layered_neighbors()? {
-            crate::connected_components::compute_components_with_neighbors_governed(
+            crate::connected_components::compute_components_with_neighbors_in_context(
                 &self.node_store,
                 &neighbors,
-                governor,
+                context,
             )?
         } else if !self.has_edge_overlay() {
             let neighbors = CsrNeighbors::new(&self.edge_store);
-            crate::connected_components::compute_components_with_neighbors_governed(
+            crate::connected_components::compute_components_with_neighbors_in_context(
                 &self.node_store,
                 &neighbors,
-                governor,
+                context,
             )?
         } else {
             let (overlay_insert_edges, overlay_deleted_edges) =
@@ -1996,10 +2030,10 @@ impl Engine {
                 &overlay_insert_edges,
                 &overlay_deleted_edges,
             );
-            crate::connected_components::compute_components_with_neighbors_governed(
+            crate::connected_components::compute_components_with_neighbors_in_context(
                 &self.node_store,
                 &neighbors,
-                governor,
+                context,
             )?
         };
         workspace_lease.retain_until_governor_drop();
