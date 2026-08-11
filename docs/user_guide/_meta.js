@@ -1,5 +1,6 @@
 export default {
   index: 'Overview',
+  supported_features: 'Supported Features',
   installation: 'Installation',
   'migration-1-0': '1.0 Migration Guide',
   'versioning-and-compatibility': 'Versioning And Compatibility',

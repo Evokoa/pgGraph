@@ -5,7 +5,7 @@ Usage:
   python3 scripts/check_doc_references.py
 
 What this checks:
-  1. Relative Markdown links in docs/**/*.mdx point at existing local files or
+  1. Relative Markdown links in docs/**/*.mdx and docs/**/*.md point at existing local files or
      directories, and local heading anchors resolve.
   2. Inline-code path references such as `graph/src/lib.rs`, `scripts/foo.py`,
      `docs/user_guide/index.mdx`, and `src/sql_facade/` point at existing
@@ -51,7 +51,10 @@ def resolve_doc_link(doc: pathlib.Path, target: str) -> pathlib.Path | None:
 
 def heading_anchors(path: pathlib.Path) -> set[str]:
     if path.is_dir():
-        path = path / "index.mdx"
+        path = next(
+            (candidate for candidate in (path / "index.mdx", path / "index.md") if candidate.is_file()),
+            path / "index.mdx",
+        )
     if not path.is_file():
         return set()
     anchors: set[str] = set()
@@ -73,12 +76,14 @@ def resolve_mdx_route(path: pathlib.Path) -> pathlib.Path:
     if path.exists():
         return path
     if path.suffix == "":
-        mdx = path.with_suffix(".mdx")
-        if mdx.exists():
-            return mdx
-        index = path / "index.mdx"
-        if index.exists():
-            return index
+        for suffix in (".mdx", ".md"):
+            page = path.with_suffix(suffix)
+            if page.exists():
+                return page
+        for name in ("index.mdx", "index.md"):
+            index = path / name
+            if index.exists():
+                return index
     return path
 
 
@@ -99,7 +104,13 @@ def resolve_inline_path(raw: str) -> pathlib.Path | None:
 def main() -> int:
     failures: list[str] = []
 
-    for doc in DOCS_DIR.rglob("*.mdx"):
+    docs = sorted(
+        path
+        for pattern in ("*.mdx", "*.md")
+        for path in DOCS_DIR.rglob(pattern)
+        if "node_modules" not in path.parts
+    )
+    for doc in docs:
         text = doc.read_text()
         for line_no, line in enumerate(text.splitlines(), start=1):
             for match in MARKDOWN_LINK.finditer(line):

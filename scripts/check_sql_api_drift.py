@@ -80,7 +80,13 @@ def documented_functions(path: pathlib.Path) -> set[str]:
 def documented_functions_by_location() -> dict[str, list[str]]:
     """Return graph.foo() documentation locations for all docs pages."""
     locations: dict[str, list[str]] = {}
-    for doc in DOCS_DIR.rglob("*.mdx"):
+    docs = sorted(
+        path
+        for pattern in ("*.mdx", "*.md")
+        for path in DOCS_DIR.rglob(pattern)
+        if "node_modules" not in path.parts
+    )
+    for doc in docs:
         for line_no, line in enumerate(doc.read_text().splitlines(), start=1):
             for name in re.findall(r"graph\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", line):
                 rel = doc.relative_to(ROOT)

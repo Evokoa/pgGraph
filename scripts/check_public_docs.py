@@ -23,6 +23,7 @@ PUBLIC_DOCS = [
     ROOT / "docs" / "release-notes.mdx",
 ]
 PUBLIC_DOCS.extend((ROOT / "docs" / "user_guide").glob("*.mdx"))
+PUBLIC_DOCS.extend((ROOT / "docs" / "user_guide").glob("*.md"))
 FORBIDDEN_PUBLIC_PHRASES = {
     r"\bPhase [0-9][A-Za-z]?\b": "internal phase name",
     r"\blater phase\b": "internal future-phase wording",
@@ -51,9 +52,18 @@ def navigation_failures() -> list[str]:
                 if key != "title":
                     keys.append(key)
         for key in keys:
-            if not ((directory / f"{key}.mdx").is_file() or (directory / key).is_dir()):
+            if not (
+                (directory / f"{key}.mdx").is_file()
+                or (directory / f"{key}.md").is_file()
+                or (directory / key).is_dir()
+            ):
                 failures.append(f"{meta.relative_to(ROOT)} references missing route {key!r}")
-        visible = {path.stem for path in directory.glob("*.mdx") if not path.name.startswith("_")}
+        visible = {
+            path.stem
+            for pattern in ("*.mdx", "*.md")
+            for path in directory.glob(pattern)
+            if not path.name.startswith("_")
+        }
         missing = visible - set(keys)
         if missing:
             failures.append(
