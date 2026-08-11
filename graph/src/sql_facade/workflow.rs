@@ -2,8 +2,8 @@ use super::admin::with_panic_boundary;
 use super::runtime::{
     current_query_freshness, ensure_current_graph, ensure_current_graph_for_query,
 };
-use super::search::{search_rows_governed, traverse_search_rows_governed};
-use super::traversal::shortest_path_rows_governed;
+use super::search::{search_rows_governed, traverse_search_rows_in_context};
+use super::traversal::{shortest_path_rows_governed, shortest_path_rows_in_context};
 use super::*;
 
 // Workflow-level SQL functions for common application and AI-tool queries.
@@ -173,9 +173,16 @@ fn expand(
             max_nodes: config::MAX_NODES.get(),
             max_frontier: config::MAX_FRONTIER.get(),
         };
-        let rows = execute_traverse_rows_governed(
-            &request,
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
             &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let rows = execute_traverse_rows_in_context(
+            &request,
+            &context,
             &query_start.tables,
             &query_start.filter_columns,
         )
@@ -297,7 +304,14 @@ fn find_related(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let filtered = traverse_search_rows_governed(
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let filtered = traverse_search_rows_in_context(
             property_key,
             property_value,
             source_table,
@@ -317,13 +331,13 @@ fn find_related(
             false,
             candidate_limit,
             0,
-            &governor,
+            &context,
             &query_start,
         )
         .unwrap_or_else(|err| err.report());
         let broad_count = if include_counts {
             Some(
-                traverse_search_rows_governed(
+                traverse_search_rows_in_context(
                     property_key,
                     property_value,
                     source_table,
@@ -343,7 +357,7 @@ fn find_related(
                     false,
                     candidate_limit,
                     0,
-                    &governor,
+                    &context,
                     &query_start,
                 )
                 .unwrap_or_else(|err| err.report())
@@ -462,6 +476,7 @@ fn path(
             true,
             &governor,
             &query_start.tables,
+            &query_start.edges,
         )
         .unwrap_or_else(|err| err.report());
         let mut workspace = workflow_workspace(&governor).unwrap_or_else(|err| err.report());
@@ -560,6 +575,13 @@ fn connection(
             &query_start,
         )
         .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
 
         for (source_oid, source_id, _match_type, _score, source_verified, _node, source_name) in
             &sources
@@ -573,14 +595,14 @@ fn connection(
                 if !target_verified {
                     continue;
                 }
-                let path_rows = shortest_path_rows_governed(
+                let path_rows = shortest_path_rows_in_context(
                     *source_oid,
                     source_id,
                     *target_oid,
                     target_id,
                     max_depth,
                     true,
-                    &governor,
+                    &context,
                     &query_start.tables,
                 )
                 .unwrap_or_else(|err| err.report());
@@ -687,7 +709,14 @@ fn neighborhood(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let rows = traverse_search_rows_governed(
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let rows = traverse_search_rows_in_context(
             property_key,
             property_value,
             source_table,
@@ -707,7 +736,7 @@ fn neighborhood(
             false,
             node_limit,
             0,
-            &governor,
+            &context,
             &query_start,
         )
         .unwrap_or_else(|err| err.report());

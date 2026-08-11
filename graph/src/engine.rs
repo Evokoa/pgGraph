@@ -1190,12 +1190,12 @@ impl Engine {
             }
             (TraversalStrategy::Dfs, Some(layered)) => {
                 let neighbors = layered.for_direction(direction);
-                bfs::execute_dfs_with_neighbors_governed(
+                bfs::execute_dfs_with_neighbors_governed_with_context(
                     &self.node_store,
                     &neighbors,
                     &self.filter_index,
                     &config,
-                    context.governor,
+                    context,
                 )?
             }
             (TraversalStrategy::Bfs, None) => bfs::execute_governed_with_context(
@@ -1205,12 +1205,12 @@ impl Engine {
                 &config,
                 context,
             )?,
-            (TraversalStrategy::Dfs, None) => bfs::execute_dfs_governed(
+            (TraversalStrategy::Dfs, None) => bfs::execute_dfs_governed_with_context(
                 &self.node_store,
                 edge_store,
                 &self.filter_index,
                 &config,
-                context.governor,
+                context,
             )?,
         };
         let output_bytes = self.traversal_result_upper_bound(&bfs_result, max_depth)?;
@@ -1486,6 +1486,28 @@ impl Engine {
         max_depth: i32,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<Vec<PathStep>> {
+        let visibility = crate::visibility::VisibilityScope::Unrestricted;
+        let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+        self.shortest_path_governed_in_context(
+            source_table_oid,
+            source_id,
+            target_table_oid,
+            target_id,
+            max_depth,
+            &context,
+        )
+    }
+
+    pub(crate) fn shortest_path_governed_in_context(
+        &self,
+        source_table_oid: u32,
+        source_id: &str,
+        target_table_oid: u32,
+        target_id: &str,
+        max_depth: i32,
+        context: &crate::visibility::QueryExecutionContext<'_>,
+    ) -> GraphResult<Vec<PathStep>> {
+        let governor = context.governor;
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
@@ -1496,6 +1518,9 @@ impl Engine {
                     table: format!("{}", source_table_oid),
                     pk: source_id.to_string(),
                 })?;
+        if !context.visibility.allows_node(source) {
+            return Ok(Vec::new());
+        }
 
         let target =
             self.resolve(target_table_oid, target_id)
@@ -1503,6 +1528,9 @@ impl Engine {
                     table: format!("{}", target_table_oid),
                     pk: target_id.to_string(),
                 })?;
+        if !context.visibility.allows_node(target) {
+            return Ok(Vec::new());
+        }
 
         let workspace = whole_graph_workspace_bytes(self.node_store.node_count(), 80)?;
         let workspace_lease = governor
@@ -1517,7 +1545,7 @@ impl Engine {
 
         let result = if !self.has_edge_overlay() {
             if let Some(neighbors) = self.layered_neighbors()? {
-                path_finder::shortest_path_with_neighbors_governed(
+                path_finder::shortest_path_with_neighbors_governed_with_context(
                     &self.node_store,
                     &neighbors,
                     path_finder::UnweightedPathRequest {
@@ -1527,11 +1555,11 @@ impl Engine {
                         has_unidirectional_edges: true,
                         edge_type_registry: &self.edge_type_registry,
                     },
-                    governor,
+                    context,
                 )
             } else {
                 let neighbors = CsrNeighbors::new(&self.edge_store);
-                path_finder::shortest_path_with_neighbors_governed(
+                path_finder::shortest_path_with_neighbors_governed_with_context(
                     &self.node_store,
                     &neighbors,
                     path_finder::UnweightedPathRequest {
@@ -1541,11 +1569,11 @@ impl Engine {
                         has_unidirectional_edges: self.has_unidirectional_edges,
                         edge_type_registry: &self.edge_type_registry,
                     },
-                    governor,
+                    context,
                 )
             }
         } else if let Some(neighbors) = self.layered_neighbors()? {
-            path_finder::shortest_path_with_neighbors_governed(
+            path_finder::shortest_path_with_neighbors_governed_with_context(
                 &self.node_store,
                 &neighbors,
                 path_finder::UnweightedPathRequest {
@@ -1555,7 +1583,7 @@ impl Engine {
                     has_unidirectional_edges: true,
                     edge_type_registry: &self.edge_type_registry,
                 },
-                governor,
+                context,
             )
         } else {
             let (overlay_insert_edges, overlay_deleted_edges) =
@@ -1565,7 +1593,7 @@ impl Engine {
                 &overlay_insert_edges,
                 &overlay_deleted_edges,
             );
-            path_finder::shortest_path_with_neighbors_governed(
+            path_finder::shortest_path_with_neighbors_governed_with_context(
                 &self.node_store,
                 &neighbors,
                 path_finder::UnweightedPathRequest {
@@ -1575,7 +1603,7 @@ impl Engine {
                     has_unidirectional_edges: self.has_unidirectional_edges,
                     edge_type_registry: &self.edge_type_registry,
                 },
-                governor,
+                context,
             )
         };
 
@@ -1618,8 +1646,47 @@ impl Engine {
         target_id: &str,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<Vec<WeightedPathStep>> {
+        let visibility = crate::visibility::VisibilityScope::Unrestricted;
+        let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+        self.weighted_shortest_path_governed_in_context(
+            source_table_oid,
+            source_id,
+            target_table_oid,
+            target_id,
+            &context,
+        )
+    }
+
+    pub(crate) fn weighted_shortest_path_governed_in_context(
+        &self,
+        source_table_oid: u32,
+        source_id: &str,
+        target_table_oid: u32,
+        target_id: &str,
+        context: &crate::visibility::QueryExecutionContext<'_>,
+    ) -> GraphResult<Vec<WeightedPathStep>> {
+        let governor = context.governor;
         if !self.built {
             return Err(GraphError::NotBuilt);
+        }
+        let source =
+            self.resolve(source_table_oid, source_id)
+                .ok_or_else(|| GraphError::NodeNotFound {
+                    table: format!("{}", source_table_oid),
+                    pk: source_id.to_string(),
+                })?;
+        if !context.visibility.allows_node(source) {
+            return Ok(Vec::new());
+        }
+
+        let target =
+            self.resolve(target_table_oid, target_id)
+                .ok_or_else(|| GraphError::NodeNotFound {
+                    table: format!("{}", target_table_oid),
+                    pk: target_id.to_string(),
+                })?;
+        if !context.visibility.allows_node(target) {
+            return Ok(Vec::new());
         }
         let node_workspace = whole_graph_workspace_bytes(self.node_store.node_count(), 64)?;
         let neighbor_workspace = whole_graph_workspace_bytes(self.edge_store.edge_count(), 24)?;
@@ -1653,37 +1720,23 @@ impl Engine {
             });
         }
 
-        let source =
-            self.resolve(source_table_oid, source_id)
-                .ok_or_else(|| GraphError::NodeNotFound {
-                    table: format!("{}", source_table_oid),
-                    pk: source_id.to_string(),
-                })?;
-
-        let target =
-            self.resolve(target_table_oid, target_id)
-                .ok_or_else(|| GraphError::NodeNotFound {
-                    table: format!("{}", target_table_oid),
-                    pk: target_id.to_string(),
-                })?;
-
         let path = if let Some(neighbors) = layered_neighbors {
-            path_finder::weighted_shortest_path_with_neighbors_governed(
+            path_finder::weighted_shortest_path_with_neighbors_governed_with_context(
                 &self.node_store,
                 &neighbors,
                 source,
                 target,
                 &self.edge_type_registry,
-                governor,
+                context,
             )
         } else {
-            path_finder::weighted_shortest_path_with_neighbors_governed(
+            path_finder::weighted_shortest_path_with_neighbors_governed_with_context(
                 &self.node_store,
                 &self.edge_store,
                 source,
                 target,
                 &self.edge_type_registry,
-                governor,
+                context,
             )
         };
         let path = path?.unwrap_or_default();
@@ -3195,6 +3248,49 @@ mod tests {
             result,
             Err(GraphError::UnsupportedOperation { .. })
         ));
+    }
+
+    #[test]
+    fn weighted_hidden_endpoint_precedes_overlay_diagnostics() {
+        let mut eng = build_test_engine();
+        eng.edge_store = crate::edge_store::EdgeStore::from_edges(
+            5,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: Some(1),
+                schema_reversed: false,
+            }],
+            true,
+        );
+        eng.edge_buffer.push(EdgeMutation {
+            source: 1,
+            target: 2,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+            kind: MutationKind::Insert,
+        });
+        let mut hidden_nodes = roaring::RoaringBitmap::new();
+        hidden_nodes.insert(0);
+        let visibility = crate::visibility::VisibilityScope::enforced(
+            hidden_nodes,
+            roaring::RoaringBitmap::new(),
+            roaring::RoaringBitmap::new(),
+        );
+        let governor = eng.query_resource_governor().unwrap();
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+
+        let hidden_source = eng
+            .weighted_shortest_path_governed_in_context(100, "A", 100, "C", &context)
+            .unwrap();
+        let hidden_same_endpoint = eng
+            .weighted_shortest_path_governed_in_context(100, "A", 100, "A", &context)
+            .unwrap();
+
+        assert!(hidden_source.is_empty());
+        assert!(hidden_same_endpoint.is_empty());
     }
 
     #[test]

@@ -34,8 +34,7 @@ pub(crate) use crate::sql_sync::{
 };
 pub(crate) use crate::sql_traversal::{
     apply_traversal_uniqueness_governed, canonical_node_ref_string,
-    execute_traverse_candidates_governed, execute_traverse_rows_governed,
-    execute_traverse_rows_in_context, format_path_value,
+    execute_traverse_candidates_in_context, execute_traverse_rows_in_context, format_path_value,
     paginate_and_format_traverse_candidates_governed, sort_traverse_candidates_for_many_governed,
     usize_from_nonnegative,
 };

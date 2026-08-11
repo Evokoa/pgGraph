@@ -210,14 +210,14 @@ run_sql "DROP TABLE IF EXISTS public.graph_boundary_output_nodes CASCADE;"
 run_sql "DROP TABLE IF EXISTS public.graph_boundary_identity_nodes CASCADE;"
 run_sql "DROP TABLE IF EXISTS public.graph_boundary_sparse_nodes CASCADE;"
 run_sql "CREATE TABLE public.graph_boundary_nodes (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, age INT NOT NULL, friend_id TEXT REFERENCES public.graph_boundary_nodes(id));"
-run_sql "CREATE TABLE public.graph_boundary_edges (id BIGSERIAL PRIMARY KEY, from_id TEXT NOT NULL REFERENCES public.graph_boundary_nodes(id), to_id TEXT NOT NULL REFERENCES public.graph_boundary_nodes(id), visible_to NAME NOT NULL);"
+run_sql "CREATE TABLE public.graph_boundary_edges (id BIGSERIAL PRIMARY KEY, from_id TEXT NOT NULL REFERENCES public.graph_boundary_nodes(id), to_id TEXT NOT NULL REFERENCES public.graph_boundary_nodes(id), visible_to NAME NOT NULL, edge_weight INT NOT NULL);"
 run_sql "CREATE TABLE public.graph_boundary_output_nodes (id TEXT PRIMARY KEY);"
 run_sql "CREATE TABLE public.graph_boundary_identity_nodes (id TEXT PRIMARY KEY, visible_to NAME NOT NULL, name TEXT NOT NULL);"
 run_sql "CREATE TABLE public.graph_boundary_sparse_nodes (id TEXT PRIMARY KEY, ordinal INT NOT NULL);"
 run_sql "CREATE TABLE public.graph_boundary_secret_nodes (id TEXT PRIMARY KEY, output_id TEXT REFERENCES public.graph_boundary_output_nodes(id), edge_weight INT NOT NULL);"
 run_sql "CREATE TABLE public.graph_boundary_public_nodes (id TEXT PRIMARY KEY, secret_id TEXT REFERENCES public.graph_boundary_secret_nodes(id), edge_weight INT NOT NULL);"
-run_sql "INSERT INTO public.graph_boundary_nodes VALUES ('c', 't1', 'Carol', 30, NULL), ('b', 't2', 'Bob', 20, 'c'), ('a', 't1', 'Alice', 10, 'b');"
-run_sql "INSERT INTO public.graph_boundary_edges (from_id, to_id, visible_to) VALUES ('a', 'b', 'graph_boundary_other');"
+run_sql "INSERT INTO public.graph_boundary_nodes VALUES ('c', 't1', 'Carol', 30, NULL), ('b', 't2', 'Bob', 20, 'c'), ('a', 't1', 'Alice', 10, 'b'), ('d', 't1', 'Dana', 40, NULL);"
+run_sql "INSERT INTO public.graph_boundary_edges (from_id, to_id, visible_to, edge_weight) VALUES ('a', 'c', 'graph_boundary_other', 1), ('a', 'd', '$ROLE_NAME', 2), ('d', 'c', '$ROLE_NAME', 2);"
 run_sql "INSERT INTO public.graph_boundary_output_nodes VALUES ('o1');"
 run_sql "INSERT INTO public.graph_boundary_identity_nodes VALUES ('visible', '$ROLE_NAME', 'Visible'), ('hidden', 'graph_boundary_other', 'Hidden');"
 run_sql "INSERT INTO public.graph_boundary_sparse_nodes SELECT 's' || value::text, value FROM generate_series(0, 999) AS value;"
@@ -228,7 +228,7 @@ expect_sqlstate "55000" "SELECT * FROM graph.traverse('public.graph_boundary_nod
 
 run_sql "SELECT graph.add_table('public.graph_boundary_nodes'::regclass, 'id', ARRAY['tenant_id', 'name', 'age']);"
 run_sql "SELECT graph.add_edge('public.graph_boundary_nodes'::regclass, 'friend_id', 'public.graph_boundary_nodes'::regclass, 'id', 'boundary', bidirectional := false);"
-run_sql "SELECT graph.add_edge('public.graph_boundary_edges'::regclass, 'from_id', 'public.graph_boundary_nodes'::regclass, 'to_id', 'boundary_row', bidirectional := false);"
+run_sql "SELECT graph.add_edge('public.graph_boundary_edges'::regclass, 'from_id', 'public.graph_boundary_nodes'::regclass, 'to_id', 'boundary_row', bidirectional := false, weight_column := 'edge_weight');"
 run_sql "SELECT graph.add_filter_column('public.graph_boundary_nodes'::regclass, 'age');"
 run_sql "SELECT graph.add_table('public.graph_boundary_public_nodes'::regclass, 'id');"
 run_sql "SELECT graph.add_table('public.graph_boundary_secret_nodes'::regclass, 'id');"
@@ -237,7 +237,8 @@ run_sql "SELECT graph.add_table('public.graph_boundary_identity_nodes'::regclass
 run_sql "SELECT graph.add_table('public.graph_boundary_sparse_nodes'::regclass, 'id', ARRAY['ordinal']);"
 run_sql "SELECT graph.add_edge('public.graph_boundary_public_nodes'::regclass, 'secret_id', 'public.graph_boundary_secret_nodes'::regclass, 'id', 'hidden_link', bidirectional := false, weight_column := 'edge_weight');"
 run_sql "SELECT graph.add_edge('public.graph_boundary_secret_nodes'::regclass, 'output_id', 'public.graph_boundary_output_nodes'::regclass, 'id', 'visible_link', bidirectional := false, weight_column := 'edge_weight');"
-run_sql "SELECT * FROM graph.build();"
+run_sql "SET graph.mutable_enabled = on; SELECT * FROM graph.build(mode := 'mutable_overlay');"
+run_sql "SELECT * FROM graph.create_graph('boundary_private_graph');"
 
 expect_sqlstate "P0002" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'missing', 1);"
 expect_sqlstate "22023" "SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, NULL, '🔥 > 1');"
@@ -280,15 +281,33 @@ expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_policy = 'sparse_deny
 expect_value_as_login "$ROLE_NAME" "3" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary'], hydrate := false);"
 
 run_sql "ALTER TABLE public.graph_boundary_edges ENABLE ROW LEVEL SECURITY;"
-run_sql "CREATE POLICY graph_boundary_edge_rls ON public.graph_boundary_edges FOR SELECT TO $ROLE_NAME USING (visible_to = current_user);"
-expect_value_as_login "$ROLE_NAME" "1" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
-run_sql "ALTER ROLE $ROLE_NAME BYPASSRLS;"
+run_sql "CREATE POLICY graph_boundary_edge_rls ON public.graph_boundary_edges FOR SELECT TO $ROLE_NAME USING (visible_to = current_user OR visible_to = NULLIF(current_setting('graph.boundary_edge_override', true), '')::name);"
+run_sql "CREATE POLICY graph_boundary_edge_insert_rls ON public.graph_boundary_edges FOR INSERT TO $ROLE_NAME WITH CHECK (true);"
+run_sql "GRANT INSERT ON public.graph_boundary_edges TO $ROLE_NAME;"
+run_sql "GRANT UPDATE ON public.graph_boundary_nodes TO $ROLE_NAME;"
+run_sql "GRANT USAGE, SELECT ON SEQUENCE public.graph_boundary_edges_id_seq TO $ROLE_NAME;"
 expect_value_as_login "$ROLE_NAME" "2" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "2" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'c', 1, edge_types := ARRAY['boundary_row'], direction := 'in', strategy := 'dfs', hydrate := false);"
+run_sql "ALTER ROLE $ROLE_NAME BYPASSRLS;"
+expect_value_as_login "$ROLE_NAME" "3" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
 run_sql "ALTER ROLE $ROLE_NAME NOBYPASSRLS;"
+
+expect_value_as_login "$ROLE_NAME" $'1\n1\n1\n2\na,c' "BEGIN;
+SAVEPOINT graph_boundary_hidden_tx_edge;
+SET LOCAL graph.boundary_edge_override = 'graph_boundary_other';
+SELECT count(*) FROM graph.gql('MATCH (u:graph_boundary_nodes {id: ''c''}), (v:graph_boundary_nodes {id: ''d''}) CREATE (u)-[r:boundary_row {visible_to: ''graph_boundary_other'', edge_weight: 3}]->(v) RETURN r', hydrate := false);
+SET LOCAL graph.boundary_edge_override = '';
+SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'c', 1, edge_types := ARRAY['boundary_row'], strategy := 'dfs', hydrate := false);
+ROLLBACK TO SAVEPOINT graph_boundary_hidden_tx_edge;
+RELEASE SAVEPOINT graph_boundary_hidden_tx_edge;
+SELECT count(*) FROM graph.gql('MATCH (u:graph_boundary_nodes {id: ''c''}), (v:graph_boundary_nodes {id: ''a''}) CREATE (u)-[r:boundary_row {visible_to: ''$ROLE_NAME'', edge_weight: 3}]->(v) RETURN r', hydrate := false);
+SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], direction := 'in', strategy := 'dfs', hydrate := false);
+SELECT string_agg(node_id, ',' ORDER BY depth, node_id) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], direction := 'in', strategy := 'dfs', hydrate := false);
+ROLLBACK;"
 
 if psql -X -q -tA -d "$DBNAME" -c "SELECT to_regprocedure('graph._test_arm_visibility_scan_cancel(bigint)') IS NOT NULL;" | grep -qx t; then
   expect_visibility_cancel_cleanup_as_login "$ROLE_NAME" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
-  expect_value_as_login "$ROLE_NAME" "1" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
+  expect_value_as_login "$ROLE_NAME" "2" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
 fi
 
 if psql -X -q -tA -d "$DBNAME" -c "SELECT to_regprocedure('graph._test_arm_missing_relationship_identity()') IS NOT NULL;" | grep -qx t; then
@@ -307,11 +326,24 @@ run_sql "DROP TABLE IF EXISTS public.graph_boundary_traversal_coords;"
 run_sql "CREATE TABLE public.graph_boundary_traversal_coords AS SELECT node_table, node_id, depth FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, hydrate := false);"
 run_sql "GRANT SELECT ON public.graph_boundary_traversal_coords TO $ROLE_NAME;"
 
-expect_value_as_role "$ROLE_NAME" "2" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM public.graph_boundary_traversal_coords;"
-expect_value_as_role "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM public.graph_boundary_traversal_coords g JOIN public.graph_boundary_nodes n ON n.id = g.node_id;"
+expect_value_as_role "$ROLE_NAME" "4" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM public.graph_boundary_traversal_coords;"
+expect_value_as_role "$ROLE_NAME" "3" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM public.graph_boundary_traversal_coords g JOIN public.graph_boundary_nodes n ON n.id = g.node_id;"
 expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary'], hydrate := false);"
 expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary'], hydrate := true);"
 expect_value_as_login "$ROLE_NAME" "0" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'b', 2, edge_types := ARRAY['boundary'], hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "2" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse(ARRAY['public.graph_boundary_nodes'::regclass::oid, 'public.graph_boundary_nodes'::regclass::oid, 'public.graph_boundary_nodes'::regclass::oid], ARRAY['a', 'b', 'c'], max_depth := 0, strategy := 'dfs', hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse_search('name', 'Alice', table_filter := 'public.graph_boundary_nodes'::regclass, max_depth := 2, edge_types := ARRAY['boundary'], strategy := 'dfs', hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "d" "SET graph.boundary_tenant = 't1'; SELECT string_agg(node_id, ',' ORDER BY rank) FROM graph.expand('public.graph_boundary_nodes'::regclass, 'a', max_depth := 1, edge_types := ARRAY['boundary_row'], include_start := false);"
+expect_value_as_login "$ROLE_NAME" "d" "SET graph.boundary_tenant = 't1'; SELECT string_agg(node_id, ',' ORDER BY rank) FROM graph.find_related('name', 'Alice', source_table := 'public.graph_boundary_nodes'::regclass, max_depth := 1, edge_types := ARRAY['boundary_row'], include_start := false);"
+expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT COALESCE(sum(node_count), 0) FROM graph.neighborhood('name', 'Alice', source_table := 'public.graph_boundary_nodes'::regclass, max_depth := 1, edge_types := ARRAY['boundary_row']);"
+expect_sqlstate_as_login "$ROLE_NAME" "22023" "SELECT count(*) FROM graph.get_neighbors('boundary_private_graph', 'graph_boundary_nodes', 'a', hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary'], strategy := 'dfs', hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'c', 2, edge_types := ARRAY['boundary'], direction := 'in', strategy := 'dfs', hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "a,d,c" "SET graph.boundary_tenant = 't1'; SELECT string_agg(node_id, ',' ORDER BY step) FROM graph.shortest_path('public.graph_boundary_nodes'::regclass, 'a', 'public.graph_boundary_nodes'::regclass, 'c', hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "0" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.shortest_path('public.graph_boundary_nodes'::regclass, 'a', 'public.graph_boundary_nodes'::regclass, 'b', hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "0" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.shortest_path('public.graph_boundary_nodes'::regclass, 'b', 'public.graph_boundary_nodes'::regclass, 'b', hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "a,d,c" "SET graph.boundary_tenant = 't1'; SELECT string_agg(node_id, ',' ORDER BY step) FROM graph.weighted_shortest_path('public.graph_boundary_nodes'::regclass, 'a', 'public.graph_boundary_nodes'::regclass, 'c');"
+expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.get_neighbors('default', 'graph_boundary_nodes', 'a', direction := 'out', hydrate := false);"
 
 expect_sqlstate_as_role "$ROLE_NAME" "42501" "INSERT INTO graph._registered_tables (table_name, id_column) VALUES ('public.nope', 'id');"
 expect_sqlstate_as_role "$ROLE_NAME" "42501" "SELECT graph.add_table('public.graph_boundary_nodes'::regclass, 'id');"

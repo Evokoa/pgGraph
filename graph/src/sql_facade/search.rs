@@ -296,6 +296,62 @@ pub(super) fn traverse_search_rows_governed(
     governor: &crate::resource::ResourceGovernor,
     query_start: &super::runtime::QueryStartState,
 ) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
+    let visibility = crate::sql_visibility::build_visibility_scope(
+        &query_start.tables,
+        &query_start.edges,
+        governor,
+    )?;
+    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    traverse_search_rows_in_context(
+        property_key,
+        property_value,
+        table_filter,
+        search_mode,
+        case_sensitive,
+        search_max_rows,
+        search_row_offset,
+        max_depth,
+        edge_types,
+        direction,
+        node_tables,
+        filter,
+        tenant,
+        strategy,
+        uniqueness,
+        include_start,
+        hydrate,
+        max_rows,
+        row_offset,
+        &context,
+        query_start,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn traverse_search_rows_in_context(
+    property_key: &str,
+    property_value: &str,
+    table_filter: Option<pgrx::pg_sys::Oid>,
+    search_mode: &str,
+    case_sensitive: bool,
+    search_max_rows: i32,
+    search_row_offset: i32,
+    max_depth: i32,
+    edge_types: Option<&[String]>,
+    direction: &str,
+    node_tables: Option<&[pgrx::pg_sys::Oid]>,
+    filter: Option<&pgrx::JsonB>,
+    tenant: Option<&str>,
+    strategy: &str,
+    uniqueness: &str,
+    include_start: bool,
+    hydrate: bool,
+    max_rows: i32,
+    row_offset: i32,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    query_start: &super::runtime::QueryStartState,
+) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
+    let governor = context.governor;
     check_enabled_result()?;
     let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
         tenant,
@@ -357,9 +413,9 @@ pub(super) fn traverse_search_rows_governed(
             max_nodes: config::MAX_NODES.get(),
             max_frontier: config::MAX_FRONTIER.get(),
         };
-        let mut start_candidates = execute_traverse_candidates_governed(
+        let mut start_candidates = execute_traverse_candidates_in_context(
             &request,
-            governor,
+            context,
             &query_start.tables,
             &query_start.filter_columns,
         )?;

@@ -31,7 +31,7 @@ subject to the documented SQL, security, freshness, and resource contracts.
 | Playground portability and stability fixes | Implemented for 1.1; unreleased | Docker and Podman setup, deterministic Panama data, Python-shim handling, policy-compliant reuse of pre-provisioned virtual environments, cached initialization, scoped statement timeouts, and stable data-frame rendering |
 | Cancellation-safe graph replacement | Implemented for 1.1; unreleased | Build, vacuum, foreground/background maintenance, projection compaction/repair, and durable sync ingestion publish only validated generations under one per-graph writer lock. Cancellation before publication retains the previous generation and removes only the recorded unpublished candidate; interruption after publication reconciles the backend to the new generation. Low-memory eviction is rejected unless the serving base, projection files, and relationship-identity sidecar pass recovery validation. |
 | Caller-preserving query boundary | Implemented for 1.1; unreleased | Topology query entry points run as `SECURITY INVOKER`, so hydration and other source-table SQL observe the outer application role. Narrow `SECURITY DEFINER` catalog mediators pin `search_path`, capture the outer role, and expose only authorized graph metadata; they do not switch Rust user IDs. This establishes caller identity but does not yet provide the planned topology/RLS intersection. |
-| Caller-scoped topology RLS | Partially implemented for 1.1; unreleased | The single-seed BFS form of `graph.traverse()` intersects projected nodes and relationships with caller-visible source rows before seed or frontier admission. Paths, multi-seed traversal, DFS, components, aggregation, GQL, Cypher, and workflows remain in the ordered follow-on phases. |
+| Caller-scoped topology RLS | Partially implemented for 1.1; unreleased | Direct traversal and path APIs now intersect projected nodes and relationships with caller-visible source rows before admission. This covers single- and multi-seed BFS/DFS, inbound/reverse traversal, search-derived traversal seeds, `get_neighbors()`, `expand()`, `find_related()`, `neighborhood()`, unweighted and weighted shortest paths, and the `path()`/`connection()` wrappers. Components, aggregation, GQL, Cypher, and the remaining derived workflows are owned by the ordered follow-on phases. |
 | Operational telemetry authorization | Implemented for 1.1; unreleased | Selected/named-graph status requires read authorization, artifact and build-resource status requires selected-graph admin authorization, cluster/resource telemetry requires graph-schema administration, and runtime rows are filtered to caller-readable graphs. These are physical totals, not RLS-row-filtered query results. |
 | Query-start catalog deduplication | Implemented for 1.1; unreleased | Each topology query initialization composes one owned state from the selected graph and one registered-catalog read. Fingerprints, schema drift, tenant scope, and applicable sync relations derive from that state; caller/graph-bound sync mediators and automatic replay reuse it without weakening freshness, ACL, or sync checks. |
 | Relationship-typed shortest paths | Planned for 1.1 | Backward-compatible shortest-path overloads accept `edge_types text[]`; legacy calls continue to use every registered type |
@@ -39,18 +39,20 @@ subject to the documented SQL, security, freshness, and resource contracts.
 
 ## Current RLS Boundary
 
-The unreleased 1.1 single-seed BFS `graph.traverse()` path evaluates applicable
-node and relationship policies as the caller, then excludes hidden identities
-before reachability, limits, paths, or hydration are computed. Hidden seeds
-behave as nonexistent, and a hidden intermediate blocks visible nodes behind
-it. `graph.allow_rls_tables` is now a deprecated no-op; builds accept
-RLS-enabled source tables by default.
+The unreleased 1.1 direct traversal and path APIs evaluate applicable node and
+relationship policies as the caller, then exclude hidden identities before
+reachability, limits, paths, costs, or hydration are computed. Hidden seeds and
+targets behave as nonexistent, a hidden intermediate blocks visible nodes
+behind it, and shortest-path selection chooses the best caller-visible route.
+`graph.allow_rls_tables` is now a deprecated no-op; builds accept RLS-enabled
+source tables by default.
 
 This is a deliberately bounded vertical slice, not yet a release-wide promise.
-Until the remaining 1.1 phases are complete, do not use the other topology
-APIs to isolate tenants or roles whose source-row visibility differs. Use the
-documented BFS traversal slice, separate graphs, or PostgreSQL-native recursive
-SQL where row policies must control every hop.
+Until the remaining 1.1 phases are complete, do not use components,
+aggregation, GQL/Cypher graph reads, or other derived topology APIs to isolate
+tenants or roles whose source-row visibility differs. Use the documented
+direct traversal/path APIs, separate graphs, or PostgreSQL-native recursive SQL
+where row policies must control every hop.
 
 ## Not Targeted for 1.1
 

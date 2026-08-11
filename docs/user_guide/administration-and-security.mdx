@@ -178,13 +178,17 @@ table `SELECT` permissions.
 role, so row-level security policies on the underlying tables apply exactly as
 they would to a direct `SELECT`.
 
-The unreleased 1.1 single-seed BFS form of `graph.traverse()` builds one
-statement-scoped visibility scope after freshness handling. For each registered
-source relation where PostgreSQL says RLS applies to the outer caller, pgGraph
-scans caller-visible source keys and intersects them with projected node and
-relationship identities. Hidden seeds behave as nonexistent, and hidden nodes
-or relationship rows are rejected before they affect reachability, paths,
-limits, or hydration.
+The unreleased 1.1 direct traversal and path APIs build one statement-scoped
+visibility scope after freshness handling. For each registered source relation
+where PostgreSQL says RLS applies to the outer caller, pgGraph scans
+caller-visible source keys and intersects them with projected node and
+relationship identities. Hidden seeds and targets behave as nonexistent, and
+hidden nodes or relationship rows are rejected before they affect
+reachability, path selection, weighted costs, limits, or hydration. This covers
+single- and multi-seed BFS/DFS, inbound traversal, search-derived traversal,
+`get_neighbors()`, `expand()`, `find_related()`, `neighborhood()`, shortest
+paths, weighted shortest paths, and the direct `path()` and `connection()`
+wrappers.
 
 `graph.build()` now accepts RLS-enabled node and relationship source tables by
 default. `graph.allow_rls_tables` remains registered for 1.x configuration
@@ -194,10 +198,9 @@ escape hatch; table ACL checks still apply.
 
 <Callout type="warning">
 Caller-scoped topology RLS is not yet wired into every API on this development
-branch. The current vertical slice covers only single-seed BFS
-`graph.traverse()`. Multi-seed traversal, DFS, path, component, aggregation,
-GQL, Cypher, and workflow paths remain builder-scoped until their ordered 1.1
-phases land. Do not treat those APIs as tenant-isolation boundaries yet.
+branch. Components, aggregation, GQL/Cypher execution, and remaining derived
+workflow/analytics paths stay builder-scoped until their ordered 1.1 phases
+land. Do not treat those APIs as tenant-isolation boundaries yet.
 </Callout>
 
 An RLS-active projected relationship must carry its durable source-row

@@ -303,6 +303,13 @@ fn traverse_many(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
         let mut candidates = Vec::new();
         for (table, id) in start_tables.into_iter().zip(start_ids) {
             let request = TraverseRequest {
@@ -322,9 +329,9 @@ fn traverse_many(
                 max_nodes,
                 max_frontier,
             };
-            let mut start_candidates = execute_traverse_candidates_governed(
+            let mut start_candidates = execute_traverse_candidates_in_context(
                 &request,
-                &governor,
+                &context,
                 &query_start.tables,
                 &query_start.filter_columns,
             )
@@ -396,6 +403,7 @@ pub(super) fn shortest_path(
             hydrate,
             &governor,
             &query_start.tables,
+            &query_start.edges,
         )
         .unwrap_or_else(|err| err.report());
 
@@ -416,15 +424,45 @@ pub(super) fn shortest_path_rows_governed(
     hydrate: bool,
     governor: &crate::resource::ResourceGovernor,
     tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
+    let visibility = crate::sql_visibility::build_visibility_scope(tables, edges, governor)?;
+    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    shortest_path_rows_in_context(
+        source_table,
+        source_id,
+        target_table,
+        target_id,
+        max_depth,
+        hydrate,
+        &context,
+        tables,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shortest-path execution keeps SQL coordinates, bounds, context, and query catalog explicit"
+)]
+pub(super) fn shortest_path_rows_in_context(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    max_depth: i32,
+    hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    tables: &[builder::RegisteredTable],
+) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
+    let governor = context.governor;
     let steps = ENGINE.with(|e| {
-        e.borrow().shortest_path_governed(
+        e.borrow().shortest_path_governed_in_context(
             source_table.to_u32(),
             source_id,
             target_table.to_u32(),
             target_id,
             max_depth,
-            governor,
+            context,
         )
     })?;
     acl::check_table_acls(steps.iter().map(|step| step.node_table.0))?;
@@ -514,19 +552,27 @@ fn weighted_shortest_path(
         acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
 
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
         let steps = ENGINE.with(|e| {
             let eng = e.borrow();
-            eng.weighted_shortest_path_governed(
+            eng.weighted_shortest_path_governed_in_context(
                 source_table.to_u32(),
                 source_id,
                 target_table.to_u32(),
                 target_id,
-                &governor,
+                &context,
             )
             .unwrap_or_else(|err| err.report())
         });
@@ -665,9 +711,18 @@ fn direct_get_neighbors_rows(
             max_frontier: config::MAX_FRONTIER.get(),
         };
         let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-        execute_traverse_rows_governed(
-            &request,
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
             &governor,
+        )?;
+        if !visibility.allows_node(matched.node_idx) {
+            return Ok(Vec::new());
+        }
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        execute_traverse_rows_in_context(
+            &request,
+            &context,
             &query_start.tables,
             &query_start.filter_columns,
         )
@@ -680,13 +735,14 @@ fn with_named_graph<T>(
     graph_namespace: Option<&str>,
     action: impl FnOnce(&super::runtime::QueryStartState) -> safety::GraphResult<T>,
 ) -> safety::GraphResult<T> {
-    let graph = catalog::resolve_visible_graph_metadata(graph_name, graph_tenant, graph_namespace)?
-        .ok_or_else(|| safety::GraphError::InvalidFilter {
-            reason: format!("graph '{graph_name}' does not exist"),
-        })?;
-    catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Read)?;
+    let graph_id = catalog::graph_id_with_privilege_via_definer(
+        graph_name,
+        graph_tenant,
+        graph_namespace,
+        catalog::GraphPrivilege::Read,
+    )?;
     let previous_graph_id = catalog::selected_graph_id()?;
-    catalog::set_selected_graph_id(&graph.graph_id)?;
+    catalog::set_selected_graph_id(&graph_id)?;
     let result = (|| {
         let freshness = current_query_freshness()?;
         let query_start = ensure_current_graph_for_query(freshness)?;

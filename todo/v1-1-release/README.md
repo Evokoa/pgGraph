@@ -761,8 +761,8 @@ when its evidence and exit gate are both satisfied.
 | 3 | Complete | Invoker query modes, caller-preserving catalog mediators, telemetry authorization, update SQL, real-login evidence, and independent Rust review pass. |
 | 4 | Complete | Query-start composition, catalog/pending-sync deduplication, drift/freshness and recovery regressions, fixed-work benchmark evidence, and independent Rust review are complete. |
 | 5 | Complete | The complete traverse/BFS vertical slice, retained evidence, and independent Rust security review pass. |
-| 6 | In progress | The accepted traverse/BFS visibility seam is being extended to direct traversal and path APIs. |
-| 7 | Not started | Depends on complete direct-algorithm visibility from Phase 6. |
+| 6 | Complete | Direct traversal/path visibility, semantic tests, real-login transaction/savepoint evidence, benchmarks, and independent Rust review pass. |
+| 7 | In progress | Derived component, aggregation, estimate, and raw-adjacency surfaces are being moved onto visible topology. |
 | 8 | Not started | Depends on stable direct and derived admission behavior from Phases 6 and 7. |
 | 9 | Not started | Depends on the Phase 8 security-complete checkpoint. |
 | 10 | Not started | Depends on all implementation phases and their retained evidence. |
@@ -1251,6 +1251,37 @@ RLS callers.
 **Exit gate:** all direct traversal, neighbor, unweighted-path, and
 weighted-path APIs share the same visibility scope and pass the required
 semantic scenarios.
+
+Implementation evidence recorded on 2026-08-11:
+
+- The pure Rust suite passes 902 tests with one scale test ignored. New tests
+  prove DFS pre-accounting admission, a longer visible unweighted route when a
+  shorter route crosses a hidden node, a visible weighted route when the
+  cheaper relationship row is hidden, and bidirectional meeting-node selection
+  that ignores hidden topology.
+- The PostgreSQL 17 real-login boundary fixture passes for single- and
+  multi-direction DFS, hidden targets, hidden source-equals-target paths,
+  reverse traversal, `get_neighbors()`, unweighted and weighted route
+  selection, `expand()`/`find_related()`/`neighborhood()` parity, and
+  caller-visible hydration/coordinates.
+- The same external-role fixture creates a hidden transaction-local
+  relationship, proves it cannot affect traversal, rolls it back to a
+  savepoint, creates a visible relationship, and proves its transaction-local
+  identity is admitted before the outer transaction rolls back.
+- Named direct-node APIs resolve private graph metadata through the existing
+  caller-authorized definer mediator; source-table visibility scans still run
+  as the login role.
+- A 40-sample, five-warmup shortest-path run measured 1.707 ms median and
+  2.569 ms p95 on the unrestricted path, and 1.959/2.997 ms for the matching
+  active-RLS login. Phase 5's retained BFS baseline remains 0.623/0.709 ms and
+  inside its no-RLS regression budget.
+
+Independent Rust review completed on 2026-08-11 after two findings were fixed:
+weighted hidden endpoints now precede allocation and overlay diagnostics, and
+`expand()` no longer reaches the unrestricted compatibility wrapper. The
+review also confirmed DFS/reverse relationship admission, transaction-local
+identity handling, direct workflow context reuse, and private named-graph
+non-disclosure. No blockers or requested changes remain.
 
 ### Phase 7: Enforce RLS in derived topology and analytics
 
