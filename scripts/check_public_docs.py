@@ -256,6 +256,38 @@ def internal_api_failures() -> list[str]:
     return failures
 
 
+def registration_cast_failures() -> list[str]:
+    """Keep the common regclass diagnostic beside registration entry points."""
+
+    failures: list[str] = []
+    quickstart = (ROOT / "docs" / "quickstart.mdx").read_text(encoding="utf-8")
+    troubleshooting = (
+        ROOT / "docs" / "user_guide" / "troubleshooting.mdx"
+    ).read_text(encoding="utf-8")
+    quickstart_markers = (
+        "## Manual Registration",
+        "Keep the `::regclass` casts shown below",
+        "'public.people'::regclass",
+    )
+    troubleshooting_markers = (
+        "## Function Does Not Exist for a Registration Call",
+        "graph.add_table(unknown, unknown) does not exist",
+        "graph.add_table('public.users'::regclass, 'id')",
+    )
+    for marker in quickstart_markers:
+        if marker not in quickstart:
+            failures.append(
+                f"docs/quickstart.mdx is missing registration cast marker {marker!r}"
+            )
+    for marker in troubleshooting_markers:
+        if marker not in troubleshooting:
+            failures.append(
+                "docs/user_guide/troubleshooting.mdx is missing registration "
+                f"cast marker {marker!r}"
+            )
+    return failures
+
+
 def main() -> int:
     maturity = json.loads((ROOT / "release" / "maturity.json").read_text(encoding="utf-8"))
     failures = []
@@ -264,6 +296,7 @@ def main() -> int:
     failures.extend(readme_failures(cargo_version(), maturity))
     failures.extend(example_failures())
     failures.extend(internal_api_failures())
+    failures.extend(registration_cast_failures())
     if failures:
         print("Public documentation contract drift:", file=sys.stderr)
         for failure in failures:

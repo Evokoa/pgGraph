@@ -134,7 +134,9 @@ if [ ! -d "${VENV_DIR}" ]; then
   "${PLAYGROUND_PYTHON}" -m venv "${VENV_DIR}"
 fi
 
-pggraph_venv_pip "${VENV_DIR}" install -r "${SANDBOX_DIR}/playground/requirements.txt"
+pggraph_prepare_venv_requirements \
+  "${VENV_DIR}" \
+  "${SANDBOX_DIR}/playground/requirements.txt"
 
 export PGGRAPH_DSN="host=127.0.0.1 port=${ACTUAL_PG_PORT} dbname=postgres user=postgres password=postgres"
 export PGGRAPH_ASSETS_DIR="${ROOT_DIR}/assets"

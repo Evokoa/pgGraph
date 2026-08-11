@@ -38,21 +38,46 @@ class ShellEntrypointTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         TEMPORARY_ROOT.mkdir(exist_ok=True)
 
-    def test_venv_pip_uses_sfw_when_available(self) -> None:
+    def test_requirements_install_uses_sfw_when_change_is_needed(self) -> None:
         with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
             root = Path(temporary_dir)
             venv = root / "venv"
             tools = root / "tools"
+            requirements = root / "requirements.txt"
+            requirements.write_text("example==1.0\n", encoding="utf-8")
+            write_executable(venv / "bin" / "python", "#!/bin/sh\nexit 1\n")
             write_executable(tools / "sfw", "#!/bin/sh\nprintf 'sfw:%s\\n' \"$*\"\n")
 
             result = run_helper(
-                f'pggraph_venv_pip "{venv}" install -r requirements.txt',
+                f'pggraph_prepare_venv_requirements "{venv}" "{requirements}"',
                 path=f"{tools}:/usr/bin:/bin",
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "sfw:pip install -r requirements.txt")
-            self.assertNotIn("using the sandbox virtualenv", result.stderr)
+            self.assertEqual(result.stdout.strip(), f"sfw:pip install -r {requirements}")
+
+    def test_requirements_install_uses_resolved_sfw_not_venv_shadow(self) -> None:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
+            root = Path(temporary_dir)
+            venv = root / "venv"
+            tools = root / "tools"
+            requirements = root / "requirements.txt"
+            requirements.write_text("example==1.0\n", encoding="utf-8")
+            write_executable(venv / "bin" / "python", "#!/bin/sh\nexit 1\n")
+            write_executable(
+                venv / "bin" / "sfw",
+                "#!/bin/sh\nprintf 'shadowed-sfw-ran\\n'\nexit 19\n",
+            )
+            write_executable(tools / "sfw", "#!/bin/sh\nprintf 'trusted:%s\\n' \"$*\"\n")
+
+            result = run_helper(
+                f'pggraph_prepare_venv_requirements "{venv}" "{requirements}"',
+                path=f"{tools}:/usr/bin:/bin",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), f"trusted:pip install -r {requirements}")
+            self.assertNotIn("shadowed-sfw-ran", result.stdout)
 
     def test_python_resolution_follows_executable_symlinks(self) -> None:
         with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
@@ -67,31 +92,52 @@ class ShellEntrypointTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(Path(result.stdout.strip()), Path(sys.executable).resolve())
 
-    def test_venv_pip_falls_back_when_sfw_is_unavailable(self) -> None:
+    def test_satisfied_venv_skips_sfw_requirement(self) -> None:
         with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
             root = Path(temporary_dir)
             venv = root / "venv"
-            write_executable(venv / "bin" / "python", "#!/bin/sh\nprintf 'python:%s\\n' \"$*\"\n")
+            requirements = root / "requirements.txt"
+            requirements.write_text("example==1.0\n", encoding="utf-8")
+            write_executable(venv / "bin" / "python", "#!/bin/sh\nexit 0\n")
 
             result = run_helper(
-                f'pggraph_venv_pip "{venv}" install -r requirements.txt',
+                f'pggraph_prepare_venv_requirements "{venv}" "{requirements}"',
                 path="/usr/bin:/bin",
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "python:-m pip install -r requirements.txt")
-            self.assertIn("using the sandbox virtualenv", result.stderr)
+            self.assertIn("already satisfies", result.stdout)
+            self.assertNotIn("sfw is required", result.stderr)
 
-    def test_venv_pip_does_not_bypass_a_failing_sfw(self) -> None:
+    def test_unsatisfied_venv_requires_sfw(self) -> None:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
+            root = Path(temporary_dir)
+            venv = root / "venv"
+            requirements = root / "requirements.txt"
+            requirements.write_text("example==1.0\n", encoding="utf-8")
+            write_executable(venv / "bin" / "python", "#!/bin/sh\nexit 1\n")
+
+            result = run_helper(
+                f'pggraph_prepare_venv_requirements "{venv}" "{requirements}"',
+                path="/usr/bin:/bin",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("sfw is required", result.stderr)
+            self.assertNotIn("pip install", result.stdout)
+
+    def test_requirements_install_does_not_bypass_a_failing_sfw(self) -> None:
         with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_dir:
             root = Path(temporary_dir)
             venv = root / "venv"
             tools = root / "tools"
+            requirements = root / "requirements.txt"
+            requirements.write_text("example==1.0\n", encoding="utf-8")
             write_executable(tools / "sfw", "#!/bin/sh\nexit 17\n")
-            write_executable(venv / "bin" / "python", "#!/bin/sh\nprintf 'unexpected fallback\\n'\n")
+            write_executable(venv / "bin" / "python", "#!/bin/sh\nexit 1\n")
 
             result = run_helper(
-                f'pggraph_venv_pip "{venv}" install -r requirements.txt',
+                f'pggraph_prepare_venv_requirements "{venv}" "{requirements}"',
                 path=f"{tools}:/usr/bin:/bin",
             )
 

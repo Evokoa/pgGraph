@@ -26,10 +26,14 @@ class FakeCursor:
         fail: bool = False,
         fail_on: str | None = None,
         executed: list[str] | None = None,
+        parameters: list[object] | None = None,
+        previous_timeout: str = "17s",
     ) -> None:
         self.fail = fail
         self.fail_on = fail_on
         self.executed = executed if executed is not None else []
+        self.parameters = parameters if parameters is not None else []
+        self.previous_timeout = previous_timeout
 
     def __enter__(self):
         return self
@@ -39,10 +43,13 @@ class FakeCursor:
 
     def execute(self, sql, _params=None) -> None:
         self.executed.append(sql)
+        self.parameters.append(_params)
         if self.fail or sql == self.fail_on:
             raise RuntimeError("broken connection")
 
     def fetchone(self):
+        if self.executed[-1].startswith("SELECT current_setting"):
+            return {"statement_timeout": self.previous_timeout}
         return {"set_config": "30000"}
 
     def nextset(self) -> bool:
@@ -55,10 +62,16 @@ class FakeConnection:
         self.fail_health = fail_health
         self.fail_on = fail_on
         self.executed: list[str] = []
+        self.parameters: list[object] = []
 
     def cursor(self) -> FakeCursor:
         fail, self.fail_health = self.fail_health, False
-        return FakeCursor(fail=fail, fail_on=self.fail_on, executed=self.executed)
+        return FakeCursor(
+            fail=fail,
+            fail_on=self.fail_on,
+            executed=self.executed,
+            parameters=self.parameters,
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -134,23 +147,31 @@ class CatalogTests(unittest.TestCase):
 
         self.assertEqual(ensure_calls, [])
 
-    def test_execution_resets_statement_timeout_after_success(self) -> None:
+    def test_execution_restores_statement_timeout_after_success(self) -> None:
         config = PlaygroundConfig("postgresql://example", "csr", Path("assets"))
         connection = FakeConnection()
 
         result = run_with_error_handling(connection, ("SELECT 1",), config)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(connection.executed[-1], "RESET statement_timeout;")
+        self.assertEqual(
+            connection.executed[-1],
+            "SELECT set_config('statement_timeout', %s, false);",
+        )
+        self.assertEqual(connection.parameters[-1], ("17s",))
 
-    def test_execution_resets_statement_timeout_after_query_error(self) -> None:
+    def test_execution_restores_statement_timeout_after_query_error(self) -> None:
         config = PlaygroundConfig("postgresql://example", "csr", Path("assets"))
         connection = FakeConnection(fail_on="SELECT broken")
 
         result = run_with_error_handling(connection, ("SELECT broken",), config)
 
         self.assertFalse(result["ok"])
-        self.assertEqual(connection.executed[-1], "RESET statement_timeout;")
+        self.assertEqual(
+            connection.executed[-1],
+            "SELECT set_config('statement_timeout', %s, false);",
+        )
+        self.assertEqual(connection.parameters[-1], ("17s",))
 
     def test_execution_returns_bounded_error_shape(self) -> None:
         config = PlaygroundConfig("postgresql://example", "csr", Path("assets"))

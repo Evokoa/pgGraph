@@ -28,13 +28,13 @@ subject to the documented SQL, security, freshness, and resource contracts.
 
 | Capability | Status | Intended contract |
 |---|---|---|
-| Playground portability and stability fixes | Targeted for 1.1; not in 1.0 | Docker and Podman setup, deterministic Panama data, Python-shim handling, cached initialization, scoped statement timeouts, and stable data-frame rendering |
+| Playground portability and stability fixes | Implemented for 1.1; unreleased | Docker and Podman setup, deterministic Panama data, Python-shim handling, policy-compliant reuse of pre-provisioned virtual environments, cached initialization, scoped statement timeouts, and stable data-frame rendering |
 | Cancellation-safe graph replacement | Planned for 1.1 | A failed or cancelled build, vacuum, or maintenance replacement retains the last published generation |
 | Caller-scoped topology RLS | Planned for 1.1 | Traversal, paths, components, aggregation, GQL, Cypher, and workflows use the projection intersected with caller-visible node and relationship rows |
 | Operational telemetry authorization | Planned for 1.1 | Runtime, artifact, resource, build, and maintenance status expose physical totals only across an explicit selected/named-graph or graph-administrator boundary; telemetry totals are not RLS-row-filtered query results |
 | Query-start catalog deduplication | Planned for 1.1 | Resolve the selected graph and registered catalog once per graph query without weakening freshness, drift, ACL, or sync checks |
 | Relationship-typed shortest paths | Planned for 1.1 | Backward-compatible shortest-path overloads accept `edge_types text[]`; legacy calls continue to use every registered type |
-| Registration troubleshooting | Planned for 1.1 | Documentation identifies missing `::regclass` casts for table arguments |
+| Registration troubleshooting | Implemented for 1.1; unreleased | Documentation identifies missing `::regclass` casts for table arguments |
 
 ## Current RLS Boundary
 

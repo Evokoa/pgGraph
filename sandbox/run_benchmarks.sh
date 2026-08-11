@@ -70,7 +70,9 @@ if [ ! -d "${VENV_DIR}" ]; then
   "${BENCHMARK_PYTHON}" -m venv "${VENV_DIR}"
 fi
 
-pggraph_venv_pip "${VENV_DIR}" install -r "${SANDBOX_DIR}/benchmark/requirements.txt"
+pggraph_prepare_venv_requirements \
+  "${VENV_DIR}" \
+  "${SANDBOX_DIR}/benchmark/requirements.txt"
 
 "${VENV_DIR}/bin/python" "${SANDBOX_DIR}/common/run_benchmarks.py" \
   --dataset "${DATASET}" \

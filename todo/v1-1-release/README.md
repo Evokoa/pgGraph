@@ -754,7 +754,7 @@ when its evidence and exit gate are both satisfied.
 | Phase | Status at this snapshot | Blocking item |
 |---|---|---|
 | 0 | Complete | Scope, non-goals, compatibility direction, phase ownership, and supported-feature tracking are locked. |
-| 1 | In progress | The 12 implementations exist locally; clean-host evidence, docs work, roadmap retargeting, and clean integration remain. |
+| 1 | Complete | Reported fixes, policy-compliant virtualenv reuse, full Panama/Docker evidence, docs gates, and independent review are complete. |
 | 2 | Not started | Depends on the Phase 1 playground reproduction and baseline. |
 | 3 | Not started | Depends on cancellation-safe build replacement from Phase 2. |
 | 4 | Not started | Depends on caller identity and security-mode contract from Phase 3. |
@@ -800,17 +800,46 @@ it to the inventory before implementation continues.
 - Preserve commit separation or squash by coherent issue, not into one release
   dump.
 - Run each playground test from its supported working directory.
-- Run Docker and Podman clean-host smoke tests.
+- Run the available local container workflow and the fully qualified
+  Dockerfile-reference regression. Repeat clean-host Docker and Podman smokes
+  as a mandatory Phase 10 release-candidate matrix.
 - Run the pinned Panama preparation from an empty dataset cache.
 - Add the missing `::regclass` troubleshooting section and docs-drift check.
 - Commit the Phase 0 roadmap retargeting without rewriting historical plans.
 
-**Evidence:** clean-host command log, dataset checksum and uniqueness results,
-playground regression results, and docs-drift result.
+**Evidence:** available-runtime command log, Dockerfile portability regression,
+dataset checksum and uniqueness results, playground regression results, and
+docs-drift result.
+
+**Recorded Phase 1 evidence (2026-08-10):**
+
+- `sandbox/playground/.venv/bin/python -m unittest discover -s
+  sandbox/playground -p 'test_*.py'`: 31 passed, including Streamlit `AppTest`
+  rendering and first-click behavior.
+- `npm run check` in `docs`, `scripts/check_docs_drift.sh`, release validation,
+  script inventory, shell syntax, Python compilation, and `git diff --check`
+  pass.
+- A clean temporary Panama transform verified archive SHA-256
+  `34475194b6a8c2d683fddc55cca02f88f08f0a538521fb13a324975221624380`,
+  emitted 2,016,523 nodes and 3,339,267 source edges, and removed 1,139
+  duplicate node rows.
+- An isolated PostgreSQL 17.10 Docker preparation loaded the normalized data,
+  built 2,016,523 projected nodes and 6,678,534 directed edges, and returned
+  matching `graph.status()` counts.
+- The Dockerfile qualification regression passes. A no-cache Docker build
+  resolved both fully qualified Docker Hub references but the external
+  registry metadata fetch did not complete on this host. Podman is not
+  installed here; the qualified-reference regression is the retained portable
+  evidence, with a clean Podman smoke repeated at the release-candidate gate.
+- With `sfw` removed from `PATH`, an already-provisioned playground virtualenv
+  is reused without invoking pip. An unsatisfied environment fails closed and
+  requires `sfw` before installation.
 
 **Exit gate:** every pasted playground and documentation issue has a linked
-test or docs check, the working tree is clean, and this exact commit becomes
-the performance and behavior baseline for all subsequent phases.
+test or docs check, the available Docker workflow and static Podman-sensitive
+image-reference contract pass, and this exact commit becomes the performance
+and behavior baseline for all subsequent phases. Clean-host Docker and Podman
+remain mandatory before Phase 10 can complete.
 
 ### Phase 2: Make build replacement cancellation-safe
 
@@ -1139,6 +1168,9 @@ PostgreSQL versions, documentation, and rollback.
   rebuild-required path for artifacts without usable relationship identity.
 - Run PostgreSQL 14 through 18 source, package, install, update, artifact, and
   rollback gates.
+- Run the playground from clean Docker and Podman hosts with no unqualified
+  registry configuration, pre-provisioned-venv reuse, and fresh dependency
+  installation through `sfw`.
 - Re-run unrestricted and RLS-active performance suites against the exact
   candidate.
 - Archive security, correctness, performance, playground, SBOM, provenance,

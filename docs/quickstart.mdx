@@ -245,6 +245,10 @@ Auto-discovery is the fastest start for primary-key and foreign-key schemas.
 Manual registration gives more control over labels, direction, weights, tenant
 columns, and search columns. This small example mirrors the graph above:
 
+Table arguments are PostgreSQL relation identifiers, not ordinary strings.
+Keep the `::regclass` casts shown below; omitting one causes PostgreSQL to
+report that the overloaded function does not exist.
+
 ```sql
 SELECT graph.reset();
 
