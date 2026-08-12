@@ -763,7 +763,7 @@ when its evidence and exit gate are both satisfied.
 | 5 | Complete | The complete traverse/BFS vertical slice, retained evidence, and independent Rust security review pass. |
 | 6 | Complete | Direct traversal/path visibility, semantic tests, real-login transaction/savepoint evidence, benchmarks, and independent Rust review pass. |
 | 7 | Complete | Component unions, statistics, pagination, exact-path aggregation, and path estimates use caller-visible topology; retained evidence and independent Rust review pass. |
-| 8 | Not started | Depends on stable direct and derived admission behavior from Phases 6 and 7. |
+| 8 | Complete | GQL/Cypher scans, identity lookups, optional/join/wildcard expansion, workflow delegation, and projected write-MATCH paths use the shared caller visibility context. |
 | 9 | Not started | Depends on the Phase 8 security-complete checkpoint. |
 | 10 | Not started | Depends on all implementation phases and their retained evidence. |
 
@@ -1374,6 +1374,27 @@ workflow tests, row-cap ordering tests, and governed-resource evidence.
 **Exit gate:** every topology-producing surface in the Phase 0 inventory has a
 pre-topology visibility gate and a passing real-role regression test. This is
 the security-complete checkpoint for pgGraph 1.1.
+
+**Recorded Phase 8 evidence (2026-08-11):**
+
+- GQL source scans, identity resolution, joins, optional matching, wildcard
+  expansion, and both typed and untyped adjacency iterators now consume the
+  same query-scoped visibility context before row construction or caps.
+- Cypher reuses the GQL executor context, and the mapped read phase of
+  relationship `CREATE`, `SET`, `REMOVE`, relationship `DELETE`, and
+  `DETACH DELETE` cannot resolve hidden nodes or relationship rows. Plain node
+  `CREATE` and PostgreSQL-backed `MERGE` retain their native source-table RLS
+  boundary without requiring unrelated graph-wide reads.
+- The pure Rust suite passes 908 tests with one scale test ignored. A focused
+  executor regression proves that hidden targets and relationship identities
+  are both rejected before projection. Development clippy and the production
+  feature build are clean.
+- The PostgreSQL 17 real-login boundary suite passes GQL node and identity
+  scans, relationship RLS, multi-pattern joins, optional matching, bounded
+  wildcard paths, Cypher parity, hidden write targets/endpoints, session-GUC
+  policies, `BYPASSRLS`, `FORCE ROW LEVEL SECURITY`, `row_security = off`,
+  transaction-local identities, savepoints, and visibility-build cancellation
+  cleanup. Existing hydration probes remain as defense in depth.
 
 ### Phase 9: Add relationship-typed shortest-path overloads
 

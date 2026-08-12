@@ -7,6 +7,7 @@ use crate::projection::neighbors::EdgeOverlay;
 use crate::projection::neighbors::{CsrNeighbors, NeighborSource, OverlayNeighbors};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
+use crate::visibility::{QueryExecutionContext, VisibilityScope};
 
 use super::logical_plan::BoundDirection;
 use super::physical_plan::{
@@ -79,6 +80,7 @@ pub(crate) struct GqlNodeRow {
 /// Returns [`GraphError`] when the graph is not built, the requested
 /// relationship type is not present in the built engine registry, or execution
 /// exceeds the plan's cardinality cap.
+#[cfg(test)]
 pub(crate) fn execute(
     engine: &Engine,
     plan: &PhysicalPlan,
@@ -88,11 +90,23 @@ pub(crate) fn execute(
     execute_governed(engine, plan, tenant, &governor)
 }
 
+#[cfg(test)]
 pub(crate) fn execute_governed(
     engine: &Engine,
     plan: &PhysicalPlan,
     tenant: Option<&str>,
     governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<GqlRow>> {
+    let visibility = VisibilityScope::Unrestricted;
+    let context = QueryExecutionContext::new(governor, &visibility);
+    execute_in_context(engine, plan, tenant, &context)
+}
+
+pub(crate) fn execute_in_context(
+    engine: &Engine,
+    plan: &PhysicalPlan,
+    tenant: Option<&str>,
+    context: &QueryExecutionContext<'_>,
 ) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
@@ -101,16 +115,19 @@ pub(crate) fn execute_governed(
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
     reserve_execution_rows(
-        governor,
+        context.governor,
         engine,
         row_cap,
         one_hop_row_shape(plan.hops.max)?,
         crate::resource::ResourcePhase::QueryCandidates,
     )?
     .retain_until_governor_drop();
-    let neighbors = GqlNeighbors::new(engine)?;
-    for source_idx in source_nodes(engine, plan.source_table_oid, tenant) {
-        consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
+    let neighbors = GqlNeighbors::new(engine, context.visibility)?;
+    for source_idx in source_nodes(engine, plan.source_table_oid, tenant, context.visibility) {
+        consume_query_work(
+            context.governor,
+            crate::resource::ResourcePhase::QueryCandidates,
+        )?;
         if !node_active(engine, source_idx) || crate::projection::tx_delta::node_deleted(source_idx)
         {
             continue;
@@ -123,7 +140,7 @@ pub(crate) fn execute_governed(
                 rel_type_id,
                 tenant,
                 result_cap: row_cap.saturating_sub(rows.len()),
-                governor,
+                context,
             },
             source_idx,
         )?;
@@ -160,6 +177,7 @@ pub(crate) fn execute_governed(
 ///
 /// Returns [`GraphError`] when the graph is not built or execution exceeds the
 /// plan's cardinality cap.
+#[cfg(test)]
 pub(crate) fn execute_node_scan(
     engine: &Engine,
     plan: &PhysicalNodeScan,
@@ -170,6 +188,7 @@ pub(crate) fn execute_node_scan(
     execute_node_scan_governed(engine, plan, tenant, params, &governor)
 }
 
+#[cfg(test)]
 pub(crate) fn execute_node_scan_governed(
     engine: &Engine,
     plan: &PhysicalNodeScan,
@@ -177,12 +196,24 @@ pub(crate) fn execute_node_scan_governed(
     params: &crate::query::value::QueryParams,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<GqlNodeRow>> {
+    let visibility = VisibilityScope::Unrestricted;
+    let context = QueryExecutionContext::new(governor, &visibility);
+    execute_node_scan_in_context(engine, plan, tenant, params, &context)
+}
+
+pub(crate) fn execute_node_scan_in_context(
+    engine: &Engine,
+    plan: &PhysicalNodeScan,
+    tenant: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    context: &QueryExecutionContext<'_>,
+) -> GraphResult<Vec<GqlNodeRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
     let row_cap = plan.execution_row_cap();
     reserve_execution_rows(
-        governor,
+        context.governor,
         engine,
         row_cap,
         (1, 0),
@@ -195,21 +226,32 @@ pub(crate) fn execute_node_scan_governed(
             return Ok(optional_node_scan_fallback(plan));
         };
         if let Some(node_idx) = engine.resolve(plan.table_oid, &node_id) {
-            if crate::projection::tx_delta::node_deleted(node_idx)
+            if !context.visibility.allows_node(node_idx)
+                || crate::projection::tx_delta::node_deleted(node_idx)
                 || !tenant_allows_node(engine, node_idx, tenant)
             {
                 return Ok(optional_node_scan_fallback(plan));
             }
         } else {
             let table_is_tenanted = engine.tenanted_table_oids.contains(&plan.table_oid);
-            if !crate::projection::tx_delta::added_node_keys(
-                plan.table_oid,
-                tenant,
-                table_is_tenanted,
-            )
-            .iter()
-            .any(|added| added == &node_id)
-            {
+            let visible_added = if matches!(context.visibility, VisibilityScope::Unrestricted) {
+                crate::projection::tx_delta::added_node_keys(
+                    plan.table_oid,
+                    tenant,
+                    table_is_tenanted,
+                )
+                .iter()
+                .any(|added| added == &node_id)
+            } else {
+                crate::projection::tx_delta::resolve_added_node(
+                    plan.table_oid,
+                    &node_id,
+                    tenant,
+                    table_is_tenanted,
+                )
+                .is_some_and(|node_idx| context.visibility.allows_node(node_idx))
+            };
+            if !visible_added {
                 return Ok(optional_node_scan_fallback(plan));
             }
         }
@@ -223,8 +265,11 @@ pub(crate) fn execute_node_scan_governed(
     }
     let mut rows = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for node_idx in source_nodes(engine, plan.table_oid, tenant) {
-        consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
+    for node_idx in source_nodes(engine, plan.table_oid, tenant, context.visibility) {
+        consume_query_work(
+            context.governor,
+            crate::resource::ResourcePhase::QueryCandidates,
+        )?;
         if !node_active(engine, node_idx) || crate::projection::tx_delta::node_deleted(node_idx) {
             continue;
         }
@@ -248,7 +293,22 @@ pub(crate) fn execute_node_scan_governed(
     for node_id in
         crate::projection::tx_delta::added_node_keys(plan.table_oid, tenant, table_is_tenanted)
     {
-        consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
+        consume_query_work(
+            context.governor,
+            crate::resource::ResourcePhase::QueryCandidates,
+        )?;
+        let table_is_tenanted = engine.tenanted_table_oids.contains(&plan.table_oid);
+        let node_idx = crate::projection::tx_delta::resolve_added_node(
+            plan.table_oid,
+            &node_id,
+            tenant,
+            table_is_tenanted,
+        );
+        if node_idx.is_some_and(|node_idx| !context.visibility.allows_node(node_idx))
+            || (node_idx.is_none() && !matches!(context.visibility, VisibilityScope::Unrestricted))
+        {
+            continue;
+        }
         if seen.insert(node_id.clone()) {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
@@ -302,11 +362,23 @@ pub(crate) fn execute_join(
     execute_join_governed(engine, plan, tenant, &governor)
 }
 
+#[cfg(test)]
 pub(crate) fn execute_join_governed(
     engine: &Engine,
     plan: &PhysicalJoinPlan,
     tenant: Option<&str>,
     governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<GqlRow>> {
+    let visibility = VisibilityScope::Unrestricted;
+    let context = QueryExecutionContext::new(governor, &visibility);
+    execute_join_in_context(engine, plan, tenant, &context)
+}
+
+pub(crate) fn execute_join_in_context(
+    engine: &Engine,
+    plan: &PhysicalJoinPlan,
+    tenant: Option<&str>,
+    context: &QueryExecutionContext<'_>,
 ) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
@@ -319,14 +391,14 @@ pub(crate) fn execute_join_governed(
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
     reserve_execution_rows(
-        governor,
+        context.governor,
         engine,
         row_cap,
         join_row_shape(plan)?,
         crate::resource::ResourcePhase::QueryBlocking,
     )?
     .retain_until_governor_drop();
-    let neighbors = GqlNeighbors::new(engine)?;
+    let neighbors = GqlNeighbors::new(engine, context.visibility)?;
     let state = JoinState {
         node_slots: vec![None; plan.node_slots.len()],
         relationships: vec![None; plan.patterns.len()],
@@ -341,7 +413,7 @@ pub(crate) fn execute_join_governed(
         0,
         &mut rows,
         row_cap,
-        governor,
+        context,
     )?;
     Ok(rows)
 }
@@ -357,7 +429,7 @@ fn expand_join_pattern(
     pattern_idx: usize,
     rows: &mut Vec<GqlRow>,
     row_cap: usize,
-    governor: &crate::resource::ResourceGovernor,
+    context: &QueryExecutionContext<'_>,
 ) -> GraphResult<()> {
     let Some(pattern) = plan.patterns.get(pattern_idx) else {
         if rows.len() >= row_cap {
@@ -388,17 +460,33 @@ fn expand_join_pattern(
             pattern_idx + 1,
             rows,
             row_cap,
-            governor,
+            context,
         )?;
         return Ok(());
     }
-    let source_candidates =
-        join_source_candidates(engine, plan, &state, pattern.source_slot, tenant);
+    let source_candidates = join_source_candidates(
+        engine,
+        plan,
+        &state,
+        pattern.source_slot,
+        tenant,
+        context.visibility,
+    );
     let null_extend_per_source = plan.optional && state.node_slots.iter().all(Option::is_none);
     let mut matched_any_source = false;
     for source_idx in source_candidates {
-        consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
-        if !join_node_matches(engine, plan, pattern.source_slot, source_idx, tenant) {
+        consume_query_work(
+            context.governor,
+            crate::resource::ResourcePhase::QueryCandidates,
+        )?;
+        if !join_node_matches(
+            engine,
+            plan,
+            pattern.source_slot,
+            source_idx,
+            tenant,
+            context.visibility,
+        ) {
             continue;
         }
         let state = state.with_node(pattern.source_slot, source_idx);
@@ -417,7 +505,7 @@ fn expand_join_pattern(
             &mut matched_source,
             rows,
             row_cap,
-            governor,
+            context,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -434,7 +522,7 @@ fn expand_join_pattern(
                 pattern_idx + 1,
                 rows,
                 row_cap,
-                governor,
+                context,
             )?;
             if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
                 return Ok(());
@@ -454,7 +542,7 @@ fn expand_join_pattern(
             pattern_idx + 1,
             rows,
             row_cap,
-            governor,
+            context,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -478,11 +566,18 @@ fn expand_join_pattern_hops(
     matched_source: &mut bool,
     rows: &mut Vec<GqlRow>,
     row_cap: usize,
-    governor: &crate::resource::ResourceGovernor,
+    context: &QueryExecutionContext<'_>,
 ) -> GraphResult<()> {
     let pattern = &plan.patterns[pattern_idx];
     if hop_count >= pattern.hops.min
-        && join_node_matches(engine, plan, pattern.target_slot, current_idx, tenant)
+        && join_node_matches(
+            engine,
+            plan,
+            pattern.target_slot,
+            current_idx,
+            tenant,
+            context.visibility,
+        )
         && state.node_slots[pattern.target_slot].is_none_or(|idx| idx == current_idx)
     {
         *matched_source = true;
@@ -502,7 +597,7 @@ fn expand_join_pattern_hops(
             pattern_idx + 1,
             rows,
             row_cap,
-            governor,
+            context,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -511,10 +606,13 @@ fn expand_join_pattern_hops(
     if hop_count >= pattern.hops.max {
         return Ok(());
     }
-    for target in neighbors.for_direction_any(pattern.direction, current_idx) {
-        consume_query_work(governor, crate::resource::ResourcePhase::QueryExpand)?;
+    for target in neighbors.for_direction_any(pattern.direction, current_idx)? {
+        consume_query_work(
+            context.governor,
+            crate::resource::ResourcePhase::QueryExpand,
+        )?;
         if target.type_id != rel_type_ids[pattern_idx]
-            || !wildcard_node_visible(engine, target.node_idx, tenant)
+            || !wildcard_node_visible(engine, target.node_idx, tenant, context.visibility)
         {
             continue;
         }
@@ -541,7 +639,7 @@ fn expand_join_pattern_hops(
             matched_source,
             rows,
             row_cap,
-            governor,
+            context,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -566,11 +664,23 @@ pub(crate) fn execute_wildcard_path(
     execute_wildcard_path_governed(engine, plan, tenant, &governor)
 }
 
+#[cfg(test)]
 pub(crate) fn execute_wildcard_path_governed(
     engine: &Engine,
     plan: &PhysicalWildcardPathPlan,
     tenant: Option<&str>,
     governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<Vec<GqlRow>> {
+    let visibility = VisibilityScope::Unrestricted;
+    let context = QueryExecutionContext::new(governor, &visibility);
+    execute_wildcard_path_in_context(engine, plan, tenant, &context)
+}
+
+pub(crate) fn execute_wildcard_path_in_context(
+    engine: &Engine,
+    plan: &PhysicalWildcardPathPlan,
+    tenant: Option<&str>,
+    context: &QueryExecutionContext<'_>,
 ) -> GraphResult<Vec<GqlRow>> {
     if !engine.built {
         return Err(GraphError::NotBuilt);
@@ -588,14 +698,14 @@ pub(crate) fn execute_wildcard_path_governed(
         .collect::<GraphResult<Vec<_>>>()?;
     let row_cap = plan.execution_row_cap();
     reserve_execution_rows(
-        governor,
+        context.governor,
         engine,
         row_cap,
         wildcard_row_shape(plan)?,
         crate::resource::ResourcePhase::QueryPaths,
     )?
     .retain_until_governor_drop();
-    let neighbors = GqlNeighbors::new(engine)?;
+    let neighbors = GqlNeighbors::new(engine, context.visibility)?;
     let mut rows = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
     let scan_table_oids: Vec<u32> = plan.source_table_filter.map_or_else(
@@ -603,8 +713,11 @@ pub(crate) fn execute_wildcard_path_governed(
         |oid| vec![oid],
     );
     for table_oid in scan_table_oids {
-        for source_idx in source_nodes(engine, table_oid, tenant) {
-            consume_query_work(governor, crate::resource::ResourcePhase::QueryCandidates)?;
+        for source_idx in source_nodes(engine, table_oid, tenant, context.visibility) {
+            consume_query_work(
+                context.governor,
+                crate::resource::ResourcePhase::QueryCandidates,
+            )?;
             if !node_active(engine, source_idx)
                 || crate::projection::tx_delta::node_deleted(source_idx)
             {
@@ -618,7 +731,7 @@ pub(crate) fn execute_wildcard_path_governed(
                     segment_filters: &segment_filters,
                     tenant,
                     row_cap,
-                    governor,
+                    context,
                 },
                 source_idx,
                 &mut rows,
@@ -636,7 +749,7 @@ struct WildcardExpansion<'a> {
     segment_filters: &'a [std::collections::BTreeSet<u8>],
     tenant: Option<&'a str>,
     row_cap: usize,
-    governor: &'a crate::resource::ResourceGovernor,
+    context: &'a QueryExecutionContext<'a>,
 }
 
 type WildcardPathStepKey = (u32, u32, u8, Option<RelationshipId>);
@@ -664,7 +777,7 @@ fn expand_wildcard_segments(
         rows,
         seen_paths,
         expansion.row_cap,
-        expansion.governor,
+        expansion.context,
     )
 }
 
@@ -680,7 +793,7 @@ fn expand_wildcard_segment(
     rows: &mut Vec<GqlRow>,
     seen_paths: &mut SeenWildcardPaths,
     row_cap: usize,
-    governor: &crate::resource::ResourceGovernor,
+    context: &QueryExecutionContext<'_>,
 ) -> GraphResult<()> {
     let Some(segment) = plan.segments.get(segment_idx) else {
         let path_key = state
@@ -723,7 +836,7 @@ fn expand_wildcard_segment(
         rows,
         seen_paths,
         row_cap,
-        governor,
+        context,
     )
 }
 
@@ -741,10 +854,16 @@ fn expand_wildcard_segment_hops(
     rows: &mut Vec<GqlRow>,
     seen_paths: &mut SeenWildcardPaths,
     row_cap: usize,
-    governor: &crate::resource::ResourceGovernor,
+    context: &QueryExecutionContext<'_>,
 ) -> GraphResult<()> {
     if hop_count >= segment.hops.min
-        && wildcard_segment_endpoint_matches(engine, segment, state.node_idx, tenant)
+        && wildcard_segment_endpoint_matches(
+            engine,
+            segment,
+            state.node_idx,
+            tenant,
+            context.visibility,
+        )
     {
         expand_wildcard_segment(
             engine,
@@ -757,7 +876,7 @@ fn expand_wildcard_segment_hops(
             rows,
             seen_paths,
             row_cap,
-            governor,
+            context,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -766,14 +885,14 @@ fn expand_wildcard_segment_hops(
     if hop_count >= segment.hops.max {
         return Ok(());
     }
-    for target in neighbors.for_direction_any(segment.direction, state.node_idx) {
-        consume_query_work(governor, crate::resource::ResourcePhase::QueryPaths)?;
+    for target in neighbors.for_direction_any(segment.direction, state.node_idx)? {
+        consume_query_work(context.governor, crate::resource::ResourcePhase::QueryPaths)?;
         if !segment_filters[segment_idx].is_empty()
             && !segment_filters[segment_idx].contains(&target.type_id)
         {
             continue;
         }
-        if !wildcard_node_visible(engine, target.node_idx, tenant) {
+        if !wildcard_node_visible(engine, target.node_idx, tenant, context.visibility) {
             continue;
         }
         let next_state = state.push(target);
@@ -790,7 +909,7 @@ fn expand_wildcard_segment_hops(
             rows,
             seen_paths,
             row_cap,
-            governor,
+            context,
         )?;
         if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
             return Ok(());
@@ -799,10 +918,16 @@ fn expand_wildcard_segment_hops(
     Ok(())
 }
 
-fn wildcard_node_visible(engine: &Engine, target_idx: u32, tenant: Option<&str>) -> bool {
+fn wildcard_node_visible(
+    engine: &Engine,
+    target_idx: u32,
+    tenant: Option<&str>,
+    visibility: &VisibilityScope,
+) -> bool {
     node_active(engine, target_idx)
         && !crate::projection::tx_delta::node_deleted(target_idx)
         && tenant_allows_node(engine, target_idx, tenant)
+        && visibility.allows_node(target_idx)
 }
 
 fn wildcard_segment_endpoint_matches(
@@ -810,8 +935,9 @@ fn wildcard_segment_endpoint_matches(
     segment: &PhysicalWildcardPathSegment,
     target_idx: u32,
     tenant: Option<&str>,
+    visibility: &VisibilityScope,
 ) -> bool {
-    wildcard_node_visible(engine, target_idx, tenant)
+    wildcard_node_visible(engine, target_idx, tenant, visibility)
         && segment
             .target_table_filter
             .is_none_or(|table_oid| node_table_oid(engine, target_idx) == Some(table_oid))
@@ -828,6 +954,7 @@ fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<u8> {
         })
 }
 
+#[cfg(test)]
 fn execution_governor(engine: &Engine) -> GraphResult<crate::resource::ResourceGovernor> {
     let resident = crate::resource::ByteCount::from_usize(engine.estimated_memory_used_bytes())
         .ok_or_else(|| GraphError::Internal("engine residency does not fit u64".to_string()))?;
@@ -1036,6 +1163,7 @@ fn source_nodes<'a>(
     engine: &'a Engine,
     table_oid: u32,
     tenant: Option<&'a str>,
+    visibility: &'a VisibilityScope,
 ) -> impl Iterator<Item = u32> + 'a {
     let nodes: Box<dyn Iterator<Item = u32> + 'a> =
         if let Some(nodes) = engine.table_membership.get(&table_oid) {
@@ -1052,6 +1180,7 @@ fn source_nodes<'a>(
     nodes
         .chain(added)
         .filter(move |&idx| tenant_allows_node(engine, idx, tenant))
+        .filter(move |&idx| visibility.allows_node(idx))
 }
 
 fn consume_query_work(
@@ -1077,7 +1206,7 @@ struct TargetExpansion<'a> {
     rel_type_id: u8,
     tenant: Option<&'a str>,
     result_cap: usize,
-    governor: &'a crate::resource::ResourceGovernor,
+    context: &'a QueryExecutionContext<'a>,
 }
 
 fn expand_targets(expansion: &TargetExpansion<'_>, source_idx: u32) -> GraphResult<Vec<GqlTarget>> {
@@ -1088,7 +1217,7 @@ fn expand_targets(expansion: &TargetExpansion<'_>, source_idx: u32) -> GraphResu
         rel_type_id,
         tenant,
         result_cap,
-        governor,
+        context,
     } = expansion;
     let mut results = Vec::new();
     let preserve_path_matches = plan.hops.variable;
@@ -1102,8 +1231,11 @@ fn expand_targets(expansion: &TargetExpansion<'_>, source_idx: u32) -> GraphResu
         let mut next = Vec::new();
         let mut seen_next = std::collections::HashSet::new();
         for state in current {
-            for target in neighbors.for_direction(plan.direction, state.node_idx, *rel_type_id) {
-                consume_query_work(governor, crate::resource::ResourcePhase::QueryExpand)?;
+            for target in neighbors.for_direction(plan.direction, state.node_idx, *rel_type_id)? {
+                consume_query_work(
+                    context.governor,
+                    crate::resource::ResourcePhase::QueryExpand,
+                )?;
                 if !node_active(engine, target.node_idx)
                     || crate::projection::tx_delta::node_deleted(target.node_idx)
                     || !tenant_allows_node(engine, target.node_idx, *tenant)
@@ -1115,7 +1247,13 @@ fn expand_targets(expansion: &TargetExpansion<'_>, source_idx: u32) -> GraphResu
                 }
                 let next_state = state.push(target);
                 if depth >= plan.hops.min
-                    && target_matches(engine, target.node_idx, plan.target_table_oid, *tenant)
+                    && target_matches(
+                        engine,
+                        target.node_idx,
+                        plan.target_table_oid,
+                        *tenant,
+                        context.visibility,
+                    )
                 {
                     if results.len() >= *result_cap {
                         if plan.cap_exhaustion_is_error() {
@@ -1233,10 +1371,11 @@ struct GqlNeighbors<'a> {
     out_overlay: Option<EdgeOverlay>,
     in_overlay: Option<EdgeOverlay>,
     layered: Option<LayeredNeighbors<'a>>,
+    visibility: &'a VisibilityScope,
 }
 
 impl<'a> GqlNeighbors<'a> {
-    fn new(engine: &'a Engine) -> GraphResult<Self> {
+    fn new(engine: &'a Engine, visibility: &'a VisibilityScope) -> GraphResult<Self> {
         let layered = engine.layered_neighbors()?;
         let (out_overlay, in_overlay) = if layered.is_some() || !engine.has_edge_overlay() {
             (None, None)
@@ -1253,6 +1392,7 @@ impl<'a> GqlNeighbors<'a> {
             out_overlay,
             in_overlay,
             layered,
+            visibility,
         })
     }
 
@@ -1261,7 +1401,7 @@ impl<'a> GqlNeighbors<'a> {
         direction: BoundDirection,
         node_idx: u32,
         rel_type_id: u8,
-    ) -> Vec<GqlStepTarget> {
+    ) -> GraphResult<Vec<GqlStepTarget>> {
         let mut neighbors = Vec::new();
         if matches!(direction, BoundDirection::Out | BoundDirection::Undirected) {
             self.append_direction_neighbors(
@@ -1270,7 +1410,7 @@ impl<'a> GqlNeighbors<'a> {
                 rel_type_id,
                 EdgeOrientation::Forward,
                 &mut neighbors,
-            );
+            )?;
         }
         if matches!(direction, BoundDirection::In | BoundDirection::Undirected) {
             self.append_direction_neighbors(
@@ -1279,7 +1419,7 @@ impl<'a> GqlNeighbors<'a> {
                 rel_type_id,
                 EdgeOrientation::Reverse,
                 &mut neighbors,
-            );
+            )?;
         }
         if direction == BoundDirection::Undirected {
             sort_and_deduplicate_undirected(&mut neighbors);
@@ -1293,10 +1433,14 @@ impl<'a> GqlNeighbors<'a> {
                 )
             });
         }
-        neighbors
+        Ok(neighbors)
     }
 
-    fn for_direction_any(&self, direction: BoundDirection, node_idx: u32) -> Vec<GqlStepTarget> {
+    fn for_direction_any(
+        &self,
+        direction: BoundDirection,
+        node_idx: u32,
+    ) -> GraphResult<Vec<GqlStepTarget>> {
         let mut neighbors = Vec::new();
         if matches!(direction, BoundDirection::Out | BoundDirection::Undirected) {
             self.append_direction_neighbors_any(
@@ -1304,7 +1448,7 @@ impl<'a> GqlNeighbors<'a> {
                 node_idx,
                 EdgeOrientation::Forward,
                 &mut neighbors,
-            );
+            )?;
         }
         if matches!(direction, BoundDirection::In | BoundDirection::Undirected) {
             self.append_direction_neighbors_any(
@@ -1312,7 +1456,7 @@ impl<'a> GqlNeighbors<'a> {
                 node_idx,
                 EdgeOrientation::Reverse,
                 &mut neighbors,
-            );
+            )?;
         }
         if direction == BoundDirection::Undirected {
             sort_and_deduplicate_undirected(&mut neighbors);
@@ -1327,7 +1471,7 @@ impl<'a> GqlNeighbors<'a> {
                 )
             });
         }
-        neighbors
+        Ok(neighbors)
     }
 
     fn append_direction_neighbors(
@@ -1337,7 +1481,7 @@ impl<'a> GqlNeighbors<'a> {
         rel_type_id: u8,
         orientation: EdgeOrientation,
         out: &mut Vec<GqlStepTarget>,
-    ) {
+    ) -> GraphResult<()> {
         let (edge_store, overlay) = match direction {
             TraversalDirection::Any | TraversalDirection::Out => {
                 (self.out_store, self.out_overlay.as_ref())
@@ -1346,16 +1490,37 @@ impl<'a> GqlNeighbors<'a> {
         };
         if let Some(layered) = &self.layered {
             let neighbors = layered.for_direction(direction);
-            append_matching_neighbors(&neighbors, node_idx, rel_type_id, orientation, out);
-            return;
+            append_matching_neighbors(
+                &neighbors,
+                node_idx,
+                rel_type_id,
+                orientation,
+                self.visibility,
+                out,
+            )?;
+            return Ok(());
         }
         let Some((inserts, deletes)) = overlay else {
             let neighbors = CsrNeighbors::new(edge_store);
-            append_matching_neighbors(&neighbors, node_idx, rel_type_id, orientation, out);
-            return;
+            append_matching_neighbors(
+                &neighbors,
+                node_idx,
+                rel_type_id,
+                orientation,
+                self.visibility,
+                out,
+            )?;
+            return Ok(());
         };
         let neighbors = OverlayNeighbors::new(edge_store, inserts, deletes);
-        append_matching_neighbors(&neighbors, node_idx, rel_type_id, orientation, out);
+        append_matching_neighbors(
+            &neighbors,
+            node_idx,
+            rel_type_id,
+            orientation,
+            self.visibility,
+            out,
+        )
     }
 
     fn append_direction_neighbors_any(
@@ -1364,7 +1529,7 @@ impl<'a> GqlNeighbors<'a> {
         node_idx: u32,
         orientation: EdgeOrientation,
         out: &mut Vec<GqlStepTarget>,
-    ) {
+    ) -> GraphResult<()> {
         let (edge_store, overlay) = match direction {
             TraversalDirection::Any | TraversalDirection::Out => {
                 (self.out_store, self.out_overlay.as_ref())
@@ -1373,16 +1538,16 @@ impl<'a> GqlNeighbors<'a> {
         };
         if let Some(layered) = &self.layered {
             let neighbors = layered.for_direction(direction);
-            append_all_neighbors(&neighbors, node_idx, orientation, out);
-            return;
+            append_all_neighbors(&neighbors, node_idx, orientation, self.visibility, out)?;
+            return Ok(());
         }
         let Some((inserts, deletes)) = overlay else {
             let neighbors = CsrNeighbors::new(edge_store);
-            append_all_neighbors(&neighbors, node_idx, orientation, out);
-            return;
+            append_all_neighbors(&neighbors, node_idx, orientation, self.visibility, out)?;
+            return Ok(());
         };
         let neighbors = OverlayNeighbors::new(edge_store, inserts, deletes);
-        append_all_neighbors(&neighbors, node_idx, orientation, out);
+        append_all_neighbors(&neighbors, node_idx, orientation, self.visibility, out)
     }
 }
 
@@ -1445,32 +1610,49 @@ fn append_matching_neighbors(
     node_idx: u32,
     rel_type_id: u8,
     orientation: EdgeOrientation,
+    visibility: &VisibilityScope,
     out: &mut Vec<GqlStepTarget>,
-) {
-    out.extend(source.neighbors(node_idx).filter_map(|neighbor| {
-        (neighbor.type_id == rel_type_id).then_some(GqlStepTarget {
+) -> GraphResult<()> {
+    for neighbor in source.neighbors(node_idx) {
+        if neighbor.type_id != rel_type_id
+            || !visibility.allows_node(neighbor.target)
+            || !visibility.allows_relationship(neighbor.type_id, neighbor.relationship_id)?
+        {
+            continue;
+        }
+        out.push(GqlStepTarget {
             node_idx: neighbor.target,
             orientation,
             type_id: neighbor.type_id,
             schema_reversed: neighbor.schema_reversed,
             relationship_id: neighbor.relationship_id,
-        })
-    }));
+        });
+    }
+    Ok(())
 }
 
 fn append_all_neighbors(
     source: &impl NeighborSource,
     node_idx: u32,
     orientation: EdgeOrientation,
+    visibility: &VisibilityScope,
     out: &mut Vec<GqlStepTarget>,
-) {
-    out.extend(source.neighbors(node_idx).map(|neighbor| GqlStepTarget {
-        node_idx: neighbor.target,
-        orientation,
-        type_id: neighbor.type_id,
-        schema_reversed: neighbor.schema_reversed,
-        relationship_id: neighbor.relationship_id,
-    }));
+) -> GraphResult<()> {
+    for neighbor in source.neighbors(node_idx) {
+        if !visibility.allows_node(neighbor.target)
+            || !visibility.allows_relationship(neighbor.type_id, neighbor.relationship_id)?
+        {
+            continue;
+        }
+        out.push(GqlStepTarget {
+            node_idx: neighbor.target,
+            orientation,
+            type_id: neighbor.type_id,
+            schema_reversed: neighbor.schema_reversed,
+            relationship_id: neighbor.relationship_id,
+        });
+    }
+    Ok(())
 }
 
 fn join_source_candidates(
@@ -1479,9 +1661,10 @@ fn join_source_candidates(
     state: &JoinState,
     slot: usize,
     tenant: Option<&str>,
+    visibility: &VisibilityScope,
 ) -> Vec<u32> {
     state.node_slots[slot].map_or_else(
-        || source_nodes(engine, plan.node_slots[slot].table_oid, tenant).collect(),
+        || source_nodes(engine, plan.node_slots[slot].table_oid, tenant, visibility).collect(),
         |node_idx| vec![node_idx],
     )
 }
@@ -1492,15 +1675,28 @@ fn join_node_matches(
     slot: usize,
     node_idx: u32,
     tenant: Option<&str>,
+    visibility: &VisibilityScope,
 ) -> bool {
-    target_matches(engine, node_idx, plan.node_slots[slot].table_oid, tenant)
-        && !crate::projection::tx_delta::node_deleted(node_idx)
+    target_matches(
+        engine,
+        node_idx,
+        plan.node_slots[slot].table_oid,
+        tenant,
+        visibility,
+    ) && !crate::projection::tx_delta::node_deleted(node_idx)
 }
 
-fn target_matches(engine: &Engine, target_idx: u32, table_oid: u32, tenant: Option<&str>) -> bool {
+fn target_matches(
+    engine: &Engine,
+    target_idx: u32,
+    table_oid: u32,
+    tenant: Option<&str>,
+    visibility: &VisibilityScope,
+) -> bool {
     node_table_oid(engine, target_idx).is_some_and(|node_table_oid| node_table_oid == table_oid)
         && node_active(engine, target_idx)
         && tenant_allows_node(engine, target_idx, tenant)
+        && visibility.allows_node(target_idx)
 }
 
 fn tenant_allows_node(engine: &Engine, node_idx: u32, tenant: Option<&str>) -> bool {
@@ -1829,5 +2025,121 @@ mod resource_accounting_tests {
         };
 
         assert!(matches!(error, GraphError::ResourceLimit { .. }));
+    }
+
+    #[test]
+    fn visibility_filters_sources_targets_and_relationships_before_projection() {
+        let mut engine = Engine::new();
+        let source = engine.node_store.add_node(10, "source".to_string());
+        let hidden_target = engine.node_store.add_node(10, "hidden".to_string());
+        let visible_target = engine.node_store.add_node(10, "visible".to_string());
+        engine
+            .table_membership
+            .entry(10)
+            .or_default()
+            .insert(source);
+        engine
+            .table_membership
+            .entry(10)
+            .or_default()
+            .insert(hidden_target);
+        engine
+            .table_membership
+            .entry(10)
+            .or_default()
+            .insert(visible_target);
+        engine.edge_type_registry.push("knows".to_string());
+        let mut outgoing = crate::edge_store::SortedEdgeStoreBuilder::new(3, false);
+        outgoing
+            .try_push_identified(crate::edge_store::IdentifiedRawEdge {
+                edge: crate::edge_store::RawEdge {
+                    source,
+                    target: hidden_target,
+                    type_id: 0,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                relationship_id: 0,
+            })
+            .expect("hidden edge");
+        outgoing
+            .try_push_identified(crate::edge_store::IdentifiedRawEdge {
+                edge: crate::edge_store::RawEdge {
+                    source,
+                    target: visible_target,
+                    type_id: 0,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                relationship_id: 1,
+            })
+            .expect("visible edge");
+        engine.edge_store = outgoing.finish();
+        let mut incoming = crate::edge_store::SortedEdgeStoreBuilder::new(3, false);
+        incoming
+            .try_push_identified(crate::edge_store::IdentifiedRawEdge {
+                edge: crate::edge_store::RawEdge {
+                    source: hidden_target,
+                    target: source,
+                    type_id: 0,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                relationship_id: 0,
+            })
+            .expect("hidden reverse edge");
+        incoming
+            .try_push_identified(crate::edge_store::IdentifiedRawEdge {
+                edge: crate::edge_store::RawEdge {
+                    source: visible_target,
+                    target: source,
+                    type_id: 0,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                relationship_id: 1,
+            })
+            .expect("visible reverse edge");
+        engine.reverse_edge_store = incoming.finish();
+        engine.built = true;
+
+        let plan = PhysicalPlan {
+            optional: false,
+            source_var: "u".to_string(),
+            source_table_oid: 10,
+            source_label: "nodes".to_string(),
+            rel_type: "knows".to_string(),
+            rel_var: None,
+            direction: BoundDirection::Out,
+            hops: crate::query::logical_plan::HopBounds {
+                variable: false,
+                min: 1,
+                max: 1,
+            },
+            edge_mapping: None,
+            target_var: "v".to_string(),
+            target_table_oid: 10,
+            target_label: "nodes".to_string(),
+            returns: Vec::new(),
+            distinct_stages: Vec::new(),
+            distinct: false,
+            predicate: None,
+            order_by: Vec::new(),
+            skip: None,
+            limit: None,
+        };
+        let governor = execution_governor(&engine).expect("governor");
+        let mut hidden_nodes = roaring::RoaringBitmap::new();
+        hidden_nodes.insert(hidden_target);
+        let mut hidden_relationships = roaring::RoaringBitmap::new();
+        hidden_relationships.insert(1);
+        let mut rls_edge_types = roaring::RoaringBitmap::new();
+        rls_edge_types.insert(0);
+        let visibility =
+            VisibilityScope::enforced(hidden_nodes, hidden_relationships, rls_edge_types);
+        let context = QueryExecutionContext::new(&governor, &visibility);
+
+        let rows = execute_in_context(&engine, &plan, None, &context).expect("visible execution");
+        assert!(rows.is_empty());
     }
 }

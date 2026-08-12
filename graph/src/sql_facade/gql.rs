@@ -339,15 +339,21 @@ fn execute_statement_governed(
     catalog_tables: &[crate::builder::RegisteredTable],
     catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
+    let visibility = if statement_uses_projection_matching(&statement) {
+        crate::sql_visibility::build_visibility_scope(catalog_tables, catalog_edges, governor)?
+    } else {
+        crate::visibility::VisibilityScope::Unrestricted
+    };
+    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
     match statement {
         crate::query::physical_plan::PhysicalStatement::Read(plan) => {
             check_plan_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_governed(
+                crate::query::execute::execute_in_context(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
-                    governor,
+                    &context,
                 )
             })?;
             ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
@@ -373,12 +379,12 @@ fn execute_statement_governed(
         crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
             check_node_scan_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_node_scan_governed(
+                crate::query::execute::execute_node_scan_in_context(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
                     params,
-                    governor,
+                    &context,
                 )
             })?;
             ensure_gql_node_rows_visible(&matches, governor, catalog_tables)?;
@@ -395,11 +401,11 @@ fn execute_statement_governed(
         crate::query::physical_plan::PhysicalStatement::JoinRead(plan) => {
             check_join_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_join_governed(
+                crate::query::execute::execute_join_in_context(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
-                    governor,
+                    &context,
                 )
             })?;
             ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
@@ -417,11 +423,11 @@ fn execute_statement_governed(
         crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
             check_wildcard_path_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_wildcard_path_governed(
+                crate::query::execute::execute_wildcard_path_in_context(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
-                    governor,
+                    &context,
                 )
             })?;
             ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
@@ -447,7 +453,7 @@ fn execute_statement_governed(
                 tenant_scope,
                 params,
                 hydrate,
-                governor,
+                &context,
                 catalog_tables,
             )
         }
@@ -462,7 +468,7 @@ fn execute_statement_governed(
                 tenant_scope,
                 params,
                 hydrate,
-                governor,
+                &context,
                 catalog_tables,
             )
         }
@@ -473,7 +479,7 @@ fn execute_statement_governed(
                 tenant_scope,
                 params,
                 hydrate,
-                governor,
+                &context,
                 catalog_tables,
             )
         }
@@ -484,7 +490,7 @@ fn execute_statement_governed(
                 tenant_scope,
                 params,
                 hydrate,
-                governor,
+                &context,
                 catalog_tables,
                 catalog_edges,
             )
@@ -496,12 +502,22 @@ fn execute_statement_governed(
                 tenant_scope,
                 params,
                 hydrate,
-                governor,
+                &context,
                 catalog_tables,
                 catalog_edges,
             )
         }
     }
+}
+
+fn statement_uses_projection_matching(
+    statement: &crate::query::physical_plan::PhysicalStatement,
+) -> bool {
+    !matches!(
+        statement,
+        crate::query::physical_plan::PhysicalStatement::CreateNode(_)
+            | crate::query::physical_plan::PhysicalStatement::MergeNode(_)
+    )
 }
 
 fn execute_create_node(
@@ -529,7 +545,7 @@ fn execute_create_relationship(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
     catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL relationship CREATE")?;
@@ -544,14 +560,14 @@ fn execute_create_relationship(
         &source_scan,
         tenant_scope,
         params,
-        governor,
+        context,
         catalog_tables,
     )?;
     let target = matched_create_relationship_endpoint(
         &target_scan,
         tenant_scope,
         params,
-        governor,
+        context,
         catalog_tables,
     )?;
     lock_and_recheck_node_write(
@@ -591,7 +607,7 @@ fn execute_create_relationship(
         &target.node.node_id,
         created,
         hydrate,
-        governor,
+        context.governor,
         catalog_tables,
     )
 }
@@ -629,19 +645,25 @@ fn execute_set_property(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
     catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL SET")?;
     crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
     let scan = set_property_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            &scan,
+            tenant_scope,
+            params,
+            context,
+        )
     })?;
     let hydrated = hydrate_gql_node_rows_governed(
         &matches,
         scan.predicate.is_some(),
-        governor,
+        context.governor,
         catalog_tables,
     )?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
@@ -675,19 +697,25 @@ fn execute_remove_property(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
     catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL REMOVE")?;
     crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
     let scan = remove_property_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            &scan,
+            tenant_scope,
+            params,
+            context,
+        )
     })?;
     let hydrated = hydrate_gql_node_rows_governed(
         &matches,
         scan.predicate.is_some(),
-        governor,
+        context.governor,
         catalog_tables,
     )?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
@@ -778,19 +806,25 @@ fn execute_detach_delete_node(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
     catalog_tables: &[crate::builder::RegisteredTable],
     catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL DETACH DELETE")?;
     let scan = detach_delete_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            &scan,
+            tenant_scope,
+            params,
+            context,
+        )
     })?;
     let hydrated = hydrate_gql_node_rows_governed(
         &matches,
         scan.predicate.is_some(),
-        governor,
+        context.governor,
         catalog_tables,
     )?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
@@ -839,7 +873,7 @@ fn execute_delete_edge(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
     catalog_tables: &[crate::builder::RegisteredTable],
     catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
@@ -851,12 +885,17 @@ fn execute_delete_edge(
     )?;
     let read_plan = delete_edge_read_plan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute(&engine.borrow(), &read_plan, tenant_scope)
+        crate::query::execute::execute_in_context(
+            &engine.borrow(),
+            &read_plan,
+            tenant_scope,
+            context,
+        )
     })?;
     let hydrated = hydrate_gql_rows_governed(
         &matches,
         crate::query::value::requires_hydration(&read_plan, hydrate),
-        governor,
+        context.governor,
         catalog_tables,
     )?;
     let matches = crate::query::value::filter_rows(matches, &read_plan, &hydrated, params)?;
@@ -969,16 +1008,22 @@ fn matched_create_relationship_endpoint(
     scan: &crate::query::physical_plan::PhysicalNodeScan,
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
     catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<crate::query::execute::GqlNodeRow> {
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), scan, tenant_scope, params)
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            scan,
+            tenant_scope,
+            params,
+            context,
+        )
     })?;
     let hydrated = hydrate_gql_node_rows_governed(
         &matches,
         scan.predicate.is_some(),
-        governor,
+        context.governor,
         catalog_tables,
     )?;
     let matches = crate::query::value::filter_node_rows(matches, scan, &hydrated, params)?;
