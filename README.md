@@ -286,13 +286,16 @@ structure.
   typed `FilterIndex` values, tenant bitmaps, active bits, and sync overlays.
 - **Read-only artifact mapping.** Persisted `.pggraph` artifacts are written
   atomically. When a new Postgres backend spins up, it validates the artifact
-  and maps immutable forward graph arrays and the resolution index read-only.
-  The operating system page cache can then share those physical pages across
-  isolated PostgreSQL backends without copying the base graph into each
-  backend's Rust heap. This is not a replacement for PostgreSQL's buffer pool:
-  PostgreSQL remains responsible for table storage, WAL, MVCC, durability, and
-  crash recovery, while pgGraph's artifact is derived state that can be rebuilt
-  from source tables.
+  and copies it into a backend-local anonymous mapping before exposing immutable
+  forward graph arrays and the resolution index through read-only views. The
+  private snapshot prevents a concurrent write or truncation of the source file
+  from invalidating live Rust references. It also means each backend that loads
+  a graph retains approximately one artifact-sized private snapshot; base graph
+  pages are not shared across backends through the operating system page cache.
+  This is not a replacement for PostgreSQL's buffer pool: PostgreSQL remains
+  responsible for table storage, WAL, MVCC, durability, and crash recovery,
+  while pgGraph's artifact is derived state that can be rebuilt from source
+  tables.
 - **Predictable and safe.** Unbounded graph expansion can crash a database.
   pgGraph includes explicit circuit breakers: depth limits, visited-node
   tracking, frontier limits, pagination, and strict OOM/memory safeguards.
