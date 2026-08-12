@@ -208,9 +208,9 @@ graph.shortest_path(
   source_id text,
   target_table regclass,
   target_id text,
-  edge_types text[],
-  max_depth integer DEFAULT 20,
-  hydrate boolean DEFAULT true
+  max_depth integer,
+  hydrate boolean,
+  edge_types text[]
 )
 
 graph.weighted_shortest_path(
@@ -222,10 +222,11 @@ graph.weighted_shortest_path(
 )
 ```
 
-The required `edge_types` argument keeps four-argument calls unambiguous. The
-existing overloads delegate with `edge_types = NULL`. Both algorithms resolve
-labels once before entering the hot loop and compare compact type IDs during
-expansion.
+The required final `edge_types` argument keeps the existing four-, five-, and
+six-argument calls unambiguous, including an untyped `NULL` in the legacy
+`max_depth` position. Existing overloads continue to mean all relationship
+types. Both algorithms resolve labels once before entering the hot loop and
+compare compact type IDs during expansion.
 
 Tests must cover:
 
@@ -1421,6 +1422,33 @@ and path benchmarks with and without type filters.
 **Exit gate:** existing calls are unchanged, filtered paths compose with RLS,
 and callers no longer need a second graph artifact for relationship-type
 restriction.
+
+**Recorded Phase 9 evidence (2026-08-11):**
+
+- The legacy unweighted and weighted signatures remain installed. New overloads
+  accept a required `edge_types text[]`; the unweighted array is last so the
+  existing five-argument form, including untyped `NULL`, remains unambiguous.
+- Relationship labels are resolved once into a compact bitmap before algorithm
+  entry. Both unweighted expansion modes and weighted Dijkstra admit caller RLS
+  before applying the type-ID filter.
+- Focused Rust path tests pass for longer typed routes, weighted parity, empty
+  filters, unknown labels, hidden nodes, and hidden relationship identities.
+  Strict development clippy and the production feature build are clean.
+- The PostgreSQL overload acceptance test passes legacy metadata, exact result
+  shapes, empty-filter behavior, and parity with a recursive typed SQL query.
+  The PostgreSQL 17 real-login boundary suite passes typed visible routes,
+  hidden-node and hidden-edge rejection, weighted parity, and SQLSTATE `22023`
+  for an unknown relationship label.
+- A 40-sample warm PostgreSQL 17 microbenchmark on the six-node boundary
+  fixture measured unweighted median/p95 at 1,673.5/1,963.0 us without a type
+  filter and 1,675.0/1,772.0 us with one. Weighted median/p95 measured
+  1,686.0/1,800.4 us without a filter and 1,677.0/1,850.1 us with one. On this
+  fixed-work fixture, the compact relationship-type admission check adds no
+  measurable median regression.
+- The 1.0-to-1.1 update script creates both overloads with explicit PUBLIC
+  execution grants. The canonical schema, exact SQL signatures, release
+  contract, API reference, querying examples, and supported-feature ledger are
+  synchronized.
 
 ### Phase 10: Compatibility, documentation, and release candidate
 

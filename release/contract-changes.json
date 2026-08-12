@@ -316,5 +316,15 @@
     "date": "2026-08-11",
     "new_schema_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e",
     "previous_schema_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e"
+  },
+  {
+    "acknowledgement": "phase9-relationship-typed-shortest-paths",
+    "changed_sections": [
+      "sql_schema",
+      "sql_signatures"
+    ],
+    "date": "2026-08-11",
+    "new_schema_sha256": "19464640ada859e9ac88d363948efece4d7e1ee383dca923f9ed7b625510edcd",
+    "previous_schema_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e"
   }
 ]

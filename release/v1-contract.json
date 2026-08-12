@@ -950,10 +950,10 @@
     "schema_version": 1
   },
   "sql_schema": {
-    "entity_block_count": 157,
-    "function_contract_count": 155,
-    "function_contracts_sha256": "62fc32cfc44fe3084f36d8516b39e9eb81088932044961645eb435939046afff",
-    "normalized_sha256": "0c55186efdc45ad0802bd4e0cca97381b2d6b55de550e44d83262496bf1df46e"
+    "entity_block_count": 159,
+    "function_contract_count": 157,
+    "function_contracts_sha256": "9af14735d567ac9ad214993df58a269b7c5ba3558022c863499e0bb660e7935f",
+    "normalized_sha256": "19464640ada859e9ac88d363948efece4d7e1ee383dca923f9ed7b625510edcd"
   },
   "sql_signatures": [
     {
@@ -1517,6 +1517,10 @@
       "name": "shortest_path"
     },
     {
+      "declaration": "-- graph::sql_facade::traversal::shortest_path CREATE FUNCTION graph.\"shortest_path\"( \"source_table\" oid, \"source_id\" TEXT, \"target_table\" oid, \"target_id\" TEXT, \"max_depth\" INT, \"hydrate\" bool, \"edge_types\" TEXT[] ) RETURNS TABLE ( \"step\" INT, \"node_table\" oid, \"node_id\" TEXT, \"edge_label\" TEXT, \"node\" jsonb, \"node_table_name\" TEXT ) STRICT LANGUAGE c;",
+      "name": "shortest_path"
+    },
+    {
       "declaration": "-- graph::sql_facade::admin::status CREATE FUNCTION graph.\"status\"() RETURNS TABLE ( \"node_count\" INT, \"edge_count\" INT, \"memory_used_mb\" double precision, \"memory_limit_mb\" INT, \"sync_mode\" TEXT, \"sync_status\" TEXT, \"last_build\" timestamp with time zone, \"last_vacuum\" timestamp with time zone, \"edge_types\" TEXT[], \"edge_buffer_used\" INT, \"has_unidirectional_edges\" bool, \"schema_status\" TEXT, \"sync_lag\" bigint, \"pending_edge_deltas\" INT, \"needs_vacuum\" bool, \"needs_rebuild\" bool, \"applied_sync_id\" bigint, \"pending_sync_rows\" bigint, \"invalid_reason\" TEXT, \"disabled_trigger_count\" INT, \"read_only\" bool, \"read_only_reason\" TEXT, \"projection_mode\" TEXT, \"overlay_tombstone_count\" INT, \"overlay_memory_bytes\" bigint, \"compaction_recommended\" bool, \"tx_delta_dirty\" bool, \"tx_delta_added_nodes\" INT, \"tx_delta_deleted_nodes\" INT, \"tx_delta_added_edges\" INT, \"tx_delta_deleted_edges\" INT, \"tx_delta_memory_bytes\" bigint ) STRICT LANGUAGE c;",
       "name": "status"
     },
@@ -1558,6 +1562,10 @@
     },
     {
       "declaration": "-- graph::sql_facade::traversal::weighted_shortest_path CREATE FUNCTION graph.\"weighted_shortest_path\"( \"source_table\" oid, \"source_id\" TEXT, \"target_table\" oid, \"target_id\" TEXT ) RETURNS TABLE ( \"step\" INT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"edge_label\" TEXT, \"edge_weight\" bigint, \"step_cost\" bigint, \"total_cost\" bigint ) STRICT LANGUAGE c;",
+      "name": "weighted_shortest_path"
+    },
+    {
+      "declaration": "-- graph::sql_facade::traversal::weighted_shortest_path CREATE FUNCTION graph.\"weighted_shortest_path\"( \"source_table\" oid, \"source_id\" TEXT, \"target_table\" oid, \"target_id\" TEXT, \"edge_types\" TEXT[] ) RETURNS TABLE ( \"step\" INT, \"node_table\" oid, \"node_table_name\" TEXT, \"node_id\" TEXT, \"edge_label\" TEXT, \"edge_weight\" bigint, \"step_cost\" bigint, \"total_cost\" bigint ) STRICT LANGUAGE c;",
       "name": "weighted_shortest_path"
     }
   ]

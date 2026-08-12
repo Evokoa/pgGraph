@@ -3899,3 +3899,50 @@ LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'vacuum_wrapper';
 /* </end connected objects> */
 
+/* <begin connected objects> */
+-- src/sql_facade/traversal.rs:414
+-- graph::sql_facade::traversal::shortest_path
+CREATE FUNCTION graph."shortest_path"(
+	"source_table" oid,
+	"source_id" TEXT,
+	"target_table" oid,
+	"target_id" TEXT,
+	"max_depth" INT,
+	"hydrate" bool,
+	"edge_types" TEXT[]
+) RETURNS TABLE (
+	"step" INT,
+	"node_table" oid,
+	"node_id" TEXT,
+	"edge_label" TEXT,
+	"node" jsonb,
+	"node_table_name" TEXT
+)
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'shortest_path_typed_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- src/sql_facade/traversal.rs:660
+-- graph::sql_facade::traversal::weighted_shortest_path
+CREATE FUNCTION graph."weighted_shortest_path"(
+	"source_table" oid,
+	"source_id" TEXT,
+	"target_table" oid,
+	"target_id" TEXT,
+	"edge_types" TEXT[]
+) RETURNS TABLE (
+	"step" INT,
+	"node_table" oid,
+	"node_table_name" TEXT,
+	"node_id" TEXT,
+	"edge_label" TEXT,
+	"edge_weight" bigint,
+	"step_cost" bigint,
+	"total_cost" bigint
+)
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'weighted_shortest_path_typed_wrapper';
+/* </end connected objects> */

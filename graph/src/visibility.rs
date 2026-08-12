@@ -120,6 +120,7 @@ impl VisibilityScope {
 pub(crate) struct QueryExecutionContext<'a> {
     pub(crate) governor: &'a crate::resource::ResourceGovernor,
     pub(crate) visibility: &'a VisibilityScope,
+    pub(crate) edge_type_filter: Option<&'a RoaringBitmap>,
 }
 
 impl<'a> QueryExecutionContext<'a> {
@@ -130,6 +131,19 @@ impl<'a> QueryExecutionContext<'a> {
         Self {
             governor,
             visibility,
+            edge_type_filter: None,
+        }
+    }
+
+    pub(crate) const fn with_edge_type_filter(
+        governor: &'a crate::resource::ResourceGovernor,
+        visibility: &'a VisibilityScope,
+        edge_type_filter: Option<&'a RoaringBitmap>,
+    ) -> Self {
+        Self {
+            governor,
+            visibility,
+            edge_type_filter,
         }
     }
 }

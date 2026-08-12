@@ -88,6 +88,7 @@ pub(crate) fn shortest_path_with_neighbors(
         },
         None,
         &VisibilityScope::Unrestricted,
+        None,
     )
 }
 
@@ -125,6 +126,7 @@ pub(crate) fn shortest_path_with_neighbors_governed_with_context(
         request,
         Some(&budget),
         context.visibility,
+        context.edge_type_filter,
     );
     budget.finish(result)
 }
@@ -135,8 +137,13 @@ fn shortest_path_with_neighbors_inner(
     request: UnweightedPathRequest<'_>,
     budget: Option<&PathWorkBudget<'_>>,
     visibility: &VisibilityScope,
+    edge_type_filter: Option<&RoaringBitmap>,
 ) -> Option<Vec<PathStep>> {
-    let admission = PathAdmission { budget, visibility };
+    let admission = PathAdmission {
+        budget,
+        visibility,
+        edge_type_filter,
+    };
     let UnweightedPathRequest {
         source,
         target,
@@ -188,6 +195,7 @@ fn shortest_path_with_neighbors_inner(
 struct PathAdmission<'a, 'governor> {
     budget: Option<&'a PathWorkBudget<'governor>>,
     visibility: &'a VisibilityScope,
+    edge_type_filter: Option<&'a RoaringBitmap>,
 }
 
 fn bidirectional_bfs(
@@ -252,7 +260,7 @@ fn bidirectional_bfs(
                     if !consume_path_work(admission.budget) {
                         return None;
                     }
-                    if !path_candidate_visible(admission.budget, admission.visibility, edge)
+                    if !path_candidate_visible(admission, edge)
                         || !node_store.is_active(edge.target)
                         || crate::projection::tx_delta::node_deleted(edge.target)
                     {
@@ -297,7 +305,7 @@ fn bidirectional_bfs(
                     if !consume_path_work(admission.budget) {
                         return None;
                     }
-                    if !path_candidate_visible(admission.budget, admission.visibility, edge)
+                    if !path_candidate_visible(admission, edge)
                         || !node_store.is_active(edge.target)
                         || crate::projection::tx_delta::node_deleted(edge.target)
                     {
@@ -437,7 +445,7 @@ fn single_direction_bfs(
             if !consume_path_work(admission.budget) {
                 return None;
             }
-            if !path_candidate_visible(admission.budget, admission.visibility, edge)
+            if !path_candidate_visible(admission, edge)
                 || visited.contains(edge.target)
                 || !node_store.is_active(edge.target)
                 || crate::projection::tx_delta::node_deleted(edge.target)
@@ -534,6 +542,7 @@ pub(crate) fn weighted_shortest_path_with_neighbors(
         edge_type_registry,
         None,
         &VisibilityScope::Unrestricted,
+        None,
     )
 }
 
@@ -576,10 +585,15 @@ pub(crate) fn weighted_shortest_path_with_neighbors_governed_with_context(
         edge_type_registry,
         Some(&budget),
         context.visibility,
+        context.edge_type_filter,
     );
     budget.finish(result)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "weighted path execution keeps stores, coordinates, admission, and output labels explicit"
+)]
 fn weighted_shortest_path_with_neighbors_inner(
     node_store: &NodeStore,
     neighbors: &impl WeightedNeighborSource,
@@ -588,6 +602,7 @@ fn weighted_shortest_path_with_neighbors_inner(
     edge_type_registry: &[String],
     budget: Option<&PathWorkBudget<'_>>,
     visibility: &VisibilityScope,
+    edge_type_filter: Option<&RoaringBitmap>,
 ) -> Option<Vec<WeightedPathStep>> {
     if source >= node_store.node_count()
         || target >= node_store.node_count()
@@ -630,7 +645,9 @@ fn weighted_shortest_path_with_neighbors_inner(
                 return None;
             }
             let neighbor = edge.target;
-            if !path_weighted_candidate_visible(budget, visibility, edge) {
+            if !path_weighted_candidate_visible(budget, visibility, edge)
+                || edge_type_filter.is_some_and(|filter| !filter.contains(u32::from(edge.type_id)))
+            {
                 continue;
             }
             let edge_weight = edge.weight;
@@ -733,14 +750,22 @@ impl<'a> PathWorkBudget<'a> {
 }
 
 fn path_candidate_visible(
-    budget: Option<&PathWorkBudget<'_>>,
-    visibility: &VisibilityScope,
+    admission: PathAdmission<'_, '_>,
     edge: crate::projection::neighbors::Neighbor,
 ) -> bool {
-    match visibility.allows_relationship(edge.type_id, edge.relationship_id) {
-        Ok(allowed) => allowed && visibility.allows_node(edge.target),
+    match admission
+        .visibility
+        .allows_relationship(edge.type_id, edge.relationship_id)
+    {
+        Ok(allowed) => {
+            allowed
+                && admission.visibility.allows_node(edge.target)
+                && admission
+                    .edge_type_filter
+                    .is_none_or(|filter| filter.contains(u32::from(edge.type_id)))
+        }
         Err(error) => {
-            if let Some(budget) = budget {
+            if let Some(budget) = admission.budget {
                 budget.record_error(error);
             }
             false
@@ -980,6 +1005,92 @@ mod tests {
             vec!["N-0", "N-2", "N-1"]
         );
         assert_eq!(result.last().unwrap().total_cost, 4);
+    }
+
+    #[test]
+    fn edge_type_filters_select_longer_unweighted_and_weighted_paths() {
+        let mut nodes = NodeStore::new();
+        for idx in 0..4 {
+            nodes.add_node(100, format!("N-{idx}"));
+        }
+        let edge = |source, target, type_id, weight| RawEdge {
+            source,
+            target,
+            type_id,
+            weight: Some(weight),
+            schema_reversed: false,
+        };
+        let edges = identified_store(
+            4,
+            true,
+            vec![
+                (edge(0, 3, 1, 1), 10),
+                (edge(0, 1, 2, 2), 11),
+                (edge(1, 2, 2, 2), 12),
+                (edge(2, 3, 2, 2), 13),
+            ],
+        );
+        let mut only_long = RoaringBitmap::new();
+        only_long.insert(2);
+        let governor = path_governor(1_000);
+        let visibility = VisibilityScope::Unrestricted;
+        let context =
+            QueryExecutionContext::with_edge_type_filter(&governor, &visibility, Some(&only_long));
+        let registry = ["".to_string(), "direct".to_string(), "long".to_string()];
+
+        let unweighted = shortest_path_with_neighbors_governed_with_context(
+            &nodes,
+            &CsrNeighbors::new(&edges),
+            UnweightedPathRequest {
+                source: 0,
+                target: 3,
+                max_depth: 5,
+                has_unidirectional_edges: true,
+                edge_type_registry: &registry,
+            },
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+        let weighted = weighted_shortest_path_with_neighbors_governed_with_context(
+            &nodes, &edges, 0, 3, &registry, &context,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            unweighted
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["N-0", "N-1", "N-2", "N-3"]
+        );
+        assert_eq!(
+            weighted
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["N-0", "N-1", "N-2", "N-3"]
+        );
+        assert_eq!(weighted.last().unwrap().total_cost, 6);
+
+        let empty = RoaringBitmap::new();
+        let empty_context =
+            QueryExecutionContext::with_edge_type_filter(&governor, &visibility, Some(&empty));
+        assert!(shortest_path_with_neighbors_governed_with_context(
+            &nodes,
+            &CsrNeighbors::new(&edges),
+            UnweightedPathRequest {
+                source: 0,
+                target: 3,
+                max_depth: 5,
+                has_unidirectional_edges: true,
+                edge_type_registry: &registry,
+            },
+            &empty_context,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]

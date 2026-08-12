@@ -16,7 +16,7 @@ subject to the documented SQL, security, freshness, and resource contracts.
 | Registration | Manual and discovered table, relationship, filter-column, and named-graph registration |
 | Search | Source-table search with `contains`, `exact`, `prefix`, and `token` modes |
 | Traversal | Bounded BFS and DFS with direction, relationship type, table, tenant, indexed filters, hydration, pagination, and resource limits |
-| Paths | Unweighted and weighted shortest paths across all registered relationship types |
+| Paths | Unweighted and weighted shortest paths across all registered relationship types, with optional relationship-type restriction through backward-compatible overloads |
 | GQL and Cypher | The documented GQL-compatible read/write subset and Cypher compatibility entry point |
 | Analytics | Connected components, path counting, and server-side aggregation |
 | Synchronization | Manual rebuild, trigger-log synchronization, maintenance, vacuum, and transaction-local overlays |
@@ -34,7 +34,7 @@ subject to the documented SQL, security, freshness, and resource contracts.
 | Caller-scoped topology RLS | Implemented for 1.1; unreleased | Every topology-producing surface intersects projected nodes and relationship identities with caller-visible source rows before admission. This includes direct traversal and path APIs, workflows, components and statistics, aggregation and path estimates, GQL node/identity scans, optional and multi-pattern matches, wildcard paths, Cypher lowering, and the projected MATCH phase of mapped GQL writes. PostgreSQL DML remains the final write authority. |
 | Operational telemetry authorization | Implemented for 1.1; unreleased | Selected/named-graph status requires read authorization, artifact and build-resource status requires selected-graph admin authorization, cluster/resource telemetry requires graph-schema administration, and runtime rows are filtered to caller-readable graphs. These are physical totals, not RLS-row-filtered query results. |
 | Query-start catalog deduplication | Implemented for 1.1; unreleased | Each topology query initialization composes one owned state from the selected graph and one registered-catalog read. Fingerprints, schema drift, tenant scope, and applicable sync relations derive from that state; caller/graph-bound sync mediators and automatic replay reuse it without weakening freshness, ACL, or sync checks. |
-| Relationship-typed shortest paths | Planned for 1.1 | Backward-compatible shortest-path overloads accept `edge_types text[]`; legacy calls continue to use every registered type |
+| Relationship-typed shortest paths | Implemented for 1.1 | Backward-compatible shortest-path overloads accept a required `edge_types text[]`; the unweighted array is the seventh argument so legacy calls, including an untyped fifth-argument `NULL`, remain unambiguous |
 | Registration troubleshooting | Implemented for 1.1; unreleased | Documentation identifies missing `::regclass` casts for table arguments |
 
 ## Current RLS Boundary

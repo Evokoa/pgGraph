@@ -2551,6 +2551,28 @@ RETURNS TABLE (
 )
 ```
 
+Relationship-typed overload:
+
+```sql
+graph.shortest_path(
+  source_table regclass,
+  source_id text,
+  target_table regclass,
+  target_id text,
+  max_depth int,
+  hydrate boolean,
+  edge_types text[]
+)
+RETURNS TABLE (
+  step int,
+  node_table oid,
+  node_id text,
+  edge_label text,
+  node jsonb,
+  node_table_name text
+)
+```
+
 Returns no rows when no path is found. Pending trigger-sync edge overlays are
 included, so a backend that has applied sync sees inserted/deleted unweighted
 edges before the next vacuum or maintenance rebuild.
@@ -2575,6 +2597,34 @@ RETURNS TABLE (
   total_cost bigint
 )
 ```
+
+Relationship-typed overload:
+
+```sql
+graph.weighted_shortest_path(
+  source_table regclass,
+  source_id text,
+  target_table regclass,
+  target_id text,
+  edge_types text[]
+)
+RETURNS TABLE (
+  step int,
+  node_table oid,
+  node_table_name text,
+  node_id text,
+  edge_label text,
+  edge_weight bigint,
+  step_cost bigint,
+  total_cost bigint
+)
+```
+
+The type array is required and last on the unweighted overload so PostgreSQL
+can preserve legacy five-argument calls, including an untyped `NULL` for
+`max_depth`. An empty array returns no path; an unknown label
+fails with SQLSTATE `22023` (`PG005`). Visibility is evaluated before the type
+filter, so source-table RLS still governs every candidate route.
 
 Uses registered edge weights and returns one row per path step. Step `0` is the
 source node and has NULL `edge_label` and `edge_weight`. `step_cost` is the

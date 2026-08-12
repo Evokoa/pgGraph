@@ -411,6 +411,66 @@ pub(super) fn shortest_path(
     })
 }
 
+#[pg_extern(schema = "graph", name = "shortest_path")]
+#[allow(clippy::type_complexity)]
+fn shortest_path_typed(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    max_depth: i32,
+    hydrate: bool,
+    edge_types: Vec<String>,
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(node_table, pgrx::pg_sys::Oid),
+        name!(node_id, String),
+        name!(edge_label, Option<String>),
+        name!(node, Option<pgrx::JsonB>),
+        name!(node_table_name, String),
+    ),
+> {
+    with_panic_boundary("shortest_path()", || {
+        check_enabled_result().unwrap_or_else(|err| err.report());
+        acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
+        acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let edge_type_filter = ENGINE
+            .with(|engine| engine.borrow().resolve_edge_type_filter(Some(&edge_types)))
+            .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::with_edge_type_filter(
+            &governor,
+            &visibility,
+            edge_type_filter.as_ref(),
+        );
+        let rows = shortest_path_rows_in_context(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            max_depth,
+            hydrate,
+            &context,
+            &query_start.tables,
+        )
+        .unwrap_or_else(|err| err.report());
+        TableIterator::new(rows)
+    })
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "shortest-path execution keeps SQL coordinates, bounds, budget, and query catalog explicit"
@@ -594,6 +654,80 @@ fn weighted_shortest_path(
             })
             .collect::<Vec<_>>();
         TableIterator::new(rows)
+    })
+}
+
+#[pg_extern(schema = "graph", name = "weighted_shortest_path")]
+#[allow(clippy::type_complexity)]
+fn weighted_shortest_path_typed(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    edge_types: Vec<String>,
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(node_table, pgrx::pg_sys::Oid),
+        name!(node_table_name, String),
+        name!(node_id, String),
+        name!(edge_label, Option<String>),
+        name!(edge_weight, Option<i64>),
+        name!(step_cost, i64),
+        name!(total_cost, i64),
+    ),
+> {
+    with_panic_boundary("weighted_shortest_path()", || {
+        check_enabled();
+        acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
+        acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let edge_type_filter = ENGINE
+            .with(|engine| engine.borrow().resolve_edge_type_filter(Some(&edge_types)))
+            .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::with_edge_type_filter(
+            &governor,
+            &visibility,
+            edge_type_filter.as_ref(),
+        );
+        let steps = ENGINE.with(|engine| {
+            engine
+                .borrow()
+                .weighted_shortest_path_governed_in_context(
+                    source_table.to_u32(),
+                    source_id,
+                    target_table.to_u32(),
+                    target_id,
+                    &context,
+                )
+                .unwrap_or_else(|err| err.report())
+        });
+        acl::check_table_acls(steps.iter().map(|step| step.node_table.0))
+            .unwrap_or_else(|err| err.report());
+        TableIterator::new(steps.into_iter().map(|step| {
+            (
+                step.step,
+                pgrx::pg_sys::Oid::from_u32(step.node_table.0),
+                relation_name(step.node_table.0).unwrap_or_else(|err| err.report()),
+                step.node_id,
+                step.edge_label,
+                step.edge_weight.map(i64::from),
+                u64_to_bigint(step.step_cost).unwrap_or_else(|err| err.report()),
+                u64_to_bigint(step.total_cost).unwrap_or_else(|err| err.report()),
+            )
+        }))
     })
 }
 

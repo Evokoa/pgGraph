@@ -843,10 +843,16 @@ The release contract gate regenerates and compares every declaration.
 -- graph::sql_facade::admin::set_graph_residency CREATE FUNCTION graph."set_graph_residency"( "graph_name" TEXT, "residency" TEXT, "tenant" TEXT DEFAULT NULL, "namespace" TEXT DEFAULT NULL ) RETURNS TABLE ( "graph_id" TEXT, "graph_name" TEXT, "owner_role" oid, "created_by" oid, "tenant" TEXT, "namespace" TEXT, "graph_kind" TEXT, "residency" TEXT, "materialization" TEXT, "projection_mode" TEXT, "created_at" timestamp with time zone, "updated_at" timestamp with time zone ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
 ```
 
-### `graph.shortest_path`
+### `graph.shortest_path` (overload 1)
 
 ```sql
 -- graph::sql_facade::traversal::shortest_path CREATE FUNCTION graph."shortest_path"( "source_table" oid, "source_id" TEXT, "target_table" oid, "target_id" TEXT, "max_depth" INT DEFAULT 20, "hydrate" bool DEFAULT true ) RETURNS TABLE ( "step" INT, "node_table" oid, "node_id" TEXT, "edge_label" TEXT, "node" jsonb, "node_table_name" TEXT ) STRICT LANGUAGE c;
+```
+
+### `graph.shortest_path` (overload 2)
+
+```sql
+-- graph::sql_facade::traversal::shortest_path CREATE FUNCTION graph."shortest_path"( "source_table" oid, "source_id" TEXT, "target_table" oid, "target_id" TEXT, "max_depth" INT, "hydrate" bool, "edge_types" TEXT[] ) RETURNS TABLE ( "step" INT, "node_table" oid, "node_id" TEXT, "edge_label" TEXT, "node" jsonb, "node_table_name" TEXT ) STRICT LANGUAGE c;
 ```
 
 ### `graph.status`
@@ -909,8 +915,14 @@ The release contract gate regenerates and compares every declaration.
 -- graph::sql_facade::admin::vacuum_graph CREATE FUNCTION graph."vacuum_graph"( "graph_name" TEXT, "graph_tenant" TEXT DEFAULT NULL, "graph_namespace" TEXT DEFAULT NULL ) RETURNS TABLE ( "nodes_before" bigint, "nodes_after" bigint, "tombstones_removed" bigint, "edges_rebuilt" bigint, "vacuum_time_ms" double precision ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
 ```
 
-### `graph.weighted_shortest_path`
+### `graph.weighted_shortest_path` (overload 1)
 
 ```sql
 -- graph::sql_facade::traversal::weighted_shortest_path CREATE FUNCTION graph."weighted_shortest_path"( "source_table" oid, "source_id" TEXT, "target_table" oid, "target_id" TEXT ) RETURNS TABLE ( "step" INT, "node_table" oid, "node_table_name" TEXT, "node_id" TEXT, "edge_label" TEXT, "edge_weight" bigint, "step_cost" bigint, "total_cost" bigint ) STRICT LANGUAGE c;
+```
+
+### `graph.weighted_shortest_path` (overload 2)
+
+```sql
+-- graph::sql_facade::traversal::weighted_shortest_path CREATE FUNCTION graph."weighted_shortest_path"( "source_table" oid, "source_id" TEXT, "target_table" oid, "target_id" TEXT, "edge_types" TEXT[] ) RETURNS TABLE ( "step" INT, "node_table" oid, "node_table_name" TEXT, "node_id" TEXT, "edge_label" TEXT, "edge_weight" bigint, "step_cost" bigint, "total_cost" bigint ) STRICT LANGUAGE c;
 ```

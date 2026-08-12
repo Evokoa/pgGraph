@@ -45,6 +45,53 @@ SET search_path TO pg_catalog, pg_temp;
 REVOKE ALL ON TABLE graph._build_jobs FROM PUBLIC;
 REVOKE ALL ON TABLE graph._maintenance_jobs FROM PUBLIC;
 
+-- Relationship-typed path overloads preserve the 1.0 signatures while
+-- allowing callers to restrict route selection without a second projection.
+CREATE FUNCTION graph.shortest_path(
+    source_table oid,
+    source_id text,
+    target_table oid,
+    target_id text,
+    max_depth integer,
+    hydrate boolean,
+    edge_types text[]
+) RETURNS TABLE (
+    step integer,
+    node_table oid,
+    node_id text,
+    edge_label text,
+    node jsonb,
+    node_table_name text
+)
+STRICT LANGUAGE c
+AS 'MODULE_PATHNAME', 'shortest_path_typed_wrapper';
+
+CREATE FUNCTION graph.weighted_shortest_path(
+    source_table oid,
+    source_id text,
+    target_table oid,
+    target_id text,
+    edge_types text[]
+) RETURNS TABLE (
+    step integer,
+    node_table oid,
+    node_table_name text,
+    node_id text,
+    edge_label text,
+    edge_weight bigint,
+    step_cost bigint,
+    total_cost bigint
+)
+STRICT LANGUAGE c
+AS 'MODULE_PATHNAME', 'weighted_shortest_path_typed_wrapper';
+
+GRANT EXECUTE ON FUNCTION
+    graph.shortest_path(oid, text, oid, text, integer, boolean, text[])
+TO PUBLIC;
+GRANT EXECUTE ON FUNCTION
+    graph.weighted_shortest_path(oid, text, oid, text, text[])
+TO PUBLIC;
+
 -- Pinned catalog mediators let invoker entry points authorize the outer role
 -- without switching PostgreSQL user IDs or exposing internal catalog tables.
 CREATE FUNCTION graph._require_selected_graph_privilege_for_current_role(

@@ -891,6 +891,23 @@ FROM graph.shortest_path(
 );
 ```
 
+Restrict an unweighted path to one or more relationship types by using the
+seven-argument overload. The type array is last so legacy calls that pass an
+untyped `NULL` for `max_depth` remain unambiguous:
+
+```sql
+SELECT *
+FROM graph.shortest_path(
+  'public.users'::regclass,
+  'u1',
+  'public.users'::regclass,
+  'u9',
+  20,
+  true,
+  ARRAY['friend', 'member_of']::text[]
+);
+```
+
 Weighted shortest path:
 
 ```sql
@@ -902,6 +919,24 @@ FROM graph.weighted_shortest_path(
   'd'
 );
 ```
+
+The weighted overload accepts the type array as its fifth argument:
+
+```sql
+SELECT *
+FROM graph.weighted_shortest_path(
+  'public.places'::regclass,
+  'a',
+  'public.places'::regclass,
+  'd',
+  ARRAY['road', 'rail']::text[]
+);
+```
+
+An empty array matches no relationships. Unknown relationship labels fail with
+SQLSTATE `22023` and diagnostic `PG005`. Type filters compose with caller RLS:
+hidden nodes and relationship rows remain unavailable even when their label is
+included.
 
 Unweighted shortest path includes pending trigger-sync edge overlays after
 `graph.apply_sync()`. Weighted shortest path requires merged weighted CSR data;

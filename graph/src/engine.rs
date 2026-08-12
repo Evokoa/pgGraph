@@ -1641,6 +1641,32 @@ impl Engine {
         Ok(path)
     }
 
+    pub(crate) fn resolve_edge_type_filter(
+        &self,
+        edge_types: Option<&[String]>,
+    ) -> GraphResult<Option<roaring::RoaringBitmap>> {
+        let Some(edge_types) = edge_types else {
+            return Ok(None);
+        };
+        let mut filter = roaring::RoaringBitmap::new();
+        for edge_type in edge_types {
+            let Some(index) = self
+                .edge_type_registry
+                .iter()
+                .position(|label| label == edge_type)
+            else {
+                return Err(GraphError::InvalidFilter {
+                    reason: format!("unknown edge type '{edge_type}'"),
+                });
+            };
+            filter
+                .insert(u32::try_from(index).map_err(|_| {
+                    GraphError::Internal("edge type index exceeds u32".to_string())
+                })?);
+        }
+        Ok(Some(filter))
+    }
+
     /// Find weighted shortest path between two nodes.
     #[allow(dead_code, reason = "compatibility entry point")]
     pub fn weighted_shortest_path(
@@ -3091,6 +3117,15 @@ mod tests {
             TraversalStrategy::Bfs,
             TraversalDirection::Out,
         );
+        assert!(matches!(result, Err(GraphError::InvalidFilter { .. })));
+    }
+
+    #[test]
+    fn shortest_path_edge_type_filter_rejects_unknown_labels() {
+        let eng = build_test_engine();
+        let labels = ["missing".to_string()];
+        let result = eng.resolve_edge_type_filter(Some(&labels));
+
         assert!(matches!(result, Err(GraphError::InvalidFilter { .. })));
     }
 
