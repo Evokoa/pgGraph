@@ -136,7 +136,7 @@
       "GitHub release archive"
     ]
   },
-  "gql_implementation_sha256": "a502f542dd2f07131f433fb160864e53c3d0e83dcd7977f2aa4e87a374133069",
+  "gql_implementation_sha256": "8627cdbefa243576a985177c8e64c7797fb17ff01c0f48a1eab2016b3af56ba4",
   "gql_profile": {
     "assurance_profiles": {
       "read": {
@@ -950,10 +950,10 @@
     "schema_version": 1
   },
   "sql_schema": {
-    "entity_block_count": 159,
-    "function_contract_count": 157,
-    "function_contracts_sha256": "9af14735d567ac9ad214993df58a269b7c5ba3558022c863499e0bb660e7935f",
-    "normalized_sha256": "19464640ada859e9ac88d363948efece4d7e1ee383dca923f9ed7b625510edcd"
+    "entity_block_count": 168,
+    "function_contract_count": 166,
+    "function_contracts_sha256": "fb4bb1421944a77c645badc1ba4f80c41883f93e80c57316e00d2fd70f470e28",
+    "normalized_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d"
   },
   "sql_signatures": [
     {
@@ -1069,11 +1069,11 @@
       "name": "build_resource_status"
     },
     {
-      "declaration": "-- graph::sql_facade::admin::build_status CREATE FUNCTION graph.\"build_status\"( \"build_id\" TEXT ) RETURNS TABLE ( \"build_id\" TEXT, \"status\" TEXT, \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) STRICT LANGUAGE c;",
+      "declaration": "-- graph::sql_facade::admin::build_status CREATE FUNCTION graph.\"build_status\"( \"build_id\" TEXT ) RETURNS TABLE ( \"build_id\" TEXT, \"status\" TEXT, \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
       "name": "build_status"
     },
     {
-      "declaration": "-- graph::sql_facade::admin::build_status_for_graph CREATE FUNCTION graph.\"build_status_for_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"build_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"sync_mode\" TEXT, \"projection_mode\" TEXT, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) LANGUAGE c;",
+      "declaration": "-- graph::sql_facade::admin::build_status_for_graph CREATE FUNCTION graph.\"build_status_for_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"build_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"nodes_loaded\" bigint, \"edges_loaded\" bigint, \"build_time_ms\" double precision, \"memory_used_mb\" double precision, \"sync_mode\" TEXT, \"projection_mode\" TEXT, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
       "name": "build_status_for_graph"
     },
     {
@@ -1081,7 +1081,7 @@
       "name": "component"
     },
     {
-      "declaration": "-- graph::sql_facade::components::component_stats CREATE FUNCTION graph.\"component_stats\"() RETURNS TABLE ( \"num_components\" INT, \"largest_component\" INT, \"num_isolated_nodes\" INT, \"total_active_nodes\" INT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "declaration": "-- graph::sql_facade::components::component_stats CREATE FUNCTION graph.\"component_stats\"() RETURNS TABLE ( \"num_components\" INT, \"largest_component\" INT, \"num_isolated_nodes\" INT, \"total_active_nodes\" INT ) STRICT LANGUAGE c;",
       "name": "component_stats"
     },
     {
@@ -1089,7 +1089,7 @@
       "name": "components"
     },
     {
-      "declaration": "-- graph::sql_facade::components::connected_components CREATE FUNCTION graph.\"connected_components\"() RETURNS TABLE ( \"node_table\" oid, \"node_id\" TEXT, \"component_id\" bigint, \"component_size\" INT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "declaration": "-- graph::sql_facade::components::connected_components CREATE FUNCTION graph.\"connected_components\"() RETURNS TABLE ( \"node_table\" oid, \"node_id\" TEXT, \"component_id\" bigint, \"component_size\" INT ) STRICT LANGUAGE c;",
       "name": "connected_components"
     },
     {
@@ -1325,11 +1325,11 @@
       "name": "maintenance_graph"
     },
     {
-      "declaration": "-- graph::sql_facade::admin::maintenance_status CREATE FUNCTION graph.\"maintenance_status\"( \"job_id\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"job_id\" TEXT, \"status\" TEXT, \"sync_rows_applied\" bigint, \"nodes_after\" bigint, \"edges_after\" bigint, \"vacuum_time_ms\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) LANGUAGE c;",
+      "declaration": "-- graph::sql_facade::admin::maintenance_status CREATE FUNCTION graph.\"maintenance_status\"( \"job_id\" TEXT DEFAULT NULL ) RETURNS TABLE ( \"job_id\" TEXT, \"status\" TEXT, \"sync_rows_applied\" bigint, \"nodes_after\" bigint, \"edges_after\" bigint, \"vacuum_time_ms\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
       "name": "maintenance_status"
     },
     {
-      "declaration": "-- graph::sql_facade::admin::maintenance_status_for_graph CREATE FUNCTION graph.\"maintenance_status_for_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"sync_rows_applied\" bigint, \"nodes_after\" bigint, \"edges_after\" bigint, \"vacuum_time_ms\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) LANGUAGE c;",
+      "declaration": "-- graph::sql_facade::admin::maintenance_status_for_graph CREATE FUNCTION graph.\"maintenance_status_for_graph\"( \"graph_name\" TEXT, \"graph_tenant\" TEXT DEFAULT NULL, \"graph_namespace\" TEXT DEFAULT NULL, \"max_rows\" INT DEFAULT 50 ) RETURNS TABLE ( \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"status\" TEXT, \"sync_rows_applied\" bigint, \"nodes_after\" bigint, \"edges_after\" bigint, \"vacuum_time_ms\" double precision, \"progress_phase\" TEXT, \"progress_message\" TEXT, \"started_at\" timestamp with time zone, \"finished_at\" timestamp with time zone, \"error\" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
       "name": "maintenance_status_for_graph"
     },
     {
@@ -1537,7 +1537,7 @@
       "name": "transfer_graph_ownership"
     },
     {
-      "declaration": "-- graph::sql_facade::traversal::traverse CREATE FUNCTION graph.\"traverse\"( \"seed_table\" oid, \"seed_id\" TEXT, \"max_depth\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), \"edge_types\" TEXT[] DEFAULT NULL, \"direction\" TEXT DEFAULT 'any', \"node_tables\" oid[] DEFAULT NULL, \"filter\" jsonb DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"strategy\" TEXT DEFAULT 'bfs', \"uniqueness\" TEXT DEFAULT 'node_global', \"include_start\" bool DEFAULT true, \"hydrate\" bool DEFAULT true, \"max_rows\" INT DEFAULT 1000, \"row_offset\" INT DEFAULT 0, \"max_nodes\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), \"max_frontier\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) ) RETURNS TABLE ( \"root_table\" oid, \"root_id\" TEXT, \"node_table\" oid, \"node_id\" TEXT, \"depth\" INT, \"path\" jsonb, \"edge_path\" jsonb, \"node\" jsonb, \"root_table_name\" TEXT, \"node_table_name\" TEXT, \"capped\" bool ) SECURITY DEFINER COST 1000 SET search_path TO pg_catalog, pg_temp LANGUAGE c;",
+      "declaration": "-- graph::sql_facade::traversal::traverse CREATE FUNCTION graph.\"traverse\"( \"seed_table\" oid, \"seed_id\" TEXT, \"max_depth\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), \"edge_types\" TEXT[] DEFAULT NULL, \"direction\" TEXT DEFAULT 'any', \"node_tables\" oid[] DEFAULT NULL, \"filter\" jsonb DEFAULT NULL, \"tenant\" TEXT DEFAULT NULL, \"strategy\" TEXT DEFAULT 'bfs', \"uniqueness\" TEXT DEFAULT 'node_global', \"include_start\" bool DEFAULT true, \"hydrate\" bool DEFAULT true, \"max_rows\" INT DEFAULT 1000, \"row_offset\" INT DEFAULT 0, \"max_nodes\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), \"max_frontier\" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) ) RETURNS TABLE ( \"root_table\" oid, \"root_id\" TEXT, \"node_table\" oid, \"node_id\" TEXT, \"depth\" INT, \"path\" jsonb, \"edge_path\" jsonb, \"node\" jsonb, \"root_table_name\" TEXT, \"node_table_name\" TEXT, \"capped\" bool ) COST 1000 LANGUAGE c;",
       "name": "traverse"
     },
     {

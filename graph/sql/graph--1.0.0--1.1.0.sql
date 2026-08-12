@@ -1,15 +1,21 @@
 -- pgGraph 1.0.0 -> 1.1.0
 --
--- This script is extended by later 1.1 phases. Existing functions are altered
--- in place so their owner and explicit EXECUTE grants remain unchanged.
+-- Existing functions are altered in place so their owner and explicit EXECUTE
+-- grants remain unchanged.
 
 ALTER FUNCTION graph.traverse(
     oid, text, integer, text[], text, oid[], jsonb, text, text, text,
     boolean, boolean, integer, integer, integer, integer
 ) SECURITY INVOKER;
+ALTER FUNCTION graph.traverse(
+    oid, text, integer, text[], text, oid[], jsonb, text, text, text,
+    boolean, boolean, integer, integer, integer, integer
+) RESET ALL;
 
 ALTER FUNCTION graph.connected_components() SECURITY INVOKER;
+ALTER FUNCTION graph.connected_components() RESET ALL;
 ALTER FUNCTION graph.component_stats() SECURITY INVOKER;
+ALTER FUNCTION graph.component_stats() RESET ALL;
 
 -- Query start now passes catalog-derived table OIDs through backend-private
 -- one-shot state. Remove the 1.0 helper that accepted a caller-supplied

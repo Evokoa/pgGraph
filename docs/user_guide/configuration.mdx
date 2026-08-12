@@ -47,7 +47,7 @@ SELECT pg_reload_conf();
 | `graph.default_case_sensitive` | bool | `false` | `USERSET` | `on`, `off` | Search wrappers |
 | `graph.default_hydrate` | bool | `true` | `USERSET` | `on`, `off` | `graph.traverse_search()` hydrate default |
 | `graph.query_freshness` | string | `apply_pending_sync` | `USERSET` | `apply_pending_sync`, `off`, `error_on_pending` | Topology-read pending sync policy |
-| `graph.rls_mode` | string | `enforce` | `SUSET` | `enforce`, `legacy_bypass` | Caller-scoped topology RLS; the 1.1 implementation is being rolled out API by API |
+| `graph.rls_mode` | string | `enforce` | `SUSET` | `enforce`, `legacy_bypass` | Caller-scoped topology RLS; `legacy_bypass` is a superuser-only temporary compatibility mode |
 | `graph.max_nodes` | int | `100000` | `USERSET` | `1` to `10000000` | Traversal circuit breaker |
 | `graph.max_frontier` | int | `100000` | `USERSET` | `1` to `10000000` | BFS/DFS frontier circuit breaker |
 | `graph.max_exact_path_count` | int | `100000` | `USERSET` | `1` to `10000000` | `graph.path_count_estimate()`, `graph.aggregate()` |

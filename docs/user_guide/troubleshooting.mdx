@@ -161,6 +161,32 @@ pending edge overlays after `graph.apply_sync()`. Weighted shortest path fails
 closed while overlays are pending because pending edge mutations do not carry
 edge weights.
 
+## RLS Relationship Identity Requires A Rebuild
+
+Symptom:
+
+```text
+SQLSTATE 55000
+DETAIL: pgGraph diagnostic: PG023
+```
+
+pgGraph 1.1 evaluates relationship-source RLS before an edge can affect
+topology. That requires every projected edge to retain its source-row identity.
+If a compatible legacy artifact does not contain a usable identity for an
+RLS-active relationship mapping, pgGraph fails closed instead of treating the
+edge as visible.
+
+Rebuild from the authoritative PostgreSQL tables:
+
+```sql
+SELECT * FROM graph.build();
+```
+
+The replacement is published only after validation. If the rebuild fails or is
+cancelled, the previous published generation remains authoritative, but RLS
+queries that require the missing identity continue to fail closed until a
+successful rebuild.
+
 ## Schema Invalid Or Needs Rebuild
 
 Symptoms:

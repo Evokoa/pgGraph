@@ -577,19 +577,17 @@ fn gql_hydration_fails_closed_when_source_row_is_not_visible() {
     create_error_sqlstate_helper();
 
     Spi::run("SET ROLE graph_gql_hydration_rls").expect("set hydration rls role failed");
-    let sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
-                'MATCH (u:graph_gql_hydration_rls_pgtest) RETURN u',
-                hydrate := true
-             )"
-        )
-    ))
-    .expect("hydration SQLSTATE capture failed");
+    let rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
+            'MATCH (u:graph_gql_hydration_rls_pgtest) RETURN u',
+            hydrate := true
+         )",
+    )
+    .expect("hydration visibility count failed")
+    .unwrap_or_default();
     Spi::run("RESET ROLE").expect("reset hydration rls role failed");
 
-    assert_eq!(sqlstate.as_deref(), Some("22000"));
+    assert_eq!(rows, 0);
 }
 
 #[pg_test]
@@ -619,19 +617,17 @@ fn gql_coordinate_only_rows_fail_closed_when_source_row_is_not_visible() {
     create_error_sqlstate_helper();
 
     Spi::run("SET ROLE graph_gql_coordinate_rls").expect("set coordinate rls role failed");
-    let sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
-                'MATCH (u:graph_gql_coordinate_rls_pgtest) RETURN u',
-                hydrate := false
-             )"
-        )
-    ))
-    .expect("coordinate SQLSTATE capture failed");
+    let rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
+            'MATCH (u:graph_gql_coordinate_rls_pgtest) RETURN u',
+            hydrate := false
+         )",
+    )
+    .expect("coordinate visibility count failed")
+    .unwrap_or_default();
     Spi::run("RESET ROLE").expect("reset coordinate rls role failed");
 
-    assert_eq!(sqlstate.as_deref(), Some("22000"));
+    assert_eq!(rows, 0);
 }
 
 #[pg_test]
@@ -650,58 +646,47 @@ fn gql_coordinate_only_relationships_fail_closed_when_edge_row_is_not_visible() 
     create_error_sqlstate_helper();
 
     Spi::run("SET ROLE graph_gql_relationship_rls").expect("set relationship rls role failed");
-    let coordinate_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
+    let coordinate_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
                 'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
                  RETURN u, r, v',
                 hydrate := false
-             )"
-        )
-    ))
-    .expect("relationship coordinate SQLSTATE capture failed");
-    let hydrated_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
+             )",
+    )
+    .expect("relationship coordinate count failed")
+    .unwrap_or_default();
+    let hydrated_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
                 'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
                  RETURN u, r, v',
                 hydrate := true
-             )"
-        )
-    ))
-    .expect("relationship hydrated SQLSTATE capture failed");
-    let aggregate_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
+             )",
+    )
+    .expect("relationship hydrated count failed")
+    .unwrap_or_default();
+    let aggregate_count = Spi::get_one::<i64>(
+        "SELECT (row #>> '{relationship_count}')::bigint FROM graph.gql(
                 'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
                  RETURN count(r) AS relationship_count',
                 hydrate := false
-             )"
-        )
-    ))
-    .expect("relationship aggregate SQLSTATE capture failed");
-    let existence_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT EXISTS (
+             )",
+    )
+    .expect("relationship aggregate count failed")
+    .unwrap_or_default();
+    let exists = Spi::get_one::<bool>(
+        "SELECT EXISTS (
                 SELECT 1 FROM graph.gql(
                     'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
                      RETURN r',
                     hydrate := false
                 )
-             )"
-        )
-    ))
-    .expect("relationship existence SQLSTATE capture failed");
+             )",
+    )
+    .expect("relationship existence check failed")
+    .unwrap_or_default();
     Spi::run("RESET ROLE").expect("reset relationship rls role failed");
 
-    assert_eq!(coordinate_sqlstate.as_deref(), Some("22000"));
-    assert_eq!(hydrated_sqlstate.as_deref(), Some("22000"));
-    assert_eq!(aggregate_sqlstate.as_deref(), Some("22000"));
-    assert_eq!(existence_sqlstate.as_deref(), Some("22000"));
+    assert_eq!((coordinate_rows, hydrated_rows, aggregate_count, exists), (0, 0, 0, false));
 }
 
 #[pg_test]
@@ -763,24 +748,14 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
     )
     .expect("configure overlay RLS failed");
     create_error_sqlstate_helper();
-    let queries = [
-        "SELECT * FROM graph.gql(
+    let row_count_queries = [
+        "SELECT count(*)::bigint FROM graph.gql(
            'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN u, r, v',
            hydrate := false
          )",
-        "SELECT * FROM graph.gql(
+        "SELECT count(*)::bigint FROM graph.gql(
            'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN u, r, v',
            hydrate := true
-         )",
-        "SELECT * FROM graph.gql(
-           'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN count(r) AS relationship_count',
-           hydrate := false
-         )",
-        "SELECT EXISTS (
-           SELECT 1 FROM graph.gql(
-             'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN r',
-             hydrate := false
-           )
          )",
     ];
     Spi::run("SET ROLE graph_gql_overlay_rls").expect("set overlay role failed");
@@ -824,14 +799,31 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
     })
     .expect("restricted-role control queries failed");
     assert_eq!((visible_source_rows, hidden_source_rows, node_query_rows), (1, 0, 1));
-    for query in queries {
-        let sqlstate = Spi::get_one::<String>(&format!(
-            "SELECT public.graph_test_sqlstate({})",
-            super::sql_literal(query)
-        ))
-        .expect("overlay RLS SQLSTATE capture failed");
-        assert_eq!(sqlstate.as_deref(), Some("22000"));
+    for query in row_count_queries {
+        let rows = Spi::get_one::<i64>(query)
+            .expect("overlay RLS row count failed")
+            .unwrap_or_default();
+        assert_eq!(rows, 0);
     }
+    let aggregate_count = Spi::get_one::<i64>(
+        "SELECT (row #>> '{relationship_count}')::bigint FROM graph.gql(
+           'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN count(r) AS relationship_count',
+           hydrate := false
+         )",
+    )
+    .expect("overlay RLS aggregate count failed")
+    .unwrap_or_default();
+    let exists = Spi::get_one::<bool>(
+        "SELECT EXISTS (
+           SELECT 1 FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN r',
+             hydrate := false
+           )
+         )",
+    )
+    .expect("overlay RLS existence check failed")
+    .unwrap_or_default();
+    assert_eq!((aggregate_count, exists), (0, false));
     Spi::run("RESET ROLE").expect("reset overlay role failed");
     Spi::run("SET graph.auto_load = off").expect("restore auto-load failed");
     Spi::run("SET graph.persist_on_build = off").expect("restore persisted build failed");
@@ -855,34 +847,29 @@ fn gql_join_relationships_fail_closed_when_edge_row_is_not_visible() {
     create_error_sqlstate_helper();
 
     Spi::run("SET ROLE graph_gql_join_relationship_rls").expect("set relationship rls role failed");
-    let coordinate_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
+    let coordinate_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
                 'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest),
                        (u)-[:friend]->(v)
                  RETURN u, r, v',
                 hydrate := false
-             )"
-        )
-    ))
-    .expect("join relationship coordinate SQLSTATE capture failed");
-    let hydrated_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
+             )",
+    )
+    .expect("join relationship coordinate count failed")
+    .unwrap_or_default();
+    let hydrated_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
                 'MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest),
                        (u)-[:friend]->(v)
                  RETURN u, r, v',
                 hydrate := true
-             )"
-        )
-    ))
-    .expect("join relationship hydrated SQLSTATE capture failed");
+             )",
+    )
+    .expect("join relationship hydrated count failed")
+    .unwrap_or_default();
     Spi::run("RESET ROLE").expect("reset relationship rls role failed");
 
-    assert_eq!(coordinate_sqlstate.as_deref(), Some("22000"));
-    assert_eq!(hydrated_sqlstate.as_deref(), Some("22000"));
+    assert_eq!((coordinate_rows, hydrated_rows), (0, 0));
 }
 
 #[pg_test]
@@ -902,44 +889,36 @@ fn gql_wildcard_relationships_fail_closed_when_edge_row_is_not_visible() {
 
     Spi::run("SET ROLE graph_gql_wildcard_relationship_rls")
         .expect("set relationship rls role failed");
-    let coordinate_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
+    let coordinate_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
                 'MATCH p=(u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
                  RETURN p, r',
                 hydrate := false
-             )"
-        )
-    ))
-    .expect("wildcard relationship coordinate SQLSTATE capture failed");
-    let hydrated_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
+             )",
+    )
+    .expect("wildcard relationship coordinate count failed")
+    .unwrap_or_default();
+    let hydrated_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
                 'MATCH p=(u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
                  RETURN p, r',
                 hydrate := true
-             )"
-        )
-    ))
-    .expect("wildcard relationship hydrated SQLSTATE capture failed");
-    let relationship_list_sqlstate = Spi::get_one::<String>(&format!(
-        "SELECT public.graph_test_sqlstate({})",
-        super::sql_literal(
-            "SELECT * FROM graph.gql(
+             )",
+    )
+    .expect("wildcard relationship hydrated count failed")
+    .unwrap_or_default();
+    let relationship_list_rows = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.gql(
                 'MATCH p=(u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest)
                  RETURN relationships(p) AS relationships',
                 hydrate := false
-             )"
-        )
-    ))
-    .expect("wildcard relationship-list SQLSTATE capture failed");
+             )",
+    )
+    .expect("wildcard relationship-list count failed")
+    .unwrap_or_default();
     Spi::run("RESET ROLE").expect("reset relationship rls role failed");
 
-    assert_eq!(coordinate_sqlstate.as_deref(), Some("22000"));
-    assert_eq!(hydrated_sqlstate.as_deref(), Some("22000"));
-    assert_eq!(relationship_list_sqlstate.as_deref(), Some("22000"));
+    assert_eq!((coordinate_rows, hydrated_rows, relationship_list_rows), (0, 0, 0));
 }
 
 #[pg_test]

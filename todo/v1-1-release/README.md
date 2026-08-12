@@ -765,8 +765,8 @@ when its evidence and exit gate are both satisfied.
 | 6 | Complete | Direct traversal/path visibility, semantic tests, real-login transaction/savepoint evidence, benchmarks, and independent Rust review pass. |
 | 7 | Complete | Component unions, statistics, pagination, exact-path aggregation, and path estimates use caller-visible topology; retained evidence and independent Rust review pass. |
 | 8 | Complete | GQL/Cypher scans, identity lookups, optional/join/wildcard expansion, workflow delegation, and projected write-MATCH paths use the shared caller visibility context. |
-| 9 | Not started | Depends on the Phase 8 security-complete checkpoint. |
-| 10 | Not started | Depends on all implementation phases and their retained evidence. |
+| 9 | Complete | Relationship-typed shortest paths preserve legacy overload resolution, compose with caller RLS, pass recursive-SQL parity and performance evidence, and have independent Rust review. |
+| 10 | Complete | The 1.1 candidate metadata/docs, exact packaged update and artifact/rollback matrix on PostgreSQL 14-18, contract regeneration, full pg17 suite, and independent review are complete. |
 
 ### Phase 0: Freeze scope, contracts, and risk
 
@@ -1481,6 +1481,28 @@ PostgreSQL versions, documentation, and rollback.
 every supported PostgreSQL major, the public docs match its behavior, rollback
 is explicit and tested to the promised level, and no unresolved Phase 0
 inventory row remains.
+
+**Recorded Phase 10 evidence (2026-08-12):**
+
+- `cargo +1.96.0 pgrx test --no-default-features --features 'pg17 development'`
+  passed 1,200 tests with the single documented scale test ignored.
+- `v1_1_update_artifact_rollback.sh` passed locally on PostgreSQL 17 using the
+  packaged signed 1.0.0 source and the packaged 1.1.0 candidate. It verified
+  invoker metadata, explicit owner/grant preservation, node and relationship
+  RLS over the 1.0 artifact, safe backup restoration with the matching 1.0
+  package, re-registration/rebuild after logical restore, and a working 1.0
+  traversal.
+- The isolated Docker `v1-update-artifact-rollback` gate passed PostgreSQL 14,
+  15, 16, 17, and 18 with those same update, artifact, ACL, rollback, rebuild,
+  and query assertions.
+- Production `cargo check`, development `cargo clippy -D warnings`, 910 pure
+  Rust tests with one ignored scale test, documentation/public-doc/script
+  inventory checks, release-contract validation, `cargo fmt --check`, and
+  `git diff --check` passed.
+- The earlier phase checkpoints retain the real-login RLS/ACL, cancellation,
+  low-memory, concurrency, GQL write, playground Docker/Podman-compatibility,
+  Panama preparation, and unrestricted/RLS benchmark evidence required by
+  this release candidate.
 
 ## Compatibility and migration
 

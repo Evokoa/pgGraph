@@ -691,6 +691,36 @@
       "decision": "keep"
     },
     {
+      "path": "graph/tests/heavy/phase3_update_smoke.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash",
+        "cargo-pgrx",
+        "psql",
+        "createdb",
+        "dropdb"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
       "path": "graph/tests/heavy/playground_release_gate.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -744,6 +774,32 @@
     },
     {
       "path": "graph/tests/heavy/projection_recovery_gate.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/query_start_hot_path.sh",
       "owner": "pgGraph maintainers",
       "audience": "internal",
       "tier": "rc",
@@ -1227,6 +1283,39 @@
         "exit status"
       ],
       "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/v1_1_update_artifact_rollback.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash",
+        "cargo-pgrx",
+        "psql",
+        "pg_dump",
+        "pg_restore",
+        "createdb",
+        "dropdb",
+        "dropuser"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
       "timeout_seconds": 3600,
       "platforms": [
         "Linux",

@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.0.0-16a34a?style=flat-square" alt="Version 1.0.0">
+    <img src="https://img.shields.io/badge/version-1.1.0-16a34a?style=flat-square" alt="Version 1.1.0">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -100,7 +100,7 @@ scripts/quickstart.sh
 ```
 
 The signed multi-architecture release image is
-`ghcr.io/evokoa/pggraph:1.0.0`. Verify its published digest before deployment.
+`ghcr.io/evokoa/pggraph:1.1.0`. Verify its published digest before deployment.
 
 Verify the extensions are loaded (uses `psql` inside the container, so you
 don't need a local PostgreSQL client):
@@ -135,7 +135,7 @@ psql -d postgres -c "CREATE EXTENSION graph;"
 psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';"
 ```
 
-The formula installs pgGraph 1.0.0 from the signed release bundle.
+The formula installs pgGraph 1.1.0 from the signed release bundle.
 
 To build from source or run the full interactive demo instead, use the included
 quickstart script. It starts a disposable Docker-backed PostgreSQL database,
@@ -190,7 +190,7 @@ WSL2 or Git Bash with Docker Desktop. It is not a native PowerShell or Command
 Prompt script.
 
 Docker images are published for PostgreSQL 14 through 18. Tags without a
-PostgreSQL major, such as `1.0.0` and `latest`, use the default PostgreSQL 17
+PostgreSQL major, such as `1.1.0` and `latest`, use the default PostgreSQL 17
 image.
 PostgreSQL 13 is no longer an official support target after upstream EOL, though
 the legacy `pg13` pgrx feature remains available on a best-effort basis. The
@@ -198,7 +198,7 @@ PostgreSQL major version of the extension package must match the target server.
 
 ## PGXN Source Installation
 
-PGXN provides the verified source ZIP from the signed 1.0.0 release bundle.
+PGXN provides the verified source ZIP from the signed 1.1.0 release bundle.
 Because pgGraph is a Rust/pgrx extension, building from source requires the Rust
 toolchain.
 

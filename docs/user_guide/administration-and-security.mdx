@@ -178,7 +178,7 @@ table `SELECT` permissions.
 role, so row-level security policies on the underlying tables apply exactly as
 they would to a direct `SELECT`.
 
-The unreleased 1.1 direct traversal and path APIs build one statement-scoped
+The 1.1 topology APIs build one statement-scoped
 visibility scope after freshness handling. For each registered source relation
 where PostgreSQL says RLS applies to the outer caller, pgGraph scans
 caller-visible source keys and intersects them with projected node and
@@ -196,12 +196,10 @@ compatibility but is a deprecated no-op. `graph.rls_mode = 'enforce'` is the
 default. A superuser can select `legacy_bypass` as a temporary compatibility
 escape hatch; table ACL checks still apply.
 
-<Callout type="warning">
-Caller-scoped topology RLS is not yet wired into every API on this development
-branch. Components, aggregation, GQL/Cypher execution, and remaining derived
-workflow/analytics paths stay builder-scoped until their ordered 1.1 phases
-land. Do not treat those APIs as tenant-isolation boundaries yet.
-</Callout>
+The same visibility scope is used by components, aggregation, GQL/Cypher,
+derived workflows, path enumeration, and topology-producing mapped-write
+matching. PostgreSQL DML then rechecks source-table RLS, ACLs, constraints, and
+triggers before a mapped write commits.
 
 An RLS-active projected relationship must carry its durable source-row
 identity. A legacy artifact that lacks that identity fails closed with SQLSTATE

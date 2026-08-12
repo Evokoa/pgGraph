@@ -18,7 +18,7 @@ import verify_release_evidence
 
 class ReleaseMetadataTests(unittest.TestCase):
     def test_current_candidate_metadata_agrees(self) -> None:
-        validate_release.validate_version_metadata("1.0.0")
+        validate_release.validate_version_metadata("1.1.0")
 
     def test_candidate_version_mismatch_fails(self) -> None:
         original = validate_release.read_text
@@ -31,7 +31,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         with patch.object(validate_release, "read_text", side_effect=read_text):
             stderr = StringIO()
             with redirect_stderr(stderr), self.assertRaises(SystemExit) as failure:
-                validate_release.validate_version_metadata("1.0.0")
+                validate_release.validate_version_metadata("1.1.0")
             self.assertEqual(failure.exception.code, 1)
             self.assertIn("candidate_version", stderr.getvalue())
 

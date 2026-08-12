@@ -687,6 +687,21 @@ hydration filters, then sorts by depth, node table, and node ID for a single
 root before applying `row_offset` and `max_rows`. Multi-start traversal sorts by
 root table, root ID, depth, node table, and node ID before pagination.
 
+Source-table ACLs and RLS are applied before projected topology becomes
+observable. A hidden seed or target behaves as nonexistent, a hidden
+intermediate blocks visible nodes behind it, and a hidden relationship row
+cannot connect otherwise visible endpoints. Shortest-path selection therefore
+returns the best caller-visible path, or no path. Component sizes, statistics,
+path counts, and aggregates are computed from caller-visible topology rather
+than post-filtering unrestricted results. Hydrated and coordinate-only forms
+use the same visibility boundary.
+
+Visibility is evaluated against source rows at query time, while topology still
+comes from the synchronized projection. Newly committed rows or relationships
+do not become traversable until trigger sync is applied, the selected freshness
+mode catches up, or the graph is rebuilt. The visible result is the intersection
+of that projected snapshot and the caller's current source-row visibility.
+
 `uniqueness := 'node_global'` returns each reached node at most once across the
 merged multi-start result set. When more than one root reaches the same node,
 the row that sorts first by the multi-start ordering is kept. Use
@@ -974,6 +989,11 @@ SELECT * FROM graph.isolated_nodes(max_rows := 100);
 Component functions touch the whole graph. Run them on a read replica or during
 controlled windows for large production graphs.
 </Callout>
+
+Component identifiers and pagination are derived after caller visibility is
+applied. Two callers with different RLS policies can therefore observe
+different component membership, sizes, rankings, isolated nodes, and page
+contents from the same physical projection.
 
 ## Hydration
 

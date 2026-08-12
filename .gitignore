@@ -79,3 +79,4 @@ sandbox/playground/.venv/
 .direnv/
 .pgrx/
 .nix-cargo/
+.pggraph-v1.0-source.tar.gz

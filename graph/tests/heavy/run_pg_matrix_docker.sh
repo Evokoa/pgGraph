@@ -12,11 +12,29 @@ RUN_PACKAGE_INSTALL_MATRIX="${RUN_PACKAGE_INSTALL_MATRIX:-0}"
 RUN_CRASH_MATRIX="${RUN_CRASH_MATRIX:-0}"
 RUN_RUNTIME_RESOURCES="${RUN_RUNTIME_RESOURCES:-0}"
 RUN_PG_UPGRADE_MATRIX="${RUN_PG_UPGRADE_MATRIX:-0}"
+RUN_V1_UPDATE_ARTIFACT_ROLLBACK="${RUN_V1_UPDATE_ARTIFACT_ROLLBACK:-0}"
 PROFILE_TIMEOUT_SECONDS="${PROFILE_TIMEOUT_SECONDS:-600}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DOCKERFILE="$ROOT_DIR/graph/tests/heavy/Dockerfile.pg-matrix"
+V1_SOURCE_ARCHIVE="$ROOT_DIR/.pggraph-v1.0-source.tar.gz"
+
+cleanup() {
+  rm -f "$V1_SOURCE_ARCHIVE" "${V1_SOURCE_ARCHIVE}."*
+}
+trap cleanup EXIT
+
+v1_source_args=()
+if [[ "$RUN_V1_UPDATE_ARTIFACT_ROLLBACK" == "1" ]]; then
+  git -C "$ROOT_DIR" archive --format=tar.gz --output="$V1_SOURCE_ARCHIVE" v1.0.0 graph
+  split -b 400k "$V1_SOURCE_ARCHIVE" "${V1_SOURCE_ARCHIVE}."
+  v1_source_args=(
+    --secret "id=v1_source_aa,src=${V1_SOURCE_ARCHIVE}.aa"
+    --secret "id=v1_source_ab,src=${V1_SOURCE_ARCHIVE}.ab"
+  )
+fi
 
 docker build \
+  "${v1_source_args[@]}" \
   --build-arg "PG_VERSIONS=${PG_VERSIONS}" \
   --build-arg "RUN_RUST_TESTS=${RUN_RUST_TESTS}" \
   --build-arg "RUN_PGRX_SQL=${RUN_PGRX_SQL}" \
@@ -27,6 +45,7 @@ docker build \
   --build-arg "RUN_CRASH_MATRIX=${RUN_CRASH_MATRIX}" \
   --build-arg "RUN_RUNTIME_RESOURCES=${RUN_RUNTIME_RESOURCES}" \
   --build-arg "RUN_PG_UPGRADE_MATRIX=${RUN_PG_UPGRADE_MATRIX}" \
+  --build-arg "RUN_V1_UPDATE_ARTIFACT_ROLLBACK=${RUN_V1_UPDATE_ARTIFACT_ROLLBACK}" \
   --build-arg "PROFILE_TIMEOUT_SECONDS=${PROFILE_TIMEOUT_SECONDS}" \
   -f "$DOCKERFILE" \
   -t "$IMAGE" \

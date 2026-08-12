@@ -30,6 +30,18 @@ The exact supported surfaces are documented in the
 [GQL 1.0 profile](/user_guide/gql-profile), and
 [Versioning And Compatibility](/user_guide/versioning-and-compatibility).
 
+## 1.1 Security And Reliability Baseline
+
+The 1.1 release adds caller-scoped source-table RLS across every
+topology-producing surface, cancellation-safe generation replacement,
+authorized operational telemetry, deduplicated query-start catalog work, a
+portable and deterministic playground, and relationship-typed shortest-path
+overloads. Those are shipped baseline behavior, not future roadmap items.
+
+The 1.0 SQL and GQL profiles remain the named compatibility profiles because
+1.1 extends rather than replaces them. Future work must preserve the 1.1 RLS,
+publication, caller-identity, and PostgreSQL source-of-truth guarantees.
+
 ## 1.0 Production Baseline
 
 The 1.0 release established these ongoing release requirements:
@@ -85,9 +97,9 @@ For example, an LLM may emit `works_at`, `founded`, `acquired_by`, or
 `co_authored_with` as free-form structured output. These values must remain
 filterable during traversal instead of becoming opaque relationship properties.
 
-### Current 1.0 Boundary
+### Current 1.1 Boundary
 
-The 1.0 engine stores relationship-label IDs as `u8`. ID 0 is untyped and ID
+The 1.1 engine stores relationship-label IDs as `u8`. ID 0 is untyped and ID
 255 is reserved, so each graph can use 254 user-facing relationship labels.
 `label_column` interns every distinct nonempty source value into this registry.
 A build or sync path that needs another ID fails with SQLSTATE `54000` and
@@ -147,7 +159,7 @@ an ID, exhausting a backend, or silently grouping unrelated types.
 
 Applications should choose the current path by required semantics:
 
-| Need | Recommended 1.0 path |
+| Need | Recommended 1.1 path |
 |---|---|
 | Exact relationship types fit within 254 labels | Register the exact source value with `label_column` and filter with `edge_types` or a concrete GQL relationship type. |
 | Family-level traversal is sufficient | Store a bounded semantic family in a separate `graph_label` column, register that column, and retain the exact `relationship_name` in PostgreSQL. Prefer meaningful families such as `employment`, `ownership`, or `collaboration` over hash buckets. |
@@ -161,7 +173,7 @@ later filter cannot undo that reachability. Buckets are appropriate only when
 the bucket itself has useful graph meaning or the caller accepts candidate-set
 semantics.
 
-## Post-1.0 Direction
+## Post-1.1 Direction
 
 | Area | Direction |
 |---|---|

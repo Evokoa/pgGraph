@@ -33,6 +33,23 @@ types, and result columns. The sections below provide task-oriented guidance.
 
 ## Availability
 
+### Query security and freshness
+
+In pgGraph 1.1, topology-producing APIs enforce source-table `SELECT` and the
+outer caller's applicable row-level-security policies before a node or
+relationship can influence reachability, paths, costs, limits, components,
+statistics, aggregation, GQL/Cypher matching, or projected mapped-write target
+selection. Hidden seeds and targets behave as nonexistent. Operational status
+functions report authorized physical projection totals and are not
+RLS-filtered query-result counts.
+
+Topology comes from the synchronized projection, then intersects with current
+caller-visible source identities. Source inserts, deletes, or relationship
+changes wait for the configured freshness/sync path or a rebuild before the
+projection reflects them. `graph.rls_mode = 'enforce'` is the default;
+superusers may temporarily select `legacy_bypass`, and
+`graph.allow_rls_tables` is retained as a deprecated no-op.
+
 ### `graph.status()`
 
 ```sql

@@ -1,14 +1,12 @@
 # Supported Features
 
-This page distinguishes behavior available in pgGraph 1.0 from work targeted
-for pgGraph 1.1. A feature marked **Planned for 1.1** is not supported by the
-latest stable package until the 1.1 release notes mark it as shipped.
+This page summarizes the pgGraph 1.1 release surface and its explicit limits.
 
 PostgreSQL source tables remain authoritative for every release. Graph writes
 use PostgreSQL DML before projection synchronization, and graph reads remain
 subject to the documented SQL, security, freshness, and resource contracts.
 
-## Stable 1.0 Features
+## Stable 1.1 Features
 
 | Area | Supported behavior |
 |---|---|
@@ -21,25 +19,25 @@ subject to the documented SQL, security, freshness, and resource contracts.
 | Analytics | Connected components, path counting, and server-side aggregation |
 | Synchronization | Manual rebuild, trigger-log synchronization, maintenance, vacuum, and transaction-local overlays |
 | Persistence | Versioned, validated graph artifacts with generation manifests and lazy backend loading |
-| Security | Table ACL enforcement and source-table PostgreSQL authority; see the current RLS limitation below |
+| Security | Table ACL enforcement, caller-scoped source-table RLS for topology, authorized operational telemetry, and PostgreSQL authority |
 | Playground | Docker-backed Streamlit SQL playground with the Panama dataset fixture |
 
-## Targeted 1.1 Changes
+## Changes Shipped In 1.1
 
 | Capability | Status | Intended contract |
 |---|---|---|
-| Playground portability and stability fixes | Implemented for 1.1; unreleased | Docker and Podman setup, deterministic Panama data, Python-shim handling, policy-compliant reuse of pre-provisioned virtual environments, cached initialization, scoped statement timeouts, and stable data-frame rendering |
-| Cancellation-safe graph replacement | Implemented for 1.1; unreleased | Build, vacuum, foreground/background maintenance, projection compaction/repair, and durable sync ingestion publish only validated generations under one per-graph writer lock. Cancellation before publication retains the previous generation and removes only the recorded unpublished candidate; interruption after publication reconciles the backend to the new generation. Low-memory eviction is rejected unless the serving base, projection files, and relationship-identity sidecar pass recovery validation. |
-| Caller-preserving query boundary | Implemented for 1.1; unreleased | Topology query entry points run as `SECURITY INVOKER`, so hydration and other source-table SQL observe the outer application role. Narrow `SECURITY DEFINER` catalog mediators pin `search_path`, capture the outer role, and expose only authorized graph metadata; they do not switch Rust user IDs. This establishes caller identity but does not yet provide the planned topology/RLS intersection. |
-| Caller-scoped topology RLS | Implemented for 1.1; unreleased | Every topology-producing surface intersects projected nodes and relationship identities with caller-visible source rows before admission. This includes direct traversal and path APIs, workflows, components and statistics, aggregation and path estimates, GQL node/identity scans, optional and multi-pattern matches, wildcard paths, Cypher lowering, and the projected MATCH phase of mapped GQL writes. PostgreSQL DML remains the final write authority. |
-| Operational telemetry authorization | Implemented for 1.1; unreleased | Selected/named-graph status requires read authorization, artifact and build-resource status requires selected-graph admin authorization, cluster/resource telemetry requires graph-schema administration, and runtime rows are filtered to caller-readable graphs. These are physical totals, not RLS-row-filtered query results. |
-| Query-start catalog deduplication | Implemented for 1.1; unreleased | Each topology query initialization composes one owned state from the selected graph and one registered-catalog read. Fingerprints, schema drift, tenant scope, and applicable sync relations derive from that state; caller/graph-bound sync mediators and automatic replay reuse it without weakening freshness, ACL, or sync checks. |
-| Relationship-typed shortest paths | Implemented for 1.1 | Backward-compatible shortest-path overloads accept a required `edge_types text[]`; the unweighted array is the seventh argument so legacy calls, including an untyped fifth-argument `NULL`, remain unambiguous |
-| Registration troubleshooting | Implemented for 1.1; unreleased | Documentation identifies missing `::regclass` casts for table arguments |
+| Playground portability and stability fixes | Implemented in 1.1 | Docker and Podman setup, deterministic Panama data, Python-shim handling, policy-compliant reuse of pre-provisioned virtual environments, cached initialization, scoped statement timeouts, and stable data-frame rendering |
+| Cancellation-safe graph replacement | Implemented in 1.1 | Build, vacuum, foreground/background maintenance, projection compaction/repair, and durable sync ingestion publish only validated generations under one per-graph writer lock. Cancellation before publication retains the previous generation and removes only the recorded unpublished candidate; interruption after publication reconciles the backend to the new generation. Low-memory eviction is rejected unless the serving base, projection files, and relationship-identity sidecar pass recovery validation. |
+| Caller-preserving query boundary | Implemented in 1.1 | Topology query entry points run as `SECURITY INVOKER`, so hydration and other source-table SQL observe the outer application role. Narrow `SECURITY DEFINER` catalog mediators pin `search_path`, capture the outer role, and expose only authorized graph metadata; they do not switch Rust user IDs. |
+| Caller-scoped topology RLS | Implemented in 1.1 | Every topology-producing surface intersects projected nodes and relationship identities with caller-visible source rows before admission. This includes direct traversal and path APIs, workflows, components and statistics, aggregation and path estimates, GQL node/identity scans, optional and multi-pattern matches, wildcard paths, Cypher lowering, and the projected MATCH phase of mapped GQL writes. PostgreSQL DML remains the final write authority. |
+| Operational telemetry authorization | Implemented in 1.1 | Selected/named-graph status requires read authorization, artifact and build-resource status requires selected-graph admin authorization, cluster/resource telemetry requires graph-schema administration, and runtime rows are filtered to caller-readable graphs. These are physical totals, not RLS-row-filtered query results. |
+| Query-start catalog deduplication | Implemented in 1.1 | Each topology query initialization composes one owned state from the selected graph and one registered-catalog read. Fingerprints, schema drift, tenant scope, and applicable sync relations derive from that state; caller/graph-bound sync mediators and automatic replay reuse it without weakening freshness, ACL, or sync checks. |
+| Relationship-typed shortest paths | Implemented in 1.1 | Backward-compatible shortest-path overloads accept a required `edge_types text[]`; the unweighted array is the seventh argument so legacy calls, including an untyped fifth-argument `NULL`, remain unambiguous |
+| Registration troubleshooting | Implemented in 1.1 | Documentation identifies missing `::regclass` casts for table arguments |
 
 ## Current RLS Boundary
 
-The unreleased 1.1 topology, GQL, Cypher, workflow, component, and analytics APIs
+The 1.1 topology, GQL, Cypher, workflow, component, and analytics APIs
 evaluate applicable node and relationship policies as the caller, then exclude
 hidden identities before reachability, limits, paths, costs, component unions,
 statistics, or aggregate inputs are computed. Hidden seeds and targets behave

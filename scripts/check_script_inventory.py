@@ -28,6 +28,23 @@ MAINTAINER = {
     "scripts/check_secrets.sh",
     "scripts/validate_release.py",
 }
+HOST_MUTATING = {
+    "graph/tests/heavy/phase3_update_smoke.sh",
+    "graph/tests/heavy/v1_1_update_artifact_rollback.sh",
+}
+TOOL_OVERRIDES = {
+    "graph/tests/heavy/phase3_update_smoke.sh": ["bash", "cargo-pgrx", "psql", "createdb", "dropdb"],
+    "graph/tests/heavy/v1_1_update_artifact_rollback.sh": [
+        "bash",
+        "cargo-pgrx",
+        "psql",
+        "pg_dump",
+        "pg_restore",
+        "createdb",
+        "dropdb",
+        "dropuser",
+    ],
+}
 
 
 def maintained_scripts() -> list[Path]:
@@ -52,13 +69,17 @@ def entry(path: Path) -> dict[str, object]:
     relative = path.relative_to(ROOT).as_posix()
     audience = "public/stable" if relative in PUBLIC else "maintainer/stable" if relative in MAINTAINER else "internal"
     heavy = relative.startswith("graph/tests/heavy/")
-    destructive = any(word in path.name for word in ("clean", "cleanup", "crash", "install", "upgrade"))
+    destructive = relative in HOST_MUTATING or any(
+        word in path.name for word in ("clean", "cleanup", "crash", "install", "upgrade")
+    )
     return {
         "path": relative,
         "owner": "pgGraph maintainers",
         "audience": audience,
         "tier": "rc" if heavy or relative in MAINTAINER else "pr",
-        "required_tools": ["bash"] if path.suffix == ".sh" else ["python3"],
+        "required_tools": TOOL_OVERRIDES.get(
+            relative, ["bash"] if path.suffix == ".sh" else ["python3"]
+        ),
         "inputs": ["documented CLI arguments", "documented environment variables"],
         "outputs": ["stdout/stderr", "exit status"],
         "destructive": destructive,

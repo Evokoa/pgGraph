@@ -180,13 +180,13 @@ The release contract gate regenerates and compares every declaration.
 ### `graph.build_status`
 
 ```sql
--- graph::sql_facade::admin::build_status CREATE FUNCTION graph."build_status"( "build_id" TEXT ) RETURNS TABLE ( "build_id" TEXT, "status" TEXT, "nodes_loaded" bigint, "edges_loaded" bigint, "build_time_ms" double precision, "memory_used_mb" double precision, "progress_phase" TEXT, "progress_message" TEXT, "started_at" timestamp with time zone, "finished_at" timestamp with time zone, "error" TEXT ) STRICT LANGUAGE c;
+-- graph::sql_facade::admin::build_status CREATE FUNCTION graph."build_status"( "build_id" TEXT ) RETURNS TABLE ( "build_id" TEXT, "status" TEXT, "nodes_loaded" bigint, "edges_loaded" bigint, "build_time_ms" double precision, "memory_used_mb" double precision, "progress_phase" TEXT, "progress_message" TEXT, "started_at" timestamp with time zone, "finished_at" timestamp with time zone, "error" TEXT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
 ```
 
 ### `graph.build_status_for_graph`
 
 ```sql
--- graph::sql_facade::admin::build_status_for_graph CREATE FUNCTION graph."build_status_for_graph"( "graph_name" TEXT, "graph_tenant" TEXT DEFAULT NULL, "graph_namespace" TEXT DEFAULT NULL, "max_rows" INT DEFAULT 50 ) RETURNS TABLE ( "build_id" TEXT, "graph_id" TEXT, "graph_name" TEXT, "status" TEXT, "nodes_loaded" bigint, "edges_loaded" bigint, "build_time_ms" double precision, "memory_used_mb" double precision, "sync_mode" TEXT, "projection_mode" TEXT, "progress_phase" TEXT, "progress_message" TEXT, "started_at" timestamp with time zone, "finished_at" timestamp with time zone, "error" TEXT ) LANGUAGE c;
+-- graph::sql_facade::admin::build_status_for_graph CREATE FUNCTION graph."build_status_for_graph"( "graph_name" TEXT, "graph_tenant" TEXT DEFAULT NULL, "graph_namespace" TEXT DEFAULT NULL, "max_rows" INT DEFAULT 50 ) RETURNS TABLE ( "build_id" TEXT, "graph_id" TEXT, "graph_name" TEXT, "status" TEXT, "nodes_loaded" bigint, "edges_loaded" bigint, "build_time_ms" double precision, "memory_used_mb" double precision, "sync_mode" TEXT, "projection_mode" TEXT, "progress_phase" TEXT, "progress_message" TEXT, "started_at" timestamp with time zone, "finished_at" timestamp with time zone, "error" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
 ```
 
 ### `graph.component`
@@ -198,7 +198,7 @@ The release contract gate regenerates and compares every declaration.
 ### `graph.component_stats`
 
 ```sql
--- graph::sql_facade::components::component_stats CREATE FUNCTION graph."component_stats"() RETURNS TABLE ( "num_components" INT, "largest_component" INT, "num_isolated_nodes" INT, "total_active_nodes" INT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
+-- graph::sql_facade::components::component_stats CREATE FUNCTION graph."component_stats"() RETURNS TABLE ( "num_components" INT, "largest_component" INT, "num_isolated_nodes" INT, "total_active_nodes" INT ) STRICT LANGUAGE c;
 ```
 
 ### `graph.components`
@@ -210,7 +210,7 @@ The release contract gate regenerates and compares every declaration.
 ### `graph.connected_components`
 
 ```sql
--- graph::sql_facade::components::connected_components CREATE FUNCTION graph."connected_components"() RETURNS TABLE ( "node_table" oid, "node_id" TEXT, "component_id" bigint, "component_size" INT ) STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
+-- graph::sql_facade::components::connected_components CREATE FUNCTION graph."connected_components"() RETURNS TABLE ( "node_table" oid, "node_id" TEXT, "component_id" bigint, "component_size" INT ) STRICT LANGUAGE c;
 ```
 
 ### `graph.connection`
@@ -564,13 +564,13 @@ The release contract gate regenerates and compares every declaration.
 ### `graph.maintenance_status`
 
 ```sql
--- graph::sql_facade::admin::maintenance_status CREATE FUNCTION graph."maintenance_status"( "job_id" TEXT DEFAULT NULL ) RETURNS TABLE ( "job_id" TEXT, "status" TEXT, "sync_rows_applied" bigint, "nodes_after" bigint, "edges_after" bigint, "vacuum_time_ms" double precision, "progress_phase" TEXT, "progress_message" TEXT, "started_at" timestamp with time zone, "finished_at" timestamp with time zone, "error" TEXT ) LANGUAGE c;
+-- graph::sql_facade::admin::maintenance_status CREATE FUNCTION graph."maintenance_status"( "job_id" TEXT DEFAULT NULL ) RETURNS TABLE ( "job_id" TEXT, "status" TEXT, "sync_rows_applied" bigint, "nodes_after" bigint, "edges_after" bigint, "vacuum_time_ms" double precision, "progress_phase" TEXT, "progress_message" TEXT, "started_at" timestamp with time zone, "finished_at" timestamp with time zone, "error" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
 ```
 
 ### `graph.maintenance_status_for_graph`
 
 ```sql
--- graph::sql_facade::admin::maintenance_status_for_graph CREATE FUNCTION graph."maintenance_status_for_graph"( "graph_name" TEXT, "graph_tenant" TEXT DEFAULT NULL, "graph_namespace" TEXT DEFAULT NULL, "max_rows" INT DEFAULT 50 ) RETURNS TABLE ( "job_id" TEXT, "graph_id" TEXT, "graph_name" TEXT, "status" TEXT, "sync_rows_applied" bigint, "nodes_after" bigint, "edges_after" bigint, "vacuum_time_ms" double precision, "progress_phase" TEXT, "progress_message" TEXT, "started_at" timestamp with time zone, "finished_at" timestamp with time zone, "error" TEXT ) LANGUAGE c;
+-- graph::sql_facade::admin::maintenance_status_for_graph CREATE FUNCTION graph."maintenance_status_for_graph"( "graph_name" TEXT, "graph_tenant" TEXT DEFAULT NULL, "graph_namespace" TEXT DEFAULT NULL, "max_rows" INT DEFAULT 50 ) RETURNS TABLE ( "job_id" TEXT, "graph_id" TEXT, "graph_name" TEXT, "status" TEXT, "sync_rows_applied" bigint, "nodes_after" bigint, "edges_after" bigint, "vacuum_time_ms" double precision, "progress_phase" TEXT, "progress_message" TEXT, "started_at" timestamp with time zone, "finished_at" timestamp with time zone, "error" TEXT ) SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;
 ```
 
 ### `graph.memory_profile`
@@ -882,7 +882,7 @@ The release contract gate regenerates and compares every declaration.
 ### `graph.traverse` (overload 1)
 
 ```sql
--- graph::sql_facade::traversal::traverse CREATE FUNCTION graph."traverse"( "seed_table" oid, "seed_id" TEXT, "max_depth" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), "edge_types" TEXT[] DEFAULT NULL, "direction" TEXT DEFAULT 'any', "node_tables" oid[] DEFAULT NULL, "filter" jsonb DEFAULT NULL, "tenant" TEXT DEFAULT NULL, "strategy" TEXT DEFAULT 'bfs', "uniqueness" TEXT DEFAULT 'node_global', "include_start" bool DEFAULT true, "hydrate" bool DEFAULT true, "max_rows" INT DEFAULT 1000, "row_offset" INT DEFAULT 0, "max_nodes" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), "max_frontier" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) ) RETURNS TABLE ( "root_table" oid, "root_id" TEXT, "node_table" oid, "node_id" TEXT, "depth" INT, "path" jsonb, "edge_path" jsonb, "node" jsonb, "root_table_name" TEXT, "node_table_name" TEXT, "capped" bool ) SECURITY DEFINER COST 1000 SET search_path TO pg_catalog, pg_temp LANGUAGE c;
+-- graph::sql_facade::traversal::traverse CREATE FUNCTION graph."traverse"( "seed_table" oid, "seed_id" TEXT, "max_depth" INT DEFAULT COALESCE(NULLIF(current_setting('graph.default_max_depth', true), '')::int, 5), "edge_types" TEXT[] DEFAULT NULL, "direction" TEXT DEFAULT 'any', "node_tables" oid[] DEFAULT NULL, "filter" jsonb DEFAULT NULL, "tenant" TEXT DEFAULT NULL, "strategy" TEXT DEFAULT 'bfs', "uniqueness" TEXT DEFAULT 'node_global', "include_start" bool DEFAULT true, "hydrate" bool DEFAULT true, "max_rows" INT DEFAULT 1000, "row_offset" INT DEFAULT 0, "max_nodes" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_nodes', true), '')::int, 100000), "max_frontier" INT DEFAULT COALESCE(NULLIF(current_setting('graph.max_frontier', true), '')::int, 100000) ) RETURNS TABLE ( "root_table" oid, "root_id" TEXT, "node_table" oid, "node_id" TEXT, "depth" INT, "path" jsonb, "edge_path" jsonb, "node" jsonb, "root_table_name" TEXT, "node_table_name" TEXT, "capped" bool ) COST 1000 LANGUAGE c;
 ```
 
 ### `graph.traverse` (overload 2)

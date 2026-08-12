@@ -627,11 +627,11 @@ The protected package workflow does not publish the external Evokoa Homebrew
 tap. After the signed GitHub release exists, the tap owner performs a separate
 handoff:
 
-1. Update the formula to the signed 1.0.0 source archive URL and exact SHA-256.
+1. Update the formula to the signed 1.1.0 source archive URL and exact SHA-256.
 2. Run `brew audit --strict --online pggraph`, `brew style pggraph`, and
    `brew test pggraph` in the tap repository.
 3. Install into PostgreSQL 17, query `pg_extension`, and verify the reported
-   extension version is `1.0.0`.
+   extension version is `1.1.0`.
 4. Announce Homebrew availability only after the formula commit and checksum
    are reviewed. A delayed tap update does not change PGXN/GHCR release bytes.
 

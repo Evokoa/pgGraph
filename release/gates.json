@@ -12,8 +12,8 @@
   "tiers": {
     "pr": ["script-contracts", "docs-drift", "docs-render", "rust-static"],
     "nightly": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "rust-docs", "rust-tests"],
-    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "release-bundle"],
-    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "postgres-sanitizer", "release-bundle"]
+    "rc": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "package-install-matrix", "v1-update-artifact-rollback", "release-bundle"],
+    "full-matrix": ["script-contracts", "docs-drift", "docs-render", "external-links", "rust-static", "checked-casts", "miri-mapped", "rust-docs", "legacy-release", "crash-recovery", "tx-delta-crash-recovery", "read-latency", "supported-majors", "linux-runtime-resources", "pg-upgrade-matrix", "package-install-matrix", "v1-update-artifact-rollback", "postgres-sanitizer", "release-bundle"]
   },
   "gates": {
     "script-contracts": {
@@ -186,6 +186,15 @@
       "thresholds": {"packaged_postgresql_majors": 5, "failed_packages": 0},
       "exclusive_resources": ["docker", "cargo-target"]
     },
+    "v1-update-artifact-rollback": {
+      "command": ["./tests/heavy/run_pg_matrix_docker.sh"],
+      "cwd": "graph",
+      "timeout_seconds": 14400,
+      "environment": {"IMAGE": "pggraph:v1-update-artifact-rollback", "PG_VERSIONS": "14 15 16 17 18", "RUN_RUST_TESTS": "0", "RUN_PGRX_SQL": "0", "RUN_GQL_WRITE_MATRIX": "0", "RUN_DURABLE_PROJECTION_MATRIX": "0", "RUN_PACKAGE_INSTALL_MATRIX": "0", "RUN_CRASH_MATRIX": "0", "RUN_RUNTIME_RESOURCES": "0", "RUN_PG_UPGRADE_MATRIX": "0", "RUN_V1_UPDATE_ARTIFACT_ROLLBACK": "1"},
+      "depends_on": ["package-install-matrix"],
+      "thresholds": {"failed_updates": 0, "failed_artifact_loads": 0, "failed_restore_rollbacks": 0},
+      "exclusive_resources": ["docker", "cargo-target", "pgrx-cluster", "postgres-port"]
+    },
     "read-latency": {
       "command": ["./tests/heavy/read_latency_under_sync.sh"],
       "cwd": "graph",
@@ -209,7 +218,7 @@
       "command": ["bash", "-c", "../scripts/prepare_release_bundle.py --ref HEAD --out-dir ../release/evidence/artifacts/release-bundle && ../scripts/verify_release_bundle.py ../release/evidence/artifacts/release-bundle --commit $(git rev-parse HEAD)"],
       "cwd": "graph",
       "timeout_seconds": 600,
-      "depends_on": ["package-install-matrix"],
+      "depends_on": ["v1-update-artifact-rollback"],
       "thresholds": {"missing_artifacts": 0, "checksum_mismatches": 0},
       "artifacts": ["release/evidence/artifacts/release-bundle/*"],
       "exclusive_resources": []
