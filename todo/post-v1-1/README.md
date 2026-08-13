@@ -147,7 +147,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P5 | In progress (P5.2 complete) | Targeted queries select lazy and global analytics select eager; relationship-identity completeness uses fixed projection summaries; retained 1M/10M evidence remains. |
 | P6 | Complete | The existing `EdgeTypeId` is the one production checked authority across logical consumers and v6 adapters; behavior and v6 bytes remain unchanged, and retained evidence selects adaptive 1/2/4-byte physical storage for P7. |
 | P7 | Complete | Runtime topology and rebuilt immutable v7 bases use checked logical IDs with adaptive 1/2/4-byte storage, explicit dictionary policies, v6 read compatibility, and atomic candidate validation. Incremental unseen labels remain in P8. |
-| P8 | Not started | Persistent dictionaries, mutable segments, compaction, reload, and transaction-local/savepoint state support unseen labels atomically and within resource limits. |
+| P8 | In progress (P8.1 complete) | Adaptive v7 mutable segments and a checksummed manifest-owned cumulative dictionary now have v5/v6 compatibility, governed validation, recovery, compaction carry-forward, and GC coverage. Atomic unseen-label sync and transaction/savepoint dictionaries remain. |
 | P9 | Not started | SQL traversal, paths, and GQL preserve exact filtering beyond 254 labels; migration, diagnostics, docs, fuzz/property, and performance evidence are complete. |
 | P10 | Not started | The private batch contract validates and types bounded ordered input once, rejects duplicate identities, and proves no per-input DML loop. |
 | P11 | Not started | Set-based node `CREATE`/`MERGE` preserve RLS, constraints, triggers, partitions, ordinality, atomicity, savepoints, and idempotent replay. |

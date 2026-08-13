@@ -1150,7 +1150,13 @@ impl Engine {
     ) -> crate::safety::GraphResult<()> {
         let provider = ManifestSegmentProvider::new(&root, manifest);
         let segments = provider.load_segments()?;
+        for segment in &segments {
+            segment.validate_edge_type_ids(self.edge_type_registry.as_slice().len())?;
+        }
         let base_chunks = provider.load_base_chunks()?;
+        for chunk in &base_chunks {
+            chunk.validate_edge_type_ids(self.edge_type_registry.as_slice().len())?;
+        }
         if segments.is_empty() && base_chunks.is_empty() {
             if record_heartbeat {
                 crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;

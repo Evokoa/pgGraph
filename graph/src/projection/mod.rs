@@ -12,6 +12,11 @@ pub(crate) mod chunk;
 pub(crate) mod compact;
 #[allow(
     dead_code,
+    reason = "P8.1 establishes the validated dictionary artifact before P8.2 sync publication writes it"
+)]
+pub(crate) mod edge_type_dictionary;
+#[allow(
+    dead_code,
     reason = "Microphase 12 adds generation-aware GC before scheduled maintenance wires it"
 )]
 pub(crate) mod gc;

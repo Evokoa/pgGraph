@@ -2508,6 +2508,26 @@ fn load_graph_file_internal(
         })
         .transpose()?;
     if let Some(manifest) = manifest {
+        if let Some(reference) = &manifest.edge_type_dictionary {
+            let dictionary_path = manifest_root.join(&reference.path);
+            let dictionary =
+                crate::projection::edge_type_dictionary::read_manifest_edge_type_dictionary_artifact(
+                    &dictionary_path,
+                    &reference.checksum,
+                    reference.bytes,
+                    reference.entry_count,
+                )?;
+            if !dictionary
+                .labels()
+                .starts_with(engine.edge_type_registry.as_slice())
+            {
+                return Err(GraphError::CorruptFile {
+                    reason: "cumulative relationship type dictionary does not preserve the base registry prefix"
+                        .to_string(),
+                });
+            }
+            engine.edge_type_registry = dictionary.into_registry();
+        }
         if let Some(reference) = &manifest.relationship_identities {
             let identity_path = manifest_root.join(&reference.path);
             let actual_bytes = std::fs::metadata(&identity_path)
@@ -2581,6 +2601,17 @@ fn projection_workspace_bytes(
         .relationship_identities
         .as_ref()
         .map_or(0, |identity| identity.bytes);
+    let edge_type_dictionary_workspace = manifest
+        .edge_type_dictionary
+        .as_ref()
+        .map(|dictionary| {
+            crate::projection::edge_type_dictionary::edge_type_dictionary_decode_upper_bound(
+                dictionary.bytes,
+                dictionary.entry_count,
+            )
+        })
+        .transpose()?
+        .unwrap_or(0);
     // Decoding retains row vectors and derives forward/reverse hash maps. The
     // multiplier includes both representations plus allocator/hash overhead.
     let identity_workspace =
@@ -2592,6 +2623,7 @@ fn projection_workspace_bytes(
     segment_bytes
         .checked_mul(8)
         .and_then(|bytes| bytes.checked_add(identity_workspace))
+        .and_then(|bytes| bytes.checked_add(edge_type_dictionary_workspace))
         .map(crate::resource::ByteCount::from_bytes)
         .ok_or_else(|| GraphError::CorruptFile {
             reason: "projection load workspace estimate overflowed".to_string(),
@@ -2656,6 +2688,13 @@ pub(crate) fn graph_artifact_metadata_for_path(path: &Path) -> GraphResult<Graph
         .metadata()
         .map_err(|err| GraphError::Internal(format!("stat graph artifact metadata: {err}")))?
         .len();
+    graph_artifact_metadata_from_file(&mut file, file_len)
+}
+
+fn graph_artifact_metadata_from_file(
+    file: &mut fs::File,
+    file_len: u64,
+) -> GraphResult<GraphArtifactMetadata> {
     if file_len < HEADER_SIZE as u64 {
         return Err(GraphError::CorruptFile {
             reason: "file too small for graph artifact header".into(),
@@ -2718,6 +2757,87 @@ pub(crate) fn graph_artifact_metadata_for_path(path: &Path) -> GraphResult<Graph
         edge_type_width,
         body_crc: computed_body_crc,
     })
+}
+
+/// Read and validate only the bounded edge-type registry from a base artifact.
+///
+/// Recovery uses this metadata seam to validate cumulative dictionaries and
+/// segment IDs without snapshotting or constructing the graph-sized CSR.
+pub(crate) fn graph_artifact_edge_type_metadata_for_path(
+    path: &Path,
+) -> GraphResult<(GraphArtifactMetadata, Vec<String>)> {
+    let mut file = fs::File::open(path)
+        .map_err(|err| GraphError::Internal(format!("open graph registry metadata: {err}")))?;
+    let file_len_u64 = file
+        .metadata()
+        .map_err(|err| GraphError::Internal(format!("stat graph registry metadata: {err}")))?
+        .len();
+    let file_len = usize::try_from(file_len_u64).map_err(|_| GraphError::CorruptFile {
+        reason: "graph artifact length exceeds usize".into(),
+    })?;
+    let metadata = graph_artifact_metadata_from_file(&mut file, file_len_u64)?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|err| GraphError::Internal(format!("seek graph registry header: {err}")))?;
+    let mut header = [0_u8; HEADER_SIZE];
+    file.read_exact(&mut header)
+        .map_err(|err| GraphError::Internal(format!("read graph registry header: {err}")))?;
+    let descriptor = SECTION_DESCRIPTORS_OFFSET + 20 * SECTION_DESCRIPTOR_SIZE;
+    let start =
+        usize::try_from(read_u64_at(&header, descriptor)).map_err(|_| GraphError::CorruptFile {
+            reason: "edge type registry section offset exceeds usize".into(),
+        })?;
+    let len = usize::try_from(read_u64_at(&header, descriptor + 8)).map_err(|_| {
+        GraphError::CorruptFile {
+            reason: "edge type registry section length exceeds usize".into(),
+        }
+    })?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "edge type registry section range overflows".into(),
+        })?;
+    if start < HEADER_SIZE || end > file_len {
+        return Err(GraphError::CorruptFile {
+            reason: "edge type registry section is outside the artifact".into(),
+        });
+    }
+    let governor = crate::resource::load_governor(crate::resource::ByteCount::ZERO);
+    let section_bytes = crate::resource::ByteCount::from_usize(len)
+        .ok_or_else(|| GraphError::Internal("edge type registry section exceeds u64".into()))?;
+    let _section_lease = governor
+        .reserve_memory(crate::resource::ResourcePhase::LoadMetadata, section_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
+    file.seek(std::io::SeekFrom::Start(start as u64))
+        .map_err(|err| GraphError::Internal(format!("seek graph registry section: {err}")))?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).map_err(|error| {
+        GraphError::Internal(format!(
+            "edge type registry metadata allocation failed: {error}"
+        ))
+    })?;
+    bytes.resize(len, 0);
+    file.read_exact(&mut bytes)
+        .map_err(|err| GraphError::Internal(format!("read graph registry section: {err}")))?;
+    let decoded_bytes = if metadata.version == V6_VERSION {
+        EdgeTypeRegistry::v6_load_metadata_upper_bound(&bytes)?
+    } else {
+        EdgeTypeRegistry::load_metadata_upper_bound(&bytes)?
+    };
+    let _decoded_lease = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::LoadMetadata,
+            crate::resource::ByteCount::from_usize(decoded_bytes).ok_or_else(|| {
+                GraphError::Internal("edge type registry decode bound exceeds u64".into())
+            })?,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let labels = decode_string_registry(&bytes, (0, bytes.len()))?;
+    let registry = if metadata.version == V6_VERSION {
+        EdgeTypeRegistry::try_from_v6_labels(labels)?
+    } else {
+        EdgeTypeRegistry::try_from_labels(labels)?
+    };
+    Ok((metadata, registry.into_labels()))
 }
 
 #[allow(
@@ -2962,9 +3082,11 @@ mod tests {
         FilterColumnType, PersistedFilterValue, FILTER_CATALOG_HEADER_SIZE, FILTER_DESCRIPTOR_SIZE,
     };
     use crate::projection::manifest::{
-        ManifestSegmentRef, ProjectionManifest, ProjectionManifestStore,
+        ManifestChunkRef, ManifestEdgeTypeDictionaryRef, ManifestSegmentRef, ProjectionManifest,
+        ProjectionManifestStore,
     };
-    use crate::projection::segment::{DeltaSegment, SegmentFilterValue, SegmentKind};
+    use crate::projection::neighbors::NeighborSource;
+    use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentFilterValue, SegmentKind};
     use crate::types::{FilterCondition, FilterOp, TraversalDirection, TraversalStrategy};
 
     #[cfg(not(feature = "pg_test"))]
@@ -3938,6 +4060,107 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
         assert_eq!(status, (Some(12), Some(0)));
+    }
+
+    #[test]
+    fn engine_loads_cumulative_dictionary_with_wide_segment_and_chunk() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("cumulative-dictionary-wide-layered");
+        write_graph_file(&engine, &path).expect("base writes");
+        let root = projection_manifest_root(&path);
+        let mut labels = engine.edge_type_registry.as_slice().to_vec();
+        while labels.len() <= 255 {
+            labels.push(format!("wide_type_{}", labels.len()));
+        }
+        let wide_label = labels[255].clone();
+        let dictionary =
+            crate::projection::edge_type_dictionary::EdgeTypeDictionary::try_from_labels(labels)
+                .expect("cumulative dictionary validates");
+        let dictionary_path = root.join("relationship-types-00000000000000000012.bin");
+        let governor = crate::resource::ResourceGovernor::new(
+            crate::resource::ResourceLimits::memory_only(crate::resource::MemoryBudget::new(
+                crate::resource::ByteCount::from_bytes(u64::MAX),
+            )),
+        );
+        let (dictionary_checksum, dictionary_bytes) =
+            crate::projection::edge_type_dictionary::write_edge_type_dictionary_artifact(
+                &root,
+                &dictionary_path,
+                &dictionary,
+                &governor,
+            )
+            .expect("dictionary writes");
+
+        let mut wide_segment =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 2, 1)
+                .expect("segment constructs");
+        wide_segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: EdgeTypeId::try_from(255).expect("wide type is logical"),
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        let segment_path = root.join("wide.pggraph-delta");
+        let segment_bytes = wide_segment.to_bytes().expect("wide segment encodes");
+        std::fs::write(&segment_path, &segment_bytes).expect("wide segment writes");
+
+        let mut wide_chunk = wide_segment.clone();
+        wide_chunk.header.level = 1;
+        let chunk_path = root.join("wide.pggraph-chunk");
+        let chunk_bytes = wide_chunk.to_bytes().expect("wide chunk encodes");
+        std::fs::write(&chunk_path, &chunk_bytes).expect("wide chunk writes");
+
+        let mut manifest = ProjectionManifest::base_only(
+            12,
+            path.file_name().expect("base name").to_string_lossy(),
+            checksum_graph_artifact(&path),
+            VERSION,
+            1,
+            1,
+        );
+        manifest.edge_type_dictionary = Some(ManifestEdgeTypeDictionaryRef {
+            path: dictionary_path
+                .file_name()
+                .expect("dictionary name")
+                .to_string_lossy()
+                .into_owned(),
+            checksum: dictionary_checksum,
+            entry_count: 256,
+            bytes: dictionary_bytes,
+        });
+        manifest.segments.push(ManifestSegmentRef {
+            path: "wide.pggraph-delta".to_string(),
+            checksum: format!("crc32:{:08x}", crc32fast::hash(&segment_bytes)),
+            level: 0,
+            source_start: 0,
+            source_end: 2,
+            sync_watermark: 1,
+        });
+        manifest.base_chunks.push(ManifestChunkRef {
+            path: "wide.pggraph-chunk".to_string(),
+            checksum: format!("crc32:{:08x}", crc32fast::hash(&chunk_bytes)),
+            source_start: 0,
+            source_end: 2,
+            dirty_source_count: 1,
+            dirty_edge_count: 1,
+        });
+        publish_manifest(root, manifest);
+
+        let loaded = load_graph_file(&path).expect("wide layered projection reloads");
+        assert_eq!(
+            loaded.edge_type_id(&wide_label).map(EdgeTypeId::get),
+            Some(255)
+        );
+        let layered = loaded
+            .layered_neighbors()
+            .expect("layered topology constructs")
+            .expect("layered topology is installed");
+        let neighbors = layered.neighbors(0).collect::<Vec<_>>();
+        assert!(neighbors
+            .iter()
+            .any(|neighbor| neighbor.target == 1 && neighbor.type_id.get() == 255));
+        let _ = std::fs::remove_dir_all(path.parent().expect("fixture has parent"));
     }
 
     #[test]

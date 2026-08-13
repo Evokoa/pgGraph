@@ -221,7 +221,7 @@ direction, writes node/resolution/filter/tenant L0 deltas into node segments,
 and narrows each segment's source-node range to the rows it actually covers
 when that range is known. Mapped relationship source keys are interned into a
 deterministically ordered cumulative dictionary, written as a checksummed
-artifact, and referenced by projection manifest version 2. It then publishes
+artifact, and referenced by projection manifest version 3. It then publishes
 durable no-overwrite segment files, validates segment and identity-artifact
 reloads, and publishes the next manifest under an artifact-root ingestion
 publication lock. The SQL boundary also holds the graph-scoped PostgreSQL
@@ -353,12 +353,18 @@ from its authoritative PostgreSQL tables before serving the mutable projection. 
 `graph.build()` publishes a compatible base and manifest; old derived segment
 files can then be removed by the normal generation cleanup path.
 
-Manifest version 2 adds the cumulative post-build relationship-identity
+Manifest version 2 added the cumulative post-build relationship-identity
 dictionary reference. The loader validates its checksum, declared slot count,
 reserved empty slot, uniqueness, and base-dictionary prefix before installing
 segments. Segment relationship IDs outside that dictionary fail closed. GC
 protects identity artifacts referenced by retained manifests and accounts for
 their bytes in projection status.
+
+Manifest version 3 adds the optional cumulative relationship-type dictionary
+used by adaptive mutable segments. Version 2 remains readable when that
+reference is absent. The loader preserves the immutable base registry as an
+exact prefix and rejects segment or base-chunk IDs outside the cumulative
+dictionary before topology installation.
 
 Ingestion generations retain all segment, base-chunk, and obsolete-file
 references from the preceding manifest before appending new segments. A sync

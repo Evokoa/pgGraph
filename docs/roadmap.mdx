@@ -101,9 +101,10 @@ filterable during traversal instead of becoming opaque relationship properties.
 
 The runtime uses a checked logical `EdgeTypeId(u32)`. New immutable CSR bases
 use the v7 adaptive one-, two-, or four-byte encoding, while v6 bases remain
-read compatible. The mutable segment format still stores relationship-label
-IDs as `u8`; consequently, rebuilt `csr_readonly` graphs can exceed 254 labels,
-but wide mutable bases are rejected until P8 upgrades segment and sync storage.
+read compatible. Mutable segments now use the same adaptive widths and retain
+v5/v6 read compatibility. Wide mutable publication remains disabled until the
+P8 sync checkpoint can publish its cumulative dictionary and segments as one
+generation.
 `label_column` interns every distinct nonempty source value into this registry.
 A build that exceeds the public count, label, or dictionary-byte policy fails
 with SQLSTATE `54000` and diagnostic `PG004`. Incremental sync accepts labels
@@ -167,7 +168,7 @@ Applications should choose the current path by required semantics:
 | Need | Recommended path |
 |---|---|
 | Exact relationship types are known at rebuild time | Use a `csr_readonly` projection with `label_column`; v7 selects one, two, or four bytes and exact `edge_types`/GQL filters remain available. |
-| A mutable projection needs more than 254 labels | Keep the mutable dictionary within the v6 segment boundary until P8, or rebuild a read-only v7 base. |
+| A mutable projection needs more than 254 labels | Rebuild a read-only v7 base until P8 completes atomic cumulative-dictionary publication; the adaptive segment codec is already in place. |
 | Incremental ingestion introduces unseen labels | Rebuild the base dictionary, or normalize new source values to labels already present; P8 owns governed incremental dictionary growth. |
 | Family-level traversal is sufficient | Store a bounded semantic family in a separate `graph_label` column, register that column, and retain the exact `relationship_name` in PostgreSQL. Prefer meaningful families such as `employment`, `ownership`, or `collaboration` over hash buckets. |
 | Exact free-form type is required at every hop | Normalize the string once to a PostgreSQL relationship-type ID and use a bounded recursive SQL query that filters the ID before each expansion. Index `(relationship_type_id, source_id) INCLUDE (target_id)` and the reverse direction when required. |
@@ -182,9 +183,10 @@ semantics.
 
 ## Post-1.1 Direction
 
-P7 ships adaptive rebuilt immutable bases. P8 owns mutable segments and
-incremental labels; P9 owns the full query, listing, release-matrix, and public
-feature closure.
+P7 ships adaptive rebuilt immutable bases. P8.1 adds adaptive mutable segment
+storage and the durable cumulative-dictionary format; later P8 checkpoints own
+atomic incremental labels and transaction state. P9 owns the full query,
+listing, release-matrix, and public feature closure.
 
 | Area | Direction |
 |---|---|

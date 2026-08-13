@@ -463,6 +463,7 @@ pub(crate) fn compact_generation(
     manifest.inherit_operation_timestamps(previous);
     manifest.mark_compaction();
     manifest.relationship_identities = previous.relationship_identities.clone();
+    manifest.edge_type_dictionary = previous.edge_type_dictionary.clone();
     manifest.base_chunks = previous.base_chunks.clone();
     manifest.segments = retained_segments;
     manifest.segments.push(segment_ref);
@@ -1998,6 +1999,33 @@ mod tests {
         assert_eq!(result.segments_compacted, 2);
         assert_eq!(result.manifest.segments[0].level, 1);
         assert_full_csr_equivalence(base.node_count(), &expected, &actual);
+    }
+
+    #[test]
+    fn compaction_preserves_cumulative_edge_type_dictionary_reference() {
+        let (dir, base, mut manifest) = fixture_manifest(
+            "compaction_preserves_cumulative_edge_type_dictionary_reference",
+            vec![segment(1, 0, 0, &[(0, 2, 1)], &[])],
+        );
+        let dictionary_path = "relationship-types-00000000000000000001.bin";
+        std::fs::write(dir.path().join(dictionary_path), b"dictionary")
+            .expect("dictionary fixture writes");
+        manifest.edge_type_dictionary =
+            Some(crate::projection::manifest::ManifestEdgeTypeDictionaryRef {
+                path: dictionary_path.to_string(),
+                checksum: "crc32:fixture".to_string(),
+                entry_count: 2,
+                bytes: 10,
+            });
+
+        let result =
+            compact_generation(dir.path(), &manifest, &base, CompactionBudgets::generous())
+                .expect("compaction publishes");
+
+        assert_eq!(
+            result.manifest.edge_type_dictionary,
+            manifest.edge_type_dictionary
+        );
     }
 
     #[test]

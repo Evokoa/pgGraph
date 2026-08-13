@@ -266,6 +266,10 @@ fn status_from_manifest(
         .relationship_identities
         .as_ref()
         .map_or(0, |identities| identities.bytes.min(i64::MAX as u64) as i64);
+    let edge_type_dictionary_bytes = manifest
+        .edge_type_dictionary
+        .as_ref()
+        .map_or(0, |dictionary| dictionary.bytes.min(i64::MAX as u64) as i64);
     let obsolete_file_count = manifest.obsolete_files.len().min(i32::MAX as usize) as i32;
     let obsolete_bytes = manifest.obsolete_files.iter().fold(0_i64, |acc, file| {
         acc.saturating_add(file.bytes.min(i64::MAX as u64) as i64)
@@ -287,7 +291,8 @@ fn status_from_manifest(
         .saturating_add(manifest_bytes)
         .saturating_add(segment_bytes)
         .saturating_add(dirty_chunk_bytes)
-        .saturating_add(identity_bytes);
+        .saturating_add(identity_bytes)
+        .saturating_add(edge_type_dictionary_bytes);
     let compaction_backlog = manifest
         .segments
         .len()

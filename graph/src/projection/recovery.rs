@@ -10,10 +10,14 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use crate::persistence::{graph_artifact_checksum_for_path, graph_artifact_version};
-use crate::persistence::{graph_artifact_metadata_for_path, projection_manifest_root};
+use crate::persistence::{
+    graph_artifact_edge_type_metadata_for_path, graph_artifact_metadata_for_path,
+    projection_manifest_root,
+};
 use crate::projection::chunk::{
     repair_corrupt_base_chunks, BaseChunkRewriteResult, BaseChunkSource,
 };
+use crate::projection::edge_type_dictionary::read_manifest_edge_type_dictionary_artifact;
 use crate::projection::identity::read_manifest_identity_artifact;
 use crate::projection::layered::{ManifestSegmentProvider, SegmentProvider};
 use crate::projection::manifest::{
@@ -85,8 +89,25 @@ pub(crate) fn validate_active_projection(root: &Path) -> GraphResult<Option<Proj
         return Ok(None);
     };
     let provider = ManifestSegmentProvider::new(root, &manifest);
-    provider.load_segments()?;
-    provider.load_base_chunks()?;
+    let segments = provider.load_segments()?;
+    let base_chunks = provider.load_base_chunks()?;
+    let base_edge_type_labels = if manifest.edge_type_dictionary.is_some()
+        || !segments.is_empty()
+        || !base_chunks.is_empty()
+    {
+        Some(
+            graph_artifact_edge_type_metadata_for_path(&root.join(&manifest.base_artifact_path))?.1,
+        )
+    } else {
+        None
+    };
+    validate_manifest_edge_type_dictionary(
+        root,
+        &manifest,
+        &segments,
+        &base_chunks,
+        base_edge_type_labels.as_deref(),
+    )?;
     Ok(Some(manifest))
 }
 
@@ -114,15 +135,30 @@ pub(crate) fn plan_projection_recovery_for_artifact(
         }
     };
 
-    if graph_path.is_some() {
+    let base_metadata_and_labels = if graph_path.is_some() {
         let current_base_path = root.join(&manifest.base_artifact_path);
-        if let Err(err) = validate_manifest_base_metadata(&current_base_path, &manifest) {
-            return Ok(ProjectionRecoveryPlan::rebuild(
-                Some(manifest.generation_id),
-                err.to_string(),
-            ));
+        match graph_artifact_edge_type_metadata_for_path(&current_base_path) {
+            Ok((metadata, labels)) => {
+                if let Err(err) =
+                    validate_manifest_base_metadata_values(&current_base_path, &manifest, metadata)
+                {
+                    return Ok(ProjectionRecoveryPlan::rebuild(
+                        Some(manifest.generation_id),
+                        err.to_string(),
+                    ));
+                }
+                Some((metadata, labels))
+            }
+            Err(err) => {
+                return Ok(ProjectionRecoveryPlan::rebuild(
+                    Some(manifest.generation_id),
+                    err.to_string(),
+                ));
+            }
         }
-    }
+    } else {
+        None
+    };
 
     if let Some(reference) = &manifest.relationship_identities {
         let identity_path = root.join(&reference.path);
@@ -140,17 +176,98 @@ pub(crate) fn plan_projection_recovery_for_artifact(
     }
 
     let provider = ManifestSegmentProvider::new(root, &manifest);
-    if let Err(err) = provider.load_segments() {
+    let segments = match provider.load_segments() {
+        Ok(segments) => segments,
+        Err(err) => {
+            return Ok(ProjectionRecoveryPlan::rebuild(
+                Some(manifest.generation_id),
+                err.to_string(),
+            ));
+        }
+    };
+    let base_chunks = match provider.load_base_chunks() {
+        Ok(chunks) => chunks,
+        Err(err) => return Ok(ProjectionRecoveryPlan::repair(&manifest, err.to_string())),
+    };
+    let base_edge_type_labels = base_metadata_and_labels
+        .as_ref()
+        .map(|(_, labels)| labels.as_slice());
+    if let Err(err) = validate_manifest_edge_type_dictionary(
+        root,
+        &manifest,
+        &segments,
+        &base_chunks,
+        base_edge_type_labels,
+    ) {
         return Ok(ProjectionRecoveryPlan::rebuild(
             Some(manifest.generation_id),
             err.to_string(),
         ));
     }
-    if let Err(err) = provider.load_base_chunks() {
-        return Ok(ProjectionRecoveryPlan::repair(&manifest, err.to_string()));
-    }
-
     Ok(ProjectionRecoveryPlan::healthy(&manifest))
+}
+
+fn validate_manifest_edge_type_dictionary(
+    root: &Path,
+    manifest: &ProjectionManifest,
+    segments: &[crate::projection::segment::DeltaSegment],
+    base_chunks: &[crate::projection::segment::DeltaSegment],
+    base_edge_type_labels: Option<&[String]>,
+) -> GraphResult<()> {
+    let governor = crate::resource::load_governor(crate::resource::ByteCount::ZERO);
+    validate_manifest_edge_type_dictionary_governed(
+        root,
+        manifest,
+        segments,
+        base_chunks,
+        base_edge_type_labels,
+        &governor,
+    )
+}
+
+fn validate_manifest_edge_type_dictionary_governed(
+    root: &Path,
+    manifest: &ProjectionManifest,
+    segments: &[crate::projection::segment::DeltaSegment],
+    base_chunks: &[crate::projection::segment::DeltaSegment],
+    base_edge_type_labels: Option<&[String]>,
+    governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<()> {
+    let count = if let Some(reference) = &manifest.edge_type_dictionary {
+        let path = crate::projection::manifest::resolve_manifest_reference(root, &reference.path)?;
+        let bound =
+            crate::projection::edge_type_dictionary::edge_type_dictionary_decode_upper_bound(
+                reference.bytes,
+                reference.entry_count,
+            )?;
+        let _lease = governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::LoadMetadata,
+                crate::resource::ByteCount::from_bytes(bound),
+            )
+            .map_err(crate::safety::resource_limit_error)?;
+        let dictionary = read_manifest_edge_type_dictionary_artifact(
+            &path,
+            &reference.checksum,
+            reference.bytes,
+            reference.entry_count,
+        )?;
+        if base_edge_type_labels.is_some_and(|base| !dictionary.labels().starts_with(base)) {
+            return Err(GraphError::CorruptFile {
+                reason: "cumulative relationship type dictionary does not preserve the base registry prefix"
+                    .to_string(),
+            });
+        }
+        dictionary.labels().len()
+    } else if let Some(base) = base_edge_type_labels {
+        base.len()
+    } else {
+        return Ok(());
+    };
+    for segment in segments.iter().chain(base_chunks) {
+        segment.validate_edge_type_ids(count)?;
+    }
+    Ok(())
 }
 
 /// Repair corrupt active base chunks by publishing a replacement generation.
@@ -482,6 +599,9 @@ fn append_superseded_projection_files(
     if let Some(identity) = previous.relationship_identities.as_ref() {
         push(&identity.path, Some(identity.bytes));
     }
+    if let Some(dictionary) = previous.edge_type_dictionary.as_ref() {
+        push(&dictionary.path, Some(dictionary.bytes));
+    }
     for chunk in &previous.base_chunks {
         push(&chunk.path, None);
     }
@@ -497,6 +617,15 @@ fn validate_manifest_base_metadata(
     graph_path: &Path,
     manifest: &ProjectionManifest,
 ) -> GraphResult<()> {
+    let artifact_metadata = graph_artifact_metadata_for_path(graph_path)?;
+    validate_manifest_base_metadata_values(graph_path, manifest, artifact_metadata)
+}
+
+fn validate_manifest_base_metadata_values(
+    graph_path: &Path,
+    manifest: &ProjectionManifest,
+    artifact_metadata: crate::persistence::GraphArtifactMetadata,
+) -> GraphResult<()> {
     let expected_base = graph_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -509,7 +638,6 @@ fn validate_manifest_base_metadata(
             ),
         });
     }
-    let artifact_metadata = graph_artifact_metadata_for_path(graph_path)?;
     if manifest.base_artifact_version != artifact_metadata.version {
         return Err(GraphError::IncompatibleVersion(format!(
             "projection manifest references base artifact version {}; expected {}",
@@ -608,7 +736,13 @@ fn parse_candidate_artifact_generation(file_name: &str) -> Option<u64> {
         generation
     } else if let Some(suffix) = file_name.strip_prefix("relationship-identities-") {
         let (generation, remainder) = suffix.split_at_checked(20)?;
-        if !remainder.starts_with(".bin") {
+        if remainder != ".bin" {
+            return None;
+        }
+        generation
+    } else if let Some(suffix) = file_name.strip_prefix("relationship-types-") {
+        let (generation, remainder) = suffix.split_at_checked(20)?;
+        if remainder != ".bin" {
             return None;
         }
         generation
@@ -753,6 +887,12 @@ fn insert_active_manifest_references(
             &identities.path,
         )?);
     }
+    if let Some(dictionary) = &manifest.edge_type_dictionary {
+        paths.insert(crate::projection::manifest::resolve_manifest_reference(
+            root,
+            &dictionary.path,
+        )?);
+    }
     for segment in &manifest.segments {
         paths.insert(crate::projection::manifest::resolve_manifest_reference(
             root,
@@ -887,11 +1027,22 @@ fn now_unix_micros() -> GraphResult<i64> {
 mod tests {
     use super::*;
     use crate::projection::chunk::EdgeStoreChunkSource;
+    use crate::projection::edge_type_dictionary::{
+        write_edge_type_dictionary_artifact, EdgeTypeDictionary,
+    };
     use crate::projection::identity::{write_identity_artifact, RelationshipIdentityDictionary};
-    use crate::projection::manifest::{ManifestChunkRef, ManifestIdentityRef, ManifestSegmentRef};
+    use crate::projection::manifest::{
+        ManifestChunkRef, ManifestEdgeTypeDictionaryRef, ManifestIdentityRef, ManifestSegmentRef,
+    };
     use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentKind};
     use crate::projection::test_fixtures::{edge_store_from_tuples, ProjectionArtifactDir};
     use crate::types::TraversalDirection;
+
+    fn test_governor() -> crate::resource::ResourceGovernor {
+        crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(u64::MAX)),
+        ))
+    }
 
     #[test]
     fn interrupted_replacement_cleanup_removes_only_newer_unpublished_files() {
@@ -1065,6 +1216,251 @@ mod tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("relationship identity")));
+    }
+
+    #[test]
+    fn recovery_rejects_missing_or_corrupt_edge_type_dictionary() {
+        let dir = ProjectionArtifactDir::new("recovery_rejects_missing_edge_type_dictionary");
+        write_file(dir.path().join("base.pggraph"), b"base");
+        let mut manifest = base_manifest(1);
+        let dictionary_path = dir
+            .path()
+            .join("relationship-types-00000000000000000001.bin");
+        write_file(&dictionary_path, b"candidate");
+        manifest.edge_type_dictionary = Some(ManifestEdgeTypeDictionaryRef {
+            path: "relationship-types-00000000000000000001.bin".to_string(),
+            checksum: "crc32:missing".to_string(),
+            entry_count: 1,
+            bytes: 32,
+        });
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+        fs::remove_file(dictionary_path).expect("referenced dictionary removes");
+        let plan = plan_projection_recovery(dir.path()).expect("recovery plans");
+        assert_eq!(plan.action, ProjectionRecoveryAction::FullRebuild);
+        assert!(plan
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("relationship type")));
+    }
+
+    #[test]
+    fn recovery_rejects_segment_type_ids_outside_cumulative_dictionary() {
+        let dir = ProjectionArtifactDir::new("recovery_rejects_segment_type_outside_dictionary");
+        write_file(dir.path().join("base.pggraph"), b"base");
+        let dictionary_path = dir
+            .path()
+            .join("relationship-types-00000000000000000001.bin");
+        let dictionary =
+            EdgeTypeDictionary::try_from_labels(vec![String::new()]).expect("dictionary validates");
+        let (checksum, bytes) = write_edge_type_dictionary_artifact(
+            dir.path(),
+            &dictionary_path,
+            &dictionary,
+            &test_governor(),
+        )
+        .expect("dictionary writes");
+        let segment_path = dir.path().join("active.pggraph-delta");
+        edge_segment(1, 0, &[(0, 1, 1)])
+            .write_to_path(&segment_path)
+            .expect("segment writes");
+        let mut manifest = base_manifest(1);
+        manifest.edge_type_dictionary = Some(ManifestEdgeTypeDictionaryRef {
+            path: relative_path(dir.path(), &dictionary_path),
+            checksum,
+            entry_count: 1,
+            bytes,
+        });
+        manifest.segments.push(segment_ref(
+            dir.path(),
+            &segment_path,
+            &checksum_for_path(&segment_path),
+        ));
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+        let constrained =
+            crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+                crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(1)),
+            ));
+        assert!(matches!(
+            validate_manifest_edge_type_dictionary_governed(
+                dir.path(),
+                &manifest,
+                &[],
+                &[],
+                None,
+                &constrained,
+            ),
+            Err(GraphError::ResourceLimit { .. })
+        ));
+        validate_manifest_edge_type_dictionary_governed(
+            dir.path(),
+            &manifest,
+            &[],
+            &[],
+            None,
+            &test_governor(),
+        )
+        .expect("sufficient recovery budget validates dictionary");
+        let plan = plan_projection_recovery(dir.path()).expect("recovery plans");
+        assert_eq!(plan.action, ProjectionRecoveryAction::FullRebuild);
+        assert!(plan
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("outside the cumulative dictionary")));
+
+        let chunk_path = dir.path().join("active.pggraph-chunk");
+        edge_segment(2, 0, &[(0, 1, 1)])
+            .write_to_path(&chunk_path)
+            .expect("chunk writes");
+        let mut chunk_manifest = base_manifest(2);
+        chunk_manifest.edge_type_dictionary = manifest.edge_type_dictionary.clone();
+        chunk_manifest.base_chunks.push(ManifestChunkRef {
+            path: relative_path(dir.path(), &chunk_path),
+            checksum: checksum_for_path(&chunk_path),
+            source_start: 0,
+            source_end: 1,
+            dirty_source_count: 1,
+            dirty_edge_count: 1,
+        });
+        ProjectionManifestStore::new(dir.path())
+            .publish_if_current(&chunk_manifest, Some(1))
+            .expect("chunk manifest publishes");
+        let chunk_plan = plan_projection_recovery(dir.path()).expect("chunk recovery plans");
+        assert_eq!(chunk_plan.action, ProjectionRecoveryAction::FullRebuild);
+        assert!(chunk_plan
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("outside the cumulative dictionary")));
+    }
+
+    #[test]
+    fn artifact_recovery_rejects_dictionary_prefix_and_base_registry_overflow() {
+        use crate::engine::Engine;
+        use crate::persistence::write_graph_file;
+
+        let dir = ProjectionArtifactDir::new(
+            "artifact_recovery_rejects_dictionary_prefix_and_base_registry_overflow",
+        );
+        let graph_path = dir.path().join("base.pggraph");
+        let mut engine = Engine::new();
+        engine
+            .register_edge_type("base")
+            .expect("base label registers");
+        engine.finish_build(None);
+        write_graph_file(&engine, &graph_path).expect("base graph writes");
+
+        let dictionary_path = dir
+            .path()
+            .join("relationship-types-00000000000000000001.bin");
+        let dictionary =
+            EdgeTypeDictionary::try_from_labels(vec![String::new(), "different".to_string()])
+                .expect("dictionary validates independently");
+        let (checksum, bytes) = write_edge_type_dictionary_artifact(
+            dir.path(),
+            &dictionary_path,
+            &dictionary,
+            &test_governor(),
+        )
+        .expect("dictionary writes");
+        let mut manifest = ProjectionManifest::base_only(
+            1,
+            "base.pggraph",
+            graph_artifact_checksum_for_path(&graph_path).expect("base checksum reads"),
+            graph_artifact_version(),
+            0,
+            1,
+        );
+        manifest.edge_type_dictionary = Some(ManifestEdgeTypeDictionaryRef {
+            path: relative_path(dir.path(), &dictionary_path),
+            checksum,
+            entry_count: 2,
+            bytes,
+        });
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+        let prefix_plan = plan_projection_recovery_for_artifact(dir.path(), Some(&graph_path))
+            .expect("prefix recovery plans");
+        assert_eq!(prefix_plan.action, ProjectionRecoveryAction::FullRebuild);
+        assert!(prefix_plan
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("base registry prefix")));
+
+        let segment_path = dir.path().join("outside-base.pggraph-delta");
+        edge_segment(2, 0, &[(0, 1, 2)])
+            .write_to_path(&segment_path)
+            .expect("segment writes");
+        let mut no_dictionary = ProjectionManifest::base_only(
+            2,
+            "base.pggraph",
+            graph_artifact_checksum_for_path(&graph_path).expect("base checksum reads"),
+            graph_artifact_version(),
+            0,
+            2,
+        );
+        no_dictionary.segments.push(segment_ref(
+            dir.path(),
+            &segment_path,
+            &checksum_for_path(&segment_path),
+        ));
+        ProjectionManifestStore::new(dir.path())
+            .publish_if_current(&no_dictionary, Some(1))
+            .expect("second manifest publishes");
+        let range_plan = plan_projection_recovery_for_artifact(dir.path(), Some(&graph_path))
+            .expect("range recovery plans");
+        assert_eq!(range_plan.action, ProjectionRecoveryAction::FullRebuild);
+        assert!(range_plan
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("cumulative dictionary")));
+    }
+
+    #[test]
+    fn generation_gc_retains_referenced_edge_type_dictionaries() {
+        let dir = ProjectionArtifactDir::new("generation_gc_retains_edge_type_dictionary");
+        write_file(dir.path().join("base.pggraph"), b"base");
+        let dictionary_path = dir
+            .path()
+            .join("relationship-types-00000000000000000001.bin");
+        write_file(&dictionary_path, b"dictionary");
+        let mut manifest = base_manifest(1);
+        manifest.edge_type_dictionary = Some(ManifestEdgeTypeDictionaryRef {
+            path: relative_path(dir.path(), &dictionary_path),
+            checksum: "crc32:dictionary".to_string(),
+            entry_count: 1,
+            bytes: 10,
+        });
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+        let mut protected = BTreeSet::new();
+        insert_active_manifest_references(dir.path(), &manifest, &mut protected)
+            .expect("references resolve");
+        assert!(protected.contains(&dictionary_path));
+    }
+
+    #[test]
+    fn failed_dictionary_candidate_preserves_the_current_generation() {
+        let dir = ProjectionArtifactDir::new("failed_dictionary_candidate_preserves_current");
+        write_file(dir.path().join("base.pggraph"), b"base");
+        let store = ProjectionManifestStore::new(dir.path());
+        store.publish(&base_manifest(1)).expect("current publishes");
+        let candidate = dir
+            .path()
+            .join("relationship-types-00000000000000000002.bin");
+        write_file(&candidate, b"corrupt candidate");
+        let removed = cleanup_interrupted_replacement(dir.path(), Some(1), Some(2))
+            .expect("candidate cleanup succeeds");
+        assert_eq!(removed, 1);
+        assert!(!candidate.exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(1)
+        );
     }
 
     #[test]

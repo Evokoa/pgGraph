@@ -10,19 +10,22 @@ use std::path::Path;
 
 use crc32fast::Hasher;
 
+use crate::edge_store::EdgeTypeWidth;
 use crate::filter_index::PersistedFilterValue;
 use crate::projection::normalize::NormalizedMutationBatch;
 use crate::safety::{GraphError, GraphResult};
 use crate::types::{EdgeTypeId, TraversalDirection};
 
 const MAGIC: &[u8; 8] = b"PGGSEG01";
-const VERSION: u32 = 6;
+const V6_VERSION: u32 = 6;
+const V7_VERSION: u32 = 7;
+const VERSION: u32 = V7_VERSION;
 const HEADER_SIZE: usize = 160;
 const CHECKSUM_OFFSET: usize = 124;
 const RESERVED_OFFSET: usize = 128;
 const RESERVED_LEN: usize = 32;
 const SECTION_COUNT: usize = 7;
-const RESERVED_HEADER_RANGES: [std::ops::Range<usize>; 3] = [15..16, 60..64, 120..124];
+const RESERVED_HEADER_RANGES: [std::ops::Range<usize>; 2] = [60..64, 120..124];
 
 /// Segment file category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +51,8 @@ impl SegmentKind {
 pub(crate) struct SegmentHeader {
     /// Segment file format version.
     pub(crate) version: u32,
+    /// Physical width of edge type identifiers in edge sections.
+    pub(crate) edge_type_width: EdgeTypeWidth,
     /// Segment category.
     pub(crate) kind: SegmentKind,
     /// Segment compaction level.
@@ -179,6 +184,7 @@ impl DeltaSegment {
     ) -> GraphResult<Self> {
         let header = SegmentHeader {
             version: VERSION,
+            edge_type_width: EdgeTypeWidth::One,
             kind,
             level,
             direction,
@@ -260,6 +266,7 @@ impl DeltaSegment {
                 }
             }
         }
+        segment.header.edge_type_width = segment.canonical_edge_type_width();
         validate_segment(&segment)?;
         Ok(segment)
     }
@@ -272,7 +279,11 @@ impl DeltaSegment {
     /// are invalid.
     pub(crate) fn to_bytes(&self) -> GraphResult<Vec<u8>> {
         validate_segment(self)?;
-        let section_lengths = self.encoded_section_lengths()?;
+        let edge_type_width = self.canonical_edge_type_width();
+        let mut header = self.header.clone();
+        header.version = VERSION;
+        header.edge_type_width = edge_type_width;
+        let section_lengths = self.encoded_section_lengths_for_width(edge_type_width)?;
         let encoded_len = section_lengths
             .iter()
             .try_fold(HEADER_SIZE, |total, length| {
@@ -281,9 +292,21 @@ impl DeltaSegment {
                     .ok_or_else(|| segment_corrupt("encoded segment length overflowed"))
             })?;
         let mut sections = EncodedSections::with_capacities(section_lengths);
-        encode_edges(&mut sections.edge_inserts, &self.edge_inserts)?;
-        encode_edges(&mut sections.edge_deletes, &self.edge_deletes)?;
-        encode_edge_weights(&mut sections.edge_weights, &self.edge_weights)?;
+        encode_edges(
+            &mut sections.edge_inserts,
+            &self.edge_inserts,
+            edge_type_width,
+        )?;
+        encode_edges(
+            &mut sections.edge_deletes,
+            &self.edge_deletes,
+            edge_type_width,
+        )?;
+        encode_edge_weights(
+            &mut sections.edge_weights,
+            &self.edge_weights,
+            edge_type_width,
+        )?;
         encode_node_states(&mut sections.node_states, &self.node_states);
         encode_resolutions(&mut sections.resolutions, &self.resolutions)?;
         encode_filters(&mut sections.filters, &self.filters)?;
@@ -300,7 +323,7 @@ impl DeltaSegment {
             bytes.extend_from_slice(section);
             cursor += section.len();
         }
-        write_header(&mut bytes, &self.header, &counts, &offsets, 0);
+        write_header(&mut bytes, &header, &counts, &offsets, 0);
         let checksum = checksum_segment_bytes(&bytes);
         write_u32_at(&mut bytes, CHECKSUM_OFFSET, checksum);
         Ok(bytes)
@@ -317,7 +340,7 @@ impl DeltaSegment {
     /// encoded size cannot be represented by `usize`.
     pub(crate) fn encoded_len(&self) -> GraphResult<usize> {
         validate_segment(self)?;
-        self.encoded_section_lengths()?
+        self.encoded_section_lengths_for_width(self.canonical_edge_type_width())?
             .into_iter()
             .try_fold(HEADER_SIZE, |total, length| {
                 total
@@ -363,13 +386,14 @@ impl DeltaSegment {
         if &bytes[0..8] != MAGIC {
             return Err(segment_corrupt("invalid segment magic"));
         }
-        validate_reserved_header_bytes(bytes)?;
         let version = read_u32(bytes, 8)?;
-        if !matches!(version, 5 | VERSION) {
+        if !matches!(version, 5 | V6_VERSION | V7_VERSION) {
             return Err(GraphError::IncompatibleVersion(format!(
-                "projection segment version {version} is unsupported; expected 5 or {VERSION}"
+                "projection segment version {version} is unsupported; expected 5, {V6_VERSION}, or {V7_VERSION}"
             )));
         }
+        validate_reserved_header_bytes(bytes)?;
+        let edge_type_width = decode_edge_type_width(version, read_u8(bytes, 15)?)?;
         let stored_checksum = read_u32(bytes, CHECKSUM_OFFSET)?;
         if stored_checksum != checksum_segment_bytes(bytes) {
             return Err(segment_corrupt("segment checksum mismatch"));
@@ -377,6 +401,7 @@ impl DeltaSegment {
 
         let header = SegmentHeader {
             version,
+            edge_type_width,
             kind: SegmentKind::from_u8(read_u8(bytes, 12)?)?,
             level: read_u8(bytes, 14)?,
             direction: decode_direction(read_u8(bytes, 13)?)?,
@@ -388,11 +413,24 @@ impl DeltaSegment {
         validate_header_shape(&header)?;
         let counts = read_counts(bytes)?;
         let offsets = read_offsets(bytes)?;
-        let ranges = validate_section_ranges(bytes.len(), &counts, &offsets, version)?;
+        let ranges =
+            validate_section_ranges(bytes.len(), &counts, &offsets, version, edge_type_width)?;
         let segment = Self {
-            edge_inserts: decode_edges(section(bytes, ranges[0].clone())?, counts[0])?,
-            edge_deletes: decode_edges(section(bytes, ranges[1].clone())?, counts[1])?,
-            edge_weights: decode_edge_weights(section(bytes, ranges[2].clone())?, counts[2])?,
+            edge_inserts: decode_edges(
+                section(bytes, ranges[0].clone())?,
+                counts[0],
+                edge_type_width,
+            )?,
+            edge_deletes: decode_edges(
+                section(bytes, ranges[1].clone())?,
+                counts[1],
+                edge_type_width,
+            )?,
+            edge_weights: decode_edge_weights(
+                section(bytes, ranges[2].clone())?,
+                counts[2],
+                edge_type_width,
+            )?,
             node_states: decode_node_states(section(bytes, ranges[3].clone())?, counts[3])?,
             resolutions: decode_resolutions(
                 section(bytes, ranges[4].clone())?,
@@ -404,6 +442,11 @@ impl DeltaSegment {
             header,
         };
         validate_segment(&segment)?;
+        if version == V7_VERSION && edge_type_width != segment.canonical_edge_type_width() {
+            return Err(segment_corrupt(
+                "segment edge type width is not canonical for its edge types",
+            ));
+        }
         Ok(segment)
     }
 
@@ -419,20 +462,22 @@ impl DeltaSegment {
         if &bytes[0..8] != MAGIC {
             return Err(segment_corrupt("invalid segment magic"));
         }
-        validate_reserved_header_bytes(bytes)?;
         let version = read_u32(bytes, 8)?;
-        if !matches!(version, 5 | VERSION) {
+        if !matches!(version, 5 | V6_VERSION | V7_VERSION) {
             return Err(GraphError::IncompatibleVersion(format!(
-                "projection segment version {version} is unsupported; expected 5 or {VERSION}"
+                "projection segment version {version} is unsupported; expected 5, {V6_VERSION}, or {V7_VERSION}"
             )));
         }
+        validate_reserved_header_bytes(bytes)?;
+        let edge_type_width = decode_edge_type_width(version, read_u8(bytes, 15)?)?;
         let stored_checksum = read_u32(bytes, CHECKSUM_OFFSET)?;
         if stored_checksum != checksum_segment_bytes(bytes) {
             return Err(segment_corrupt("segment checksum mismatch"));
         }
         let counts = read_counts(bytes)?;
         let offsets = read_offsets(bytes)?;
-        let ranges = validate_section_ranges(bytes.len(), &counts, &offsets, version)?;
+        let ranges =
+            validate_section_ranges(bytes.len(), &counts, &offsets, version, edge_type_width)?;
         let row_sizes = [
             std::mem::size_of::<SegmentEdge>(),
             std::mem::size_of::<SegmentEdge>(),
@@ -464,6 +509,25 @@ impl DeltaSegment {
         })
     }
 
+    /// Validate every persisted edge type against the cumulative dictionary.
+    pub(crate) fn validate_edge_type_ids(&self, registry_len: usize) -> GraphResult<()> {
+        for type_id in self
+            .edge_inserts
+            .iter()
+            .chain(self.edge_deletes.iter())
+            .map(|edge| edge.type_id)
+            .chain(self.edge_weights.iter().map(|edge| edge.type_id))
+        {
+            if type_id.get() as usize >= registry_len {
+                return Err(segment_corrupt(format!(
+                    "edge type identifier {} is outside the cumulative dictionary count {registry_len}",
+                    type_id.get()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn section_counts(&self) -> GraphResult<[u32; SECTION_COUNT]> {
         Ok([
             count_len(self.edge_inserts.len())?,
@@ -476,7 +540,15 @@ impl DeltaSegment {
         ])
     }
 
+    #[cfg(test)]
     fn encoded_section_lengths(&self) -> GraphResult<[usize; SECTION_COUNT]> {
+        self.encoded_section_lengths_for_width(self.header.edge_type_width)
+    }
+
+    fn encoded_section_lengths_for_width(
+        &self,
+        edge_type_width: EdgeTypeWidth,
+    ) -> GraphResult<[usize; SECTION_COUNT]> {
         self.section_counts()?;
         let fixed = |count: usize, row_bytes: usize| {
             count
@@ -526,15 +598,28 @@ impl DeltaSegment {
                 .and_then(|value| value.checked_add(tenant.len()))
                 .ok_or_else(|| segment_corrupt("encoded tenant section length overflowed"))
         })?;
+        let type_width = edge_type_width.bytes();
         Ok([
-            fixed(self.edge_inserts.len(), 14)?,
-            fixed(self.edge_deletes.len(), 14)?,
-            fixed(self.edge_weights.len(), 18)?,
+            fixed(self.edge_inserts.len(), 13 + type_width)?,
+            fixed(self.edge_deletes.len(), 13 + type_width)?,
+            fixed(self.edge_weights.len(), 17 + type_width)?,
             fixed(self.node_states.len(), 5)?,
             resolutions,
             filters,
             tenants,
         ])
+    }
+
+    fn canonical_edge_type_width(&self) -> EdgeTypeWidth {
+        let max_id = self
+            .edge_inserts
+            .iter()
+            .chain(self.edge_deletes.iter())
+            .map(|edge| edge.type_id)
+            .chain(self.edge_weights.iter().map(|edge| edge.type_id))
+            .max()
+            .unwrap_or(EdgeTypeId::UNTYPED);
+        EdgeTypeWidth::select_for_max_id(max_id)
     }
 }
 
@@ -642,6 +727,14 @@ impl EncodedSections {
 
 fn validate_segment(segment: &DeltaSegment) -> GraphResult<()> {
     validate_header_shape(&segment.header)?;
+    match segment.header.version {
+        5 | V6_VERSION if segment.header.edge_type_width != EdgeTypeWidth::One => {
+            return Err(segment_corrupt(
+                "legacy segment must use one-byte edge type identifiers",
+            ));
+        }
+        _ => {}
+    }
     match segment.header.kind {
         SegmentKind::Edge => {
             if !segment.node_states.is_empty()
@@ -727,7 +820,11 @@ fn validate_header_shape(header: &SegmentHeader) -> GraphResult<()> {
 
 fn validate_edge_bounds(header: &SegmentHeader, edge: &SegmentEdge) -> GraphResult<()> {
     validate_node_bounds(header, edge.source)?;
-    encode_v6_type_id(edge.type_id)?;
+    if edge.type_id == EdgeTypeId::SENTINEL {
+        return Err(segment_corrupt(
+            "edge type identifier uses the logical sentinel",
+        ));
+    }
     Ok(())
 }
 
@@ -747,6 +844,12 @@ fn validate_reserved_header_bytes(bytes: &[u8]) -> GraphResult<()> {
             return Err(segment_corrupt("reserved header bytes must be zero"));
         }
     }
+    let version = read_u32(bytes, 8)?;
+    if version != V7_VERSION && bytes[15] != 0 {
+        return Err(segment_corrupt(
+            "legacy segment edge type width byte must be zero",
+        ));
+    }
     if bytes[RESERVED_OFFSET..RESERVED_OFFSET + RESERVED_LEN]
         .iter()
         .any(|byte| *byte != 0)
@@ -764,11 +867,15 @@ fn write_header(
     checksum: u32,
 ) {
     bytes[0..8].copy_from_slice(MAGIC);
-    write_u32_at(bytes, 8, VERSION);
+    write_u32_at(bytes, 8, header.version);
     bytes[12] = header.kind as u8;
     bytes[13] = encode_direction(header.direction);
     bytes[14] = header.level;
-    bytes[15] = 0;
+    bytes[15] = if header.version == V7_VERSION {
+        header.edge_type_width.bytes() as u8
+    } else {
+        0
+    };
     write_u32_at(bytes, 16, header.source_start);
     write_u32_at(bytes, 20, header.source_end);
     write_i64_at(bytes, 24, header.sync_watermark);
@@ -806,11 +913,13 @@ fn validate_section_ranges(
     counts: &[u32; SECTION_COUNT],
     offsets: &[u64; SECTION_COUNT],
     version: u32,
+    edge_type_width: EdgeTypeWidth,
 ) -> GraphResult<[std::ops::Range<usize>; SECTION_COUNT]> {
+    let type_width = edge_type_width.bytes();
     let widths = [
-        Some(14_usize),
-        Some(14),
-        Some(18),
+        Some(13_usize + type_width),
+        Some(13 + type_width),
+        Some(17 + type_width),
         Some(5),
         (version == 5).then_some(17),
         None,
@@ -860,11 +969,11 @@ fn section(bytes: &[u8], range: std::ops::Range<usize>) -> GraphResult<&[u8]> {
         .ok_or_else(|| segment_corrupt("section range is out of bounds"))
 }
 
-fn encode_edges(out: &mut Vec<u8>, rows: &[SegmentEdge]) -> GraphResult<()> {
+fn encode_edges(out: &mut Vec<u8>, rows: &[SegmentEdge], width: EdgeTypeWidth) -> GraphResult<()> {
     for row in rows {
         push_u32(out, row.source);
         push_u32(out, row.target);
-        out.push(encode_v6_type_id(row.type_id)?);
+        encode_type_id(row.type_id, width, out)?;
         out.push(u8::from(row.schema_reversed));
         push_u32(
             out,
@@ -875,11 +984,15 @@ fn encode_edges(out: &mut Vec<u8>, rows: &[SegmentEdge]) -> GraphResult<()> {
     Ok(())
 }
 
-fn encode_edge_weights(out: &mut Vec<u8>, rows: &[SegmentEdgeWeight]) -> GraphResult<()> {
+fn encode_edge_weights(
+    out: &mut Vec<u8>,
+    rows: &[SegmentEdgeWeight],
+    width: EdgeTypeWidth,
+) -> GraphResult<()> {
     for row in rows {
         push_u32(out, row.source);
         push_u32(out, row.target);
-        out.push(encode_v6_type_id(row.type_id)?);
+        encode_type_id(row.type_id, width, out)?;
         out.push(u8::from(row.schema_reversed));
         push_u32(
             out,
@@ -966,21 +1079,24 @@ fn encode_tenants(out: &mut Vec<u8>, rows: &[SegmentTenant]) -> GraphResult<()> 
     Ok(())
 }
 
-fn decode_edges(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdge>> {
+fn decode_edges(bytes: &[u8], count: u32, width: EdgeTypeWidth) -> GraphResult<Vec<SegmentEdge>> {
     let mut rows = Vec::with_capacity(count as usize);
+    let row_width = 13 + width.bytes();
     for idx in 0..count as usize {
-        let offset = idx * 14;
-        let schema_reversed = read_u8(bytes, offset + 9)?;
+        let offset = idx * row_width;
+        let type_offset = offset + 8;
+        let schema_offset = type_offset + width.bytes();
+        let schema_reversed = read_u8(bytes, schema_offset)?;
         if schema_reversed > 1 {
             return Err(segment_corrupt(format!(
                 "schema_reversed flag must be 0 or 1, found {schema_reversed}"
             )));
         }
-        let relationship_id = read_u32(bytes, offset + 10)?;
+        let relationship_id = read_u32(bytes, schema_offset + 1)?;
         rows.push(SegmentEdge {
             source: read_u32(bytes, offset)?,
             target: read_u32(bytes, offset + 4)?,
-            type_id: decode_v6_type_id(read_u8(bytes, offset + 8)?)?,
+            type_id: decode_type_id(bytes, type_offset, width)?,
             schema_reversed: schema_reversed != 0,
             relationship_id: (relationship_id != crate::edge_store::NO_RELATIONSHIP_ID)
                 .then_some(relationship_id),
@@ -989,11 +1105,18 @@ fn decode_edges(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdge>> {
     Ok(rows)
 }
 
-fn decode_edge_weights(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdgeWeight>> {
+fn decode_edge_weights(
+    bytes: &[u8],
+    count: u32,
+    width: EdgeTypeWidth,
+) -> GraphResult<Vec<SegmentEdgeWeight>> {
     let mut rows = Vec::with_capacity(count as usize);
+    let row_width = 17 + width.bytes();
     for idx in 0..count as usize {
-        let offset = idx * 18;
-        let schema_reversed = read_u8(bytes, offset + 9)?;
+        let offset = idx * row_width;
+        let type_offset = offset + 8;
+        let schema_offset = type_offset + width.bytes();
+        let schema_reversed = read_u8(bytes, schema_offset)?;
         if schema_reversed > 1 {
             return Err(segment_corrupt(format!(
                 "schema_reversed flag must be 0 or 1, found {schema_reversed}"
@@ -1002,13 +1125,13 @@ fn decode_edge_weights(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdgeW
         rows.push(SegmentEdgeWeight {
             source: read_u32(bytes, offset)?,
             target: read_u32(bytes, offset + 4)?,
-            type_id: decode_v6_type_id(read_u8(bytes, offset + 8)?)?,
+            type_id: decode_type_id(bytes, type_offset, width)?,
             schema_reversed: schema_reversed != 0,
-            relationship_id: match read_u32(bytes, offset + 10)? {
+            relationship_id: match read_u32(bytes, schema_offset + 1)? {
                 crate::edge_store::NO_RELATIONSHIP_ID => None,
                 relationship_id => Some(relationship_id),
             },
-            weight: read_u32(bytes, offset + 14)?,
+            weight: read_u32(bytes, schema_offset + 5)?,
         });
     }
     Ok(rows)
@@ -1020,9 +1143,64 @@ fn encode_v6_type_id(type_id: EdgeTypeId) -> GraphResult<u8> {
         .map_err(|_| segment_corrupt("edge type identifier exceeds v6 storage"))
 }
 
-fn decode_v6_type_id(value: u8) -> GraphResult<EdgeTypeId> {
-    EdgeTypeId::from_v6_storage(value)
-        .map_err(|_| segment_corrupt("edge type identifier uses the reserved v6 sentinel"))
+fn encode_type_id(type_id: EdgeTypeId, width: EdgeTypeWidth, out: &mut Vec<u8>) -> GraphResult<()> {
+    validate_type_id_width(type_id, width)?;
+    match width {
+        EdgeTypeWidth::One => out.push(encode_v6_type_id(type_id)?),
+        EdgeTypeWidth::Two => {
+            let value = u16::try_from(type_id.get()).map_err(|_| {
+                segment_corrupt("edge type identifier exceeds two-byte segment storage")
+            })?;
+            if value == u16::MAX {
+                return Err(segment_corrupt(
+                    "edge type identifier uses the reserved two-byte sentinel",
+                ));
+            }
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        EdgeTypeWidth::Four => out.extend_from_slice(&type_id.get().to_le_bytes()),
+    }
+    Ok(())
+}
+
+fn validate_type_id_width(type_id: EdgeTypeId, width: EdgeTypeWidth) -> GraphResult<()> {
+    if type_id == EdgeTypeId::SENTINEL
+        || EdgeTypeWidth::select_for_max_id(type_id).bytes() > width.bytes()
+    {
+        return Err(segment_corrupt(
+            "edge type identifier does not fit the declared segment width",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_type_id(bytes: &[u8], offset: usize, width: EdgeTypeWidth) -> GraphResult<EdgeTypeId> {
+    let raw = match width {
+        EdgeTypeWidth::One => u32::from(read_u8(bytes, offset)?),
+        EdgeTypeWidth::Two => u32::from(read_u16(bytes, offset)?),
+        EdgeTypeWidth::Four => read_u32(bytes, offset)?,
+    };
+    if raw
+        == match width {
+            EdgeTypeWidth::One => u8::MAX as u32,
+            EdgeTypeWidth::Two => u16::MAX as u32,
+            EdgeTypeWidth::Four => u32::MAX,
+        }
+    {
+        return Err(segment_corrupt(
+            "edge type identifier uses the reserved physical sentinel",
+        ));
+    }
+    EdgeTypeId::try_from(raw)
+        .map_err(|_| segment_corrupt("edge type identifier uses the logical sentinel"))
+}
+
+fn decode_edge_type_width(version: u32, raw: u8) -> GraphResult<EdgeTypeWidth> {
+    if version != V7_VERSION {
+        return Ok(EdgeTypeWidth::One);
+    }
+    EdgeTypeWidth::from_bytes(u32::from(raw))
+        .ok_or_else(|| segment_corrupt(format!("invalid edge type width {raw}")))
 }
 
 fn decode_node_states(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentNodeState>> {
@@ -1243,6 +1421,13 @@ fn read_u8(bytes: &[u8], offset: usize) -> GraphResult<u8> {
         .ok_or_else(|| segment_corrupt("unexpected end of segment"))
 }
 
+fn read_u16(bytes: &[u8], offset: usize) -> GraphResult<u16> {
+    let raw = bytes
+        .get(offset..offset + 2)
+        .ok_or_else(|| segment_corrupt("u16 read exceeds segment length"))?;
+    Ok(u16::from_le_bytes([raw[0], raw[1]]))
+}
+
 fn read_u32(bytes: &[u8], offset: usize) -> GraphResult<u32> {
     let raw = bytes
         .get(offset..offset + 4)
@@ -1303,12 +1488,24 @@ fn segment_corrupt(reason: impl Into<String>) -> GraphError {
 #[cfg(test)]
 pub(crate) fn encode_version_5_segment_for_test(segment: &DeltaSegment) -> Vec<u8> {
     let mut sections = EncodedSections::default();
-    encode_edges(&mut sections.edge_inserts, &segment.edge_inserts)
-        .expect("test segment edge insert IDs fit v6");
-    encode_edges(&mut sections.edge_deletes, &segment.edge_deletes)
-        .expect("test segment edge delete IDs fit v6");
-    encode_edge_weights(&mut sections.edge_weights, &segment.edge_weights)
-        .expect("test segment edge weight IDs fit v6");
+    encode_edges(
+        &mut sections.edge_inserts,
+        &segment.edge_inserts,
+        EdgeTypeWidth::One,
+    )
+    .expect("test segment edge insert IDs fit v6");
+    encode_edges(
+        &mut sections.edge_deletes,
+        &segment.edge_deletes,
+        EdgeTypeWidth::One,
+    )
+    .expect("test segment edge delete IDs fit v6");
+    encode_edge_weights(
+        &mut sections.edge_weights,
+        &segment.edge_weights,
+        EdgeTypeWidth::One,
+    )
+    .expect("test segment edge weight IDs fit v6");
     encode_node_states(&mut sections.node_states, &segment.node_states);
     for row in &segment.resolutions {
         push_u32(&mut sections.resolutions, row.table_oid);
@@ -1335,6 +1532,57 @@ pub(crate) fn encode_version_5_segment_for_test(segment: &DeltaSegment) -> Vec<u
     }
     write_header(&mut bytes, &segment.header, &counts, &offsets, 0);
     write_u32_at(&mut bytes, 8, 5);
+    bytes[15] = 0;
+    let checksum = checksum_segment_bytes(&bytes);
+    write_u32_at(&mut bytes, CHECKSUM_OFFSET, checksum);
+    bytes
+}
+
+#[cfg(test)]
+fn encode_version_6_segment_for_test(segment: &DeltaSegment) -> Vec<u8> {
+    let mut legacy = segment.clone();
+    legacy.header.version = V6_VERSION;
+    legacy.header.edge_type_width = EdgeTypeWidth::One;
+    validate_segment(&legacy).expect("v6 test segment is valid");
+    let section_lengths = legacy
+        .encoded_section_lengths()
+        .expect("v6 section lengths fit");
+    let mut sections = EncodedSections::with_capacities(section_lengths);
+    encode_edges(
+        &mut sections.edge_inserts,
+        &legacy.edge_inserts,
+        EdgeTypeWidth::One,
+    )
+    .expect("v6 inserts encode");
+    encode_edges(
+        &mut sections.edge_deletes,
+        &legacy.edge_deletes,
+        EdgeTypeWidth::One,
+    )
+    .expect("v6 deletes encode");
+    encode_edge_weights(
+        &mut sections.edge_weights,
+        &legacy.edge_weights,
+        EdgeTypeWidth::One,
+    )
+    .expect("v6 weights encode");
+    encode_node_states(&mut sections.node_states, &legacy.node_states);
+    encode_resolutions(&mut sections.resolutions, &legacy.resolutions)
+        .expect("v6 resolutions encode");
+    encode_filters(&mut sections.filters, &legacy.filters).expect("v6 filters encode");
+    encode_tenants(&mut sections.tenants, &legacy.tenants).expect("v6 tenants encode");
+    let counts = legacy.section_counts().expect("v6 counts fit");
+    let mut offsets = [0_u64; SECTION_COUNT];
+    let mut cursor = HEADER_SIZE;
+    let mut bytes = vec![0; HEADER_SIZE];
+    for (idx, section) in sections.as_slices().iter().enumerate() {
+        offsets[idx] = cursor as u64;
+        bytes.extend_from_slice(section);
+        cursor += section.len();
+    }
+    write_header(&mut bytes, &legacy.header, &counts, &offsets, 0);
+    write_u32_at(&mut bytes, 8, V6_VERSION);
+    bytes[15] = 0;
     let checksum = checksum_segment_bytes(&bytes);
     write_u32_at(&mut bytes, CHECKSUM_OFFSET, checksum);
     bytes
@@ -1346,6 +1594,122 @@ mod tests {
     use crate::projection::normalize::{
         normalize_committed_mutations, CommittedMutation, MutationBufferLimits, MutationOperation,
     };
+
+    fn edge_segment_with_type(type_id: u32) -> DeltaSegment {
+        let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 2, 1)
+            .expect("segment constructs");
+        segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: EdgeTypeId::try_from(type_id).expect("logical type is valid"),
+            schema_reversed: false,
+            relationship_id: Some(1),
+        });
+        segment
+    }
+
+    #[test]
+    fn segment_v7_roundtrips_one_two_four_byte_edge_types() {
+        for (type_id, expected_width) in [
+            (254, EdgeTypeWidth::One),
+            (255, EdgeTypeWidth::Two),
+            (65_534, EdgeTypeWidth::Two),
+            (65_535, EdgeTypeWidth::Four),
+        ] {
+            let bytes = edge_segment_with_type(type_id)
+                .to_bytes()
+                .expect("adaptive segment encodes");
+            assert_eq!(read_u32(&bytes, 8).expect("version reads"), V7_VERSION);
+            assert_eq!(bytes[15] as usize, expected_width.bytes());
+            let decoded = DeltaSegment::from_bytes(&bytes).expect("adaptive segment decodes");
+            assert_eq!(decoded.edge_inserts[0].type_id.get(), type_id);
+            assert_eq!(decoded.header.edge_type_width, expected_width);
+        }
+    }
+
+    #[test]
+    fn segment_v6_remains_readable_after_v7_activation() {
+        let original = edge_segment_with_type(254);
+        let bytes = encode_version_6_segment_for_test(&original);
+        assert_eq!(bytes.len(), 174);
+        assert_eq!(checksum_segment_bytes(&bytes), 0xace9_e683);
+        assert_eq!(&bytes[0..8], MAGIC);
+        assert_eq!(&bytes[8..12], &V6_VERSION.to_le_bytes());
+        assert_eq!(bytes[15], 0);
+        let decoded = DeltaSegment::from_bytes(&bytes).expect("v6 segment remains readable");
+        assert_eq!(decoded.header.version, V6_VERSION);
+        assert_eq!(decoded.header.edge_type_width, EdgeTypeWidth::One);
+        assert_eq!(decoded.edge_inserts, original.edge_inserts);
+    }
+
+    #[test]
+    fn segment_v7_rejects_invalid_or_noncanonical_edge_type_width() {
+        let bytes = edge_segment_with_type(255)
+            .to_bytes()
+            .expect("two-byte segment encodes");
+        for invalid in [0, 3, 8] {
+            let mut corrupt = bytes.clone();
+            corrupt[15] = invalid;
+            rewrite_checksum(&mut corrupt);
+            assert!(DeltaSegment::from_bytes(&corrupt).is_err());
+        }
+        let mut overwide = edge_segment_with_type(254)
+            .to_bytes()
+            .expect("one-byte segment encodes");
+        overwide[15] = 2;
+        rewrite_checksum(&mut overwide);
+        assert!(DeltaSegment::from_bytes(&overwide).is_err());
+    }
+
+    #[test]
+    fn segment_v7_rejects_edge_type_sentinel_and_registry_overflow() {
+        let mut sentinel = edge_segment_with_type(255)
+            .to_bytes()
+            .expect("two-byte segment encodes");
+        let section =
+            usize::try_from(read_u64(&sentinel, 64).expect("offset reads")).expect("offset fits");
+        sentinel[section + 8..section + 10].copy_from_slice(&u16::MAX.to_le_bytes());
+        rewrite_checksum(&mut sentinel);
+        assert!(DeltaSegment::from_bytes(&sentinel).is_err());
+
+        let decoded = DeltaSegment::from_bytes(
+            &edge_segment_with_type(255)
+                .to_bytes()
+                .expect("segment encodes"),
+        )
+        .expect("segment decodes");
+        assert!(decoded.validate_edge_type_ids(255).is_err());
+        decoded
+            .validate_edge_type_ids(256)
+            .expect("dictionary contains type 255");
+    }
+
+    #[test]
+    fn segment_v7_rejects_misaligned_truncated_or_mismatched_type_sections() {
+        let bytes = edge_segment_with_type(255)
+            .to_bytes()
+            .expect("two-byte segment encodes");
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        rewrite_checksum(&mut truncated);
+        assert!(DeltaSegment::from_bytes(&truncated).is_err());
+
+        let mut mismatched = bytes;
+        mismatched[15] = 4;
+        rewrite_checksum(&mut mismatched);
+        assert!(DeltaSegment::from_bytes(&mismatched).is_err());
+    }
+
+    #[test]
+    fn segment_v7_decode_and_encode_account_selected_width_bytes() {
+        for (type_id, width) in [(254, 1usize), (255, 2), (65_535, 4)] {
+            let segment = edge_segment_with_type(type_id);
+            let bytes = segment.to_bytes().expect("segment encodes");
+            assert_eq!(bytes.len(), HEADER_SIZE + 13 + width);
+            assert_eq!(segment.encoded_len().expect("length computes"), bytes.len());
+            assert!(DeltaSegment::decoded_heap_upper_bound(&bytes).is_ok());
+        }
+    }
 
     #[test]
     fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
@@ -1638,7 +2002,7 @@ mod tests {
         assert!(matches!(checksum_err, GraphError::CorruptFile { .. }));
         assert!(matches!(reserved_err, GraphError::CorruptFile { .. }));
 
-        for offset in [15, 60, 120] {
+        for offset in [60, 120] {
             let mut bad_padding = segment.to_bytes().expect("segment encodes");
             bad_padding[offset] = 1;
             rewrite_checksum(&mut bad_padding);
@@ -1646,6 +2010,14 @@ mod tests {
                 DeltaSegment::from_bytes(&bad_padding).expect_err("bad padding rejects");
             assert!(matches!(padding_err, GraphError::CorruptFile { .. }));
         }
+
+        let mut bad_width = segment.to_bytes().expect("segment encodes");
+        bad_width[15] = 3;
+        rewrite_checksum(&mut bad_width);
+        assert!(matches!(
+            DeltaSegment::from_bytes(&bad_width),
+            Err(GraphError::CorruptFile { reason }) if reason.contains("edge type width")
+        ));
     }
 
     #[test]

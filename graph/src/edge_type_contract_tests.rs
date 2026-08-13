@@ -381,8 +381,10 @@ fn p6_logical_migration_preserves_the_v6_byte_contract() {
         "the full-file v6 compatibility oracle must remain active"
     );
     assert!(
-        segment.contains("const VERSION: u32 = 6") && segment.contains("from_v6_storage"),
-        "segment DTOs may widen logically only through the v6 codec adapter"
+        segment.contains("const V6_VERSION: u32 = 6")
+            && segment.contains("const V7_VERSION: u32 = 7")
+            && segment.contains("segment_v6_remains_readable_after_v7_activation"),
+        "adaptive mutable segments must retain their v6 compatibility oracle"
     );
 }
 

@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::safety::{GraphError, GraphResult};
 
 /// Current JSON manifest format version.
-pub(crate) const MANIFEST_VERSION: u32 = 2;
+pub(crate) const MANIFEST_VERSION: u32 = 3;
+const LEGACY_MANIFEST_VERSION: u32 = 2;
 /// Validation state for a generation whose artifacts are ready to read.
 pub(crate) const VALIDATION_STATUS_VALID: &str = "valid";
 /// Validation state for a generation that has been marked corrupt.
@@ -86,6 +87,9 @@ pub(crate) struct ProjectionManifest {
     /// Cumulative post-build relationship identity dictionary artifact.
     #[serde(default)]
     pub(crate) relationship_identities: Option<ManifestIdentityRef>,
+    /// Cumulative relationship-type dictionary used by mutable segments.
+    #[serde(default)]
+    pub(crate) edge_type_dictionary: Option<ManifestEdgeTypeDictionaryRef>,
     /// Base chunks that are active for this generation.
     pub(crate) base_chunks: Vec<ManifestChunkRef>,
     /// Files that became obsolete when this generation was published.
@@ -126,6 +130,7 @@ impl ProjectionManifest {
             base_artifact_version,
             segments: Vec::new(),
             relationship_identities: None,
+            edge_type_dictionary: None,
             base_chunks: Vec::new(),
             obsolete_files: Vec::new(),
             sync_watermark,
@@ -168,11 +173,16 @@ impl ProjectionManifest {
     /// fields are empty, watermarks are negative, or child references are
     /// incomplete.
     pub(crate) fn validate(&self) -> GraphResult<()> {
-        if self.version != MANIFEST_VERSION {
+        if !matches!(self.version, LEGACY_MANIFEST_VERSION | MANIFEST_VERSION) {
             return Err(GraphError::IncompatibleVersion(format!(
                 "projection manifest version {} is unsupported; expected {}",
                 self.version, MANIFEST_VERSION
             )));
+        }
+        if self.version == LEGACY_MANIFEST_VERSION && self.edge_type_dictionary.is_some() {
+            return Err(manifest_corrupt(
+                "manifest version 2 cannot reference a relationship type dictionary",
+            ));
         }
         if self.generation_id == 0 {
             return Err(manifest_corrupt("generation_id must be positive"));
@@ -192,6 +202,9 @@ impl ProjectionManifest {
         }
         if let Some(identities) = &self.relationship_identities {
             identities.validate()?;
+        }
+        if let Some(dictionary) = &self.edge_type_dictionary {
+            dictionary.validate()?;
         }
         for chunk in &self.base_chunks {
             chunk.validate()?;
@@ -283,6 +296,10 @@ impl ProjectionManifest {
             bytes = checked_manifest_bytes(bytes, reference.path.capacity())?;
             bytes = checked_manifest_bytes(bytes, reference.checksum.capacity())?;
         }
+        if let Some(reference) = &self.edge_type_dictionary {
+            bytes = checked_manifest_bytes(bytes, reference.path.capacity())?;
+            bytes = checked_manifest_bytes(bytes, reference.checksum.capacity())?;
+        }
         Ok(bytes)
     }
 
@@ -319,6 +336,44 @@ impl ManifestIdentityRef {
         if self.entry_count == 0 {
             return Err(manifest_corrupt(
                 "relationship identity dictionary must contain reserved slot zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Cumulative relationship-type dictionary reference stored in a manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ManifestEdgeTypeDictionaryRef {
+    /// Dictionary path relative to the projection artifact directory.
+    pub(crate) path: String,
+    /// CRC32 checksum of the complete dictionary artifact.
+    pub(crate) checksum: String,
+    /// Dictionary slots including reserved logical ID zero.
+    pub(crate) entry_count: u32,
+    /// Artifact byte size used for bounded loading and retention accounting.
+    pub(crate) bytes: u64,
+}
+
+impl ManifestEdgeTypeDictionaryRef {
+    fn validate(&self) -> GraphResult<()> {
+        if self.path.trim().is_empty() {
+            return Err(manifest_corrupt(
+                "relationship type dictionary path is required",
+            ));
+        }
+        if self.checksum.trim().is_empty() {
+            return Err(manifest_corrupt(
+                "relationship type dictionary checksum is required",
+            ));
+        }
+        if self.entry_count == 0
+            || self.entry_count as usize
+                > crate::edge_type_registry::EdgeTypeRegistry::MAX_USER_EDGE_TYPES + 1
+        {
+            return Err(manifest_corrupt(
+                "relationship type dictionary entry count is invalid",
             ));
         }
         Ok(())
@@ -905,6 +960,13 @@ impl ProjectionManifestStore {
                 "relationship identity dictionary",
             )?;
         }
+        if let Some(dictionary) = &manifest.edge_type_dictionary {
+            require_existing_reference(
+                &self.root,
+                &dictionary.path,
+                "relationship type dictionary",
+            )?;
+        }
         for segment in &manifest.segments {
             require_existing_reference(&self.root, &segment.path, "segment")?;
         }
@@ -924,6 +986,13 @@ impl ProjectionManifestStore {
                 &self.root,
                 &identities.path,
                 "relationship identity dictionary",
+            )?;
+        }
+        if let Some(dictionary) = &manifest.edge_type_dictionary {
+            require_existing_reference(
+                &self.root,
+                &dictionary.path,
+                "relationship type dictionary",
             )?;
         }
         for segment in &manifest.segments {
@@ -1651,6 +1720,43 @@ mod tests {
         assert_eq!(decoded, manifest);
         assert!(decoded.segments.is_empty());
         assert_eq!(decoded.validation_status, VALIDATION_STATUS_VALID);
+    }
+
+    #[test]
+    fn projection_manifest_v2_v3_dictionary_compatibility_is_explicit() {
+        let mut legacy = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:abcd", 7, 0, 1);
+        legacy.version = LEGACY_MANIFEST_VERSION;
+        let mut legacy_value: serde_json::Value =
+            serde_json::from_str(&legacy.to_pretty_json().expect("legacy v2 encodes"))
+                .expect("legacy JSON parses");
+        legacy_value
+            .as_object_mut()
+            .expect("manifest is an object")
+            .remove("edge_type_dictionary");
+        let legacy_json = serde_json::to_string(&legacy_value).expect("legacy JSON encodes");
+        assert!(!legacy_json.contains("edge_type_dictionary"));
+        let decoded = ProjectionManifest::from_json(&legacy_json).expect("legacy v2 decodes");
+        assert_eq!(decoded.version, LEGACY_MANIFEST_VERSION);
+        assert!(decoded.edge_type_dictionary.is_none());
+
+        let dictionary = ManifestEdgeTypeDictionaryRef {
+            path: "relationship-types-00000000000000000001.bin".to_string(),
+            checksum: "crc32:abcd".to_string(),
+            entry_count: 2,
+            bytes: 64,
+        };
+        let mut current = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:abcd", 7, 0, 2);
+        current.edge_type_dictionary = Some(dictionary.clone());
+        let current_json = current.to_pretty_json().expect("v3 encodes");
+        assert_eq!(
+            ProjectionManifest::from_json(&current_json)
+                .expect("v3 decodes")
+                .edge_type_dictionary,
+            Some(dictionary.clone())
+        );
+
+        current.version = LEGACY_MANIFEST_VERSION;
+        assert!(current.to_pretty_json().is_err());
     }
 
     #[test]

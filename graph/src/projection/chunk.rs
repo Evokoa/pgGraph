@@ -363,6 +363,7 @@ fn publish_base_chunk_rewrite_inner(
         BaseChunkRewriteReason::Repair => manifest.mark_repair(),
     }
     manifest.relationship_identities = previous.relationship_identities.clone();
+    manifest.edge_type_dictionary = previous.edge_type_dictionary.clone();
     manifest.segments = retained_segments;
     manifest.base_chunks = base_chunks;
     manifest.obsolete_files = obsolete_files;

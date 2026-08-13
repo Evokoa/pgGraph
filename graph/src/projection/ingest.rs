@@ -392,6 +392,7 @@ impl ProjectionIngester {
         );
         if let Some(previous) = previous.as_ref() {
             manifest.inherit_operation_timestamps(previous);
+            manifest.edge_type_dictionary = previous.edge_type_dictionary.clone();
             manifest.segments = previous.segments.clone();
             manifest.base_chunks = previous.base_chunks.clone();
             manifest.obsolete_files = previous.obsolete_files.clone();

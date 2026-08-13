@@ -306,6 +306,36 @@ impl EdgeTypeRegistry {
             })
             .ok_or_else(|| GraphError::Internal("edge type metadata bound overflowed".into()))
     }
+
+    /// Conservative retained registry heap bound from validated count/payload metadata.
+    pub(crate) fn decoded_heap_upper_bound(
+        count: usize,
+        payload_bytes: usize,
+    ) -> GraphResult<usize> {
+        if count == 0
+            || count > Self::MAX_USER_EDGE_TYPES + 1
+            || payload_bytes > Self::MAX_EDGE_TYPE_DICTIONARY_BYTES
+        {
+            return Err(GraphError::CorruptFile {
+                reason: "edge type registry metadata exceeds configured policy".into(),
+            });
+        }
+        let lookup_slots = count
+            .saturating_sub(1)
+            .max(1)
+            .checked_next_power_of_two()
+            .and_then(|slots| slots.checked_mul(2))
+            .ok_or_else(|| GraphError::Internal("edge type lookup bound overflowed".into()))?;
+        count
+            .checked_mul(std::mem::size_of::<String>())
+            .and_then(|bytes| bytes.checked_add(payload_bytes.checked_mul(2)?))
+            .and_then(|bytes| {
+                bytes.checked_add(lookup_slots.checked_mul(
+                    std::mem::size_of::<(String, EdgeTypeId)>() + Self::HASH_ENTRY_OVERHEAD_BYTES,
+                )?)
+            })
+            .ok_or_else(|| GraphError::Internal("edge type metadata bound overflowed".into()))
+    }
 }
 
 fn validate_policy<'a>(

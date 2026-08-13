@@ -367,6 +367,9 @@ fn insert_manifest_references(
     if let Some(identities) = &manifest.relationship_identities {
         protected.insert(resolve_manifest_reference(root, &identities.path)?);
     }
+    if let Some(dictionary) = &manifest.edge_type_dictionary {
+        protected.insert(resolve_manifest_reference(root, &dictionary.path)?);
+    }
     for segment in &manifest.segments {
         protected.insert(resolve_manifest_reference(root, &segment.path)?);
     }
@@ -387,8 +390,8 @@ fn gc_io(operation: &str, path: &Path, err: std::io::Error) -> GraphError {
 mod tests {
     use super::*;
     use crate::projection::manifest::{
-        ManifestChunkRef, ManifestFileRef, ManifestIdentityRef, ManifestSegmentRef,
-        ProjectionManifestStore,
+        ManifestChunkRef, ManifestEdgeTypeDictionaryRef, ManifestFileRef, ManifestIdentityRef,
+        ManifestSegmentRef, ProjectionManifestStore,
     };
     use crate::projection::test_fixtures::ProjectionArtifactDir;
     use std::sync::mpsc;
@@ -579,6 +582,59 @@ mod tests {
         assert!(!orphan_chunk.exists());
         assert!(!orphan_identity.exists());
         assert!(current_segment.exists());
+    }
+
+    #[test]
+    fn projection_gc_retains_current_dictionary_and_removes_orphan_dictionary() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_gc_retains_current_dictionary_and_removes_orphan_dictionary",
+        );
+        let current_segment = write_file(dir.path().join("current.pggraph-delta"), b"current");
+        let current_dictionary = write_file(
+            dir.path()
+                .join("relationship-types-00000000000000000001.bin"),
+            b"current-dictionary",
+        );
+        let mut current = manifest_with_segment(dir.path(), 1, &current_segment, Vec::new());
+        current.edge_type_dictionary = Some(ManifestEdgeTypeDictionaryRef {
+            path: relative_path(dir.path(), &current_dictionary),
+            checksum: "crc32:current".to_string(),
+            entry_count: 2,
+            bytes: current_dictionary.metadata().expect("metadata reads").len(),
+        });
+        publish(dir.path(), &current);
+
+        let orphan_dictionary = write_file(
+            dir.path()
+                .join("relationship-types-00000000000000000099.bin"),
+            b"orphan-dictionary",
+        );
+        let orphan_segment = write_file(dir.path().join("orphan.pggraph-delta"), b"orphan");
+        let mut orphan = manifest_with_segment(dir.path(), 99, &orphan_segment, Vec::new());
+        orphan.edge_type_dictionary = Some(ManifestEdgeTypeDictionaryRef {
+            path: relative_path(dir.path(), &orphan_dictionary),
+            checksum: "crc32:orphan".to_string(),
+            entry_count: 2,
+            bytes: orphan_dictionary.metadata().expect("metadata reads").len(),
+        });
+        fs::write(
+            dir.manifest_path(99),
+            orphan.to_pretty_json().expect("orphan encodes"),
+        )
+        .expect("orphan manifest writes");
+
+        collect_projection_garbage_with_active_generation_ids(
+            dir.path(),
+            ProjectionGcConfig {
+                retained_generation_floor: 1,
+            },
+            Vec::new(),
+        )
+        .expect("gc runs");
+
+        assert!(current_dictionary.exists());
+        assert!(!orphan_dictionary.exists());
+        assert!(!orphan_segment.exists());
     }
 
     #[test]
