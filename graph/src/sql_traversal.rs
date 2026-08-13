@@ -22,6 +22,86 @@ pub(crate) struct TraverseCandidate {
     capped: bool,
 }
 
+fn relation_name_with_rust_unwind(table_oid: u32) -> safety::GraphResult<String> {
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        relation_name(table_oid)
+    }))
+}
+
+/// Query-local visibility authority shared by every targeted BFS in one SQL statement.
+pub(crate) struct StatementBfsVisibility {
+    lazy: crate::visibility::LazyVisibilityCoordinator,
+    eager: Option<crate::visibility::VisibilityCoordinator>,
+}
+
+impl StatementBfsVisibility {
+    pub(crate) fn prepare(
+        tables: &[crate::builder::RegisteredTable],
+        edges: &[crate::builder::RegisteredEdge],
+    ) -> safety::GraphResult<Self> {
+        Ok(Self {
+            lazy: crate::sql_visibility::prepare_bfs_visibility(tables, edges)?,
+            eager: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_candidates(
+        &mut self,
+        request: &TraverseRequest<'_>,
+        tables: &[crate::builder::RegisteredTable],
+        edges: &[crate::builder::RegisteredEdge],
+        filter_columns: &[crate::builder::RegisteredFilterColumn],
+        governor: &crate::resource::ResourceGovernor,
+    ) -> safety::GraphResult<Vec<TraverseCandidate>> {
+        if self.eager.is_none() {
+            if let Some(candidates) = execute_lazy_bfs_candidates(
+                request,
+                &mut self.lazy,
+                tables,
+                edges,
+                filter_columns,
+                governor,
+            )? {
+                return Ok(candidates);
+            }
+            self.eager = Some(crate::sql_visibility::prepare_bfs_eager_fallback(
+                &self.lazy, tables, edges, governor,
+            )?);
+        }
+        let eager = self.eager.as_ref().ok_or_else(|| {
+            safety::GraphError::Internal("statement BFS eager fallback disappeared".into())
+        })?;
+        execute_traverse_candidates_in_context(
+            request,
+            &eager.context(governor),
+            tables,
+            filter_columns,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_rows(
+        &mut self,
+        request: &TraverseRequest<'_>,
+        tables: &[crate::builder::RegisteredTable],
+        edges: &[crate::builder::RegisteredEdge],
+        filter_columns: &[crate::builder::RegisteredFilterColumn],
+        governor: &crate::resource::ResourceGovernor,
+    ) -> safety::GraphResult<Vec<TraverseRow>> {
+        let candidates =
+            self.execute_candidates(request, tables, edges, filter_columns, governor)?;
+        paginate_and_format_traverse_candidates_governed(
+            candidates,
+            request.hydrate,
+            request.offset,
+            request.limit,
+            governor,
+            tables,
+        )
+    }
+}
+
 pub(crate) fn validate_traverse_options(
     direction: &str,
     _tenant: Option<&str>,
@@ -311,7 +391,7 @@ pub(crate) fn execute_lazy_bfs_candidates(
         crate::resource::check_postgres_interrupts,
     ));
     sort_traversal_rows(&mut page);
-    let root_table_name = relation_name(request.root_table.to_u32())?;
+    let root_table_name = relation_name_with_rust_unwind(request.root_table.to_u32())?;
     let mut hydrated = if structured_filter.hydration_filters.is_empty() {
         HashMap::new()
     } else {
@@ -473,9 +553,11 @@ pub(crate) fn execute_traverse_candidates_in_context(
     governor
         .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
         .map_err(crate::safety::resource_limit_error)?;
-    crate::resource::check_postgres_interrupts();
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+        crate::resource::check_postgres_interrupts,
+    ));
     sort_traversal_rows(&mut page);
-    let root_table_name = relation_name(request.root_table.to_u32())?;
+    let root_table_name = relation_name_with_rust_unwind(request.root_table.to_u32())?;
     let needs_hydration_verification = !structured_filter.hydration_filters.is_empty();
     let mut hydrated = if needs_hydration_verification {
         hydrate_nodes_governed_with_tables(&page, governor, tables)?
@@ -552,7 +634,9 @@ pub(crate) fn sort_traverse_candidates_for_many_governed(
     governor
         .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
         .map_err(crate::safety::resource_limit_error)?;
-    crate::resource::check_postgres_interrupts();
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+        crate::resource::check_postgres_interrupts,
+    ));
     sort_traverse_candidates_for_many(rows);
     Ok(())
 }
@@ -673,7 +757,9 @@ pub(crate) fn paginate_and_format_traverse_candidates_governed(
     governor
         .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
         .map_err(crate::safety::resource_limit_error)?;
-    crate::resource::check_postgres_interrupts();
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+        crate::resource::check_postgres_interrupts,
+    ));
     let rows = page
         .drain(..)
         .map(|candidate| {
@@ -703,7 +789,7 @@ pub(crate) fn paginate_and_format_traverse_candidates_governed(
                 )),
                 node,
                 candidate.root_table_name,
-                relation_name(candidate.row.node_table.0)?,
+                relation_name_with_rust_unwind(candidate.row.node_table.0)?,
                 candidate.capped,
             ))
         })
@@ -909,7 +995,7 @@ pub(crate) fn path_coordinates_json(
     path.into_iter()
         .map(|coord| {
             Ok(serde_json::json!({
-                "table": relation_name(coord.table_oid.0)?,
+                "table": relation_name_with_rust_unwind(coord.table_oid.0)?,
                 "id": coord.node_id,
             }))
         })

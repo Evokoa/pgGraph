@@ -2,6 +2,56 @@
 // These wrappers add readable paths, endpoint search, and grouped samples on
 // top of primitive shortest-path and traversal APIs.
 
+#[cfg(feature = "development")]
+#[pg_test]
+fn workflow_neighborhood_lazy_matches_eager_groups_samples_and_caps() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Carol', 55);
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f2', 'u1', 'u3')",
+    )
+    .expect("create neighborhood RLS fixture failed");
+    build_friendship_fixture_graph();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_neighborhood_rls_reader;
+         CREATE ROLE graph_neighborhood_rls_reader;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_neighborhood_visible_nodes
+           ON public.graph_test_users_pgtest FOR SELECT
+           TO graph_neighborhood_rls_reader USING (id <> 'u3');
+         GRANT USAGE ON SCHEMA graph, public TO graph_neighborhood_rls_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest,
+                         public.graph_test_friendships_pgtest
+           TO graph_neighborhood_rls_reader;
+         SET ROLE graph_neighborhood_rls_reader",
+    )
+    .expect("configure neighborhood RLS fixture failed");
+    let query = "SELECT jsonb_agg(to_jsonb(result) ORDER BY depth, node_table, node_count)
+                   FROM graph.neighborhood(
+                     'name', 'Alice',
+                     source_table := 'graph_test_users_pgtest'::regclass,
+                     search_mode := 'exact', max_depth := 1,
+                     direction := 'out', sample_k := 1, node_limit := 1
+                   ) AS result";
+    Spi::run("SELECT graph._test_set_visibility_strategy('eager')")
+        .expect("force eager neighborhood failed");
+    let eager = Spi::get_one::<pgrx::JsonB>(query)
+        .expect("eager neighborhood failed")
+        .expect("eager neighborhood rows missing");
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')")
+        .expect("force lazy neighborhood failed");
+    let lazy = Spi::get_one::<pgrx::JsonB>(query)
+        .expect("lazy neighborhood failed")
+        .expect("lazy neighborhood rows missing");
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("reset neighborhood strategy failed");
+    assert_eq!(lazy.0, eager.0);
+    assert_eq!(lazy.0.as_array().map(Vec::len), Some(1));
+    assert_eq!(lazy.0[0]["truncated"].as_bool(), Some(true));
+}
+
 #[pg_test]
 fn workflow_path_returns_ordered_hydrated_steps_with_readable_summary() {
     reset_and_create_fixtures();

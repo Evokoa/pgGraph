@@ -5,6 +5,35 @@ use crate::{acl, safety, types};
 use pgrx::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "development")]
+thread_local! {
+    static HYDRATION_CANCEL_BEFORE_SPI: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(feature = "development")]
+fn inject_hydration_cancellation() {
+    HYDRATION_CANCEL_BEFORE_SPI.with(|armed| {
+        if armed.replace(false) {
+            pgrx::ereport!(
+                ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                "injected hydration cancellation"
+            );
+        }
+    });
+}
+
+#[cfg(not(feature = "development"))]
+#[inline(always)]
+fn inject_hydration_cancellation() {}
+
+#[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_arm_hydration_cancel")]
+fn test_arm_hydration_cancel() -> bool {
+    HYDRATION_CANCEL_BEFORE_SPI.with(|armed| armed.set(true));
+    true
+}
+
 // PostgreSQL's binary JSONB stores at least one four-byte entry per scalar or
 // container element. An owned `serde_json::Value` uses no more than 128 bytes
 // of structural/key allocation per such entry on supported 64-bit targets.
@@ -218,8 +247,7 @@ pub(crate) fn hydrate_nodes_governed_with_tables(
         acl::check_table_acl(table_oid)?;
         let table_name = sql_table_name_from_oid(table.table_oid)?;
         let pk_expr = primary_key_expr("src", &table.id_columns);
-        let (visible_rows, binary_bytes, text_bytes) = Spi::connect(|client| {
-            let query = format!(
+        let size_query = format!(
                 "SELECT pg_catalog.count(*)::bigint,
                         COALESCE(pg_catalog.sum(pg_catalog.pg_column_size(pg_catalog.to_jsonb(src.*))), 0)::bigint,
                         COALESCE(pg_catalog.sum(pg_catalog.octet_length(pg_catalog.to_jsonb(src.*)::text)), 0)::bigint
@@ -227,78 +255,92 @@ pub(crate) fn hydrate_nodes_governed_with_tables(
                 table_name.as_sql(),
                 pk_expr
             );
-            let result = client
-                .select(&query, None, &[node_ids.clone().into()])
-                .map_err(|error| {
-                    safety::GraphError::Internal(format!(
-                        "batch hydration size preflight failed: {error}"
-                    ))
-                })?;
-            let row = result.first();
-            Ok::<_, safety::GraphError>((
-                row.get::<i64>(1)
-                    .map_err(|error| {
-                        safety::GraphError::Internal(format!(
-                            "batch hydration row count read failed: {error}"
+        let size_params = vec![node_ids.clone().into()];
+        let (visible_rows, binary_bytes, text_bytes) =
+            crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+                || {
+                    inject_hydration_cancellation();
+                    Spi::connect(|client| {
+                        let result =
+                            client
+                                .select(&size_query, None, &size_params)
+                                .map_err(|error| {
+                                    safety::GraphError::Internal(format!(
+                                        "batch hydration size preflight failed: {error}"
+                                    ))
+                                })?;
+                        let row = result.first();
+                        Ok::<_, safety::GraphError>((
+                            row.get::<i64>(1)
+                                .map_err(|error| {
+                                    safety::GraphError::Internal(format!(
+                                        "batch hydration row count read failed: {error}"
+                                    ))
+                                })?
+                                .unwrap_or(0),
+                            row.get::<i64>(2)
+                                .map_err(|error| {
+                                    safety::GraphError::Internal(format!(
+                                        "batch hydration JSONB size read failed: {error}"
+                                    ))
+                                })?
+                                .unwrap_or(0),
+                            row.get::<i64>(3)
+                                .map_err(|error| {
+                                    safety::GraphError::Internal(format!(
+                                        "batch hydration JSON text size read failed: {error}"
+                                    ))
+                                })?
+                                .unwrap_or(0),
                         ))
-                    })?
-                    .unwrap_or(0),
-                row.get::<i64>(2)
-                    .map_err(|error| {
-                        safety::GraphError::Internal(format!(
-                            "batch hydration JSONB size read failed: {error}"
-                        ))
-                    })?
-                    .unwrap_or(0),
-                row.get::<i64>(3)
-                    .map_err(|error| {
-                        safety::GraphError::Internal(format!(
-                            "batch hydration JSON text size read failed: {error}"
-                        ))
-                    })?
-                    .unwrap_or(0),
-            ))
-        })?;
+                    })
+                },
+            ))?;
         reserve_jsonb_materialization(
             &mut workspace,
             u64::try_from(visible_rows.max(0)).unwrap_or(0),
             u64::try_from(binary_bytes.max(0)).unwrap_or(0),
             u64::try_from(text_bytes.max(0)).unwrap_or(0),
         )?;
-        crate::resource::check_postgres_interrupts();
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+            crate::resource::check_postgres_interrupts,
+        ));
         let query = format!(
             "SELECT {} AS graph_node_id, to_jsonb(src.*) FROM {} src WHERE {} = ANY($1::text[])",
             pk_expr,
             table_name.as_sql(),
             pk_expr
         );
-        Spi::connect(|client| {
-            let result = client
-                .select(&query, None, &[node_ids.clone().into()])
-                .map_err(|e| {
-                    safety::GraphError::Internal(format!(
-                        "batch hydration failed for {}: {}",
-                        table_name.as_sql(),
-                        e
-                    ))
-                })?;
-            for row in result {
-                let node_id = row
-                    .get::<String>(1)
+        let hydration_params = vec![node_ids.clone().into()];
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            Spi::connect(|client| {
+                let result = client
+                    .select(&query, None, &hydration_params)
                     .map_err(|e| {
-                        safety::GraphError::Internal(format!("hydration PK read failed: {}", e))
-                    })?
-                    .ok_or_else(|| {
-                        safety::GraphError::Internal("hydration returned NULL PK".to_string())
+                        safety::GraphError::Internal(format!(
+                            "batch hydration failed for {}: {}",
+                            table_name.as_sql(),
+                            e
+                        ))
                     })?;
-                if let Some(node) = row.get::<pgrx::JsonB>(2).map_err(|e| {
-                    safety::GraphError::Internal(format!("hydration row read failed: {}", e))
-                })? {
-                    hydrated.insert((table_oid, node_id), node);
+                for row in result {
+                    let node_id = row
+                        .get::<String>(1)
+                        .map_err(|e| {
+                            safety::GraphError::Internal(format!("hydration PK read failed: {}", e))
+                        })?
+                        .ok_or_else(|| {
+                            safety::GraphError::Internal("hydration returned NULL PK".to_string())
+                        })?;
+                    if let Some(node) = row.get::<pgrx::JsonB>(2).map_err(|e| {
+                        safety::GraphError::Internal(format!("hydration row read failed: {}", e))
+                    })? {
+                        hydrated.insert((table_oid, node_id), node);
+                    }
                 }
-            }
-            Ok::<(), safety::GraphError>(())
-        })?;
+                Ok::<(), safety::GraphError>(())
+            })
+        }))?;
     }
 
     workspace.retain_until_governor_drop();
@@ -333,7 +375,9 @@ pub(crate) fn visible_node_keys_governed_with_tables(
         .collect::<HashMap<_, _>>();
     let mut visible = HashSet::new();
     for (table_oid, node_ids) in ids_by_table {
-        crate::resource::check_postgres_interrupts();
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+            crate::resource::check_postgres_interrupts,
+        ));
         let table = tables_by_oid.get(table_oid).ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "cannot check source visibility for unregistered table OID {table_oid}"
@@ -346,29 +390,32 @@ pub(crate) fn visible_node_keys_governed_with_tables(
             "SELECT {pk_expr} AS graph_node_id FROM {} src WHERE {pk_expr} = ANY($1::text[])",
             table_name.as_sql()
         );
-        Spi::connect(|client| {
-            let result = client
-                .select(&query, None, &[node_ids.clone().into()])
-                .map_err(|e| {
-                    safety::GraphError::Internal(format!("source visibility check failed: {e}"))
-                })?;
-            for row in result {
-                let node_id = row
-                    .get::<String>(1)
+        let visibility_params = vec![node_ids.clone().into()];
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            Spi::connect(|client| {
+                let result = client
+                    .select(&query, None, &visibility_params)
                     .map_err(|e| {
-                        safety::GraphError::Internal(format!(
-                            "source visibility key read failed: {e}"
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        safety::GraphError::Internal(
-                            "source visibility returned NULL key".to_string(),
-                        )
+                        safety::GraphError::Internal(format!("source visibility check failed: {e}"))
                     })?;
-                visible.insert((*table_oid, node_id));
-            }
-            Ok::<(), safety::GraphError>(())
-        })?;
+                for row in result {
+                    let node_id = row
+                        .get::<String>(1)
+                        .map_err(|e| {
+                            safety::GraphError::Internal(format!(
+                                "source visibility key read failed: {e}"
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            safety::GraphError::Internal(
+                                "source visibility returned NULL key".to_string(),
+                            )
+                        })?;
+                    visible.insert((*table_oid, node_id));
+                }
+                Ok::<(), safety::GraphError>(())
+            })
+        }))?;
     }
     workspace.retain_until_governor_drop();
     Ok(visible)

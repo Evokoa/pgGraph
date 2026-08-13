@@ -1666,7 +1666,9 @@ fn consume_expansion(governor: Option<&crate::resource::ResourceGovernor>) -> Gr
         )
         .map_err(crate::safety::resource_limit_error)?;
     if governor.work_used().as_u64().is_multiple_of(1_024) {
-        crate::resource::check_postgres_interrupts();
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+            crate::resource::check_postgres_interrupts,
+        ));
         governor
             .check_elapsed(crate::resource::ResourcePhase::QueryExpand)
             .map_err(crate::safety::resource_limit_error)?;

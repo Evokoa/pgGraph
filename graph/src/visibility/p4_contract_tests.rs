@@ -146,15 +146,18 @@ fn targeted_bfs_workflow_inventory_is_explicit() {
     let find_related = function_body(&workflow, "fn find_related");
     let neighborhood = function_body(&workflow, "fn neighborhood");
     assert!(
-        expand.contains("execute_traverse_rows_in_context"),
+        expand.contains("StatementBfsVisibility") && expand.contains("execute_rows"),
         "expand is a direct targeted BFS workflow and needs eager/lazy differential coverage"
     );
     assert!(
-        find_related.matches("traverse_search_rows_in_context").count() >= 2,
+        find_related
+            .matches("traverse_search_rows_with_statement_bfs_visibility")
+            .count()
+            >= 2,
         "find_related is the resolver-sharing workflow because its filtered and broad-count traversals must reuse one statement-local oracle"
     );
     assert!(
-        neighborhood.contains("traverse_search_rows_in_context"),
+        neighborhood.contains("traverse_search_rows_with_statement_bfs_visibility"),
         "neighborhood is a targeted BFS workflow and needs exact grouped-row eager/lazy parity"
     );
 }
@@ -201,19 +204,63 @@ fn targeted_paths_freeze_meeting_heap_and_tie_order_before_migration() {
 }
 
 #[test]
-#[ignore = "P4 workflow checkpoint contract"]
 fn targeted_workflows_share_one_statement_local_resolver() {
     let workflow = crate_source("src/sql_facade/workflow.rs");
-    let traversal = crate_source("src/sql_facade/traversal.rs");
+    let traversal = crate_source("src/sql_traversal.rs");
+    let workflow_search_tests = crate_source("src/pg_tests/workflow_search_api.rs");
+    let workflow_relationship_tests = crate_source("src/pg_tests/workflow_relationship_api.rs");
+    let expand = function_body(&workflow, "fn expand");
+    let find_related = function_body(&workflow, "fn find_related");
+    let neighborhood = function_body(&workflow, "fn neighborhood");
 
     assert!(
-        workflow.contains("targeted_workflows_share_one_lazy_resolver_and_match_eager_rows"),
-        "P4 workflows need an eager/lazy differential that covers exact ordered rows and diagnostics"
+        traversal.contains("struct StatementBfsVisibility")
+            && traversal.contains("fn execute_candidates")
+            && traversal.contains("fn execute_rows"),
+        "P4.2 workflows need an owned statement-local BFS visibility resolver that survives multiple internal traversals without becoming transaction-scoped"
     );
+    for (name, body) in [
+        ("expand", expand),
+        ("find_related", find_related),
+        ("neighborhood", neighborhood),
+    ] {
+        assert!(
+            body.contains("StatementBfsVisibility"),
+            "{name} must create one statement-local resolver before its first targeted traversal"
+        );
+        assert_eq!(
+            body.matches("StatementBfsVisibility").count(),
+            1,
+            "{name} must own one resolver, not prepare one resolver per internal traversal"
+        );
+        assert!(
+            !body.contains("prepare_eager_visibility"),
+            "{name} must select eager or resumable BFS through the shared statement resolver instead of forcing the eager oracle"
+        );
+    }
     assert!(
-        workflow.contains("LazyVisibilityResolver")
-            && (workflow.contains("execute_lazy") || traversal.contains("execute_lazy_path")),
-        "one top-level workflow invocation must reuse one statement-local resolver across its targeted internal traversals"
+        find_related
+            .matches("traverse_search_rows_with_statement_bfs_visibility")
+            .count()
+            >= 2,
+        "find_related must retain both filtered and broad-count traversals so the shared-resolver test exercises actual reuse"
+    );
+
+    for required in [
+        "workflow_expand_lazy_matches_eager_rows_hydration_and_truncation",
+        "workflow_find_related_lazy_reuses_one_resolver_across_roots_and_counts",
+        "workflow_lazy_visibility_cancellation_cleans_statement_and_retries",
+        "workflow_no_rls_lazy_fast_path_has_zero_visibility_spi",
+    ] {
+        assert!(
+            workflow_search_tests.contains(required),
+            "P4.2 workflow search PostgreSQL corpus is missing `{required}`"
+        );
+    }
+    assert!(
+        workflow_relationship_tests
+            .contains("workflow_neighborhood_lazy_matches_eager_groups_samples_and_caps"),
+        "P4.2 neighborhood PostgreSQL corpus must compare exact grouped rows, deterministic samples, and truncation caps"
     );
 }
 

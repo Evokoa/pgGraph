@@ -327,6 +327,14 @@ pub(super) fn traverse_search_rows_governed(
     )
 }
 
+enum SearchTraversalVisibility<'a, 'g> {
+    Context(&'a crate::visibility::QueryExecutionContext<'g>),
+    Statement(
+        &'a mut crate::sql_traversal::StatementBfsVisibility,
+        &'g crate::resource::ResourceGovernor,
+    ),
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn traverse_search_rows_in_context(
     property_key: &str,
@@ -351,7 +359,109 @@ pub(super) fn traverse_search_rows_in_context(
     context: &crate::visibility::QueryExecutionContext<'_>,
     query_start: &super::runtime::QueryStartState,
 ) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
-    let governor = context.governor;
+    traverse_search_rows_with_visibility(
+        property_key,
+        property_value,
+        table_filter,
+        search_mode,
+        case_sensitive,
+        search_max_rows,
+        search_row_offset,
+        max_depth,
+        edge_types,
+        direction,
+        node_tables,
+        filter,
+        tenant,
+        strategy,
+        uniqueness,
+        include_start,
+        hydrate,
+        max_rows,
+        row_offset,
+        SearchTraversalVisibility::Context(context),
+        query_start,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn traverse_search_rows_with_statement_bfs_visibility(
+    property_key: &str,
+    property_value: &str,
+    table_filter: Option<pgrx::pg_sys::Oid>,
+    search_mode: &str,
+    case_sensitive: bool,
+    search_max_rows: i32,
+    search_row_offset: i32,
+    max_depth: i32,
+    edge_types: Option<&[String]>,
+    direction: &str,
+    node_tables: Option<&[pgrx::pg_sys::Oid]>,
+    filter: Option<&pgrx::JsonB>,
+    tenant: Option<&str>,
+    strategy: &str,
+    uniqueness: &str,
+    include_start: bool,
+    hydrate: bool,
+    max_rows: i32,
+    row_offset: i32,
+    visibility: &mut crate::sql_traversal::StatementBfsVisibility,
+    governor: &crate::resource::ResourceGovernor,
+    query_start: &super::runtime::QueryStartState,
+) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
+    traverse_search_rows_with_visibility(
+        property_key,
+        property_value,
+        table_filter,
+        search_mode,
+        case_sensitive,
+        search_max_rows,
+        search_row_offset,
+        max_depth,
+        edge_types,
+        direction,
+        node_tables,
+        filter,
+        tenant,
+        strategy,
+        uniqueness,
+        include_start,
+        hydrate,
+        max_rows,
+        row_offset,
+        SearchTraversalVisibility::Statement(visibility, governor),
+        query_start,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn traverse_search_rows_with_visibility(
+    property_key: &str,
+    property_value: &str,
+    table_filter: Option<pgrx::pg_sys::Oid>,
+    search_mode: &str,
+    case_sensitive: bool,
+    search_max_rows: i32,
+    search_row_offset: i32,
+    max_depth: i32,
+    edge_types: Option<&[String]>,
+    direction: &str,
+    node_tables: Option<&[pgrx::pg_sys::Oid]>,
+    filter: Option<&pgrx::JsonB>,
+    tenant: Option<&str>,
+    strategy: &str,
+    uniqueness: &str,
+    include_start: bool,
+    hydrate: bool,
+    max_rows: i32,
+    row_offset: i32,
+    mut visibility: SearchTraversalVisibility<'_, '_>,
+    query_start: &super::runtime::QueryStartState,
+) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
+    let governor = match &visibility {
+        SearchTraversalVisibility::Context(context) => context.governor,
+        SearchTraversalVisibility::Statement(_, governor) => governor,
+    };
     check_enabled_result()?;
     let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
         tenant,
@@ -413,12 +523,21 @@ pub(super) fn traverse_search_rows_in_context(
             max_nodes: config::MAX_NODES.get(),
             max_frontier: config::MAX_FRONTIER.get(),
         };
-        let mut start_candidates = execute_traverse_candidates_in_context(
-            &request,
-            context,
-            &query_start.tables,
-            &query_start.filter_columns,
-        )?;
+        let mut start_candidates = match &mut visibility {
+            SearchTraversalVisibility::Context(context) => execute_traverse_candidates_in_context(
+                &request,
+                context,
+                &query_start.tables,
+                &query_start.filter_columns,
+            )?,
+            SearchTraversalVisibility::Statement(visibility, _) => visibility.execute_candidates(
+                &request,
+                &query_start.tables,
+                &query_start.edges,
+                &query_start.filter_columns,
+                governor,
+            )?,
+        };
         candidates.append(&mut start_candidates);
     }
     sort_traverse_candidates_for_many_governed(&mut candidates, governor)?;

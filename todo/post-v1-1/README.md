@@ -388,9 +388,12 @@ identities with forced eager/lazy parity and the `PG023` fail-closed diagnostic
 for a missing durable identity.
 The segment-backed `any` cursor now merges both directional sources through the
 same precedence key, including cross-direction tombstones and equal-key inbound
-payload precedence, while retaining bounded progress pages. Resolver sharing
-across `expand`, `find_related`, and `neighborhood` remains the active P4.2
-work.
+payload precedence, while retaining bounded progress pages. `expand`,
+`find_related`, and `neighborhood` now reuse one query-local resolver across
+all roots and optional count passes while preserving their established
+ordering, pagination, hydration, grouping, and truncation. PostgreSQL tests
+cover exact eager/lazy results, cancellation cleanup and retry, and the no-RLS
+zero-SPI fast path. P4.2 is complete; P4.3 DFS is the active checkpoint.
 
 - Extend the state-machine boundary to DFS/reverse traversal without changing
   reversed-neighbor push order or visited timing.

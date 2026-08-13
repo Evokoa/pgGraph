@@ -2,7 +2,7 @@ use super::admin::with_panic_boundary;
 use super::runtime::{
     current_query_freshness, ensure_current_graph, ensure_current_graph_for_query,
 };
-use super::search::{search_rows_governed, traverse_search_rows_in_context};
+use super::search::{search_rows_governed, traverse_search_rows_with_statement_bfs_visibility};
 use super::traversal::{shortest_path_rows_governed, shortest_path_rows_in_context};
 use super::*;
 
@@ -173,20 +173,20 @@ fn expand(
             max_nodes: config::MAX_NODES.get(),
             max_frontier: config::MAX_FRONTIER.get(),
         };
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
+        let mut visibility = crate::sql_traversal::StatementBfsVisibility::prepare(
             &query_start.tables,
             &query_start.edges,
-            &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = coordinator.context(&governor);
-        let rows = execute_traverse_rows_in_context(
-            &request,
-            &context,
-            &query_start.tables,
-            &query_start.filter_columns,
-        )
-        .unwrap_or_else(|err| err.report());
+        let rows = visibility
+            .execute_rows(
+                &request,
+                &query_start.tables,
+                &query_start.edges,
+                &query_start.filter_columns,
+                &governor,
+            )
+            .unwrap_or_else(|err| err.report());
         let mut truncated = max_rows > 0 && rows.len() == max_rows as usize;
         let mut workspace = workflow_workspace(&governor).unwrap_or_else(|err| err.report());
         let mut output = Vec::new();
@@ -304,14 +304,12 @@ fn find_related(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
+        let mut visibility = crate::sql_traversal::StatementBfsVisibility::prepare(
             &query_start.tables,
             &query_start.edges,
-            &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = coordinator.context(&governor);
-        let filtered = traverse_search_rows_in_context(
+        let filtered = traverse_search_rows_with_statement_bfs_visibility(
             property_key,
             property_value,
             source_table,
@@ -331,13 +329,14 @@ fn find_related(
             false,
             candidate_limit,
             0,
-            &context,
+            &mut visibility,
+            &governor,
             &query_start,
         )
         .unwrap_or_else(|err| err.report());
         let broad_count = if include_counts {
             Some(
-                traverse_search_rows_in_context(
+                traverse_search_rows_with_statement_bfs_visibility(
                     property_key,
                     property_value,
                     source_table,
@@ -357,7 +356,8 @@ fn find_related(
                     false,
                     candidate_limit,
                     0,
-                    &context,
+                    &mut visibility,
+                    &governor,
                     &query_start,
                 )
                 .unwrap_or_else(|err| err.report())
@@ -709,14 +709,12 @@ fn neighborhood(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
+        let mut visibility = crate::sql_traversal::StatementBfsVisibility::prepare(
             &query_start.tables,
             &query_start.edges,
-            &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = coordinator.context(&governor);
-        let rows = traverse_search_rows_in_context(
+        let rows = traverse_search_rows_with_statement_bfs_visibility(
             property_key,
             property_value,
             source_table,
@@ -736,7 +734,8 @@ fn neighborhood(
             false,
             node_limit,
             0,
-            &context,
+            &mut visibility,
+            &governor,
             &query_start,
         )
         .unwrap_or_else(|err| err.report());
@@ -898,7 +897,9 @@ fn workflow_step(
     governor: &crate::resource::ResourceGovernor,
     units: u64,
 ) -> safety::GraphResult<()> {
-    crate::resource::check_postgres_interrupts();
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+        crate::resource::check_postgres_interrupts,
+    ));
     governor
         .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
         .and_then(|()| {

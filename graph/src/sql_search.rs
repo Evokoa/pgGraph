@@ -9,6 +9,35 @@ use crate::{acl, safety, types};
 use pgrx::prelude::*;
 use std::borrow::Cow;
 
+#[cfg(feature = "development")]
+thread_local! {
+    static SEARCH_CANCEL_BEFORE_SCAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(feature = "development")]
+fn inject_search_cancellation() {
+    SEARCH_CANCEL_BEFORE_SCAN.with(|armed| {
+        if armed.replace(false) {
+            pgrx::ereport!(
+                ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                "injected source search cancellation"
+            );
+        }
+    });
+}
+
+#[cfg(not(feature = "development"))]
+#[inline(always)]
+fn inject_search_cancellation() {}
+
+#[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_arm_search_cancel")]
+fn test_arm_search_cancel() -> bool {
+    SEARCH_CANCEL_BEFORE_SCAN.with(|armed| armed.set(true));
+    true
+}
+
 struct SourceSearchStatement {
     table_oid: u32,
     table_name: String,
@@ -458,7 +487,10 @@ pub(crate) fn source_table_search_rows_governed_with_tables(
         governor
             .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
             .map_err(crate::safety::resource_limit_error)?;
-        crate::resource::check_postgres_interrupts();
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            inject_search_cancellation();
+            crate::resource::check_postgres_interrupts();
+        }));
         governor
             .consume_work(
                 crate::resource::ResourcePhase::QueryCandidates,
@@ -482,65 +514,71 @@ pub(crate) fn source_table_search_rows_governed_with_tables(
                 "search candidate allocation failed after reservation: {error}"
             ))
         })?;
-        Spi::connect(|client| {
-            // The per-statement reservation includes 8 KiB of fixed slack for
-            // both parameter Vecs and their pgrx datum wrappers.
-            let params = statement
-                .params
-                .iter()
-                .map(|param| param.as_str().into())
-                .collect::<Vec<_>>();
-            let result = client
-                .select(&statement.query, None, &params)
-                .map_err(|e| {
-                    safety::GraphError::Internal(format!(
-                        "source-table search failed for {}: {}",
-                        statement.table_name, e
-                    ))
-                })?;
-            for row in result {
-                governor
-                    .consume_work(
-                        crate::resource::ResourcePhase::QueryCandidates,
-                        crate::resource::WorkUnits::new(1),
-                    )
-                    .map_err(crate::safety::resource_limit_error)?;
-                governor
-                    .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
-                    .map_err(crate::safety::resource_limit_error)?;
-                crate::resource::check_postgres_interrupts();
-                let node_id = row
-                    .get::<String>(1)
+        // Own SPI parameter wrappers outside PG_TRY so a policy ERROR resumes
+        // as Rust unwinding through their destructors.
+        let params = statement
+            .params
+            .iter()
+            .map(|param| param.as_str().into())
+            .collect::<Vec<_>>();
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            Spi::connect(|client| {
+                // The per-statement reservation includes 8 KiB of fixed slack for
+                // both parameter Vecs and their pgrx datum wrappers.
+                let result = client
+                    .select(&statement.query, None, &params)
                     .map_err(|e| {
-                        safety::GraphError::Internal(format!("search PK read failed: {}", e))
-                    })?
-                    .ok_or_else(|| {
-                        safety::GraphError::Internal("search returned NULL PK".to_string())
+                        safety::GraphError::Internal(format!(
+                            "source-table search failed for {}: {}",
+                            statement.table_name, e
+                        ))
                     })?;
-                let Some(actual) = row.get::<String>(2).map_err(|e| {
-                    safety::GraphError::Internal(format!("search value read failed: {}", e))
-                })?
-                else {
-                    continue;
-                };
-                if !matcher.matches(&actual) {
-                    continue;
+                for row in result {
+                    governor
+                        .consume_work(
+                            crate::resource::ResourcePhase::QueryCandidates,
+                            crate::resource::WorkUnits::new(1),
+                        )
+                        .map_err(crate::safety::resource_limit_error)?;
+                    governor
+                        .check_elapsed(crate::resource::ResourcePhase::QueryCandidates)
+                        .map_err(crate::safety::resource_limit_error)?;
+                    crate::sql_visibility::postgres_error_as_rust_unwind(
+                        std::panic::AssertUnwindSafe(crate::resource::check_postgres_interrupts),
+                    );
+                    let node_id = row
+                        .get::<String>(1)
+                        .map_err(|e| {
+                            safety::GraphError::Internal(format!("search PK read failed: {}", e))
+                        })?
+                        .ok_or_else(|| {
+                            safety::GraphError::Internal("search returned NULL PK".to_string())
+                        })?;
+                    let Some(actual) = row.get::<String>(2).map_err(|e| {
+                        safety::GraphError::Internal(format!("search value read failed: {}", e))
+                    })?
+                    else {
+                        continue;
+                    };
+                    if !matcher.matches(&actual) {
+                        continue;
+                    }
+                    let node = row.get::<pgrx::JsonB>(3).map_err(|e| {
+                        safety::GraphError::Internal(format!("search hydration read failed: {}", e))
+                    })?;
+                    rows.push((
+                        pgrx::pg_sys::Oid::from_u32(statement.table_oid),
+                        node_id,
+                        match_type.clone(),
+                        1.0,
+                        true,
+                        node,
+                        statement.display_table_name.clone(),
+                    ));
                 }
-                let node = row.get::<pgrx::JsonB>(3).map_err(|e| {
-                    safety::GraphError::Internal(format!("search hydration read failed: {}", e))
-                })?;
-                rows.push((
-                    pgrx::pg_sys::Oid::from_u32(statement.table_oid),
-                    node_id,
-                    match_type.clone(),
-                    1.0,
-                    true,
-                    node,
-                    statement.display_table_name.clone(),
-                ));
-            }
-            Ok::<(), safety::GraphError>(())
-        })?;
+                Ok::<(), safety::GraphError>(())
+            })
+        }))?;
     }
 
     govern_search_blocking(governor, &rows)?;
@@ -613,36 +651,40 @@ struct SearchMaterializationSizes {
 fn search_statement_sizes(
     statement: &SourceSearchStatement,
 ) -> safety::GraphResult<SearchMaterializationSizes> {
-    Spi::connect(|client| {
-        let params = statement
-            .params
-            .iter()
-            .map(|param| param.as_str().into())
-            .collect::<Vec<_>>();
-        let result = client
-            .select(&statement.size_query, None, &params)
-            .map_err(|error| {
-                safety::GraphError::Internal(format!(
-                    "source-table search size preflight failed for {}: {error}",
-                    statement.table_name
-                ))
-            })?;
-        let row = result.first();
-        let read = |column, label: &str| -> safety::GraphResult<u64> {
-            let value = row.get::<i64>(column).map_err(|error| {
-                safety::GraphError::Internal(format!("search {label} size read failed: {error}"))
-            })?;
-            Ok(u64::try_from(value.unwrap_or(0).max(0)).unwrap_or(0))
-        };
-        Ok(SearchMaterializationSizes {
-            rows: read(1, "row count")?,
-            id_bytes: read(2, "primary-key")?,
-            actual_bytes: read(3, "property value")?,
-            max_actual_bytes: read(4, "maximum property value")?,
-            json_binary_bytes: read(5, "JSONB")?,
-            json_text_bytes: read(6, "JSON text")?,
+    let params = statement
+        .params
+        .iter()
+        .map(|param| param.as_str().into())
+        .collect::<Vec<_>>();
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        Spi::connect(|client| {
+            let result = client
+                .select(&statement.size_query, None, &params)
+                .map_err(|error| {
+                    safety::GraphError::Internal(format!(
+                        "source-table search size preflight failed for {}: {error}",
+                        statement.table_name
+                    ))
+                })?;
+            let row = result.first();
+            let read = |column, label: &str| -> safety::GraphResult<u64> {
+                let value = row.get::<i64>(column).map_err(|error| {
+                    safety::GraphError::Internal(format!(
+                        "search {label} size read failed: {error}"
+                    ))
+                })?;
+                Ok(u64::try_from(value.unwrap_or(0).max(0)).unwrap_or(0))
+            };
+            Ok(SearchMaterializationSizes {
+                rows: read(1, "row count")?,
+                id_bytes: read(2, "primary-key")?,
+                actual_bytes: read(3, "property value")?,
+                max_actual_bytes: read(4, "maximum property value")?,
+                json_binary_bytes: read(5, "JSONB")?,
+                json_text_bytes: read(6, "JSON text")?,
+            })
         })
-    })
+    }))
 }
 
 fn reserve_search_materialization(
@@ -714,7 +756,9 @@ fn govern_search_blocking(
     governor
         .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
         .map_err(crate::safety::resource_limit_error)?;
-    crate::resource::check_postgres_interrupts();
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+        crate::resource::check_postgres_interrupts,
+    ));
     Ok(())
 }
 
