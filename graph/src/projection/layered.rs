@@ -14,8 +14,8 @@ use crate::edge_store::{EdgeStore, RelationshipId, NO_RELATIONSHIP_ID};
 use crate::projection::chunk::SourceRange;
 use crate::projection::manifest::{ManifestChunkRef, ManifestSegmentRef, ProjectionManifest};
 use crate::projection::neighbors::{
-    EdgeOverlay, Neighbor, NeighborIter, NeighborSource, OverlayDeletes, OverlayInserts,
-    OwnedNeighborCursor, WeightedNeighbor, WeightedNeighborSource,
+    EdgeOverlay, Neighbor, NeighborIter, NeighborSource, OverlayDeletes, OverlayInsert,
+    OverlayInserts, OwnedNeighborCursor, WeightedNeighbor, WeightedNeighborSource,
 };
 use crate::projection::segment::{DeltaSegment, SegmentKind};
 use crate::projection::tx_delta;
@@ -56,6 +56,26 @@ struct DurableEdges {
 }
 
 type MergedEdgeKey = (u32, u8, bool, Option<RelationshipId>);
+
+fn any_base_layer_winner(
+    next_key: MergedEdgeKey,
+    out_base: Option<LayeredEdge>,
+    out_chunk: Option<LayeredEdge>,
+    in_base: Option<LayeredEdge>,
+    in_chunk: Option<LayeredEdge>,
+) -> Option<LayeredEdge> {
+    [out_base, out_chunk, in_base, in_chunk]
+        .into_iter()
+        .flatten()
+        .rfind(|edge| {
+            (
+                edge.target,
+                edge.type_id,
+                edge.schema_reversed,
+                edge.relationship_id,
+            ) == next_key
+        })
+}
 
 /// Fully decoded immutable durable state for one projection generation.
 ///
@@ -629,6 +649,32 @@ impl<'a> LayeredNeighbors<'a> {
         }
     }
 
+    /// Borrow a pinned snapshot plus query-frozen overlays for both directions.
+    pub(crate) fn from_snapshot_with_frozen_overlays(
+        base: &'a EdgeStore,
+        base_in: &'a EdgeStore,
+        snapshot: &'a LayeredSnapshot,
+        committed_out: &'a EdgeOverlay,
+        committed_in: &'a EdgeOverlay,
+    ) -> Self {
+        Self {
+            base,
+            base_in: Some(base_in),
+            base_chunk_ranges: Cow::Borrowed(&snapshot.base_chunk_ranges),
+            base_chunk_out: Cow::Borrowed(&snapshot.base_chunk_out),
+            base_chunk_in: Cow::Borrowed(&snapshot.base_chunk_in),
+            durable_out: Cow::Borrowed(&snapshot.durable_out),
+            durable_in: Cow::Borrowed(&snapshot.durable_in),
+            committed_out_inserts: Cow::Borrowed(&committed_out.0),
+            committed_out_deletes: Cow::Borrowed(&committed_out.1),
+            committed_in_inserts: Cow::Borrowed(&committed_in.0),
+            committed_in_deletes: Cow::Borrowed(&committed_in.1),
+            active_nodes: Cow::Borrowed(&snapshot.active_nodes),
+            tenant_memberships: Cow::Borrowed(&snapshot.tenant_memberships),
+            tenant_filter: None,
+        }
+    }
+
     /// Borrow this layered snapshot as a neighbor source for `direction`.
     pub(crate) fn for_direction(
         &self,
@@ -994,6 +1040,9 @@ impl<'a> LayeredNeighbors<'a> {
         if !self.node_visible(node_idx) || limit == 0 {
             return true;
         }
+        if direction == TraversalDirection::Any {
+            return self.fill_any_neighbors(node_idx, cursor, limit, output);
+        }
         let (base, chunks, durable, overlay_inserts, overlay_deletes) = match direction {
             TraversalDirection::Out => (
                 self.base,
@@ -1009,7 +1058,7 @@ impl<'a> LayeredNeighbors<'a> {
                 &self.committed_in_inserts,
                 &self.committed_in_deletes,
             ),
-            TraversalDirection::Any => return false,
+            TraversalDirection::Any => unreachable!("Any is handled above"),
         };
         let (targets, type_ids, schema_reversed, relationship_ids) =
             base.neighbors_with_schema_and_relationship_ids(node_idx);
@@ -1154,6 +1203,259 @@ impl<'a> LayeredNeighbors<'a> {
             chunk_pos,
             durable_pos,
             overlay_pos,
+            last_key,
+        };
+        false
+    }
+
+    fn fill_any_neighbors(
+        &self,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<Neighbor>,
+    ) -> bool {
+        let Some(base_in) = self.base_in else {
+            return false;
+        };
+        let (out_targets, out_types, out_reversed, out_relationship_ids) = self
+            .base
+            .neighbors_with_schema_and_relationship_ids(node_idx);
+        let (in_targets, in_types, in_reversed, in_relationship_ids) =
+            base_in.neighbors_with_schema_and_relationship_ids(node_idx);
+        let out_chunk = self.base_chunk_out.get(&node_idx);
+        let in_chunk = self.base_chunk_in.get(&node_idx);
+        let out_durable = self.durable_out.get(&node_idx);
+        let in_durable = self.durable_in.get(&node_idx);
+        let out_overlay = self.committed_out_inserts.get(&node_idx).map(Vec::as_slice);
+        let in_overlay = self.committed_in_inserts.get(&node_idx).map(Vec::as_slice);
+        let (
+            mut out_base_pos,
+            mut in_base_pos,
+            mut out_chunk_pos,
+            mut in_chunk_pos,
+            mut out_durable_pos,
+            mut in_durable_pos,
+            mut out_overlay_pos,
+            mut in_overlay_pos,
+            mut last_key,
+        ) = match cursor {
+            OwnedNeighborCursor::LayeredAny {
+                out_base_pos,
+                in_base_pos,
+                out_chunk_pos,
+                in_chunk_pos,
+                out_durable_pos,
+                in_durable_pos,
+                out_overlay_pos,
+                in_overlay_pos,
+                last_key,
+            } => (
+                *out_base_pos,
+                *in_base_pos,
+                *out_chunk_pos,
+                *in_chunk_pos,
+                *out_durable_pos,
+                *in_durable_pos,
+                *out_overlay_pos,
+                *in_overlay_pos,
+                *last_key,
+            ),
+            _ => (0, 0, 0, 0, 0, 0, 0, 0, None),
+        };
+        let key = |edge: LayeredEdge| {
+            (
+                edge.target,
+                edge.type_id,
+                edge.schema_reversed,
+                edge.relationship_id,
+            )
+        };
+        let deleted = |set: Option<&HashSet<MergedEdgeKey>>, candidate: MergedEdgeKey| {
+            set.is_some_and(|set| {
+                set.contains(&candidate)
+                    || set.contains(&(candidate.0, candidate.1, candidate.2, None))
+            })
+        };
+        let base_edge = |targets: &[u32],
+                         types: &[u8],
+                         reversed: &[u8],
+                         identities: &[RelationshipId],
+                         pos: usize| {
+            (pos < targets.len()).then(|| LayeredEdge {
+                target: targets[pos],
+                type_id: types[pos],
+                schema_reversed: reversed[pos] != 0,
+                weight: None,
+                relationship_id: identities
+                    .get(pos)
+                    .copied()
+                    .filter(|id| *id != NO_RELATIONSHIP_ID),
+            })
+        };
+        let overlay_edge = |overlay: Option<&[OverlayInsert]>, pos: usize| {
+            overlay.and_then(|edges| edges.get(pos)).map(
+                |&(target, type_id, schema_reversed, relationship_id)| LayeredEdge {
+                    target,
+                    type_id,
+                    schema_reversed,
+                    weight: None,
+                    relationship_id,
+                },
+            )
+        };
+        let mut examined = 0usize;
+        while examined < limit {
+            while in_base_pos < in_targets.len()
+                && self.base_chunk_covers(in_targets[in_base_pos])
+                && examined < limit
+            {
+                in_base_pos += 1;
+                examined += 1;
+            }
+            if examined == limit {
+                break;
+            }
+            let out_base_edge = (!self.base_chunk_covers(node_idx))
+                .then(|| {
+                    base_edge(
+                        out_targets,
+                        out_types,
+                        out_reversed,
+                        out_relationship_ids,
+                        out_base_pos,
+                    )
+                })
+                .flatten();
+            let in_base_edge = base_edge(
+                in_targets,
+                in_types,
+                in_reversed,
+                in_relationship_ids,
+                in_base_pos,
+            );
+            let out_chunk_edge = out_chunk
+                .and_then(|edges| edges.inserts.get(out_chunk_pos))
+                .copied();
+            let in_chunk_edge = in_chunk
+                .and_then(|edges| edges.inserts.get(in_chunk_pos))
+                .copied();
+            let out_durable_edge = out_durable
+                .and_then(|edges| edges.inserts.get(out_durable_pos))
+                .copied();
+            let in_durable_edge = in_durable
+                .and_then(|edges| edges.inserts.get(in_durable_pos))
+                .copied();
+            let out_overlay_edge = overlay_edge(out_overlay, out_overlay_pos);
+            let in_overlay_edge = overlay_edge(in_overlay, in_overlay_pos);
+            let sources = [
+                out_base_edge,
+                in_base_edge,
+                out_chunk_edge,
+                in_chunk_edge,
+                out_durable_edge,
+                in_durable_edge,
+                out_overlay_edge,
+                in_overlay_edge,
+            ];
+            let Some(next_key) = sources.into_iter().flatten().map(key).min() else {
+                *cursor = OwnedNeighborCursor::LayeredAny {
+                    out_base_pos,
+                    in_base_pos,
+                    out_chunk_pos,
+                    in_chunk_pos,
+                    out_durable_pos,
+                    in_durable_pos,
+                    out_overlay_pos,
+                    in_overlay_pos,
+                    last_key,
+                };
+                return true;
+            };
+            let equal_source_count = sources
+                .into_iter()
+                .flatten()
+                .filter(|edge| key(*edge) == next_key)
+                .count();
+            if examined > 0 && examined.saturating_add(equal_source_count) > limit {
+                break;
+            }
+            let mut selected = any_base_layer_winner(
+                next_key,
+                out_base_edge,
+                out_chunk_edge,
+                in_base_edge,
+                in_chunk_edge,
+            );
+            if out_base_edge.is_some_and(|edge| key(edge) == next_key) {
+                out_base_pos += 1;
+                examined += 1;
+            }
+            if out_chunk_edge.is_some_and(|edge| key(edge) == next_key) {
+                out_chunk_pos += 1;
+                examined += 1;
+            }
+            if in_base_edge.is_some_and(|edge| key(edge) == next_key) {
+                in_base_pos += 1;
+                examined += 1;
+            }
+            if in_chunk_edge.is_some_and(|edge| key(edge) == next_key) {
+                in_chunk_pos += 1;
+                examined += 1;
+            }
+            if deleted(out_durable.map(|edges| &edges.deletes), next_key) {
+                selected = None;
+            }
+            if out_durable_edge.is_some_and(|edge| key(edge) == next_key) {
+                selected = out_durable_edge;
+                out_durable_pos += 1;
+                examined += 1;
+            }
+            if deleted(in_durable.map(|edges| &edges.deletes), next_key) {
+                selected = None;
+            }
+            if in_durable_edge.is_some_and(|edge| key(edge) == next_key) {
+                selected = in_durable_edge;
+                in_durable_pos += 1;
+                examined += 1;
+            }
+            if deleted(self.committed_out_deletes.get(&node_idx), next_key) {
+                selected = None;
+            }
+            if out_overlay_edge.is_some_and(|edge| key(edge) == next_key) {
+                selected = out_overlay_edge;
+                out_overlay_pos += 1;
+                examined += 1;
+            }
+            if deleted(self.committed_in_deletes.get(&node_idx), next_key) {
+                selected = None;
+            }
+            if in_overlay_edge.is_some_and(|edge| key(edge) == next_key) {
+                selected = in_overlay_edge;
+                in_overlay_pos += 1;
+                examined += 1;
+            }
+            if last_key != Some(next_key) {
+                if let Some(edge) = selected.filter(|edge| self.node_visible(edge.target)) {
+                    output.push(Neighbor {
+                        target: edge.target,
+                        type_id: edge.type_id,
+                        schema_reversed: edge.schema_reversed,
+                        relationship_id: edge.relationship_id,
+                    });
+                }
+            }
+            last_key = Some(next_key);
+        }
+        *cursor = OwnedNeighborCursor::LayeredAny {
+            out_base_pos,
+            in_base_pos,
+            out_chunk_pos,
+            in_chunk_pos,
+            out_durable_pos,
+            in_durable_pos,
+            out_overlay_pos,
+            in_overlay_pos,
             last_key,
         };
         false
@@ -2080,6 +2382,33 @@ mod tests {
         }
     }
 
+    fn collect_layered_pages_requiring_progress(
+        neighbors: &impl NeighborSource,
+        node_idx: u32,
+        page_size: usize,
+    ) -> Vec<Neighbor> {
+        let mut cursor = OwnedNeighborCursor::default();
+        let mut output = Vec::new();
+        for _ in 0..1_000 {
+            let before = cursor.clone();
+            let mut page = Vec::new();
+            let exhausted = neighbors.fill_neighbors(node_idx, &mut cursor, page_size, &mut page);
+            assert!(
+                exhausted || cursor != before,
+                "a non-exhausted layered page must advance bounded owned state"
+            );
+            assert!(
+                page.len() <= page_size,
+                "one layered page exceeded its output-row bound"
+            );
+            output.extend(page);
+            if exhausted {
+                return output;
+            }
+        }
+        panic!("layered pager did not exhaust within its bounded fixture")
+    }
+
     #[test]
     fn owned_layered_cursor_preserves_tombstone_precedence_and_parallel_relationships() {
         let base = edge_store_from_tuples(5, &[(0, 1, 1), (1, 0, 1)]);
@@ -2506,6 +2835,319 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1]
         );
+    }
+
+    #[test]
+    fn owned_layered_any_cursor_preserves_shared_map_precedence_and_order() {
+        let base = edge_store_from_tuples(8, &[(0, 1, 1), (0, 2, 1), (5, 0, 1)]);
+        let base_in = edge_store_from_tuples(8, &[(1, 0, 1), (2, 0, 1), (0, 5, 1)]);
+
+        let mut chunk_out =
+            DeltaSegment::new(SegmentKind::Edge, 1, TraversalDirection::Out, 0, 1, 1)
+                .expect("outbound base chunk");
+        chunk_out.edge_inserts.extend([
+            SegmentEdge {
+                source: 0,
+                target: 3,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(30),
+            },
+            SegmentEdge {
+                source: 0,
+                target: 4,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(31),
+            },
+        ]);
+        let mut chunk_in =
+            DeltaSegment::new(SegmentKind::Edge, 1, TraversalDirection::Out, 5, 6, 2)
+                .expect("inbound base chunk");
+        chunk_in.edge_inserts.push(SegmentEdge {
+            source: 5,
+            target: 0,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(32),
+        });
+
+        let mut durable_out =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 8, 3)
+                .expect("outbound durable segment");
+        durable_out.edge_deletes.push(SegmentEdge {
+            source: 0,
+            target: 3,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        for (target, relationship_id) in [(6, 60), (7, 70)] {
+            durable_out.edge_inserts.push(SegmentEdge {
+                source: 0,
+                target,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(relationship_id),
+            });
+            durable_out.edge_weights.push(SegmentEdgeWeight {
+                source: 0,
+                target,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(relationship_id),
+                weight: 7,
+            });
+        }
+        let mut durable_in =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::In, 0, 8, 4)
+                .expect("inbound durable segment");
+        for relationship_id in [63, 64] {
+            durable_in.edge_inserts.push(SegmentEdge {
+                source: 0,
+                target: 2,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: Some(relationship_id),
+            });
+        }
+        durable_in.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 7,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(70),
+        });
+        durable_in.edge_weights.push(SegmentEdgeWeight {
+            source: 0,
+            target: 7,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(70),
+            weight: 9,
+        });
+
+        let mut overlay_out_inserts = OverlayInserts::new();
+        overlay_out_inserts
+            .entry(0)
+            .or_default()
+            .push((3, 1, false, None));
+        let mut overlay_out_deletes = OverlayDeletes::new();
+        overlay_out_deletes
+            .entry(0)
+            .or_default()
+            .insert((6, 1, false, None));
+        let mut overlay_in_inserts = OverlayInserts::new();
+        overlay_in_inserts
+            .entry(0)
+            .or_default()
+            .push((6, 1, false, Some(60)));
+        let mut overlay_in_deletes = OverlayDeletes::new();
+        overlay_in_deletes
+            .entry(0)
+            .or_default()
+            .insert((2, 1, false, Some(62)));
+
+        let layered = LayeredNeighbors::new_with_base_chunks(
+            &base,
+            Some(&base_in),
+            vec![chunk_out, chunk_in],
+            vec![durable_out, durable_in],
+            None,
+            Some((overlay_out_inserts, overlay_out_deletes)),
+            Some((overlay_in_inserts, overlay_in_deletes)),
+        );
+        let any = layered.for_direction(TraversalDirection::Any);
+        let expected = any.neighbors(0).collect::<Vec<_>>();
+        assert_eq!(
+            expected,
+            vec![
+                Neighbor {
+                    target: 2,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(63)
+                },
+                Neighbor {
+                    target: 2,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(64)
+                },
+                Neighbor {
+                    target: 3,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: None
+                },
+                Neighbor {
+                    target: 4,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(31)
+                },
+                Neighbor {
+                    target: 5,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(32)
+                },
+                Neighbor {
+                    target: 6,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(60)
+                },
+                Neighbor {
+                    target: 7,
+                    type_id: 1,
+                    schema_reversed: false,
+                    relationship_id: Some(70)
+                },
+            ]
+        );
+        let (_, winning_payload) = layered
+            .merged_neighbors(TraversalDirection::Any, 0, false)
+            .into_iter()
+            .find(|(target, edge)| *target == 7 && edge.relationship_id == Some(70))
+            .expect("shared-key durable edge must survive");
+        assert_eq!(
+            winning_payload.weight,
+            Some(9),
+            "within one precedence layer In must overwrite an identical Out full key"
+        );
+        for page_size in 1..=expected.len() {
+            assert_eq!(
+                collect_layered_pages_requiring_progress(&any, 0, page_size),
+                expected,
+                "owned Any cursor changed shared-map order at page size {page_size}"
+            );
+        }
+    }
+
+    #[test]
+    fn owned_layered_any_base_layer_applies_complete_out_before_in() {
+        let key = (3, 1, false, Some(30));
+        let out_chunk = LayeredEdge {
+            target: 3,
+            type_id: 1,
+            schema_reversed: false,
+            weight: Some(7),
+            relationship_id: Some(30),
+        };
+        let in_base = LayeredEdge {
+            weight: Some(9),
+            ..out_chunk
+        };
+
+        assert_eq!(
+            any_base_layer_winner(key, None, Some(out_chunk), Some(in_base), None),
+            Some(in_base),
+            "eager Any applies the complete outbound base/chunk layer before inbound base"
+        );
+    }
+
+    #[test]
+    fn owned_layered_any_cursor_yields_after_bounded_zero_output_work() {
+        let base = edge_store_from_tuples(6, &[(0, 1, 1), (0, 2, 1), (3, 0, 1), (4, 0, 1)]);
+        let base_in = edge_store_from_tuples(6, &[(1, 0, 1), (2, 0, 1), (0, 3, 1), (0, 4, 1)]);
+        let mut durable = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Any, 0, 6, 1)
+            .expect("Any tombstone segment");
+        durable.edge_deletes.extend([
+            SegmentEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+            SegmentEdge {
+                source: 0,
+                target: 2,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+            SegmentEdge {
+                source: 0,
+                target: 3,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+            SegmentEdge {
+                source: 0,
+                target: 4,
+                type_id: 1,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        ]);
+        let layered = LayeredNeighbors::new_with_options(
+            &base,
+            Some(&base_in),
+            vec![durable],
+            None,
+            None,
+            None,
+        );
+        let any = layered.for_direction(TraversalDirection::Any);
+        let mut cursor = OwnedNeighborCursor::default();
+        let before = cursor.clone();
+        let mut page = Vec::new();
+
+        let exhausted = any.fill_neighbors(0, &mut cursor, 2, &mut page);
+
+        assert!(
+            !exhausted,
+            "one bounded raw page must yield before exhaustion"
+        );
+        assert!(page.is_empty(), "tombstoned raw work must not leak output");
+        assert_ne!(cursor, before, "a Progress page must advance owned state");
+    }
+
+    proptest! {
+        #[test]
+        fn owned_layered_any_cursor_matches_eager_for_generated_direction_pairs(
+            out_mask in 0u8..64,
+            in_mask in 0u8..64,
+            page_size in 1usize..5,
+        ) {
+            let out_edges = (1u32..7)
+                .filter(|target| out_mask & (1 << (target - 1)) != 0)
+                .map(|target| (0, target, 1))
+                .collect::<Vec<_>>();
+            let in_edges = (1u32..7)
+                .filter(|target| in_mask & (1 << (target - 1)) != 0)
+                .map(|target| (0, target, 1))
+                .collect::<Vec<_>>();
+            let base = edge_store_from_tuples(7, &out_edges);
+            let base_in = edge_store_from_tuples(7, &in_edges);
+            let mut durable =
+                DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 7, 1)
+                    .expect("durable segment activates layered paging");
+            durable.edge_inserts.push(SegmentEdge {
+                source: 0,
+                target: 6,
+                type_id: 2,
+                schema_reversed: false,
+                relationship_id: Some(90),
+            });
+            let layered = LayeredNeighbors::new_with_options(
+                &base,
+                Some(&base_in),
+                vec![durable],
+                None,
+                None,
+                None,
+            );
+            let any = layered.for_direction(TraversalDirection::Any);
+
+            prop_assert_eq!(
+                collect_layered_pages_requiring_progress(&any, 0, page_size),
+                any.neighbors(0).collect::<Vec<_>>()
+            );
+        }
     }
 
     proptest! {

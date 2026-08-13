@@ -547,6 +547,7 @@ pub mod bench_support {
                 tenant_membership_removals: HashMap::new(),
                 overlay_insert_edges: HashMap::new(),
                 overlay_deleted_edges: HashMap::new(),
+                any_direction_overlays: None,
             }
         }
 

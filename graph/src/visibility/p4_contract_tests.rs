@@ -111,6 +111,34 @@ fn durable_layers_require_a_bounded_owned_cursor_before_lazy_bfs_selection() {
 }
 
 #[test]
+fn segment_backed_any_requires_a_shared_precedence_cursor_before_lazy_selection() {
+    let engine = crate_source("src/engine.rs");
+    let layered = crate_source("src/projection/layered.rs");
+    let prepare = function_body(&engine, "fn prepare_resumable_bfs");
+
+    for required in [
+        "owned_layered_any_cursor_preserves_shared_map_precedence_and_order",
+        "owned_layered_any_cursor_yields_after_bounded_zero_output_work",
+        "owned_layered_any_cursor_matches_eager_for_generated_direction_pairs",
+    ] {
+        assert!(
+            layered.contains(required),
+            "P4.2 Any cursor behavioral corpus is missing `{required}`"
+        );
+    }
+    assert!(
+        prepare.contains("let segment_backed_any")
+            && prepare.contains("any_direction_overlays = segment_backed_any.then"),
+        "segment-backed Any must freeze both directional overlays before the first visibility yield"
+    );
+    assert!(
+        engine.contains("assert_resumable_bfs_matches_eager")
+            && engine.contains("TraversalDirection::Any"),
+        "segment-backed Any eligibility needs an engine-level eager/resumable differential"
+    );
+}
+
+#[test]
 fn targeted_bfs_workflow_inventory_is_explicit() {
     let workflow = crate_source("src/sql_facade/workflow.rs");
 

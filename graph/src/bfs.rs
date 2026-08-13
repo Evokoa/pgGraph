@@ -656,6 +656,13 @@ pub struct BfsConfig {
     pub overlay_insert_edges: OverlayInserts,
     /// Sync overlay edges deleted after the last base build, keyed by source node.
     pub overlay_deleted_edges: OverlayDeletes,
+    /// Frozen outbound and inbound overlays used by segment-backed `any` traversal.
+    pub any_direction_overlays: Option<
+        Box<(
+            crate::projection::neighbors::EdgeOverlay,
+            crate::projection::neighbors::EdgeOverlay,
+        )>,
+    >,
 }
 
 /// Result of BFS: discovered nodes with parent tracking for path reconstruction.
@@ -1946,6 +1953,7 @@ mod tests {
             tenant_membership_removals: HashMap::new(),
             overlay_insert_edges: HashMap::new(),
             overlay_deleted_edges: HashMap::new(),
+            any_direction_overlays: None,
         }
     }
 
@@ -2614,6 +2622,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
         let governor = crate::resource::ResourceGovernor::new(ResourceLimits::bounded(
             MemoryBudget::new(ByteCount::from_bytes(1_024 * 1_024)),
@@ -2671,6 +2680,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
         let governor = crate::resource::ResourceGovernor::new(ResourceLimits::bounded(
             MemoryBudget::new(ByteCount::from_bytes(1_024 * 1_024)),
@@ -2766,6 +2776,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
         let direct = execute_governed_with_context(
             &nodes,
@@ -2825,6 +2836,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -2849,6 +2861,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -2872,6 +2885,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -2902,6 +2916,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -2932,6 +2947,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges,
             overlay_deleted_edges,
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3001,6 +3017,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges,
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute_dfs(&ns, &es, &fi, &config);
@@ -3030,6 +3047,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3054,6 +3072,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3119,6 +3138,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3148,6 +3168,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3173,6 +3194,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3197,6 +3219,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3229,6 +3252,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3255,6 +3279,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3280,6 +3305,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute_dfs(&ns, &es, &fi, &config);
@@ -3304,6 +3330,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute_dfs(&ns, &es, &fi, &config);
@@ -3338,6 +3365,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3380,6 +3408,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3404,6 +3433,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3431,6 +3461,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let bfs_result = execute(&ns, &es, &fi, &config);
@@ -3513,6 +3544,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);
@@ -3538,6 +3570,7 @@ mod tests {
             tenant_membership_removals: std::collections::HashMap::new(),
             overlay_insert_edges: std::collections::HashMap::new(),
             overlay_deleted_edges: std::collections::HashMap::new(),
+            any_direction_overlays: None,
         };
 
         let result = execute(&ns, &es, &fi, &config);

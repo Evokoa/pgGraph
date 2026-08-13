@@ -386,8 +386,11 @@ deletes, later inserts, parallel IDs, raw work bounds, and exact eager rows. A
 PostgreSQL RLS regression covers visible and hidden durable relationship
 identities with forced eager/lazy parity and the `PG023` fail-closed diagnostic
 for a missing durable identity.
-Segment-backed `any` direction and resolver sharing across `expand`,
-`find_related`, and `neighborhood` remain the active P4.2 work.
+The segment-backed `any` cursor now merges both directional sources through the
+same precedence key, including cross-direction tombstones and equal-key inbound
+payload precedence, while retaining bounded progress pages. Resolver sharing
+across `expand`, `find_related`, and `neighborhood` remains the active P4.2
+work.
 
 - Extend the state-machine boundary to DFS/reverse traversal without changing
   reversed-neighbor push order or visited timing.

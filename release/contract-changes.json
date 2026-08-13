@@ -374,5 +374,14 @@
     "date": "2026-08-13",
     "new_schema_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d",
     "previous_schema_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d"
+  },
+  {
+    "acknowledgement": "P4.2-segment-any-cursor",
+    "changed_sections": [
+      "gql_implementation_sha256"
+    ],
+    "date": "2026-08-13",
+    "new_schema_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d",
+    "previous_schema_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d"
   }
 ]

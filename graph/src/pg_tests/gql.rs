@@ -1513,6 +1513,11 @@ fn gql_coordinate_only_relationships_fail_closed_when_edge_row_is_not_visible() 
 #[pg_test]
 fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
     reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Carol', 43)",
+    )
+    .expect("insert distinct Any endpoint failed");
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
     Spi::run("SET graph.persist_on_build = on").expect("enable persisted build failed");
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
@@ -1535,6 +1540,7 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
     Spi::run(
         "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
          VALUES ('f_overlay_hidden', 'u2', 'u1'),
+                ('f_overlay_any_hidden', 'u3', 'u1'),
                 ('f_overlay_visible', 'u1', 'u2')",
     )
     .expect("insert overlay relationship failed");
@@ -1563,7 +1569,8 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
         "ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
          CREATE POLICY graph_gql_overlay_visible
            ON public.graph_test_friendships_pgtest FOR SELECT
-           TO graph_gql_overlay_rls USING (id <> 'f_overlay_hidden');
+           TO graph_gql_overlay_rls
+           USING (id NOT IN ('f_overlay_hidden', 'f_overlay_any_hidden'));
          GRANT USAGE ON SCHEMA graph, public TO graph_gql_overlay_rls;
          GRANT SELECT ON public.graph_test_users_pgtest TO graph_gql_overlay_rls;
          GRANT SELECT ON public.graph_test_friendships_pgtest TO graph_gql_overlay_rls;",
@@ -1688,6 +1695,19 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
     )
     .expect("eager hidden inbound durable traversal failed")
     .unwrap_or_default();
+    let eager_any = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u1',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'any',
+           strategy := 'bfs',
+           hydrate := false
+         )",
+    )
+    .expect("eager Any durable traversal failed")
+    .unwrap_or_default();
     Spi::run("SELECT graph._test_set_visibility_strategy('lazy')")
         .expect("force lazy durable traversal failed");
     let lazy_visible = Spi::get_one::<i64>(
@@ -1729,11 +1749,27 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
     )
     .expect("lazy hidden inbound durable traversal failed")
     .unwrap_or_default();
+    let lazy_any = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u1',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'any',
+           strategy := 'bfs',
+           hydrate := false
+         )",
+    )
+    .expect("lazy Any durable traversal failed")
+    .unwrap_or_default();
     assert_eq!(
-        (eager_visible, eager_hidden_out, eager_hidden_in),
-        (lazy_visible, lazy_hidden_out, lazy_hidden_in)
+        (eager_visible, eager_hidden_out, eager_hidden_in, eager_any),
+        (lazy_visible, lazy_hidden_out, lazy_hidden_in, lazy_any)
     );
-    assert_eq!((lazy_visible, lazy_hidden_out, lazy_hidden_in), (2, 1, 1));
+    assert_eq!(
+        (lazy_visible, lazy_hidden_out, lazy_hidden_in, lazy_any),
+        (2, 1, 1, 2)
+    );
     let lazy_metrics = Spi::get_one::<pgrx::JsonB>("SELECT graph._test_visibility_metrics()")
         .expect("read lazy durable traversal metrics failed")
         .expect("lazy durable traversal metrics missing");

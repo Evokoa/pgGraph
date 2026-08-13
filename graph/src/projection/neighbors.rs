@@ -70,6 +70,17 @@ pub(crate) enum OwnedNeighborCursor {
         overlay_pos: usize,
         last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
     },
+    LayeredAny {
+        out_base_pos: usize,
+        in_base_pos: usize,
+        out_chunk_pos: usize,
+        in_chunk_pos: usize,
+        out_durable_pos: usize,
+        in_durable_pos: usize,
+        out_overlay_pos: usize,
+        in_overlay_pos: usize,
+        last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
+    },
     Logical {
         pos: usize,
     },
@@ -80,7 +91,7 @@ impl OwnedNeighborCursor {
         match self {
             Self::Start => 0,
             Self::Csr { pos } | Self::Logical { pos } => *pos,
-            Self::Overlay { .. } | Self::Layered { .. } => 0,
+            Self::Overlay { .. } | Self::Layered { .. } | Self::LayeredAny { .. } => 0,
         }
     }
 

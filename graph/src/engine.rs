@@ -285,14 +285,6 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        // The owned layered cursor currently preserves the independent Out/In
-        // merge order. `Any` retains the eager shared-map oracle until its
-        // cross-direction precedence has a dedicated cursor.
-        if self.segment_backed_projection_manifest().is_some()
-            && direction == TraversalDirection::Any
-        {
-            return Ok(None);
-        }
         // Transaction-local topology requires a combined base+transaction
         // identity cursor. P4 owns that representation; retain the proven
         // eager oracle until it is available.
@@ -351,7 +343,19 @@ impl Engine {
             )
             .map_err(crate::safety::resource_limit_error)?
             .retain_until_governor_drop();
-        let (overlay_insert_edges, overlay_deleted_edges) = self.traversal_edge_overlay(direction);
+        let segment_backed_any = direction == TraversalDirection::Any
+            && self.segment_backed_projection_manifest().is_some();
+        let any_direction_overlays = segment_backed_any.then(|| {
+            Box::new((
+                self.traversal_edge_overlay(TraversalDirection::Out),
+                self.traversal_edge_overlay(TraversalDirection::In),
+            ))
+        });
+        let (overlay_insert_edges, overlay_deleted_edges) = if segment_backed_any {
+            (HashMap::new(), HashMap::new())
+        } else {
+            self.traversal_edge_overlay(direction)
+        };
         let config = bfs::BfsConfig {
             seed_node,
             max_depth,
@@ -365,6 +369,7 @@ impl Engine {
             tenant_membership_removals: self.tenant_membership_removals.clone(),
             overlay_insert_edges,
             overlay_deleted_edges,
+            any_direction_overlays,
         };
         let mut machine =
             bfs::ResumableBfsMachine::try_new(self.node_store.node_count() as usize, &config)?;
@@ -386,16 +391,28 @@ impl Engine {
             TraversalDirection::In => &self.reverse_edge_store,
         };
         if self.segment_backed_projection_manifest().is_some() {
-            let layered = LayeredNeighbors::from_snapshot_with_direction_overlay(
-                &self.edge_store,
-                &self.reverse_edge_store,
-                self.projection_snapshot.as_ref().ok_or_else(|| {
-                    GraphError::Internal("projection snapshot is missing".to_string())
-                })?,
-                direction,
-                &config.overlay_insert_edges,
-                &config.overlay_deleted_edges,
-            );
+            let snapshot = self.projection_snapshot.as_ref().ok_or_else(|| {
+                GraphError::Internal("projection snapshot is missing".to_string())
+            })?;
+            let layered = match config.any_direction_overlays.as_deref() {
+                Some((out, inbound)) if direction == TraversalDirection::Any => {
+                    LayeredNeighbors::from_snapshot_with_frozen_overlays(
+                        &self.edge_store,
+                        &self.reverse_edge_store,
+                        snapshot,
+                        out,
+                        inbound,
+                    )
+                }
+                _ => LayeredNeighbors::from_snapshot_with_direction_overlay(
+                    &self.edge_store,
+                    &self.reverse_edge_store,
+                    snapshot,
+                    direction,
+                    &config.overlay_insert_edges,
+                    &config.overlay_deleted_edges,
+                ),
+            };
             let neighbors = layered.for_direction(direction);
             return bfs::materialize_bfs_candidate_batch(
                 machine,
@@ -1378,6 +1395,7 @@ impl Engine {
             tenant_membership_removals: self.tenant_membership_removals.clone(),
             overlay_insert_edges,
             overlay_deleted_edges,
+            any_direction_overlays: None,
         };
 
         let edge_store = match direction {
@@ -2837,6 +2855,7 @@ mod tests {
 
         assert_resumable_bfs_matches_eager(&engine, "E", TraversalDirection::Out);
         assert_resumable_bfs_matches_eager(&engine, "D", TraversalDirection::In);
+        assert_resumable_bfs_matches_eager(&engine, "E", TraversalDirection::Any);
     }
 
     #[test]
@@ -2857,6 +2876,7 @@ mod tests {
 
         assert_resumable_bfs_matches_eager(&engine, "E", TraversalDirection::Out);
         assert_resumable_bfs_matches_eager(&engine, "D", TraversalDirection::In);
+        assert_resumable_bfs_matches_eager(&engine, "E", TraversalDirection::Any);
     }
 
     #[test]
