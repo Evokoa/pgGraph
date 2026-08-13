@@ -1,0 +1,14 @@
+case_name,strategy,key_shape,rls_scope,policy_shape,query_kind,samples,p50_ms,p95_ms,p50_visibility_ms,p95_visibility_ms,result_rows,hidden_nodes,hidden_relationships,min_spi_calls,max_spi_calls,min_requested_keys,max_requested_keys,min_returned_keys,max_returned_keys,min_requested_key_bytes,max_requested_key_bytes,min_returned_key_bytes,max_returned_key_bytes,min_source_rows,max_source_rows
+p3_combined_eager,eager,scalar,combined,sparse_allow,edge_one_hop,1,430.27,430.27,398.029,398.029,1,10890,19800,0,0,0,0,0,0,0,0,0,0,309,309
+p3_combined_lazy,lazy,scalar,combined,sparse_allow,edge_one_hop,1,39.355,39.355,0,0,1,0,0,3,3,3,3,2,2,9,9,6,6,2,2
+p3_edge_hidden_eager,eager,scalar,edge,sparse_allow,edge_one_hop,1,320.854,320.854,288.217,288.217,1,0,9900,0,0,0,0,0,0,0,0,0,0,99,99
+p3_edge_hidden_lazy,lazy,scalar,edge,sparse_allow,edge_one_hop,1,34.964,34.964,0,0,1,0,0,1,1,1,1,0,0,3,3,0,0,0,0
+p3_edge_visible_eager,eager,scalar,edge,sparse_allow,edge_one_hop,1,318.132,318.132,285.948,285.948,2,0,9900,0,0,0,0,0,0,0,0,0,0,99,99
+p3_edge_visible_lazy,lazy,scalar,edge,sparse_allow,edge_one_hop,1,35.493,35.493,0,0,2,0,0,1,1,1,1,1,1,3,3,3,3,1,1
+p3_no_rls_auto,auto,scalar,none,no_rls,traverse_depth_4,1,31.818,31.818,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+p3_node_bfs_eager,eager,scalar,node,sparse_allow,traverse_depth_4,1,146.435,146.435,113.838,113.838,1,10890,9900,0,0,0,0,0,0,0,0,0,0,210,210
+p3_node_bfs_lazy,lazy,scalar,node,sparse_allow,traverse_depth_4,1,39.445,39.445,0,0,1,0,0,3,3,3,3,2,2,9,9,6,6,2,2
+p3_node_inbound_eager,eager,scalar,node,sparse_allow,inbound_one_hop,1,148.568,148.568,116.529,116.529,1,10890,9900,0,0,0,0,0,0,0,0,0,0,210,210
+p3_node_inbound_lazy,lazy,scalar,node,sparse_allow,inbound_one_hop,1,39.762,39.762,0,0,1,0,0,3,3,3,3,1,1,7,7,3,3,1,1
+p3_node_multiseed_eager,eager,scalar,node,sparse_allow,multi_seed_one_hop,1,147.019,147.019,114.899,114.899,2,10890,9900,0,0,0,0,0,0,0,0,0,0,210,210
+p3_node_multiseed_lazy,lazy,scalar,node,sparse_allow,multi_seed_one_hop,1,47.082,47.082,0,0,2,0,0,6,6,6,6,4,4,18,18,12,12,4,4

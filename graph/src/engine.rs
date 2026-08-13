@@ -244,6 +244,177 @@ impl From<&ProjectionManifest> for ProjectionManifestSnapshot {
 }
 
 impl Engine {
+    fn bfs_projection_epoch(&self) -> bfs::BfsProjectionEpoch {
+        let tx = tx_delta::stats();
+        bfs::BfsProjectionEpoch {
+            generation_id: self
+                .projection_manifest
+                .as_ref()
+                .map(|manifest| manifest.generation_id),
+            applied_sync_id: self.applied_sync_id,
+            node_count: u64::from(self.node_store.node_count()),
+            edge_count: u64::from(self.edge_store.edge_count()),
+            relationship_identity_count: u64::try_from(self.relationship_identities.len())
+                .unwrap_or(u64::MAX),
+            edge_buffer_len: u64::try_from(self.edge_buffer.len()).unwrap_or(u64::MAX),
+            tx_added_nodes: u64::try_from(tx.added_nodes).unwrap_or(u64::MAX),
+            tx_added_edges: u64::try_from(tx.added_edges).unwrap_or(u64::MAX),
+            tx_deleted_nodes: u64::try_from(tx.deleted_nodes).unwrap_or(u64::MAX),
+            tx_deleted_edges: u64::try_from(tx.deleted_edges).unwrap_or(u64::MAX),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_resumable_bfs(
+        &self,
+        seed_table_oid: u32,
+        seed_id: &str,
+        max_depth: i32,
+        max_nodes: u32,
+        max_frontier: u32,
+        edge_types: Option<Vec<String>>,
+        filter_ops: Vec<FilterOp>,
+        tenant: Option<&str>,
+        direction: TraversalDirection,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<Option<(bfs::BfsConfig, bfs::ResumableBfsMachine)>> {
+        if !self.built {
+            return Err(GraphError::NotBuilt);
+        }
+        // Segment-backed adjacency still uses its eager k-way materialization
+        // until P4 supplies an owned cursor for that representation.
+        if self.layered_neighbors()?.is_some() || !self.edge_buffer.is_empty() {
+            return Ok(None);
+        }
+        // Transaction-local topology requires a combined base+transaction
+        // identity cursor. P4 owns that representation; retain the proven
+        // eager oracle until it is available.
+        if tx_delta::stats().dirty {
+            return Ok(None);
+        }
+        let seed_node =
+            self.resolve(seed_table_oid, seed_id)
+                .ok_or_else(|| GraphError::NodeNotFound {
+                    table: seed_table_oid.to_string(),
+                    pk: seed_id.to_string(),
+                })?;
+        let edge_type_filter = match edge_types {
+            Some(types) => {
+                let mut set = HashSet::new();
+                for label in types {
+                    let Some(position) = self
+                        .edge_type_registry
+                        .iter()
+                        .position(|item| item == &label)
+                    else {
+                        return Err(GraphError::InvalidFilter {
+                            reason: format!("unknown edge type '{label}'"),
+                        });
+                    };
+                    set.insert(position as u8);
+                }
+                if set.is_empty() {
+                    EdgeTypeFilter::NoneMatched
+                } else {
+                    EdgeTypeFilter::Only(set)
+                }
+            }
+            None => EdgeTypeFilter::All,
+        };
+        let workspace = bfs::estimated_workspace_bytes(
+            self.node_store.node_count() as usize,
+            max_nodes,
+            max_frontier,
+        )?;
+        governor
+            .reserve_memory(crate::resource::ResourcePhase::QueryFrontier, workspace)
+            .map_err(crate::safety::resource_limit_error)?
+            .retain_until_governor_drop();
+        let overlay_workspace = self.estimated_traversal_overlay_clone_bytes()?;
+        governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryExpand,
+                overlay_workspace,
+            )
+            .map_err(crate::safety::resource_limit_error)?
+            .retain_until_governor_drop();
+        let (overlay_insert_edges, overlay_deleted_edges) = self.traversal_edge_overlay(direction);
+        let config = bfs::BfsConfig {
+            seed_node,
+            max_depth,
+            max_nodes,
+            max_frontier,
+            edge_type_filter,
+            filter_ops,
+            tenant: tenant.map(ToOwned::to_owned),
+            tenanted_table_oids: self.tenanted_table_oids.clone(),
+            tenant_membership: self.tenant_membership.clone(),
+            tenant_membership_removals: self.tenant_membership_removals.clone(),
+            overlay_insert_edges,
+            overlay_deleted_edges,
+        };
+        let mut machine =
+            bfs::ResumableBfsMachine::try_new(self.node_store.node_count() as usize, &config)?;
+        machine.bind_projection_epoch(self.bfs_projection_epoch());
+        Ok(Some((config, machine)))
+    }
+
+    pub(crate) fn materialize_resumable_bfs_batch(
+        &self,
+        machine: &mut bfs::ResumableBfsMachine,
+        config: &bfs::BfsConfig,
+        direction: TraversalDirection,
+        limits: bfs::BfsCandidateLimits,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<bfs::BfsMaterialization> {
+        machine.require_projection_epoch(self.bfs_projection_epoch())?;
+        let edge_store = match direction {
+            TraversalDirection::Any | TraversalDirection::Out => &self.edge_store,
+            TraversalDirection::In => &self.reverse_edge_store,
+        };
+        let neighbors = OverlayNeighbors::new(
+            edge_store,
+            &config.overlay_insert_edges,
+            &config.overlay_deleted_edges,
+        );
+        bfs::materialize_bfs_candidate_batch(
+            machine,
+            &self.node_store,
+            &neighbors,
+            &self.relationship_identities,
+            config,
+            limits,
+            governor,
+        )
+    }
+
+    pub(crate) fn admit_resumable_bfs_batch(
+        &self,
+        machine: &mut bfs::ResumableBfsMachine,
+        batch: &bfs::BfsAdjacencyCandidateBatch,
+        verdicts: &[bfs::BfsAdjacencyVerdict],
+        config: &bfs::BfsConfig,
+    ) -> GraphResult<()> {
+        machine.require_projection_epoch(self.bfs_projection_epoch())?;
+        machine.apply_visibility_verdicts(
+            batch,
+            verdicts,
+            &self.node_store,
+            &self.filter_index,
+            config,
+        )
+    }
+
+    pub(crate) fn finish_resumable_bfs(
+        &self,
+        machine: bfs::ResumableBfsMachine,
+    ) -> GraphResult<TraverseOutcome> {
+        machine.require_projection_epoch(self.bfs_projection_epoch())?;
+        let result = machine.finish();
+        let truncated = result.truncated;
+        let rows = bfs::to_traversal_results(&result, &self.node_store, &self.edge_type_registry)?;
+        Ok(TraverseOutcome { rows, truncated })
+    }
     pub fn new() -> Self {
         let edge_type_registry = vec!["".to_string()];
         // Index 0 = untyped (reserved)

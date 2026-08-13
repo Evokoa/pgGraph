@@ -202,6 +202,8 @@ pub(crate) struct LazyVisibilityCoordinator {
     mode: LazyVisibilityMode,
     probe_tables: std::collections::HashSet<u32>,
     policy_rls_tables: std::collections::HashSet<u32>,
+    probe_mappings: std::collections::HashSet<u64>,
+    probe_edge_types: std::collections::HashSet<u8>,
 }
 
 pub(crate) struct ProvenVisibleNode {
@@ -221,11 +223,31 @@ impl LazyVisibilityCoordinator {
         probe_tables: std::collections::HashSet<u32>,
         policy_rls_tables: std::collections::HashSet<u32>,
     ) -> Self {
+        Self::with_relationship_mappings(
+            limits,
+            mode,
+            probe_tables,
+            policy_rls_tables,
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        )
+    }
+
+    pub(crate) fn with_relationship_mappings(
+        limits: VisibilityCacheLimits,
+        mode: LazyVisibilityMode,
+        probe_tables: std::collections::HashSet<u32>,
+        policy_rls_tables: std::collections::HashSet<u32>,
+        probe_mappings: std::collections::HashSet<u64>,
+        probe_edge_types: std::collections::HashSet<u8>,
+    ) -> Self {
         Self {
             cache: VisibilityStatementCache::new(limits),
             mode,
             probe_tables,
             policy_rls_tables,
+            probe_mappings,
+            probe_edge_types,
         }
     }
 
@@ -235,6 +257,18 @@ impl LazyVisibilityCoordinator {
 
     pub(crate) fn table_has_policy_rls(&self, table_oid: u32) -> bool {
         self.policy_rls_tables.contains(&table_oid)
+    }
+
+    pub(crate) fn is_enforced(&self) -> bool {
+        self.mode == LazyVisibilityMode::Enforced
+    }
+
+    pub(crate) fn mapping_requires_probe(&self, mapping_id: u64) -> bool {
+        self.mode == LazyVisibilityMode::Enforced && self.probe_mappings.contains(&mapping_id)
+    }
+
+    pub(crate) fn edge_type_requires_relationship_identity(&self, edge_type: u8) -> bool {
+        self.mode == LazyVisibilityMode::Enforced && self.probe_edge_types.contains(&edge_type)
     }
 
     pub(crate) fn prove_visible_node(&self, node_idx: u32) -> GraphResult<ProvenVisibleNode> {
@@ -403,12 +437,12 @@ pub(crate) enum VisibilityCandidate {
     reason = "P1 freezes the bounded candidate seam consumed by P2"
 )]
 impl VisibilityCandidate {
-    fn sequence(&self) -> u32 {
+    pub(crate) fn sequence(&self) -> u32 {
         match self {
             Self::Node { sequence, .. } | Self::Relationship { sequence, .. } => *sequence,
         }
     }
-    fn key_bytes(&self) -> usize {
+    pub(crate) fn key_bytes(&self) -> usize {
         match self {
             Self::Node { source_key, .. } | Self::Relationship { source_key, .. } => {
                 source_key.len()
@@ -614,6 +648,17 @@ impl VisibilityVerdictBatch {
 
     pub(crate) fn verdicts(&self) -> &[(u32, VisibilityVerdict)] {
         &self.verdicts
+    }
+
+    pub(crate) fn verdict(&self, sequence: u32) -> GraphResult<VisibilityVerdict> {
+        self.verdicts
+            .iter()
+            .find_map(|(candidate_sequence, verdict)| {
+                (*candidate_sequence == sequence).then_some(*verdict)
+            })
+            .ok_or_else(|| {
+                GraphError::Internal(format!("visibility verdict sequence {sequence} is absent"))
+            })
     }
 }
 
@@ -1059,3 +1104,7 @@ mod p1_contract_tests;
 #[cfg(test)]
 #[path = "visibility/p2_contract_tests.rs"]
 mod p2_contract_tests;
+
+#[cfg(test)]
+#[path = "visibility/p3_contract_tests.rs"]
+mod p3_contract_tests;

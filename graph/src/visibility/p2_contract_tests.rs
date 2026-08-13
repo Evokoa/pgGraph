@@ -173,10 +173,11 @@ fn direct_identity_and_depth_zero_select_the_narrow_lazy_path() {
     let depth_zero = function_body(&traversal, "fn execute_depth_zero_lazy");
     assert!(
         traverse.contains("max_depth == 0")
-            && traverse.contains("prepare_eager_visibility")
+            && traverse.contains("prepare_bfs_visibility")
+            && traverse.contains("prepare_bfs_eager_fallback")
             && depth_zero.contains("prepare_direct_identity_visibility")
             && depth_zero.contains("resolve_lazy_visibility_batch"),
-        "only true depth-zero traversal may select direct-identity lazy preparation; expanding traversal must retain eager visibility"
+        "depth-zero traversal must retain its narrow direct-identity path while expanding traversal uses the P3 BFS resolver with eager fallback"
     );
 
     assert!(

@@ -1,0 +1,80 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Gather",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 1000.00,
+      "Total Cost": 23373.93,
+      "Plan Rows": 7713,
+      "Plan Width": 32,
+      "Actual Startup Time": 0.074,
+      "Actual Total Time": 109.417,
+      "Actual Rows": 990000,
+      "Actual Loops": 1,
+      "Workers Planned": 2,
+      "Workers Launched": 2,
+      "Single Copy": false,
+      "Shared Hit Blocks": 9135,
+      "Shared Read Blocks": 1175,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0,
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": true,
+          "Async Capable": false,
+          "Relation Name": "rls_bench_nodes",
+          "Alias": "src",
+          "Startup Cost": 0.00,
+          "Total Cost": 21602.63,
+          "Plan Rows": 3214,
+          "Plan Width": 32,
+          "Actual Startup Time": 0.007,
+          "Actual Total Time": 97.751,
+          "Actual Rows": 330000,
+          "Actual Loops": 3,
+          "Filter": "((current_setting('graph.rls_benchmark_policy'::text, true) = 'broad_allow'::text) OR ((current_setting('graph.rls_benchmark_policy'::text, true) = 'sparse_allow'::text) AND ((id % '100'::bigint) = 0)) OR ((current_setting('graph.rls_benchmark_policy'::text, true) = 'sparse_deny'::text) AND ((id % '100'::bigint) <> 0)))",
+          "Rows Removed by Filter": 3333,
+          "Shared Hit Blocks": 9135,
+          "Shared Read Blocks": 1175,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "Workers": [
+          ]
+        }
+      ]
+    },
+    "Settings": {
+    },
+    "Planning": {
+      "Shared Hit Blocks": 91,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Planning Time": 0.174,
+    "Triggers": [
+    ],
+    "Execution Time": 127.320
+  }
+]

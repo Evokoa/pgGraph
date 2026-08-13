@@ -103,6 +103,266 @@ pub(crate) fn execute_traverse_rows_in_context(
     )
 }
 
+/// Execute a targeted BFS through bounded projection/SQL visibility yields.
+///
+/// The eager fallback is retained for non-BFS strategies and segment-backed
+/// layered projections until their owned cursors land in P4.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_lazy_bfs_rows(
+    request: &TraverseRequest<'_>,
+    lazy: &mut crate::visibility::LazyVisibilityCoordinator,
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Option<Vec<TraverseRow>>> {
+    let candidates =
+        execute_lazy_bfs_candidates(request, lazy, tables, edges, filter_columns, governor)?;
+    let Some(candidates) = candidates else {
+        return Ok(None);
+    };
+    paginate_and_format_traverse_candidates_governed(
+        candidates,
+        request.hydrate,
+        request.offset,
+        request.limit,
+        governor,
+        tables,
+    )
+    .map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(
+    dead_code,
+    reason = "P3 workflow sharing seam is consumed by P4 workflows"
+)]
+pub(crate) fn execute_lazy_bfs_rows_with_coordinator(
+    request: &TraverseRequest<'_>,
+    lazy: &mut crate::visibility::LazyVisibilityCoordinator,
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Option<Vec<TraverseRow>>> {
+    execute_lazy_bfs_rows(request, lazy, tables, edges, filter_columns, governor)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_lazy_bfs_candidates(
+    request: &TraverseRequest<'_>,
+    lazy: &mut crate::visibility::LazyVisibilityCoordinator,
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Option<Vec<TraverseCandidate>>> {
+    if request.strategy != types::TraversalStrategy::Bfs || request.max_depth <= 0 {
+        return Ok(None);
+    }
+    if !crate::sql_visibility::lazy_bfs_strategy_enabled(lazy) {
+        return Ok(None);
+    }
+    let request_bytes = traversal_request_workspace_upper_bound(request)?;
+    governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryCandidates,
+            request_bytes,
+        )
+        .map_err(crate::safety::resource_limit_error)?
+        .retain_until_governor_drop();
+    acl::check_table_acl(request.root_table.to_u32())?;
+    let table_filter = request
+        .node_tables
+        .map(|tables| {
+            tables
+                .iter()
+                .map(|oid| {
+                    acl::check_table_acl(oid.to_u32())?;
+                    Ok::<_, safety::GraphError>(oid.to_u32())
+                })
+                .collect::<safety::GraphResult<HashSet<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let structured_filter = request
+        .filter
+        .map(|filter| {
+            parse_structured_filter_from_catalog(filter, &table_filter, tables, filter_columns)
+        })
+        .transpose()?
+        .unwrap_or(ParsedStructuredFilter {
+            pushdown_filters: Vec::new(),
+            hydration_filters: Vec::new(),
+        });
+    let prepared = ENGINE.with(|cell| {
+        let engine = cell.borrow();
+        let mut filter_ops = Vec::with_capacity(structured_filter.pushdown_filters.len());
+        for filter in &structured_filter.pushdown_filters {
+            filter_ops.push(typed_pushdown_filter_op(&engine.filter_index, filter)?);
+        }
+        engine.prepare_resumable_bfs(
+            request.root_table.to_u32(),
+            request.root_id,
+            request.max_depth,
+            u32_from_nonnegative(request.max_nodes, "max_nodes")?,
+            u32_from_nonnegative(request.max_frontier, "max_frontier")?,
+            request.edge_types.map(<[String]>::to_vec),
+            filter_ops,
+            request.tenant,
+            request.direction,
+            governor,
+        )
+    })?;
+    let Some((config, mut machine)) = prepared else {
+        return Ok(None);
+    };
+
+    let root_table = tables
+        .iter()
+        .find(|table| table.table_oid == request.root_table.to_u32())
+        .ok_or_else(|| safety::GraphError::Internal("unregistered traversal root table".into()))?;
+    let seed_batch = crate::bfs::BfsAdjacencyCandidateBatch::try_new(
+        vec![crate::bfs::BfsAdjacencyCandidate {
+            sequence: 0,
+            parent_node: config.seed_node,
+            parent_depth: -1,
+            target_node: config.seed_node,
+            target_table_oid: root_table.table_oid,
+            target_source_key: request.root_id.to_string(),
+            edge_type: 0,
+            relationship_id: None,
+            relationship_mapping_id: None,
+            relationship_source_key: None,
+        }],
+        true,
+        crate::bfs::BfsCandidateLimits {
+            max_candidates: 1,
+            max_key_bytes: request.root_id.len(),
+        },
+    )?;
+    let seed_visible = crate::sql_visibility::resolve_bfs_visibility_batch(
+        lazy,
+        &seed_batch,
+        tables,
+        edges,
+        governor,
+    )?
+    .first()
+    .is_some_and(|verdict| verdict.visible());
+    if !seed_visible {
+        return Ok(Some(Vec::new()));
+    }
+
+    const CANDIDATE_LIMIT: usize = 64;
+    const KEY_BYTE_LIMIT: usize = 1024 * 1024;
+    while !machine.is_complete() {
+        let max_candidates = machine.next_candidate_limit(CANDIDATE_LIMIT, &config);
+        let materialized = materialize_bfs_candidate_batch(
+            &mut machine,
+            &config,
+            request.direction,
+            crate::bfs::BfsCandidateLimits {
+                max_candidates,
+                max_key_bytes: KEY_BYTE_LIMIT,
+            },
+            governor,
+        )?;
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+            crate::resource::check_postgres_interrupts,
+        ));
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryExpand)
+            .map_err(crate::safety::resource_limit_error)?;
+        let batch = match materialized {
+            crate::bfs::BfsMaterialization::Batch(batch) => batch,
+            crate::bfs::BfsMaterialization::Progress => continue,
+            crate::bfs::BfsMaterialization::Complete => break,
+        };
+        let verdicts = crate::sql_visibility::resolve_bfs_visibility_batch(
+            lazy, &batch, tables, edges, governor,
+        )?;
+        ENGINE.with(|cell| {
+            cell.borrow()
+                .admit_resumable_bfs_batch(&mut machine, &batch, &verdicts, &config)
+        })?;
+    }
+    let outcome = ENGINE.with(|cell| cell.borrow().finish_resumable_bfs(machine))?;
+    acl::check_table_acls(outcome.rows.iter().flat_map(|row| {
+        std::iter::once(row.node_table.0).chain(row.path.iter().map(|coord| coord.table_oid.0))
+    }))?;
+    let capped = outcome.truncated;
+    let page_lease = reserve_traversal_rows(
+        governor,
+        crate::resource::ResourcePhase::QueryBlocking,
+        &outcome.rows,
+        2,
+    )?;
+    let mut page = outcome
+        .rows
+        .into_iter()
+        .filter(|row| request.include_start || row.depth != 0)
+        .filter(|row| table_filter.is_empty() || table_filter.contains(&row.node_table.0))
+        .collect::<Vec<_>>();
+    governor
+        .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
+        .map_err(crate::safety::resource_limit_error)?;
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+        crate::resource::check_postgres_interrupts,
+    ));
+    sort_traversal_rows(&mut page);
+    let root_table_name = relation_name(request.root_table.to_u32())?;
+    let mut hydrated = if structured_filter.hydration_filters.is_empty() {
+        HashMap::new()
+    } else {
+        hydrate_nodes_governed_with_tables(&page, governor, tables)?
+    };
+    if !structured_filter.hydration_filters.is_empty() {
+        page.retain(|row| {
+            hydrated
+                .get(&(row.node_table.0, row.node_id.clone()))
+                .is_some_and(|node| {
+                    hydration_filters_match(
+                        row.node_table.0,
+                        node,
+                        &structured_filter.hydration_filters,
+                    )
+                })
+        });
+    }
+    let candidates = page
+        .into_iter()
+        .map(|row| {
+            let pre_hydrated = hydrated
+                .remove(&(row.node_table.0, row.node_id.clone()))
+                .map(|node| node.0);
+            TraverseCandidate {
+                root_table: request.root_table,
+                root_id: request.root_id.to_string(),
+                root_table_name: root_table_name.clone(),
+                row,
+                pre_hydrated,
+                capped,
+            }
+        })
+        .collect();
+    page_lease.retain_until_governor_drop();
+    Ok(Some(candidates))
+}
+
+fn materialize_bfs_candidate_batch(
+    machine: &mut crate::bfs::ResumableBfsMachine,
+    config: &crate::bfs::BfsConfig,
+    direction: types::TraversalDirection,
+    limits: crate::bfs::BfsCandidateLimits,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<crate::bfs::BfsMaterialization> {
+    ENGINE.with(|cell| {
+        cell.borrow()
+            .materialize_resumable_bfs_batch(machine, config, direction, limits, governor)
+    })
+}
+
 #[cfg(test)]
 #[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_traverse_candidates(
@@ -214,12 +474,7 @@ pub(crate) fn execute_traverse_candidates_in_context(
         .check_elapsed(crate::resource::ResourcePhase::QueryBlocking)
         .map_err(crate::safety::resource_limit_error)?;
     crate::resource::check_postgres_interrupts();
-    page.sort_by(|left, right| {
-        left.depth
-            .cmp(&right.depth)
-            .then_with(|| left.node_table.cmp(&right.node_table))
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
+    sort_traversal_rows(&mut page);
     let root_table_name = relation_name(request.root_table.to_u32())?;
     let needs_hydration_verification = !structured_filter.hydration_filters.is_empty();
     let mut hydrated = if needs_hydration_verification {
@@ -559,6 +814,15 @@ fn reserve_traversal_rows<'a>(
     governor
         .reserve_memory(phase, bytes)
         .map_err(crate::safety::resource_limit_error)
+}
+
+fn sort_traversal_rows(rows: &mut [types::TraversalResult]) {
+    rows.sort_by(|left, right| {
+        left.depth
+            .cmp(&right.depth)
+            .then_with(|| left.node_table.cmp(&right.node_table))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
 }
 
 fn traverse_output_upper_bound(
@@ -927,6 +1191,27 @@ mod tests {
             }],
             edge_path: Vec::new(),
         }
+    }
+
+    #[test]
+    fn traversal_row_order_uses_identity_ties_not_projection_index_order() {
+        let mut z = one_result();
+        z.node_id = "z-node".into();
+        let mut a = one_result();
+        a.node_id = "a-node".into();
+        let mut other_table = one_result();
+        other_table.node_table = types::TableOid(41);
+        other_table.node_id = "middle".into();
+        let mut rows = vec![z, a, other_table];
+
+        sort_traversal_rows(&mut rows);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.node_table.0, row.node_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(41, "middle"), (42, "a-node"), (42, "z-node")]
+        );
     }
 
     #[test]

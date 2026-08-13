@@ -1,0 +1,17 @@
+ M docs/user_guide/supported_features.md
+ M graph/src/bfs.rs
+ M graph/src/engine.rs
+ M graph/src/projection/neighbors.rs
+ M graph/src/sql_facade/admin.rs
+ M graph/src/sql_facade/mod.rs
+ M graph/src/sql_facade/traversal.rs
+ M graph/src/sql_traversal.rs
+ M graph/src/sql_visibility.rs
+ M graph/src/visibility.rs
+ M graph/src/visibility/p2_contract_tests.rs
+ M graph/tests/heavy/rls_large_table_baseline.sh
+ M graph/tests/heavy/run_sqlstate_acl_boundary.sh
+ M todo/post-v1-1/README.md
+?? graph/src/visibility/p3_contract_tests.rs
+?? todo/measurements/2026-08-13-p3-selective-rls-10k/
+?? todo/measurements/2026-08-13-p3-selective-rls-1m/

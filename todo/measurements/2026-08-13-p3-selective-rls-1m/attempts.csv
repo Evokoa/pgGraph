@@ -1,0 +1,2 @@
+case_name,status,completed_samples,elapsed_seconds,log
+p3_node_bfs_eager,censored_statement_timeout,0,3929,logs/p3_node_bfs_eager.log

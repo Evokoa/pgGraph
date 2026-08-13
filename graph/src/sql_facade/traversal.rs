@@ -121,7 +121,23 @@ pub(super) fn traverse(
             .unwrap_or_else(|err| err.report());
             return TableIterator::new(rows);
         }
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
+        let mut lazy =
+            crate::sql_visibility::prepare_bfs_visibility(&query_start.tables, &query_start.edges)
+                .unwrap_or_else(|err| err.report());
+        if let Some(rows) = execute_lazy_bfs_rows(
+            &request,
+            &mut lazy,
+            &query_start.tables,
+            &query_start.edges,
+            &query_start.filter_columns,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report())
+        {
+            return TableIterator::new(rows);
+        }
+        let coordinator = crate::sql_visibility::prepare_bfs_eager_fallback(
+            &lazy,
             &query_start.tables,
             &query_start.edges,
             &governor,
@@ -387,14 +403,13 @@ fn traverse_many(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
-            &query_start.tables,
-            &query_start.edges,
-            &governor,
-        )
-        .unwrap_or_else(|err| err.report());
-        let context = coordinator.context(&governor);
+        let mut lazy =
+            crate::sql_visibility::prepare_bfs_visibility(&query_start.tables, &query_start.edges)
+                .unwrap_or_else(|err| err.report());
+        let mut eager = None;
         let mut candidates = Vec::new();
+        // Each root routes through execute_lazy_bfs_rows semantics while the
+        // statement-owned coordinator preserves verdicts across roots.
         for (table, id) in start_tables.into_iter().zip(start_ids) {
             let request = TraverseRequest {
                 root_table: table,
@@ -413,13 +428,44 @@ fn traverse_many(
                 max_nodes,
                 max_frontier,
             };
-            let mut start_candidates = execute_traverse_candidates_in_context(
+            let lazy_candidates = execute_lazy_bfs_candidates(
                 &request,
-                &context,
+                &mut lazy,
                 &query_start.tables,
+                &query_start.edges,
                 &query_start.filter_columns,
+                &governor,
             )
             .unwrap_or_else(|err| err.report());
+            let mut start_candidates = if let Some(candidates) = lazy_candidates {
+                candidates
+            } else {
+                if eager.is_none() {
+                    eager = Some(
+                        crate::sql_visibility::prepare_bfs_eager_fallback(
+                            &lazy,
+                            &query_start.tables,
+                            &query_start.edges,
+                            &governor,
+                        )
+                        .unwrap_or_else(|err| err.report()),
+                    );
+                }
+                let Some(eager) = eager.as_ref() else {
+                    safety::GraphError::Internal(
+                        "eager visibility was not initialized for traversal fallback".into(),
+                    )
+                    .report()
+                };
+                let context = eager.context(&governor);
+                execute_traverse_candidates_in_context(
+                    &request,
+                    &context,
+                    &query_start.tables,
+                    &query_start.filter_columns,
+                )
+                .unwrap_or_else(|err| err.report())
+            };
             candidates.append(&mut start_candidates);
         }
         sort_traverse_candidates_for_many_governed(&mut candidates, &governor)
@@ -940,6 +986,8 @@ fn direct_get_neighbors_rows(
     graph_tenant: Option<&str>,
     graph_namespace: Option<&str>,
 ) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
+    // This named-graph surface delegates to execute_lazy_bfs_rows below after
+    // the named graph and seed coordinate have been authorized.
     check_enabled_result()?;
     with_named_graph(graph_name, graph_tenant, graph_namespace, |query_start| {
         let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
@@ -979,7 +1027,20 @@ fn direct_get_neighbors_rows(
             max_frontier: config::MAX_FRONTIER.get(),
         };
         let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
+        let mut lazy =
+            crate::sql_visibility::prepare_bfs_visibility(&query_start.tables, &query_start.edges)?;
+        if let Some(rows) = execute_lazy_bfs_rows(
+            &request,
+            &mut lazy,
+            &query_start.tables,
+            &query_start.edges,
+            &query_start.filter_columns,
+            &governor,
+        )? {
+            return Ok(rows);
+        }
+        let coordinator = crate::sql_visibility::prepare_bfs_eager_fallback(
+            &lazy,
             &query_start.tables,
             &query_start.edges,
             &governor,

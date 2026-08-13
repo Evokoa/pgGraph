@@ -27,6 +27,7 @@ STRATEGIES = {
 }
 TERMINAL_CALLS = {
     "prepare_eager_visibility(",
+    "prepare_bfs_visibility(",
     "prepare_direct_identity_visibility(",
     "source_row_visible(",
 }

@@ -1,0 +1,8 @@
+PostgreSQL: 17.9 (Homebrew)
+Projection: 1,001,000 nodes / 1,999,998 directed edges
+Query: sparse-allow node RLS, outbound BFS depth 4 from source key 100
+Strategy: forced lazy
+Result rows: 1
+Execution Time: 3248.530 ms
+Buffers: shared hit=33490 dirtied=1
+Metrics: {"strategy":"lazy","spi_calls":3,"source_rows":2,"requested_keys":3,"returned_keys":2,"requested_key_bytes":9,"returned_key_bytes":6}

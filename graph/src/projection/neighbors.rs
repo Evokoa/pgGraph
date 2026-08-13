@@ -28,6 +28,21 @@ pub(crate) trait NeighborSource {
 
     /// Iterate neighbors in reverse expansion order for DFS stack pushes.
     fn neighbors_reversed(&self, node_idx: u32) -> NeighborIter<'_>;
+
+    /// Fill a bounded forward-order page beginning at an owned logical cursor.
+    /// The default keeps layered sources compatible; CSR/overlay sources
+    /// override it to seek without replaying earlier neighbors.
+    fn fill_neighbors(
+        &self,
+        node_idx: u32,
+        cursor: usize,
+        limit: usize,
+        output: &mut Vec<Neighbor>,
+    ) -> bool {
+        let mut iter = self.neighbors(node_idx).skip(cursor).peekable();
+        output.extend(iter.by_ref().take(limit));
+        iter.peek().is_none()
+    }
 }
 
 /// Clean CSR neighbor source.
@@ -65,6 +80,31 @@ impl NeighborSource for CsrNeighbors<'_> {
             schema_reversed,
             relationship_ids,
         ))
+    }
+
+    fn fill_neighbors(
+        &self,
+        node_idx: u32,
+        cursor: usize,
+        limit: usize,
+        output: &mut Vec<Neighbor>,
+    ) -> bool {
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .edge_store
+            .neighbors_with_schema_and_relationship_ids(node_idx);
+        let end = cursor.saturating_add(limit).min(targets.len());
+        output.extend((cursor.min(targets.len())..end).map(|pos| {
+            Neighbor {
+                target: targets[pos],
+                type_id: type_ids[pos],
+                schema_reversed: schema_reversed[pos] != 0,
+                relationship_id: relationship_ids
+                    .get(pos)
+                    .copied()
+                    .filter(|id| *id != NO_RELATIONSHIP_ID),
+            }
+        }));
+        end == targets.len()
     }
 }
 
@@ -117,6 +157,24 @@ impl NeighborSource for OverlayNeighbors<'_> {
             self.inserts.get(&node_idx).map(Vec::as_slice),
             self.deletes.get(&node_idx),
         ))
+    }
+
+    fn fill_neighbors(
+        &self,
+        node_idx: u32,
+        cursor: usize,
+        limit: usize,
+        output: &mut Vec<Neighbor>,
+    ) -> bool {
+        // Classic overlays are bounded by query mutation caps. Preserve their
+        // exact merged order; clean CSR takes the constant-time slice path.
+        if self.inserts.get(&node_idx).is_none() && self.deletes.get(&node_idx).is_none() {
+            return CsrNeighbors::new(self.edge_store)
+                .fill_neighbors(node_idx, cursor, limit, output);
+        }
+        let mut iter = self.neighbors(node_idx).skip(cursor).peekable();
+        output.extend(iter.by_ref().take(limit));
+        iter.peek().is_none()
     }
 }
 
@@ -602,6 +660,33 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn clean_csr_cursor_pages_preserve_high_degree_order() {
+        let degree = 4_096u32;
+        let edges = (1..=degree)
+            .map(|target| RawEdge {
+                source: 0,
+                target,
+                type_id: (target % 7) as u8,
+                weight: None,
+                schema_reversed: target % 2 == 0,
+            })
+            .collect::<Vec<_>>();
+        let store = EdgeStore::from_edges(degree + 1, edges, false);
+        let neighbors = CsrNeighbors::new(&store);
+        let expected = neighbors.neighbors(0).collect::<Vec<_>>();
+        let mut actual = Vec::new();
+        let mut cursor = 0usize;
+        loop {
+            let exhausted = neighbors.fill_neighbors(0, cursor, 17, &mut actual);
+            cursor = actual.len();
+            if exhausted {
+                break;
+            }
+        }
+        assert_eq!(actual, expected);
     }
 
     proptest! {

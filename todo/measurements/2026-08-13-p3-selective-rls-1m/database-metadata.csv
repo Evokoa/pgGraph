@@ -1,0 +1,2 @@
+postgres_version,database_name,node_count,composite_count,node_table_bytes,composite_table_bytes,edge_table_bytes
+17.9 (Homebrew),pggraph_rls_p3_1m,1000000,1000,107003904,172032,82771968

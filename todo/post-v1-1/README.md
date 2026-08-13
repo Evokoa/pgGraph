@@ -142,7 +142,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P0 | Complete | Contracts, surface inventory, semantic corpus, and representative large-table baselines are frozen before production behavior changes. |
 | P1 | Complete | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
 | P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
-| P3 | Not started | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent. |
+| P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
 | P4 | Not started | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
 | P5 | Not started | Targeted queries select lazy and global analytics select eager; redundant read checks are removed only if proven; 1M/10M evidence meets the accepted latency and memory budgets. |
 | P6 | Not started | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
@@ -307,6 +307,37 @@ with requested identities rather than table membership.
 
 **Exit:** one-hop and BFS results, paths, caps, and diagnostics match eager mode
 exactly while selective-table benchmarks show bounded source work.
+
+**P3 evidence (2026-08-13):**
+
+- Clean CSR BFS uses an owned resumable machine; committed overlays, durable
+  segments, and transaction-local topology deliberately retain eager visibility
+  until P4 provides their owned identity cursors.
+- Candidate materialization owns node and relationship source identities before
+  releasing the engine borrow. Set-based typed PostgreSQL probes execute after
+  that boundary and fan node/relationship verdicts back to adjacency order.
+- Pure Rust tests cover exact eager result bytes, duplicate-parent selection,
+  count/key-byte limits, cap/truncation parity, relationship-identity folding,
+  projection-epoch validation, cursor paging, and one expansion charge per
+  emitted adjacency across yields. Empty or filtered raw pages yield between
+  bounded engine borrows, and PostgreSQL errors are converted to Rust unwinds
+  so traversal/resolver allocations are dropped before the original SQLSTATE
+  is rethrown. PostgreSQL policy cancellation and cleanup are covered by the
+  real-login boundary suite.
+- The PG17 real-login SQLSTATE/ACL boundary suite passes eager/lazy outbound,
+  inbound, depth-two, multi-seed, cap, `get_neighbors`, policy
+  cancellation/retry, node policy, and relationship policy cases. Hydration and
+  pagination remain on their shared post-traversal implementation and are not
+  claimed as separate P3 evidence.
+- Automatic selection uses lazy BFS only when RLS applies; development forcing
+  supports differential evidence. No-RLS and authorized bypass calls remain on
+  the established eager path.
+- Retained PG17 evidence lives in
+  `todo/measurements/2026-08-13-p3-selective-rls-10k/` and
+  `todo/measurements/2026-08-13-p3-selective-rls-1m/`. The completed 10k paired
+  run measured 35–47 ms lazy versus 146–430 ms eager with identical results;
+  at 1M rows eager exceeded the 600-second timeout while the equivalent lazy
+  query completed in 3.25 seconds with two returned source rows.
 
 ### P4: Complete targeted lazy topology coverage
 

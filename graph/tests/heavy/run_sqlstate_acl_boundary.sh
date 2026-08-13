@@ -163,6 +163,40 @@ SQL
   fi
 }
 
+expect_lazy_visibility_cancel_cleanup_as_login() {
+  local role="$1"
+  local sql="$2"
+  local out
+
+  set +e
+  out="$(psql -X -q -tA -U "$role" -d "$DBNAME" <<SQL 2>&1
+\set VERBOSITY verbose
+SELECT graph._test_set_visibility_strategy('lazy');
+SELECT graph._test_arm_lazy_visibility_cancel();
+$sql
+SELECT graph._test_visibility_resolution_state_empty();
+SQL
+)"
+  local rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    echo "Lazy visibility cancellation cleanup session failed unexpectedly:"
+    echo "$out"
+    exit 1
+  fi
+  if ! grep -Eq "ERROR:[[:space:]]+57014:" <<<"$out"; then
+    echo "Expected SQLSTATE 57014 from injected lazy visibility cancellation:"
+    echo "$out"
+    exit 1
+  fi
+  if [[ "$(tail -n 1 <<<"$out" | tr -d '[:space:]')" != "t" ]]; then
+    echo "Lazy visibility resolution state was not empty after cancellation:"
+    echo "$out"
+    exit 1
+  fi
+}
+
 expect_missing_identity_as_login() {
   local role="$1"
   local sql="$2"
@@ -331,7 +365,9 @@ SELECT string_agg(node_id, ',' ORDER BY depth, node_id) FROM graph.traverse('pub
 ROLLBACK;"
 
 if psql -X -q -tA -d "$DBNAME" -c "SELECT to_regprocedure('graph._test_arm_visibility_scan_cancel(bigint)') IS NOT NULL;" | grep -qx t; then
-  expect_visibility_cancel_cleanup_as_login "$ROLE_NAME" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
+  # Force the eager oracle: P3 targeted BFS is lazy by default and therefore
+  # does not consume the eager scan's cancellation injection point.
+  expect_visibility_cancel_cleanup_as_login "$ROLE_NAME" "SELECT graph._test_set_visibility_strategy('eager'); SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
   expect_value_as_login "$ROLE_NAME" "2" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], hydrate := false);"
 fi
 
@@ -391,6 +427,92 @@ expect_value_as_login "$ROLE_NAME" "a,d,c" "SET graph.boundary_tenant = 't1'; SE
 expect_value_as_login "$ROLE_NAME" "0" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.weighted_shortest_path('public.graph_boundary_nodes'::regclass, 'a', 'public.graph_boundary_nodes'::regclass, 'c', ARRAY['boundary']::text[]);"
 expect_sqlstate_as_login "$ROLE_NAME" "22023" "SET graph.boundary_tenant = 't1'; SELECT * FROM graph.shortest_path('public.graph_boundary_nodes'::regclass, 'a', 'public.graph_boundary_nodes'::regclass, 'c', 20, false, ARRAY['missing']::text[]);"
 expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.get_neighbors('default', 'graph_boundary_nodes', 'a', direction := 'out', hydrate := false);"
+
+# P3 contract: every migrated targeted traversal must remain byte-for-byte
+# equivalent to the eager oracle. This helper also makes source work a retained
+# assertion rather than relying on latency as a proxy. It is intentionally
+# development-only and runs through a real LOGIN so PostgreSQL remains the RLS
+# policy oracle.
+# P3 deliberately targets the clean CSR/classic in-memory overlay. Durable
+# segment cursors and transaction-local identities are assigned to P4, so
+# rebuild the retained fixture into a clean CSR before forcing lazy execution.
+run_sql "SET graph.mutable_enabled = off; SELECT * FROM graph.build(mode := 'csr_readonly');"
+run_sql "SELECT CASE WHEN to_regprocedure('graph._test_set_visibility_strategy(text)') IS NOT NULL THEN true ELSE pg_catalog.current_setting('graph.p3_missing_strategy_test_api')::boolean END;"
+run_sql "SELECT CASE WHEN (graph._test_visibility_metrics() ?& ARRAY['strategy', 'spi_calls', 'requested_keys', 'returned_keys', 'requested_key_bytes', 'returned_key_bytes', 'source_rows']) THEN true ELSE pg_catalog.current_setting('graph.p3_missing_visibility_metrics')::boolean END;"
+psql -X -q -v ON_ERROR_STOP=1 -d "$DBNAME" <<SQL
+CREATE OR REPLACE FUNCTION public.graph_boundary_assert_p3_visibility(
+    query_sql text,
+    max_lazy_requested_keys bigint,
+    max_lazy_source_rows bigint
+) RETURNS text
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path TO pg_catalog, pg_temp
+AS \$p3\$
+DECLARE
+    eager_rows jsonb;
+    lazy_rows jsonb;
+    eager_metrics jsonb;
+    lazy_metrics jsonb;
+BEGIN
+    PERFORM graph._test_set_visibility_strategy('eager');
+    EXECUTE format(
+        'SELECT COALESCE(jsonb_agg(to_jsonb(q)), ''[]''::jsonb) FROM (%s) AS q',
+        query_sql
+    ) INTO eager_rows;
+    eager_metrics := graph._test_visibility_metrics();
+
+    PERFORM graph._test_set_visibility_strategy('lazy');
+    EXECUTE format(
+        'SELECT COALESCE(jsonb_agg(to_jsonb(q)), ''[]''::jsonb) FROM (%s) AS q',
+        query_sql
+    ) INTO lazy_rows;
+    lazy_metrics := graph._test_visibility_metrics();
+
+    IF eager_rows IS DISTINCT FROM lazy_rows THEN
+        RAISE EXCEPTION 'P3 eager/lazy mismatch: eager=%, lazy=%', eager_rows, lazy_rows;
+    END IF;
+    IF eager_metrics->>'strategy' <> 'eager' OR lazy_metrics->>'strategy' <> 'lazy' THEN
+        RAISE EXCEPTION 'P3 strategy override was not honored: eager=%, lazy=%', eager_metrics, lazy_metrics;
+    END IF;
+    IF (lazy_metrics->>'spi_calls')::bigint < 1
+       OR (lazy_metrics->>'requested_keys')::bigint < 1
+       OR (lazy_metrics->>'requested_keys')::bigint > max_lazy_requested_keys
+       OR (lazy_metrics->>'source_rows')::bigint > max_lazy_source_rows THEN
+        RAISE EXCEPTION 'P3 lazy source work exceeded bounds: metrics=%, max_keys=%, max_rows=%',
+            lazy_metrics, max_lazy_requested_keys, max_lazy_source_rows;
+    END IF;
+    IF (lazy_metrics->>'returned_keys')::bigint > (lazy_metrics->>'requested_keys')::bigint
+       OR (lazy_metrics->>'returned_key_bytes')::bigint > (lazy_metrics->>'requested_key_bytes')::bigint THEN
+        RAISE EXCEPTION 'P3 lazy returned work exceeds requested work: %', lazy_metrics;
+    END IF;
+
+    PERFORM graph._test_set_visibility_strategy('auto');
+    RETURN 'ok';
+END
+\$p3\$;
+REVOKE ALL ON FUNCTION public.graph_boundary_assert_p3_visibility(text,bigint,bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.graph_boundary_assert_p3_visibility(text,bigint,bigint) TO $ROLE_NAME;
+SQL
+
+# Hidden relationship a->c and hidden node b must not enter either result;
+# visible relationship a->d and d->c preserve their eager order and parents.
+# Contract names retained for the Rust architecture inventory:
+# one_hop_lazy_matches_eager_for_node_and_relationship_rls
+# bounded_bfs_lazy_matches_eager_for_order_parents_caps_and_truncation
+# multi_seed_lazy_matches_eager_for_order_and_rows
+expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false)\$q\$, 8, 8);"
+expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'c', 1, edge_types := ARRAY['boundary_row'], direction := 'in', strategy := 'bfs', hydrate := false)\$q\$, 8, 8);"
+expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false)\$q\$, 12, 12);"
+expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse(ARRAY['public.graph_boundary_nodes'::regclass::oid, 'public.graph_boundary_nodes'::regclass::oid, 'public.graph_boundary_nodes'::regclass::oid], ARRAY['a', 'b', 'c'], max_depth := 1, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false)\$q\$, 16, 16);"
+expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false, max_nodes := 2)\$q\$, 12, 12);"
+expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false, max_frontier := 1)\$q\$, 12, 12);"
+expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.get_neighbors('default', 'graph_boundary_nodes', 'a', direction := 'out', hydrate := false)\$q\$, 8, 8);"
+
+if psql -X -q -tA -d "$DBNAME" -c "SELECT to_regprocedure('graph._test_arm_lazy_visibility_cancel()') IS NOT NULL;" | grep -qx t; then
+  expect_lazy_visibility_cancel_cleanup_as_login "$ROLE_NAME" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], strategy := 'bfs', hydrate := false);"
+  expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], strategy := 'bfs', hydrate := false)\$q\$, 8, 8);"
+fi
 
 run_sql "GRANT CREATE ON SCHEMA graph TO $ROLE_NAME;"
 run_sql "GRANT SELECT ON public.graph_boundary_secret_nodes TO $ROLE_NAME;"

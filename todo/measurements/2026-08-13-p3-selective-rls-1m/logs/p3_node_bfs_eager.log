@@ -1,0 +1,4 @@
+ERROR:  57014: canceling statement due to statement timeout
+CONTEXT:  SQL statement "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := 'out', strategy := 'bfs', hydrate := false)"
+PL/pgSQL function public.rls_bench_measure(text,text,text,text,text,text,text,bigint,integer) line 10 at EXECUTE
+LOCATION:  ProcessInterrupts, postgres.c:3407

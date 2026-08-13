@@ -1,0 +1,14 @@
+case_name,strategy,key_shape,rls_scope,policy_shape,query_kind,sample,total_ms,result_rows,visibility_us,hidden_nodes,hidden_relationships,spi_calls,requested_keys,returned_keys,requested_key_bytes,returned_key_bytes,source_rows
+p3_combined_eager,eager,scalar,combined,sparse_allow,edge_one_hop,1,430.27,1,398029,10890,19800,0,0,0,0,0,309
+p3_combined_lazy,lazy,scalar,combined,sparse_allow,edge_one_hop,1,39.355,1,0,0,0,3,3,2,9,6,2
+p3_edge_hidden_eager,eager,scalar,edge,sparse_allow,edge_one_hop,1,320.854,1,288217,0,9900,0,0,0,0,0,99
+p3_edge_hidden_lazy,lazy,scalar,edge,sparse_allow,edge_one_hop,1,34.964,1,0,0,0,1,1,0,3,0,0
+p3_edge_visible_eager,eager,scalar,edge,sparse_allow,edge_one_hop,1,318.132,2,285948,0,9900,0,0,0,0,0,99
+p3_edge_visible_lazy,lazy,scalar,edge,sparse_allow,edge_one_hop,1,35.493,2,0,0,0,1,1,1,3,3,1
+p3_no_rls_auto,auto,scalar,none,no_rls,traverse_depth_4,1,31.818,5,0,0,0,0,0,0,0,0,0
+p3_node_bfs_eager,eager,scalar,node,sparse_allow,traverse_depth_4,1,146.435,1,113838,10890,9900,0,0,0,0,0,210
+p3_node_bfs_lazy,lazy,scalar,node,sparse_allow,traverse_depth_4,1,39.445,1,0,0,0,3,3,2,9,6,2
+p3_node_inbound_eager,eager,scalar,node,sparse_allow,inbound_one_hop,1,148.568,1,116529,10890,9900,0,0,0,0,0,210
+p3_node_inbound_lazy,lazy,scalar,node,sparse_allow,inbound_one_hop,1,39.762,1,0,0,0,3,3,1,7,3,1
+p3_node_multiseed_eager,eager,scalar,node,sparse_allow,multi_seed_one_hop,1,147.019,2,114899,10890,9900,0,0,0,0,0,210
+p3_node_multiseed_lazy,lazy,scalar,node,sparse_allow,multi_seed_one_hop,1,47.082,2,0,0,0,6,6,4,18,12,4

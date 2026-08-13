@@ -1,0 +1,47 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Seq Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "rls_bench_edges",
+      "Alias": "src",
+      "Startup Cost": 0.00,
+      "Total Cost": 18051.62,
+      "Plan Rows": 713241,
+      "Plan Width": 32,
+      "Actual Startup Time": 0.135,
+      "Actual Total Time": 64.177,
+      "Actual Rows": 999999,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 4314,
+      "Shared Read Blocks": 3039,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Settings": {
+    },
+    "Planning": {
+      "Shared Hit Blocks": 62,
+      "Shared Read Blocks": 1,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Planning Time": 0.433,
+    "Triggers": [
+    ],
+    "Execution Time": 81.739
+  }
+]
