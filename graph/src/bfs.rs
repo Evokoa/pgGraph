@@ -46,6 +46,8 @@ pub(crate) struct BfsProjectionEpoch {
     pub(crate) edge_count: u64,
     pub(crate) relationship_identity_count: u64,
     pub(crate) edge_buffer_len: u64,
+    pub(crate) edge_buffer_revision: u64,
+    pub(crate) tx_topology_revision: u64,
     pub(crate) tx_added_nodes: u64,
     pub(crate) tx_added_edges: u64,
     pub(crate) tx_deleted_nodes: u64,
@@ -1822,6 +1824,34 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::time::Duration;
+
+    #[test]
+    fn resumable_bfs_epoch_rejects_same_cardinality_topology_substitution() {
+        let config = resumable_test_config(2, 100, 100);
+        let mut machine = ResumableBfsMachine::try_new(5, &config).expect("resumable machine");
+        let original = BfsProjectionEpoch {
+            generation_id: Some(1),
+            applied_sync_id: 10,
+            node_count: 5,
+            edge_count: 4,
+            relationship_identity_count: 3,
+            edge_buffer_len: 1,
+            edge_buffer_revision: 7,
+            tx_topology_revision: 11,
+            tx_added_nodes: 0,
+            tx_added_edges: 1,
+            tx_deleted_nodes: 0,
+            tx_deleted_edges: 0,
+        };
+        machine.bind_projection_epoch(original);
+        let substituted = BfsProjectionEpoch {
+            edge_buffer_revision: 8,
+            tx_topology_revision: 12,
+            ..original
+        };
+
+        assert!(machine.require_projection_epoch(substituted).is_err());
+    }
 
     fn build_test_graph() -> (NodeStore, EdgeStore) {
         // Build a simple graph: 0 → 1 → 2 → 3, with 0 → 4

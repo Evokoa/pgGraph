@@ -1534,7 +1534,8 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
         .expect("build mutable graph failed");
     Spi::run(
         "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
-         VALUES ('f_overlay_hidden', 'u2', 'u1')",
+         VALUES ('f_overlay_hidden', 'u2', 'u1'),
+                ('f_overlay_visible', 'u1', 'u2')",
     )
     .expect("insert overlay relationship failed");
     let published = Spi::get_one::<i64>(
@@ -1569,6 +1570,7 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
     )
     .expect("configure overlay RLS failed");
     create_error_sqlstate_helper();
+    create_error_detail_helper();
     let row_count_queries = [
         "SELECT count(*)::bigint FROM graph.gql(
            'MATCH (u:graph_test_users_pgtest {id: ''u2''})-[r:friend]->(v:graph_test_users_pgtest {id: ''u1''}) RETURN u, r, v',
@@ -1645,6 +1647,134 @@ fn gql_mutable_overlay_relationships_fail_closed_under_rls() {
     .expect("overlay RLS existence check failed")
     .unwrap_or_default();
     assert_eq!((aggregate_count, exists), (0, false));
+    Spi::run("SELECT graph._test_set_visibility_strategy('eager')")
+        .expect("force eager durable traversal failed");
+    let eager_visible = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u1',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'out',
+           strategy := 'bfs',
+           hydrate := false
+         )",
+    )
+    .expect("eager visible durable traversal failed")
+    .unwrap_or_default();
+    let eager_hidden_out = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u2',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'out',
+           strategy := 'bfs',
+           hydrate := false
+         )",
+    )
+    .expect("eager hidden outbound durable traversal failed")
+    .unwrap_or_default();
+    let eager_hidden_in = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u1',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'in',
+           strategy := 'bfs',
+           hydrate := false
+         )",
+    )
+    .expect("eager hidden inbound durable traversal failed")
+    .unwrap_or_default();
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')")
+        .expect("force lazy durable traversal failed");
+    let lazy_visible = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u1',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'out',
+           strategy := 'bfs',
+           hydrate := false
+         )",
+    )
+    .expect("lazy visible durable traversal failed")
+    .unwrap_or_default();
+    let lazy_hidden_out = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u2',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'out',
+           strategy := 'bfs',
+           hydrate := false
+         )",
+    )
+    .expect("lazy hidden outbound durable traversal failed")
+    .unwrap_or_default();
+    let lazy_hidden_in = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u1',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'in',
+           strategy := 'bfs',
+           hydrate := false
+         )",
+    )
+    .expect("lazy hidden inbound durable traversal failed")
+    .unwrap_or_default();
+    assert_eq!(
+        (eager_visible, eager_hidden_out, eager_hidden_in),
+        (lazy_visible, lazy_hidden_out, lazy_hidden_in)
+    );
+    assert_eq!((lazy_visible, lazy_hidden_out, lazy_hidden_in), (2, 1, 1));
+    let lazy_metrics = Spi::get_one::<pgrx::JsonB>("SELECT graph._test_visibility_metrics()")
+        .expect("read lazy durable traversal metrics failed")
+        .expect("lazy durable traversal metrics missing");
+    assert_eq!(
+        lazy_metrics.0.get("strategy").and_then(|value| value.as_str()),
+        Some("lazy")
+    );
+    Spi::run("SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore automatic visibility strategy failed");
+    Spi::run(
+        "RESET ROLE; SELECT graph._test_arm_missing_bfs_candidate_relationship_identity()",
+    )
+        .expect("arm missing durable relationship identity failed");
+    Spi::run("SET ROLE graph_gql_overlay_rls").expect("restore overlay role failed");
+    let missing_durable_statement = "SELECT count(*) FROM graph.traverse(
+           'public.graph_test_users_pgtest'::regclass,
+           'u2',
+           1,
+           edge_types := ARRAY['friend'],
+           direction := 'out',
+           strategy := 'bfs',
+           hydrate := false
+         )";
+    let missing_durable_identity = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(missing_durable_statement)
+    ))
+    .expect("missing durable relationship identity SQLSTATE capture failed");
+    assert_eq!(missing_durable_identity.as_deref(), Some("55000"));
+    Spi::run(
+        "RESET ROLE; SELECT graph._test_arm_missing_bfs_candidate_relationship_identity()",
+    )
+    .expect("rearm missing durable relationship identity failed");
+    Spi::run("SET ROLE graph_gql_overlay_rls").expect("restore overlay role for detail failed");
+    let missing_durable_detail = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sql_error_detail({})",
+        super::sql_literal(missing_durable_statement)
+    ))
+    .expect("missing durable relationship identity detail capture failed")
+    .unwrap_or_default();
+    assert!(missing_durable_detail.contains("PG023"));
     Spi::run("RESET ROLE").expect("reset overlay role failed");
     Spi::run("SET graph.auto_load = off").expect("restore auto-load failed");
     Spi::run("SET graph.persist_on_build = off").expect("restore persisted build failed");

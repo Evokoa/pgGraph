@@ -115,6 +115,8 @@ pub struct Engine {
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
     pub(crate) edge_buffer: Vec<EdgeMutation>,
+    /// Monotonic backend-local revision for committed overlay substitutions.
+    edge_buffer_revision: u64,
     /// Runtime projection mode selected at build/load time.
     pub(crate) projection_mode: crate::config::ProjectionMode,
     /// Durable projection generation loaded with the base artifact, if any.
@@ -257,6 +259,8 @@ impl Engine {
             relationship_identity_count: u64::try_from(self.relationship_identities.len())
                 .unwrap_or(u64::MAX),
             edge_buffer_len: u64::try_from(self.edge_buffer.len()).unwrap_or(u64::MAX),
+            edge_buffer_revision: self.edge_buffer_revision,
+            tx_topology_revision: tx_delta::topology_revision(),
             tx_added_nodes: u64::try_from(tx.added_nodes).unwrap_or(u64::MAX),
             tx_added_edges: u64::try_from(tx.added_edges).unwrap_or(u64::MAX),
             tx_deleted_nodes: u64::try_from(tx.deleted_nodes).unwrap_or(u64::MAX),
@@ -281,9 +285,12 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        // Segment-backed adjacency still uses its eager k-way materialization
-        // until P4 supplies an owned cursor for that representation.
-        if self.layered_neighbors()?.is_some() {
+        // The owned layered cursor currently preserves the independent Out/In
+        // merge order. `Any` retains the eager shared-map oracle until its
+        // cross-direction precedence has a dedicated cursor.
+        if self.segment_backed_projection_manifest().is_some()
+            && direction == TraversalDirection::Any
+        {
             return Ok(None);
         }
         // Transaction-local topology requires a combined base+transaction
@@ -378,6 +385,28 @@ impl Engine {
             TraversalDirection::Any | TraversalDirection::Out => &self.edge_store,
             TraversalDirection::In => &self.reverse_edge_store,
         };
+        if self.segment_backed_projection_manifest().is_some() {
+            let layered = LayeredNeighbors::from_snapshot_with_direction_overlay(
+                &self.edge_store,
+                &self.reverse_edge_store,
+                self.projection_snapshot.as_ref().ok_or_else(|| {
+                    GraphError::Internal("projection snapshot is missing".to_string())
+                })?,
+                direction,
+                &config.overlay_insert_edges,
+                &config.overlay_deleted_edges,
+            );
+            let neighbors = layered.for_direction(direction);
+            return bfs::materialize_bfs_candidate_batch(
+                machine,
+                &self.node_store,
+                &neighbors,
+                &self.relationship_identities,
+                config,
+                limits,
+                governor,
+            );
+        }
         let neighbors = OverlayNeighbors::new(
             edge_store,
             &config.overlay_insert_edges,
@@ -445,6 +474,7 @@ impl Engine {
             resolution_delta: ResolutionDeltaIndex::new(),
             _mmap: None,
             edge_buffer: Vec::new(),
+            edge_buffer_revision: 0,
             projection_mode: crate::config::ProjectionMode::CsrReadonly,
             projection_manifest: None,
             projection_manifest_full: None,
@@ -1472,6 +1502,7 @@ impl Engine {
     pub fn push_edge_mutation(&mut self, mutation: EdgeMutation) -> GraphResult<()> {
         self.reserve_edge_mutation_capacity(1)?;
         self.edge_buffer.push(mutation);
+        self.edge_buffer_revision = self.edge_buffer_revision.wrapping_add(1);
         self.needs_vacuum = true;
         Ok(())
     }
@@ -2809,7 +2840,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "P4 layered-segment cursor checkpoint"]
     fn resumable_bfs_matches_eager_with_durable_segments() {
         let mut engine = build_test_engine();
         let _dir =

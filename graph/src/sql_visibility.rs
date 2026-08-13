@@ -68,6 +68,9 @@ thread_local! {
     static VISIBILITY_FORCE_MISSING_IDENTITY: Cell<bool> = const { Cell::new(false) };
 
     #[cfg(feature = "development")]
+    static BFS_VISIBILITY_FORCE_MISSING_CANDIDATE_IDENTITY: Cell<bool> = const { Cell::new(false) };
+
+    #[cfg(feature = "development")]
     static VISIBILITY_LAST_METRICS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
 
     #[cfg(feature = "development")]
@@ -1176,7 +1179,11 @@ pub(crate) fn resolve_bfs_visibility_batch(
                 sequence,
                 mapping_id,
                 source_key,
-                relationship_id: candidate.relationship_id,
+                relationship_id: if force_missing_bfs_candidate_identity_for_test() {
+                    None
+                } else {
+                    candidate.relationship_id
+                },
                 edge_type: candidate.edge_type,
             });
             sequence = sequence
@@ -2220,6 +2227,26 @@ fn test_set_visibility_strategy(strategy: &str) -> bool {
 #[pg_extern(schema = "graph", name = "_test_arm_missing_relationship_identity")]
 fn test_arm_missing_relationship_identity() -> bool {
     VISIBILITY_FORCE_MISSING_IDENTITY.with(|armed| armed.set(true));
+    true
+}
+
+#[cfg(feature = "development")]
+fn force_missing_bfs_candidate_identity_for_test() -> bool {
+    BFS_VISIBILITY_FORCE_MISSING_CANDIDATE_IDENTITY.with(|armed| armed.replace(false))
+}
+
+#[cfg(not(feature = "development"))]
+fn force_missing_bfs_candidate_identity_for_test() -> bool {
+    false
+}
+
+#[cfg(feature = "development")]
+#[pg_extern(
+    schema = "graph",
+    name = "_test_arm_missing_bfs_candidate_relationship_identity"
+)]
+fn test_arm_missing_bfs_candidate_relationship_identity() -> bool {
+    BFS_VISIBILITY_FORCE_MISSING_CANDIDATE_IDENTITY.with(|armed| armed.set(true));
     true
 }
 

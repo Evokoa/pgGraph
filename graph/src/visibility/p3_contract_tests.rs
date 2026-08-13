@@ -237,14 +237,14 @@ fn frontier_visibility_is_set_based_indexable_and_cancellation_safe() {
 }
 
 #[test]
-fn layered_and_transaction_node_or_filter_topology_remain_eager() {
+fn transaction_node_or_filter_topology_remains_eager_until_its_owned_cursor_exists() {
     let engine = crate_source("src/engine.rs");
     let prepare = function_body(&engine, "fn prepare_resumable_bfs");
     assert!(
-        prepare.contains("layered_neighbors()?.is_some()")
-            && prepare.contains("tx_stats.added_nodes")
+        prepare.contains("tx_stats.added_nodes")
+            && prepare.contains("tx_stats.filter_updates")
             && prepare.contains("return Ok(None)"),
-        "durable topology and transaction-local node/filter changes must retain eager visibility until P4 owns their resumable cursors"
+        "transaction-local node/filter changes must retain eager visibility until P4 owns their resumable cursors"
     );
 }
 

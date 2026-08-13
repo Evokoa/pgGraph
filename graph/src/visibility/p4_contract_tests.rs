@@ -62,6 +62,76 @@ fn bounded_classic_edge_overlays_use_owned_cursors_instead_of_eager_fallbacks() 
 }
 
 #[test]
+fn durable_layers_require_a_bounded_owned_cursor_before_lazy_bfs_selection() {
+    let engine = crate_source("src/engine.rs");
+    let bfs = crate_source("src/bfs.rs");
+    let neighbors = crate_source("src/projection/neighbors.rs");
+    let layered = crate_source("src/projection/layered.rs");
+    let prepare = function_body(&engine, "fn prepare_resumable_bfs");
+    let layered_neighbor_impl = function_body(&layered, "impl NeighborSource for LayeredNeighbors");
+    let directional_impl = function_body(
+        &layered,
+        "impl NeighborSource for DirectionalLayeredNeighbors",
+    );
+
+    assert!(
+        neighbors.contains("Layered {") || layered.contains("OwnedLayeredNeighborCursor"),
+        "P4.2 needs an owned layered cursor that records k-way base, durable-segment, committed-overlay, and transaction-delta positions"
+    );
+    assert!(
+        layered_neighbor_impl.contains("fn fill_neighbors")
+            && directional_impl.contains("fn fill_neighbors"),
+        "layered sources must override the replaying default pager before they can cross the ENGINE/SPI boundary"
+    );
+    for required in [
+        "owned_layered_cursor_matches_current_order_in_both_directions",
+        "owned_layered_cursor_preserves_tombstone_precedence_and_parallel_relationships",
+        "owned_layered_cursor_yields_progress_after_zero_output_raw_page",
+        "owned_layered_cursor_bounds_examined_raw_rows",
+        "owned_layered_cursor_matches_eager_for_generated_mutation_sequences",
+        "owned_layered_cursor_preserves_parallel_base_relationship_identity_order",
+        "owned_layered_cursor_pages_base_chunk_replacements_without_base_leakage",
+        "owned_layered_cursor_collapses_duplicate_full_base_keys_across_pages",
+        "owned_layered_cursor_preserves_durable_and_frozen_overlay_precedence",
+        "owned_layered_cursor_preserves_inbound_durable_and_frozen_overlay_precedence",
+    ] {
+        assert!(
+            layered.contains(required),
+            "P4.2 layered-cursor behavioral corpus is missing `{required}`"
+        );
+    }
+    assert!(
+        !prepare.contains("layered_neighbors()?.is_some()"),
+        "segment-backed targeted BFS must stop selecting eager only after the bounded layered cursor contracts are green"
+    );
+    assert!(
+        bfs.contains("resumable_bfs_epoch_rejects_same_cardinality_topology_substitution"),
+        "resumable durable traversal must reject same-cardinality overlay substitutions across policy SPI"
+    );
+}
+
+#[test]
+fn targeted_bfs_workflow_inventory_is_explicit() {
+    let workflow = crate_source("src/sql_facade/workflow.rs");
+
+    let expand = function_body(&workflow, "fn expand");
+    let find_related = function_body(&workflow, "fn find_related");
+    let neighborhood = function_body(&workflow, "fn neighborhood");
+    assert!(
+        expand.contains("execute_traverse_rows_in_context"),
+        "expand is a direct targeted BFS workflow and needs eager/lazy differential coverage"
+    );
+    assert!(
+        find_related.matches("traverse_search_rows_in_context").count() >= 2,
+        "find_related is the resolver-sharing workflow because its filtered and broad-count traversals must reuse one statement-local oracle"
+    );
+    assert!(
+        neighborhood.contains("traverse_search_rows_in_context"),
+        "neighborhood is a targeted BFS workflow and needs exact grouped-row eager/lazy parity"
+    );
+}
+
+#[test]
 #[ignore = "P4 DFS/reverse checkpoint contract"]
 fn dfs_and_reverse_traversal_freeze_order_and_visited_timing_before_migration() {
     let bfs = crate_source("src/bfs.rs");

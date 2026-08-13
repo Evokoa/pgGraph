@@ -76,6 +76,7 @@ pub(crate) struct TxDeltaStats {
 
 thread_local! {
     static TX_DELTA: RefCell<Option<TxGraphDelta>> = const { RefCell::new(None) };
+    static TX_TOPOLOGY_REVISION: Cell<u64> = const { Cell::new(0) };
     static SUBTRANSACTION_DEPTH: Cell<u32> = const { Cell::new(0) };
     static SUBTRANSACTION_SNAPSHOTS: RefCell<Vec<Option<TxGraphDelta>>> = const { RefCell::new(Vec::new()) };
     #[cfg(test)]
@@ -84,6 +85,16 @@ thread_local! {
     static TEST_MAX_TX_DELTA_EDGES: Cell<usize> = const { Cell::new(100_000) };
     #[cfg(test)]
     static TEST_MAX_OVERLAY_MEMORY_BYTES: Cell<usize> = const { Cell::new(256 * 1_048_576) };
+}
+
+fn bump_topology_revision() {
+    TX_TOPOLOGY_REVISION.with(|revision| revision.set(revision.get().wrapping_add(1)));
+}
+
+/// Return a backend-local monotonic revision for edge and relationship-identity
+/// state used by resumable traversal.
+pub(crate) fn topology_revision() -> u64 {
+    TX_TOPOLOGY_REVISION.with(Cell::get)
 }
 
 static CALLBACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -192,6 +203,7 @@ pub(crate) fn record_added_node(
             node_idx: None,
         });
     });
+    bump_topology_revision();
     Ok(())
 }
 
@@ -203,7 +215,7 @@ pub(crate) fn record_added_node_indexed(
     base_node_count: u32,
 ) -> GraphResult<u32> {
     ensure_write_capacity(1, 0, estimated_added_node_bytes(primary_key, tenant))?;
-    TX_DELTA.with(|delta| {
+    let result = TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
         delta.max_added_node_primary_key_bytes = delta
@@ -234,7 +246,11 @@ pub(crate) fn record_added_node_indexed(
             node_idx: Some(node_idx),
         });
         Ok(node_idx)
-    })
+    });
+    if result.is_ok() {
+        bump_topology_revision();
+    }
+    result
 }
 
 /// Return transaction-local node primary keys for a table and tenant scope.
@@ -356,6 +372,7 @@ pub(crate) fn record_deleted_node(node_idx: u32) -> GraphResult<()> {
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
         delta.deleted_nodes.insert(node_idx);
     });
+    bump_topology_revision();
     Ok(())
 }
 
@@ -381,6 +398,7 @@ pub(crate) fn record_filter_value_update(
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
         delta.filter_updates.insert((column_idx, node_idx), value);
     });
+    bump_topology_revision();
     Ok(())
 }
 
@@ -502,6 +520,7 @@ pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()>
         }
         delta.added_edges.entry(source).or_default().push(edge);
     });
+    bump_topology_revision();
     Ok(())
 }
 
@@ -512,7 +531,7 @@ pub(crate) fn record_relationship_identity(
     identity: RelationshipIdentity,
 ) -> GraphResult<RelationshipId> {
     ensure_write_capacity(0, 0, estimated_relationship_identity_bytes(&identity))?;
-    TX_DELTA.with(|delta| {
+    let result = TX_DELTA.with(|delta| {
         let mut borrowed = delta.borrow_mut();
         let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
         let offset = delta.relationship_identities.len();
@@ -524,7 +543,11 @@ pub(crate) fn record_relationship_identity(
         })?;
         delta.relationship_identities.push(identity);
         Ok(id)
-    })
+    });
+    if result.is_ok() {
+        bump_topology_revision();
+    }
+    result
 }
 
 /// Return transaction-local relationship identities in allocation order.
@@ -647,6 +670,7 @@ pub(crate) fn record_deleted_edge_with_identity(
             .deleted_edges
             .insert((source, target, type_id, schema_reversed, relationship_id));
     });
+    bump_topology_revision();
     Ok(())
 }
 
@@ -887,6 +911,7 @@ fn clear_current_delta() {
 
 fn clear_current_transaction_state() {
     clear_current_delta();
+    bump_topology_revision();
     SUBTRANSACTION_DEPTH.with(|depth| depth.set(0));
     SUBTRANSACTION_SNAPSHOTS.with(|snapshots| snapshots.borrow_mut().clear());
 }
@@ -933,6 +958,7 @@ fn finish_subtransaction(aborted: bool) {
     if aborted {
         if let Some(snapshot) = snapshot {
             TX_DELTA.with(|delta| *delta.borrow_mut() = Some(snapshot));
+            bump_topology_revision();
         }
     }
     SUBTRANSACTION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
@@ -975,6 +1001,39 @@ mod tests {
         clear_current_transaction_state();
 
         assert_eq!(stats(), TxDeltaStats::default());
+    }
+
+    #[test]
+    fn topology_revision_changes_for_same_cardinality_edge_substitutions() {
+        clear_current_transaction_state();
+        record_added_edge(
+            0,
+            DeltaEdge {
+                target: 1,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        )
+        .expect("first edge insert");
+        let first_revision = topology_revision();
+        record_deleted_edge_with_identity(0, 1, 1, false, None).expect("cancel first edge insert");
+        record_added_edge(
+            0,
+            DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        )
+        .expect("replacement edge insert");
+
+        assert_eq!(stats().added_edges, 1);
+        assert!(topology_revision() > first_revision);
+        clear_current_transaction_state();
     }
 
     #[test]

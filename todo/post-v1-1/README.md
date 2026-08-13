@@ -374,6 +374,21 @@ relationship delete, stable identities, source-work bounds, rollback, and
 retry. Committed durable segments remain assigned to the next cursor
 checkpoint.
 
+The durable-cursor portion of P4.2 completed on 2026-08-13. Segment-backed
+`out` and `in` BFS now merge base/base-chunk, cumulative durable, and the
+query-frozen classic overlay through an owned bounded cursor. Equal keys
+advance atomically, newer inserts retain the established tombstone precedence,
+parallel relationship identities remain distinct, and empty pages yield
+between engine borrows. Monotonic committed-overlay and transaction topology
+revisions reject same-cardinality substitutions across a policy probe. Pure
+cursor and engine differentials cover both directions, wildcard and identified
+deletes, later inserts, parallel IDs, raw work bounds, and exact eager rows. A
+PostgreSQL RLS regression covers visible and hidden durable relationship
+identities with forced eager/lazy parity and the `PG023` fail-closed diagnostic
+for a missing durable identity.
+Segment-backed `any` direction and resolver sharing across `expand`,
+`find_related`, and `neighborhood` remain the active P4.2 work.
+
 - Extend the state-machine boundary to DFS/reverse traversal without changing
   reversed-neighbor push order or visited timing.
 - Resolve complete bounded bidirectional-BFS levels without changing meeting
