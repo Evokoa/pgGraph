@@ -102,13 +102,12 @@ filterable during traversal instead of becoming opaque relationship properties.
 The runtime uses a checked logical `EdgeTypeId(u32)`. New immutable CSR bases
 use the v7 adaptive one-, two-, or four-byte encoding, while v6 bases remain
 read compatible. Mutable segments now use the same adaptive widths and retain
-v5/v6 read compatibility. Wide mutable publication remains disabled until the
-P8 sync checkpoint can publish its cumulative dictionary and segments as one
-generation.
+v5/v6 read compatibility. Committed durable sync can publish a widened
+cumulative dictionary and matching segments as one validated generation.
 `label_column` interns every distinct nonempty source value into this registry.
 A build that exceeds the public count, label, or dictionary-byte policy fails
-with SQLSTATE `54000` and diagnostic `PG004`. Incremental sync accepts labels
-already present in the base dictionary and rejects unseen labels until P8.
+with SQLSTATE `54000` and diagnostic `PG004`. Committed incremental sync accepts
+valid unseen labels; transaction-local provisional labels remain a P8.3 item.
 
 All type-aware topology paths use the same registry. This includes
 `graph.traverse(edge_types := ...)`, GQL relationship-type matching, path
@@ -168,8 +167,8 @@ Applications should choose the current path by required semantics:
 | Need | Recommended path |
 |---|---|
 | Exact relationship types are known at rebuild time | Use a `csr_readonly` projection with `label_column`; v7 selects one, two, or four bytes and exact `edge_types`/GQL filters remain available. |
-| A mutable projection needs more than 254 labels | Rebuild a read-only v7 base until P8 completes atomic cumulative-dictionary publication; the adaptive segment codec is already in place. |
-| Incremental ingestion introduces unseen labels | Rebuild the base dictionary, or normalize new source values to labels already present; P8 owns governed incremental dictionary growth. |
+| A durable mutable projection needs more than 254 labels | Use trigger-backed committed sync; P8.2 publishes the cumulative dictionary and adaptive segments atomically. Transaction-local unseen labels remain deferred to P8.3. |
+| Incremental ingestion introduces unseen labels | Apply committed sync under the graph writer lock. Count, per-label, dictionary, memory, and artifact limits remain enforced. |
 | Family-level traversal is sufficient | Store a bounded semantic family in a separate `graph_label` column, register that column, and retain the exact `relationship_name` in PostgreSQL. Prefer meaningful families such as `employment`, `ownership`, or `collaboration` over hash buckets. |
 | Exact free-form type is required at every hop | Normalize the string once to a PostgreSQL relationship-type ID and use a bounded recursive SQL query that filters the ID before each expansion. Index `(relationship_type_id, source_id) INCLUDE (target_id)` and the reverse direction when required. |
 | Most traffic targets a stable hot set | Keep hot exact types as pgGraph labels, map the long tail to a semantic or `other` label, and use indexed recursive SQL for exact long-tail traversals. Measure the crossover with `EXPLAIN (ANALYZE, BUFFERS)`. |
@@ -184,9 +183,10 @@ semantics.
 ## Post-1.1 Direction
 
 P7 ships adaptive rebuilt immutable bases. P8.1 adds adaptive mutable segment
-storage and the durable cumulative-dictionary format; later P8 checkpoints own
-atomic incremental labels and transaction state. P9 owns the full query,
-listing, release-matrix, and public feature closure.
+storage and the durable cumulative-dictionary format. P8.2 atomically interns
+unseen labels from committed durable sync and publishes their dictionary with
+the matching segments. P8.3 owns transaction-local/savepoint label state. P9
+owns the full query, listing, release-matrix, and public feature closure.
 
 | Area | Direction |
 |---|---|

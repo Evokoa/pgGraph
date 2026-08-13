@@ -63,6 +63,178 @@ fn adaptive_edge_type_policy_limits_fail_atomically() {
     assert_eq!(loaded, 0);
 }
 
+fn build_p8_unseen_edge_type_sync_fixture() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SET graph.sync_mode = 'trigger';
+         SET graph.persist_on_build = on;
+         SET graph.mutable_enabled = on;
+         SET graph.query_freshness = 'off';
+         INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Carol', 43);
+         TRUNCATE public.graph_test_friendships_pgtest;
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('base', 'u1', 'u2');
+         SELECT graph.add_table(
+             'graph_test_users_pgtest'::regclass, 'id', ARRAY['name']);
+         SELECT graph.add_edge(
+             'graph_test_friendships_pgtest'::regclass,
+             'user_id', 'graph_test_users_pgtest'::regclass,
+             'friend_id', 'fallback', false, label_column := 'id');
+         SELECT * FROM graph.build(mode := 'mutable_overlay');
+         SELECT graph.enable_sync()",
+    )
+    .expect("build P8 unseen relationship type fixture failed");
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn durable_sync_unseen_edge_type_survives_reload_and_filters_exactly() {
+    build_p8_unseen_edge_type_sync_fixture();
+    // Source order is deliberately the reverse of lexical order. Dictionary
+    // allocation must not depend on trigger/log iteration order.
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('zeta', 'u2', 'u3'), ('alpha', 'u1', 'u3')",
+    )
+    .expect("insert P8 unseen relationship types failed");
+    Spi::run("SELECT * FROM graph.apply_sync()")
+        .expect("publish unseen relationship types failed");
+
+    crate::ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        let alpha = engine
+            .edge_type_id("alpha")
+            .expect("alpha must be interned")
+            .get();
+        let zeta = engine
+            .edge_type_id("zeta")
+            .expect("zeta must be interned")
+            .get();
+        assert!(alpha < zeta, "new labels must be interned deterministically");
+    });
+
+    Spi::run(
+        "SELECT graph.unload_graph('default');
+         SELECT * FROM graph.load_graph('default')",
+    )
+    .expect("reload P8 unseen relationship type generation failed");
+    let alpha_nodes = Spi::get_one::<String>(
+        "SELECT string_agg(node_id, ',' ORDER BY node_id)
+           FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass, 'u1', 1,
+             edge_types := ARRAY['alpha'], hydrate := false)",
+    )
+    .expect("filter alpha relationship type after reload failed")
+    .unwrap_or_default();
+    let zeta_nodes = Spi::get_one::<String>(
+        "SELECT string_agg(node_id, ',' ORDER BY node_id)
+           FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass, 'u2', 1,
+             edge_types := ARRAY['zeta'], hydrate := false)",
+    )
+    .expect("filter zeta relationship type after reload failed")
+    .unwrap_or_default();
+
+    assert_eq!(alpha_nodes, "u1,u3");
+    assert_eq!(zeta_nodes, "u2,u3");
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn durable_sync_unseen_edge_type_policy_failure_is_atomic() {
+    build_p8_unseen_edge_type_sync_fixture();
+    let generation_before =
+        Spi::get_one::<i64>("SELECT manifest_generation FROM graph.projection_status()")
+            .expect("read P8 generation before policy failure failed");
+    let watermark_before =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read P8 watermark before policy failure failed");
+    let oversized = "x".repeat(
+        crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES + 1,
+    );
+    Spi::run(&format!(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ({}, 'u1', 'u3')",
+        super::sql_literal(&oversized)
+    ))
+    .expect("insert oversized P8 relationship type failed");
+
+    let statement = "SELECT * FROM graph.apply_sync()";
+    let state = sqlstate_for_error(statement);
+    assert_eq!(
+        state.as_deref(),
+        Some("54000"),
+        "unexpected apply_sync error: {:?}",
+        sql_error_message(statement)
+    );
+    assert!(
+        sql_error_detail(statement).is_some_and(|detail| detail.contains("PG004")),
+        "policy failure must retain the PG004 diagnostic"
+    );
+    let generation_after =
+        Spi::get_one::<i64>("SELECT manifest_generation FROM graph.projection_status()")
+            .expect("read P8 generation after policy failure failed");
+    let watermark_after =
+        Spi::get_one::<i64>("SELECT manifest_watermark FROM graph.projection_status()")
+            .expect("read P8 watermark after policy failure failed");
+    assert_eq!(generation_after, generation_before);
+    assert_eq!(watermark_after, watermark_before);
+    crate::ENGINE.with(|engine| {
+        assert!(engine.borrow().edge_type_id(&oversized).is_none());
+    });
+    assert_eq!(
+        Spi::get_one::<i64>(
+            "SELECT count(*) FROM graph.traverse(
+               'graph_test_users_pgtest'::regclass, 'u1', 1,
+               edge_types := ARRAY['base'], hydrate := false)"
+        )
+        .expect("query last-good P8 generation after policy failure failed"),
+        Some(2)
+    );
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn durable_sync_dictionary_corruption_fails_closed_without_advancing_generation() {
+    build_p8_unseen_edge_type_sync_fixture();
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('alpha', 'u1', 'u3');
+         SELECT * FROM graph.apply_sync()",
+    )
+    .expect("publish unseen relationship type failed");
+    let generation_before =
+        Spi::get_one::<i64>("SELECT manifest_generation FROM graph.projection_status()")
+            .expect("read generation before corruption failed");
+    let graph_path = crate::persistence::graph_file_path().expect("graph path resolves");
+    let root = crate::persistence::projection_manifest_root(&graph_path);
+    let manifest = crate::projection::manifest::ProjectionManifestStore::new(&root)
+        .load_latest_current()
+        .expect("manifest reads")
+        .expect("manifest exists");
+    let dictionary = manifest
+        .edge_type_dictionary
+        .expect("unseen label publishes a dictionary");
+    let path = root.join(dictionary.path);
+    let mut bytes = std::fs::read(&path).expect("dictionary reads");
+    *bytes.last_mut().expect("dictionary has payload") ^= 0xff;
+    std::fs::write(&path, bytes).expect("dictionary corruption writes");
+
+    Spi::run("SELECT graph.unload_graph('default')").expect("graph unloads");
+    let load = "SELECT * FROM graph.load_graph('default')";
+    assert_eq!(sqlstate_for_error(load).as_deref(), Some("XX001"));
+    assert!(
+        sql_error_detail(load).is_some_and(|detail| detail.contains("PG009")),
+        "corruption failure must retain the PG009 diagnostic"
+    );
+    let current = crate::projection::manifest::ProjectionManifestStore::new(&root)
+        .load_latest_current()
+        .expect("manifest remains readable")
+        .expect("manifest remains current");
+    assert_eq!(Some(current.generation_id as i64), generation_before);
+}
+
 #[pg_test]
 fn edge_type_policy_limits_have_stable_sqlstate_and_detail() {
     let error = crate::safety::GraphError::EdgeTypeLimit;

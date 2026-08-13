@@ -905,6 +905,27 @@ pub(crate) fn ingest_projection_internal(
     ingest_projection_until_internal(max_rows, max_bytes, None, None).map(|outcome| outcome.stats)
 }
 
+#[cfg(test)]
+fn encoded_edge_type_dictionary_bytes(labels: &[String]) -> Option<usize> {
+    let payload = labels
+        .iter()
+        .try_fold(0_usize, |total, label| total.checked_add(label.len()))?;
+    let offsets = labels.len().checked_add(1)?.checked_mul(8)?;
+    32_usize.checked_add(offsets)?.checked_add(payload)
+}
+
+fn artifact_quota_peak_bytes(
+    current_artifact_bytes: i64,
+    sync_byte_limit: usize,
+    current_type_dictionary_bytes: i64,
+    retained_obsolete_bytes: i64,
+) -> i64 {
+    current_artifact_bytes
+        .saturating_add(i64::try_from(sync_byte_limit).unwrap_or(i64::MAX))
+        .saturating_add(current_type_dictionary_bytes)
+        .saturating_add(retained_obsolete_bytes)
+}
+
 fn ingest_projection_until_internal(
     max_rows: Option<i64>,
     max_bytes: Option<i64>,
@@ -1033,17 +1054,29 @@ fn ingest_projection_until_internal(
         Some(target_sync_id) => target_sync_id,
         None => max_sync_log_id()?,
     };
-    let current_artifact_bytes = crate::projection::status::collect_projection_metadata_status(
+    let projection_status = crate::projection::status::collect_projection_metadata_status(
         &root,
         observed_max_sync_id,
         0,
         config::compaction_threshold(),
-    )
-    .map(|status| status.artifact_bytes)
-    .unwrap_or(0);
-    crate::catalog::enforce_artifact_storage_quota(
-        current_artifact_bytes.saturating_add(byte_limit.min(i64::MAX as usize) as i64),
     )?;
+    let current_artifact_bytes = projection_status.artifact_bytes;
+    let retained_obsolete_bytes = projection_status.obsolete_bytes;
+    let current_base_path =
+        current_base_artifact_path(&graph_path)?.ok_or(safety::GraphError::NotBuilt)?;
+    // Every batch must cover its current retained artifacts plus the bounded
+    // new segment payload. A second exact peak check below adds cumulative
+    // dictionary replacement bytes only when the batch actually has unseen
+    // labels.
+    let ordinary_projected_artifact_bytes = artifact_quota_peak_bytes(
+        current_artifact_bytes,
+        byte_limit,
+        0,
+        retained_obsolete_bytes,
+    );
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::catalog::enforce_artifact_storage_quota(ordinary_projected_artifact_bytes)
+    }))?;
     if entries.iter().any(|entry| entry.op == SyncOp::Truncate) {
         return Err(safety::GraphError::UnsupportedOperation {
             operation: "durable projection ingestion".to_string(),
@@ -1115,8 +1148,6 @@ fn ingest_projection_until_internal(
                 "materialized relationship identity store was not owned".to_string(),
             )
         })?;
-    let current_base_path =
-        current_base_artifact_path(&graph_path)?.ok_or(safety::GraphError::NotBuilt)?;
     let (base_artifact_path, base_checksum, base_version) =
         sync_ingest_base_artifact_metadata(&current_base_path)?;
     let ingester = ProjectionIngester::new(root, base_artifact_path, base_checksum, base_version);
@@ -1130,19 +1161,71 @@ fn ingest_projection_until_internal(
         previous.as_ref().map(|manifest| manifest.generation_id),
         crate::projection::ingest::candidate_generation_id(previous.as_ref(), &rows)?,
     );
-    let (result, validated_engine) = ingester.ingest_committed_rows_with_identities_governed(
-        &rows,
-        MutationBufferLimits::new(row_limit, byte_limit),
-        relationship_identities,
-        &governor,
-        |candidate| {
-            load_graph_file_with_projection_candidate_and_residency(
-                &current_base_path,
-                candidate,
-                candidate_residency,
+    let has_unseen_edge_type = rows
+        .iter()
+        .filter_map(|row| row.edge_type_label.as_deref())
+        .any(|label| planning_engine.edge_type_id(label).is_none());
+    if has_unseen_edge_type {
+        // Publishing an extended cumulative dictionary temporarily retains
+        // the current dictionary as well as the replacement. For the first
+        // external dictionary, use the authoritative base section length;
+        // this does not decode or allocate the potentially large registry.
+        let current_type_dictionary_bytes = previous
+            .as_ref()
+            .and_then(|manifest| manifest.edge_type_dictionary.as_ref())
+            .map(|reference| i64::try_from(reference.bytes).unwrap_or(i64::MAX))
+            .unwrap_or_else(|| {
+                crate::persistence::graph_artifact_external_edge_type_dictionary_bytes_for_path(
+                    &current_base_path,
+                )
+                .ok()
+                .and_then(|bytes| i64::try_from(bytes).ok())
+                .unwrap_or(i64::MAX)
+            });
+        let dictionary_peak = artifact_quota_peak_bytes(
+            current_artifact_bytes,
+            byte_limit,
+            current_type_dictionary_bytes,
+            retained_obsolete_bytes,
+        );
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::catalog::enforce_artifact_storage_quota(dictionary_peak)
+        }))?;
+    }
+    let (result, validated_engine) = if has_unseen_edge_type {
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            ingester.ingest_committed_rows_with_dictionaries_governed(
+                &rows,
+                MutationBufferLimits::new(row_limit, byte_limit),
+                relationship_identities,
+                planning_engine.edge_type_registry.as_slice(),
+                &governor,
+                |candidate| {
+                    load_graph_file_with_projection_candidate_and_residency(
+                        &current_base_path,
+                        candidate,
+                        candidate_residency,
+                    )
+                },
             )
-        },
-    )?;
+        }))?
+    } else {
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            ingester.ingest_committed_rows_with_identities_governed(
+                &rows,
+                MutationBufferLimits::new(row_limit, byte_limit),
+                relationship_identities,
+                &governor,
+                |candidate| {
+                    load_graph_file_with_projection_candidate_and_residency(
+                        &current_base_path,
+                        candidate,
+                        candidate_residency,
+                    )
+                },
+            )
+        }))?
+    };
     let stats = projection_ingest_stats(result, previous_watermark, &entries);
     if stats.sync_watermark > previous_watermark {
         let mut validated_engine = validated_engine.ok_or_else(|| {
@@ -2842,6 +2925,7 @@ fn append_projection_node_row(
         source: node_idx,
         target: node_idx,
         type_id: crate::types::EdgeTypeId::UNTYPED,
+        edge_type_label: None,
         schema_reversed: false,
         weight: None,
         relationship_identity: None,
@@ -2875,6 +2959,7 @@ fn append_projection_tenant_tombstone(
         source: node_idx,
         target: node_idx,
         type_id: crate::types::EdgeTypeId::UNTYPED,
+        edge_type_label: None,
         schema_reversed: false,
         weight: None,
         relationship_identity: None,
@@ -2921,15 +3006,10 @@ fn append_projection_edge_rows(
             .as_deref()
             .and_then(|column| row_u32_value(row, column))
             .transpose()?;
-        let type_id = nodes.engine.edge_type_id(&edge_label).ok_or_else(|| {
-            safety::GraphError::UnsupportedOperation {
-                operation: "durable projection ingestion".to_string(),
-                reason: format!(
-                    "sync row {} uses relationship label '{}' absent from the persisted graph; rebuild the graph",
-                    entry.id, edge_label
-                ),
-            }
-        })?;
+        let type_id = nodes
+            .engine
+            .edge_type_id(&edge_label)
+            .unwrap_or(crate::types::EdgeTypeId::UNTYPED);
         let source_key = row_pk_value(row, &edge.source_key_columns).ok_or_else(|| {
             safety::GraphError::Internal(format!(
                 "mapped relationship sync row {} is missing source key columns",
@@ -2980,6 +3060,7 @@ fn append_projection_edge_rows(
                 source,
                 target,
                 type_id,
+                edge_type_label: edge_label.clone(),
                 schema_reversed: false,
                 weight,
                 relationship_identity: Some(relationship_identity.clone()),
@@ -2994,6 +3075,7 @@ fn append_projection_edge_rows(
                     source: target,
                     target: source,
                     type_id,
+                    edge_type_label: edge_label.clone(),
                     schema_reversed: true,
                     weight,
                     relationship_identity: Some(relationship_identity),
@@ -3037,6 +3119,7 @@ struct ProjectionEdgeRow<'a> {
     source: u32,
     target: u32,
     type_id: crate::types::EdgeTypeId,
+    edge_type_label: String,
     schema_reversed: bool,
     weight: Option<u32>,
     relationship_identity: Option<crate::edge_store::RelationshipIdentity>,
@@ -3053,6 +3136,7 @@ fn push_projection_edge_row(row: ProjectionEdgeRow<'_>, out: &mut Vec<Projection
         source: row.source,
         target: row.target,
         type_id: row.type_id,
+        edge_type_label: Some(row.edge_type_label),
         schema_reversed: row.schema_reversed,
         weight: row.weight,
         relationship_identity: row.relationship_identity,
@@ -3195,6 +3279,7 @@ fn append_projection_filter_rows_for_pk(
             source: node_idx,
             target: node_idx,
             type_id: crate::types::EdgeTypeId::UNTYPED,
+            edge_type_label: None,
             schema_reversed: false,
             weight: None,
             relationship_identity: None,
@@ -4222,7 +4307,8 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::{
-        applicable_table_oids_from_catalog, compute_sync_log_retention_floor,
+        applicable_table_oids_from_catalog, artifact_quota_peak_bytes,
+        compute_sync_log_retention_floor, encoded_edge_type_dictionary_bytes,
         guard_standalone_endpoint_lifecycle, intern_sync_relationship_identity,
         is_sync_log_prune_recommended, parse_sync_op, parse_sync_properties,
         projected_vec_capacity, required_sync_i64, required_sync_string,
@@ -4238,6 +4324,23 @@ mod tests {
     use crate::safety::GraphError;
     use proptest::prelude::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn unseen_sync_dictionary_quota_covers_first_and_replacement_artifacts() {
+        let base_labels = vec![String::new(), "base".to_string(), "wide".repeat(64)];
+        let base_dictionary = encoded_edge_type_dictionary_bytes(&base_labels).unwrap();
+        assert!(base_dictionary > 32 + 8 * base_labels.len());
+        assert_eq!(
+            artifact_quota_peak_bytes(10_000, 4_096, base_dictionary as i64, 2_048),
+            10_000 + 4_096 + base_dictionary as i64 + 2_048
+        );
+
+        let retained_external_dictionary = 32_768_i64;
+        assert_eq!(
+            artifact_quota_peak_bytes(50_000, 8_192, retained_external_dictionary, 4_096),
+            50_000 + 8_192 + retained_external_dictionary + 4_096
+        );
+    }
 
     #[test]
     fn sync_ingester_carries_actual_base_artifact_version() {

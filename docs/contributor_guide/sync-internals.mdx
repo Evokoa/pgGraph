@@ -230,6 +230,16 @@ allocation, validation, publication, and backend reload. Aborted transaction
 rows are ignored, and the manifest watermark advances only after every
 referenced artifact succeeds.
 
+For a relationship mapping with a dynamic label column, the sync row carries
+the exact source spelling until durable planning. Under the same writer lock,
+the ingester collects previously unseen spellings, sorts and deduplicates them
+lexically, and appends them to the cumulative relationship-type dictionary.
+It resolves row IDs only from that candidate dictionary, then stages the
+dictionary and adaptive-width segments in the same generation. Candidate
+validation happens before the manifest compare-and-swap; failures leave the
+current dictionary, serving engine, and watermark unchanged. Transaction-local
+provisional labels are deliberately separate work in P8.3.
+
 Every generated source trigger takes a shared transaction-scoped advisory lock
 before it appends a sync row. Durable ingestion and persisted builds use the
 corresponding exclusive try-lock before reading source or sync state. Active

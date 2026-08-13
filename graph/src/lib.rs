@@ -640,6 +640,7 @@ pub mod bench_support {
                     target: (idx + 1) % 64,
                     type_id: crate::types::EdgeTypeId::from_v6_storage(1)
                         .expect("benchmark fixture type ID fits v6"),
+                    edge_type_label: None,
                     weight: Some(1),
                     relationship_identity: None,
                     table_oid: None,

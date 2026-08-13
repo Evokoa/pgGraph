@@ -38,6 +38,12 @@ impl EdgeTypeDictionary {
         self.registry.id(label)
     }
 
+    /// Append one previously unseen source spelling under the public policy
+    /// limits. Existing labels retain their current logical IDs.
+    pub(crate) fn intern(&mut self, label: &str) -> GraphResult<EdgeTypeId> {
+        self.registry.register(label)
+    }
+
     /// Consume the artifact wrapper and return its validated runtime registry.
     pub(crate) fn into_registry(self) -> EdgeTypeRegistry {
         self.registry
@@ -50,6 +56,25 @@ pub(crate) fn write_edge_type_dictionary_artifact(
     path: &Path,
     dictionary: &EdgeTypeDictionary,
     governor: &crate::resource::ResourceGovernor,
+) -> GraphResult<(String, u64)> {
+    write_edge_type_dictionary_artifact_inner(root, path, dictionary, Some(governor))
+}
+
+/// Write an artifact whose exact memory and disk bytes are already retained by
+/// the caller's larger atomic publication plan.
+pub(crate) fn write_edge_type_dictionary_artifact_precharged(
+    root: &Path,
+    path: &Path,
+    dictionary: &EdgeTypeDictionary,
+) -> GraphResult<(String, u64)> {
+    write_edge_type_dictionary_artifact_inner(root, path, dictionary, None)
+}
+
+fn write_edge_type_dictionary_artifact_inner(
+    root: &Path,
+    path: &Path,
+    dictionary: &EdgeTypeDictionary,
+    governor: Option<&crate::resource::ResourceGovernor>,
 ) -> GraphResult<(String, u64)> {
     fs::create_dir_all(root).map_err(|error| dictionary_io("create directory", root, error))?;
     let labels = dictionary.labels();
@@ -72,11 +97,19 @@ pub(crate) fn write_edge_type_dictionary_artifact(
     let resource_bytes = crate::resource::ByteCount::from_usize(total_len)
         .ok_or_else(|| dictionary_corrupt("relationship type artifact length exceeds u64"))?;
     let _memory = governor
-        .reserve_memory(crate::resource::ResourcePhase::Persistence, resource_bytes)
-        .map_err(crate::safety::resource_limit_error)?;
+        .map(|governor| {
+            governor
+                .reserve_memory(crate::resource::ResourcePhase::Persistence, resource_bytes)
+                .map_err(crate::safety::resource_limit_error)
+        })
+        .transpose()?;
     let _disk = governor
-        .reserve_disk(crate::resource::ResourcePhase::Persistence, resource_bytes)
-        .map_err(crate::safety::resource_limit_error)?;
+        .map(|governor| {
+            governor
+                .reserve_disk(crate::resource::ResourcePhase::Persistence, resource_bytes)
+                .map_err(crate::safety::resource_limit_error)
+        })
+        .transpose()?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(total_len).map_err(|error| {
         GraphError::Internal(format!(
@@ -111,6 +144,7 @@ pub(crate) fn write_edge_type_dictionary_artifact(
     bytes[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_le_bytes());
 
     let (temp_path, mut file) = create_temp_file(root, path)?;
+    let mut published = false;
     let result = (|| {
         file.write_all(&bytes)
             .map_err(|error| dictionary_io("write temp artifact", &temp_path, error))?;
@@ -118,6 +152,7 @@ pub(crate) fn write_edge_type_dictionary_artifact(
             .map_err(|error| dictionary_io("sync temp artifact", &temp_path, error))?;
         fs::hard_link(&temp_path, path)
             .map_err(|error| dictionary_io("publish artifact without overwrite", path, error))?;
+        published = true;
         fs::remove_file(&temp_path)
             .map_err(|error| dictionary_io("remove temp artifact", &temp_path, error))?;
         fs::File::open(root)
@@ -126,6 +161,10 @@ pub(crate) fn write_edge_type_dictionary_artifact(
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);
+        if published {
+            let _ = fs::remove_file(path);
+            let _ = fs::File::open(root).and_then(|directory| directory.sync_all());
+        }
     }
     result?;
     Ok((format!("crc32:{checksum:08x}"), bytes.len() as u64))

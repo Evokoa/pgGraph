@@ -147,7 +147,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P5 | In progress (P5.2 complete) | Targeted queries select lazy and global analytics select eager; relationship-identity completeness uses fixed projection summaries; retained 1M/10M evidence remains. |
 | P6 | Complete | The existing `EdgeTypeId` is the one production checked authority across logical consumers and v6 adapters; behavior and v6 bytes remain unchanged, and retained evidence selects adaptive 1/2/4-byte physical storage for P7. |
 | P7 | Complete | Runtime topology and rebuilt immutable v7 bases use checked logical IDs with adaptive 1/2/4-byte storage, explicit dictionary policies, v6 read compatibility, and atomic candidate validation. Incremental unseen labels remain in P8. |
-| P8 | In progress (P8.1 complete) | Adaptive v7 mutable segments and a checksummed manifest-owned cumulative dictionary now have v5/v6 compatibility, governed validation, recovery, compaction carry-forward, and GC coverage. Atomic unseen-label sync and transaction/savepoint dictionaries remain. |
+| P8 | In progress (P8.2 complete) | Adaptive v7 mutable segments and a checksummed manifest-owned cumulative dictionary have v5/v6 compatibility, governed validation, recovery, compaction carry-forward, and GC coverage. Durable sync now interns unseen labels deterministically and publishes dictionary plus segments atomically. Transaction/savepoint dictionaries remain in P8.3. |
 | P9 | Not started | SQL traversal, paths, and GQL preserve exact filtering beyond 254 labels; migration, diagnostics, docs, fuzz/property, and performance evidence are complete. |
 | P10 | Not started | The private batch contract validates and types bounded ordered input once, rejects duplicate identities, and proves no per-input DML loop. |
 | P11 | Not started | Set-based node `CREATE`/`MERGE` preserve RLS, constraints, triggers, partitions, ordinality, atomicity, savepoints, and idempotent replay. |
@@ -575,6 +575,15 @@ latency envelope.
 
 **Exit:** inserts and label changes can introduce unseen valid types without a
 full rebuild, survive reload/compaction, and roll back cleanly.
+
+P8.1 completed the adaptive mutable artifact and cumulative-dictionary format.
+P8.2 completed durable committed sync: exact source spellings cross the trigger
+log boundary, new labels are sorted and interned under the graph writer lock,
+and the dictionary, segments, identities, manifest, watermark, and serving
+engine advance as one validated generation. Policy, resource, validation,
+publication-conflict, and corruption failures retain the prior generation.
+Transaction-local provisional labels and savepoint behavior remain assigned to
+P8.3; the full public high-cardinality query matrix remains assigned to P9.
 
 ### P9: Complete open-type query and release behavior
 

@@ -59,8 +59,9 @@ index 1..1,000,000 = user relationship labels (subject to byte limits)
 raises `EdgeTypeLimit` at the configured count or byte policies. Runtime
 consumers use the checked logical `EdgeTypeId(u32)` authority. New v7 base CSR
 uses adaptive 1/2/4-byte IDs; the v6 reader and mutable segment codecs retain
-checked legacy readers. Mutable v7 segments are adaptive too; unseen-label sync
-publication remains disabled until the later P8 atomic-publication checkpoint.
+checked legacy readers. Mutable v7 segments are adaptive too. P8.2 durable sync
+sorts and interns unseen committed labels under the writer lock, then publishes
+the cumulative dictionary and matching segments in one generation.
 
 ## Traversal Dispatch
 

@@ -4,7 +4,7 @@
 //! rows and immutable L0 projection segments. SQL wiring is added separately;
 //! this module keeps the artifact publication rules pure and testable.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -12,13 +12,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::edge_store::RelationshipIdentity;
 use crate::filter_index::PersistedFilterValue;
+use crate::projection::edge_type_dictionary::{
+    read_manifest_edge_type_dictionary_artifact, write_edge_type_dictionary_artifact_precharged,
+    EdgeTypeDictionary,
+};
 use crate::projection::identity::{
     read_identity_artifact, read_manifest_identity_artifact, write_identity_artifact,
     RelationshipIdentityDictionary,
 };
 use crate::projection::manifest::{
-    ManifestFileRef, ManifestIdentityRef, ManifestSegmentRef, ProjectionManifest,
-    ProjectionManifestStore, MANIFEST_DECODED_MEMORY_BYTES_PER_JSON_BYTE,
+    ManifestEdgeTypeDictionaryRef, ManifestFileRef, ManifestIdentityRef, ManifestSegmentRef,
+    ProjectionManifest, ProjectionManifestStore, MANIFEST_DECODED_MEMORY_BYTES_PER_JSON_BYTE,
 };
 use crate::projection::normalize::{
     normalize_committed_mutations, CommittedMutation, MutationBufferLimits, MutationOperation,
@@ -46,6 +50,8 @@ pub(crate) struct ProjectionSyncRow {
     pub(crate) source: u32,
     pub(crate) target: u32,
     pub(crate) type_id: EdgeTypeId,
+    /// Authoritative source spelling used for durable dictionary interning.
+    pub(crate) edge_type_label: Option<String>,
     pub(crate) schema_reversed: bool,
     pub(crate) weight: Option<u32>,
     pub(crate) relationship_identity: Option<RelationshipIdentity>,
@@ -212,6 +218,7 @@ impl ProjectionIngester {
             limits,
             base_relationship_identities,
             None,
+            None,
             validate_candidate,
         )
     }
@@ -222,6 +229,10 @@ impl ProjectionIngester {
     /// identity dictionary, segments, serialization buffers, and validation
     /// reloads before any of those allocations are made. Artifact and staging
     /// bytes remain charged until manifest publication has completed.
+    #[allow(
+        dead_code,
+        reason = "retained compatibility seam for callers without authoritative label text"
+    )]
     pub(crate) fn ingest_committed_rows_with_identities_governed<F, T>(
         &self,
         rows: &[ProjectionSyncRow],
@@ -238,6 +249,31 @@ impl ProjectionIngester {
             rows,
             limits,
             base_relationship_identities,
+            None,
+            Some(governor),
+            validate_candidate,
+        )
+    }
+
+    /// Publish rows while deterministically extending the cumulative edge-type dictionary.
+    pub(crate) fn ingest_committed_rows_with_dictionaries_governed<F, T>(
+        &self,
+        rows: &[ProjectionSyncRow],
+        limits: MutationBufferLimits,
+        base_relationship_identities: &[Option<RelationshipIdentity>],
+        base_edge_type_labels: &[String],
+        governor: &ResourceGovernor,
+        validate_candidate: F,
+    ) -> GraphResult<(ProjectionIngestResult, Option<T>)>
+    where
+        F: FnOnce(&ProjectionManifest) -> GraphResult<T>,
+    {
+        let _guard = self.lock.try_enter()?;
+        self.ingest_committed_rows_locked(
+            rows,
+            limits,
+            base_relationship_identities,
+            Some(base_edge_type_labels),
             Some(governor),
             validate_candidate,
         )
@@ -248,6 +284,7 @@ impl ProjectionIngester {
         rows: &[ProjectionSyncRow],
         limits: MutationBufferLimits,
         base_relationship_identities: &[Option<RelationshipIdentity>],
+        base_edge_type_labels: Option<&[String]>,
         governor: Option<&ResourceGovernor>,
         validate_candidate: F,
     ) -> GraphResult<(ProjectionIngestResult, Option<T>)>
@@ -264,8 +301,12 @@ impl ProjectionIngester {
                         ByteCount::from_bytes(1024 * 1024),
                     )
                     .map_err(crate::safety::resource_limit_error)?;
-                let peak =
-                    ingestion_memory_upper_bound(&self.root, rows, base_relationship_identities)?;
+                let peak = ingestion_memory_upper_bound(
+                    &self.root,
+                    rows,
+                    base_relationship_identities,
+                    base_edge_type_labels.unwrap_or(&[]),
+                )?;
                 lease
                     .try_resize(peak)
                     .map_err(crate::safety::resource_limit_error)?;
@@ -295,6 +336,70 @@ impl ProjectionIngester {
         validate_ingestion_limits(committed_rows.iter().copied(), limits)?;
 
         let generation_id = next_generation_id(previous.as_ref(), &committed_rows)?;
+        let (resolved_rows, edge_type_dictionary, edge_type_dictionary_changed) = if let Some(
+            base_labels,
+        ) =
+            base_edge_type_labels
+        {
+            let labels = if let Some(reference) = previous
+                .as_ref()
+                .and_then(|manifest| manifest.edge_type_dictionary.as_ref())
+            {
+                read_manifest_edge_type_dictionary_artifact(
+                    &self.root.join(&reference.path),
+                    &reference.checksum,
+                    reference.bytes,
+                    reference.entry_count,
+                )?
+                .labels()
+                .to_vec()
+            } else {
+                base_labels.to_vec()
+            };
+            if !labels.starts_with(base_labels) {
+                return Err(GraphError::CorruptFile {
+                        reason: "cumulative relationship type dictionary does not preserve the base registry prefix"
+                            .to_string(),
+                    });
+            }
+            let existing = labels.iter().map(String::as_str).collect::<HashSet<_>>();
+            let unseen = committed_rows
+                .iter()
+                .filter_map(|row| row.edge_type_label.as_deref())
+                .filter(|label| !existing.contains(label))
+                .collect::<BTreeSet<_>>();
+            let changed = !unseen.is_empty();
+            let mut dictionary = EdgeTypeDictionary::try_from_labels(labels)?;
+            for label in unseen {
+                dictionary.intern(label)?;
+            }
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(committed_rows.len())
+                .map_err(|error| {
+                    GraphError::Internal(format!(
+                        "resolved projection sync row allocation failed: {error}"
+                    ))
+                })?;
+            for row in &committed_rows {
+                let mut resolved = (*row).clone();
+                if let Some(label) = resolved.edge_type_label.as_deref() {
+                    resolved.type_id = dictionary.id(label).ok_or_else(|| {
+                        GraphError::Internal(
+                            "interned relationship type label is missing".to_string(),
+                        )
+                    })?;
+                }
+                rows.push(resolved);
+            }
+            (rows, Some(dictionary), changed)
+        } else {
+            (
+                committed_rows.iter().map(|row| (*row).clone()).collect(),
+                None,
+                false,
+            )
+        };
+        let committed_rows = resolved_rows.iter().collect::<Vec<_>>();
         let mut identity_dictionary =
             self.load_identity_dictionary(previous.as_ref(), base_relationship_identities)?;
         let prior_identity_count = identity_dictionary.identities().len();
@@ -326,11 +431,19 @@ impl ProjectionIngester {
             segments.push(node_segment);
         }
         let identity_artifact_bytes = identity_artifact_encoded_len(&identity_dictionary)?;
+        let edge_type_artifact_bytes = edge_type_dictionary
+            .as_ref()
+            .filter(|_| edge_type_dictionary_changed)
+            .map(edge_type_dictionary_encoded_len)
+            .transpose()?
+            .unwrap_or(0);
         let initial_artifact_bytes = if identity_artifact_required {
             identity_artifact_bytes
         } else {
             0
-        };
+        }
+        .checked_add(edge_type_artifact_bytes)
+        .ok_or_else(ingest_resource_size_overflow)?;
         let artifact_bytes =
             segments
                 .iter()
@@ -363,6 +476,7 @@ impl ProjectionIngester {
                             &self.root,
                             &new_segment_refs,
                             Some(&reference),
+                            None,
                         )?;
                         return Err(GraphError::CorruptFile {
                             reason: "relationship identity artifact size changed after resource preflight"
@@ -381,6 +495,29 @@ impl ProjectionIngester {
                 .as_ref()
                 .and_then(|manifest| manifest.relationship_identities.clone())
         };
+        let edge_type_ref = if edge_type_dictionary_changed {
+            let dictionary = edge_type_dictionary.as_ref().ok_or_else(|| {
+                GraphError::Internal("changed relationship type dictionary is missing".to_string())
+            })?;
+            match self.write_edge_type_dictionary(generation_id, dictionary) {
+                Ok(reference) => Some(reference),
+                Err(err) => {
+                    cleanup_candidate_artifacts(
+                        &self.root,
+                        &new_segment_refs,
+                        identity_artifact_required
+                            .then_some(identity_ref.as_ref())
+                            .flatten(),
+                        None,
+                    )?;
+                    return Err(err);
+                }
+            }
+        } else {
+            previous
+                .as_ref()
+                .and_then(|manifest| manifest.edge_type_dictionary.clone())
+        };
 
         let mut manifest = ProjectionManifest::base_only(
             generation_id,
@@ -392,11 +529,11 @@ impl ProjectionIngester {
         );
         if let Some(previous) = previous.as_ref() {
             manifest.inherit_operation_timestamps(previous);
-            manifest.edge_type_dictionary = previous.edge_type_dictionary.clone();
             manifest.segments = previous.segments.clone();
             manifest.base_chunks = previous.base_chunks.clone();
             manifest.obsolete_files = previous.obsolete_files.clone();
         }
+        manifest.edge_type_dictionary = edge_type_ref.clone();
         manifest.relationship_identities = identity_ref.clone();
         if identity_artifact_required {
             if let Some(previous_identity) = previous
@@ -406,6 +543,17 @@ impl ProjectionIngester {
                 manifest.obsolete_files.push(ManifestFileRef {
                     path: previous_identity.path.clone(),
                     bytes: previous_identity.bytes,
+                });
+            }
+        }
+        if edge_type_dictionary_changed {
+            if let Some(previous_dictionary) = previous
+                .as_ref()
+                .and_then(|manifest| manifest.edge_type_dictionary.as_ref())
+            {
+                manifest.obsolete_files.push(ManifestFileRef {
+                    path: previous_dictionary.path.clone(),
+                    bytes: previous_dictionary.bytes,
                 });
             }
         }
@@ -420,6 +568,9 @@ impl ProjectionIngester {
                     &new_segment_refs,
                     identity_artifact_required
                         .then_some(identity_ref.as_ref())
+                        .flatten(),
+                    edge_type_dictionary_changed
+                        .then_some(edge_type_ref.as_ref())
                         .flatten(),
                 )?;
                 return Err(err);
@@ -445,6 +596,9 @@ impl ProjectionIngester {
                     &new_segment_refs,
                     identity_artifact_required
                         .then_some(identity_ref.as_ref())
+                        .flatten(),
+                    edge_type_dictionary_changed
+                        .then_some(edge_type_ref.as_ref())
                         .flatten(),
                 )?;
             }
@@ -552,6 +706,32 @@ impl ProjectionIngester {
             entry_count: u32::try_from(dictionary.identities().len()).map_err(|_| {
                 GraphError::Internal("relationship identity count exceeds u32".to_string())
             })?,
+            bytes,
+        })
+    }
+
+    fn write_edge_type_dictionary(
+        &self,
+        generation_id: u64,
+        dictionary: &EdgeTypeDictionary,
+    ) -> GraphResult<ManifestEdgeTypeDictionaryRef> {
+        let file_name = format!("relationship-types-{generation_id:020}.bin");
+        let path = self.root.join(&file_name);
+        let (checksum, bytes) =
+            write_edge_type_dictionary_artifact_precharged(&self.root, &path, dictionary)?;
+        let entry_count = u32::try_from(dictionary.labels().len())
+            .map_err(|_| GraphError::Internal("relationship type count exceeds u32".to_string()))?;
+        if let Err(err) =
+            read_manifest_edge_type_dictionary_artifact(&path, &checksum, bytes, entry_count)
+        {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::File::open(&self.root).and_then(|directory| directory.sync_all());
+            return Err(err);
+        }
+        Ok(ManifestEdgeTypeDictionaryRef {
+            path: file_name,
+            checksum,
+            entry_count,
             bytes,
         })
     }
@@ -901,6 +1081,9 @@ fn validate_ingestion_limits<'a>(
             })
             .and_then(|total| total.checked_add(row.primary_key.as_ref().map_or(0, String::len)))
             .and_then(|total| total.checked_add(row.tenant.as_ref().map_or(0, String::len)))
+            .and_then(|total| {
+                total.checked_add(row.edge_type_label.as_ref().map_or(0, String::len))
+            })
             .ok_or_else(|| {
                 GraphError::Internal("projection ingest byte estimate overflowed".into())
             })?;
@@ -933,6 +1116,7 @@ fn ingestion_memory_upper_bound(
     root: &Path,
     rows: &[ProjectionSyncRow],
     base_relationship_identities: &[Option<RelationshipIdentity>],
+    base_edge_type_labels: &[String],
 ) -> GraphResult<ByteCount> {
     let row_dynamic = rows.iter().try_fold(0usize, |total, row| {
         INGEST_ROW_BYTES
@@ -950,6 +1134,9 @@ fn ingestion_memory_upper_bound(
             })
             .and_then(|bytes| bytes.checked_add(row.primary_key.as_ref().map_or(0, String::len)))
             .and_then(|bytes| bytes.checked_add(row.tenant.as_ref().map_or(0, String::len)))
+            .and_then(|bytes| {
+                bytes.checked_add(row.edge_type_label.as_ref().map_or(0, String::len))
+            })
             .and_then(|bytes| total.checked_add(bytes))
             .ok_or_else(ingest_resource_size_overflow)
     })?;
@@ -987,6 +1174,23 @@ fn ingestion_memory_upper_bound(
         .and_then(|fixed| fixed.checked_add(identity_strings))
         .and_then(|bytes| bytes.checked_mul(INGEST_IDENTITY_PEAK_COPIES))
         .ok_or_else(ingest_resource_size_overflow)?;
+    let edge_type_label_bytes = base_edge_type_labels
+        .iter()
+        .map(String::len)
+        .chain(
+            rows.iter()
+                .filter_map(|row| row.edge_type_label.as_ref().map(String::len)),
+        )
+        .try_fold(0usize, |total, bytes| total.checked_add(bytes))
+        .ok_or_else(ingest_resource_size_overflow)?;
+    let edge_type_count = base_edge_type_labels
+        .len()
+        .checked_add(rows.len())
+        .ok_or_else(ingest_resource_size_overflow)?;
+    let edge_type_peak = edge_type_count
+        .checked_mul(1024)
+        .and_then(|fixed| edge_type_label_bytes.checked_mul(8)?.checked_add(fixed))
+        .ok_or_else(ingest_resource_size_overflow)?;
 
     let manifest_json_bytes = largest_manifest_file_bytes(root)?;
     let manifest_peak = manifest_json_bytes
@@ -995,9 +1199,27 @@ fn ingestion_memory_upper_bound(
     let total = INGEST_PREFLIGHT_FIXED_BYTES
         .checked_add(row_peak)
         .and_then(|bytes| bytes.checked_add(identity_peak))
+        .and_then(|bytes| bytes.checked_add(edge_type_peak))
         .and_then(|bytes| bytes.checked_add(manifest_peak))
         .ok_or_else(ingest_resource_size_overflow)?;
     ByteCount::from_usize(total).ok_or_else(ingest_resource_size_overflow)
+}
+
+fn edge_type_dictionary_encoded_len(dictionary: &EdgeTypeDictionary) -> GraphResult<usize> {
+    dictionary
+        .labels()
+        .iter()
+        .try_fold(0usize, |bytes, label| bytes.checked_add(label.len()))
+        .and_then(|payload| {
+            dictionary
+                .labels()
+                .len()
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(8))
+                .and_then(|offsets| 32usize.checked_add(offsets))
+                .and_then(|header| header.checked_add(payload))
+        })
+        .ok_or_else(ingest_resource_size_overflow)
 }
 
 fn largest_manifest_file_bytes(root: &Path) -> GraphResult<usize> {
@@ -1139,17 +1361,29 @@ fn cleanup_candidate_artifacts(
     root: &Path,
     segments: &[ManifestSegmentRef],
     identity: Option<&ManifestIdentityRef>,
+    edge_types: Option<&ManifestEdgeTypeDictionaryRef>,
 ) -> GraphResult<()> {
     cleanup_segment_refs(root, segments)?;
-    let Some(identity) = identity else {
-        return Ok(());
-    };
-    match std::fs::remove_file(root.join(&identity.path)) {
-        Ok(()) => sync_directory(root),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(GraphError::Internal(format!(
-            "remove unpublished projection identity dictionary: {err}"
-        ))),
+    let mut removed = false;
+    for (reference, kind) in [
+        (identity.map(|value| value.path.as_str()), "identity"),
+        (edge_types.map(|value| value.path.as_str()), "edge type"),
+    ] {
+        let Some(reference) = reference else { continue };
+        match std::fs::remove_file(root.join(reference)) {
+            Ok(()) => removed = true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(GraphError::Internal(format!(
+                    "remove unpublished projection {kind} dictionary: {err}"
+                )))
+            }
+        }
+    }
+    if removed {
+        sync_directory(root)
+    } else {
+        Ok(())
     }
 }
 
@@ -1337,6 +1571,7 @@ mod tests {
                 source: 2,
                 target: 2,
                 type_id: EdgeTypeId::from_v6_storage(0).expect("fixture type ID is valid v6"),
+                edge_type_label: None,
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
@@ -1360,6 +1595,7 @@ mod tests {
                 source: 2,
                 target: 2,
                 type_id: EdgeTypeId::from_v6_storage(0).expect("fixture type ID is valid v6"),
+                edge_type_label: None,
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
@@ -1383,6 +1619,7 @@ mod tests {
                 source: 4,
                 target: 4,
                 type_id: EdgeTypeId::from_v6_storage(0).expect("fixture type ID is valid v6"),
+                edge_type_label: None,
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
@@ -1406,6 +1643,7 @@ mod tests {
                 source: 4,
                 target: 4,
                 type_id: EdgeTypeId::from_v6_storage(0).expect("fixture type ID is valid v6"),
+                edge_type_label: None,
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(101),
@@ -1802,6 +2040,174 @@ mod tests {
         assert_eq!(current.sync_watermark, first.sync_watermark);
     }
 
+    fn generous_governor() -> ResourceGovernor {
+        ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(ByteCount::from_mib(64).expect("budget fits")),
+        ))
+    }
+
+    fn labeled_edge_row(sync_id: u64, label: &str) -> ProjectionSyncRow {
+        let mut row = edge_row(sync_id, 0, 1, None, MutationOperation::InsertEdge);
+        row.edge_type_label = Some(label.to_string());
+        row
+    }
+
+    fn publish_labeled_rows(
+        publisher: &ProjectionIngester,
+        rows: &[ProjectionSyncRow],
+    ) -> GraphResult<ProjectionIngestResult> {
+        publisher
+            .ingest_committed_rows_with_dictionaries_governed(
+                rows,
+                MutationBufferLimits::new(16, 1_000_000),
+                &[None],
+                &[String::new(), "base".to_string()],
+                &generous_governor(),
+                |_| Ok(()),
+            )
+            .map(|(result, _)| result)
+    }
+
+    #[test]
+    fn unseen_sync_labels_are_interned_in_deterministic_order_under_writer_lock() {
+        let dir = seeded_artifacts("unseen_sync_labels_deterministic");
+        let result = publish_labeled_rows(
+            &ingester(&dir),
+            &[labeled_edge_row(1, "zeta"), labeled_edge_row(2, "alpha")],
+        )
+        .expect("unseen labels publish");
+        let reference = result
+            .manifest
+            .expect("manifest publishes")
+            .edge_type_dictionary
+            .expect("dictionary publishes");
+        let dictionary = read_manifest_edge_type_dictionary_artifact(
+            &dir.path().join(reference.path),
+            &reference.checksum,
+            reference.bytes,
+            reference.entry_count,
+        )
+        .expect("dictionary reloads");
+        assert_eq!(dictionary.labels(), ["", "base", "alpha", "zeta"]);
+    }
+
+    #[test]
+    fn duplicate_unseen_sync_labels_reuse_one_dictionary_slot() {
+        let dir = seeded_artifacts("duplicate_unseen_sync_labels");
+        let result = publish_labeled_rows(
+            &ingester(&dir),
+            &[labeled_edge_row(1, "alpha"), labeled_edge_row(2, "alpha")],
+        )
+        .expect("duplicate label publishes");
+        assert_eq!(
+            result
+                .manifest
+                .expect("manifest publishes")
+                .edge_type_dictionary
+                .expect("dictionary publishes")
+                .entry_count,
+            3
+        );
+    }
+
+    #[test]
+    fn unseen_sync_labels_publish_dictionary_and_segments_in_one_generation() {
+        let dir = seeded_artifacts("unseen_sync_one_generation");
+        let result = publish_labeled_rows(&ingester(&dir), &[labeled_edge_row(1, "alpha")])
+            .expect("unseen label publishes");
+        let manifest = result.manifest.expect("manifest publishes");
+        assert!(manifest.edge_type_dictionary.is_some());
+        assert_eq!(manifest.segments.len(), 1);
+        assert_eq!(manifest.generation_id, 2);
+        assert_eq!(
+            load_segment(&dir, &manifest.segments[0].path).edge_inserts[0]
+                .type_id
+                .get(),
+            2
+        );
+    }
+
+    #[test]
+    fn unseen_sync_label_failure_preserves_manifest_dictionary_engine_and_watermark() {
+        let dir = seeded_artifacts("unseen_sync_validation_failure");
+        let publisher = ingester(&dir);
+        let err = publisher
+            .ingest_committed_rows_with_dictionaries_governed(
+                &[labeled_edge_row(1, "alpha")],
+                MutationBufferLimits::new(16, 1_000_000),
+                &[None],
+                &[String::new(), "base".to_string()],
+                &generous_governor(),
+                |_| {
+                    Err::<(), _>(GraphError::CorruptFile {
+                        reason: "injected".into(),
+                    })
+                },
+            )
+            .expect_err("candidate validation fails");
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+        let current = publisher.store.load_latest_current().unwrap().unwrap();
+        assert_eq!((current.generation_id, current.sync_watermark), (1, 0));
+        assert!(current.edge_type_dictionary.is_none());
+    }
+
+    #[test]
+    fn unseen_sync_manifest_conflict_cleans_dictionary_and_segment_candidates() {
+        let dir = seeded_artifacts("unseen_sync_manifest_conflict");
+        let publisher = ingester(&dir);
+        let store = ProjectionManifestStore::new(dir.path());
+        let err = publisher
+            .ingest_committed_rows_with_dictionaries_governed(
+                &[labeled_edge_row(1, "alpha")],
+                MutationBufferLimits::new(16, 1_000_000),
+                &[None],
+                &[String::new(), "base".to_string()],
+                &generous_governor(),
+                |_| {
+                    let winner =
+                        ProjectionManifest::base_only(3, "base.pggraph", "crc32:00000000", 1, 0, 3);
+                    store.publish_if_current(&winner, Some(1))?;
+                    Ok(())
+                },
+            )
+            .expect_err("manifest CAS loses");
+        assert!(matches!(err, GraphError::BuildLocked));
+        assert!(!dir
+            .path()
+            .join("relationship-types-00000000000000000002.bin")
+            .exists());
+        assert!(!dir.segment_path(2, 0).exists());
+    }
+
+    #[test]
+    fn sync_dictionary_growth_is_governed_before_label_or_segment_allocation() {
+        let dir = seeded_artifacts("sync_dictionary_growth_governed");
+        let publisher = ingester(&dir);
+        let governor = ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(ByteCount::from_bytes(1)),
+        ));
+        let err = publisher
+            .ingest_committed_rows_with_dictionaries_governed(
+                &[labeled_edge_row(1, "alpha")],
+                MutationBufferLimits::new(16, 1_000_000),
+                &[None],
+                &[String::new(), "base".to_string()],
+                &governor,
+                |_| Ok(()),
+            )
+            .expect_err("dictionary growth exceeds governor");
+        assert!(matches!(err, GraphError::ResourceLimit { .. }));
+        assert_eq!(
+            publisher
+                .store
+                .load_latest_current()
+                .unwrap()
+                .unwrap()
+                .generation_id,
+            1
+        );
+    }
+
     #[test]
     fn projection_ingest_aborted_gql_write_is_not_published() {
         let dir = seeded_artifacts("projection_ingest_aborted");
@@ -2006,6 +2412,7 @@ mod tests {
             source,
             target,
             type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
+            edge_type_label: None,
             weight,
             relationship_identity: None,
             table_oid: None,

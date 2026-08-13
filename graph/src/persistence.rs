@@ -2691,6 +2691,41 @@ pub(crate) fn graph_artifact_metadata_for_path(path: &Path) -> GraphResult<Graph
     graph_artifact_metadata_from_file(&mut file, file_len)
 }
 
+/// Return the exact bytes needed to externalize the base artifact's encoded
+/// relationship-type registry, without scanning or decoding the graph body.
+/// The caller must hold the graph replacement lock so the validated published
+/// artifact cannot change between this header read and candidate planning.
+pub(crate) fn graph_artifact_external_edge_type_dictionary_bytes_for_path(
+    path: &Path,
+) -> GraphResult<u64> {
+    let mut file = fs::File::open(path)
+        .map_err(|err| GraphError::Internal(format!("open graph registry header: {err}")))?;
+    let mut header = [0_u8; HEADER_SIZE];
+    file.read_exact(&mut header)
+        .map_err(|err| GraphError::Internal(format!("read graph registry header: {err}")))?;
+    if &header[..4] != MAGIC || read_u32_at(&header, 8) as usize != HEADER_SIZE {
+        return Err(GraphError::CorruptFile {
+            reason: "invalid graph artifact registry header".into(),
+        });
+    }
+    let stored_header_crc = read_u32_at(&header, HEADER_CRC_OFFSET);
+    header[HEADER_CRC_OFFSET..HEADER_CRC_OFFSET + 4].fill(0);
+    if stored_header_crc != crc32fast::hash(&header) {
+        return Err(GraphError::CorruptFile {
+            reason: "header CRC32 mismatch while sizing edge type dictionary".into(),
+        });
+    }
+    let descriptor = SECTION_DESCRIPTORS_OFFSET + 20 * SECTION_DESCRIPTOR_SIZE;
+    let registry_bytes = read_u64_at(&header, descriptor + 8);
+    // The base registry encodes a 4-byte count plus the same u64 offsets and
+    // payload. The external artifact adds its 32-byte header instead.
+    registry_bytes
+        .checked_add((32 - 4) as u64)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "external edge type dictionary length overflows".into(),
+        })
+}
+
 fn graph_artifact_metadata_from_file(
     file: &mut fs::File,
     file_len: u64,

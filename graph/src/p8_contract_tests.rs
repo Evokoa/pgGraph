@@ -94,30 +94,31 @@ fn p8_recovery_and_gc_validate_and_retain_the_dictionary_reference() {
 }
 
 #[test]
-#[ignore = "P8.2 activates sync publication after the P8.1 persistence foundation"]
 fn p8_unseen_sync_labels_publish_dictionary_and_segments_atomically() {
     let sync = crate_source("src/sql_sync.rs");
+    let ingest = crate_source("src/projection/ingest.rs");
     for seam in [
         "unseen_sync_labels_are_interned_in_deterministic_order_under_writer_lock",
+        "duplicate_unseen_sync_labels_reuse_one_dictionary_slot",
         "unseen_sync_labels_publish_dictionary_and_segments_in_one_generation",
         "unseen_sync_label_failure_preserves_manifest_dictionary_engine_and_watermark",
+        "unseen_sync_manifest_conflict_cleans_dictionary_and_segment_candidates",
         "sync_dictionary_growth_is_governed_before_label_or_segment_allocation",
     ] {
         assert!(
-            sync.contains(seam),
+            sync.contains(seam) || ingest.contains(seam),
             "P8.2 unseen-label publication contract is missing `{seam}`"
         );
     }
 }
 
 #[test]
-#[ignore = "P8.2 activates the public durable-sync boundary after atomic publication exists"]
 fn p8_unseen_sync_labels_survive_reload_and_fail_closed_on_corruption() {
     let pg_tests = crate_source("src/pg_tests/maintenance_admin.rs");
     for gate in [
         "durable_sync_unseen_edge_type_survives_reload_and_filters_exactly",
         "durable_sync_unseen_edge_type_policy_failure_is_atomic",
-        "durable_sync_dictionary_corruption_preserves_last_good_generation",
+        "durable_sync_dictionary_corruption_fails_closed_without_advancing_generation",
     ] {
         assert!(
             pg_tests.contains(gate),

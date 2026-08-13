@@ -165,6 +165,7 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
         source: 0,
         target: 1,
         type_id: crate::types::EdgeTypeId::test_v6(2),
+        edge_type_label: None,
         weight: None,
         relationship_identity: None,
         table_oid: None,
