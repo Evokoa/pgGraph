@@ -21,7 +21,7 @@ use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::projection::neighbors::{
-    NeighborSource, OverlayDeletes, OverlayInserts, OverlayNeighbors,
+    NeighborSource, OverlayDeletes, OverlayInserts, OverlayNeighbors, OwnedNeighborCursor,
 };
 use crate::safety::{GraphError, GraphResult};
 use crate::types::{FilterOp, PathCoordinate, TableOid, TraversalResult};
@@ -158,7 +158,9 @@ pub(crate) struct ResumableBfsMachine {
     pub(crate) parent: TraversalParentMap,
     pub(crate) parent_edge_type: TraversalParentEdgeTypes,
     pub(crate) outputs: Vec<u32>,
-    pub(crate) adjacency_cursor: usize,
+    pub(crate) adjacency_cursor: OwnedNeighborCursor,
+    pending_adjacency: VecDeque<crate::projection::neighbors::Neighbor>,
+    pending_adjacency_exhausts_node: bool,
     pub(crate) state: ResumableBfsState,
     nodes_visited: u32,
     active_node: Option<u32>,
@@ -167,6 +169,9 @@ pub(crate) struct ResumableBfsMachine {
     truncated: bool,
     projection_epoch: Option<BfsProjectionEpoch>,
 }
+
+/// Maximum raw adjacency page retained by a resumable BFS machine.
+pub(crate) const RESUMABLE_BFS_PAGE_CAPACITY: usize = 64;
 
 impl ResumableBfsMachine {
     pub(crate) fn try_new(node_count: usize, config: &BfsConfig) -> GraphResult<Self> {
@@ -203,6 +208,10 @@ impl ResumableBfsMachine {
         if seed_valid {
             outputs.push(config.seed_node);
         }
+        let mut pending_adjacency = VecDeque::new();
+        pending_adjacency
+            .try_reserve(RESUMABLE_BFS_PAGE_CAPACITY)
+            .map_err(traversal_allocation_error)?;
         Ok(Self {
             frontier,
             visited,
@@ -210,7 +219,9 @@ impl ResumableBfsMachine {
             parent,
             parent_edge_type,
             outputs,
-            adjacency_cursor: 0,
+            adjacency_cursor: OwnedNeighborCursor::default(),
+            pending_adjacency,
+            pending_adjacency_exhausts_node: false,
             state: if complete_without_expansion {
                 ResumableBfsState::Complete
             } else {
@@ -414,7 +425,10 @@ pub(crate) fn materialize_bfs_candidate_batch(
             "BFS candidate materialization requires NeedCandidates state".into(),
         ));
     }
-    if limits.max_candidates == 0 || limits.max_key_bytes == 0 {
+    if limits.max_candidates == 0
+        || limits.max_candidates > RESUMABLE_BFS_PAGE_CAPACITY
+        || limits.max_key_bytes == 0
+    {
         return Err(GraphError::InvalidFilter {
             reason: "BFS visibility candidate limits must be positive".into(),
         });
@@ -422,6 +436,13 @@ pub(crate) fn materialize_bfs_candidate_batch(
     let allocation_bytes = limits
         .max_candidates
         .checked_mul(std::mem::size_of::<BfsAdjacencyCandidate>())
+        .and_then(|bytes| {
+            bytes.checked_add(
+                limits
+                    .max_candidates
+                    .checked_mul(std::mem::size_of::<crate::projection::neighbors::Neighbor>())?,
+            )
+        })
         .and_then(|bytes| bytes.checked_add(limits.max_key_bytes))
         .ok_or_else(|| GraphError::InvalidFilter {
             reason: "BFS visibility candidate allocation estimate overflow".into(),
@@ -440,7 +461,9 @@ pub(crate) fn materialize_bfs_candidate_batch(
             current
         } else if let Some(current) = machine.frontier.pop_front() {
             machine.active_node = Some(current);
-            machine.adjacency_cursor = 0;
+            machine.adjacency_cursor = OwnedNeighborCursor::default();
+            machine.pending_adjacency.clear();
+            machine.pending_adjacency_exhausts_node = false;
             current
         } else {
             machine.state = ResumableBfsState::Complete;
@@ -449,7 +472,9 @@ pub(crate) fn materialize_bfs_candidate_batch(
         let current_depth = machine.depth.get(current).unwrap_or(-1);
         if current_depth >= config.max_depth {
             machine.active_node = None;
-            machine.adjacency_cursor = 0;
+            machine.adjacency_cursor = OwnedNeighborCursor::default();
+            machine.pending_adjacency.clear();
+            machine.pending_adjacency_exhausts_node = false;
             continue;
         }
 
@@ -458,35 +483,38 @@ pub(crate) fn materialize_bfs_candidate_batch(
             .try_reserve(limits.max_candidates)
             .map_err(traversal_allocation_error)?;
         let mut key_bytes = 0usize;
-        let mut adjacency = Vec::new();
-        adjacency
-            .try_reserve(limits.max_candidates)
-            .map_err(traversal_allocation_error)?;
-        let exhausted_current = neighbors.fill_neighbors(
-            current,
-            machine.adjacency_cursor,
-            limits.max_candidates,
-            &mut adjacency,
-        );
+        let exhausted_current = if machine.pending_adjacency.is_empty() {
+            let mut adjacency = Vec::new();
+            adjacency
+                .try_reserve(limits.max_candidates)
+                .map_err(traversal_allocation_error)?;
+            let exhausted = neighbors.fill_neighbors(
+                current,
+                &mut machine.adjacency_cursor,
+                limits.max_candidates,
+                &mut adjacency,
+            );
+            machine
+                .pending_adjacency
+                .try_reserve(adjacency.len())
+                .map_err(traversal_allocation_error)?;
+            machine.pending_adjacency.extend(adjacency);
+            machine.pending_adjacency_exhausts_node = exhausted;
+            exhausted
+        } else {
+            machine.pending_adjacency_exhausts_node
+        };
         let mut yielded_for_key_bytes = false;
-        for neighbor in adjacency {
+        while let Some(neighbor) = machine.pending_adjacency.pop_front() {
             match &config.edge_type_filter {
                 crate::types::EdgeTypeFilter::NoneMatched => {
                     consume_expansion_without_interrupt(governor)?;
-                    machine.adjacency_cursor =
-                        machine.adjacency_cursor.checked_add(1).ok_or_else(|| {
-                            GraphError::Internal("BFS adjacency cursor overflow".into())
-                        })?;
                     continue;
                 }
                 crate::types::EdgeTypeFilter::Only(allowed)
                     if !allowed.contains(&neighbor.type_id) =>
                 {
                     consume_expansion_without_interrupt(governor)?;
-                    machine.adjacency_cursor =
-                        machine.adjacency_cursor.checked_add(1).ok_or_else(|| {
-                            GraphError::Internal("BFS adjacency cursor overflow".into())
-                        })?;
                     continue;
                 }
                 crate::types::EdgeTypeFilter::All | crate::types::EdgeTypeFilter::Only(_) => {}
@@ -529,14 +557,11 @@ pub(crate) fn materialize_bfs_candidate_batch(
                 });
             }
             if next_key_bytes > limits.max_key_bytes {
+                machine.pending_adjacency.push_front(neighbor);
                 yielded_for_key_bytes = true;
                 break;
             }
             consume_expansion_without_interrupt(governor)?;
-            machine.adjacency_cursor = machine
-                .adjacency_cursor
-                .checked_add(1)
-                .ok_or_else(|| GraphError::Internal("BFS adjacency cursor overflow".into()))?;
             key_bytes = next_key_bytes;
             let relationship_identity = neighbor.relationship_id.and_then(|relationship_id| {
                 relationship_identity(relationships, relationship_id, |mapping_id, source_key| {
@@ -563,7 +588,9 @@ pub(crate) fn materialize_bfs_candidate_batch(
         let exhausted_current = exhausted_current && !yielded_for_key_bytes;
         if exhausted_current {
             machine.active_node = None;
-            machine.adjacency_cursor = 0;
+            machine.adjacency_cursor = OwnedNeighborCursor::default();
+            machine.pending_adjacency.clear();
+            machine.pending_adjacency_exhausts_node = false;
         }
         if candidates.is_empty() {
             // A leaf or an all-filtered raw page has no policy work. Advance
@@ -844,6 +871,12 @@ pub(crate) fn estimated_workspace_bytes(
                 usize::try_from(max_frontier)
                     .ok()?
                     .checked_mul(std::mem::size_of::<u32>())?,
+            )
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                RESUMABLE_BFS_PAGE_CAPACITY
+                    .checked_mul(std::mem::size_of::<crate::projection::neighbors::Neighbor>())?,
             )
         })
         .and_then(crate::resource::ByteCount::from_usize)

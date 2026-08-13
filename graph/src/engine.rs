@@ -283,13 +283,19 @@ impl Engine {
         }
         // Segment-backed adjacency still uses its eager k-way materialization
         // until P4 supplies an owned cursor for that representation.
-        if self.layered_neighbors()?.is_some() || !self.edge_buffer.is_empty() {
+        if self.layered_neighbors()?.is_some() {
             return Ok(None);
         }
         // Transaction-local topology requires a combined base+transaction
         // identity cursor. P4 owns that representation; retain the proven
         // eager oracle until it is available.
-        if tx_delta::stats().dirty {
+        let tx_stats = tx_delta::stats();
+        if tx_stats.dirty
+            && (tx_stats.added_nodes > 0
+                || tx_stats.deleted_nodes > 0
+                || tx_stats.filter_updates > 0
+                || !tx_delta::edge_delta_dirty())
+        {
             return Ok(None);
         }
         let seed_node =
@@ -1595,6 +1601,10 @@ impl Engine {
                 relationship_id,
             ));
         }
+        for values in insert_map.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
         let mut delete_map: OverlayDeletes = HashMap::new();
         for (source, target, type_id, schema_reversed, relationship_id) in deletes {
             delete_map.entry(source).or_default().insert((
@@ -2693,6 +2703,191 @@ mod tests {
             .install_projection_manifest(&manifest, root)
             .expect("projection manifest installs");
         dir
+    }
+
+    fn run_resumable_bfs_unrestricted(
+        engine: &Engine,
+        seed_id: &str,
+        direction: TraversalDirection,
+    ) -> TraverseOutcome {
+        let governor = engine
+            .query_resource_governor()
+            .expect("test governor constructs");
+        let (config, mut machine) = engine
+            .prepare_resumable_bfs(
+                100,
+                seed_id,
+                2,
+                100,
+                100,
+                None,
+                Vec::new(),
+                None,
+                direction,
+                &governor,
+            )
+            .expect("resumable BFS prepares")
+            .expect("P4 mutable topology must retain the targeted lazy BFS route");
+
+        loop {
+            match engine
+                .materialize_resumable_bfs_batch(
+                    &mut machine,
+                    &config,
+                    direction,
+                    crate::bfs::BfsCandidateLimits {
+                        max_candidates: 2,
+                        max_key_bytes: 64,
+                    },
+                    &governor,
+                )
+                .expect("candidate page materializes")
+            {
+                crate::bfs::BfsMaterialization::Batch(batch) => {
+                    let verdicts = batch
+                        .candidates
+                        .iter()
+                        .map(|candidate| crate::bfs::BfsAdjacencyVerdict {
+                            sequence: candidate.sequence,
+                            node_visible: true,
+                            relationship_visible: true,
+                        })
+                        .collect::<Vec<_>>();
+                    engine
+                        .admit_resumable_bfs_batch(&mut machine, &batch, &verdicts, &config)
+                        .expect("visible page admits");
+                }
+                crate::bfs::BfsMaterialization::Progress => {}
+                crate::bfs::BfsMaterialization::Complete => break,
+            }
+        }
+
+        engine
+            .finish_resumable_bfs(machine)
+            .expect("resumable BFS finishes")
+    }
+
+    fn assert_resumable_bfs_matches_eager(
+        engine: &Engine,
+        seed_id: &str,
+        direction: TraversalDirection,
+    ) {
+        let eager = engine
+            .traverse(
+                100,
+                seed_id,
+                2,
+                100,
+                100,
+                None,
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                direction,
+            )
+            .expect("eager traversal succeeds");
+        let resumable = run_resumable_bfs_unrestricted(engine, seed_id, direction);
+
+        assert_eq!(format!("{:?}", resumable.rows), format!("{:?}", eager.rows));
+        assert_eq!(resumable.truncated, eager.truncated);
+    }
+
+    #[test]
+    fn resumable_bfs_matches_eager_with_committed_overlay() {
+        let mut engine = build_test_engine();
+        engine.edge_buffer.push(EdgeMutation {
+            source: 4,
+            target: 3,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+            kind: MutationKind::Insert,
+        });
+
+        assert_resumable_bfs_matches_eager(&engine, "E", TraversalDirection::Out);
+        assert_resumable_bfs_matches_eager(&engine, "D", TraversalDirection::In);
+    }
+
+    #[test]
+    #[ignore = "P4 layered-segment cursor checkpoint"]
+    fn resumable_bfs_matches_eager_with_durable_segments() {
+        let mut engine = build_test_engine();
+        let _dir =
+            install_edge_segment_manifest(&mut engine, "p4_resumable_bfs_durable", |segment| {
+                segment
+                    .edge_inserts
+                    .push(crate::projection::segment::SegmentEdge {
+                        source: 4,
+                        target: 3,
+                        type_id: 1,
+                        schema_reversed: false,
+                        relationship_id: None,
+                    });
+            });
+
+        assert_resumable_bfs_matches_eager(&engine, "E", TraversalDirection::Out);
+        assert_resumable_bfs_matches_eager(&engine, "D", TraversalDirection::In);
+    }
+
+    #[test]
+    fn resumable_bfs_matches_eager_with_transaction_delta() {
+        tx_delta::clear_for_test();
+        let engine = build_test_engine();
+        tx_delta::record_added_edge(
+            4,
+            tx_delta::DeltaEdge {
+                target: 3,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        )
+        .expect("record transaction-local edge");
+
+        assert_resumable_bfs_matches_eager(&engine, "E", TraversalDirection::Out);
+        assert_resumable_bfs_matches_eager(&engine, "D", TraversalDirection::In);
+        tx_delta::clear_for_test();
+    }
+
+    #[test]
+    fn resumable_bfs_falls_back_for_mixed_edge_and_filter_transaction_delta() {
+        tx_delta::clear_for_test();
+        let engine = build_test_engine();
+        tx_delta::record_added_edge(
+            4,
+            tx_delta::DeltaEdge {
+                target: 3,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        )
+        .expect("record transaction-local edge");
+        tx_delta::record_filter_value_update(0, 4, None)
+            .expect("record transaction-local filter update");
+        let governor = engine
+            .query_resource_governor()
+            .expect("test governor constructs");
+
+        let prepared = engine
+            .prepare_resumable_bfs(
+                100,
+                "E",
+                2,
+                100,
+                100,
+                None,
+                Vec::new(),
+                None,
+                TraversalDirection::Out,
+                &governor,
+            )
+            .expect("eligibility check succeeds");
+
+        assert!(prepared.is_none());
+        tx_delta::clear_for_test();
     }
 
     fn write_projection_manifest(

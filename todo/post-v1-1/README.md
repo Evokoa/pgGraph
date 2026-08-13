@@ -143,7 +143,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P1 | Complete | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
 | P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
-| P4 | Not started | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
+| P4 | In progress (P4.1 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
 | P5 | Not started | Targeted queries select lazy and global analytics select eager; redundant read checks are removed only if proven; 1M/10M evidence meets the accepted latency and memory budgets. |
 | P6 | Not started | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
@@ -340,6 +340,39 @@ exactly while selective-table benchmarks show bounded source work.
   query completed in 3.25 seconds with two returned source rows.
 
 ### P4: Complete targeted lazy topology coverage
+
+P4 is implemented as reviewed checkpoints because every later algorithm
+depends on the same borrow-free representation cursor:
+
+1. **P4.1 — owned classic adjacency cursors:** land replay-free clean-CSR and
+   classic transaction edge-overlay cursors; both directions page without
+   whole-degree materialization.
+2. **P4.2 — durable cursor, mutable BFS, and workflows:** add the k-way
+   committed durable-segment cursor, generalize candidate identity
+   materialization, remove mutable-topology BFS fallbacks, and reuse one
+   statement resolver across targeted BFS workflows.
+3. **P4.3 — DFS:** own stack, reversed cursors, visited timing, parents, caps,
+   and outputs across policy probes.
+4. **P4.4 — unweighted paths:** migrate single-direction and bidirectional BFS
+   separately; bidirectional traversal completes the chosen level before
+   accepting its meeting node.
+5. **P4.5 — weighted paths:** page one popped Dijkstra node at a time and
+   preserve heap, tie, and target-pop semantics.
+6. **P4.6 — targeted GQL/Cypher:** migrate only identity-bounded projection
+   expansions and write MATCH plans; whole-source scans stay eager.
+7. **P4.7 — evidence and closure:** exact eager/lazy differential coverage,
+   retained large-table evidence, docs, and the final Phase 4 review.
+
+P4.1 completed on 2026-08-13. The owned cursor pages clean CSR and classic
+edge overlays by examined work, including tombstones and duplicate checks, so
+every page releases the engine borrow for cancellation. Machine-retained page
+capacity is reserved up front, overlay inserts are deterministic, and mixed
+transaction-local node/filter changes still select eager. Property tests cover
+cursor/iterator parity; the PG17 real-login gate covers forced eager/lazy
+outbound and inbound BFS over visible and hidden relationship inserts, a
+relationship delete, stable identities, source-work bounds, rollback, and
+retry. Committed durable segments remain assigned to the next cursor
+checkpoint.
 
 - Extend the state-machine boundary to DFS/reverse traversal without changing
   reversed-neighbor push order or visited timing.

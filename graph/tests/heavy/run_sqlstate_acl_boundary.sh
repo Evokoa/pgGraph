@@ -342,6 +342,7 @@ run_sql "GRANT INSERT ON public.graph_boundary_edges TO $ROLE_NAME;"
 run_sql "GRANT INSERT, UPDATE, DELETE ON public.graph_boundary_nodes TO $ROLE_NAME;"
 run_sql "GRANT DELETE ON public.graph_boundary_edges TO $ROLE_NAME;"
 run_sql "CREATE POLICY graph_boundary_node_insert_rls ON public.graph_boundary_nodes FOR INSERT TO $ROLE_NAME WITH CHECK (true);"
+run_sql "CREATE POLICY graph_boundary_node_update_rls ON public.graph_boundary_nodes FOR UPDATE TO $ROLE_NAME USING (tenant_id = NULLIF(current_setting('graph.boundary_tenant', true), '')) WITH CHECK (tenant_id = NULLIF(current_setting('graph.boundary_tenant', true), ''));"
 run_sql "CREATE POLICY graph_boundary_node_delete_rls ON public.graph_boundary_nodes FOR DELETE TO $ROLE_NAME USING (tenant_id = NULLIF(current_setting('graph.boundary_tenant', true), ''));"
 run_sql "CREATE POLICY graph_boundary_edge_delete_rls ON public.graph_boundary_edges FOR DELETE TO $ROLE_NAME USING (visible_to = current_user);"
 run_sql "GRANT USAGE, SELECT ON SEQUENCE public.graph_boundary_edges_id_seq TO $ROLE_NAME;"
@@ -508,6 +509,27 @@ expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELEC
 expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false, max_nodes := 2)\$q\$, 12, 12);"
 expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false, max_frontier := 1)\$q\$, 12, 12);"
 expect_value_as_login "$ROLE_NAME" "ok" "SET graph.boundary_tenant = 't1'; SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.get_neighbors('default', 'graph_boundary_nodes', 'a', direction := 'out', hydrate := false)\$q\$, 8, 8);"
+
+# P4.1 contract: transaction-local classic edge overlays retain stable
+# relationship identities and use the same caller-RLS oracle in both
+# directions. The hidden row must never enter the result, while transaction
+# insert/delete overlays remain byte-identical to the eager oracle.
+run_sql "SET graph.mutable_enabled = on; SELECT * FROM graph.build(mode := 'mutable_overlay');"
+expect_value_as_login "$ROLE_NAME" $'1\n1\nok\nok\n1\nok\n1\nok\nok' "BEGIN;
+SET LOCAL graph.boundary_tenant = 't1';
+SELECT count(*) FROM graph.gql('MATCH (u:graph_boundary_nodes {id: ''c''}), (v:graph_boundary_nodes {id: ''a''}) CREATE (u)-[r:boundary_row {visible_to: ''$ROLE_NAME'', edge_weight: 3}]->(v) RETURN r', hydrate := false);
+SET LOCAL graph.boundary_edge_override = 'graph_boundary_other';
+SELECT count(*) FROM graph.gql('MATCH (u:graph_boundary_nodes {id: ''c''}), (v:graph_boundary_nodes {id: ''d''}) CREATE (u)-[r:boundary_row {visible_to: ''graph_boundary_other'', edge_weight: 3}]->(v) RETURN r', hydrate := false);
+SET LOCAL graph.boundary_edge_override = '';
+SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'c', 1, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false)\$q\$, 8, 8);
+SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], direction := 'in', strategy := 'bfs', hydrate := false)\$q\$, 8, 8);
+SELECT count(*) FROM graph.gql('MATCH (u:graph_boundary_nodes {id: ''e''}), (v:graph_boundary_nodes {id: ''a''}) CREATE (u)-[r:boundary_row {visible_to: ''$ROLE_NAME'', edge_weight: 3}]->(v) RETURN r', hydrate := false);
+SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'e', 1, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false)\$q\$, 8, 8);
+SELECT count(*) FROM graph.gql('MATCH (u:graph_boundary_nodes {id: ''c''})-[r:boundary_row]->(v:graph_boundary_nodes {id: ''a''}) DELETE r RETURN r', hydrate := false);
+SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'c', 1, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false)\$q\$, 8, 8);
+ROLLBACK;
+SET graph.boundary_tenant = 't1';
+SELECT public.graph_boundary_assert_p3_visibility(\$q\$SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'c', 1, edge_types := ARRAY['boundary_row'], direction := 'out', strategy := 'bfs', hydrate := false)\$q\$, 8, 8);"
 
 if psql -X -q -tA -d "$DBNAME" -c "SELECT to_regprocedure('graph._test_arm_lazy_visibility_cancel()') IS NOT NULL;" | grep -qx t; then
   expect_lazy_visibility_cancel_cleanup_as_login "$ROLE_NAME" "SET graph.boundary_tenant = 't1'; SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1, edge_types := ARRAY['boundary_row'], strategy := 'bfs', hydrate := false);"

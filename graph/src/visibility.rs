@@ -1108,3 +1108,7 @@ mod p2_contract_tests;
 #[cfg(test)]
 #[path = "visibility/p3_contract_tests.rs"]
 mod p3_contract_tests;
+
+#[cfg(test)]
+#[path = "visibility/p4_contract_tests.rs"]
+mod p4_contract_tests;

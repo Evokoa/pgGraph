@@ -66,6 +66,8 @@ pub(crate) struct TxDeltaStats {
     pub(crate) added_edges: usize,
     /// Deleted edge tombstone count.
     pub(crate) deleted_edges: usize,
+    /// Transaction-local filter value updates.
+    pub(crate) filter_updates: usize,
     /// Estimated heap bytes owned by the transaction delta.
     pub(crate) memory_bytes: usize,
     /// Whether any graph delta is currently recorded.
@@ -95,6 +97,7 @@ impl TxGraphDelta {
             deleted_nodes: self.deleted_nodes.len(),
             added_edges,
             deleted_edges: self.deleted_edges.len(),
+            filter_updates: self.filter_updates.len(),
             memory_bytes,
             dirty: self.is_dirty(),
         }

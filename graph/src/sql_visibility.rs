@@ -232,12 +232,15 @@ fn visibility_resolution_guard_clears_after_error_and_cancellation() {
 
 #[cfg(any(test, feature = "development"))]
 pub(crate) fn _test_visibility_resolution_guard_empty() -> bool {
-    VISIBILITY_RESOLUTION_ACTIVE.with(|active| !active.get())
+    let base_empty = VISIBILITY_RESOLUTION_ACTIVE.with(|active| !active.get())
         && LAZY_VISIBILITY_RESOLUTION_SLOT.with(|slot| slot.borrow().is_none())
         && BFS_VISIBILITY_RESOLUTION_SLOT.with(|slot| slot.borrow().is_none())
         && BFS_VISIBILITY_PREPARATION_SLOT.with(|slot| slot.borrow().is_none())
-        && VISIBILITY_BUILD_SLOT.with(|slot| slot.borrow().is_none())
-        && BFS_VISIBILITY_RESOLUTION_DROPPED.with(Cell::get)
+        && VISIBILITY_BUILD_SLOT.with(|slot| slot.borrow().is_none());
+    #[cfg(feature = "development")]
+    return base_empty && BFS_VISIBILITY_RESOLUTION_DROPPED.with(Cell::get);
+    #[cfg(not(feature = "development"))]
+    base_empty
 }
 
 #[cfg(test)]

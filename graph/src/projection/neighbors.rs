@@ -35,13 +35,51 @@ pub(crate) trait NeighborSource {
     fn fill_neighbors(
         &self,
         node_idx: u32,
-        cursor: usize,
+        cursor: &mut OwnedNeighborCursor,
         limit: usize,
         output: &mut Vec<Neighbor>,
     ) -> bool {
-        let mut iter = self.neighbors(node_idx).skip(cursor).peekable();
+        let pos = cursor.logical_position();
+        let mut iter = self.neighbors(node_idx).skip(pos).peekable();
         output.extend(iter.by_ref().take(limit));
+        cursor.advance_logical(output.len());
         iter.peek().is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum OwnedNeighborCursor {
+    #[default]
+    Start,
+    Csr {
+        pos: usize,
+    },
+    Overlay {
+        base_pos: usize,
+        insert_pos: usize,
+        inserts_phase: bool,
+        duplicate_base_pos: usize,
+        duplicate_base_end: usize,
+        duplicate_insert_pos: usize,
+        duplicate_check_initialized: bool,
+    },
+    Logical {
+        pos: usize,
+    },
+}
+
+impl OwnedNeighborCursor {
+    fn logical_position(&self) -> usize {
+        match self {
+            Self::Start => 0,
+            Self::Csr { pos } | Self::Logical { pos } => *pos,
+            Self::Overlay { .. } => 0,
+        }
+    }
+
+    fn advance_logical(&mut self, count: usize) {
+        let next = self.logical_position().saturating_add(count);
+        *self = Self::Logical { pos: next };
     }
 }
 
@@ -85,15 +123,20 @@ impl NeighborSource for CsrNeighbors<'_> {
     fn fill_neighbors(
         &self,
         node_idx: u32,
-        cursor: usize,
+        cursor: &mut OwnedNeighborCursor,
         limit: usize,
         output: &mut Vec<Neighbor>,
     ) -> bool {
         let (targets, type_ids, schema_reversed, relationship_ids) = self
             .edge_store
             .neighbors_with_schema_and_relationship_ids(node_idx);
-        let end = cursor.saturating_add(limit).min(targets.len());
-        output.extend((cursor.min(targets.len())..end).map(|pos| {
+        let pos = match cursor {
+            OwnedNeighborCursor::Start => 0,
+            OwnedNeighborCursor::Csr { pos } => *pos,
+            _ => cursor.logical_position(),
+        };
+        let end = pos.saturating_add(limit).min(targets.len());
+        output.extend((pos.min(targets.len())..end).map(|pos| {
             Neighbor {
                 target: targets[pos],
                 type_id: type_ids[pos],
@@ -104,6 +147,7 @@ impl NeighborSource for CsrNeighbors<'_> {
                     .filter(|id| *id != NO_RELATIONSHIP_ID),
             }
         }));
+        *cursor = OwnedNeighborCursor::Csr { pos: end };
         end == targets.len()
     }
 }
@@ -162,7 +206,7 @@ impl NeighborSource for OverlayNeighbors<'_> {
     fn fill_neighbors(
         &self,
         node_idx: u32,
-        cursor: usize,
+        cursor: &mut OwnedNeighborCursor,
         limit: usize,
         output: &mut Vec<Neighbor>,
     ) -> bool {
@@ -172,9 +216,167 @@ impl NeighborSource for OverlayNeighbors<'_> {
             return CsrNeighbors::new(self.edge_store)
                 .fill_neighbors(node_idx, cursor, limit, output);
         }
-        let mut iter = self.neighbors(node_idx).skip(cursor).peekable();
-        output.extend(iter.by_ref().take(limit));
-        iter.peek().is_none()
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .edge_store
+            .neighbors_with_schema_and_relationship_ids(node_idx);
+        let inserted = self.inserts.get(&node_idx).map(Vec::as_slice);
+        let deleted = self.deletes.get(&node_idx);
+        let (
+            mut base_pos,
+            mut insert_pos,
+            mut inserts_phase,
+            mut duplicate_base_pos,
+            mut duplicate_base_end,
+            mut duplicate_insert_pos,
+            mut duplicate_check_initialized,
+        ) = match cursor {
+            OwnedNeighborCursor::Overlay {
+                base_pos,
+                insert_pos,
+                inserts_phase,
+                duplicate_base_pos,
+                duplicate_base_end,
+                duplicate_insert_pos,
+                duplicate_check_initialized,
+            } => (
+                *base_pos,
+                *insert_pos,
+                *inserts_phase,
+                *duplicate_base_pos,
+                *duplicate_base_end,
+                *duplicate_insert_pos,
+                *duplicate_check_initialized,
+            ),
+            _ => (0, 0, false, 0, 0, 0, false),
+        };
+        let mut examined = 0usize;
+        while examined < limit && !inserts_phase {
+            let Some(pos) = (base_pos < targets.len()).then_some(base_pos) else {
+                inserts_phase = true;
+                break;
+            };
+            base_pos += 1;
+            examined += 1;
+            let relationship_id = relationship_ids
+                .get(pos)
+                .copied()
+                .filter(|id| *id != NO_RELATIONSHIP_ID);
+            let candidate = Neighbor {
+                target: targets[pos],
+                type_id: type_ids[pos],
+                schema_reversed: schema_reversed[pos] != 0,
+                relationship_id,
+            };
+            if deleted.is_some_and(|set| {
+                set.contains(&(
+                    candidate.target,
+                    candidate.type_id,
+                    candidate.schema_reversed,
+                    None,
+                )) || set.contains(&(
+                    candidate.target,
+                    candidate.type_id,
+                    candidate.schema_reversed,
+                    relationship_id,
+                ))
+            }) {
+                continue;
+            }
+            output.push(candidate);
+        }
+        while examined < limit && inserts_phase {
+            let Some(values) = inserted else { break };
+            let Some(&(target, type_id, reversed, relationship_id)) = values.get(insert_pos) else {
+                break;
+            };
+            if !duplicate_check_initialized {
+                let key_before = |idx: usize| {
+                    (targets[idx], type_ids[idx], schema_reversed[idx] != 0)
+                        < (target, type_id, reversed)
+                };
+                let key_after = |idx: usize| {
+                    (targets[idx], type_ids[idx], schema_reversed[idx] != 0)
+                        <= (target, type_id, reversed)
+                };
+                let mut low = 0usize;
+                let mut high = targets.len();
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    if key_before(mid) {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                duplicate_base_pos = low;
+                high = targets.len();
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    if key_after(mid) {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                duplicate_base_end = low;
+                duplicate_insert_pos = 0;
+                duplicate_check_initialized = true;
+            }
+
+            let mut duplicate = false;
+            while examined < limit && duplicate_base_pos < duplicate_base_end {
+                let idx = duplicate_base_pos;
+                duplicate_base_pos += 1;
+                examined += 1;
+                if relationship_ids
+                    .get(idx)
+                    .copied()
+                    .filter(|id| *id != NO_RELATIONSHIP_ID)
+                    == relationship_id
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            while !duplicate && examined < limit && duplicate_insert_pos < insert_pos {
+                duplicate =
+                    values[duplicate_insert_pos] == (target, type_id, reversed, relationship_id);
+                duplicate_insert_pos += 1;
+                examined += 1;
+            }
+            let checks_complete = duplicate
+                || (duplicate_base_pos == duplicate_base_end && duplicate_insert_pos == insert_pos);
+            if !checks_complete {
+                break;
+            }
+            if !duplicate {
+                if examined == limit {
+                    break;
+                }
+                output.push(Neighbor {
+                    target,
+                    type_id,
+                    schema_reversed: reversed,
+                    relationship_id,
+                });
+                examined += 1;
+            }
+            insert_pos += 1;
+            duplicate_base_pos = 0;
+            duplicate_base_end = 0;
+            duplicate_insert_pos = 0;
+            duplicate_check_initialized = false;
+        }
+        *cursor = OwnedNeighborCursor::Overlay {
+            base_pos,
+            insert_pos,
+            inserts_phase,
+            duplicate_base_pos,
+            duplicate_base_end,
+            duplicate_insert_pos,
+            duplicate_check_initialized,
+        };
+        inserts_phase && insert_pos >= inserted.map_or(0, <[_]>::len)
     }
 }
 
@@ -678,10 +880,9 @@ mod tests {
         let neighbors = CsrNeighbors::new(&store);
         let expected = neighbors.neighbors(0).collect::<Vec<_>>();
         let mut actual = Vec::new();
-        let mut cursor = 0usize;
+        let mut cursor = OwnedNeighborCursor::default();
         loop {
-            let exhausted = neighbors.fill_neighbors(0, cursor, 17, &mut actual);
-            cursor = actual.len();
+            let exhausted = neighbors.fill_neighbors(0, &mut cursor, 17, &mut actual);
             if exhausted {
                 break;
             }
@@ -689,7 +890,85 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn owned_overlay_cursor_pages_without_replaying_prefixes() {
+        let store = EdgeStore::from_edges(
+            6,
+            (1..=4)
+                .map(|target| RawEdge {
+                    source: 0,
+                    target,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                })
+                .collect(),
+            false,
+        );
+        let inserts = OverlayInserts::from([(0, vec![(5, 1, false, None)])]);
+        let deletes = OverlayDeletes::from([(0, HashSet::from([(2, 1, false, None)]))]);
+        let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
+        let expected = neighbors.neighbors(0).collect::<Vec<_>>();
+        let mut cursor = OwnedNeighborCursor::default();
+        let mut actual = Vec::new();
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            let mut page = Vec::new();
+            let exhausted = neighbors.fill_neighbors(0, &mut cursor, 2, &mut page);
+            actual.extend(page);
+            if exhausted {
+                break;
+            }
+        }
+        assert_eq!(actual, expected);
+        // Two raw base pages plus one bounded insert-deduplication page.
+        assert_eq!(pages, 3);
+        assert!(matches!(cursor, OwnedNeighborCursor::Overlay { .. }));
+    }
+
     proptest! {
+        #[test]
+        fn owned_overlay_cursor_matches_iterator_for_bounded_pages(
+            raw_edges in prop::collection::vec((1u32..12, 0u8..4, any::<bool>()), 0..48),
+            raw_inserts in prop::collection::vec((1u32..12, 0u8..4, any::<bool>(), prop::option::of(1u32..32)), 0..32),
+            raw_deletes in prop::collection::vec((1u32..12, 0u8..4, any::<bool>(), prop::option::of(1u32..32)), 0..32),
+            page_size in 1usize..8,
+        ) {
+            let store = EdgeStore::from_edges(
+                12,
+                raw_edges
+                    .into_iter()
+                    .map(|(target, type_id, schema_reversed)| RawEdge {
+                        source: 0,
+                        target,
+                        type_id,
+                        weight: None,
+                        schema_reversed,
+                    })
+                    .collect(),
+                false,
+            );
+            let inserts = OverlayInserts::from([(0, raw_inserts)]);
+            let deletes = OverlayDeletes::from([(0, raw_deletes.into_iter().collect())]);
+            let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
+            let expected = neighbors.neighbors(0).collect::<Vec<_>>();
+            let mut actual = Vec::new();
+            let mut cursor = OwnedNeighborCursor::default();
+            let mut pages = 0usize;
+            loop {
+                pages += 1;
+                prop_assert!(pages <= 10_000, "cursor failed to make bounded progress");
+                let mut page = Vec::new();
+                let exhausted = neighbors.fill_neighbors(0, &mut cursor, page_size, &mut page);
+                actual.extend(page);
+                if exhausted {
+                    break;
+                }
+            }
+            prop_assert_eq!(actual, expected);
+        }
+
         #[test]
         fn clean_overlay_matches_csr_neighbors(
             node_count in 1u32..16,
