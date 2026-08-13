@@ -159,7 +159,9 @@ Initial deterministic selection:
 
 An adaptive switch is not part of the initial implementation. It may be added
 only if representative evidence shows a material win, and it must reuse known
-verdicts when completing an eager scope.
+verdicts when completing an eager scope. Any adaptive implementation must reuse
+known verdicts when completing an eager scope; it may never restart policy work
+from zero.
 
 ## Differential and performance gates
 

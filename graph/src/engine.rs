@@ -90,6 +90,9 @@ pub struct Engine {
     /// Source-row identities indexed by nonzero CSR relationship IDs. Persisted
     /// base descriptors and keys remain mapped; later identities form a suffix.
     pub(crate) relationship_identities: RelationshipIdentityStore,
+    /// Per-type summary for immutable base edges that lack relationship
+    /// identities. Rebuilt when a base edge store is installed.
+    relationship_identity_missing_edge_types: [bool; 256],
     pub(crate) has_unidirectional_edges: bool,
     pub(crate) built: bool,
     pub(crate) sync_status: SyncStatus,
@@ -117,6 +120,9 @@ pub struct Engine {
     pub(crate) edge_buffer: Vec<EdgeMutation>,
     /// Monotonic backend-local revision for committed overlay substitutions.
     edge_buffer_revision: u64,
+    edge_buffer_missing_relationship_identity_edge_types: [bool; 256],
+    edge_buffer_missing_relationship_identity_keys: HashSet<(u32, u32, u8, bool)>,
+    edge_buffer_missing_relationship_identity_counts: [u32; 256],
     /// Runtime projection mode selected at build/load time.
     pub(crate) projection_mode: crate::config::ProjectionMode,
     /// Durable projection generation loaded with the base artifact, if any.
@@ -917,6 +923,7 @@ impl Engine {
             filter_index: FilterIndex::new(),
             edge_type_registry,
             relationship_identities: RelationshipIdentityStore::default(),
+            relationship_identity_missing_edge_types: [false; 256],
             has_unidirectional_edges: false,
             built: false,
             sync_status: SyncStatus::Idle,
@@ -931,6 +938,9 @@ impl Engine {
             _mmap: None,
             edge_buffer: Vec::new(),
             edge_buffer_revision: 0,
+            edge_buffer_missing_relationship_identity_edge_types: [false; 256],
+            edge_buffer_missing_relationship_identity_keys: HashSet::new(),
+            edge_buffer_missing_relationship_identity_counts: [0; 256],
             projection_mode: crate::config::ProjectionMode::CsrReadonly,
             projection_manifest: None,
             projection_manifest_full: None,
@@ -1016,6 +1026,7 @@ impl Engine {
         let reverse_edge_store = edge_store.try_reversed()?;
         self.edge_store = edge_store;
         self.reverse_edge_store = reverse_edge_store;
+        self.refresh_relationship_identity_completeness_summary();
         Ok(())
     }
 
@@ -1024,8 +1035,95 @@ impl Engine {
     }
 
     pub fn finish_build(&mut self, built_at: Option<TimestampWithTimeZone>) {
+        self.refresh_relationship_identity_completeness_summary();
         self.built = true;
         self.last_build = built_at;
+    }
+
+    fn refresh_relationship_identity_completeness_summary(&mut self) {
+        self.relationship_identity_missing_edge_types.fill(false);
+        for (edge_type, relationship_id) in self
+            .edge_store
+            .type_ids_slice()
+            .iter()
+            .copied()
+            .zip(self.edge_store.relationship_ids_slice().iter().copied())
+        {
+            if relationship_id == crate::edge_store::NO_RELATIONSHIP_ID {
+                self.relationship_identity_missing_edge_types[usize::from(edge_type)] = true;
+            }
+        }
+    }
+
+    fn update_edge_buffer_relationship_identity_completeness_summary(
+        &mut self,
+        mutation: &EdgeMutation,
+    ) {
+        let key = (
+            mutation.source,
+            mutation.target,
+            mutation.type_id,
+            mutation.schema_reversed,
+        );
+        match (mutation.kind, mutation.relationship_id) {
+            (MutationKind::Insert, None) => {
+                if self
+                    .edge_buffer_missing_relationship_identity_keys
+                    .insert(key)
+                {
+                    let count = &mut self.edge_buffer_missing_relationship_identity_counts
+                        [usize::from(mutation.type_id)];
+                    *count = count.saturating_add(1);
+                    self.edge_buffer_missing_relationship_identity_edge_types
+                        [usize::from(mutation.type_id)] = true;
+                }
+            }
+            (MutationKind::Delete, None)
+                if self
+                    .edge_buffer_missing_relationship_identity_keys
+                    .remove(&key) =>
+            {
+                let count = &mut self.edge_buffer_missing_relationship_identity_counts
+                    [usize::from(mutation.type_id)];
+                *count = count.saturating_sub(1);
+                self.edge_buffer_missing_relationship_identity_edge_types
+                    [usize::from(mutation.type_id)] = *count != 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Check the precomputed base/durable summaries plus bounded mutable
+    /// overlays for a relationship identity gap in any requested edge type.
+    pub(crate) fn has_missing_relationship_identity_for_types(
+        &self,
+        active_edge_types: &[bool; 256],
+    ) -> bool {
+        // Preserve the established conservative PG023 contract: a legacy base
+        // identity gap remains incomplete until rebuild, even when a later
+        // tombstone masks that row. Durable state adds newly introduced gaps.
+        let immutable_missing = active_edge_types
+            .iter()
+            .enumerate()
+            .any(|(edge_type, active)| {
+                *active && self.relationship_identity_missing_edge_types[edge_type]
+            })
+            || self.projection_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.has_missing_relationship_identity_for_types(active_edge_types)
+            });
+        if immutable_missing {
+            return true;
+        }
+        if active_edge_types
+            .iter()
+            .enumerate()
+            .any(|(edge_type, active)| {
+                *active && self.edge_buffer_missing_relationship_identity_edge_types[edge_type]
+            })
+        {
+            return true;
+        }
+        crate::projection::tx_delta::has_missing_relationship_identity_for_types(active_edge_types)
     }
 
     pub fn set_catalog_fingerprint(&mut self, catalog_fingerprint: u64) {
@@ -1958,6 +2056,7 @@ impl Engine {
 
     pub fn push_edge_mutation(&mut self, mutation: EdgeMutation) -> GraphResult<()> {
         self.reserve_edge_mutation_capacity(1)?;
+        self.update_edge_buffer_relationship_identity_completeness_summary(&mutation);
         self.edge_buffer.push(mutation);
         self.edge_buffer_revision = self.edge_buffer_revision.wrapping_add(1);
         self.needs_vacuum = true;
@@ -1972,6 +2071,13 @@ impl Engine {
                 size: self.edge_buffer.len(),
             });
         }
+        self.edge_buffer_missing_relationship_identity_keys
+            .try_reserve(additional)
+            .map_err(|_| GraphError::Oom {
+                used_mb: 0,
+                need_mb: 1,
+                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+            })?;
         Ok(())
     }
 
@@ -2593,6 +2699,10 @@ impl Engine {
                 .map(String::capacity)
                 .sum::<usize>();
         let edge_buffer_bytes = self.edge_buffer.capacity() * std::mem::size_of::<EdgeMutation>();
+        let edge_buffer_summary_bytes = self
+            .edge_buffer_missing_relationship_identity_keys
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(u32, u32, u8, bool)>() * 2);
         let table_membership_bytes = self.table_membership.capacity()
             * (std::mem::size_of::<u32>() + std::mem::size_of::<RoaringBitmap>());
         let tenant_bytes = self.tenant_membership.capacity()
@@ -2623,6 +2733,7 @@ impl Engine {
             + resolution_bytes
             + registry_bytes
             + edge_buffer_bytes
+            + edge_buffer_summary_bytes
             + table_membership_bytes
             + tenant_bytes
             + tenant_removal_bytes
@@ -3016,6 +3127,66 @@ mod tests {
         assert_eq!(engine.edge_buffer.len(), 2);
         assert_eq!(engine.edge_buffer[0].kind, MutationKind::Insert);
         assert_eq!(engine.edge_buffer[1].kind, MutationKind::Delete);
+    }
+
+    #[test]
+    fn relationship_identity_summary_is_type_selective_and_tracks_effective_edge_buffer() {
+        let mut builder =
+            crate::edge_store::SortedEdgeStoreBuilder::try_new(3, false).expect("base builder");
+        builder
+            .try_push(crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+            })
+            .expect("missing-identity base edge");
+        builder
+            .try_push_identified(crate::edge_store::IdentifiedRawEdge {
+                edge: crate::edge_store::RawEdge {
+                    source: 1,
+                    target: 2,
+                    type_id: 2,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                relationship_id: 1,
+            })
+            .expect("identified base edge");
+        let mut engine = Engine::new();
+        let before_summary = engine.estimated_heap_bytes();
+        engine
+            .replace_edge_stores(builder.finish())
+            .expect("install base edges");
+
+        let mut type_one = [false; 256];
+        type_one[1] = true;
+        let mut type_two = [false; 256];
+        type_two[2] = true;
+        assert!(engine.has_missing_relationship_identity_for_types(&type_one));
+        assert!(!engine.has_missing_relationship_identity_for_types(&type_two));
+
+        let missing_overlay = EdgeMutation {
+            source: 2,
+            target: 0,
+            type_id: 2,
+            schema_reversed: false,
+            relationship_id: None,
+            kind: MutationKind::Insert,
+        };
+        engine
+            .push_edge_mutation(missing_overlay.clone())
+            .expect("insert missing overlay identity");
+        assert!(engine.has_missing_relationship_identity_for_types(&type_two));
+        assert!(engine.estimated_heap_bytes() > before_summary);
+        engine
+            .push_edge_mutation(EdgeMutation {
+                kind: MutationKind::Delete,
+                ..missing_overlay
+            })
+            .expect("delete missing overlay identity");
+        assert!(!engine.has_missing_relationship_identity_for_types(&type_two));
     }
 
     #[test]

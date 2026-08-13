@@ -144,7 +144,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
 | P4 | In progress (P4.6 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL/Cypher expansions preserve exact result ordering and semantics; P4.7 retained evidence and closure remain. |
-| P5 | Not started | Targeted queries select lazy and global analytics select eager; redundant read checks are removed only if proven; 1M/10M evidence meets the accepted latency and memory budgets. |
+| P5 | In progress (P5.1 complete) | Targeted queries select lazy and global analytics select eager; relationship-identity completeness uses fixed projection summaries; retained 1M/10M evidence and read-recheck measurement remain. |
 | P6 | Not started | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
 | P8 | Not started | Persistent dictionaries, mutable segments, compaction, reload, and transaction-local/savepoint state support unseen labels atomically and within resource limits. |
@@ -450,6 +450,17 @@ fallback, and the unrestricted resolver fast path.
 global work retains the eager oracle.
 
 ### P5: Select strategy and publish scalable-RLS evidence
+
+P5.1 completed on 2026-08-13. Base CSR publication now records a fixed
+per-edge-type relationship-identity completeness summary. Durable snapshots
+derive the same summary from their effective changed-source topology, while
+committed and transaction-local overlays maintain bounded summaries alongside
+their revisioned state. Eager and targeted preparation intersect the active
+mapping types with those summaries instead of scanning projected relationship
+arrays at query start. Candidate validation remains fail-closed with `PG023`,
+and static/dynamic mapping selection preserves the established ACL and error
+ordering. P5.2 owns runner telemetry and read-recheck measurement; P5.3 owns
+the retained 1M/10M release matrix and public closure.
 
 - Start with deterministic targeted-lazy/global-eager selection.
 - Add adaptive fallback only if retained benchmarks beat the deterministic

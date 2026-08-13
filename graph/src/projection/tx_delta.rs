@@ -44,7 +44,7 @@ pub(crate) struct DeltaEdge {
 }
 
 /// Per-transaction graph projection delta.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct TxGraphDelta {
     added_nodes: Vec<AddedNode>,
     max_added_node_primary_key_bytes: usize,
@@ -53,6 +53,22 @@ pub(crate) struct TxGraphDelta {
     deleted_edges: HashSet<(u32, u32, u8, bool, Option<RelationshipId>)>,
     filter_updates: HashMap<(usize, u32), Option<EncodedFilterValue>>,
     relationship_identities: Vec<RelationshipIdentity>,
+    missing_relationship_identity_edge_types: [bool; 256],
+}
+
+impl Default for TxGraphDelta {
+    fn default() -> Self {
+        Self {
+            added_nodes: Vec::new(),
+            max_added_node_primary_key_bytes: 0,
+            deleted_nodes: HashSet::new(),
+            added_edges: HashMap::new(),
+            deleted_edges: HashSet::new(),
+            filter_updates: HashMap::new(),
+            relationship_identities: Vec::new(),
+            missing_relationship_identity_edge_types: [false; 256],
+        }
+    }
 }
 
 /// Lightweight statistics exposed through graph status surfaces.
@@ -100,6 +116,15 @@ pub(crate) fn topology_revision() -> u64 {
 static CALLBACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 impl TxGraphDelta {
+    fn refresh_relationship_identity_completeness_summary(&mut self) {
+        self.missing_relationship_identity_edge_types.fill(false);
+        for edge in self.added_edges.values().flatten() {
+            if edge.relationship_id.is_none() {
+                self.missing_relationship_identity_edge_types[usize::from(edge.type_id)] = true;
+            }
+        }
+    }
+
     fn stats(&self) -> TxDeltaStats {
         let added_edges = self.added_edges.values().map(Vec::len).sum::<usize>();
         let memory_bytes = self.estimated_heap_bytes();
@@ -175,6 +200,9 @@ impl TxGraphDelta {
 
     #[cfg(test)]
     fn add_edge_for_test(&mut self, source: u32, edge: DeltaEdge) {
+        if edge.relationship_id.is_none() {
+            self.missing_relationship_identity_edge_types[usize::from(edge.type_id)] = true;
+        }
         self.added_edges.entry(source).or_default().push(edge);
     }
 }
@@ -518,6 +546,9 @@ pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()>
         if deleted_key.is_some_and(|key| delta.deleted_edges.remove(&key)) {
             return;
         }
+        if edge.relationship_id.is_none() {
+            delta.missing_relationship_identity_edge_types[usize::from(edge.type_id)] = true;
+        }
         delta.added_edges.entry(source).or_default().push(edge);
     });
     bump_topology_revision();
@@ -599,6 +630,25 @@ pub(crate) fn for_each_relationship_identity(
     });
 }
 
+/// Return whether a transaction-local inserted edge of a requested type lacks
+/// a stable relationship identity.
+///
+/// Transaction deltas are bounded independently of the base projection. This
+/// check deliberately stays inside the delta owner so subtransaction restore
+/// and abort semantics remain authoritative.
+pub(crate) fn has_missing_relationship_identity_for_types(active_edge_types: &[bool; 256]) -> bool {
+    TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().is_some_and(|delta| {
+            active_edge_types
+                .iter()
+                .enumerate()
+                .any(|(edge_type, active)| {
+                    *active && delta.missing_relationship_identity_edge_types[edge_type]
+                })
+        })
+    })
+}
+
 /// Resolve a transaction-local relationship source identity.
 pub(crate) fn find_relationship_identity_id(
     base_identity_count: usize,
@@ -663,6 +713,7 @@ pub(crate) fn record_deleted_edge_with_identity(
                 delta.added_edges.remove(&source);
             }
             if cancels_insert {
+                delta.refresh_relationship_identity_completeness_summary();
                 return;
             }
         }
@@ -1063,6 +1114,28 @@ mod tests {
         assert_eq!(stats.deleted_edges, 1);
         assert!(stats.memory_bytes > 0);
         assert!(stats.dirty);
+    }
+
+    #[test]
+    fn relationship_identity_summary_tracks_transaction_insert_and_cancellation() {
+        clear_current_transaction_state();
+        let mut active = [false; 256];
+        active[3] = true;
+        record_added_edge(
+            0,
+            DeltaEdge {
+                target: 1,
+                type_id: 3,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        )
+        .expect("record missing transaction identity");
+        assert!(has_missing_relationship_identity_for_types(&active));
+        record_deleted_edge_with_identity(0, 1, 3, false, None).expect("cancel transaction edge");
+        assert!(!has_missing_relationship_identity_for_types(&active));
+        clear_current_transaction_state();
     }
 
     #[test]

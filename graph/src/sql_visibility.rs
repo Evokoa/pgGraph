@@ -184,22 +184,26 @@ struct BfsVisibilityResolutionFrame {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct BfsVisibilityMetrics {
+    elapsed_micros: u64,
     spi_calls: u64,
     requested_keys: u64,
     returned_keys: u64,
     requested_key_bytes: u64,
     returned_key_bytes: u64,
     source_rows: u64,
+    relationship_completeness_checks: u64,
 }
 
 impl BfsVisibilityMetrics {
     const EMPTY: Self = Self {
         spi_calls: 0,
+        elapsed_micros: 0,
         requested_keys: 0,
         returned_keys: 0,
         requested_key_bytes: 0,
         returned_key_bytes: 0,
         source_rows: 0,
+        relationship_completeness_checks: 0,
     };
 }
 
@@ -379,17 +383,16 @@ pub(crate) fn prepare_eager_visibility(
                 })?);
             }
         }
+        let mut active_edge_types = [false; 256];
+        for edge_type in relationship_rls_edge_types.iter() {
+            active_edge_types[usize::try_from(edge_type).map_err(|_| {
+                GraphError::Internal("edge type index exceeds usize".to_string())
+            })?] = true;
+        }
+        record_relationship_completeness_check();
         if !active_edges.is_empty()
             && (force_missing_relationship_identity_for_test()
-                || engine
-                    .edge_store
-                    .type_ids_slice()
-                    .iter()
-                    .zip(engine.edge_store.relationship_ids_slice())
-                    .any(|(edge_type, relationship_id)| {
-                        relationship_rls_edge_types.contains(u32::from(*edge_type))
-                            && *relationship_id == crate::edge_store::NO_RELATIONSHIP_ID
-                    }))
+                || engine.has_missing_relationship_identity_for_types(&active_edge_types))
         {
             return Err(GraphError::RlsRelationshipIdentityMissing);
         }
@@ -531,7 +534,35 @@ pub(crate) fn prepare_direct_identity_visibility(
                         acl::check_table_acl(edge.from_table_oid)?;
                     }
                 }
-                validate_relationship_identity_completeness(edges)?;
+                let mut active_edge_types = [false; 256];
+                let mut has_dynamic_mapping = false;
+                for edge in edges {
+                    if !acl::row_security_applies_to_effective_caller(edge.from_table_oid) {
+                        continue;
+                    }
+                    let edge_type = ENGINE.with(|engine| {
+                        engine.borrow().edge_type_id(&edge.label).ok_or_else(|| {
+                            GraphError::Internal(format!(
+                                "registered RLS edge label '{}' is absent from the loaded projection",
+                                edge.label
+                            ))
+                        })
+                    })?;
+                    active_edge_types[usize::from(edge_type)] = true;
+                    has_dynamic_mapping |= edge.label_column.is_some();
+                }
+                let missing_identity = ENGINE.with(|engine| {
+                    let engine = engine.borrow();
+                    if has_dynamic_mapping {
+                        active_edge_types[1..engine.edge_type_registry.len()].fill(true);
+                    }
+                    force_missing_relationship_identity_for_test()
+                        || engine.has_missing_relationship_identity_for_types(&active_edge_types)
+                });
+                record_relationship_completeness_check();
+                if missing_identity {
+                    return Err(GraphError::RlsRelationshipIdentityMissing);
+                }
             } else {
                 acl::check_table_acl(table.table_oid)?;
             }
@@ -651,17 +682,6 @@ pub(crate) fn prepare_bfs_visibility(
                         })?;
                     }
                 }
-                let active_edge_types = BFS_VISIBILITY_PREPARATION_SLOT.with(|slot| {
-                    let slot = slot.borrow();
-                    slot.as_deref()
-                        .map(|frame| frame.edge_types.clone())
-                        .ok_or_else(|| {
-                            GraphError::Internal(
-                                "BFS visibility preparation frame disappeared".into(),
-                            )
-                        })
-                })?;
-                validate_relationship_identity_completeness_for_types(&active_edge_types)?;
                 BFS_VISIBILITY_PREPARATION_SLOT
                     .with(|slot| slot.borrow_mut().take())
                     .ok_or_else(|| {
@@ -693,6 +713,18 @@ pub(crate) fn prepare_bfs_visibility(
                         })?,
                     );
                 }
+            }
+            let missing_identity = ENGINE.with(|engine| {
+                let engine = engine.borrow();
+                let mut active = [false; 256];
+                for edge_type in &edge_types {
+                    active[usize::from(*edge_type)] = true;
+                }
+                engine.has_missing_relationship_identity_for_types(&active)
+            });
+            record_relationship_completeness_check();
+            if force_missing_relationship_identity_for_test() || missing_identity {
+                return Err(GraphError::RlsRelationshipIdentityMissing);
             }
             let mode = if node_tables.is_empty() && mappings.is_empty() {
                 LazyVisibilityMode::Unrestricted
@@ -769,77 +801,6 @@ fn ensure_session_stable_rls_identity(
         }
     }
     Ok(())
-}
-
-fn validate_relationship_identity_completeness(edges: &[RegisteredEdge]) -> GraphResult<()> {
-    for edge in edges {
-        // PostgreSQL may ERROR here (for example row_security=off with FORCE
-        // RLS), so do not retain an owned Rust accumulator across this call.
-        if !acl::row_security_applies_to_effective_caller(edge.from_table_oid) {
-            continue;
-        }
-        if force_missing_relationship_identity_for_test() {
-            return Err(GraphError::RlsRelationshipIdentityMissing);
-        }
-        ENGINE.with(|engine| {
-            let engine = engine.borrow();
-            let edge_type = engine
-                .edge_type_registry
-                .iter()
-                .position(|entry| entry == &edge.label)
-                .ok_or_else(|| {
-                    GraphError::Internal(format!(
-                        "registered RLS edge label '{}' is absent from the loaded projection",
-                        edge.label
-                    ))
-                })?;
-            let edge_type = u8::try_from(edge_type)
-                .map_err(|_| GraphError::Internal("edge type index exceeds u8".into()))?;
-            if engine
-                .edge_store
-                .type_ids_slice()
-                .iter()
-                .zip(engine.edge_store.relationship_ids_slice())
-                .any(|(candidate_type, relationship_id)| {
-                    *candidate_type == edge_type
-                        && *relationship_id == crate::edge_store::NO_RELATIONSHIP_ID
-                })
-            {
-                Err(GraphError::RlsRelationshipIdentityMissing)
-            } else {
-                Ok(())
-            }
-        })?;
-    }
-    Ok(())
-}
-
-fn validate_relationship_identity_completeness_for_types(
-    active_edge_types: &HashSet<u8>,
-) -> GraphResult<()> {
-    if active_edge_types.is_empty() {
-        return Ok(());
-    }
-    if force_missing_relationship_identity_for_test() {
-        return Err(GraphError::RlsRelationshipIdentityMissing);
-    }
-    ENGINE.with(|engine| {
-        let engine = engine.borrow();
-        if engine
-            .edge_store
-            .type_ids_slice()
-            .iter()
-            .zip(engine.edge_store.relationship_ids_slice())
-            .any(|(edge_type, relationship_id)| {
-                active_edge_types.contains(edge_type)
-                    && *relationship_id == crate::edge_store::NO_RELATIONSHIP_ID
-            })
-        {
-            Err(GraphError::RlsRelationshipIdentityMissing)
-        } else {
-            Ok(())
-        }
-    })
 }
 
 pub(crate) fn direct_visibility_batch(
@@ -1130,6 +1091,8 @@ pub(crate) fn resolve_bfs_visibility_batch(
     edges: &[RegisteredEdge],
     governor: &ResourceGovernor,
 ) -> GraphResult<Vec<crate::bfs::BfsAdjacencyVerdict>> {
+    #[cfg(feature = "development")]
+    let visibility_started_at = start_visibility_timer();
     #[cfg(feature = "development")]
     let _drop_probe = BfsVisibilityResolutionDropProbe::arm();
     // Keep the P2 oracle as the single semantic authority for Unknown,
@@ -1452,6 +1415,9 @@ pub(crate) fn resolve_bfs_visibility_batch(
     BFS_VISIBILITY_LAST_METRICS.with(|last| {
         let previous = last.get();
         last.set(BfsVisibilityMetrics {
+            elapsed_micros: previous
+                .elapsed_micros
+                .saturating_add(visibility_elapsed_micros(visibility_started_at)),
             spi_calls: previous.spi_calls.saturating_add(metrics.spi_calls),
             requested_keys: previous
                 .requested_keys
@@ -1464,6 +1430,7 @@ pub(crate) fn resolve_bfs_visibility_batch(
                 .returned_key_bytes
                 .saturating_add(metrics.returned_key_bytes),
             source_rows: previous.source_rows.saturating_add(metrics.source_rows),
+            relationship_completeness_checks: previous.relationship_completeness_checks,
         });
     });
 
@@ -1975,6 +1942,11 @@ fn start_visibility_timer() -> VisibilityTimer {
     Instant::now()
 }
 
+#[cfg(feature = "development")]
+fn visibility_elapsed_micros(started_at: VisibilityTimer) -> u64 {
+    u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
 #[cfg(not(feature = "development"))]
 #[inline(always)]
 fn start_visibility_timer() -> VisibilityTimer {
@@ -2141,6 +2113,20 @@ fn record_eager_visibility_source_rows(fetched: usize) {
     });
 }
 
+#[cfg(feature = "development")]
+fn record_relationship_completeness_check() {
+    BFS_VISIBILITY_LAST_METRICS.with(|last| {
+        let mut metrics = last.get();
+        metrics.relationship_completeness_checks =
+            metrics.relationship_completeness_checks.saturating_add(1);
+        last.set(metrics);
+    });
+}
+
+#[cfg(not(feature = "development"))]
+#[inline(always)]
+fn record_relationship_completeness_check() {}
+
 #[cfg(not(feature = "development"))]
 #[inline(always)]
 fn record_eager_visibility_source_rows(_fetched: usize) {}
@@ -2226,6 +2212,7 @@ fn test_visibility_metrics() -> pgrx::JsonB {
     let bfs = BFS_VISIBILITY_LAST_METRICS.with(Cell::get);
     let strategy = VISIBILITY_STRATEGY_OVERRIDE.with(Cell::get);
     let selected_strategy = VISIBILITY_SELECTED_STRATEGY.with(Cell::get);
+    let resource = crate::resource::last_operation_snapshot();
     pgrx::JsonB(serde_json::json!({
         "strategy": match strategy {
             VisibilityStrategyOverride::Auto => "auto",
@@ -2237,7 +2224,7 @@ fn test_visibility_metrics() -> pgrx::JsonB {
             VisibilityStrategyOverride::Eager => "eager",
             VisibilityStrategyOverride::Lazy => "lazy",
         },
-        "elapsed_micros": elapsed_micros,
+        "elapsed_micros": elapsed_micros.saturating_add(bfs.elapsed_micros),
         "hidden_nodes": hidden_nodes,
         "hidden_relationships": hidden_relationships,
         "spi_calls": bfs.spi_calls,
@@ -2246,6 +2233,9 @@ fn test_visibility_metrics() -> pgrx::JsonB {
         "requested_key_bytes": bfs.requested_key_bytes,
         "returned_key_bytes": bfs.returned_key_bytes,
         "source_rows": bfs.source_rows,
+        "relationship_completeness_checks": bfs.relationship_completeness_checks,
+        "memory_peak_bytes": resource.as_ref().map(|snapshot| snapshot.memory_peak_bytes).unwrap_or(0),
+        "work_units": resource.as_ref().map(|snapshot| snapshot.work_units).unwrap_or(0),
     }))
 }
 

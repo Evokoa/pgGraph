@@ -89,6 +89,7 @@ pub(crate) struct LayeredSnapshot {
     durable_in: HashMap<u32, DurableEdges>,
     active_nodes: HashMap<u32, bool>,
     tenant_memberships: HashMap<u64, HashSet<u32>>,
+    missing_relationship_identity_edge_types: [bool; 256],
 }
 
 /// Allocation preflight for constructing an immutable layered snapshot.
@@ -122,6 +123,87 @@ struct LayeredBuilderCapacity {
 }
 
 impl LayeredSnapshot {
+    fn summarize_relationship_identity_completeness(
+        &self,
+        base: &EdgeStore,
+        page: &mut Vec<Neighbor>,
+    ) -> [bool; 256] {
+        let mut missing = [false; 256];
+        let layered = LayeredNeighbors::from_snapshot(base, self);
+        for (direction, first, second) in [
+            (
+                TraversalDirection::Out,
+                &self.base_chunk_out,
+                &self.durable_out,
+            ),
+            (
+                TraversalDirection::In,
+                &self.base_chunk_in,
+                &self.durable_in,
+            ),
+        ] {
+            for source in first.keys().chain(second.keys()).copied() {
+                let mut cursor = OwnedNeighborCursor::Start;
+                loop {
+                    page.clear();
+                    let exhausted = layered.fill_directional_neighbors_internal(
+                        direction,
+                        source,
+                        &mut cursor,
+                        64,
+                        page,
+                        false,
+                    );
+                    for edge in &*page {
+                        if edge.relationship_id.is_none() {
+                            missing[usize::from(edge.type_id)] = true;
+                        }
+                    }
+                    if exhausted {
+                        break;
+                    }
+                }
+            }
+        }
+        missing
+    }
+
+    fn refresh_relationship_identity_completeness_summary(&mut self, base: &EdgeStore) {
+        let mut page = Vec::with_capacity(64);
+        self.missing_relationship_identity_edge_types =
+            self.summarize_relationship_identity_completeness(base, &mut page);
+    }
+
+    fn try_refresh_relationship_identity_completeness_summary(
+        &mut self,
+        base: &EdgeStore,
+    ) -> GraphResult<()> {
+        let mut page = Vec::new();
+        page.try_reserve_exact(64)
+            .map_err(layered_allocation_error)?;
+        self.missing_relationship_identity_edge_types =
+            self.summarize_relationship_identity_completeness(base, &mut page);
+        Ok(())
+    }
+
+    /// Return whether an installed durable/base-chunk edge of any requested
+    /// type lacks the relationship identity required by caller-scoped RLS.
+    ///
+    /// The snapshot computes this summary once while it is assembled. Serving
+    /// queries only inspect the fixed-size summary; they never rescan segment
+    /// adjacency.
+    pub(crate) fn has_missing_relationship_identity_for_types(
+        &self,
+        active_edge_types: &[bool; 256],
+    ) -> bool {
+        active_edge_types
+            .iter()
+            .enumerate()
+            .any(|(edge_type, active)| {
+                *active && self.missing_relationship_identity_edge_types[edge_type]
+            })
+    }
+
     /// Derive the immutable serving snapshot from validated decoded segments.
     pub(crate) fn build(
         base: &EdgeStore,
@@ -152,7 +234,7 @@ impl LayeredSnapshot {
         let mut builder = LayeredBuilder::new(base);
         builder.apply_segment_refs(segments);
         let output = builder.finish();
-        Self {
+        let mut snapshot = Self {
             base_chunk_ranges,
             base_chunk_out: base_chunk_output.durable_out,
             base_chunk_in: base_chunk_output.durable_in,
@@ -160,7 +242,10 @@ impl LayeredSnapshot {
             durable_in: output.durable_in,
             active_nodes: output.active_nodes,
             tenant_memberships: output.tenant_memberships,
-        }
+            missing_relationship_identity_edge_types: [false; 256],
+        };
+        snapshot.refresh_relationship_identity_completeness_summary(base);
+        snapshot
     }
 
     /// Preflight all collection capacities required by a layered snapshot.
@@ -178,9 +263,11 @@ impl LayeredSnapshot {
         let range_bytes = checked_bytes(base_chunks.len(), std::mem::size_of::<SourceRange>())?;
         let base_bytes = base_capacity.estimated_heap_bytes()?;
         let segment_bytes = segment_capacity.estimated_heap_bytes()?;
+        let summary_page_bytes = checked_bytes(64, std::mem::size_of::<Neighbor>())?;
         let estimated_peak_bytes = range_bytes
             .checked_add(base_bytes)
             .and_then(|bytes| bytes.checked_add(segment_bytes))
+            .and_then(|bytes| bytes.checked_add(summary_page_bytes))
             .ok_or_else(layered_size_overflow)?;
         Ok(LayeredSnapshotBuildPlan {
             base_chunk_ranges: base_chunks.len(),
@@ -236,7 +323,7 @@ impl LayeredSnapshot {
         let mut builder = LayeredBuilder::try_new(base, plan.segments, segments)?;
         builder.try_apply_segment_refs(segments)?;
         let output = builder.try_finish()?;
-        Ok(Self {
+        let mut snapshot = Self {
             base_chunk_ranges,
             base_chunk_out: base_chunk_output.durable_out,
             base_chunk_in: base_chunk_output.durable_in,
@@ -244,7 +331,10 @@ impl LayeredSnapshot {
             durable_in: output.durable_in,
             active_nodes: output.active_nodes,
             tenant_memberships: output.tenant_memberships,
-        })
+            missing_relationship_identity_edge_types: [false; 256],
+        };
+        snapshot.try_refresh_relationship_identity_completeness_summary(base)?;
+        Ok(snapshot)
     }
 
     /// Conservatively estimate backend-private heap retained by this snapshot.
@@ -1159,11 +1249,7 @@ impl<'a> LayeredNeighbors<'a> {
         if tx_delta::node_deleted(node_idx) {
             return false;
         }
-        if self
-            .active_nodes
-            .get(&node_idx)
-            .is_some_and(|active| !*active)
-        {
+        if !self.projection_node_visible(node_idx) {
             return false;
         }
         match self.tenant_filter {
@@ -1175,6 +1261,12 @@ impl<'a> LayeredNeighbors<'a> {
         }
     }
 
+    fn projection_node_visible(&self, node_idx: u32) -> bool {
+        self.active_nodes
+            .get(&node_idx)
+            .is_none_or(|active| *active)
+    }
+
     fn fill_directional_neighbors(
         &self,
         direction: TraversalDirection,
@@ -1183,7 +1275,24 @@ impl<'a> LayeredNeighbors<'a> {
         limit: usize,
         output: &mut Vec<Neighbor>,
     ) -> bool {
-        if !self.node_visible(node_idx) || limit == 0 {
+        self.fill_directional_neighbors_internal(direction, node_idx, cursor, limit, output, true)
+    }
+
+    fn fill_directional_neighbors_internal(
+        &self,
+        direction: TraversalDirection,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<Neighbor>,
+        apply_query_visibility: bool,
+    ) -> bool {
+        let source_visible = if apply_query_visibility {
+            self.node_visible(node_idx)
+        } else {
+            self.projection_node_visible(node_idx)
+        };
+        if !source_visible || limit == 0 {
             return true;
         }
         if direction == TraversalDirection::Any {
@@ -1333,7 +1442,13 @@ impl<'a> LayeredNeighbors<'a> {
             let survives_durable = overlay_reinserts || durable_reinserts || !hidden_by_durable;
             let first_occurrence = last_key != Some(next_key);
             if first_occurrence && survives_overlay && survives_durable {
-                if let Some(edge) = selected.filter(|edge| self.node_visible(edge.target)) {
+                if let Some(edge) = selected.filter(|edge| {
+                    if apply_query_visibility {
+                        self.node_visible(edge.target)
+                    } else {
+                        self.projection_node_visible(edge.target)
+                    }
+                }) {
                     output.push(Neighbor {
                         target: edge.target,
                         type_id: edge.type_id,
@@ -3921,6 +4036,100 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn relationship_identity_summary_uses_effective_out_in_and_base_chunk_precedence() {
+        let base = edge_store_from_tuples(6, &[]);
+        let mut chunk = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 6, 1)
+            .expect("base chunk");
+        chunk.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        let mut delete_chunk =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 6, 2)
+                .expect("durable delete");
+        delete_chunk.edge_deletes.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        let mut inbound = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::In, 0, 6, 3)
+            .expect("inbound insert");
+        inbound.edge_inserts.push(SegmentEdge {
+            source: 4,
+            target: 5,
+            type_id: 2,
+            schema_reversed: true,
+            relationship_id: None,
+        });
+        let chunk_refs = [&chunk];
+        let segment_refs = [&delete_chunk, &inbound];
+        let snapshot = LayeredSnapshot::try_build_from_refs(&base, &chunk_refs, &segment_refs)
+            .expect("summarized snapshot");
+        let mut type_one = [false; 256];
+        type_one[1] = true;
+        let mut type_two = [false; 256];
+        type_two[2] = true;
+
+        assert!(!snapshot.has_missing_relationship_identity_for_types(&type_one));
+        assert!(snapshot.has_missing_relationship_identity_for_types(&type_two));
+    }
+
+    #[test]
+    fn relationship_identity_summary_ignores_ambient_transaction_visibility() {
+        tx_delta::clear_for_test();
+        let base = edge_store_from_tuples(3, &[]);
+        let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 3, 1)
+            .expect("durable segment");
+        segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        tx_delta::record_deleted_node(1).expect("ambient transaction tombstone");
+        let snapshot = LayeredSnapshot::try_build_from_refs(&base, &[], &[&segment])
+            .expect("snapshot summary must ignore tx visibility");
+        tx_delta::clear_for_test();
+        let mut active = [false; 256];
+        active[1] = true;
+        assert!(snapshot.has_missing_relationship_identity_for_types(&active));
+    }
+
+    #[test]
+    fn relationship_identity_summary_honors_durable_node_visibility() {
+        let base = edge_store_from_tuples(3, &[]);
+        let mut edge_segment =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 3, 1)
+                .expect("durable edge");
+        edge_segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        let mut node_segment =
+            DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 3, 2)
+                .expect("durable node state");
+        node_segment.node_states.push(SegmentNodeState {
+            node_idx: 1,
+            active: false,
+        });
+        let snapshot =
+            LayeredSnapshot::try_build_from_refs(&base, &[], &[&edge_segment, &node_segment])
+                .expect("snapshot with tombstoned target");
+        let mut active = [false; 256];
+        active[1] = true;
+        assert!(!snapshot.has_missing_relationship_identity_for_types(&active));
     }
 
     #[test]
