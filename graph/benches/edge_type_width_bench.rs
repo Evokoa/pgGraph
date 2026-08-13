@@ -44,6 +44,46 @@ struct EdgeTypeArtifactFixture {
     label_count: u32,
 }
 
+#[derive(Clone, Copy)]
+enum FilterSelectivity {
+    None,
+    One,
+    All,
+}
+
+impl FilterSelectivity {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::One => "one",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Out,
+    In,
+}
+
+impl Direction {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Out => "out",
+            Self::In => "in",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TraversalCase {
+    degree: usize,
+    depth: usize,
+    direction: Direction,
+    filter: FilterSelectivity,
+}
+
 impl EdgeTypeArtifactFixture {
     fn new(edge_count: usize, label_count: u32, width: CandidateWidth) -> Self {
         let maximum_user_id = match width {
@@ -101,6 +141,58 @@ impl EdgeTypeArtifactFixture {
         }
     }
 
+    #[inline]
+    fn decode_at(&self, edge: usize) -> u32 {
+        debug_assert!(edge < EDGE_COUNT);
+        match self.width {
+            CandidateWidth::One => u32::from(self.encoded[edge]),
+            CandidateWidth::Two => {
+                let offset = edge * 2;
+                u32::from(u16::from_le_bytes([
+                    self.encoded[offset],
+                    self.encoded[offset + 1],
+                ]))
+            }
+            CandidateWidth::Four => {
+                let offset = edge * 4;
+                u32::from_le_bytes([
+                    self.encoded[offset],
+                    self.encoded[offset + 1],
+                    self.encoded[offset + 2],
+                    self.encoded[offset + 3],
+                ])
+            }
+        }
+    }
+
+    fn traversal_checksum(&self, case: TraversalCase) -> u64 {
+        let mut checksum = 0_u64;
+        let available_starts = EDGE_COUNT - case.degree + 1;
+        for level in 0..case.depth {
+            let start = (level * case.degree * 17) % available_starts;
+            let cursor = match case.direction {
+                Direction::Out => start,
+                Direction::In => start + case.degree - 1,
+            };
+            for offset in 0..case.degree {
+                let edge = match case.direction {
+                    Direction::Out => cursor + offset,
+                    Direction::In => cursor - offset,
+                };
+                let type_id = self.decode_at(edge);
+                let allowed = match case.filter {
+                    FilterSelectivity::None => true,
+                    FilterSelectivity::One => type_id == 1,
+                    FilterSelectivity::All => (1..=self.label_count).contains(&type_id),
+                };
+                if allowed {
+                    checksum = checksum.wrapping_add(u64::from(type_id));
+                }
+            }
+        }
+        checksum
+    }
+
     fn benchmark_id(&self) -> String {
         format!(
             "{}_{}_labels_{}_artifact_bytes",
@@ -109,6 +201,60 @@ impl EdgeTypeArtifactFixture {
             self.encoded.len()
         )
     }
+}
+
+fn traversal_cases() -> Vec<TraversalCase> {
+    let baseline = TraversalCase {
+        degree: 8,
+        depth: 4,
+        direction: Direction::Out,
+        filter: FilterSelectivity::None,
+    };
+    let mut cases = vec![baseline];
+    cases.extend(
+        [
+            FilterSelectivity::None,
+            FilterSelectivity::One,
+            FilterSelectivity::All,
+        ]
+        .into_iter()
+        .map(|filter| TraversalCase { filter, ..baseline }),
+    );
+    cases.extend(
+        [1, 8, 64, 1_024]
+            .into_iter()
+            .map(|degree| TraversalCase { degree, ..baseline }),
+    );
+    cases.extend(
+        [Direction::Out, Direction::In]
+            .into_iter()
+            .map(|direction| TraversalCase {
+                direction,
+                ..baseline
+            }),
+    );
+    cases.extend(
+        [1, 4, 16]
+            .into_iter()
+            .map(|depth| TraversalCase { depth, ..baseline }),
+    );
+    cases.sort_unstable_by_key(|case| {
+        (
+            case.degree,
+            case.depth,
+            case.direction.label(),
+            case.filter.label(),
+        )
+    });
+    cases.dedup_by_key(|case| {
+        (
+            case.degree,
+            case.depth,
+            case.direction.label(),
+            case.filter.label(),
+        )
+    });
+    cases
 }
 
 fn bench_edge_type_width_candidates(c: &mut Criterion) {
@@ -145,6 +291,34 @@ fn bench_edge_type_width_candidates(c: &mut Criterion) {
         );
     }
     materialization.finish();
+
+    let mut traversal = c.benchmark_group("edge_type_width_traversal");
+    traversal.measurement_time(Duration::from_secs(2));
+    traversal.warm_up_time(Duration::from_secs(1));
+    traversal.sample_size(10);
+    for fixture in &fixtures {
+        for case in traversal_cases() {
+            let examined = case.degree.saturating_mul(case.depth);
+            traversal.throughput(Throughput::Elements(examined as u64));
+            traversal.bench_with_input(
+                BenchmarkId::new(
+                    fixture.benchmark_id(),
+                    format!(
+                        "degree_{}_depth_{}_{}_filter_{}",
+                        case.degree,
+                        case.depth,
+                        case.direction.label(),
+                        case.filter.label()
+                    ),
+                ),
+                &(fixture, case),
+                |b, (fixture, case)| {
+                    b.iter(|| black_box(fixture).traversal_checksum(black_box(*case)))
+                },
+            );
+        }
+    }
+    traversal.finish();
 }
 
 criterion_group!(benches, bench_edge_type_width_candidates);

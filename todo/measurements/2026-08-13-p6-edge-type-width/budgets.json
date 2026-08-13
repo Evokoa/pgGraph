@@ -1,0 +1,21 @@
+{
+  "status": "predeclared-before-measurement",
+  "edge_count": 1000000,
+  "low_cardinality_control": {
+    "labels": 254,
+    "u32_to_u8_decode_median_ratio_max": 4.0,
+    "u32_to_u8_baseline_traversal_median_ratio_max": 2.5,
+    "u32_to_u8_copy_throughput_per_byte_ratio_min": 0.7
+  },
+  "artifact_bytes_per_edge": {
+    "u8": 1,
+    "u16": 2,
+    "u32": 4
+  },
+  "required_dimensions": {
+    "degree": [1, 8, 64, 1024],
+    "depth": [1, 4, 16],
+    "direction": ["out", "in"],
+    "filter_selectivity": ["none", "one", "all"]
+  }
+}

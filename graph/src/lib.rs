@@ -171,6 +171,10 @@ pub mod fuzz_support {
 /// structures. This module is available only to tests and builds that opt into
 /// the `benchmarks` feature; it is not part of the pgrx extension surface.
 #[cfg(any(test, feature = "benchmarks"))]
+#[allow(
+    clippy::expect_used,
+    reason = "benchmark-only fixtures use compile-time-valid v6 IDs and explicit setup assertions"
+)]
 pub mod bench_support {
     use std::collections::{HashMap, HashSet};
 
@@ -348,7 +352,8 @@ pub mod bench_support {
                     segment.edge_inserts.push(SegmentEdge {
                         source,
                         target,
-                        type_id: crate::types::EdgeTypeId::test_v6(1),
+                        type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                            .expect("benchmark fixture type ID fits v6"),
                         schema_reversed: false,
                         relationship_id: None,
                     });
@@ -356,7 +361,8 @@ pub mod bench_support {
                         segment.edge_deletes.push(SegmentEdge {
                             source,
                             target: source + 1,
-                            type_id: crate::types::EdgeTypeId::test_v6(1),
+                            type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                                .expect("benchmark fixture type ID fits v6"),
                             schema_reversed: false,
                             relationship_id: None,
                         });
@@ -389,7 +395,8 @@ pub mod bench_support {
             segment.edge_inserts.push(SegmentEdge {
                 source,
                 target: source.wrapping_add(3) % node_count,
-                type_id: crate::types::EdgeTypeId::test_v6(1),
+                type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                    .expect("benchmark fixture type ID fits v6"),
                 schema_reversed: false,
                 relationship_id: None,
             });
@@ -418,14 +425,16 @@ pub mod bench_support {
             segment.edge_inserts.push(SegmentEdge {
                 source,
                 target,
-                type_id: crate::types::EdgeTypeId::test_v6(1),
+                type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                    .expect("benchmark fixture type ID fits v6"),
                 schema_reversed: false,
                 relationship_id: None,
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source,
                 target,
-                type_id: crate::types::EdgeTypeId::test_v6(1),
+                type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                    .expect("benchmark fixture type ID fits v6"),
                 schema_reversed: false,
                 relationship_id: None,
                 weight: 1,
@@ -441,7 +450,8 @@ pub mod bench_support {
             segment.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target,
-                type_id: crate::types::EdgeTypeId::test_v6(1),
+                type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                    .expect("benchmark fixture type ID fits v6"),
                 schema_reversed: false,
                 relationship_id: None,
             });
@@ -457,7 +467,8 @@ pub mod bench_support {
                 source,
                 vec![(
                     source.wrapping_add(23) % node_count,
-                    crate::types::EdgeTypeId::test_v6(1),
+                    crate::types::EdgeTypeId::from_v6_storage(1)
+                        .expect("benchmark fixture type ID fits v6"),
                     false,
                     None,
                 )],
@@ -466,7 +477,8 @@ pub mod bench_support {
                 source,
                 HashSet::from([(
                     source.wrapping_add(1) % node_count,
-                    crate::types::EdgeTypeId::test_v6(1),
+                    crate::types::EdgeTypeId::from_v6_storage(1)
+                        .expect("benchmark fixture type ID fits v6"),
                     false,
                     None,
                 )]),
@@ -548,7 +560,8 @@ pub mod bench_support {
                 edges.push(RawEdge {
                     source,
                     target: source + 1,
-                    type_id: crate::types::EdgeTypeId::test_v6(1),
+                    type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                        .expect("benchmark fixture type ID fits v6"),
                     weight: None,
                     schema_reversed: false,
                 });
@@ -625,7 +638,8 @@ pub mod bench_support {
                     direction: TraversalDirection::Out,
                     source: idx,
                     target: (idx + 1) % 64,
-                    type_id: crate::types::EdgeTypeId::test_v6(1),
+                    type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                        .expect("benchmark fixture type ID fits v6"),
                     weight: Some(1),
                     relationship_identity: None,
                     table_oid: None,
@@ -727,7 +741,8 @@ pub mod bench_support {
                     .map(|source| RawEdge {
                         source,
                         target: source + 1,
-                        type_id: crate::types::EdgeTypeId::test_v6(1),
+                        type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                            .expect("benchmark fixture type ID fits v6"),
                         weight: Some(1),
                         schema_reversed: false,
                     })
