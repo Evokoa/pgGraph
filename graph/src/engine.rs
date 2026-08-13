@@ -265,6 +265,11 @@ pub(crate) struct ResumableUnweightedPathConfig {
     edge_type_filter: Option<roaring::RoaringBitmap>,
 }
 
+pub(crate) struct ResumableWeightedPathConfig {
+    edge_type_filter: Option<roaring::RoaringBitmap>,
+    layered: bool,
+}
+
 impl Engine {
     fn bfs_projection_epoch(&self) -> bfs::BfsProjectionEpoch {
         let tx = tx_delta::stats();
@@ -548,6 +553,147 @@ impl Engine {
         let truncated = result.truncated;
         let rows = bfs::to_traversal_results(&result, &self.node_store, &self.edge_type_registry)?;
         Ok(TraverseOutcome { rows, truncated })
+    }
+
+    pub(crate) fn resumable_weighted_path_eligible(&self) -> bool {
+        self.built
+            && self.edge_store.has_weights()
+            && !self.has_edge_overlay()
+            && !tx_delta::stats().dirty
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "weighted preparation keeps endpoint coordinates, filters, and governor explicit"
+    )]
+    pub(crate) fn prepare_resumable_dijkstra(
+        &self,
+        source_table_oid: u32,
+        source_id: &str,
+        target_table_oid: u32,
+        target_id: &str,
+        edge_types: Option<&[String]>,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<(ResumableWeightedPathConfig, path_finder::ResumableDijkstra)> {
+        if !self.built {
+            return Err(GraphError::NotBuilt);
+        }
+        if !self.resumable_weighted_path_eligible() {
+            return Err(GraphError::Internal(
+                "resumable weighted path selected for an ineligible projection".into(),
+            ));
+        }
+        let source =
+            self.resolve(source_table_oid, source_id)
+                .ok_or_else(|| GraphError::NodeNotFound {
+                    table: source_table_oid.to_string(),
+                    pk: source_id.to_owned(),
+                })?;
+        let target =
+            self.resolve(target_table_oid, target_id)
+                .ok_or_else(|| GraphError::NodeNotFound {
+                    table: target_table_oid.to_string(),
+                    pk: target_id.to_owned(),
+                })?;
+        let node_count = usize::try_from(self.node_store.node_count()).unwrap_or(usize::MAX);
+        let workspace = node_count
+            .checked_mul(std::mem::size_of::<u64>())
+            .and_then(|bytes| bytes.checked_add(1024 * 1024))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    crate::bfs::RESUMABLE_BFS_PAGE_CAPACITY
+                        * std::mem::size_of::<crate::bfs::BfsAdjacencyCandidate>(),
+                )
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    crate::bfs::RESUMABLE_BFS_PAGE_CAPACITY
+                        * (std::mem::size_of::<crate::projection::neighbors::WeightedNeighbor>()
+                            + std::mem::size_of::<u32>()),
+                )
+            })
+            .ok_or_else(|| GraphError::Internal("weighted path workspace overflowed".into()))?;
+        governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryPaths,
+                crate::resource::ByteCount::from_usize(workspace).ok_or_else(|| {
+                    GraphError::Internal("weighted path workspace does not fit u64".into())
+                })?,
+            )
+            .map_err(crate::safety::resource_limit_error)?
+            .retain_until_governor_drop();
+        let mut machine = path_finder::ResumableDijkstra::try_new(node_count, source, target)?;
+        machine.bind_projection_epoch(self.bfs_projection_epoch());
+        Ok((
+            ResumableWeightedPathConfig {
+                edge_type_filter: self.resolve_edge_type_filter(edge_types)?,
+                layered: self.segment_backed_projection_manifest().is_some(),
+            },
+            machine,
+        ))
+    }
+
+    pub(crate) fn materialize_resumable_dijkstra_batch(
+        &self,
+        machine: &mut path_finder::ResumableDijkstra,
+        config: &ResumableWeightedPathConfig,
+        limits: bfs::BfsCandidateLimits,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<path_finder::ResumablePathMaterialization> {
+        machine.require_projection_epoch(self.bfs_projection_epoch())?;
+        if config.layered {
+            let neighbors = self.layered_neighbors()?.ok_or_else(|| {
+                GraphError::Internal("weighted layered projection disappeared".into())
+            })?;
+            path_finder::materialize_resumable_dijkstra_batch(
+                machine,
+                &self.node_store,
+                &neighbors,
+                &self.relationship_identities,
+                config.edge_type_filter.as_ref(),
+                limits,
+                governor,
+            )
+        } else {
+            path_finder::materialize_resumable_dijkstra_batch(
+                machine,
+                &self.node_store,
+                &self.edge_store,
+                &self.relationship_identities,
+                config.edge_type_filter.as_ref(),
+                limits,
+                governor,
+            )
+        }
+    }
+
+    pub(crate) fn admit_resumable_dijkstra_batch(
+        &self,
+        machine: &mut path_finder::ResumableDijkstra,
+        batch: &bfs::BfsAdjacencyCandidateBatch,
+        verdicts: &[bfs::BfsAdjacencyVerdict],
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<()> {
+        machine.require_projection_epoch(self.bfs_projection_epoch())?;
+        path_finder::apply_resumable_dijkstra_verdicts(
+            machine,
+            batch,
+            verdicts,
+            &self.relationship_identities,
+            &self.node_store,
+            governor,
+        )
+    }
+
+    pub(crate) fn finish_resumable_dijkstra(
+        &self,
+        machine: path_finder::ResumableDijkstra,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<Vec<WeightedPathStep>> {
+        machine.require_projection_epoch(self.bfs_projection_epoch())?;
+        Ok(machine
+            .finish(&self.node_store, &self.edge_type_registry, governor)?
+            .unwrap_or_default())
     }
 
     #[allow(

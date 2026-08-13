@@ -900,41 +900,20 @@ fn weighted_shortest_path(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
+        let steps = weighted_shortest_path_rows_governed(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            None,
+            &governor,
             &query_start.tables,
             &query_start.edges,
-            &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = coordinator.context(&governor);
-        let steps = ENGINE.with(|e| {
-            let eng = e.borrow();
-            eng.weighted_shortest_path_governed_in_context(
-                source_table.to_u32(),
-                source_id,
-                target_table.to_u32(),
-                target_id,
-                &context,
-            )
-            .unwrap_or_else(|err| err.report())
-        });
         acl::check_table_acls(steps.iter().map(|step| step.node_table.0))
             .unwrap_or_else(|err| err.report());
-        let rows = steps
-            .into_iter()
-            .map(|step| {
-                (
-                    step.step,
-                    pgrx::pg_sys::Oid::from_u32(step.node_table.0),
-                    relation_name(step.node_table.0).unwrap_or_else(|err| err.report()),
-                    step.node_id,
-                    step.edge_label,
-                    step.edge_weight.map(i64::from),
-                    u64_to_bigint(step.step_cost).unwrap_or_else(|err| err.report()),
-                    u64_to_bigint(step.total_cost).unwrap_or_else(|err| err.report()),
-                )
-            })
-            .collect::<Vec<_>>();
+        let rows = format_weighted_path_rows(steps, &governor).unwrap_or_else(|err| err.report());
         TableIterator::new(rows)
     })
 }
@@ -970,44 +949,136 @@ fn weighted_shortest_path_typed(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
+        let steps = weighted_shortest_path_rows_governed(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            Some(&edge_types),
+            &governor,
             &query_start.tables,
             &query_start.edges,
-            &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let edge_type_filter = ENGINE
-            .with(|engine| engine.borrow().resolve_edge_type_filter(Some(&edge_types)))
-            .unwrap_or_else(|err| err.report());
-        let context =
-            coordinator.context_with_edge_type_filter(&governor, edge_type_filter.as_ref());
-        let steps = ENGINE.with(|engine| {
-            engine
-                .borrow()
-                .weighted_shortest_path_governed_in_context(
-                    source_table.to_u32(),
-                    source_id,
-                    target_table.to_u32(),
-                    target_id,
-                    &context,
-                )
-                .unwrap_or_else(|err| err.report())
-        });
         acl::check_table_acls(steps.iter().map(|step| step.node_table.0))
             .unwrap_or_else(|err| err.report());
-        TableIterator::new(steps.into_iter().map(|step| {
-            (
-                step.step,
-                pgrx::pg_sys::Oid::from_u32(step.node_table.0),
-                relation_name(step.node_table.0).unwrap_or_else(|err| err.report()),
-                step.node_id,
-                step.edge_label,
-                step.edge_weight.map(i64::from),
-                u64_to_bigint(step.step_cost).unwrap_or_else(|err| err.report()),
-                u64_to_bigint(step.total_cost).unwrap_or_else(|err| err.report()),
-            )
-        }))
+        let rows = format_weighted_path_rows(steps, &governor).unwrap_or_else(|err| err.report());
+        TableIterator::new(rows)
     })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "weighted path routing keeps coordinates, filters, query catalog, and governor explicit"
+)]
+fn weighted_shortest_path_rows_governed(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    edge_types: Option<&[String]>,
+    governor: &crate::resource::ResourceGovernor,
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+) -> safety::GraphResult<Vec<types::WeightedPathStep>> {
+    let mut lazy = crate::sql_visibility::prepare_bfs_visibility(tables, edges)?;
+    let eligible = ENGINE.with(|engine| engine.borrow().resumable_weighted_path_eligible());
+    if crate::sql_visibility::lazy_bfs_strategy_enabled(&lazy) && eligible {
+        crate::sql_visibility::record_selected_visibility_strategy(true);
+        return execute_lazy_weighted_shortest_path(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            edge_types,
+            &mut lazy,
+            tables,
+            edges,
+            governor,
+        );
+    }
+    crate::sql_visibility::record_selected_visibility_strategy(false);
+    let coordinator =
+        crate::sql_visibility::prepare_bfs_eager_fallback(&lazy, tables, edges, governor)?;
+    let edge_type_filter =
+        ENGINE.with(|engine| engine.borrow().resolve_edge_type_filter(edge_types))?;
+    let context = coordinator.context_with_edge_type_filter(governor, edge_type_filter.as_ref());
+    ENGINE.with(|engine| {
+        engine.borrow().weighted_shortest_path_governed_in_context(
+            source_table.to_u32(),
+            source_id,
+            target_table.to_u32(),
+            target_id,
+            &context,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_lazy_weighted_shortest_path(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    edge_types: Option<&[String]>,
+    lazy: &mut crate::visibility::LazyVisibilityCoordinator,
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<types::WeightedPathStep>> {
+    if !prove_lazy_path_source_visible(source_table, source_id, lazy, tables, governor)? {
+        return Ok(Vec::new());
+    }
+    let (config, mut machine) = ENGINE.with(|engine| {
+        engine.borrow().prepare_resumable_dijkstra(
+            source_table.to_u32(),
+            source_id,
+            target_table.to_u32(),
+            target_id,
+            edge_types,
+            governor,
+        )
+    })?;
+    loop {
+        let materialization = ENGINE.with(|engine| {
+            engine.borrow().materialize_resumable_dijkstra_batch(
+                &mut machine,
+                &config,
+                crate::bfs::BfsCandidateLimits {
+                    max_candidates: crate::bfs::RESUMABLE_BFS_PAGE_CAPACITY,
+                    max_key_bytes: RESUMABLE_PATH_KEY_BYTE_LIMIT,
+                },
+                governor,
+            )
+        })?;
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::resource::check_postgres_interrupts()
+        }));
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryPaths)
+            .map_err(crate::safety::resource_limit_error)?;
+        match materialization {
+            crate::path_finder::ResumablePathMaterialization::Batch(batch) => {
+                let verdicts = crate::sql_visibility::resolve_bfs_visibility_batch(
+                    lazy, &batch, tables, edges, governor,
+                )?;
+                ENGINE.with(|engine| {
+                    engine.borrow().admit_resumable_dijkstra_batch(
+                        &mut machine,
+                        &batch,
+                        &verdicts,
+                        governor,
+                    )
+                })?;
+                if machine.is_complete() {
+                    break;
+                }
+            }
+            crate::path_finder::ResumablePathMaterialization::Progress => continue,
+            crate::path_finder::ResumablePathMaterialization::Complete => break,
+        }
+    }
+    ENGINE.with(|engine| engine.borrow().finish_resumable_dijkstra(machine, governor))
 }
 
 fn u64_to_bigint(value: u64) -> safety::GraphResult<i64> {
@@ -1017,6 +1088,56 @@ fn u64_to_bigint(value: u64) -> safety::GraphResult<i64> {
             value
         ))
     })
+}
+
+type WeightedPathSqlRow = (
+    i32,
+    pgrx::pg_sys::Oid,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    i64,
+    i64,
+);
+
+fn format_weighted_path_rows(
+    steps: Vec<types::WeightedPathStep>,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<WeightedPathSqlRow>> {
+    // PostgreSQL identifiers are bounded by NAMEDATALEN. The step-owned node
+    // and label strings are moved, so this reservation covers only the tuple
+    // vector plus newly allocated relation names while both vectors are live.
+    let bytes = steps
+        .len()
+        .checked_mul(std::mem::size_of::<WeightedPathSqlRow>() + 64)
+        .ok_or_else(|| safety::GraphError::Internal("weighted SQL row size overflowed".into()))?;
+    governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::QueryPaths,
+            crate::resource::ByteCount::from_usize(bytes).ok_or_else(|| {
+                safety::GraphError::Internal("weighted SQL row size does not fit u64".into())
+            })?,
+        )
+        .map_err(crate::safety::resource_limit_error)?
+        .retain_until_governor_drop();
+    let mut rows = Vec::new();
+    rows.try_reserve(steps.len()).map_err(|_| {
+        safety::GraphError::Internal("unable to allocate weighted SQL result rows".into())
+    })?;
+    for step in steps {
+        rows.push((
+            step.step,
+            pgrx::pg_sys::Oid::from_u32(step.node_table.0),
+            crate::sql_traversal::relation_name_with_rust_unwind(step.node_table.0)?,
+            step.node_id,
+            step.edge_label,
+            step.edge_weight.map(i64::from),
+            u64_to_bigint(step.step_cost)?,
+            u64_to_bigint(step.total_cost)?,
+        ));
+    }
+    Ok(rows)
 }
 
 struct DirectNodeMatch {

@@ -695,6 +695,17 @@ pub(crate) trait WeightedNeighborSource {
 
     /// Return weighted neighbors for `node_idx`.
     fn weighted_neighbors(&self, node_idx: u32) -> Vec<WeightedNeighbor>;
+
+    /// Fill at most `limit` examined weighted adjacency rows and advance an
+    /// owned cursor. Returns true when the node's weighted adjacency is fully
+    /// exhausted.
+    fn fill_weighted_neighbors(
+        &self,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<WeightedNeighbor>,
+    ) -> bool;
 }
 
 impl WeightedNeighborSource for EdgeStore {
@@ -725,6 +736,40 @@ impl WeightedNeighborSource for EdgeStore {
                 },
             )
             .collect()
+    }
+
+    fn fill_weighted_neighbors(
+        &self,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<WeightedNeighbor>,
+    ) -> bool {
+        let (targets, type_ids, schema_reversed, weights) =
+            self.neighbors_weighted_with_schema(node_idx);
+        let (_, _, _, relationship_ids) = self.neighbors_with_schema_and_relationship_ids(node_idx);
+        let mut position = match cursor {
+            OwnedNeighborCursor::Csr { pos } => *pos,
+            _ => 0,
+        };
+        let end = position.saturating_add(limit).min(targets.len());
+        while position < end {
+            if let Some(&weight) = weights.get(position) {
+                output.push(WeightedNeighbor {
+                    target: targets[position],
+                    type_id: type_ids[position],
+                    weight,
+                    schema_reversed: schema_reversed[position] != 0,
+                    relationship_id: relationship_ids
+                        .get(position)
+                        .copied()
+                        .filter(|&id| id != crate::edge_store::NO_RELATIONSHIP_ID),
+                });
+            }
+            position += 1;
+        }
+        *cursor = OwnedNeighborCursor::Csr { pos: position };
+        position >= targets.len()
     }
 }
 

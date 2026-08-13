@@ -280,11 +280,11 @@ fn targeted_surfaces_share_one_resolver_while_non_bfs_algorithms_stay_eager() {
             && shortest.contains("prepare_bfs_eager_fallback"),
         "P4.4 must route unweighted paths through the later resumable policy oracle"
     );
-    let weighted = function_body(&facade, "fn weighted_shortest_path");
+    let weighted = function_body(&facade, "fn weighted_shortest_path_rows_governed");
     assert!(
-        weighted.contains("prepare_eager_visibility")
-            && !weighted.contains("execute_lazy_shortest_path_rows"),
-        "weighted paths remain on the eager oracle until P4.5"
+        weighted.contains("execute_lazy_weighted_shortest_path")
+            && weighted.contains("prepare_bfs_eager_fallback"),
+        "P4.5 must route weighted paths through the later resumable policy oracle"
     );
 }
 

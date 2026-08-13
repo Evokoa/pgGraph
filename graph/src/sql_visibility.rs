@@ -163,6 +163,7 @@ struct BfsVisibilityPreparationFrame {
     policy_tables: HashSet<u32>,
     mappings: HashSet<u64>,
     edge_types: HashSet<u8>,
+    has_dynamic_relationship_mapping: bool,
 }
 
 struct LazyVisibilityResolutionFrame {
@@ -351,7 +352,7 @@ pub(crate) fn prepare_eager_visibility(
     let active_mapping_ids = active_edges
         .iter()
         .map(|edge| edge.mapping_id)
-        .collect::<BTreeSet<_>>();
+        .collect::<HashSet<_>>();
     let (identity_slots, projected_nodes, relationship_rls_edge_types) = ENGINE.with(|engine| {
         let engine = engine.borrow();
         let mut relationship_rls_edge_types = RoaringBitmap::new();
@@ -370,6 +371,13 @@ pub(crate) fn prepare_eager_visibility(
                 .insert(u32::try_from(edge_type).map_err(|_| {
                     GraphError::Internal("edge type index exceeds u32".to_string())
                 })?);
+        }
+        if active_edges.iter().any(|edge| edge.label_column.is_some()) {
+            for edge_type in 1..engine.edge_type_registry.len() {
+                relationship_rls_edge_types.insert(u32::try_from(edge_type).map_err(|_| {
+                    GraphError::Internal("edge type index exceeds u32".to_string())
+                })?);
+            }
         }
         if !active_edges.is_empty()
             && (force_missing_relationship_identity_for_test()
@@ -638,6 +646,7 @@ pub(crate) fn prepare_bfs_visibility(
                             })?;
                             frame.mappings.insert(edge.mapping_id);
                             frame.edge_types.insert(edge_type);
+                            frame.has_dynamic_relationship_mapping |= edge.label_column.is_some();
                             Ok::<_, GraphError>(())
                         })?;
                     }
@@ -671,8 +680,20 @@ pub(crate) fn prepare_bfs_visibility(
                 node_tables,
                 policy_tables,
                 mappings,
-                edge_types,
+                mut edge_types,
+                has_dynamic_relationship_mapping,
             } = *frame;
+            if has_dynamic_relationship_mapping && !mappings.is_empty() {
+                let edge_type_count =
+                    ENGINE.with(|engine| engine.borrow().edge_type_registry.len());
+                for edge_type in 1..edge_type_count {
+                    edge_types.insert(
+                        u8::try_from(edge_type).map_err(|_| {
+                            GraphError::Internal("edge type index exceeds u8".into())
+                        })?,
+                    );
+                }
+            }
             let mode = if node_tables.is_empty() && mappings.is_empty() {
                 LazyVisibilityMode::Unrestricted
             } else {

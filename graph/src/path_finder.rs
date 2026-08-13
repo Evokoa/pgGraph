@@ -20,7 +20,7 @@ use crate::node_store::NodeStore;
 #[cfg(test)]
 use crate::projection::neighbors::CsrNeighbors;
 use crate::projection::neighbors::{
-    Neighbor, NeighborSource, OwnedNeighborCursor, WeightedNeighborSource,
+    Neighbor, NeighborSource, OwnedNeighborCursor, WeightedNeighbor, WeightedNeighborSource,
 };
 use crate::resource::{ResourceGovernor, ResourcePhase, WorkUnits};
 use crate::safety::{GraphError, GraphResult};
@@ -385,7 +385,7 @@ pub(crate) fn materialize_single_direction_path_batch(
                 &candidates,
                 &mut key_bytes,
                 neighbor,
-                &mut machine.pending_adjacency,
+                Some(&mut machine.pending_adjacency),
                 limits,
                 node_store,
                 relationships,
@@ -618,7 +618,7 @@ pub(crate) fn materialize_bidirectional_path_batch(
                 &candidates,
                 &mut key_bytes,
                 neighbor,
-                &mut machine.pending_adjacency,
+                Some(&mut machine.pending_adjacency),
                 limits,
                 node_store,
                 relationships,
@@ -957,6 +957,13 @@ fn reserve_path_page_workspace(
                     .checked_mul(std::mem::size_of::<Neighbor>())?,
             )
         })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                limits
+                    .max_candidates
+                    .checked_mul(std::mem::size_of::<WeightedNeighbor>())?,
+            )
+        })
         .and_then(|bytes| bytes.checked_add(limits.max_key_bytes))
         .ok_or_else(|| GraphError::InvalidFilter {
             reason: "path visibility candidate allocation estimate overflow".into(),
@@ -1030,7 +1037,7 @@ fn path_candidate_fits(
     candidates: &[BfsAdjacencyCandidate],
     key_bytes: &mut usize,
     neighbor: Neighbor,
-    pending: &mut VecDeque<Neighbor>,
+    pending: Option<&mut VecDeque<Neighbor>>,
     limits: BfsCandidateLimits,
     node_store: &NodeStore,
     relationships: &crate::relationship_identity_store::RelationshipIdentityStore,
@@ -1067,7 +1074,9 @@ fn path_candidate_fits(
                 reason: "one path visibility candidate exceeds the key-byte limit".into(),
             });
         }
-        pending.push_front(neighbor);
+        if let Some(pending) = pending {
+            pending.push_front(neighbor);
+        }
         return Ok(false);
     }
     *key_bytes = next_bytes;
@@ -1338,6 +1347,114 @@ struct WeightedParentStep {
     parent: u32,
     edge_type: u8,
     edge_weight: u32,
+}
+
+/// Owned Dijkstra state that yields bounded adjacency candidates for caller
+/// visibility resolution without retaining a projection borrow.
+#[derive(Debug)]
+pub(crate) struct ResumableDijkstra {
+    source: u32,
+    target: u32,
+    dist: Vec<u64>,
+    parent: HashMap<u32, WeightedParentStep>,
+    heap: BinaryHeap<Reverse<(u64, u32)>>,
+    active: Option<(u64, u32)>,
+    adjacency_cursor: OwnedNeighborCursor,
+    pending_adjacency: VecDeque<WeightedNeighbor>,
+    pending_adjacency_exhausts_node: bool,
+    endpoint_cursor: usize,
+    source_visible: Option<bool>,
+    target_visible: Option<bool>,
+    state: ResumablePathState,
+    pending_kind: Option<PendingPathBatch>,
+    pending_batch: Option<(Option<u32>, usize)>,
+    pending_weights: Vec<u32>,
+    next_sequence: u32,
+    projection_epoch: Option<BfsProjectionEpoch>,
+}
+
+impl ResumableDijkstra {
+    pub(crate) fn try_new(node_count: usize, source: u32, target: u32) -> GraphResult<Self> {
+        if source as usize >= node_count || target as usize >= node_count {
+            return Err(GraphError::Internal(
+                "resumable weighted path received an invalid endpoint index".into(),
+            ));
+        }
+        let mut dist = Vec::new();
+        dist.try_reserve_exact(node_count)
+            .map_err(path_allocation_error)?;
+        dist.resize(node_count, u64::MAX);
+        dist[source as usize] = 0;
+        let mut parent = HashMap::new();
+        parent.try_reserve(1).map_err(path_allocation_error)?;
+        parent.insert(
+            source,
+            WeightedParentStep {
+                parent: source,
+                edge_type: 0,
+                edge_weight: 0,
+            },
+        );
+        let mut heap = BinaryHeap::new();
+        heap.try_reserve(1).map_err(path_allocation_error)?;
+        heap.push(Reverse((0, source)));
+        Ok(Self {
+            source,
+            target,
+            dist,
+            parent,
+            heap,
+            active: None,
+            adjacency_cursor: OwnedNeighborCursor::default(),
+            pending_adjacency: VecDeque::new(),
+            pending_adjacency_exhausts_node: false,
+            endpoint_cursor: 0,
+            source_visible: None,
+            target_visible: None,
+            state: ResumablePathState::NeedEndpoints,
+            pending_kind: None,
+            pending_batch: None,
+            pending_weights: Vec::new(),
+            next_sequence: 0,
+            projection_epoch: None,
+        })
+    }
+
+    pub(crate) fn bind_projection_epoch(&mut self, epoch: BfsProjectionEpoch) {
+        self.projection_epoch = Some(epoch);
+    }
+
+    pub(crate) fn require_projection_epoch(&self, actual: BfsProjectionEpoch) -> GraphResult<()> {
+        require_path_epoch(self.projection_epoch, actual)
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.state == ResumablePathState::Complete
+    }
+
+    pub(crate) fn finish(
+        self,
+        node_store: &NodeStore,
+        edge_type_registry: &[String],
+        governor: &ResourceGovernor,
+    ) -> GraphResult<Option<Vec<WeightedPathStep>>> {
+        if self.source_visible != Some(true)
+            || self.target_visible != Some(true)
+            || self.dist[self.target as usize] == u64::MAX
+        {
+            return Ok(None);
+        }
+        weighted_path_from_parents(
+            node_store,
+            self.source,
+            self.target,
+            &self.dist,
+            &self.parent,
+            edge_type_registry,
+            governor,
+        )
+        .map(Some)
+    }
 }
 
 /// Find the shortest unweighted path between two nodes using bidirectional BFS.
@@ -1805,6 +1922,392 @@ fn single_direction_bfs(
     }
 
     None // No path found
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "weighted paging keeps search state, identities, filtering, and resource bounds explicit"
+)]
+pub(crate) fn materialize_resumable_dijkstra_batch(
+    machine: &mut ResumableDijkstra,
+    node_store: &NodeStore,
+    neighbors: &(impl WeightedNeighborSource + ?Sized),
+    relationships: &crate::relationship_identity_store::RelationshipIdentityStore,
+    edge_type_filter: Option<&RoaringBitmap>,
+    limits: BfsCandidateLimits,
+    governor: &ResourceGovernor,
+) -> GraphResult<ResumablePathMaterialization> {
+    validate_path_materialization(machine.state, limits)?;
+    let _page_lease = reserve_path_page_workspace(governor, limits)?;
+    if machine.state == ResumablePathState::NeedEndpoints {
+        return materialize_endpoint_batch(
+            machine.source,
+            machine.target,
+            &mut machine.endpoint_cursor,
+            &mut machine.next_sequence,
+            &mut machine.pending_batch,
+            &mut machine.pending_kind,
+            &mut machine.state,
+            node_store,
+            limits,
+        );
+    }
+
+    let mut progress_steps = 0usize;
+    loop {
+        let (cost, current) = if let Some(active) = machine.active {
+            active
+        } else {
+            let Some(Reverse((cost, current))) = machine.heap.pop() else {
+                machine.state = ResumablePathState::Complete;
+                return Ok(ResumablePathMaterialization::Complete);
+            };
+            progress_steps = progress_steps.saturating_add(1);
+            if cost > machine.dist[current as usize] {
+                if progress_steps >= limits.max_candidates {
+                    return Ok(ResumablePathMaterialization::Progress);
+                }
+                continue;
+            }
+            if current == machine.target {
+                machine.state = ResumablePathState::Complete;
+                return Ok(ResumablePathMaterialization::Complete);
+            }
+            machine.active = Some((cost, current));
+            machine.adjacency_cursor = OwnedNeighborCursor::default();
+            (cost, current)
+        };
+        if machine.pending_adjacency.is_empty() {
+            let mut page = Vec::new();
+            page.try_reserve(limits.max_candidates)
+                .map_err(path_allocation_error)?;
+            machine.pending_adjacency_exhausts_node = neighbors.fill_weighted_neighbors(
+                current,
+                &mut machine.adjacency_cursor,
+                limits.max_candidates,
+                &mut page,
+            );
+            machine
+                .pending_adjacency
+                .try_reserve(page.len())
+                .map_err(path_allocation_error)?;
+            machine.pending_adjacency.extend(page);
+        }
+        if machine.pending_adjacency.is_empty() {
+            if machine.pending_adjacency_exhausts_node {
+                machine.active = None;
+            }
+            return Ok(ResumablePathMaterialization::Progress);
+        }
+        if machine.pending_weights.capacity() < machine.pending_adjacency.len() {
+            machine
+                .pending_weights
+                .try_reserve(machine.pending_adjacency.len() - machine.pending_weights.capacity())
+                .map_err(path_allocation_error)?;
+        }
+        machine.pending_weights.clear();
+        let mut candidates = path_candidate_vec(limits)?;
+        let mut key_bytes = 0usize;
+        while let Some(weighted_neighbor) = machine.pending_adjacency.front().copied() {
+            let neighbor = Neighbor {
+                target: weighted_neighbor.target,
+                type_id: weighted_neighbor.type_id,
+                schema_reversed: weighted_neighbor.schema_reversed,
+                relationship_id: weighted_neighbor.relationship_id,
+            };
+            if edge_type_filter.is_some_and(|allowed| !allowed.contains(neighbor.type_id as u32)) {
+                consume_path_work_without_interrupt(governor)?;
+                machine.pending_adjacency.pop_front();
+                continue;
+            }
+            if !path_candidate_fits(
+                &candidates,
+                &mut key_bytes,
+                neighbor,
+                None,
+                limits,
+                node_store,
+                relationships,
+            )? {
+                break;
+            }
+            let candidate = path_candidate(
+                machine.next_sequence,
+                current,
+                0,
+                neighbor,
+                node_store,
+                relationships,
+            )?;
+            candidates.push(candidate);
+            machine.pending_weights.push(weighted_neighbor.weight);
+            consume_path_work_without_interrupt(governor)?;
+            machine.next_sequence = next_path_sequence(machine.next_sequence)?;
+            machine.pending_adjacency.pop_front();
+        }
+        let exhausted =
+            machine.pending_adjacency.is_empty() && machine.pending_adjacency_exhausts_node;
+        if exhausted {
+            machine.active = None;
+        }
+        if candidates.is_empty() {
+            return Ok(ResumablePathMaterialization::Progress);
+        }
+        let _ = cost;
+        return finish_path_batch(
+            candidates,
+            exhausted,
+            limits,
+            &mut machine.pending_batch,
+            &mut machine.pending_kind,
+            &mut machine.state,
+        );
+    }
+}
+
+pub(crate) fn apply_resumable_dijkstra_verdicts(
+    machine: &mut ResumableDijkstra,
+    batch: &BfsAdjacencyCandidateBatch,
+    verdicts: &[BfsAdjacencyVerdict],
+    relationships: &crate::relationship_identity_store::RelationshipIdentityStore,
+    node_store: &NodeStore,
+    governor: &ResourceGovernor,
+) -> GraphResult<()> {
+    let pending_kind = validate_path_verdicts(
+        machine.state,
+        machine.pending_batch,
+        machine.pending_kind,
+        batch,
+        verdicts,
+    )?;
+    machine.pending_kind = None;
+    match pending_kind {
+        PendingPathBatch::Endpoints => {
+            apply_endpoint_verdicts(
+                machine.source,
+                machine.target,
+                batch,
+                verdicts,
+                &mut machine.source_visible,
+                &mut machine.target_visible,
+            );
+            if machine.endpoint_cursor < endpoint_count(machine.source, machine.target) {
+                machine.state = ResumablePathState::NeedEndpoints;
+            } else if machine.source_visible == Some(false) || machine.target_visible == Some(false)
+            {
+                machine.state = ResumablePathState::Complete;
+            } else if machine.source_visible == Some(true) && machine.target_visible == Some(true) {
+                machine.state = ResumablePathState::NeedCandidates;
+            }
+        }
+        PendingPathBatch::Adjacency => {
+            let (cost, current) = machine
+                .active
+                .or_else(|| {
+                    batch.candidates.first().map(|candidate| {
+                        (
+                            machine.dist[candidate.parent_node as usize],
+                            candidate.parent_node,
+                        )
+                    })
+                })
+                .ok_or_else(|| {
+                    GraphError::Internal("weighted batch lost its active heap node".into())
+                })?;
+            if machine.pending_weights.len() != batch.candidates.len() {
+                return Err(GraphError::Internal(
+                    "weighted batch lost its relaxation metadata".into(),
+                ));
+            }
+            for ((candidate, verdict), &weight) in batch
+                .candidates
+                .iter()
+                .zip(verdicts)
+                .zip(&machine.pending_weights)
+            {
+                if !verdict.visible()
+                    || !node_store.is_active(candidate.target_node)
+                    || crate::projection::tx_delta::node_deleted(candidate.target_node)
+                {
+                    continue;
+                }
+                if candidate.relationship_id.is_some_and(|relationship_id| {
+                    path_relationship_identity(
+                        relationships,
+                        relationship_id,
+                        |mapping_id, source_key| {
+                            candidate.relationship_mapping_id == Some(mapping_id)
+                                && candidate.relationship_source_key.as_deref() == Some(source_key)
+                        },
+                    ) != Some(true)
+                }) {
+                    return Err(GraphError::Internal(
+                        "weighted candidate identity changed across visibility resolution".into(),
+                    ));
+                }
+                let Some(new_cost) = cost.checked_add(u64::from(weight)) else {
+                    continue;
+                };
+                if new_cost < machine.dist[candidate.target_node as usize] {
+                    reserve_weighted_state_growth(
+                        governor,
+                        &mut machine.parent,
+                        &mut machine.heap,
+                    )?;
+                    machine.dist[candidate.target_node as usize] = new_cost;
+                    machine.parent.insert(
+                        candidate.target_node,
+                        WeightedParentStep {
+                            parent: current,
+                            edge_type: candidate.edge_type,
+                            edge_weight: weight,
+                        },
+                    );
+                    machine
+                        .heap
+                        .push(Reverse((new_cost, candidate.target_node)));
+                }
+            }
+            machine.pending_weights.clear();
+            machine.state = ResumablePathState::NeedCandidates;
+        }
+    }
+    machine.pending_batch = None;
+    Ok(())
+}
+
+fn reserve_weighted_state_growth(
+    governor: &ResourceGovernor,
+    parent: &mut HashMap<u32, WeightedParentStep>,
+    heap: &mut BinaryHeap<Reverse<(u64, u32)>>,
+) -> GraphResult<()> {
+    governor
+        .reserve_memory(
+            ResourcePhase::QueryPaths,
+            crate::resource::ByteCount::from_bytes(PATH_STATE_BYTES_PER_VISIT as u64),
+        )
+        .map_err(crate::safety::resource_limit_error)?
+        .retain_until_governor_drop();
+    parent.try_reserve(1).map_err(path_allocation_error)?;
+    heap.try_reserve(1).map_err(path_allocation_error)?;
+    Ok(())
+}
+
+fn weighted_path_from_parents(
+    node_store: &NodeStore,
+    source: u32,
+    target: u32,
+    dist: &[u64],
+    parent: &HashMap<u32, WeightedParentStep>,
+    edge_type_registry: &[String],
+    governor: &ResourceGovernor,
+) -> GraphResult<Vec<WeightedPathStep>> {
+    let total_cost = dist[target as usize];
+    let mut node_count = 0usize;
+    let mut string_bytes = 0usize;
+    let mut current = target;
+    loop {
+        node_count = node_count
+            .checked_add(1)
+            .ok_or_else(|| GraphError::Internal("weighted path length overflowed".into()))?;
+        let node_key = node_store
+            .primary_key(current)
+            .ok_or_else(|| GraphError::CorruptFile {
+                reason: format!("weighted path node {current} has no source identity"),
+            })?;
+        string_bytes = string_bytes
+            .checked_add(node_key.len())
+            .ok_or_else(|| GraphError::Internal("weighted path output size overflowed".into()))?;
+        if current != source {
+            let edge_type = parent
+                .get(&current)
+                .map(|parent| parent.edge_type)
+                .ok_or_else(|| {
+                    GraphError::Internal("weighted path parent chain is incomplete".into())
+                })?;
+            string_bytes = string_bytes
+                .checked_add(
+                    edge_type_registry
+                        .get(edge_type as usize)
+                        .map_or_else(|| "type_255".len(), String::len),
+                )
+                .ok_or_else(|| {
+                    GraphError::Internal("weighted path output size overflowed".into())
+                })?;
+        }
+        if current == source {
+            break;
+        }
+        current = parent
+            .get(&current)
+            .ok_or_else(|| GraphError::Internal("weighted path parent chain is incomplete".into()))?
+            .parent;
+    }
+    let output_bytes = node_count
+        .checked_mul(std::mem::size_of::<u32>() + std::mem::size_of::<WeightedPathStep>())
+        .and_then(|bytes| bytes.checked_add(string_bytes))
+        .ok_or_else(|| GraphError::Internal("weighted path output size overflowed".into()))?;
+    governor
+        .reserve_memory(
+            ResourcePhase::QueryPaths,
+            crate::resource::ByteCount::from_usize(output_bytes).ok_or_else(|| {
+                GraphError::Internal("weighted path output size does not fit u64".into())
+            })?,
+        )
+        .map_err(crate::safety::resource_limit_error)?
+        .retain_until_governor_drop();
+    let mut nodes = Vec::new();
+    nodes
+        .try_reserve(node_count)
+        .map_err(path_allocation_error)?;
+    current = target;
+    loop {
+        nodes.push(current);
+        if current == source {
+            break;
+        }
+        current = parent
+            .get(&current)
+            .ok_or_else(|| GraphError::Internal("weighted path parent chain is incomplete".into()))?
+            .parent;
+    }
+    nodes.reverse();
+    let mut output = Vec::new();
+    output
+        .try_reserve(nodes.len())
+        .map_err(path_allocation_error)?;
+    for (step, node) in nodes.into_iter().enumerate() {
+        let parent_step = parent.get(&node).copied().unwrap_or(WeightedParentStep {
+            parent: node,
+            edge_type: 0,
+            edge_weight: 0,
+        });
+        output.push(WeightedPathStep {
+            step: i32::try_from(step)
+                .map_err(|_| GraphError::Internal("weighted path step count exceeds i32".into()))?,
+            node_table: TableOid(node_store.table_oid(node).ok_or_else(|| {
+                GraphError::CorruptFile {
+                    reason: format!("weighted path node {node} has no table identity"),
+                }
+            })?),
+            node_id: node_store
+                .primary_key(node)
+                .ok_or_else(|| GraphError::CorruptFile {
+                    reason: format!("weighted path node {node} has no source identity"),
+                })?
+                .to_owned(),
+            edge_label: (step != 0).then(|| {
+                edge_type_registry
+                    .get(parent_step.edge_type as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("type_{}", parent_step.edge_type))
+            }),
+            edge_weight: (step != 0).then_some(parent_step.edge_weight),
+            step_cost: dist[node as usize],
+            total_cost,
+        });
+    }
+    Ok(output)
 }
 
 /// Dijkstra's algorithm for weighted shortest path.
@@ -2647,7 +3150,7 @@ mod tests {
                 schema_reversed: false,
                 relationship_id: None,
             },
-            &mut pending,
+            Some(&mut pending),
             limits,
             &oversized_node,
             &crate::relationship_identity_store::RelationshipIdentityStore::default(),
@@ -2683,7 +3186,7 @@ mod tests {
                 schema_reversed: false,
                 relationship_id: Some(1),
             },
-            &mut pending,
+            Some(&mut pending),
             limits,
             &nodes,
             &relationships,
@@ -3387,6 +3890,504 @@ mod tests {
             vec!["A", "B", "C"]
         );
         assert_eq!(path.last().unwrap().total_cost, u64::from(u32::MAX));
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "weighted differential driver keeps endpoints, masks, and page size explicit"
+    )]
+    fn run_resumable_dijkstra(
+        nodes: &NodeStore,
+        edges: &EdgeStore,
+        source: u32,
+        target: u32,
+        edge_filter: Option<&RoaringBitmap>,
+        hidden_nodes: &RoaringBitmap,
+        hidden_relationships: &RoaringBitmap,
+        page_size: usize,
+    ) -> GraphResult<Option<Vec<WeightedPathStep>>> {
+        let governor = path_governor(100_000);
+        let relationships =
+            crate::relationship_identity_store::RelationshipIdentityStore::default();
+        let mut machine = ResumableDijkstra::try_new(nodes.node_count() as usize, source, target)?;
+        loop {
+            match materialize_resumable_dijkstra_batch(
+                &mut machine,
+                nodes,
+                edges,
+                &relationships,
+                edge_filter,
+                candidate_limits(page_size),
+                &governor,
+            )? {
+                ResumablePathMaterialization::Batch(batch) => {
+                    let verdicts = candidate_verdicts(&batch, hidden_nodes, hidden_relationships);
+                    apply_resumable_dijkstra_verdicts(
+                        &mut machine,
+                        &batch,
+                        &verdicts,
+                        &relationships,
+                        nodes,
+                        &governor,
+                    )?;
+                }
+                ResumablePathMaterialization::Progress => {}
+                ResumablePathMaterialization::Complete => break,
+            }
+            if machine.is_complete() {
+                break;
+            }
+        }
+        machine.finish(nodes, &["".into(), "route".into()], &governor)
+    }
+
+    #[test]
+    fn resumable_dijkstra_matches_eager_heap_ties_stale_entries_and_target_pop() {
+        let mut nodes = NodeStore::new();
+        for id in ["s", "a", "b", "t"] {
+            nodes.add_node(100, id.into());
+        }
+        let edges = EdgeStore::from_edges(
+            4,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 3,
+                    type_id: 1,
+                    weight: Some(10),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: Some(2),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: 1,
+                    weight: Some(2),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 1,
+                    target: 3,
+                    type_id: 1,
+                    weight: Some(2),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 2,
+                    target: 3,
+                    type_id: 1,
+                    weight: Some(2),
+                    schema_reversed: false,
+                },
+            ],
+            true,
+        );
+        let eager = weighted_shortest_path(&nodes, &edges, 0, 3, &["".into(), "route".into()]);
+        for page_size in [1, 2, 4] {
+            let lazy = run_resumable_dijkstra(
+                &nodes,
+                &edges,
+                0,
+                3,
+                None,
+                &RoaringBitmap::new(),
+                &RoaringBitmap::new(),
+                page_size,
+            )
+            .unwrap();
+            assert_eq!(lazy, eager);
+        }
+    }
+
+    #[test]
+    fn resumable_dijkstra_hidden_identity_endpoint_is_fail_closed() {
+        let mut nodes = NodeStore::new();
+        nodes.add_node(100, "s".into());
+        let edges = EdgeStore::from_edges(1, Vec::new(), true);
+        let mut hidden = RoaringBitmap::new();
+        hidden.insert(0);
+        assert_eq!(
+            run_resumable_dijkstra(
+                &nodes,
+                &edges,
+                0,
+                0,
+                None,
+                &hidden,
+                &RoaringBitmap::new(),
+                1,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn resumable_dijkstra_matches_eager_generated_visibility_and_weights() {
+        let mut nodes = NodeStore::new();
+        for id in ["s", "cheap", "visible", "t"] {
+            nodes.add_node(100, id.into());
+        }
+        let edges = EdgeStore::from_edges(
+            4,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 1,
+                    target: 3,
+                    type_id: 1,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: 1,
+                    weight: Some(3),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 2,
+                    target: 3,
+                    type_id: 1,
+                    weight: Some(3),
+                    schema_reversed: false,
+                },
+            ],
+            true,
+        );
+        for hidden_mask in 0u32..4 {
+            let mut hidden = RoaringBitmap::new();
+            if hidden_mask & 1 != 0 {
+                hidden.insert(1);
+            }
+            if hidden_mask & 2 != 0 {
+                hidden.insert(2);
+            }
+            let baseline = run_resumable_dijkstra(
+                &nodes,
+                &edges,
+                0,
+                3,
+                None,
+                &hidden,
+                &RoaringBitmap::new(),
+                64,
+            )
+            .unwrap();
+            for page_size in [1, 2, 3] {
+                assert_eq!(
+                    run_resumable_dijkstra(
+                        &nodes,
+                        &edges,
+                        0,
+                        3,
+                        None,
+                        &hidden,
+                        &RoaringBitmap::new(),
+                        page_size,
+                    )
+                    .unwrap(),
+                    baseline,
+                    "visibility mask {hidden_mask} diverged at page size {page_size}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resumable_dijkstra_preserves_weighted_step_metadata_and_edge_type_filters() {
+        let mut nodes = NodeStore::new();
+        for id in ["s", "a", "b", "t"] {
+            nodes.add_node(100, id.into());
+        }
+        let edges = EdgeStore::from_edges(
+            4,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 1,
+                    target: 3,
+                    type_id: 1,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: 2,
+                    weight: Some(3),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 2,
+                    target: 3,
+                    type_id: 2,
+                    weight: Some(3),
+                    schema_reversed: false,
+                },
+            ],
+            true,
+        );
+        let mut allowed = RoaringBitmap::new();
+        allowed.insert(2);
+        let result = run_resumable_dijkstra(
+            &nodes,
+            &edges,
+            0,
+            3,
+            Some(&allowed),
+            &RoaringBitmap::new(),
+            &RoaringBitmap::new(),
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["s", "b", "t"]
+        );
+        assert_eq!(
+            result
+                .iter()
+                .map(|step| step.edge_weight)
+                .collect::<Vec<_>>(),
+            [None, Some(3), Some(3)]
+        );
+        assert_eq!(result.last().map(|step| step.total_cost), Some(6));
+    }
+
+    #[test]
+    fn resumable_dijkstra_pages_one_popped_node_at_a_time() {
+        let mut nodes = NodeStore::new();
+        for id in ["s", "a", "b", "c", "t"] {
+            nodes.add_node(100, id.into());
+        }
+        let edges = EdgeStore::from_edges(
+            5,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: 1,
+                    weight: Some(2),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 3,
+                    type_id: 1,
+                    weight: Some(3),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 3,
+                    target: 4,
+                    type_id: 1,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+            ],
+            true,
+        );
+        let expected = weighted_shortest_path(&nodes, &edges, 0, 4, &["".into(), "route".into()]);
+        let actual = run_resumable_dijkstra(
+            &nodes,
+            &edges,
+            0,
+            4,
+            None,
+            &RoaringBitmap::new(),
+            &RoaringBitmap::new(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn resumable_dijkstra_zero_output_pages_are_bounded() {
+        let mut nodes = NodeStore::new();
+        for id in ["s", "a", "b", "t"] {
+            nodes.add_node(100, id.into());
+        }
+        let edges = EdgeStore::from_edges(
+            4,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: 1,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 2,
+                    target: 3,
+                    type_id: 2,
+                    weight: Some(1),
+                    schema_reversed: false,
+                },
+            ],
+            true,
+        );
+        let mut allowed = RoaringBitmap::new();
+        allowed.insert(2);
+        let result = run_resumable_dijkstra(
+            &nodes,
+            &edges,
+            0,
+            3,
+            Some(&allowed),
+            &RoaringBitmap::new(),
+            &RoaringBitmap::new(),
+            1,
+        )
+        .unwrap();
+        assert!(
+            result.is_none(),
+            "filtered empty pages must make bounded progress to completion"
+        );
+    }
+
+    #[test]
+    fn resumable_dijkstra_rejects_epoch_work_memory_and_oversized_keys() {
+        let mut machine = ResumableDijkstra::try_new(2, 0, 1).unwrap();
+        let epoch = BfsProjectionEpoch {
+            generation_id: Some(1),
+            applied_sync_id: 1,
+            node_count: 2,
+            edge_count: 1,
+            relationship_identity_count: 0,
+            edge_buffer_len: 0,
+            edge_buffer_revision: 0,
+            tx_topology_revision: 0,
+            tx_added_nodes: 0,
+            tx_added_edges: 0,
+            tx_deleted_nodes: 0,
+            tx_deleted_edges: 0,
+        };
+        machine.bind_projection_epoch(epoch);
+        let mut changed = epoch;
+        changed.edge_buffer_revision = 1;
+        assert!(machine.require_projection_epoch(changed).is_err());
+
+        let mut nodes = NodeStore::new();
+        nodes.add_node(100, "x".repeat(17 * 1_024));
+        nodes.add_node(100, "target".into());
+        let edges = EdgeStore::from_edges(2, Vec::new(), true);
+        let governor = path_governor(10);
+        let relationships =
+            crate::relationship_identity_store::RelationshipIdentityStore::default();
+        let mut oversized = ResumableDijkstra::try_new(2, 0, 1).unwrap();
+        let error = materialize_resumable_dijkstra_batch(
+            &mut oversized,
+            &nodes,
+            &edges,
+            &relationships,
+            None,
+            BfsCandidateLimits {
+                max_candidates: 1,
+                max_key_bytes: 16 * 1_024,
+            },
+            &governor,
+        )
+        .unwrap_err();
+        assert!(matches!(error, GraphError::InvalidFilter { .. }));
+
+        let tiny_memory = ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::new(10),
+            ElapsedBudget::new(Duration::from_secs(1)),
+        ));
+        let mut memory_limited = ResumableDijkstra::try_new(2, 0, 1).unwrap();
+        let memory_error = materialize_resumable_dijkstra_batch(
+            &mut memory_limited,
+            &nodes,
+            &edges,
+            &relationships,
+            None,
+            candidate_limits(1),
+            &tiny_memory,
+        )
+        .unwrap_err();
+        assert!(matches!(memory_error, GraphError::ResourceLimit { .. }));
+
+        let mut output_nodes = NodeStore::new();
+        output_nodes.add_node(100, "output".into());
+        let mut output_limited = ResumableDijkstra::try_new(1, 0, 0).unwrap();
+        output_limited.source_visible = Some(true);
+        output_limited.target_visible = Some(true);
+        output_limited.state = ResumablePathState::Complete;
+        let output_error = output_limited
+            .finish(&output_nodes, &[String::new()], &tiny_memory)
+            .unwrap_err();
+        assert!(matches!(output_error, GraphError::ResourceLimit { .. }));
+
+        let mut work_nodes = NodeStore::new();
+        work_nodes.add_node(100, "source".into());
+        work_nodes.add_node(100, "target".into());
+        let work_edges = EdgeStore::from_edges(
+            2,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: Some(1),
+                schema_reversed: false,
+            }],
+            true,
+        );
+        let work_error = run_resumable_dijkstra(
+            &work_nodes,
+            &work_edges,
+            0,
+            1,
+            None,
+            &RoaringBitmap::new(),
+            &RoaringBitmap::new(),
+            1,
+        );
+        assert!(work_error.is_ok());
+        let zero_work = path_governor(0);
+        assert!(consume_path_work_without_interrupt(&zero_work).is_err());
     }
 
     #[test]

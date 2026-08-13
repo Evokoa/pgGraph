@@ -143,7 +143,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P1 | Complete | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
 | P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
-| P4 | In progress (P4.4 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
+| P4 | In progress (P4.5 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
 | P5 | Not started | Targeted queries select lazy and global analytics select eager; redundant read checks are removed only if proven; 1M/10M evidence meets the accepted latency and memory budgets. |
 | P6 | Not started | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
@@ -260,7 +260,7 @@ silently omitting visibility, while eager behavior remains equivalent.
   graph-sized state across PostgreSQL ERROR/longjmp.
 - Use lazy probes for `get_node` and true depth-zero seeds. At the P2
   checkpoint, positive-depth shortest paths remained eager; unweighted paths
-  moved to resumable execution in P4.4, while weighted paths remain eager.
+  moved to resumable execution in P4.4 and weighted paths in P4.5.
 - Add negative-cache, cancellation, policy error, recursion, memory exhaustion,
   current-setting, role, snapshot, and transaction-delta tests.
 
@@ -273,7 +273,7 @@ with requested identities rather than table membership.
   statement-local tri-state resolver. At the P2 checkpoint, positive-depth
   traversal and paths remained on the eager oracle; BFS and DFS moved to their
   resumable engines in P3 and P4.3, unweighted paths moved in P4.4, and
-  weighted paths remain eager.
+  weighted paths moved in P4.5.
 - Candidate count, key bytes, probe-plan scratch, cache growth, copied payloads,
   returned work, elapsed time, and PostgreSQL interrupts are governed under
   `query.visibility`. The lazy path has no table-wide maximum-key preflight.
@@ -419,8 +419,18 @@ checkpoint. The retained
 [`10k PG17 checkpoint`](../measurements/2026-08-13-p4-unweighted-path-10k/README.md)
 records one functional/performance sample; it is not a statistical benchmark.
 
-- Batch weighted path adjacency one popped node at a time until evidence proves
-  a wider priority-safe batch; preserve heap/tie order.
+P4.5 completed on 2026-08-13. Weighted shortest paths now page one popped
+Dijkstra node at a time while preserving strict-lower relaxation, heap ties,
+stale-entry handling, target-pop termination, edge weights, and exact step
+metadata. Clean CSR and segment-backed durable projections use bounded weighted
+cursors; pending classic overlays remain the established `PG018` error, and
+transaction-local node/filter state retains the eager oracle. Endpoint order,
+typed edge filters, node and relationship RLS, dynamic relationship labels,
+resource caps, `PG023`, cancellation, policy-error cleanup, and no-RLS zero-SPI
+behavior have PostgreSQL differential coverage. The retained
+[`10k PG17 checkpoint`](../measurements/2026-08-13-p4-weighted-path-10k/README.md)
+records one functional/performance sample; it is not a statistical benchmark.
+
 - Extend to direct workflows, mutable segments, transaction-local identities,
   and eligible projection-backed GQL/Cypher expansions and write MATCH.
 - Keep connected components, component statistics, whole-table GQL scans,

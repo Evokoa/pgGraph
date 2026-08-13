@@ -299,6 +299,424 @@ fn path_visibility_metrics() -> pgrx::JsonB {
 }
 
 #[cfg(feature = "development")]
+fn build_weighted_path_rls_fixture() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "DROP TABLE IF EXISTS public.graph_test_weighted_path_edges_p45 CASCADE;
+         DROP TABLE IF EXISTS public.graph_test_weighted_path_nodes_p45 CASCADE;
+         DO $$ BEGIN
+           IF EXISTS (
+             SELECT 1 FROM pg_roles WHERE rolname = 'graph_weighted_path_rls_reader'
+           ) THEN
+             REVOKE ALL PRIVILEGES ON SCHEMA graph, public
+               FROM graph_weighted_path_rls_reader;
+           END IF;
+         END $$;
+         DROP ROLE IF EXISTS graph_weighted_path_rls_reader;
+         CREATE TABLE public.graph_test_weighted_path_nodes_p45 (
+           id text PRIMARY KEY,
+           name text NOT NULL
+         );
+         CREATE TABLE public.graph_test_weighted_path_edges_p45 (
+           id text PRIMARY KEY,
+           src text NOT NULL REFERENCES public.graph_test_weighted_path_nodes_p45(id),
+           dst text NOT NULL REFERENCES public.graph_test_weighted_path_nodes_p45(id),
+           cost integer NOT NULL CHECK (cost >= 0),
+           rel_type text NOT NULL
+         );
+         INSERT INTO public.graph_test_weighted_path_nodes_p45 (id, name) VALUES
+           ('s', 'source'), ('a', 'tie-a'), ('b', 'tie-b'),
+           ('c', 'relationship-hidden'), ('h', 'node-hidden'),
+           ('x', 'behind-hidden'), ('t', 'target');
+         INSERT INTO public.graph_test_weighted_path_edges_p45
+           (id, src, dst, cost, rel_type) VALUES
+           ('direct', 's', 't', 10, 'direct'),
+           ('sa', 's', 'a', 2, 'route'), ('at', 'a', 't', 2, 'route'),
+           ('sb', 's', 'b', 2, 'route'), ('bt', 'b', 't', 2, 'route'),
+           ('sc', 's', 'c', 1, 'secret'), ('ct', 'c', 't', 1, 'secret'),
+           ('sh', 's', 'h', 1, 'shortcut'), ('hx', 'h', 'x', 1, 'shortcut');
+         SELECT graph.add_table(
+           'graph_test_weighted_path_nodes_p45'::regclass,
+           id_column := 'id', columns := ARRAY['name']);
+         SELECT graph.add_edge(
+           'graph_test_weighted_path_edges_p45'::regclass,
+           from_column := 'src',
+           to_table := 'graph_test_weighted_path_nodes_p45'::regclass,
+           to_column := 'dst',
+           label := 'route',
+           bidirectional := false,
+           weight_column := 'cost',
+           label_column := 'rel_type');
+         SELECT * FROM graph.build();
+         CREATE ROLE graph_weighted_path_rls_reader;
+         ALTER TABLE public.graph_test_weighted_path_nodes_p45 ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE public.graph_test_weighted_path_edges_p45 ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_weighted_path_visible_nodes
+           ON public.graph_test_weighted_path_nodes_p45 FOR SELECT
+           TO graph_weighted_path_rls_reader USING (id <> 'h');
+         CREATE POLICY graph_weighted_path_visible_edges
+           ON public.graph_test_weighted_path_edges_p45 FOR SELECT
+           TO graph_weighted_path_rls_reader USING (rel_type <> 'secret');
+         GRANT USAGE ON SCHEMA graph, public TO graph_weighted_path_rls_reader;
+         GRANT SELECT ON public.graph_test_weighted_path_nodes_p45,
+                         public.graph_test_weighted_path_edges_p45
+           TO graph_weighted_path_rls_reader",
+    )
+    .expect("build weighted path RLS fixture failed");
+}
+
+#[cfg(feature = "development")]
+fn forced_weighted_path_detail(
+    strategy: &str,
+    source: &str,
+    target: &str,
+    edge_types: Option<&[&str]>,
+) -> String {
+    Spi::run(&format!(
+        "SELECT graph._test_set_visibility_strategy({})",
+        super::sql_literal(strategy)
+    ))
+    .expect("set weighted-path visibility strategy failed");
+    let edge_types = edge_types.map(|labels| {
+        labels
+            .iter()
+            .map(|label| super::sql_literal(label))
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let edge_types = edge_types
+        .map(|labels| format!(", ARRAY[{labels}]::text[]"))
+        .unwrap_or_default();
+    Spi::get_one::<String>(&format!(
+        "SELECT string_agg(
+           step::text || ':' || node_id || ':' ||
+           coalesce(edge_label, '<start>') || ':' ||
+           coalesce(edge_weight::text, '<start>') || ':' ||
+           step_cost::text || ':' || total_cost::text,
+           ',' ORDER BY step)
+         FROM graph.weighted_shortest_path(
+           'graph_test_weighted_path_nodes_p45'::regclass, {},
+           'graph_test_weighted_path_nodes_p45'::regclass, {}{edge_types})",
+        super::sql_literal(source),
+        super::sql_literal(target),
+    ))
+    .expect("weighted shortest-path detail query failed")
+    .unwrap_or_default()
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn weighted_paths_lazy_match_eager_rls_ties_filters_and_metadata() {
+    build_weighted_path_rls_fixture();
+    Spi::run("SET ROLE graph_weighted_path_rls_reader")
+        .expect("set weighted-path RLS reader failed");
+
+    let eager = forced_weighted_path_detail("eager", "s", "t", None);
+    let lazy = forced_weighted_path_detail("lazy", "s", "t", None);
+    let lazy_metrics = path_visibility_metrics();
+    let typed = forced_weighted_path_detail("lazy", "s", "t", Some(&["route"]));
+    let typed_metrics = path_visibility_metrics();
+    let hidden_endpoint = forced_weighted_path_detail("lazy", "s", "h", None);
+    let hidden_source = forced_weighted_path_detail("lazy", "h", "x", None);
+    let hidden_identity_endpoint = forced_weighted_path_detail("lazy", "h", "h", None);
+    let hidden_source_missing_target = forced_weighted_path_detail("lazy", "h", "missing", None);
+    let behind_hidden = forced_weighted_path_detail("lazy", "s", "x", None);
+
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore weighted-path visibility strategy failed");
+
+    let expected = "0:s:<start>:<start>:0:4,1:a:route:2:2:4,2:t:route:2:4:4";
+    assert_eq!(
+        eager, expected,
+        "eager fixture must freeze strict tie order"
+    );
+    assert_eq!(lazy, eager, "lazy weighted path must match eager exactly");
+    assert_eq!(typed, eager, "typed lazy path must preserve step metadata");
+    assert!(hidden_endpoint.is_empty(), "a hidden target must be absent");
+    assert!(hidden_source.is_empty(), "a hidden source must be absent");
+    assert!(
+        hidden_identity_endpoint.is_empty(),
+        "a hidden source-equals-target endpoint must remain absent"
+    );
+    assert!(
+        hidden_source_missing_target.is_empty(),
+        "a hidden source must short-circuit missing-target diagnostics"
+    );
+    assert!(
+        behind_hidden.is_empty(),
+        "a hidden intermediate must block the visible node behind it"
+    );
+    for metrics in [lazy_metrics, typed_metrics] {
+        assert_eq!(
+            metrics.0["selected_strategy"].as_str(),
+            Some("lazy"),
+            "forced lazy weighted paths must select the resumable oracle"
+        );
+        assert!(
+            metrics.0["spi_calls"].as_u64().unwrap_or_default() > 0,
+            "RLS-enforced weighted paths must probe PostgreSQL visibility"
+        );
+    }
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn weighted_paths_lazy_durable_segments_match_eager() {
+    build_weighted_path_rls_fixture();
+    create_error_sqlstate_helper();
+    create_error_detail_helper();
+    Spi::run(
+        "SET graph.mutable_enabled = on;
+         SET graph.persist_on_build = on;
+         SET graph.sync_mode = 'trigger';
+         SET graph.query_freshness = 'off';
+         SELECT * FROM graph.build(mode := 'mutable_overlay');
+         INSERT INTO public.graph_test_weighted_path_edges_p45
+           (id, src, dst, cost, rel_type)
+         VALUES ('durable-sx', 's', 'x', 1, 'route'),
+                ('durable-xt', 'x', 't', 1, 'route'),
+                ('durable-hidden', 's', 't', 1, 'secret')",
+    )
+    .expect("create weighted durable delta failed");
+    let published = Spi::get_one::<i64>("SELECT segments_published FROM graph.ingest_projection()")
+        .expect("ingest weighted fixture failed")
+        .unwrap_or_default();
+    assert!(published > 0);
+    Spi::run("SET graph.auto_load = on").expect("enable weighted durable auto-load failed");
+    super::ENGINE.with(|engine| *engine.borrow_mut() = super::engine::Engine::new());
+    assert!(
+        !forced_weighted_path_detail("auto", "s", "t", None).is_empty(),
+        "owner warmup must load the durable weighted projection"
+    );
+    Spi::run("SET ROLE graph_weighted_path_rls_reader")
+        .expect("set weighted reader failed");
+    let eager = forced_weighted_path_detail("eager", "s", "t", None);
+    Spi::run("SET ROLE graph_weighted_path_rls_reader")
+        .expect("restore weighted reader before durable lazy query failed");
+    let lazy = forced_weighted_path_detail("lazy", "s", "t", None);
+    let metrics = path_visibility_metrics();
+    Spi::run(
+        "RESET ROLE;
+         SELECT graph._test_arm_missing_bfs_candidate_relationship_identity();
+         SET ROLE graph_weighted_path_rls_reader",
+    )
+    .expect("arm durable weighted missing-identity probe failed");
+    let durable_statement = "SELECT * FROM graph.weighted_shortest_path(
+       'graph_test_weighted_path_nodes_p45'::regclass, 'x',
+       'graph_test_weighted_path_nodes_p45'::regclass, 't')";
+    let durable_identity_state = captured_path_sqlstate(durable_statement);
+    Spi::run(
+        "RESET ROLE;
+         SELECT graph._test_arm_missing_bfs_candidate_relationship_identity();
+         SET ROLE graph_weighted_path_rls_reader",
+    )
+    .expect("rearm durable weighted identity detail failed");
+    let durable_identity_detail = captured_path_detail(durable_statement).unwrap_or_default();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore weighted strategy failed");
+    assert_eq!(lazy, eager);
+    assert!(lazy.contains(":x:route:1:"));
+    assert!(
+        !lazy.contains(":secret:"),
+        "a lower-cost durable dynamic label hidden by relationship RLS must not be admitted"
+    );
+    assert_eq!(metrics.0["selected_strategy"].as_str(), Some("lazy"));
+    assert!(metrics.0["spi_calls"].as_u64().unwrap_or_default() > 0);
+    assert_eq!(durable_identity_state.as_deref(), Some("55000"));
+    assert!(durable_identity_detail.contains("PG023"));
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn weighted_paths_durable_unseen_dynamic_label_remains_pg018() {
+    build_weighted_path_rls_fixture();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "SET graph.mutable_enabled = on;
+         SET graph.persist_on_build = on;
+         SET graph.sync_mode = 'trigger';
+         SET graph.query_freshness = 'off';
+         SELECT * FROM graph.build(mode := 'mutable_overlay');
+         INSERT INTO public.graph_test_weighted_path_edges_p45
+           (id, src, dst, cost, rel_type)
+         VALUES ('durable-new-label', 's', 't', 1, 'runtime-only')",
+    )
+    .expect("create unseen weighted dynamic label failed");
+
+    let state = captured_path_sqlstate("SELECT * FROM graph.ingest_projection()");
+    assert_eq!(
+        state.as_deref(),
+        Some("0A000"),
+        "a durable label absent from the persisted projection must require a rebuild"
+    );
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn weighted_paths_pending_edge_overlay_remains_pg018() {
+    build_weighted_path_rls_fixture();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "SET graph.sync_mode = 'trigger';
+         SELECT * FROM graph.build();
+         SET graph.sync_mode = 'trigger';
+         INSERT INTO public.graph_test_weighted_path_edges_p45
+           (id, src, dst, cost, rel_type)
+         VALUES ('pending', 's', 't', 1, 'route');
+         SET graph.query_freshness = 'apply_pending_sync'",
+    )
+    .expect("create pending weighted overlay failed");
+    let state = captured_path_sqlstate(
+        "SELECT * FROM graph.weighted_shortest_path(
+           'graph_test_weighted_path_nodes_p45'::regclass, 's',
+           'graph_test_weighted_path_nodes_p45'::regclass, 't')",
+    );
+    assert_eq!(state.as_deref(), Some("0A000"));
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn weighted_paths_tx_node_state_falls_back_eager() {
+    build_weighted_path_rls_fixture();
+    Spi::run(
+        "SET graph.mutable_enabled = on;
+         SET graph.persist_on_build = on;
+         SET graph.sync_mode = 'trigger';
+         SET graph.query_freshness = 'off';
+         SELECT * FROM graph.build(mode := 'mutable_overlay');
+         SELECT * FROM graph.gql(
+           'CREATE (u:graph_test_weighted_path_nodes_p45 {id: ''tx'', name: ''tx''}) RETURN u',
+           hydrate := false);
+         SET ROLE graph_weighted_path_rls_reader",
+    )
+    .expect("create weighted tx-node fallback failed");
+    let eager = forced_weighted_path_detail("eager", "s", "t", None);
+    let fallback = forced_weighted_path_detail("lazy", "s", "t", None);
+    let metrics = path_visibility_metrics();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore weighted strategy failed");
+    assert_eq!(fallback, eager);
+    assert_eq!(metrics.0["selected_strategy"].as_str(), Some("eager"));
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn weighted_paths_lazy_resource_identity_cancellation_and_retry() {
+    build_weighted_path_rls_fixture();
+    create_error_sqlstate_helper();
+    create_error_detail_helper();
+    let statement = "SELECT * FROM graph.weighted_shortest_path(
+       'graph_test_weighted_path_nodes_p45'::regclass, 's',
+       'graph_test_weighted_path_nodes_p45'::regclass, 't')";
+    Spi::run(
+        "SET ROLE graph_weighted_path_rls_reader;
+         SELECT graph._test_set_visibility_strategy('lazy');
+         SET LOCAL graph.query_work_limit = 1",
+    )
+    .expect("configure capped weighted path failed");
+    let work_state = captured_path_sqlstate(statement);
+    Spi::run(
+        "SET LOCAL graph.query_work_limit = 1000000;
+         SET LOCAL graph.query_memory_mb = 1",
+    )
+    .expect("configure weighted path memory cap failed");
+    let memory_state = captured_path_sqlstate(statement);
+    Spi::run(
+        "RESET ROLE;
+         SET LOCAL graph.query_memory_mb = 1024;
+         SELECT graph._test_arm_missing_bfs_candidate_relationship_identity();
+         SET ROLE graph_weighted_path_rls_reader",
+    )
+    .expect("arm weighted missing relationship identity failed");
+    let identity_state = captured_path_sqlstate(statement);
+    Spi::run(
+        "RESET ROLE;
+         SELECT graph._test_arm_missing_bfs_candidate_relationship_identity();
+         SET ROLE graph_weighted_path_rls_reader",
+    )
+    .expect("rearm weighted missing relationship identity failed");
+    let identity_detail = captured_path_detail(statement).unwrap_or_default();
+    Spi::run("SET ROLE graph_weighted_path_rls_reader")
+        .expect("set weighted reader failed");
+    let expected = forced_weighted_path_detail("eager", "s", "t", None);
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')")
+        .expect("select lazy weighted cancellation strategy failed");
+    Spi::run("SELECT graph._test_arm_lazy_visibility_cancel()")
+        .expect("arm weighted cancellation failed");
+    let cancelled = workflow_cancellation(statement);
+    let state_empty = Spi::get_one::<bool>(
+        "SELECT graph._test_visibility_resolution_state_empty()",
+    )
+    .expect("inspect weighted cancellation cleanup failed")
+    .unwrap_or(false);
+    Spi::run("SET ROLE graph_weighted_path_rls_reader")
+        .expect("restore weighted reader after cancellation failed");
+    let retry = forced_weighted_path_detail("lazy", "s", "t", None);
+    Spi::run(
+        "RESET ROLE;
+         DROP POLICY graph_weighted_path_visible_nodes
+           ON public.graph_test_weighted_path_nodes_p45;
+         CREATE FUNCTION public.graph_weighted_path_error_policy()
+           RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
+           BEGIN PERFORM 1 / 0; RETURN true; END $$;
+         CREATE POLICY graph_weighted_path_visible_nodes
+           ON public.graph_test_weighted_path_nodes_p45 FOR SELECT
+           TO graph_weighted_path_rls_reader
+           USING (public.graph_weighted_path_error_policy());
+         GRANT EXECUTE ON FUNCTION public.graph_weighted_path_error_policy()
+           TO graph_weighted_path_rls_reader;
+         SET ROLE graph_weighted_path_rls_reader",
+    )
+    .expect("configure weighted path policy error failed");
+    let policy_state = captured_path_sqlstate(statement);
+    Spi::run(
+        "RESET ROLE;
+         DROP POLICY graph_weighted_path_visible_nodes
+           ON public.graph_test_weighted_path_nodes_p45;
+         CREATE POLICY graph_weighted_path_visible_nodes
+           ON public.graph_test_weighted_path_nodes_p45 FOR SELECT
+           TO graph_weighted_path_rls_reader USING (id <> 'h');
+         SET ROLE graph_weighted_path_rls_reader",
+    )
+    .expect("restore weighted path policy failed");
+    let state_empty_after_policy_error = Spi::get_one::<bool>(
+        "SELECT graph._test_visibility_resolution_state_empty()",
+    )
+    .expect("inspect weighted policy-error cleanup failed")
+    .unwrap_or(false);
+    let retry_after_policy_error = forced_weighted_path_detail("lazy", "s", "t", None);
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore weighted strategy failed");
+    assert_eq!(work_state.as_deref(), Some("54000"));
+    assert_eq!(memory_state.as_deref(), Some("54000"));
+    assert_eq!(identity_state.as_deref(), Some("55000"));
+    assert!(identity_detail.contains("PG023"));
+    assert!(expected.contains(":a:route:"));
+    assert!(cancelled);
+    assert!(state_empty);
+    assert!(!retry.is_empty(), "weighted path retry must succeed after cancellation");
+    assert_eq!(policy_state.as_deref(), Some("22012"));
+    assert!(state_empty_after_policy_error);
+    assert_eq!(retry_after_policy_error, retry);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn weighted_paths_no_rls_fast_path_has_zero_visibility_spi() {
+    build_weighted_path_rls_fixture();
+    Spi::run(
+        "ALTER TABLE public.graph_test_weighted_path_nodes_p45 DISABLE ROW LEVEL SECURITY;
+         ALTER TABLE public.graph_test_weighted_path_edges_p45 DISABLE ROW LEVEL SECURITY;
+         SELECT graph._test_set_visibility_strategy('auto')",
+    )
+    .expect("disable weighted RLS failed");
+    let path = forced_weighted_path_detail("auto", "s", "t", None);
+    let metrics = path_visibility_metrics();
+    assert!(!path.is_empty());
+    assert_eq!(metrics.0["spi_calls"].as_u64(), Some(0));
+}
+
+#[cfg(feature = "development")]
 fn captured_path_sqlstate(statement: &str) -> Option<String> {
     Spi::get_one::<String>(&format!(
         "SELECT public.graph_test_sqlstate({})",

@@ -263,18 +263,78 @@ fn targeted_unweighted_paths_freeze_level_meeting_and_endpoint_semantics_before_
 }
 
 #[test]
-#[ignore = "P4.5 weighted-path checkpoint contract"]
 fn targeted_weighted_paths_freeze_heap_and_tie_order_before_migration() {
     let paths = crate_source("src/path_finder.rs");
+    let engine = crate_source("src/engine.rs");
+    let traversal = crate_source("src/sql_facade/traversal.rs");
+    let visibility = crate_source("src/sql_visibility.rs");
+    let postgres_paths = crate_source("src/pg_tests/traversal_paths.rs");
 
+    for required in [
+        "ResumableDijkstra",
+        "materialize_resumable_dijkstra_batch",
+        "apply_resumable_dijkstra_verdicts",
+        "resumable_dijkstra_matches_eager_heap_ties_stale_entries_and_target_pop",
+        "resumable_dijkstra_matches_eager_generated_visibility_and_weights",
+        "resumable_dijkstra_preserves_weighted_step_metadata_and_edge_type_filters",
+        "resumable_dijkstra_pages_one_popped_node_at_a_time",
+        "resumable_dijkstra_zero_output_pages_are_bounded",
+        "resumable_dijkstra_rejects_epoch_work_memory_and_oversized_keys",
+    ] {
+        assert!(
+            paths.contains(required),
+            "P4.5 weighted-path state/differential corpus is missing `{required}`"
+        );
+    }
+
+    let preparation = function_body(&visibility, "fn prepare_bfs_visibility");
     assert!(
-        paths.contains("resumable_dijkstra_matches_eager_heap_and_tie_order"),
-        "P4.5 weighted-path differential corpus must preserve eager heap and tie order"
+        !preparation.contains("edge_store"),
+        "lazy visibility preparation must not scan projected edges to discover dynamic labels"
     );
-    assert!(
-        paths.contains("ResumableDijkstra"),
-        "weighted paths need explicit resumable heap state before policy probes may interrupt expansion"
-    );
+
+    for required in [
+        "prepare_resumable_dijkstra",
+        "materialize_resumable_dijkstra_batch",
+        "admit_resumable_dijkstra_batch",
+        "finish_resumable_dijkstra",
+    ] {
+        assert!(
+            engine.contains(required),
+            "P4.5 engine integration is missing `{required}`"
+        );
+    }
+
+    let weighted = function_body(&traversal, "fn weighted_shortest_path");
+    let weighted_typed = function_body(&traversal, "fn weighted_shortest_path_typed");
+    for (name, body) in [
+        ("weighted_shortest_path", weighted),
+        ("weighted_shortest_path_typed", weighted_typed),
+    ] {
+        assert!(
+            body.contains("weighted_shortest_path_rows_governed"),
+            "{name} must route through one governed weighted-path executor"
+        );
+        assert!(
+            !body.contains("prepare_eager_visibility"),
+            "{name} must not unconditionally prepare the eager whole-table oracle"
+        );
+    }
+
+    for required in [
+        "weighted_paths_lazy_match_eager_rls_ties_filters_and_metadata",
+        "weighted_paths_lazy_durable_segments_match_eager",
+        "weighted_paths_durable_unseen_dynamic_label_remains_pg018",
+        "weighted_paths_pending_edge_overlay_remains_pg018",
+        "weighted_paths_tx_node_state_falls_back_eager",
+        "weighted_paths_lazy_resource_identity_cancellation_and_retry",
+        "weighted_paths_no_rls_fast_path_has_zero_visibility_spi",
+    ] {
+        assert!(
+            postgres_paths.contains(required),
+            "P4.5 PostgreSQL weighted-path corpus is missing `{required}`"
+        );
+    }
 }
 
 #[test]

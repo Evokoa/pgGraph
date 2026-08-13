@@ -1,0 +1,49 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Seq Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "rls_bench_nodes",
+      "Alias": "src",
+      "Startup Cost": 0.00,
+      "Total Cost": 377.39,
+      "Plan Rows": 78,
+      "Plan Width": 32,
+      "Actual Startup Time": 0.006,
+      "Actual Total Time": 2.944,
+      "Actual Rows": 9900,
+      "Actual Loops": 1,
+      "Filter": "((current_setting('graph.rls_benchmark_policy'::text, true) = 'broad_allow'::text) OR ((current_setting('graph.rls_benchmark_policy'::text, true) = 'sparse_allow'::text) AND ((id % '100'::bigint) = 0)) OR ((current_setting('graph.rls_benchmark_policy'::text, true) = 'sparse_deny'::text) AND ((id % '100'::bigint) <> 0)))",
+      "Rows Removed by Filter": 100,
+      "Shared Hit Blocks": 104,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Settings": {
+    },
+    "Planning": {
+      "Shared Hit Blocks": 91,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Planning Time": 0.133,
+    "Triggers": [
+    ],
+    "Execution Time": 3.133
+  }
+]

@@ -163,7 +163,8 @@ CREATE TABLE public.rls_bench_edges (
     id bigint PRIMARY KEY,
     from_id bigint NOT NULL REFERENCES public.rls_bench_nodes(id),
     to_id bigint NOT NULL REFERENCES public.rls_bench_nodes(id),
-    tenant_id text NOT NULL
+    tenant_id text NOT NULL,
+    weight integer NOT NULL DEFAULT 1
 );
 INSERT INTO public.rls_bench_edges
 SELECT id,
@@ -196,7 +197,8 @@ SELECT graph.add_edge(
     'public.rls_bench_nodes'::regclass,
     'to_id',
     'edge_row',
-    false
+    false,
+    weight_column := 'weight'
 );
 SELECT * FROM graph.build();
 
@@ -473,6 +475,8 @@ elif [[ "$RUN_PROFILE" == "p3_selective" ]]; then
     "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := 'out', strategy := 'dfs', hydrate := false)" "auto"
   run_case "no_rls" "none" "p4_path_no_rls_auto" "scalar" "shortest_path" 5 \
     "SELECT count(*) FROM graph.shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', max_depth := 20, hydrate := false)" "auto"
+  run_case "no_rls" "none" "p4_weighted_path_no_rls_auto" "scalar" "weighted_shortest_path" 5 \
+    "SELECT count(*) FROM graph.weighted_shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', ARRAY['edge_row'])" "auto"
 fi
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
@@ -506,6 +510,10 @@ if [[ "$RUN_PROFILE" == "p3_selective" ]]; then
     "SELECT count(*) FROM graph.shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', max_depth := 20, hydrate := false)" "eager"
   run_case "broad_allow" "node" "p4_node_path_lazy" "scalar" "shortest_path" 5 \
     "SELECT count(*) FROM graph.shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', max_depth := 20, hydrate := false)" "lazy"
+  run_case "broad_allow" "node" "p4_node_weighted_path_eager" "scalar" "weighted_shortest_path" 5 \
+    "SELECT count(*) FROM graph.weighted_shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', ARRAY['edge_row'])" "eager"
+  run_case "broad_allow" "node" "p4_node_weighted_path_lazy" "scalar" "weighted_shortest_path" 5 \
+    "SELECT count(*) FROM graph.weighted_shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', ARRAY['edge_row'])" "lazy"
 elif [[ "$RUN_PROFILE" == "compact" ]]; then
   run_case "broad_allow" "node" "node_broad_allow_scalar_depth0" "scalar" "depth0" 1 \
     "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 0, hydrate := false)"
@@ -589,6 +597,16 @@ BEGIN
           AND source_rows = 0
     ) THEN
         RAISE EXCEPTION 'P3 no-RLS auto route did not retain the zero-probe eager fast path';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.rls_bench_samples
+        WHERE case_name = 'p4_weighted_path_no_rls_auto'
+          AND strategy = 'auto'
+          AND spi_calls = 0
+          AND source_rows = 0
+    ) THEN
+        RAISE EXCEPTION 'P4 weighted-path no-RLS auto route did not retain the zero-probe eager fast path';
     END IF;
     IF NOT EXISTS (
         SELECT 1

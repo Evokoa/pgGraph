@@ -703,6 +703,152 @@ impl<'a> LayeredNeighbors<'a> {
             .collect()
     }
 
+    fn fill_weighted_out_neighbors(
+        &self,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<WeightedNeighbor>,
+    ) -> bool {
+        if !self.node_visible(node_idx) || limit == 0 {
+            return true;
+        }
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .base
+            .neighbors_with_schema_and_relationship_ids(node_idx);
+        let weights = base_weight_slice(self.base, node_idx);
+        let base_hidden = self.base_chunk_covers(node_idx);
+        let chunk = self.base_chunk_out.get(&node_idx);
+        let durable = self.durable_out.get(&node_idx);
+        let overlay = self.committed_out_inserts.get(&node_idx).map(Vec::as_slice);
+        let overlay_deleted = self.committed_out_deletes.get(&node_idx);
+        let (mut base_pos, mut chunk_pos, mut durable_pos, mut overlay_pos, mut last_key) =
+            match cursor {
+                OwnedNeighborCursor::Layered {
+                    base_pos,
+                    chunk_pos,
+                    durable_pos,
+                    overlay_pos,
+                    last_key,
+                } => (*base_pos, *chunk_pos, *durable_pos, *overlay_pos, *last_key),
+                _ => (0, 0, 0, 0, None),
+            };
+        let key = |edge: LayeredEdge| {
+            (
+                edge.target,
+                edge.type_id,
+                edge.schema_reversed,
+                edge.relationship_id,
+            )
+        };
+        let deleted = |set: Option<&HashSet<MergedEdgeKey>>, candidate: MergedEdgeKey| {
+            set.is_some_and(|set| {
+                set.contains(&candidate)
+                    || set.contains(&(candidate.0, candidate.1, candidate.2, None))
+            })
+        };
+        let mut examined = 0usize;
+        while examined < limit {
+            let base_edge = (!base_hidden && base_pos < targets.len()).then(|| LayeredEdge {
+                target: targets[base_pos],
+                type_id: type_ids[base_pos],
+                schema_reversed: schema_reversed[base_pos] != 0,
+                weight: weights.and_then(|weights| weights.get(base_pos).copied()),
+                relationship_id: relationship_ids
+                    .get(base_pos)
+                    .copied()
+                    .filter(|id| *id != NO_RELATIONSHIP_ID),
+            });
+            let chunk_edge = chunk
+                .and_then(|edges| edges.inserts.get(chunk_pos))
+                .copied();
+            let durable_edge = durable
+                .and_then(|edges| edges.inserts.get(durable_pos))
+                .copied();
+            let overlay_edge = overlay.and_then(|edges| edges.get(overlay_pos)).map(
+                |&(target, type_id, schema_reversed, relationship_id)| LayeredEdge {
+                    target,
+                    type_id,
+                    schema_reversed,
+                    weight: None,
+                    relationship_id,
+                },
+            );
+            let Some(next_key) = [base_edge, chunk_edge, durable_edge, overlay_edge]
+                .into_iter()
+                .flatten()
+                .map(key)
+                .min()
+            else {
+                *cursor = OwnedNeighborCursor::Layered {
+                    base_pos,
+                    chunk_pos,
+                    durable_pos,
+                    overlay_pos,
+                    last_key,
+                };
+                return true;
+            };
+            let equal_count = [base_edge, chunk_edge, durable_edge, overlay_edge]
+                .into_iter()
+                .flatten()
+                .filter(|edge| key(*edge) == next_key)
+                .count();
+            if examined > 0 && examined.saturating_add(equal_count) > limit {
+                break;
+            }
+            let durable_reinserts = durable_edge.is_some_and(|edge| key(edge) == next_key);
+            let overlay_reinserts = overlay_edge.is_some_and(|edge| key(edge) == next_key);
+            let mut selected = None;
+            if base_edge.is_some_and(|edge| key(edge) == next_key) {
+                selected = base_edge;
+                base_pos += 1;
+                examined += 1;
+            }
+            if chunk_edge.is_some_and(|edge| key(edge) == next_key) {
+                selected = chunk_edge;
+                chunk_pos += 1;
+                examined += 1;
+            }
+            if durable_edge.is_some_and(|edge| key(edge) == next_key) {
+                selected = durable_edge;
+                durable_pos += 1;
+                examined += 1;
+            }
+            if overlay_edge.is_some_and(|edge| key(edge) == next_key) {
+                selected = overlay_edge;
+                overlay_pos += 1;
+                examined += 1;
+            }
+            let hidden_by_durable = deleted(durable.map(|edges| &edges.deletes), next_key);
+            let hidden_by_overlay = deleted(overlay_deleted, next_key);
+            let survives = (overlay_reinserts || !hidden_by_overlay)
+                && (overlay_reinserts || durable_reinserts || !hidden_by_durable);
+            if last_key != Some(next_key) && survives {
+                if let Some(edge) = selected.filter(|edge| self.node_visible(edge.target)) {
+                    if let Some(weight) = edge.weight {
+                        output.push(WeightedNeighbor {
+                            target: edge.target,
+                            type_id: edge.type_id,
+                            weight,
+                            schema_reversed: edge.schema_reversed,
+                            relationship_id: edge.relationship_id,
+                        });
+                    }
+                }
+            }
+            last_key = Some(next_key);
+        }
+        *cursor = OwnedNeighborCursor::Layered {
+            base_pos,
+            chunk_pos,
+            durable_pos,
+            overlay_pos,
+            last_key,
+        };
+        false
+    }
+
     fn merged_neighbors(
         &self,
         direction: TraversalDirection,
@@ -2011,6 +2157,16 @@ impl WeightedNeighborSource for LayeredNeighbors<'_> {
 
     fn weighted_neighbors(&self, node_idx: u32) -> Vec<WeightedNeighbor> {
         self.weighted_neighbors(node_idx)
+    }
+
+    fn fill_weighted_neighbors(
+        &self,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<WeightedNeighbor>,
+    ) -> bool {
+        self.fill_weighted_out_neighbors(node_idx, cursor, limit, output)
     }
 }
 
@@ -4005,6 +4161,65 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn weighted_layered_cursor_matches_eager_across_pages_and_precedence() {
+        let base =
+            weighted_edge_store_from_tuples(5, &[(0, 1, 1, 10), (0, 2, 1, 20), (0, 4, 1, 40)]);
+        let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 5, 1)
+            .expect("segment");
+        segment.edge_deletes.push(SegmentEdge {
+            source: 0,
+            target: 2,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 3,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        segment.edge_weights.push(SegmentEdgeWeight {
+            source: 0,
+            target: 3,
+            type_id: 1,
+            relationship_id: None,
+            weight: 3,
+            schema_reversed: false,
+        });
+        // The durable snapshot has already combined edge and weight rows, so
+        // the cursor must preserve the same resolved winner as the eager map.
+        segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 4,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+        });
+        let layered = LayeredNeighbors::new(&base, vec![segment]);
+        let eager = layered.weighted_neighbors(0);
+        assert_eq!(
+            eager.iter().map(|edge| edge.target).collect::<Vec<_>>(),
+            [1, 3, 4]
+        );
+        for page_size in [1, 2, 3] {
+            let mut cursor = OwnedNeighborCursor::default();
+            let mut actual = Vec::new();
+            loop {
+                let mut page = Vec::new();
+                let exhausted =
+                    layered.fill_weighted_neighbors(0, &mut cursor, page_size, &mut page);
+                actual.extend(page);
+                if exhausted {
+                    break;
+                }
+            }
+            assert_eq!(actual, eager, "weighted page size {page_size} diverged");
+        }
     }
 
     #[test]
