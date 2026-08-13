@@ -371,9 +371,9 @@ fn p6_logical_migration_preserves_the_v6_byte_contract() {
     let segment = crate_source("src/projection/segment.rs");
 
     assert!(
-        edge_store.contains("type_ids: Vec<u8>")
-            && edge_store.contains("pub fn v6_type_ids_bytes(&self) -> &[u8]"),
-        "P6.3 must not perform P7's physical CSR width migration"
+        edge_store.contains("pub fn v6_type_ids_bytes(&self) -> &[u8]")
+            && edge_store.contains("EdgeTypeWidth::One"),
+        "P7 may widen owned CSR storage, but v6 persistence must remain behind the named one-byte adapter"
     );
     assert!(
         persistence.contains("p6_logical_edge_type_promotion_preserves_v6_artifact_bytes")

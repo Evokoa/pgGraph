@@ -14,7 +14,7 @@ use crate::projection::manifest::{
 };
 use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentEdgeWeight, SegmentKind};
 use crate::safety::{GraphError, GraphResult};
-use crate::types::{EdgeTypeId, TraversalDirection};
+use crate::types::TraversalDirection;
 
 /// Inclusive/exclusive source-node range covered by one base chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +122,7 @@ impl BaseChunkSource for EdgeStoreChunkSource<'_> {
             let (_, _, _, relationship_ids) = self
                 .store
                 .neighbors_with_schema_and_relationship_ids(source);
-            for (idx, ((&target, &type_id), &schema_reversed)) in targets
+            for (idx, ((&target, type_id), &schema_reversed)) in targets
                 .iter()
                 .zip(type_ids.iter())
                 .zip(schema_reversed.iter())
@@ -132,11 +132,7 @@ impl BaseChunkSource for EdgeStoreChunkSource<'_> {
                     edge: RawEdge {
                         source,
                         target,
-                        type_id: EdgeTypeId::from_v6_storage(type_id).map_err(|_| {
-                            GraphError::CorruptFile {
-                                reason: "base chunk contains reserved v6 edge type".into(),
-                            }
-                        })?,
+                        type_id,
                         weight: weights.get(idx).copied(),
                         schema_reversed: schema_reversed != 0,
                     },
@@ -858,6 +854,7 @@ mod tests {
     use crate::projection::test_fixtures::{
         assert_full_csr_equivalence, edge_store_from_tuples, ProjectionArtifactDir,
     };
+    use crate::types::EdgeTypeId;
 
     #[test]
     fn base_chunk_manifest_roundtrips_source_node_ranges() {

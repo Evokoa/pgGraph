@@ -50,7 +50,7 @@ use std::os::unix::fs::FileExt;
 use memmap2::{Mmap, MmapMut};
 
 use crate::config;
-use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
+use crate::edge_store::{EdgeStore, EdgeTypeWidth, MmapEdgeArrayParts, MmapEdgeArrays};
 use crate::edge_type_registry::EdgeTypeRegistry;
 use crate::engine::{Engine, MmapBackedGraph, MmapResolutionState};
 use crate::filter_index::FilterIndex;
@@ -169,6 +169,7 @@ impl MappedGraphArtifact {
                 relationship_ids_range: ranges[base + 5].0..ranges[base + 5].1,
                 node_count: self.layout.node_count,
                 edge_count,
+                type_width: EdgeTypeWidth::One,
             },
             &self.token,
         )

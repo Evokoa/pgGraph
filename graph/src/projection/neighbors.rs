@@ -6,17 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::edge_store::{EdgeStore, RelationshipId, NO_RELATIONSHIP_ID};
+use crate::edge_store::{EdgeStore, EdgeTypeSlice, RelationshipId, NO_RELATIONSHIP_ID};
 use crate::types::EdgeTypeId;
-
-#[inline(always)]
-#[allow(
-    clippy::expect_used,
-    reason = "owned and mmap edge stores reject reserved v6 type bytes before publication"
-)]
-fn logical_type_id_from_validated_v6(value: u8) -> EdgeTypeId {
-    EdgeTypeId::from_v6_storage(value).expect("published topology contains validated v6 type IDs")
-}
 
 /// Pending edge inserts keyed by source node.
 pub(crate) type OverlayInsert = (u32, EdgeTypeId, bool, Option<RelationshipId>);
@@ -219,7 +210,7 @@ impl NeighborSource for CsrNeighbors<'_> {
         output.extend((pos.min(targets.len())..end).map(|pos| {
             Neighbor {
                 target: targets[pos],
-                type_id: logical_type_id_from_validated_v6(type_ids[pos]),
+                type_id: type_ids.at(pos),
                 schema_reversed: schema_reversed[pos] != 0,
                 relationship_id: relationship_ids
                     .get(pos)
@@ -250,7 +241,7 @@ impl NeighborSource for CsrNeighbors<'_> {
             let pos = targets.len() - 1 - offset;
             Neighbor {
                 target: targets[pos],
-                type_id: logical_type_id_from_validated_v6(type_ids[pos]),
+                type_id: type_ids.at(pos),
                 schema_reversed: schema_reversed[pos] != 0,
                 relationship_id: relationship_ids
                     .get(pos)
@@ -374,7 +365,7 @@ impl NeighborSource for OverlayNeighbors<'_> {
                 .filter(|id| *id != NO_RELATIONSHIP_ID);
             let candidate = Neighbor {
                 target: targets[pos],
-                type_id: logical_type_id_from_validated_v6(type_ids[pos]),
+                type_id: type_ids.at(pos),
                 schema_reversed: schema_reversed[pos] != 0,
                 relationship_id,
             };
@@ -402,18 +393,12 @@ impl NeighborSource for OverlayNeighbors<'_> {
             };
             if !duplicate_check_initialized {
                 let key_before = |idx: usize| {
-                    (
-                        targets[idx],
-                        logical_type_id_from_validated_v6(type_ids[idx]),
-                        schema_reversed[idx] != 0,
-                    ) < (target, type_id, reversed)
+                    (targets[idx], type_ids.at(idx), schema_reversed[idx] != 0)
+                        < (target, type_id, reversed)
                 };
                 let key_after = |idx: usize| {
-                    (
-                        targets[idx],
-                        logical_type_id_from_validated_v6(type_ids[idx]),
-                        schema_reversed[idx] != 0,
-                    ) <= (target, type_id, reversed)
+                    (targets[idx], type_ids.at(idx), schema_reversed[idx] != 0)
+                        <= (target, type_id, reversed)
                 };
                 let mut low = 0usize;
                 let mut high = targets.len();
@@ -554,18 +539,12 @@ impl NeighborSource for OverlayNeighbors<'_> {
             let &(target, type_id, reversed, relationship_id) = &inserted[pos];
             if !duplicate_check_initialized {
                 let key_before = |idx: usize| {
-                    (
-                        targets[idx],
-                        logical_type_id_from_validated_v6(type_ids[idx]),
-                        schema_reversed[idx] != 0,
-                    ) < (target, type_id, reversed)
+                    (targets[idx], type_ids.at(idx), schema_reversed[idx] != 0)
+                        < (target, type_id, reversed)
                 };
                 let key_after = |idx: usize| {
-                    (
-                        targets[idx],
-                        logical_type_id_from_validated_v6(type_ids[idx]),
-                        schema_reversed[idx] != 0,
-                    ) <= (target, type_id, reversed)
+                    (targets[idx], type_ids.at(idx), schema_reversed[idx] != 0)
+                        <= (target, type_id, reversed)
                 };
                 let mut low = 0usize;
                 let mut high = targets.len();
@@ -648,7 +627,7 @@ impl NeighborSource for OverlayNeighbors<'_> {
                 .filter(|id| *id != NO_RELATIONSHIP_ID);
             let candidate = Neighbor {
                 target: targets[pos],
-                type_id: logical_type_id_from_validated_v6(type_ids[pos]),
+                type_id: type_ids.at(pos),
                 schema_reversed: schema_reversed[pos] != 0,
                 relationship_id,
             };
@@ -746,9 +725,9 @@ impl WeightedNeighborSource for EdgeStore {
             .zip(weights.iter())
             .enumerate()
             .map(
-                |(idx, (((&target, &type_id), &schema_reversed), &weight))| WeightedNeighbor {
+                |(idx, (((&target, type_id), &schema_reversed), &weight))| WeightedNeighbor {
                     target,
-                    type_id: logical_type_id_from_validated_v6(type_id),
+                    type_id,
                     weight,
                     schema_reversed: schema_reversed != 0,
                     relationship_id: relationship_ids
@@ -779,7 +758,7 @@ impl WeightedNeighborSource for EdgeStore {
             if let Some(&weight) = weights.get(position) {
                 output.push(WeightedNeighbor {
                     target: targets[position],
-                    type_id: logical_type_id_from_validated_v6(type_ids[position]),
+                    type_id: type_ids.at(position),
                     weight,
                     schema_reversed: schema_reversed[position] != 0,
                     relationship_id: relationship_ids
@@ -820,7 +799,7 @@ impl Iterator for NeighborIter<'_> {
 
 pub(crate) struct CsrNeighborIter<'a> {
     targets: &'a [u32],
-    type_ids: &'a [u8],
+    type_ids: EdgeTypeSlice<'a>,
     schema_reversed: &'a [u8],
     relationship_ids: &'a [RelationshipId],
     pos: usize,
@@ -830,7 +809,7 @@ pub(crate) struct CsrNeighborIter<'a> {
 impl<'a> CsrNeighborIter<'a> {
     fn forward(
         targets: &'a [u32],
-        type_ids: &'a [u8],
+        type_ids: EdgeTypeSlice<'a>,
         schema_reversed: &'a [u8],
         relationship_ids: &'a [RelationshipId],
     ) -> Self {
@@ -846,7 +825,7 @@ impl<'a> CsrNeighborIter<'a> {
 
     fn reversed(
         targets: &'a [u32],
-        type_ids: &'a [u8],
+        type_ids: EdgeTypeSlice<'a>,
         schema_reversed: &'a [u8],
         relationship_ids: &'a [RelationshipId],
     ) -> Self {
@@ -878,7 +857,7 @@ impl Iterator for CsrNeighborIter<'_> {
         };
         Some(Neighbor {
             target: self.targets[pos],
-            type_id: logical_type_id_from_validated_v6(self.type_ids[pos]),
+            type_id: self.type_ids.at(pos),
             schema_reversed: self.schema_reversed[pos] != 0,
             relationship_id: self
                 .relationship_ids
@@ -896,7 +875,7 @@ enum OverlayPhase {
 
 pub(crate) struct OverlayNeighborIter<'a> {
     targets: &'a [u32],
-    type_ids: &'a [u8],
+    type_ids: EdgeTypeSlice<'a>,
     deleted: Option<&'a HashSet<OverlayDelete>>,
     inserted: Option<&'a [OverlayInsert]>,
     base: CsrNeighborIter<'a>,
@@ -908,7 +887,7 @@ pub(crate) struct OverlayNeighborIter<'a> {
 impl<'a> OverlayNeighborIter<'a> {
     fn forward(
         targets: &'a [u32],
-        type_ids: &'a [u8],
+        type_ids: EdgeTypeSlice<'a>,
         schema_reversed: &'a [u8],
         relationship_ids: &'a [RelationshipId],
         inserted: Option<&'a [OverlayInsert]>,
@@ -928,7 +907,7 @@ impl<'a> OverlayNeighborIter<'a> {
 
     fn reversed(
         targets: &'a [u32],
-        type_ids: &'a [u8],
+        type_ids: EdgeTypeSlice<'a>,
         schema_reversed: &'a [u8],
         relationship_ids: &'a [RelationshipId],
         inserted: Option<&'a [OverlayInsert]>,
@@ -959,9 +938,9 @@ impl<'a> OverlayNeighborIter<'a> {
             .zip(self.base.schema_reversed.iter())
             .enumerate()
             .any(
-                |(idx, ((&base_target, &base_type), &base_schema_reversed))| {
+                |(idx, ((&base_target, base_type), &base_schema_reversed))| {
                     base_target == target
-                        && logical_type_id_from_validated_v6(base_type) == type_id
+                        && base_type == type_id
                         && (base_schema_reversed != 0) == schema_reversed
                         && self
                             .base

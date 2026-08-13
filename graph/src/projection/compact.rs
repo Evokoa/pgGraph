@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::edge_store::{
-    EdgeStore, IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder, NO_RELATIONSHIP_ID,
+    EdgeStore, EdgeTypeWidth, IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder,
+    NO_RELATIONSHIP_ID,
 };
 use crate::projection::chunk::{
     publish_base_chunk_rewrite_with_segments, EdgeStoreChunkSource, SourceRange,
@@ -341,7 +342,7 @@ pub(crate) fn compact_generation(
             base,
             &layered,
             &ranges,
-            final_store_plan.edge_count,
+            final_store_plan,
             &governor,
             started,
             budgets.max_elapsed,
@@ -1367,6 +1368,7 @@ fn compaction_source_scratch_bytes(
 struct MaterializedStorePlan {
     edge_count: usize,
     heap_bytes: usize,
+    type_width: EdgeTypeWidth,
 }
 
 fn plan_materialized_store(
@@ -1375,24 +1377,40 @@ fn plan_materialized_store(
     ranges: &[SourceRange],
     execution: CompactionExecution<'_>,
 ) -> GraphResult<MaterializedStorePlan> {
-    let edge_count = ranges
+    let (edge_count, max_type_id) = ranges
         .iter()
         .flat_map(|range| range.start..range.end)
-        .try_fold(0usize, |total, source| {
-            compaction_tick(execution.governor, execution.started, execution.max_elapsed)?;
-            let degree = layered.neighbors(source).count();
-            total
-                .checked_add(degree)
-                .ok_or_else(|| compaction_resource_limit("memory bytes", total, degree, usize::MAX))
-        })?;
-    let heap_bytes = SortedEdgeStoreBuilder::planned_storage_bytes(
+        .try_fold(
+            (0usize, EdgeTypeId::UNTYPED),
+            |(total, max_type_id), source| {
+                compaction_tick(execution.governor, execution.started, execution.max_elapsed)?;
+                let mut degree = 0usize;
+                let mut source_max_type_id = max_type_id;
+                for neighbor in layered.neighbors(source) {
+                    degree = degree.checked_add(1).ok_or_else(|| {
+                        compaction_resource_limit("memory bytes", total, usize::MAX, usize::MAX)
+                    })?;
+                    source_max_type_id = source_max_type_id.max(neighbor.type_id);
+                }
+                Ok((
+                    total.checked_add(degree).ok_or_else(|| {
+                        compaction_resource_limit("memory bytes", total, degree, usize::MAX)
+                    })?,
+                    source_max_type_id,
+                ))
+            },
+        )?;
+    let type_width = EdgeTypeWidth::select_for_max_id(max_type_id);
+    let heap_bytes = SortedEdgeStoreBuilder::planned_storage_bytes_for_width(
         base.node_count(),
         edge_count,
         layered.has_weighted_edges(),
+        type_width,
     )?;
     Ok(MaterializedStorePlan {
         edge_count,
         heap_bytes,
+        type_width,
     })
 }
 
@@ -1537,16 +1555,17 @@ fn materialize_layered_ranges(
     base: &EdgeStore,
     layered: &LayeredNeighbors<'_>,
     ranges: &[SourceRange],
-    edge_count: usize,
+    plan: MaterializedStorePlan,
     governor: &crate::resource::ResourceGovernor,
     started: Instant,
     max_elapsed: Duration,
 ) -> GraphResult<EdgeStore> {
     let has_weights = layered.has_weighted_edges();
-    let mut builder = SortedEdgeStoreBuilder::try_new_with_edge_capacity(
+    let mut builder = SortedEdgeStoreBuilder::try_new_with_edge_capacity_and_width(
         base.node_count(),
-        edge_count,
+        plan.edge_count,
         has_weights,
+        plan.type_width,
     )?;
     for source in ranges.iter().flat_map(|range| range.start..range.end) {
         compaction_tick(governor, started, max_elapsed)?;
@@ -1633,12 +1652,11 @@ fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<CompactionEdgeKey, Optio
         .zip(type_ids.iter())
         .zip(schema_reversed.iter())
         .enumerate()
-        .map(|(idx, ((&target, &type_id), &schema_reversed))| {
+        .map(|(idx, ((&target, type_id), &schema_reversed))| {
             (
                 (
                     target,
-                    EdgeTypeId::from_v6_storage(type_id)
-                        .expect("published topology contains validated v6 type IDs"),
+                    type_id,
                     schema_reversed != 0,
                     relationship_ids
                         .get(idx)
@@ -1892,6 +1910,71 @@ mod tests {
         assert_full_csr_equivalence, edge_store_from_tuples, weighted_edge_store_from_tuples,
         ProjectionArtifactDir,
     };
+    use crate::resource::{
+        ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
+        RowCount, WorkUnits,
+    };
+
+    #[test]
+    fn compaction_materialization_preflights_adaptive_edge_type_width() {
+        let wide = EdgeTypeId::try_from(65_535u32).expect("logical type ID");
+        let base = EdgeStore::try_from_edges(
+            2,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id: wide,
+                weight: None,
+                schema_reversed: false,
+            }],
+            false,
+        )
+        .expect("adaptive base");
+        let layered = LayeredNeighbors::new(&base, Vec::new());
+        let governor = ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1_024 * 1_024)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
+            ElapsedBudget::new(Duration::from_secs(1)),
+        ));
+        let started = Instant::now();
+        let ranges = [SourceRange { start: 0, end: 2 }];
+        let plan = plan_materialized_store(
+            &base,
+            &layered,
+            &ranges,
+            CompactionExecution {
+                governor: &governor,
+                started,
+                max_elapsed: Duration::from_secs(1),
+            },
+        )
+        .expect("adaptive compaction plan");
+        assert_eq!(plan.type_width, EdgeTypeWidth::Four);
+        assert_eq!(
+            plan.heap_bytes,
+            SortedEdgeStoreBuilder::planned_storage_bytes_for_width(
+                2,
+                1,
+                false,
+                EdgeTypeWidth::Four,
+            )
+            .expect("exact adaptive storage")
+        );
+        let materialized = materialize_layered_ranges(
+            &base,
+            &layered,
+            &ranges,
+            plan,
+            &governor,
+            started,
+            Duration::from_secs(1),
+        )
+        .expect("adaptive compaction materialization");
+        assert_eq!(materialized.edge_type_width(), EdgeTypeWidth::Four);
+        assert_eq!(materialized.neighbors(0).1.at(0), wide);
+    }
 
     #[test]
     fn compaction_l0_to_l1_preserves_layered_neighbors() {

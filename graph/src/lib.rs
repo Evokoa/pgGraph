@@ -916,6 +916,9 @@ pub mod pg_test;
 #[cfg(test)]
 #[path = "edge_type_contract_tests.rs"]
 mod edge_type_contract_tests;
+#[cfg(test)]
+#[path = "p7_contract_tests.rs"]
+mod p7_contract_tests;
 
 /// Covers SQL API behavior through PostgreSQL, including registration,
 /// discovery, build, search, traversal, path, component, and sync flows.

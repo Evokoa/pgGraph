@@ -82,6 +82,13 @@ impl EdgeTypeId {
         self.0
     }
 
+    /// Construct from a physical value after the owning adapter validated its
+    /// width-specific all-ones sentinel and section bounds.
+    pub(crate) const fn from_validated_physical(value: u32) -> Self {
+        debug_assert!(value != u32::MAX);
+        Self(value)
+    }
+
     /// Decode the one-byte relationship-type representation used by v6.
     pub fn from_v6_storage(value: u8) -> Result<Self, EdgeTypeIdError> {
         if value == u8::MAX {

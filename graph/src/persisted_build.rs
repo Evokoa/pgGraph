@@ -1575,8 +1575,16 @@ mod tests {
         let loaded = crate::persistence::load_graph_file(&path).expect("artifact loads");
         assert_eq!(loaded.node_store.primary_key(0), Some("a"));
         assert_eq!(loaded.node_store.primary_key(1), Some("b"));
-        assert_eq!(loaded.edge_store.neighbors(0), (&[1][..], &[1][..]));
-        assert_eq!(loaded.reverse_edge_store.neighbors(1), (&[0][..], &[1][..]));
+        assert_eq!(loaded.edge_store.neighbors(0).0, &[1]);
+        assert_eq!(
+            loaded.edge_store.edge_type_at(0).map(|id| id.get()),
+            Some(1)
+        );
+        assert_eq!(loaded.reverse_edge_store.neighbors(1).0, &[0]);
+        assert_eq!(
+            loaded.reverse_edge_store.edge_type_at(0).map(|id| id.get()),
+            Some(1)
+        );
         assert_eq!(loaded.edge_type_registry.as_slice(), registry);
         assert_eq!(loaded.edge_store.weights_slice(), &[5]);
         assert_eq!(

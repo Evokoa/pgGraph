@@ -42,6 +42,268 @@ pub(crate) struct RelationshipIdentity {
 const EMPTY_U32_SLICE: [u32; 0] = [];
 const EMPTY_U8_SLICE: [u8; 0] = [];
 
+/// Physical width of one edge-type identifier in a CSR type section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeTypeWidth {
+    One,
+    Two,
+    Four,
+}
+
+impl EdgeTypeWidth {
+    pub(crate) const fn bytes(self) -> usize {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Four => 4,
+        }
+    }
+
+    pub(crate) const fn select_for_max_id(max_id: EdgeTypeId) -> Self {
+        if max_id.get() <= EdgeTypeId::V6_MAX_USER_ID {
+            Self::One
+        } else if max_id.get() < u16::MAX as u32 {
+            Self::Two
+        } else {
+            Self::Four
+        }
+    }
+}
+
+/// Owned adaptive physical edge-type array.
+enum EdgeTypeStorage {
+    One(Vec<u8>),
+    Two(Vec<u16>),
+    Four(Vec<u32>),
+}
+
+impl EdgeTypeStorage {
+    fn new() -> Self {
+        Self::One(Vec::new())
+    }
+
+    fn with_capacity(capacity: usize, width: EdgeTypeWidth) -> GraphResult<Self> {
+        macro_rules! allocated {
+            ($variant:ident, $ty:ty) => {{
+                let mut values: Vec<$ty> = Vec::new();
+                values
+                    .try_reserve_exact(capacity)
+                    .map_err(csr_allocation_error)?;
+                Ok(Self::$variant(values))
+            }};
+        }
+        match width {
+            EdgeTypeWidth::One => allocated!(One, u8),
+            EdgeTypeWidth::Two => allocated!(Two, u16),
+            EdgeTypeWidth::Four => allocated!(Four, u32),
+        }
+    }
+
+    fn width(&self) -> EdgeTypeWidth {
+        match self {
+            Self::One(_) => EdgeTypeWidth::One,
+            Self::Two(_) => EdgeTypeWidth::Two,
+            Self::Four(_) => EdgeTypeWidth::Four,
+        }
+    }
+
+    fn capacity_bytes(&self) -> usize {
+        match self {
+            Self::One(values) => values.capacity(),
+            Self::Two(values) => values.capacity() * std::mem::size_of::<u16>(),
+            Self::Four(values) => values.capacity() * std::mem::size_of::<u32>(),
+        }
+    }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        match self {
+            Self::One(values) => values.capacity(),
+            Self::Two(values) => values.capacity(),
+            Self::Four(values) => values.capacity(),
+        }
+    }
+
+    fn as_slice(&self) -> EdgeTypeSlice<'_> {
+        match self {
+            Self::One(values) => EdgeTypeSlice::One(values),
+            Self::Two(values) => EdgeTypeSlice::Two(values),
+            Self::Four(values) => EdgeTypeSlice::Four(values),
+        }
+    }
+
+    fn try_push(&mut self, type_id: EdgeTypeId) -> GraphResult<()> {
+        self.prepare_push(type_id)?;
+        match self {
+            Self::One(values) => {
+                values.push(u8::try_from(type_id.get()).map_err(|_| GraphError::EdgeTypeLimit)?)
+            }
+            Self::Two(values) => {
+                values.push(u16::try_from(type_id.get()).map_err(|_| GraphError::EdgeTypeLimit)?)
+            }
+            Self::Four(values) => values.push(type_id.get()),
+        }
+        Ok(())
+    }
+
+    fn prepare_push(&mut self, type_id: EdgeTypeId) -> GraphResult<()> {
+        if type_id == EdgeTypeId::SENTINEL {
+            return Err(GraphError::EdgeTypeLimit);
+        }
+        let required = EdgeTypeWidth::select_for_max_id(type_id);
+        if self.width().bytes() < required.bytes() {
+            self.widen(required)?;
+        }
+        match self {
+            Self::One(values) => values.try_reserve(1).map_err(csr_allocation_error)?,
+            Self::Two(values) => values.try_reserve(1).map_err(csr_allocation_error)?,
+            Self::Four(values) => values.try_reserve(1).map_err(csr_allocation_error)?,
+        }
+        Ok(())
+    }
+
+    fn widen(&mut self, target: EdgeTypeWidth) -> GraphResult<()> {
+        let replacement = match (&*self, target) {
+            (Self::One(values), EdgeTypeWidth::Two) => {
+                let mut widened = Vec::new();
+                widened
+                    .try_reserve_exact(values.capacity())
+                    .map_err(csr_allocation_error)?;
+                widened.extend(values.iter().copied().map(u16::from));
+                Self::Two(widened)
+            }
+            (Self::One(values), EdgeTypeWidth::Four) => {
+                let mut widened = Vec::new();
+                widened
+                    .try_reserve_exact(values.capacity())
+                    .map_err(csr_allocation_error)?;
+                widened.extend(values.iter().copied().map(u32::from));
+                Self::Four(widened)
+            }
+            (Self::Two(values), EdgeTypeWidth::Four) => {
+                let mut widened = Vec::new();
+                widened
+                    .try_reserve_exact(values.capacity())
+                    .map_err(csr_allocation_error)?;
+                widened.extend(values.iter().copied().map(u32::from));
+                Self::Four(widened)
+            }
+            _ => return Ok(()),
+        };
+        *self = replacement;
+        Ok(())
+    }
+}
+
+/// Borrowed adaptive edge-type array.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum EdgeTypeSlice<'a> {
+    One(&'a [u8]),
+    Two(&'a [u16]),
+    Four(&'a [u32]),
+}
+
+impl<'a> EdgeTypeSlice<'a> {
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::One(values) => values.len(),
+            Self::Two(values) => values.len(),
+            Self::Four(values) => values.len(),
+        }
+    }
+
+    pub(crate) fn get(self, index: usize) -> Option<EdgeTypeId> {
+        let raw = match self {
+            Self::One(values) => u32::from(*values.get(index)?),
+            Self::Two(values) => u32::from(*values.get(index)?),
+            Self::Four(values) => *values.get(index)?,
+        };
+        EdgeTypeId::try_from(raw).ok()
+    }
+
+    #[inline(always)]
+    pub(crate) fn at(self, index: usize) -> EdgeTypeId {
+        let raw = match self {
+            Self::One(values) => u32::from(values[index]),
+            Self::Two(values) => u32::from(values[index]),
+            Self::Four(values) => values[index],
+        };
+        EdgeTypeId::from_validated_physical(raw)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn iter(self) -> EdgeTypeIter<'a> {
+        EdgeTypeIter {
+            values: self,
+            position: 0,
+        }
+    }
+
+    pub(crate) fn subslice(self, range: Range<usize>) -> Self {
+        match self {
+            Self::One(values) => Self::One(&values[range]),
+            Self::Two(values) => Self::Two(&values[range]),
+            Self::Four(values) => Self::Four(&values[range]),
+        }
+    }
+
+    fn contains_physical_sentinel(self) -> bool {
+        match self {
+            Self::One(values) => values.contains(&u8::MAX),
+            Self::Two(values) => values.contains(&u16::MAX),
+            Self::Four(values) => values.contains(&u32::MAX),
+        }
+    }
+}
+
+impl PartialEq<&[u8]> for EdgeTypeSlice<'_> {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.iter()
+            .map(EdgeTypeId::get)
+            .eq(other.iter().copied().map(u32::from))
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for EdgeTypeSlice<'_> {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.eq(&other.as_slice())
+    }
+}
+
+impl PartialEq<&[i32]> for EdgeTypeSlice<'_> {
+    fn eq(&self, other: &&[i32]) -> bool {
+        self.iter()
+            .map(EdgeTypeId::get)
+            .eq(other.iter().copied().map(|value| value as u32))
+    }
+}
+
+pub(crate) struct EdgeTypeIter<'a> {
+    values: EdgeTypeSlice<'a>,
+    position: usize,
+}
+
+impl Iterator for EdgeTypeIter<'_> {
+    type Item = EdgeTypeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.values.get(self.position)?;
+        self.position += 1;
+        Some(value)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.values.len().saturating_sub(self.position);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for EdgeTypeIter<'_> {}
+
 /// Validated, owning metadata for mmap-backed CSR edge arrays.
 #[derive(Clone)]
 pub(crate) struct MmapEdgeArrays {
@@ -54,6 +316,7 @@ pub(crate) struct MmapEdgeArrays {
     relationship_ids_range: Range<usize>,
     node_count: u32,
     edge_count: u32,
+    type_width: EdgeTypeWidth,
 }
 
 /// Byte ranges for mmap-backed edge arrays.
@@ -77,6 +340,8 @@ pub(crate) struct MmapEdgeArrayParts {
     pub(crate) node_count: u32,
     /// Number of edges represented by the parallel edge arrays.
     pub(crate) edge_count: u32,
+    /// Validated physical width of the edge-type section.
+    pub(crate) type_width: EdgeTypeWidth,
 }
 
 impl MmapEdgeArrays {
@@ -104,7 +369,7 @@ impl MmapEdgeArrays {
             .checked_add(1)?
             .checked_mul(std::mem::size_of::<u32>())?;
         let target_bytes = (parts.edge_count as usize).checked_mul(std::mem::size_of::<u32>())?;
-        let type_id_bytes = parts.edge_count as usize;
+        let type_id_bytes = (parts.edge_count as usize).checked_mul(parts.type_width.bytes())?;
         let schema_reversed_bytes = parts.edge_count as usize;
         let weight_bytes = (parts.edge_count as usize).checked_mul(std::mem::size_of::<u32>())?;
         let relationship_id_bytes =
@@ -130,10 +395,12 @@ impl MmapEdgeArrays {
         {
             return None;
         }
-        if parts.mmap.as_slice()[parts.type_ids_range.clone()].contains(&u8::MAX) {
-            return None;
-        }
         let base = parts.mmap.as_slice().as_ptr() as usize;
+        let type_alignment = match parts.type_width {
+            EdgeTypeWidth::One => std::mem::align_of::<u8>(),
+            EdgeTypeWidth::Two => std::mem::align_of::<u16>(),
+            EdgeTypeWidth::Four => std::mem::align_of::<u32>(),
+        };
         if !base
             .checked_add(parts.offsets_range.start)?
             .is_multiple_of(std::mem::align_of::<u32>())
@@ -145,8 +412,16 @@ impl MmapEdgeArrays {
                     .is_none_or(|address| !address.is_multiple_of(std::mem::align_of::<u32>()))
             })
             || !base
+                .checked_add(parts.type_ids_range.start)?
+                .is_multiple_of(type_alignment)
+            || !base
                 .checked_add(parts.relationship_ids_range.start)?
                 .is_multiple_of(std::mem::align_of::<RelationshipId>())
+        {
+            return None;
+        }
+        if edge_type_slice(&parts.mmap, &parts.type_ids_range, parts.type_width)
+            .contains_physical_sentinel()
         {
             return None;
         }
@@ -176,6 +451,7 @@ impl MmapEdgeArrays {
             relationship_ids_range: parts.relationship_ids_range,
             node_count: parts.node_count,
             edge_count: parts.edge_count,
+            type_width: parts.type_width,
         })
     }
 
@@ -187,8 +463,8 @@ impl MmapEdgeArrays {
         u32_slice(&self.mmap, &self.targets_range)
     }
 
-    fn type_ids(&self) -> &[u8] {
-        &self.mmap.as_slice()[self.type_ids_range.clone()]
+    fn type_ids(&self) -> EdgeTypeSlice<'_> {
+        edge_type_slice(&self.mmap, &self.type_ids_range, self.type_width)
     }
 
     fn schema_reversed(&self) -> &[u8] {
@@ -232,13 +508,40 @@ fn u32_slice<'a>(mmap: &'a MappedBytes, range: &Range<usize>) -> &'a [u32] {
     }
 }
 
+fn edge_type_slice<'a>(
+    mmap: &'a MappedBytes,
+    range: &Range<usize>,
+    width: EdgeTypeWidth,
+) -> EdgeTypeSlice<'a> {
+    let bytes = &mmap.as_slice()[range.clone()];
+    match width {
+        EdgeTypeWidth::One => EdgeTypeSlice::One(bytes),
+        EdgeTypeWidth::Two => {
+            // SAFETY: `MmapEdgeArrays::validate` checks the section length and
+            // the artifact section starts are aligned to at least 64 bytes.
+            let values = unsafe {
+                std::slice::from_raw_parts(bytes.as_ptr().cast::<u16>(), bytes.len() / 2)
+            };
+            EdgeTypeSlice::Two(values)
+        }
+        EdgeTypeWidth::Four => {
+            // SAFETY: `MmapEdgeArrays::validate` checks the section length and
+            // the artifact section starts are aligned to at least 64 bytes.
+            let values = unsafe {
+                std::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), bytes.len() / 4)
+            };
+            EdgeTypeSlice::Four(values)
+        }
+    }
+}
+
 /// Backing store for edge data.
 enum EdgeBacking {
     /// Build-time: owned Vecs.
     Owned {
         edge_offsets: Vec<u32>,
         targets: Vec<u32>,
-        type_ids: Vec<u8>,
+        type_ids: EdgeTypeStorage,
         schema_reversed: Vec<u8>,
         weights: Vec<u32>,
         relationship_ids: Vec<RelationshipId>,
@@ -280,12 +583,13 @@ pub struct SortedEdgeStoreBuilder {
     has_weights: bool,
     edge_offsets: Vec<u32>,
     targets: Vec<u32>,
-    type_ids: Vec<u8>,
+    type_ids: EdgeTypeStorage,
     schema_reversed: Vec<u8>,
     weights: Vec<u32>,
     relationship_ids: Vec<RelationshipId>,
     current_node: u32,
     edge_capacity: Option<usize>,
+    edge_type_width_limit: Option<EdgeTypeWidth>,
 }
 
 impl SortedEdgeStoreBuilder {
@@ -299,10 +603,25 @@ impl SortedEdgeStoreBuilder {
     ///
     /// Returns an internal error when a count or byte total cannot be
     /// represented by the CSR format or the current platform.
+    #[cfg(test)]
     pub(crate) fn planned_storage_bytes(
         node_count: u32,
         edge_capacity: usize,
         has_weights: bool,
+    ) -> GraphResult<usize> {
+        Self::planned_storage_bytes_for_width(
+            node_count,
+            edge_capacity,
+            has_weights,
+            EdgeTypeWidth::One,
+        )
+    }
+
+    pub(crate) fn planned_storage_bytes_for_width(
+        node_count: u32,
+        edge_capacity: usize,
+        has_weights: bool,
+        type_width: EdgeTypeWidth,
     ) -> GraphResult<usize> {
         if edge_capacity > u32::MAX as usize {
             return Err(GraphError::Internal(
@@ -315,7 +634,7 @@ impl SortedEdgeStoreBuilder {
             .and_then(|count| count.checked_mul(std::mem::size_of::<u32>()))
             .ok_or_else(|| GraphError::Internal("CSR offset bytes overflowed usize".to_string()))?;
         let per_edge = std::mem::size_of::<u32>()
-            .checked_add(std::mem::size_of::<u8>())
+            .checked_add(type_width.bytes())
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u8>()))
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<RelationshipId>()))
             .and_then(|bytes| {
@@ -341,12 +660,13 @@ impl SortedEdgeStoreBuilder {
             has_weights,
             edge_offsets: vec![0],
             targets: Vec::new(),
-            type_ids: Vec::new(),
+            type_ids: EdgeTypeStorage::new(),
             schema_reversed: Vec::new(),
             weights: Vec::new(),
             relationship_ids: Vec::new(),
             current_node: 0,
             edge_capacity: None,
+            edge_type_width_limit: None,
         }
     }
 
@@ -371,12 +691,13 @@ impl SortedEdgeStoreBuilder {
             has_weights,
             edge_offsets,
             targets: Vec::new(),
-            type_ids: Vec::new(),
+            type_ids: EdgeTypeStorage::new(),
             schema_reversed: Vec::new(),
             weights: Vec::new(),
             relationship_ids: Vec::new(),
             current_node: 0,
             edge_capacity: None,
+            edge_type_width_limit: None,
         })
     }
 
@@ -391,12 +712,27 @@ impl SortedEdgeStoreBuilder {
     ///
     /// Returns an internal error when the offset count cannot fit the current
     /// platform, or [`GraphError::Oom`] when an initial allocation fails.
+    #[cfg(test)]
     pub(crate) fn try_new_with_edge_capacity(
         node_count: u32,
         edge_capacity: usize,
         has_weights: bool,
     ) -> GraphResult<Self> {
-        Self::planned_storage_bytes(node_count, edge_capacity, has_weights)?;
+        Self::try_new_with_edge_capacity_and_width(
+            node_count,
+            edge_capacity,
+            has_weights,
+            EdgeTypeWidth::One,
+        )
+    }
+
+    pub(crate) fn try_new_with_edge_capacity_and_width(
+        node_count: u32,
+        edge_capacity: usize,
+        has_weights: bool,
+        type_width: EdgeTypeWidth,
+    ) -> GraphResult<Self> {
+        Self::planned_storage_bytes_for_width(node_count, edge_capacity, has_weights, type_width)?;
         let offset_capacity = usize::try_from(node_count)
             .ok()
             .and_then(|count| count.checked_add(1))
@@ -411,10 +747,7 @@ impl SortedEdgeStoreBuilder {
         targets
             .try_reserve_exact(edge_capacity)
             .map_err(csr_allocation_error)?;
-        let mut type_ids = Vec::new();
-        type_ids
-            .try_reserve_exact(edge_capacity)
-            .map_err(csr_allocation_error)?;
+        let type_ids = EdgeTypeStorage::with_capacity(edge_capacity, type_width)?;
         let mut schema_reversed = Vec::new();
         schema_reversed
             .try_reserve_exact(edge_capacity)
@@ -441,6 +774,7 @@ impl SortedEdgeStoreBuilder {
             relationship_ids,
             current_node: 0,
             edge_capacity: Some(edge_capacity),
+            edge_type_width_limit: Some(type_width),
         })
     }
 
@@ -466,10 +800,6 @@ impl SortedEdgeStoreBuilder {
     pub(crate) fn try_push_identified(&mut self, identified: IdentifiedRawEdge) -> GraphResult<()> {
         let edge = identified.edge;
         validate_raw_edge(self.node_count, &edge)?;
-        let type_id = edge
-            .type_id
-            .to_v6_storage()
-            .map_err(|_| GraphError::EdgeTypeLimit)?;
         if self
             .edge_capacity
             .is_some_and(|capacity| self.targets.len() >= capacity)
@@ -478,8 +808,15 @@ impl SortedEdgeStoreBuilder {
                 "CSR edge count exceeded its preflight capacity".to_string(),
             ));
         }
+        if self.edge_type_width_limit.is_some_and(|width| {
+            EdgeTypeWidth::select_for_max_id(edge.type_id).bytes() > width.bytes()
+        }) {
+            return Err(GraphError::Internal(
+                "edge type ID exceeded its preflight physical width".to_string(),
+            ));
+        }
+        self.type_ids.prepare_push(edge.type_id)?;
         self.targets.try_reserve(1).map_err(csr_allocation_error)?;
-        self.type_ids.try_reserve(1).map_err(csr_allocation_error)?;
         self.schema_reversed
             .try_reserve(1)
             .map_err(csr_allocation_error)?;
@@ -494,7 +831,7 @@ impl SortedEdgeStoreBuilder {
             self.edge_offsets.push(self.targets.len() as u32);
         }
         self.targets.push(edge.target);
-        self.type_ids.push(type_id);
+        self.type_ids.try_push(edge.type_id)?;
         self.schema_reversed.push(u8::from(edge.schema_reversed));
         self.relationship_ids.push(identified.relationship_id);
         if self.has_weights {
@@ -551,7 +888,7 @@ impl EdgeStore {
             backing: EdgeBacking::Owned {
                 edge_offsets: vec![0],
                 targets: Vec::new(),
-                type_ids: Vec::new(),
+                type_ids: EdgeTypeStorage::new(),
                 schema_reversed: Vec::new(),
                 weights: Vec::new(),
                 relationship_ids: Vec::new(),
@@ -625,7 +962,16 @@ impl EdgeStore {
         // Build CSR arrays
         let mut edge_offsets = Vec::with_capacity(node_count as usize + 1);
         let mut targets = Vec::with_capacity(edge_count);
-        let mut type_ids = Vec::with_capacity(edge_count);
+        let max_type_id = edges
+            .iter()
+            .map(|edge| edge.type_id)
+            .max()
+            .unwrap_or(EdgeTypeId::UNTYPED);
+        let mut type_ids = match EdgeTypeWidth::select_for_max_id(max_type_id) {
+            EdgeTypeWidth::One => EdgeTypeStorage::One(Vec::with_capacity(edge_count)),
+            EdgeTypeWidth::Two => EdgeTypeStorage::Two(Vec::with_capacity(edge_count)),
+            EdgeTypeWidth::Four => EdgeTypeStorage::Four(Vec::with_capacity(edge_count)),
+        };
         let mut schema_reversed = Vec::with_capacity(edge_count);
         let mut weights = if has_weights {
             Vec::with_capacity(edge_count)
@@ -638,12 +984,9 @@ impl EdgeStore {
             edge_offsets.push(targets.len() as u32);
             while edge_idx < edges.len() && edges[edge_idx].source == node {
                 targets.push(edges[edge_idx].target);
-                type_ids.push(
-                    edges[edge_idx]
-                        .type_id
-                        .to_v6_storage()
-                        .expect("validated raw edge type fits v6 storage"),
-                );
+                type_ids
+                    .try_push(edges[edge_idx].type_id)
+                    .expect("validated logical edge type fits adaptive storage");
                 schema_reversed.push(u8::from(edges[edge_idx].schema_reversed));
                 if has_weights {
                     weights.push(edges[edge_idx].weight.unwrap_or(1));
@@ -724,7 +1067,11 @@ impl EdgeStore {
         }
 
         let mut reversed_targets = try_filled_vec(edge_count, 0u32)?;
-        let mut reversed_type_ids = try_filled_vec(edge_count, 0u8)?;
+        let mut reversed_type_ids = match self.edge_type_width() {
+            EdgeTypeWidth::One => EdgeTypeStorage::One(try_filled_vec(edge_count, 0u8)?),
+            EdgeTypeWidth::Two => EdgeTypeStorage::Two(try_filled_vec(edge_count, 0u16)?),
+            EdgeTypeWidth::Four => EdgeTypeStorage::Four(try_filled_vec(edge_count, 0u32)?),
+        };
         let mut reversed_schema_reversed = try_filled_vec(edge_count, 0u8)?;
         let mut reversed_weights = if has_weights {
             try_filled_vec(edge_count, 0u32)?
@@ -741,11 +1088,21 @@ impl EdgeStore {
         for source in 0..self.node_count() {
             let (targets, type_ids, schema_reversed, weights) =
                 self.neighbors_weighted_with_schema(source);
-            for (idx, (&target, &type_id)) in targets.iter().zip(type_ids.iter()).enumerate() {
+            for (idx, (&target, type_id)) in targets.iter().zip(type_ids.iter()).enumerate() {
                 let write_idx = write_offsets[target as usize] as usize;
                 write_offsets[target as usize] += 1;
                 reversed_targets[write_idx] = source;
-                reversed_type_ids[write_idx] = type_id;
+                match &mut reversed_type_ids {
+                    EdgeTypeStorage::One(values) => {
+                        values[write_idx] =
+                            u8::try_from(type_id.get()).map_err(|_| GraphError::EdgeTypeLimit)?;
+                    }
+                    EdgeTypeStorage::Two(values) => {
+                        values[write_idx] =
+                            u16::try_from(type_id.get()).map_err(|_| GraphError::EdgeTypeLimit)?;
+                    }
+                    EdgeTypeStorage::Four(values) => values[write_idx] = type_id.get(),
+                }
                 reversed_schema_reversed[write_idx] = schema_reversed[idx];
                 reversed_relationship_ids[write_idx] = self
                     .relationship_ids_slice()
@@ -781,7 +1138,7 @@ impl EdgeStore {
     ///
     /// Returns `(target_slice, type_id_slice)`.
     #[inline(always)]
-    pub fn neighbors(&self, node_idx: u32) -> (&[u32], &[u8]) {
+    pub(crate) fn neighbors(&self, node_idx: u32) -> (&[u32], EdgeTypeSlice<'_>) {
         match &self.backing {
             EdgeBacking::Owned {
                 edge_offsets,
@@ -790,17 +1147,23 @@ impl EdgeStore {
                 ..
             } => {
                 if node_idx as usize + 1 >= edge_offsets.len() {
-                    return (&EMPTY_U32_SLICE, &EMPTY_U8_SLICE);
+                    return (&EMPTY_U32_SLICE, EdgeTypeSlice::One(&EMPTY_U8_SLICE));
                 }
                 let start = edge_offsets[node_idx as usize] as usize;
                 let end = edge_offsets[node_idx as usize + 1] as usize;
-                (&targets[start..end], &type_ids[start..end])
+                (
+                    &targets[start..end],
+                    type_ids.as_slice().subslice(start..end),
+                )
             }
             EdgeBacking::Mmap { arrays } => {
                 let Some(range) = arrays.neighbor_range(node_idx) else {
-                    return (&EMPTY_U32_SLICE, &EMPTY_U8_SLICE);
+                    return (&EMPTY_U32_SLICE, EdgeTypeSlice::One(&EMPTY_U8_SLICE));
                 };
-                (&arrays.targets()[range.clone()], &arrays.type_ids()[range])
+                (
+                    &arrays.targets()[range.clone()],
+                    arrays.type_ids().subslice(range),
+                )
             }
         }
     }
@@ -811,7 +1174,10 @@ impl EdgeStore {
     /// row direction and `1` for the generated reverse copy of a bidirectional
     /// row.
     #[inline(always)]
-    pub fn neighbors_with_schema(&self, node_idx: u32) -> (&[u32], &[u8], &[u8]) {
+    pub(crate) fn neighbors_with_schema(
+        &self,
+        node_idx: u32,
+    ) -> (&[u32], EdgeTypeSlice<'_>, &[u8]) {
         match &self.backing {
             EdgeBacking::Owned {
                 edge_offsets,
@@ -821,23 +1187,31 @@ impl EdgeStore {
                 ..
             } => {
                 if node_idx as usize + 1 >= edge_offsets.len() {
-                    return (&EMPTY_U32_SLICE, &EMPTY_U8_SLICE, &EMPTY_U8_SLICE);
+                    return (
+                        &EMPTY_U32_SLICE,
+                        EdgeTypeSlice::One(&EMPTY_U8_SLICE),
+                        &EMPTY_U8_SLICE,
+                    );
                 }
                 let start = edge_offsets[node_idx as usize] as usize;
                 let end = edge_offsets[node_idx as usize + 1] as usize;
                 (
                     &targets[start..end],
-                    &type_ids[start..end],
+                    type_ids.as_slice().subslice(start..end),
                     &schema_reversed[start..end],
                 )
             }
             EdgeBacking::Mmap { arrays } => {
                 let Some(range) = arrays.neighbor_range(node_idx) else {
-                    return (&EMPTY_U32_SLICE, &EMPTY_U8_SLICE, &EMPTY_U8_SLICE);
+                    return (
+                        &EMPTY_U32_SLICE,
+                        EdgeTypeSlice::One(&EMPTY_U8_SLICE),
+                        &EMPTY_U8_SLICE,
+                    );
                 };
                 (
                     &arrays.targets()[range.clone()],
-                    &arrays.type_ids()[range.clone()],
+                    arrays.type_ids().subslice(range.clone()),
                     &arrays.schema_reversed()[range],
                 )
             }
@@ -855,7 +1229,7 @@ impl EdgeStore {
     pub(crate) fn neighbors_with_schema_and_relationship_ids(
         &self,
         node_idx: u32,
-    ) -> (&[u32], &[u8], &[u8], &[RelationshipId]) {
+    ) -> (&[u32], EdgeTypeSlice<'_>, &[u8], &[RelationshipId]) {
         let (targets, type_ids, schema_reversed) = self.neighbors_with_schema(node_idx);
         let start = self
             .offsets_slice()
@@ -869,9 +1243,13 @@ impl EdgeStore {
 
     /// Get the neighbor slice with weights for Dijkstra.
     #[inline]
-    pub fn neighbors_weighted(&self, node_idx: u32) -> (&[u32], &[u8], &[u32]) {
+    pub(crate) fn neighbors_weighted(&self, node_idx: u32) -> (&[u32], EdgeTypeSlice<'_>, &[u32]) {
         if node_idx >= self.node_count() {
-            return (&EMPTY_U32_SLICE, &EMPTY_U8_SLICE, &EMPTY_U32_SLICE);
+            return (
+                &EMPTY_U32_SLICE,
+                EdgeTypeSlice::One(&EMPTY_U8_SLICE),
+                &EMPTY_U32_SLICE,
+            );
         }
 
         match &self.backing {
@@ -886,21 +1264,29 @@ impl EdgeStore {
                 let start = edge_offsets[node_idx as usize] as usize;
                 let end = edge_offsets[node_idx as usize + 1] as usize;
                 if weights.is_empty() {
-                    return (&targets[start..end], &type_ids[start..end], &[]);
+                    return (
+                        &targets[start..end],
+                        type_ids.as_slice().subslice(start..end),
+                        &[],
+                    );
                 }
 
                 (
                     &targets[start..end],
-                    &type_ids[start..end],
+                    type_ids.as_slice().subslice(start..end),
                     &weights[start..end],
                 )
             }
             EdgeBacking::Mmap { arrays } => {
                 let Some(range) = arrays.neighbor_range(node_idx) else {
-                    return (&EMPTY_U32_SLICE, &EMPTY_U8_SLICE, &EMPTY_U32_SLICE);
+                    return (
+                        &EMPTY_U32_SLICE,
+                        EdgeTypeSlice::One(&EMPTY_U8_SLICE),
+                        &EMPTY_U32_SLICE,
+                    );
                 };
                 let targets = &arrays.targets()[range.clone()];
-                let type_ids = &arrays.type_ids()[range.clone()];
+                let type_ids = arrays.type_ids().subslice(range.clone());
                 if arrays.weights_range.is_none() {
                     return (targets, type_ids, &[]);
                 }
@@ -911,7 +1297,10 @@ impl EdgeStore {
 
     /// Get the neighbor slice with weights and registered-direction metadata.
     #[inline]
-    pub fn neighbors_weighted_with_schema(&self, node_idx: u32) -> (&[u32], &[u8], &[u8], &[u32]) {
+    pub(crate) fn neighbors_weighted_with_schema(
+        &self,
+        node_idx: u32,
+    ) -> (&[u32], EdgeTypeSlice<'_>, &[u8], &[u32]) {
         let (targets, type_ids, schema_reversed) = self.neighbors_with_schema(node_idx);
         let (_, _, weights) = self.neighbors_weighted(node_idx);
         (targets, type_ids, schema_reversed, weights)
@@ -922,6 +1311,21 @@ impl EdgeStore {
         match &self.backing {
             EdgeBacking::Owned { targets, .. } => targets.len() as u32,
             EdgeBacking::Mmap { arrays } => arrays.edge_count,
+        }
+    }
+
+    pub(crate) fn edge_type_width(&self) -> EdgeTypeWidth {
+        match &self.backing {
+            EdgeBacking::Owned { type_ids, .. } => type_ids.width(),
+            EdgeBacking::Mmap { arrays } => arrays.type_width,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn edge_type_at(&self, index: usize) -> Option<EdgeTypeId> {
+        match &self.backing {
+            EdgeBacking::Owned { type_ids, .. } => type_ids.as_slice().get(index),
+            EdgeBacking::Mmap { arrays } => arrays.type_ids().get(index),
         }
     }
 
@@ -962,7 +1366,7 @@ impl EdgeStore {
             } => {
                 edge_offsets.capacity() * std::mem::size_of::<u32>()
                     + targets.capacity() * std::mem::size_of::<u32>()
-                    + type_ids.capacity() * std::mem::size_of::<u8>()
+                    + type_ids.capacity_bytes()
                     + schema_reversed.capacity() * std::mem::size_of::<u8>()
                     + weights.capacity() * std::mem::size_of::<u32>()
                     + relationship_ids.capacity() * std::mem::size_of::<RelationshipId>()
@@ -980,7 +1384,7 @@ impl EdgeStore {
                 (arrays.node_count as usize + 1)
                     .saturating_mul(std::mem::size_of::<u32>())
                     .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u32>())
-                    .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u8>())
+                    .saturating_add(arrays.edge_count as usize * arrays.type_width.bytes())
                     .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u8>())
                     .saturating_add(weight_bytes)
                     .saturating_add(arrays.relationship_ids_range.len())
@@ -1034,8 +1438,14 @@ impl EdgeStore {
     /// Get type_ids as a slice. Used by persistence.
     pub fn v6_type_ids_bytes(&self) -> &[u8] {
         match &self.backing {
-            EdgeBacking::Owned { type_ids, .. } => type_ids,
-            EdgeBacking::Mmap { arrays } => arrays.type_ids(),
+            EdgeBacking::Owned { type_ids, .. } => match type_ids {
+                EdgeTypeStorage::One(values) => values,
+                EdgeTypeStorage::Two(_) | EdgeTypeStorage::Four(_) => &[],
+            },
+            EdgeBacking::Mmap { arrays } => match arrays.type_ids() {
+                EdgeTypeSlice::One(values) => values,
+                EdgeTypeSlice::Two(_) | EdgeTypeSlice::Four(_) => &[],
+            },
         }
     }
 
@@ -1075,24 +1485,25 @@ impl EdgeStore {
         reason = "owned and mmap constructors reject reserved v6 type bytes before publication"
     )]
     pub(crate) fn missing_relationship_identity_edge_types(&self) -> roaring::RoaringBitmap {
-        self.v6_type_ids_bytes()
-            .iter()
-            .copied()
+        self.all_type_ids()
             .zip(self.relationship_ids_slice().iter().copied())
             .filter(|(_, relationship_id)| *relationship_id == NO_RELATIONSHIP_ID)
-            .map(|(stored_type, _)| {
-                EdgeTypeId::from_v6_storage(stored_type)
-                    .expect("published topology contains validated v6 type IDs")
-                    .get()
-            })
+            .map(|(type_id, _)| type_id.get())
             .collect()
+    }
+
+    pub(crate) fn all_type_ids(&self) -> EdgeTypeIter<'_> {
+        match &self.backing {
+            EdgeBacking::Owned { type_ids, .. } => type_ids.as_slice().iter(),
+            EdgeBacking::Mmap { arrays } => arrays.type_ids().iter(),
+        }
     }
 }
 
 fn validate_raw_edge(node_count: u32, edge: &RawEdge) -> GraphResult<()> {
-    edge.type_id
-        .to_v6_storage()
-        .map_err(|_| GraphError::EdgeTypeLimit)?;
+    if edge.type_id == EdgeTypeId::SENTINEL {
+        return Err(GraphError::EdgeTypeLimit);
+    }
     if edge.source >= node_count {
         return Err(GraphError::Internal(format!(
             "edge source {} is outside node range 0..{}",
@@ -1118,6 +1529,100 @@ impl Default for EdgeStore {
 mod tests {
     //! Covers CSR edge construction, degree/neighborhood queries, reverse-edge
     //! handling, and mmap loading invariants for persisted edge data.
+
+    #[test]
+    fn adaptive_edge_type_storage_selects_reserved_boundaries() {
+        let cases = [
+            (254, EdgeTypeWidth::One),
+            (255, EdgeTypeWidth::Two),
+            (65_534, EdgeTypeWidth::Two),
+            (65_535, EdgeTypeWidth::Four),
+        ];
+        for (raw, expected) in cases {
+            let id = EdgeTypeId::try_from(raw).unwrap();
+            assert_eq!(EdgeTypeWidth::select_for_max_id(id), expected);
+            let store = EdgeStore::try_from_edges(
+                2,
+                vec![RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: id,
+                    weight: None,
+                    schema_reversed: false,
+                }],
+                false,
+            )
+            .unwrap();
+            assert_eq!(store.edge_type_width(), expected);
+            assert_eq!(store.edge_type_at(0), Some(id));
+        }
+    }
+
+    #[test]
+    fn adaptive_edge_type_storage_preserves_forward_reverse_and_weighted_neighbors() {
+        let id = EdgeTypeId::try_from(65_535).unwrap();
+        let store = EdgeStore::try_from_edges(
+            2,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id: id,
+                weight: Some(9),
+                schema_reversed: false,
+            }],
+            true,
+        )
+        .unwrap();
+        let reversed = store.try_reversed().unwrap();
+        assert_eq!(
+            store.neighbors_weighted(0).1.iter().collect::<Vec<_>>(),
+            [id]
+        );
+        assert_eq!(store.neighbors_weighted(0).2, [9]);
+        assert_eq!(reversed.neighbors(1).1.iter().collect::<Vec<_>>(), [id]);
+        assert_eq!(reversed.edge_type_width(), EdgeTypeWidth::Four);
+    }
+
+    #[test]
+    fn adaptive_edge_type_storage_rejects_all_ones_physical_sentinels() {
+        let edge = RawEdge {
+            source: 0,
+            target: 1,
+            type_id: EdgeTypeId::SENTINEL,
+            weight: None,
+            schema_reversed: false,
+        };
+        assert!(matches!(
+            EdgeStore::try_from_edges(2, vec![edge], false),
+            Err(GraphError::EdgeTypeLimit)
+        ));
+        assert!(EdgeTypeSlice::One(&[u8::MAX]).contains_physical_sentinel());
+        assert!(EdgeTypeSlice::Two(&[u16::MAX]).contains_physical_sentinel());
+        assert!(EdgeTypeSlice::Four(&[u32::MAX]).contains_physical_sentinel());
+    }
+
+    #[test]
+    fn adaptive_edge_type_storage_accounts_exact_owned_and_mapped_widths() {
+        for (raw, bytes) in [(254, 1), (255, 2), (65_535, 4)] {
+            let store = EdgeStore::try_from_edges(
+                2,
+                vec![RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: EdgeTypeId::try_from(raw).unwrap(),
+                    weight: None,
+                    schema_reversed: false,
+                }],
+                false,
+            )
+            .unwrap();
+            let EdgeBacking::Owned { type_ids, .. } = &store.backing else {
+                unreachable!()
+            };
+            assert_eq!(type_ids.width().bytes(), bytes);
+            assert_eq!(type_ids.capacity_bytes(), bytes);
+        }
+    }
 
     use super::*;
     use proptest::prelude::*;
@@ -1199,6 +1704,45 @@ mod tests {
                 relationship_ids_range,
                 node_count: 2,
                 edge_count: 1,
+                type_width: EdgeTypeWidth::One,
+            }
+        }
+
+        fn adaptive_parts(
+            type_width: EdgeTypeWidth,
+            type_ids_start: usize,
+            raw_type_id: u32,
+        ) -> MmapEdgeArrayParts {
+            let offsets_range = 0..3 * std::mem::size_of::<u32>();
+            let targets_range = offsets_range.end..offsets_range.end + 4;
+            let type_ids_range = type_ids_start..type_ids_start + type_width.bytes();
+            let schema_reversed_range = type_ids_range.end..type_ids_range.end + 1;
+            let weights_start = schema_reversed_range.end.next_multiple_of(4);
+            let weights_range = weights_start..weights_start + 4;
+            let relationship_ids_range = weights_range.end..weights_range.end + 4;
+            let mut mapping = vec![0u8; relationship_ids_range.end];
+            for (chunk, value) in mapping[offsets_range.clone()]
+                .chunks_exact_mut(4)
+                .zip([0u32, 1, 1])
+            {
+                chunk.copy_from_slice(&value.to_le_bytes());
+            }
+            mapping[targets_range.clone()].copy_from_slice(&1u32.to_le_bytes());
+            let encoded = raw_type_id.to_le_bytes();
+            mapping[type_ids_range.clone()].copy_from_slice(&encoded[..type_width.bytes()]);
+            mapping[weights_range.clone()].copy_from_slice(&9u32.to_le_bytes());
+            mapping[relationship_ids_range.clone()].copy_from_slice(&41u32.to_le_bytes());
+            MmapEdgeArrayParts {
+                mmap: MappedBytes::from_test_bytes(mapping),
+                offsets_range,
+                targets_range,
+                type_ids_range,
+                schema_reversed_range,
+                weights_range: Some(weights_range),
+                relationship_ids_range,
+                node_count: 2,
+                edge_count: 1,
+                type_width,
             }
         }
     }
@@ -1260,11 +1804,98 @@ mod tests {
     }
 
     #[test]
+    fn exact_capacity_builder_accounts_for_selected_edge_type_width() {
+        let width = EdgeTypeWidth::Four;
+        let expected = 3 * std::mem::size_of::<u32>()
+            + std::mem::size_of::<u32>()
+            + width.bytes()
+            + std::mem::size_of::<u8>()
+            + std::mem::size_of::<RelationshipId>();
+        assert_eq!(
+            SortedEdgeStoreBuilder::planned_storage_bytes_for_width(2, 1, false, width)
+                .expect("adaptive bounded storage bytes"),
+            expected
+        );
+        let mut builder =
+            SortedEdgeStoreBuilder::try_new_with_edge_capacity_and_width(2, 1, false, width)
+                .expect("adaptive bounded builder");
+        builder
+            .try_push(RawEdge {
+                source: 0,
+                target: 1,
+                type_id: EdgeTypeId::try_from(65_535u32).expect("logical type ID"),
+                weight: None,
+                schema_reversed: false,
+            })
+            .expect("edge fits the preflight width");
+        let store = builder.finish();
+        assert_eq!(store.edge_type_width(), width);
+        assert_eq!(
+            store.edge_type_at(0),
+            Some(EdgeTypeId::try_from(65_535u32).unwrap())
+        );
+
+        let mut narrow = SortedEdgeStoreBuilder::try_new_with_edge_capacity(2, 1, false)
+            .expect("one-byte bounded builder");
+        let error = narrow
+            .try_push(RawEdge {
+                source: 0,
+                target: 1,
+                type_id: EdgeTypeId::try_from(255u32).expect("logical type ID"),
+                weight: None,
+                schema_reversed: false,
+            })
+            .expect_err("narrow preflight must reject widening");
+        assert!(
+            matches!(error, GraphError::Internal(message) if message.contains("preflight physical width"))
+        );
+        assert!(narrow.targets.is_empty());
+        assert!(narrow.type_ids.as_slice().is_empty());
+        assert_eq!(narrow.edge_offsets, [0]);
+        narrow
+            .try_push(RawEdge {
+                source: 0,
+                target: 1,
+                type_id: EdgeTypeId::try_from(254u32).expect("one-byte logical type ID"),
+                weight: None,
+                schema_reversed: false,
+            })
+            .expect("builder remains usable after rejected widening");
+    }
+
+    #[test]
+    fn unbounded_builder_prepares_type_capacity_before_parallel_mutation() {
+        let mut builder = SortedEdgeStoreBuilder::try_new(2, false).expect("builder");
+        let type_id = EdgeTypeId::try_from(65_535u32).expect("logical type ID");
+        builder
+            .type_ids
+            .prepare_push(type_id)
+            .expect("fallible width and capacity preparation");
+        assert_eq!(builder.type_ids.width(), EdgeTypeWidth::Four);
+        assert!(builder.type_ids.capacity() > 0);
+        let prepared_capacity = builder.type_ids.capacity();
+        assert!(builder.targets.is_empty());
+        assert_eq!(builder.edge_offsets, [0]);
+        builder
+            .try_push(RawEdge {
+                source: 0,
+                target: 1,
+                type_id,
+                weight: None,
+                schema_reversed: false,
+            })
+            .expect("prepared push");
+        assert_eq!(builder.type_ids.capacity(), prepared_capacity);
+        assert_eq!(builder.finish().neighbors(0).1.at(0), type_id);
+    }
+
+    #[test]
     fn empty_graph() {
         let store = EdgeStore::from_edges(3, vec![], false);
         assert_eq!(store.node_count(), 3);
         assert_eq!(store.edge_count(), 0);
-        assert_eq!(store.neighbors(0), (&[][..], &[][..]));
+        assert!(store.neighbors(0).0.is_empty());
+        assert!(store.neighbors(0).1.is_empty());
         assert_eq!(store.degree(0), 0);
     }
 
@@ -1484,13 +2115,47 @@ mod tests {
     }
 
     #[test]
+    fn mmap_adaptive_type_sections_require_alignment_before_typed_views() {
+        for width in [EdgeTypeWidth::Two, EdgeTypeWidth::Four] {
+            let aligned = MappedEdgeFixture::adaptive_parts(width, 16, 7);
+            assert!(MmapEdgeArrays::new(aligned).is_some(), "valid {width:?}");
+
+            let unaligned = MappedEdgeFixture::adaptive_parts(width, 17, 7);
+            assert!(
+                MmapEdgeArrays::new(unaligned).is_none(),
+                "unaligned {width:?} must be rejected before constructing a typed slice"
+            );
+
+            let sentinel = match width {
+                EdgeTypeWidth::Two => u16::MAX as u32,
+                EdgeTypeWidth::Four => u32::MAX,
+                EdgeTypeWidth::One => unreachable!(),
+            };
+            let sentinel = MappedEdgeFixture::adaptive_parts(width, 16, sentinel);
+            assert!(
+                MmapEdgeArrays::new(sentinel).is_none(),
+                "physical {width:?} sentinel must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn mmap_edge_store_owns_mapping_after_constructor_inputs_drop() {
         let store = {
             let arrays = MmapEdgeArrays::new(MappedEdgeFixture::valid().parts())
                 .expect("valid mapped edge fixture");
             EdgeStore::from_mmap(arrays)
         };
-        assert_eq!(store.neighbors(0), (&[1][..], &[7][..]));
+        assert_eq!(store.neighbors(0).0, &[1]);
+        assert_eq!(
+            store
+                .neighbors(0)
+                .1
+                .iter()
+                .map(EdgeTypeId::get)
+                .collect::<Vec<_>>(),
+            [7]
+        );
         assert_eq!(store.weights_slice(), &[9]);
         assert_eq!(store.relationship_ids_slice(), &[41]);
     }
@@ -1542,13 +2207,20 @@ mod tests {
         assert!(store.has_weights());
         assert_eq!(store.degree(0), 1);
         assert_eq!(store.degree(2), 0);
-        assert_eq!(store.neighbors(0), (&[1][..], &[7][..]));
-        assert_eq!(store.neighbors(2), (&[][..], &[][..]));
+        assert_eq!(store.neighbors(0).0, &[1]);
         assert_eq!(
-            store.neighbors_with_schema(0),
-            (&[1][..], &[7][..], &[0][..])
+            store
+                .neighbors(0)
+                .1
+                .iter()
+                .map(EdgeTypeId::get)
+                .collect::<Vec<_>>(),
+            [7]
         );
-        assert_eq!(store.neighbors_weighted(0), (&[1][..], &[7][..], &[9][..]));
+        assert!(store.neighbors(2).0.is_empty());
+        assert!(store.neighbors(2).1.is_empty());
+        assert_eq!(store.neighbors_with_schema(0).2, &[0]);
+        assert_eq!(store.neighbors_weighted(0).2, &[9]);
         assert_eq!(store.offsets_slice(), &[0, 1, 1]);
         assert_eq!(store.targets_slice(), &[1]);
         assert_eq!(store.v6_type_ids_bytes(), &[7]);
@@ -1678,9 +2350,9 @@ mod tests {
         let (targets, types) = store.neighbors(0);
         assert_eq!(targets.len(), 3);
         // Sorted: target=1/type1, target=1/type2, target=2/type1
-        assert_eq!(types[0], 1);
-        assert_eq!(types[1], 2);
-        assert_eq!(types[2], 1);
+        assert_eq!(types.get(0).expect("fixture type").get(), 1);
+        assert_eq!(types.get(1).expect("fixture type").get(), 2);
+        assert_eq!(types.get(2).expect("fixture type").get(), 1);
     }
 
     #[test]

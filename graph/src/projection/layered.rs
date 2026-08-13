@@ -849,7 +849,7 @@ impl<'a> LayeredNeighbors<'a> {
         while examined < limit {
             let base_edge = (!base_hidden && base_pos < targets.len()).then(|| LayeredEdge {
                 target: targets[base_pos],
-                type_id: logical_type_id_from_validated_v6(type_ids[base_pos]),
+                type_id: type_ids.at(base_pos),
                 schema_reversed: schema_reversed[base_pos] != 0,
                 weight: weights.and_then(|weights| weights.get(base_pos).copied()),
                 relationship_id: relationship_ids
@@ -979,8 +979,7 @@ impl<'a> LayeredNeighbors<'a> {
                 .zip(type_ids.iter())
                 .zip(schema_reversed.iter())
                 .enumerate()
-                .filter_map(|(idx, ((&target, &type_id), &schema_reversed))| {
-                    let type_id = logical_type_id_from_validated_v6(type_id);
+                .filter_map(|(idx, ((&target, type_id), &schema_reversed))| {
                     self.node_visible(target).then_some((
                         target,
                         LayeredEdge {
@@ -1034,13 +1033,12 @@ impl<'a> LayeredNeighbors<'a> {
                         .base
                         .neighbors_with_schema_and_relationship_ids(node_idx);
                     let weights = base_weight_slice(self.base, node_idx);
-                    for (idx, ((&target, &type_id), &schema_reversed)) in targets
+                    for (idx, ((&target, type_id), &schema_reversed)) in targets
                         .iter()
                         .zip(type_ids.iter())
                         .zip(schema_reversed.iter())
                         .enumerate()
                     {
-                        let type_id = logical_type_id_from_validated_v6(type_id);
                         merged.insert(
                             (
                                 target,
@@ -1070,13 +1068,12 @@ impl<'a> LayeredNeighbors<'a> {
                     let (targets, type_ids, schema_reversed, relationship_ids) =
                         base_in.neighbors_with_schema_and_relationship_ids(node_idx);
                     let weights = base_weight_slice(base_in, node_idx);
-                    for (idx, ((&target, &type_id), &schema_reversed)) in targets
+                    for (idx, ((&target, type_id), &schema_reversed)) in targets
                         .iter()
                         .zip(type_ids.iter())
                         .zip(schema_reversed.iter())
                         .enumerate()
                     {
-                        let type_id = logical_type_id_from_validated_v6(type_id);
                         if self.base_chunk_covers(target) {
                             continue;
                         }
@@ -1126,13 +1123,12 @@ impl<'a> LayeredNeighbors<'a> {
             let (targets, type_ids, schema_reversed, relationship_ids) =
                 self.base.neighbors_with_schema_and_relationship_ids(source);
             let weights = base_weight_slice(self.base, source);
-            for (idx, ((&target, &type_id), &schema_reversed)) in targets
+            for (idx, ((&target, type_id), &schema_reversed)) in targets
                 .iter()
                 .zip(type_ids.iter())
                 .zip(schema_reversed.iter())
                 .enumerate()
             {
-                let type_id = logical_type_id_from_validated_v6(type_id);
                 if target == node_idx {
                     merged.insert(
                         (
@@ -1375,7 +1371,7 @@ impl<'a> LayeredNeighbors<'a> {
             }
             let base_edge = (!base_hidden && base_pos < targets.len()).then(|| LayeredEdge {
                 target: targets[base_pos],
-                type_id: logical_type_id_from_validated_v6(type_ids[base_pos]),
+                type_id: type_ids.at(base_pos),
                 schema_reversed: schema_reversed[base_pos] != 0,
                 weight: None,
                 relationship_id: relationship_ids
@@ -1551,13 +1547,13 @@ impl<'a> LayeredNeighbors<'a> {
             })
         };
         let base_edge = |targets: &[u32],
-                         types: &[u8],
+                         types: crate::edge_store::EdgeTypeSlice<'_>,
                          reversed: &[u8],
                          identities: &[RelationshipId],
                          pos: usize| {
             (pos < targets.len()).then(|| LayeredEdge {
                 target: targets[pos],
-                type_id: logical_type_id_from_validated_v6(types[pos]),
+                type_id: types.at(pos),
                 schema_reversed: reversed[pos] != 0,
                 weight: None,
                 relationship_id: identities
@@ -1825,7 +1821,7 @@ impl<'a> LayeredNeighbors<'a> {
                 let pos = targets.len() - 1 - bc;
                 LayeredEdge {
                     target: targets[pos],
-                    type_id: logical_type_id_from_validated_v6(type_ids[pos]),
+                    type_id: type_ids.at(pos),
                     schema_reversed: schema_reversed[pos] != 0,
                     weight: None,
                     relationship_id: relationship_ids
@@ -1978,7 +1974,7 @@ impl<'a> LayeredNeighbors<'a> {
             })
         };
         let base_edge = |targets: &[u32],
-                         types: &[u8],
+                         types: crate::edge_store::EdgeTypeSlice<'_>,
                          reversed: &[u8],
                          ids: &[RelationshipId],
                          consumed: usize| {
@@ -1987,7 +1983,7 @@ impl<'a> LayeredNeighbors<'a> {
                 .and_then(|offset| targets.len().checked_sub(offset))
                 .map(|pos| LayeredEdge {
                     target: targets[pos],
-                    type_id: logical_type_id_from_validated_v6(types[pos]),
+                    type_id: types.at(pos),
                     schema_reversed: reversed[pos] != 0,
                     weight: None,
                     relationship_id: ids.get(pos).copied().filter(|id| *id != NO_RELATIONSHIP_ID),
@@ -3049,9 +3045,9 @@ fn base_edge_exists(base: &EdgeStore, key: EdgeKey) -> bool {
         .zip(type_ids.iter())
         .zip(schema_reversed.iter())
         .enumerate()
-        .any(|(idx, ((&target, &type_id), &schema_reversed))| {
+        .any(|(idx, ((&target, type_id), &schema_reversed))| {
             target == key.target
-                && logical_type_id_from_validated_v6(type_id) == key.type_id
+                && type_id == key.type_id
                 && (schema_reversed != 0) == key.schema_reversed
                 && relationship_ids
                     .get(idx)
