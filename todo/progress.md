@@ -1,22 +1,16 @@
 # Todo Program Progress
 
 The active phased program is tracked in
-[`full-graph-engine/progress.md`](./full-graph-engine/progress.md). That file is
-the authoritative checkpoint handoff, measurement log, and next-action record.
+[`post-v1-1/README.md`](./post-v1-1/README.md). It is the authoritative phase
+ledger for scalable caller-scoped RLS, open-vocabulary relationship types, and
+bounded set-based graph mutations.
 
-Last synchronized: 2026-07-16
+Last synchronized: 2026-08-12
 
-Current phase: R7 release candidate assurance. R1 through R6 are complete.
-R6 froze the exact 134-function SQL surface and bounded GQL read/write profile,
-made their public inventories and documentation drift-enforced, and passed the
-clean PostgreSQL 14-18 package, alpha migration, packaged quickstart, and
-packaged CSR/mutable playground gates.
-
-Release planning: [`v1-release/README.md`](./v1-release/README.md) is now the
-single source of truth for pgGraph 1.0 scope. The existing full-engine plans
-remain technical references; PostgreSQL 19, full ISO GQL, competitive breadth,
-and dynamic graphs are post-1.0 roadmap work. R1 through R6 are complete; R7 is
-the active release checkpoint.
+Current phase: post-1.1 P0, contracts, semantic corpus, and representative
+baselines. The pgGraph 1.1 release program is complete in
+[`v1-1-release/README.md`](./v1-1-release/README.md). The full-engine and 1.0
+programs remain archived technical and release references, not active queues.
 
 2026-07-16 R6 documentation and packaging — Public SQL/GQL inventories,
 compatibility and migration guidance, rendered documentation, CI tiers, script

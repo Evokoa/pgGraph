@@ -1,14 +1,14 @@
 # Batched Graph Mutations
 
 <Callout type="info">
-This page is a proposed 1.1 design, not part of the frozen 1.0 SQL or GQL
-contract. Function names and signatures remain subject to contract review until
-implementation evidence is generated.
+This page is the proposed post-1.1 batch-mutation design. It is not part of the
+1.1 SQL or GQL contract. Function names and signatures remain subject to
+contract review until implementation evidence is generated.
 </Callout>
 
 ## Problem
 
-The 1.0 GQL write profile accepts one parameter object and mutates one mapped
+The 1.1 GQL write profile accepts one parameter object and mutates one mapped
 node or relationship per call. Batch-oriented ingestion systems already collect
 many nodes and relationships before writing them. Calling `graph.gql()` once per
 item creates application-to-PostgreSQL round trips and repeated parse, bind, ACL,
@@ -22,7 +22,7 @@ objects into set-based PostgreSQL DML.
 
 ## Decision Summary
 
-The proposed 1.1 direction is:
+The proposed post-1.1 direction is:
 
 - add a bounded `gql_batch` write function in the `graph` schema;
 - accept one static mapped GQL write and a JSONB array of parameter objects;
@@ -42,7 +42,7 @@ This belongs in the existing query, SQL facade, projection-delta, and sync
 modules. It does not justify a new crate, background worker, or second durable
 write store.
 
-## Current 1.0 Path
+## Current 1.1 Path
 
 Applications that need bulk ingestion today should write the registered
 PostgreSQL source tables with ordinary multi-row `INSERT`, `INSERT ... SELECT`,
@@ -252,7 +252,7 @@ order-independence of source effects and order-preservation of returned rows.
 
 ## Performance Acceptance
 
-The 1.1 release evidence must include:
+The feature's release evidence must include:
 
 - an ingestion fixture with thousands of nodes and relationships;
 - the existing repeated `graph.gql()` path as the comparison baseline;
