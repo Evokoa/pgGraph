@@ -143,7 +143,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P1 | Complete | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
 | P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
-| P4 | In progress (P4.1 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
+| P4 | In progress (P4.3 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
 | P5 | Not started | Targeted queries select lazy and global analytics select eager; redundant read checks are removed only if proven; 1M/10M evidence meets the accepted latency and memory budgets. |
 | P6 | Not started | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
@@ -272,8 +272,9 @@ with requested identities rather than table membership.
 **P2 evidence (2026-08-12):**
 
 - `get_node()` and true single-root `traverse(max_depth := 0)` use a bounded,
-  statement-local tri-state resolver. Positive-depth traversal and paths remain
-  on the eager oracle until their engines become resumable.
+  statement-local tri-state resolver. At the P2 checkpoint, positive-depth
+  traversal and paths remained on the eager oracle; BFS and DFS moved to their
+  resumable engines in P3 and P4.3, while path algorithms remain eager.
 - Candidate count, key bytes, probe-plan scratch, cache growth, copied payloads,
   returned work, elapsed time, and PostgreSQL interrupts are governed under
   `query.visibility`. The lazy path has no table-wide maximum-key preflight.
@@ -393,10 +394,19 @@ payload precedence, while retaining bounded progress pages. `expand`,
 all roots and optional count passes while preserving their established
 ordering, pagination, hydration, grouping, and truncation. PostgreSQL tests
 cover exact eager/lazy results, cancellation cleanup and retry, and the no-RLS
-zero-SPI fast path. P4.2 is complete; P4.3 DFS is the active checkpoint.
+zero-SPI fast path. P4.2 is complete.
 
-- Extend the state-machine boundary to DFS/reverse traversal without changing
-  reversed-neighbor push order or visited timing.
+P4.3 completed on 2026-08-13. DFS now owns a LIFO frontier, reverse adjacency
+cursor, visited-on-push parent state, bounded pending page, and projection epoch
+across caller-policy probes. Reverse cursors page clean CSR, classic overlays,
+and durable directional/`any` layers without prefix replay or whole-degree
+materialization. Pure and engine differentials preserve reversed push order,
+duplicate/cycle/parallel-edge parent choice, caps and truncation, and exact
+Out/In/Any results across committed, durable, and edge-only transaction state.
+PostgreSQL tests cover forced eager/lazy node and relationship RLS, hidden
+intermediates, cancellation and policy-error cleanup with retry, and the no-RLS
+zero-SPI fast path. P4.4 unweighted paths is the active checkpoint.
+
 - Resolve complete bounded bidirectional-BFS levels without changing meeting
   node selection.
 - Batch weighted path adjacency one popped node at a time until evidence proves

@@ -7,10 +7,14 @@ fn build_workflow_rls_fixture() {
     reset_and_create_fixtures();
     Spi::run(
         "INSERT INTO public.graph_test_users_pgtest (id, name, age)
-         VALUES ('u3', 'Carol', 55);
+         VALUES ('u3', 'Carol', 55), ('u4', 'Dana', 34);
          UPDATE public.graph_test_users_pgtest SET name = 'Alice' WHERE id = 'u2';
          INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
-         VALUES ('f2', 'u2', 'u3'), ('f3', 'u2', 'u1')",
+         VALUES ('f2', 'u2', 'u3'),
+                ('f3', 'u2', 'u1'),
+                ('f4', 'u1', 'u2'),
+                ('f5', 'u1', 'u3'),
+                ('f6', 'u3', 'u4')",
     )
     .expect("create workflow RLS fixture failed");
     build_friendship_fixture_graph();

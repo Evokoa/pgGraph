@@ -153,8 +153,10 @@ fn projection_materialization_and_postgres_resolution_are_separate_phases() {
         "P3 BFS must reuse the bounded statement-local policy oracle"
     );
 
-    let execute =
-        function_body_from_any(&[&facade, &sql_traversal], "fn execute_lazy_bfs_candidates");
+    let execute = function_body_from_any(
+        &[&facade, &sql_traversal],
+        "fn execute_lazy_traversal_candidates",
+    );
     let materialize_at = execute
         .find("materialize_bfs_candidate_batch")
         .expect("lazy BFS facade must materialize a bounded batch");
@@ -239,7 +241,7 @@ fn frontier_visibility_is_set_based_indexable_and_cancellation_safe() {
 #[test]
 fn transaction_node_or_filter_topology_remains_eager_until_its_owned_cursor_exists() {
     let engine = crate_source("src/engine.rs");
-    let prepare = function_body(&engine, "fn prepare_resumable_bfs");
+    let prepare = function_body(&engine, "fn prepare_resumable_traversal");
     assert!(
         prepare.contains("tx_stats.added_nodes")
             && prepare.contains("tx_stats.filter_updates")
@@ -260,6 +262,7 @@ fn targeted_surfaces_share_one_resolver_while_non_bfs_algorithms_stay_eager() {
         let body = function_body(&facade, signature);
         assert!(
             body.contains("execute_lazy_bfs_rows")
+                || body.contains("execute_lazy_bfs_candidates")
                 || (body.contains("direct_get_neighbors_rows")
                     && function_body(&facade, "fn direct_get_neighbors_rows")
                         .contains("execute_lazy_bfs_rows")),

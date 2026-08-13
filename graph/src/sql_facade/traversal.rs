@@ -408,7 +408,7 @@ fn traverse_many(
                 .unwrap_or_else(|err| err.report());
         let mut eager = None;
         let mut candidates = Vec::new();
-        // Each root routes through execute_lazy_bfs_rows semantics while the
+        // Each root routes through the selected resumable traversal while the
         // statement-owned coordinator preserves verdicts across roots.
         for (table, id) in start_tables.into_iter().zip(start_ids) {
             let request = TraverseRequest {
@@ -428,14 +428,24 @@ fn traverse_many(
                 max_nodes,
                 max_frontier,
             };
-            let lazy_candidates = execute_lazy_bfs_candidates(
-                &request,
-                &mut lazy,
-                &query_start.tables,
-                &query_start.edges,
-                &query_start.filter_columns,
-                &governor,
-            )
+            let lazy_candidates = match strategy {
+                types::TraversalStrategy::Bfs => execute_lazy_bfs_candidates(
+                    &request,
+                    &mut lazy,
+                    &query_start.tables,
+                    &query_start.edges,
+                    &query_start.filter_columns,
+                    &governor,
+                ),
+                types::TraversalStrategy::Dfs => execute_lazy_dfs_candidates(
+                    &request,
+                    &mut lazy,
+                    &query_start.tables,
+                    &query_start.edges,
+                    &query_start.filter_columns,
+                    &governor,
+                ),
+            }
             .unwrap_or_else(|err| err.report());
             let mut start_candidates = if let Some(candidates) = lazy_candidates {
                 candidates

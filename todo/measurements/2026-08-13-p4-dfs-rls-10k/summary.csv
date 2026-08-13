@@ -1,0 +1,8 @@
+case_name,strategy,key_shape,rls_scope,policy_shape,query_kind,samples,p50_ms,p95_ms,p50_visibility_ms,p95_visibility_ms,result_rows,hidden_nodes,hidden_relationships,min_spi_calls,max_spi_calls,min_requested_keys,max_requested_keys,min_returned_keys,max_returned_keys,min_requested_key_bytes,max_requested_key_bytes,min_returned_key_bytes,max_returned_key_bytes,min_source_rows,max_source_rows
+p4_dfs_no_rls_auto,auto,scalar,none,no_rls,dfs_depth_4,1,1.587,1.587,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+p4_node_dfs_any_eager,eager,scalar,node,sparse_allow,dfs_any_depth_4,1,116.927,116.927,112.991,112.991,1,19800,9900,0,0,0,0,0,0,0,0,0,0,300,300
+p4_node_dfs_any_lazy,lazy,scalar,node,sparse_allow,dfs_any_depth_4,1,10.362,10.362,0,0,1,0,0,3,3,3,3,2,2,9,9,6,6,2,2
+p4_node_dfs_in_eager,eager,scalar,node,sparse_allow,dfs_in_depth_4,1,116.506,116.506,112.428,112.428,1,19800,9900,0,0,0,0,0,0,0,0,0,0,300,300
+p4_node_dfs_in_lazy,lazy,scalar,node,sparse_allow,dfs_in_depth_4,1,10.375,10.375,0,0,1,0,0,3,3,3,3,1,1,7,7,3,3,1,1
+p4_node_dfs_out_eager,eager,scalar,node,sparse_allow,dfs_out_depth_4,1,115.142,115.142,111.122,111.122,1,19800,9900,0,0,0,0,0,0,0,0,0,0,300,300
+p4_node_dfs_out_lazy,lazy,scalar,node,sparse_allow,dfs_out_depth_4,1,10.338,10.338,0,0,1,0,0,3,3,3,3,2,2,9,9,6,6,2,2

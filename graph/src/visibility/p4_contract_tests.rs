@@ -40,7 +40,7 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
 fn bounded_classic_edge_overlays_use_owned_cursors_instead_of_eager_fallbacks() {
     let engine = crate_source("src/engine.rs");
     let neighbors = crate_source("src/projection/neighbors.rs");
-    let prepare = function_body(&engine, "fn prepare_resumable_bfs");
+    let prepare = function_body(&engine, "fn prepare_resumable_traversal");
 
     assert!(
         !prepare.contains("!self.edge_buffer.is_empty()"),
@@ -67,7 +67,7 @@ fn durable_layers_require_a_bounded_owned_cursor_before_lazy_bfs_selection() {
     let bfs = crate_source("src/bfs.rs");
     let neighbors = crate_source("src/projection/neighbors.rs");
     let layered = crate_source("src/projection/layered.rs");
-    let prepare = function_body(&engine, "fn prepare_resumable_bfs");
+    let prepare = function_body(&engine, "fn prepare_resumable_traversal");
     let layered_neighbor_impl = function_body(&layered, "impl NeighborSource for LayeredNeighbors");
     let directional_impl = function_body(
         &layered,
@@ -114,7 +114,7 @@ fn durable_layers_require_a_bounded_owned_cursor_before_lazy_bfs_selection() {
 fn segment_backed_any_requires_a_shared_precedence_cursor_before_lazy_selection() {
     let engine = crate_source("src/engine.rs");
     let layered = crate_source("src/projection/layered.rs");
-    let prepare = function_body(&engine, "fn prepare_resumable_bfs");
+    let prepare = function_body(&engine, "fn prepare_resumable_traversal");
 
     for required in [
         "owned_layered_any_cursor_preserves_shared_map_precedence_and_order",
@@ -163,24 +163,49 @@ fn targeted_bfs_workflow_inventory_is_explicit() {
 }
 
 #[test]
-#[ignore = "P4 DFS/reverse checkpoint contract"]
 fn dfs_and_reverse_traversal_freeze_order_and_visited_timing_before_migration() {
     let bfs = crate_source("src/bfs.rs");
     let engine = crate_source("src/engine.rs");
+    let traversal = crate_source("src/sql_traversal.rs");
+    let pg_traversal = crate_source("src/pg_tests/traversal_api.rs");
 
     for required in [
         "resumable_dfs_matches_eager_reversed_push_order_and_visited_timing",
-        "resumable_reverse_traversal_matches_eager_across_overlay_durable_and_tx",
+        "resumable_dfs_matches_eager_out_in_any_across_overlay_durable_and_tx",
+        "resumable_dfs_marks_visited_on_push_for_duplicates_cycles_and_parallel_edges",
+        "resumable_dfs_hidden_node_relationship_and_intermediate_match_eager",
+        "resumable_dfs_preserves_max_nodes_frontier_depth_and_truncation",
+        "resumable_dfs_yields_bounded_owned_pages_and_rejects_epoch_change",
     ] {
         assert!(
             bfs.contains(required) || engine.contains(required),
-            "P4 traversal differential corpus is missing `{required}`"
+            "P4.3 DFS differential corpus is missing `{required}`"
         );
     }
     assert!(
-        bfs.contains("ResumableDfsMachine"),
+        bfs.contains("ResumableDfsMachine")
+            && bfs.contains("OwnedNeighborCursor")
+            && bfs.contains("neighbors_reversed"),
         "DFS must own its stack, visited timing, reversed-neighbor cursor, parents, and outputs before policy probes can run outside ENGINE borrows"
     );
+    assert!(
+        traversal.contains("execute_lazy_dfs_candidates")
+            && traversal.contains("resolve_bfs_visibility_batch"),
+        "targeted DFS must resolve bounded node and relationship candidates outside ENGINE borrows through the established PostgreSQL oracle"
+    );
+    for required in [
+        "dfs_lazy_matches_eager_rls_out_in_any_and_hidden_intermediate",
+        "dfs_lazy_multiseed_matches_eager_and_selects_lazy",
+        "dfs_lazy_traverse_search_matches_eager_and_selects_lazy",
+        "dfs_lazy_relationship_rls_blocks_hidden_parallel_edge",
+        "dfs_lazy_cancellation_and_policy_error_drop_state_then_retry",
+        "dfs_no_rls_fast_path_has_zero_visibility_spi",
+    ] {
+        assert!(
+            pg_traversal.contains(required),
+            "P4.3 PostgreSQL DFS corpus is missing `{required}`"
+        );
+    }
 }
 
 #[test]

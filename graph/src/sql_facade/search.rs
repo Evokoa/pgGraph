@@ -296,13 +296,11 @@ pub(super) fn traverse_search_rows_governed(
     governor: &crate::resource::ResourceGovernor,
     query_start: &super::runtime::QueryStartState,
 ) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
-    let coordinator = crate::sql_visibility::prepare_eager_visibility(
+    let mut visibility = crate::sql_traversal::StatementBfsVisibility::prepare(
         &query_start.tables,
         &query_start.edges,
-        governor,
     )?;
-    let context = coordinator.context(governor);
-    traverse_search_rows_in_context(
+    traverse_search_rows_with_statement_bfs_visibility(
         property_key,
         property_value,
         table_filter,
@@ -322,7 +320,8 @@ pub(super) fn traverse_search_rows_governed(
         hydrate,
         max_rows,
         row_offset,
-        &context,
+        &mut visibility,
+        governor,
         query_start,
     )
 }

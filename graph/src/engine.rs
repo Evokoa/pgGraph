@@ -282,6 +282,65 @@ impl Engine {
         direction: TraversalDirection,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<Option<(bfs::BfsConfig, bfs::ResumableBfsMachine)>> {
+        self.prepare_resumable_traversal(
+            seed_table_oid,
+            seed_id,
+            max_depth,
+            max_nodes,
+            max_frontier,
+            edge_types,
+            filter_ops,
+            tenant,
+            direction,
+            false,
+            governor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_resumable_dfs(
+        &self,
+        seed_table_oid: u32,
+        seed_id: &str,
+        max_depth: i32,
+        max_nodes: u32,
+        max_frontier: u32,
+        edge_types: Option<Vec<String>>,
+        filter_ops: Vec<FilterOp>,
+        tenant: Option<&str>,
+        direction: TraversalDirection,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<Option<(bfs::BfsConfig, bfs::ResumableDfsMachine)>> {
+        self.prepare_resumable_traversal(
+            seed_table_oid,
+            seed_id,
+            max_depth,
+            max_nodes,
+            max_frontier,
+            edge_types,
+            filter_ops,
+            tenant,
+            direction,
+            true,
+            governor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_resumable_traversal(
+        &self,
+        seed_table_oid: u32,
+        seed_id: &str,
+        max_depth: i32,
+        max_nodes: u32,
+        max_frontier: u32,
+        edge_types: Option<Vec<String>>,
+        filter_ops: Vec<FilterOp>,
+        tenant: Option<&str>,
+        direction: TraversalDirection,
+        depth_first: bool,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<Option<(bfs::BfsConfig, bfs::ResumableBfsMachine)>> {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
@@ -371,8 +430,11 @@ impl Engine {
             overlay_deleted_edges,
             any_direction_overlays,
         };
-        let mut machine =
-            bfs::ResumableBfsMachine::try_new(self.node_store.node_count() as usize, &config)?;
+        let mut machine = if depth_first {
+            bfs::ResumableDfsMachine::try_new_dfs(self.node_store.node_count() as usize, &config)?
+        } else {
+            bfs::ResumableBfsMachine::try_new(self.node_store.node_count() as usize, &config)?
+        };
         machine.bind_projection_epoch(self.bfs_projection_epoch());
         Ok(Some((config, machine)))
     }
@@ -2814,6 +2876,149 @@ mod tests {
         engine
             .finish_resumable_bfs(machine)
             .expect("resumable BFS finishes")
+    }
+
+    fn run_resumable_dfs_unrestricted(
+        engine: &Engine,
+        seed_id: &str,
+        direction: TraversalDirection,
+    ) -> TraverseOutcome {
+        let governor = engine
+            .query_resource_governor()
+            .expect("test governor constructs");
+        let (config, mut machine) = engine
+            .prepare_resumable_dfs(
+                100,
+                seed_id,
+                2,
+                100,
+                100,
+                None,
+                Vec::new(),
+                None,
+                direction,
+                &governor,
+            )
+            .expect("resumable DFS prepares")
+            .expect("P4 mutable topology must retain the targeted lazy DFS route");
+        loop {
+            match engine
+                .materialize_resumable_bfs_batch(
+                    &mut machine,
+                    &config,
+                    direction,
+                    crate::bfs::BfsCandidateLimits {
+                        max_candidates: 2,
+                        max_key_bytes: 64,
+                    },
+                    &governor,
+                )
+                .expect("DFS candidate page materializes")
+            {
+                crate::bfs::BfsMaterialization::Batch(batch) => {
+                    let verdicts = batch
+                        .candidates
+                        .iter()
+                        .map(|candidate| crate::bfs::BfsAdjacencyVerdict {
+                            sequence: candidate.sequence,
+                            node_visible: true,
+                            relationship_visible: true,
+                        })
+                        .collect::<Vec<_>>();
+                    engine
+                        .admit_resumable_bfs_batch(&mut machine, &batch, &verdicts, &config)
+                        .expect("visible DFS page admits");
+                }
+                crate::bfs::BfsMaterialization::Progress => {}
+                crate::bfs::BfsMaterialization::Complete => break,
+            }
+        }
+        engine
+            .finish_resumable_bfs(machine)
+            .expect("resumable DFS finishes")
+    }
+
+    fn assert_resumable_dfs_matches_eager(
+        engine: &Engine,
+        seed_id: &str,
+        direction: TraversalDirection,
+    ) {
+        let eager = engine
+            .traverse(
+                100,
+                seed_id,
+                2,
+                100,
+                100,
+                None,
+                None,
+                None,
+                TraversalStrategy::Dfs,
+                direction,
+            )
+            .expect("eager DFS succeeds");
+        let resumable = run_resumable_dfs_unrestricted(engine, seed_id, direction);
+        assert_eq!(format!("{:?}", resumable.rows), format!("{:?}", eager.rows));
+        assert_eq!(resumable.truncated, eager.truncated);
+    }
+
+    #[test]
+    fn resumable_dfs_matches_eager_out_in_any_across_overlay_durable_and_tx() {
+        let mut overlay = build_test_engine();
+        overlay.edge_buffer.push(EdgeMutation {
+            source: 4,
+            target: 3,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: None,
+            kind: MutationKind::Insert,
+        });
+        for direction in [
+            TraversalDirection::Out,
+            TraversalDirection::In,
+            TraversalDirection::Any,
+        ] {
+            assert_resumable_dfs_matches_eager(&overlay, "E", direction);
+        }
+
+        let mut durable = build_test_engine();
+        let _dir =
+            install_edge_segment_manifest(&mut durable, "p4_resumable_dfs_durable", |segment| {
+                segment
+                    .edge_inserts
+                    .push(crate::projection::segment::SegmentEdge {
+                        source: 4,
+                        target: 3,
+                        type_id: 1,
+                        schema_reversed: false,
+                        relationship_id: None,
+                    });
+            });
+        for direction in [
+            TraversalDirection::Out,
+            TraversalDirection::In,
+            TraversalDirection::Any,
+        ] {
+            assert_resumable_dfs_matches_eager(&durable, "E", direction);
+        }
+
+        tx_delta::clear_for_test();
+        let tx = build_test_engine();
+        tx_delta::record_added_edge(
+            4,
+            tx_delta::DeltaEdge {
+                target: 3,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+                relationship_id: None,
+            },
+        )
+        .expect("record DFS transaction-local edge");
+        assert_resumable_dfs_matches_eager(&tx, "E", TraversalDirection::Out);
+        assert_resumable_dfs_matches_eager(&tx, "D", TraversalDirection::In);
+        assert_resumable_dfs_matches_eager(&tx, "E", TraversalDirection::Any);
+        tx_delta::clear_for_test();
     }
 
     fn assert_resumable_bfs_matches_eager(

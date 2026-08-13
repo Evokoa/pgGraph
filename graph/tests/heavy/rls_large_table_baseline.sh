@@ -469,6 +469,8 @@ elif [[ "$RUN_PROFILE" == "full" ]]; then
 elif [[ "$RUN_PROFILE" == "p3_selective" ]]; then
   run_case "no_rls" "none" "p3_no_rls_auto" "scalar" "traverse_depth_4" 5 \
     "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := 'out', strategy := 'bfs', hydrate := false)" "auto"
+  run_case "no_rls" "none" "p4_dfs_no_rls_auto" "scalar" "dfs_depth_4" 5 \
+    "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := 'out', strategy := 'dfs', hydrate := false)" "auto"
 fi
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
@@ -492,6 +494,12 @@ if [[ "$RUN_PROFILE" == "p3_selective" ]]; then
     "SELECT count(*) FROM graph.traverse(ARRAY['public.rls_bench_nodes'::regclass::oid, 'public.rls_bench_nodes'::regclass::oid], ARRAY['100', '200'], max_depth := 1, edge_types := ARRAY['next'], direction := 'out', strategy := 'bfs', hydrate := false)" "eager"
   run_case "sparse_allow" "node" "p3_node_multiseed_lazy" "scalar" "multi_seed_one_hop" 2 \
     "SELECT count(*) FROM graph.traverse(ARRAY['public.rls_bench_nodes'::regclass::oid, 'public.rls_bench_nodes'::regclass::oid], ARRAY['100', '200'], max_depth := 1, edge_types := ARRAY['next'], direction := 'out', strategy := 'bfs', hydrate := false)" "lazy"
+  for direction in out in any; do
+    run_case "sparse_allow" "node" "p4_node_dfs_${direction}_eager" "scalar" "dfs_${direction}_depth_4" 1 \
+      "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := '${direction}', strategy := 'dfs', hydrate := false)" "eager"
+    run_case "sparse_allow" "node" "p4_node_dfs_${direction}_lazy" "scalar" "dfs_${direction}_depth_4" 1 \
+      "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := '${direction}', strategy := 'dfs', hydrate := false)" "lazy"
+  done
 elif [[ "$RUN_PROFILE" == "compact" ]]; then
   run_case "broad_allow" "node" "node_broad_allow_scalar_depth0" "scalar" "depth0" 1 \
     "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 0, hydrate := false)"
@@ -575,6 +583,16 @@ BEGIN
           AND source_rows = 0
     ) THEN
         RAISE EXCEPTION 'P3 no-RLS auto route did not retain the zero-probe eager fast path';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.rls_bench_samples
+        WHERE case_name = 'p4_dfs_no_rls_auto'
+          AND strategy = 'auto'
+          AND spi_calls = 0
+          AND source_rows = 0
+    ) THEN
+        RAISE EXCEPTION 'P4 DFS no-RLS auto route did not retain the zero-probe eager fast path';
     END IF;
 
     SELECT count(*)

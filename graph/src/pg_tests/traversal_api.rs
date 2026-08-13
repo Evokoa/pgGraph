@@ -912,6 +912,234 @@ fn traverse_accepts_dfs_out_and_returns_path_coordinates() {
     assert!(table_name.ends_with("graph_test_users_pgtest"));
 }
 
+#[cfg(feature = "development")]
+#[pg_test]
+fn dfs_lazy_matches_eager_rls_out_in_any_and_hidden_intermediate() {
+    build_workflow_rls_fixture();
+    Spi::run("SET ROLE graph_workflow_rls_reader").expect("set DFS reader failed");
+    for direction in ["out", "in", "any"] {
+        let query = format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY depth, node_id), '[]'::jsonb)
+               FROM graph.traverse(
+                 'graph_test_users_pgtest'::regclass, 'u1', 3,
+                 strategy := 'dfs', direction := '{direction}', hydrate := false
+               ) AS t"
+        );
+        Spi::run("SELECT graph._test_set_visibility_strategy('eager')").unwrap();
+        let eager = workflow_json(&query);
+        Spi::run("SELECT graph._test_set_visibility_strategy('lazy')").unwrap();
+        let lazy = workflow_json(&query);
+        assert_eq!(lazy.0, eager.0, "DFS {direction} parity");
+        assert!(lazy.0.to_string().contains("u2"));
+        assert!(!lazy.0.to_string().contains("u3"));
+        assert!(
+            !lazy.0.to_string().contains("u4"),
+            "the visible descendant behind hidden u3 must remain unreachable"
+        );
+    }
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')").unwrap();
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn dfs_lazy_multiseed_matches_eager_and_selects_lazy() {
+    build_workflow_rls_fixture();
+    Spi::run("SET ROLE graph_workflow_rls_reader").expect("set DFS reader failed");
+    let query = "SELECT COALESCE(
+          jsonb_agg(to_jsonb(t) ORDER BY root_id, depth, node_id),
+          '[]'::jsonb
+        )
+        FROM graph.traverse(
+          ARRAY[
+            'graph_test_users_pgtest'::regclass::oid,
+            'graph_test_users_pgtest'::regclass::oid
+          ],
+          ARRAY['u1'::text, 'u2'::text],
+          2,
+          strategy := 'dfs', direction := 'out', hydrate := false
+        ) AS t";
+    Spi::run("SELECT graph._test_set_visibility_strategy('eager')").unwrap();
+    let eager = workflow_json(query);
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')").unwrap();
+    let lazy = workflow_json(query);
+    let metrics = workflow_json("SELECT graph._test_visibility_metrics()");
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')").unwrap();
+
+    assert_eq!(lazy.0, eager.0);
+    assert_eq!(metrics.0["strategy"].as_str(), Some("lazy"));
+    assert!(metrics.0["spi_calls"].as_u64().unwrap_or_default() > 0);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn dfs_lazy_traverse_search_matches_eager_and_selects_lazy() {
+    build_workflow_rls_fixture();
+    Spi::run("SET ROLE graph_workflow_rls_reader").expect("set DFS reader failed");
+    let query = "SELECT COALESCE(
+          jsonb_agg(to_jsonb(t) ORDER BY root_id, depth, node_id),
+          '[]'::jsonb
+        )
+        FROM graph.traverse_search(
+          'name', 'Alice',
+          table_filter := 'graph_test_users_pgtest'::regclass,
+          search_mode := 'exact', search_max_rows := 2,
+          max_depth := 2, strategy := 'dfs', direction := 'out', hydrate := false
+        ) AS t";
+    Spi::run("SELECT graph._test_set_visibility_strategy('eager')").unwrap();
+    let eager = workflow_json(query);
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')").unwrap();
+    let lazy = workflow_json(query);
+    let metrics = workflow_json("SELECT graph._test_visibility_metrics()");
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')").unwrap();
+
+    assert_eq!(lazy.0, eager.0);
+    assert_eq!(metrics.0["strategy"].as_str(), Some("lazy"));
+    assert!(metrics.0["spi_calls"].as_u64().unwrap_or_default() > 0);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn dfs_lazy_relationship_rls_blocks_hidden_parallel_edge() {
+    build_workflow_rls_fixture();
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_dfs_all_nodes
+           ON public.graph_test_users_pgtest FOR SELECT
+           TO graph_workflow_rls_reader USING (true);
+         CREATE POLICY graph_dfs_visible_edges
+           ON public.graph_test_friendships_pgtest FOR SELECT
+           TO graph_workflow_rls_reader USING (id = 'f4');
+         SET ROLE graph_workflow_rls_reader;
+         SELECT graph._test_set_visibility_strategy('lazy')",
+    )
+    .expect("configure DFS relationship RLS failed");
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+           'graph_test_users_pgtest'::regclass, 'u1', 1,
+           strategy := 'dfs', direction := 'out', include_start := false, hydrate := false
+         )",
+    )
+    .expect("DFS relationship RLS failed")
+    .unwrap_or_default();
+    Spi::run(
+        "RESET ROLE;
+         DROP POLICY graph_dfs_visible_edges ON public.graph_test_friendships_pgtest;
+         CREATE POLICY graph_dfs_visible_edges
+           ON public.graph_test_friendships_pgtest FOR SELECT
+           TO graph_workflow_rls_reader USING (false);
+         SET ROLE graph_workflow_rls_reader",
+    )
+    .expect("hide every DFS relationship failed");
+    let all_hidden_count = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+           'graph_test_users_pgtest'::regclass, 'u1', 1,
+           strategy := 'dfs', direction := 'out', include_start := false, hydrate := false
+         )",
+    )
+    .expect("all-hidden DFS relationship RLS failed")
+    .unwrap_or_default();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')").unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(all_hidden_count, 0);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn dfs_lazy_cancellation_and_policy_error_drop_state_then_retry() {
+    build_workflow_rls_fixture();
+    Spi::run(
+        "SET ROLE graph_workflow_rls_reader;
+         SELECT graph._test_set_visibility_strategy('lazy');
+         SELECT graph._test_arm_lazy_visibility_cancel()",
+    )
+    .unwrap();
+    let cancelled = workflow_cancellation(
+        "SELECT * FROM graph.traverse(
+           'graph_test_users_pgtest'::regclass, 'u1', 2,
+           strategy := 'dfs', direction := 'out', include_start := false, hydrate := false
+         )",
+    );
+    let retry = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+           'graph_test_users_pgtest'::regclass, 'u1', 2,
+           strategy := 'dfs', direction := 'out', include_start := false, hydrate := false
+         )",
+    )
+    .expect("DFS retry failed")
+    .unwrap_or_default();
+    Spi::run(
+        "RESET ROLE;
+         DROP POLICY graph_workflow_visible_nodes ON public.graph_test_users_pgtest;
+         CREATE FUNCTION public.graph_dfs_error_policy()
+           RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
+           BEGIN PERFORM 1 / 0; RETURN true; END $$;
+         CREATE POLICY graph_dfs_error_policy
+           ON public.graph_test_users_pgtest
+           TO graph_workflow_rls_reader
+           USING (public.graph_dfs_error_policy());
+         GRANT EXECUTE ON FUNCTION public.graph_dfs_error_policy()
+           TO graph_workflow_rls_reader;
+         SET ROLE graph_workflow_rls_reader",
+    )
+    .expect("configure DFS policy error failed");
+    let policy_rejected = std::sync::atomic::AtomicBool::new(false);
+    pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        Spi::run(
+            "SELECT * FROM graph.traverse(
+               'graph_test_users_pgtest'::regclass, 'u1', 2,
+               strategy := 'dfs', direction := 'out', hydrate := false
+             )",
+        )
+        .expect("DFS policy error unexpectedly returned");
+    }))
+    .catch_when(pgrx::PgSqlErrorCode::ERRCODE_DIVISION_BY_ZERO, |_| {
+        policy_rejected.store(true, std::sync::atomic::Ordering::Relaxed);
+    })
+    .execute();
+    Spi::run(
+        "RESET ROLE;
+         DROP POLICY graph_dfs_error_policy ON public.graph_test_users_pgtest;
+         CREATE POLICY graph_dfs_error_policy
+           ON public.graph_test_users_pgtest
+           TO graph_workflow_rls_reader USING (id <> 'u3');
+         SET ROLE graph_workflow_rls_reader",
+    )
+    .expect("replace DFS policy error failed");
+    let policy_retry = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+           'graph_test_users_pgtest'::regclass, 'u1', 2,
+           strategy := 'dfs', direction := 'out', include_start := false,
+           hydrate := false
+         )",
+    )
+    .expect("DFS policy-error retry failed")
+    .unwrap_or_default();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')").unwrap();
+    assert!(cancelled);
+    assert!(policy_rejected.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(retry, 1);
+    assert_eq!(policy_retry, 1);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn dfs_no_rls_fast_path_has_zero_visibility_spi() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run("SELECT graph._test_set_visibility_strategy('auto')").unwrap();
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+           'graph_test_users_pgtest'::regclass, 'u1', 1,
+           strategy := 'dfs', direction := 'out', include_start := false, hydrate := false
+         )",
+    )
+    .expect("no-RLS DFS failed")
+    .unwrap_or_default();
+    let metrics = workflow_json("SELECT graph._test_visibility_metrics()");
+    assert_eq!(count, 1);
+    assert_eq!(metrics.0["spi_calls"].as_u64(), Some(0));
+}
+
 #[pg_test]
 fn traverse_accepts_in_direction_and_rejects_weighted_strategy() {
     reset_and_create_fixtures();

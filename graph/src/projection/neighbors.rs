@@ -45,6 +45,22 @@ pub(crate) trait NeighborSource {
         cursor.advance_logical(output.len());
         iter.peek().is_none()
     }
+
+    /// Fill a bounded page in the exact order returned by
+    /// [`NeighborSource::neighbors_reversed`].
+    fn fill_neighbors_reversed(
+        &self,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<Neighbor>,
+    ) -> bool {
+        let pos = cursor.logical_position();
+        let mut iter = self.neighbors_reversed(node_idx).skip(pos).peekable();
+        output.extend(iter.by_ref().take(limit));
+        cursor.advance_logical(output.len());
+        iter.peek().is_none()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -53,6 +69,9 @@ pub(crate) enum OwnedNeighborCursor {
     Start,
     Csr {
         pos: usize,
+    },
+    CsrReverse {
+        consumed: usize,
     },
     Overlay {
         base_pos: usize,
@@ -63,11 +82,27 @@ pub(crate) enum OwnedNeighborCursor {
         duplicate_insert_pos: usize,
         duplicate_check_initialized: bool,
     },
+    OverlayReverse {
+        base_consumed: usize,
+        insert_consumed: usize,
+        base_phase: bool,
+        duplicate_base_pos: usize,
+        duplicate_base_end: usize,
+        duplicate_insert_pos: usize,
+        duplicate_check_initialized: bool,
+    },
     Layered {
         base_pos: usize,
         chunk_pos: usize,
         durable_pos: usize,
         overlay_pos: usize,
+        last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
+    },
+    LayeredReverse {
+        base_consumed: usize,
+        chunk_consumed: usize,
+        durable_consumed: usize,
+        overlay_consumed: usize,
         last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
     },
     LayeredAny {
@@ -81,6 +116,17 @@ pub(crate) enum OwnedNeighborCursor {
         in_overlay_pos: usize,
         last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
     },
+    LayeredAnyReverse {
+        out_base_consumed: usize,
+        in_base_consumed: usize,
+        out_chunk_consumed: usize,
+        in_chunk_consumed: usize,
+        out_durable_consumed: usize,
+        in_durable_consumed: usize,
+        out_overlay_consumed: usize,
+        in_overlay_consumed: usize,
+        last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
+    },
     Logical {
         pos: usize,
     },
@@ -91,7 +137,13 @@ impl OwnedNeighborCursor {
         match self {
             Self::Start => 0,
             Self::Csr { pos } | Self::Logical { pos } => *pos,
-            Self::Overlay { .. } | Self::Layered { .. } | Self::LayeredAny { .. } => 0,
+            Self::CsrReverse { consumed } => *consumed,
+            Self::Overlay { .. }
+            | Self::OverlayReverse { .. }
+            | Self::Layered { .. }
+            | Self::LayeredReverse { .. }
+            | Self::LayeredAny { .. }
+            | Self::LayeredAnyReverse { .. } => 0,
         }
     }
 
@@ -166,6 +218,37 @@ impl NeighborSource for CsrNeighbors<'_> {
             }
         }));
         *cursor = OwnedNeighborCursor::Csr { pos: end };
+        end == targets.len()
+    }
+
+    fn fill_neighbors_reversed(
+        &self,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<Neighbor>,
+    ) -> bool {
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .edge_store
+            .neighbors_with_schema_and_relationship_ids(node_idx);
+        let consumed = match cursor {
+            OwnedNeighborCursor::CsrReverse { consumed } => *consumed,
+            _ => 0,
+        };
+        let end = consumed.saturating_add(limit).min(targets.len());
+        output.extend((consumed..end).map(|offset| {
+            let pos = targets.len() - 1 - offset;
+            Neighbor {
+                target: targets[pos],
+                type_id: type_ids[pos],
+                schema_reversed: schema_reversed[pos] != 0,
+                relationship_id: relationship_ids
+                    .get(pos)
+                    .copied()
+                    .filter(|id| *id != NO_RELATIONSHIP_ID),
+            }
+        }));
+        *cursor = OwnedNeighborCursor::CsrReverse { consumed: end };
         end == targets.len()
     }
 }
@@ -395,6 +478,185 @@ impl NeighborSource for OverlayNeighbors<'_> {
             duplicate_check_initialized,
         };
         inserts_phase && insert_pos >= inserted.map_or(0, <[_]>::len)
+    }
+
+    fn fill_neighbors_reversed(
+        &self,
+        node_idx: u32,
+        cursor: &mut OwnedNeighborCursor,
+        limit: usize,
+        output: &mut Vec<Neighbor>,
+    ) -> bool {
+        if self.inserts.get(&node_idx).is_none() && self.deletes.get(&node_idx).is_none() {
+            return CsrNeighbors::new(self.edge_store)
+                .fill_neighbors_reversed(node_idx, cursor, limit, output);
+        }
+        let (targets, type_ids, schema_reversed, relationship_ids) = self
+            .edge_store
+            .neighbors_with_schema_and_relationship_ids(node_idx);
+        let inserted = self
+            .inserts
+            .get(&node_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let deleted = self.deletes.get(&node_idx);
+        let (
+            mut base_consumed,
+            mut insert_consumed,
+            mut base_phase,
+            mut duplicate_base_pos,
+            mut duplicate_base_end,
+            mut duplicate_insert_pos,
+            mut duplicate_check_initialized,
+        ) = match cursor {
+            OwnedNeighborCursor::OverlayReverse {
+                base_consumed,
+                insert_consumed,
+                base_phase,
+                duplicate_base_pos,
+                duplicate_base_end,
+                duplicate_insert_pos,
+                duplicate_check_initialized,
+            } => (
+                *base_consumed,
+                *insert_consumed,
+                *base_phase,
+                *duplicate_base_pos,
+                *duplicate_base_end,
+                *duplicate_insert_pos,
+                *duplicate_check_initialized,
+            ),
+            _ => (0, 0, false, 0, 0, 0, false),
+        };
+        let mut examined = 0usize;
+        while examined < limit && !base_phase {
+            if insert_consumed >= inserted.len() {
+                base_phase = true;
+                break;
+            }
+            let pos = inserted.len() - 1 - insert_consumed;
+            let &(target, type_id, reversed, relationship_id) = &inserted[pos];
+            if !duplicate_check_initialized {
+                let key_before = |idx: usize| {
+                    (targets[idx], type_ids[idx], schema_reversed[idx] != 0)
+                        < (target, type_id, reversed)
+                };
+                let key_after = |idx: usize| {
+                    (targets[idx], type_ids[idx], schema_reversed[idx] != 0)
+                        <= (target, type_id, reversed)
+                };
+                let mut low = 0usize;
+                let mut high = targets.len();
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    if key_before(mid) {
+                        low = mid + 1
+                    } else {
+                        high = mid
+                    }
+                }
+                duplicate_base_pos = low;
+                high = targets.len();
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    if key_after(mid) {
+                        low = mid + 1
+                    } else {
+                        high = mid
+                    }
+                }
+                duplicate_base_end = low;
+                duplicate_insert_pos = 0;
+                duplicate_check_initialized = true;
+            }
+            let mut duplicate = false;
+            while examined < limit && duplicate_base_pos < duplicate_base_end {
+                let idx = duplicate_base_pos;
+                duplicate_base_pos += 1;
+                examined += 1;
+                if relationship_ids
+                    .get(idx)
+                    .copied()
+                    .filter(|id| *id != NO_RELATIONSHIP_ID)
+                    == relationship_id
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            while !duplicate && examined < limit && duplicate_insert_pos < pos {
+                duplicate =
+                    inserted[duplicate_insert_pos] == (target, type_id, reversed, relationship_id);
+                duplicate_insert_pos += 1;
+                examined += 1;
+            }
+            let checks_complete = duplicate
+                || (duplicate_base_pos == duplicate_base_end && duplicate_insert_pos == pos);
+            if !checks_complete {
+                break;
+            }
+            if !duplicate {
+                if examined == limit {
+                    break;
+                }
+                output.push(Neighbor {
+                    target,
+                    type_id,
+                    schema_reversed: reversed,
+                    relationship_id,
+                });
+                examined += 1;
+            }
+            insert_consumed += 1;
+            duplicate_base_pos = 0;
+            duplicate_base_end = 0;
+            duplicate_insert_pos = 0;
+            duplicate_check_initialized = false;
+        }
+        while examined < limit && base_phase {
+            if base_consumed >= targets.len() {
+                break;
+            }
+            let pos = targets.len() - 1 - base_consumed;
+            base_consumed += 1;
+            examined += 1;
+            let relationship_id = relationship_ids
+                .get(pos)
+                .copied()
+                .filter(|id| *id != NO_RELATIONSHIP_ID);
+            let candidate = Neighbor {
+                target: targets[pos],
+                type_id: type_ids[pos],
+                schema_reversed: schema_reversed[pos] != 0,
+                relationship_id,
+            };
+            if deleted.is_some_and(|set| {
+                set.contains(&(
+                    candidate.target,
+                    candidate.type_id,
+                    candidate.schema_reversed,
+                    None,
+                )) || set.contains(&(
+                    candidate.target,
+                    candidate.type_id,
+                    candidate.schema_reversed,
+                    relationship_id,
+                ))
+            }) {
+                continue;
+            }
+            output.push(candidate);
+        }
+        *cursor = OwnedNeighborCursor::OverlayReverse {
+            base_consumed,
+            insert_consumed,
+            base_phase,
+            duplicate_base_pos,
+            duplicate_base_end,
+            duplicate_insert_pos,
+            duplicate_check_initialized,
+        };
+        base_phase && base_consumed >= targets.len()
     }
 }
 
@@ -906,6 +1168,24 @@ mod tests {
             }
         }
         assert_eq!(actual, expected);
+
+        let expected_reversed = neighbors.neighbors_reversed(0).collect::<Vec<_>>();
+        for page_size in [1, 2, 17, 257, 4_096] {
+            let mut actual_reversed = Vec::new();
+            let mut cursor = OwnedNeighborCursor::default();
+            loop {
+                let exhausted = neighbors.fill_neighbors_reversed(
+                    0,
+                    &mut cursor,
+                    page_size,
+                    &mut actual_reversed,
+                );
+                if exhausted {
+                    break;
+                }
+            }
+            assert_eq!(actual_reversed, expected_reversed);
+        }
     }
 
     #[test]
@@ -985,6 +1265,25 @@ mod tests {
                 }
             }
             prop_assert_eq!(actual, expected);
+
+            let expected_reversed = neighbors.neighbors_reversed(0).collect::<Vec<_>>();
+            let mut actual_reversed = Vec::new();
+            let mut reverse_cursor = OwnedNeighborCursor::default();
+            let mut reverse_pages = 0usize;
+            loop {
+                reverse_pages += 1;
+                prop_assert!(reverse_pages <= 10_000, "reverse cursor failed to make bounded progress");
+                let mut page = Vec::new();
+                let exhausted = neighbors.fill_neighbors_reversed(
+                    0,
+                    &mut reverse_cursor,
+                    page_size,
+                    &mut page,
+                );
+                actual_reversed.extend(page);
+                if exhausted { break; }
+            }
+            prop_assert_eq!(actual_reversed, expected_reversed);
         }
 
         #[test]

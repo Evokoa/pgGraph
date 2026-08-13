@@ -170,13 +170,30 @@ pub(crate) struct ResumableBfsMachine {
     pending_batch: Option<(Option<u32>, usize)>,
     truncated: bool,
     projection_epoch: Option<BfsProjectionEpoch>,
+    depth_first: bool,
 }
+
+/// DFS uses the same bounded candidate/verdict protocol as BFS, but owns a
+/// LIFO frontier and pages each active node in reverse expansion order.
+pub(crate) type ResumableDfsMachine = ResumableBfsMachine;
 
 /// Maximum raw adjacency page retained by a resumable BFS machine.
 pub(crate) const RESUMABLE_BFS_PAGE_CAPACITY: usize = 64;
 
 impl ResumableBfsMachine {
     pub(crate) fn try_new(node_count: usize, config: &BfsConfig) -> GraphResult<Self> {
+        Self::try_new_with_strategy(node_count, config, false)
+    }
+
+    pub(crate) fn try_new_dfs(node_count: usize, config: &BfsConfig) -> GraphResult<Self> {
+        Self::try_new_with_strategy(node_count, config, true)
+    }
+
+    fn try_new_with_strategy(
+        node_count: usize,
+        config: &BfsConfig,
+        depth_first: bool,
+    ) -> GraphResult<Self> {
         let sparse = use_sparse_metadata(node_count, config.max_nodes);
         let expected = expected_visit_capacity(node_count, config.max_nodes);
         let mut frontier = VecDeque::new();
@@ -235,6 +252,7 @@ impl ResumableBfsMachine {
             pending_batch: None,
             truncated: false,
             projection_epoch: None,
+            depth_first,
         })
     }
 
@@ -461,7 +479,11 @@ pub(crate) fn materialize_bfs_candidate_batch(
     loop {
         let current = if let Some(current) = machine.active_node {
             current
-        } else if let Some(current) = machine.frontier.pop_front() {
+        } else if let Some(current) = if machine.depth_first {
+            machine.frontier.pop_back()
+        } else {
+            machine.frontier.pop_front()
+        } {
             machine.active_node = Some(current);
             machine.adjacency_cursor = OwnedNeighborCursor::default();
             machine.pending_adjacency.clear();
@@ -490,12 +512,21 @@ pub(crate) fn materialize_bfs_candidate_batch(
             adjacency
                 .try_reserve(limits.max_candidates)
                 .map_err(traversal_allocation_error)?;
-            let exhausted = neighbors.fill_neighbors(
-                current,
-                &mut machine.adjacency_cursor,
-                limits.max_candidates,
-                &mut adjacency,
-            );
+            let exhausted = if machine.depth_first {
+                neighbors.fill_neighbors_reversed(
+                    current,
+                    &mut machine.adjacency_cursor,
+                    limits.max_candidates,
+                    &mut adjacency,
+                )
+            } else {
+                neighbors.fill_neighbors(
+                    current,
+                    &mut machine.adjacency_cursor,
+                    limits.max_candidates,
+                    &mut adjacency,
+                )
+            };
             machine
                 .pending_adjacency
                 .try_reserve(adjacency.len())
@@ -2004,6 +2035,60 @@ mod tests {
         machine.finish()
     }
 
+    fn run_resumable_dfs_with_visibility(
+        nodes: &NodeStore,
+        edges: &EdgeStore,
+        config: &BfsConfig,
+        batch_size: usize,
+        governor: &crate::resource::ResourceGovernor,
+        visible: impl Fn(&BfsAdjacencyCandidate) -> BfsAdjacencyVerdict,
+    ) -> BfsResult {
+        let relationships =
+            crate::relationship_identity_store::RelationshipIdentityStore::default();
+        let neighbors = crate::projection::neighbors::CsrNeighbors::new(edges);
+        let mut machine = ResumableDfsMachine::try_new_dfs(nodes.node_count() as usize, config)
+            .expect("resumable DFS state should allocate");
+        while !machine.is_complete() {
+            let Some(batch) = machine
+                .take_candidate_batch(
+                    nodes,
+                    &neighbors,
+                    &relationships,
+                    config,
+                    BfsCandidateLimits {
+                        max_candidates: batch_size,
+                        max_key_bytes: 1_024 * 1_024,
+                    },
+                    governor,
+                )
+                .expect("DFS candidate materialization should succeed")
+            else {
+                break;
+            };
+            let verdicts = batch.candidates.iter().map(&visible).collect::<Vec<_>>();
+            machine
+                .apply_visibility_verdicts(&batch, &verdicts, nodes, &FilterIndex::new(), config)
+                .expect("DFS candidates should be admitted in order");
+        }
+        machine.finish()
+    }
+
+    fn run_resumable_dfs_all_visible(
+        nodes: &NodeStore,
+        edges: &EdgeStore,
+        config: &BfsConfig,
+        batch_size: usize,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> BfsResult {
+        run_resumable_dfs_with_visibility(nodes, edges, config, batch_size, governor, |candidate| {
+            BfsAdjacencyVerdict {
+                sequence: candidate.sequence,
+                node_visible: true,
+                relationship_visible: true,
+            }
+        })
+    }
+
     fn bfs_result_bytes(result: &BfsResult) -> Vec<u8> {
         result
             .visited
@@ -2017,6 +2102,167 @@ mod tests {
             })
             .chain([u8::from(result.truncated)])
             .collect()
+    }
+
+    #[test]
+    fn resumable_dfs_matches_eager_reversed_push_order_and_visited_timing() {
+        let (nodes, edges) = build_test_graph();
+        let config = resumable_test_config(4, 100, 100);
+        let eager = execute_dfs(&nodes, &edges, &FilterIndex::new(), &config);
+        for batch_size in [1, 2, 3, 64] {
+            let governor = resumable_test_governor();
+            let actual =
+                run_resumable_dfs_all_visible(&nodes, &edges, &config, batch_size, &governor);
+            assert_eq!(bfs_result_bytes(&actual), bfs_result_bytes(&eager));
+        }
+    }
+
+    #[test]
+    fn resumable_dfs_marks_visited_on_push_for_duplicates_cycles_and_parallel_edges() {
+        let mut nodes = NodeStore::new();
+        for key in ["seed", "left", "right", "join"] {
+            nodes.add_node(100, key.into());
+        }
+        let edges = EdgeStore::from_edges(
+            4,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: 2,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 1,
+                    target: 3,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 2,
+                    target: 3,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: 3,
+                    target: 0,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+            ],
+            false,
+        );
+        let config = resumable_test_config(4, 100, 100);
+        let eager = execute_dfs(&nodes, &edges, &FilterIndex::new(), &config);
+        let actual =
+            run_resumable_dfs_all_visible(&nodes, &edges, &config, 1, &resumable_test_governor());
+        assert_eq!(bfs_result_bytes(&actual), bfs_result_bytes(&eager));
+        assert_eq!(actual.parent.get(3), eager.parent.get(3));
+    }
+
+    #[test]
+    fn resumable_dfs_hidden_node_relationship_and_intermediate_match_eager() {
+        let (nodes, edges) = build_test_graph();
+        let config = resumable_test_config(4, 100, 100);
+        let governor = resumable_test_governor();
+        let actual =
+            run_resumable_dfs_with_visibility(&nodes, &edges, &config, 1, &governor, |candidate| {
+                BfsAdjacencyVerdict {
+                    sequence: candidate.sequence,
+                    node_visible: candidate.target_node != 2,
+                    relationship_visible: candidate.target_node != 4,
+                }
+            });
+        assert!(!actual.visited.contains(2));
+        assert!(!actual.visited.contains(3));
+        assert!(!actual.visited.contains(4));
+    }
+
+    #[test]
+    fn resumable_dfs_preserves_max_nodes_frontier_depth_and_truncation() {
+        let (nodes, edges) = build_test_graph();
+        for config in [
+            resumable_test_config(1, 100, 100),
+            resumable_test_config(4, 2, 100),
+            resumable_test_config(4, 100, 1),
+        ] {
+            let eager = execute_dfs(&nodes, &edges, &FilterIndex::new(), &config);
+            let actual = run_resumable_dfs_all_visible(
+                &nodes,
+                &edges,
+                &config,
+                1,
+                &resumable_test_governor(),
+            );
+            assert_eq!(bfs_result_bytes(&actual), bfs_result_bytes(&eager));
+        }
+    }
+
+    #[test]
+    fn resumable_dfs_yields_bounded_owned_pages_and_rejects_epoch_change() {
+        let (nodes, edges) = build_test_graph();
+        let config = resumable_test_config(4, 100, 100);
+        let relationships =
+            crate::relationship_identity_store::RelationshipIdentityStore::default();
+        let neighbors = crate::projection::neighbors::CsrNeighbors::new(&edges);
+        let governor = resumable_test_governor();
+        let mut machine = ResumableDfsMachine::try_new_dfs(nodes.node_count() as usize, &config)
+            .expect("DFS machine");
+        let epoch = BfsProjectionEpoch {
+            generation_id: Some(1),
+            applied_sync_id: 2,
+            node_count: 5,
+            edge_count: 8,
+            relationship_identity_count: 0,
+            edge_buffer_len: 0,
+            edge_buffer_revision: 0,
+            tx_topology_revision: 0,
+            tx_added_nodes: 0,
+            tx_added_edges: 0,
+            tx_deleted_nodes: 0,
+            tx_deleted_edges: 0,
+        };
+        machine.bind_projection_epoch(epoch);
+        let batch = machine
+            .take_candidate_batch(
+                &nodes,
+                &neighbors,
+                &relationships,
+                &config,
+                BfsCandidateLimits {
+                    max_candidates: 1,
+                    max_key_bytes: 128,
+                },
+                &governor,
+            )
+            .expect("bounded page")
+            .expect("candidate");
+        assert_eq!(batch.candidates.len(), 1);
+        assert!(machine
+            .require_projection_epoch(BfsProjectionEpoch {
+                edge_buffer_revision: 1,
+                ..epoch
+            })
+            .is_err());
     }
 
     fn adjacency_candidate(sequence: u32, target: u32, key: &str) -> BfsAdjacencyCandidate {

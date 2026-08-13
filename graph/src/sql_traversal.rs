@@ -55,14 +55,25 @@ impl StatementBfsVisibility {
         governor: &crate::resource::ResourceGovernor,
     ) -> safety::GraphResult<Vec<TraverseCandidate>> {
         if self.eager.is_none() {
-            if let Some(candidates) = execute_lazy_bfs_candidates(
-                request,
-                &mut self.lazy,
-                tables,
-                edges,
-                filter_columns,
-                governor,
-            )? {
+            let lazy_candidates = match request.strategy {
+                types::TraversalStrategy::Bfs => execute_lazy_bfs_candidates(
+                    request,
+                    &mut self.lazy,
+                    tables,
+                    edges,
+                    filter_columns,
+                    governor,
+                )?,
+                types::TraversalStrategy::Dfs => execute_lazy_dfs_candidates(
+                    request,
+                    &mut self.lazy,
+                    tables,
+                    edges,
+                    filter_columns,
+                    governor,
+                )?,
+            };
+            if let Some(candidates) = lazy_candidates {
                 return Ok(candidates);
             }
             self.eager = Some(crate::sql_visibility::prepare_bfs_eager_fallback(
@@ -196,8 +207,14 @@ pub(crate) fn execute_lazy_bfs_rows(
     filter_columns: &[crate::builder::RegisteredFilterColumn],
     governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<Option<Vec<TraverseRow>>> {
-    let candidates =
-        execute_lazy_bfs_candidates(request, lazy, tables, edges, filter_columns, governor)?;
+    let candidates = match request.strategy {
+        types::TraversalStrategy::Bfs => {
+            execute_lazy_bfs_candidates(request, lazy, tables, edges, filter_columns, governor)?
+        }
+        types::TraversalStrategy::Dfs => {
+            execute_lazy_dfs_candidates(request, lazy, tables, edges, filter_columns, governor)?
+        }
+    };
     let Some(candidates) = candidates else {
         return Ok(None);
     };
@@ -237,7 +254,37 @@ pub(crate) fn execute_lazy_bfs_candidates(
     filter_columns: &[crate::builder::RegisteredFilterColumn],
     governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<Option<Vec<TraverseCandidate>>> {
-    if request.strategy != types::TraversalStrategy::Bfs || request.max_depth <= 0 {
+    if request.strategy != types::TraversalStrategy::Bfs {
+        return Ok(None);
+    }
+    execute_lazy_traversal_candidates(request, lazy, tables, edges, filter_columns, governor)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_lazy_dfs_candidates(
+    request: &TraverseRequest<'_>,
+    lazy: &mut crate::visibility::LazyVisibilityCoordinator,
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Option<Vec<TraverseCandidate>>> {
+    if request.strategy != types::TraversalStrategy::Dfs {
+        return Ok(None);
+    }
+    execute_lazy_traversal_candidates(request, lazy, tables, edges, filter_columns, governor)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_lazy_traversal_candidates(
+    request: &TraverseRequest<'_>,
+    lazy: &mut crate::visibility::LazyVisibilityCoordinator,
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Option<Vec<TraverseCandidate>>> {
+    if request.max_depth <= 0 {
         return Ok(None);
     }
     if !crate::sql_visibility::lazy_bfs_strategy_enabled(lazy) {
@@ -281,7 +328,7 @@ pub(crate) fn execute_lazy_bfs_candidates(
         for filter in &structured_filter.pushdown_filters {
             filter_ops.push(typed_pushdown_filter_op(&engine.filter_index, filter)?);
         }
-        engine.prepare_resumable_bfs(
+        let args = (
             request.root_table.to_u32(),
             request.root_id,
             request.max_depth,
@@ -291,8 +338,15 @@ pub(crate) fn execute_lazy_bfs_candidates(
             filter_ops,
             request.tenant,
             request.direction,
-            governor,
-        )
+        );
+        match request.strategy {
+            types::TraversalStrategy::Bfs => engine.prepare_resumable_bfs(
+                args.0, args.1, args.2, args.3, args.4, args.5, args.6, args.7, args.8, governor,
+            ),
+            types::TraversalStrategy::Dfs => engine.prepare_resumable_dfs(
+                args.0, args.1, args.2, args.3, args.4, args.5, args.6, args.7, args.8, governor,
+            ),
+        }
     })?;
     let Some((config, mut machine)) = prepared else {
         return Ok(None);
