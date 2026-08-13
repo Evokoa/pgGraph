@@ -399,6 +399,33 @@ fn targeted_workflows_share_one_statement_local_resolver() {
 }
 
 #[test]
+fn targeted_gql_and_cypher_lazy_postgresql_contract_is_complete() {
+    let gql_tests = crate_source("src/pg_tests/gql.rs");
+    let cypher_tests = crate_source("src/pg_tests/cypher.rs");
+
+    for required in [
+        "gql_identity_bounded_expansion_lazy_matches_eager_rls_optional_multipattern_order_and_caps",
+        "gql_identity_bounded_write_match_lazy_uses_postgres_rls_and_matches_eager",
+        "gql_identity_bounded_lazy_cancellation_policy_error_drop_state_then_retry",
+        "gql_whole_source_scan_remains_eager_under_forced_lazy",
+        "gql_no_rls_identity_bounded_fast_path_has_zero_resolver_spi",
+        "gql_identity_filtered_join_eager_fallback_preserves_result_row_cap",
+        "gql_identity_bounded_parallel_edge_after_distinct_node_cap_matches_eager_error",
+        "gql_identity_bounded_acl_denial_precedes_null_missing_and_invalid_identity_values",
+    ] {
+        assert!(
+            gql_tests.contains(required),
+            "P4.6 GQL PostgreSQL corpus is missing `{required}`"
+        );
+    }
+    assert!(
+        cypher_tests
+            .contains("cypher_identity_bounded_expansion_selects_lazy_and_matches_gql_under_rls"),
+        "P4.6 openCypher compatibility coverage must exercise the same targeted lazy executor"
+    );
+}
+
+#[test]
 fn global_topology_work_remains_on_the_eager_oracle() {
     let components = crate_source("src/sql_facade/components.rs");
     let aggregation = crate_source("src/sql_aggregation.rs");

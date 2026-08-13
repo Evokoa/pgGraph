@@ -7739,3 +7739,458 @@ fn gql_create_node_rejects_unregistered_label() {
 
     assert!(denied);
 }
+
+#[cfg(feature = "development")]
+fn build_p46_gql_rls_fixture(mutable: bool) {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Hidden node', 43), ('u4', 'Hidden edge target', 47);
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f_hidden_node', 'u1', 'u3'),
+                ('f_hidden_edge', 'u1', 'u4')",
+    )
+    .expect("create P4.6 topology fixture failed");
+    if mutable {
+        Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    }
+    Spi::run(
+        "SELECT graph.add_table(
+             'graph_test_users_pgtest'::regclass,
+             id_column := 'id',
+             columns := ARRAY['name', 'age']
+         );
+         SELECT graph.add_edge(
+             'graph_test_friendships_pgtest'::regclass,
+             'user_id',
+             'graph_test_users_pgtest'::regclass,
+             'friend_id',
+             'friend',
+             bidirectional := false
+         )",
+    )
+    .expect("register P4.6 fixture failed");
+    if mutable {
+        Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+            .expect("build mutable P4.6 fixture failed");
+    } else {
+        Spi::run("SELECT * FROM graph.build()")
+            .expect("build read-only P4.6 fixture failed");
+    }
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_gql_p46_reader;
+         CREATE ROLE graph_gql_p46_reader;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_gql_p46_nodes
+           ON public.graph_test_users_pgtest
+           TO graph_gql_p46_reader
+           USING (id <> 'u3')
+           WITH CHECK (id <> 'u3');
+         CREATE POLICY graph_gql_p46_edges
+           ON public.graph_test_friendships_pgtest
+           FOR SELECT TO graph_gql_p46_reader
+           USING (id <> 'f_hidden_edge');
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_p46_reader;
+         GRANT SELECT, UPDATE ON public.graph_test_users_pgtest TO graph_gql_p46_reader;
+         GRANT SELECT ON public.graph_test_friendships_pgtest TO graph_gql_p46_reader",
+    )
+    .expect("configure P4.6 real-role RLS fixture failed");
+}
+
+#[cfg(feature = "development")]
+fn p46_graph_query_rows(surface: &str, query: &str) -> serde_json::Value {
+    Spi::get_one::<pgrx::JsonB>(&format!(
+        "SELECT COALESCE(jsonb_agg(row ORDER BY row::text), '[]'::jsonb)
+           FROM graph.{surface}({}, hydrate := false)",
+        super::sql_literal(query)
+    ))
+    .unwrap_or_else(|error| panic!("{surface} P4.6 query failed: {error}"))
+    .expect("P4.6 query aggregate was NULL")
+    .0
+}
+
+#[cfg(feature = "development")]
+fn p46_visibility_metrics() -> serde_json::Value {
+    Spi::get_one::<pgrx::JsonB>("SELECT graph._test_visibility_metrics()")
+        .expect("read P4.6 visibility metrics failed")
+        .expect("P4.6 visibility metrics were NULL")
+        .0
+}
+
+#[cfg(feature = "development")]
+fn p46_captured_sqlstate(statement: &str) -> Option<String> {
+    Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(statement)
+    ))
+    .expect("capture P4.6 SQLSTATE failed")
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_identity_bounded_expansion_lazy_matches_eager_rls_optional_multipattern_order_and_caps() {
+    build_p46_gql_rls_fixture(false);
+    let queries = [
+        "MATCH (u:graph_test_users_pgtest {id: 'u1'})-[r:friend]->(v:graph_test_users_pgtest)
+         RETURN u.id AS source, r, v.id AS target ORDER BY target",
+        "OPTIONAL MATCH (u:graph_test_users_pgtest {id: 'u1'})<-[r:friend]-(v:graph_test_users_pgtest)
+         RETURN u.id AS source, r, v.id AS target ORDER BY target LIMIT 1",
+        "MATCH (u:graph_test_users_pgtest)-[r:friend]->(v:graph_test_users_pgtest),
+               (u)-[s:friend]->(w:graph_test_users_pgtest)
+         WHERE u.id = 'u1'
+         RETURN v.id AS target, w.id AS peer, r, s
+         ORDER BY target, peer LIMIT 1",
+    ];
+
+    Spi::run(
+        "SET ROLE graph_gql_p46_reader;
+         SELECT graph._test_set_visibility_strategy('eager')",
+    )
+    .expect("force eager P4.6 GQL failed");
+    let eager = queries
+        .iter()
+        .map(|query| p46_graph_query_rows("gql", query))
+        .collect::<Vec<_>>();
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')")
+        .expect("force lazy P4.6 GQL failed");
+    let mut lazy = Vec::with_capacity(queries.len());
+    let mut selected = Vec::with_capacity(queries.len());
+    for query in queries {
+        lazy.push(p46_graph_query_rows("gql", query));
+        selected.push(
+            p46_visibility_metrics()["selected_strategy"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+    let metrics = p46_visibility_metrics();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore P4.6 GQL strategy failed");
+
+    assert_eq!(lazy, eager);
+    assert_eq!(lazy[0].as_array().map(Vec::len), Some(1));
+    assert_eq!(lazy[1].as_array().map(Vec::len), Some(1));
+    assert_eq!(lazy[2].as_array().map(Vec::len), Some(1));
+    assert_eq!(selected, ["lazy", "lazy", "eager"]);
+    assert!(metrics["spi_calls"].as_u64().unwrap_or_default() > 0);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_identity_bounded_write_match_lazy_uses_postgres_rls_and_matches_eager() {
+    build_p46_gql_rls_fixture(true);
+    create_error_sqlstate_helper();
+    Spi::run(
+        "SET ROLE graph_gql_p46_reader;
+         SELECT graph._test_set_visibility_strategy('eager')",
+    )
+    .expect("force eager P4.6 write failed");
+    let eager = p46_graph_query_rows(
+        "gql",
+        "MATCH (u:graph_test_users_pgtest {id: 'u1'}) SET u.age = 38 RETURN u.id AS id, u.age AS age",
+    );
+    Spi::run(
+        "RESET ROLE;
+         UPDATE public.graph_test_users_pgtest SET age = 37 WHERE id = 'u1';
+         SET ROLE graph_gql_p46_reader;
+         SELECT graph._test_set_visibility_strategy('lazy')",
+    )
+    .expect("prepare lazy P4.6 write failed");
+    let lazy = p46_graph_query_rows(
+        "cypher",
+        "MATCH (u:graph_test_users_pgtest {id: 'u1'}) SET u.age = 38 RETURN u.id AS id, u.age AS age",
+    );
+    let metrics = p46_visibility_metrics();
+    let hidden_statement = "SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest {id: ''u3''}) SET u.age = 99 RETURN u')";
+    let hidden_state = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(hidden_statement)
+    ))
+    .expect("capture hidden P4.6 write failed");
+    let hidden_age = Spi::get_one::<i32>(
+        "RESET ROLE;
+         SELECT age FROM public.graph_test_users_pgtest WHERE id = 'u3'",
+    )
+    .expect("read hidden P4.6 source row failed")
+    .unwrap_or_default();
+    Spi::run(
+        "CREATE OR REPLACE FUNCTION public.graph_gql_p46_reject_age()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.age = 39 THEN RAISE division_by_zero; END IF;
+           RETURN NEW;
+         END
+         $$;
+         CREATE TRIGGER graph_gql_p46_reject_age_trigger
+           BEFORE UPDATE ON public.graph_test_users_pgtest
+           FOR EACH ROW EXECUTE FUNCTION public.graph_gql_p46_reject_age();
+         SET ROLE graph_gql_p46_reader",
+    )
+    .expect("configure P4.6 write trigger error failed");
+    let trigger_statement = "SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest {id: ''u1''}) SET u.age = 39 RETURN u.id AS id')";
+    let trigger_state = p46_captured_sqlstate(trigger_statement);
+    let retry = p46_graph_query_rows(
+        "gql",
+        "MATCH (u:graph_test_users_pgtest {id: 'u1'}) SET u.age = 40 RETURN u.id AS id, u.age AS age",
+    );
+    Spi::run("SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore P4.6 write strategy failed");
+
+    assert_eq!(lazy, eager);
+    assert!(hidden_state.is_some(), "RLS-hidden write MATCH must not select a row");
+    assert_eq!(hidden_age, 43);
+    assert_eq!(trigger_state.as_deref(), Some("22012"));
+    assert_eq!(retry.as_array().map(Vec::len), Some(1));
+    assert_eq!(metrics["selected_strategy"].as_str(), Some("lazy"));
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_identity_bounded_lazy_cancellation_policy_error_drop_state_then_retry() {
+    build_p46_gql_rls_fixture(false);
+    create_error_sqlstate_helper();
+    let statement = "SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[:friend]->(v:graph_test_users_pgtest)
+         RETURN v.id AS id')";
+    Spi::run(
+        "SET ROLE graph_gql_p46_reader;
+         SELECT graph._test_set_visibility_strategy('lazy');
+         SELECT graph._test_arm_lazy_visibility_cancel()",
+    )
+    .expect("arm P4.6 lazy cancellation failed");
+    let cancelled = workflow_cancellation(statement);
+    let empty_after_cancel =
+        Spi::get_one::<bool>("SELECT graph._test_visibility_resolution_state_empty()")
+            .expect("inspect P4.6 cancellation state failed")
+            .unwrap_or(false);
+    // If the red implementation never entered the lazy resolver, consume the
+    // one-shot hook through an already-migrated API so it cannot leak to the
+    // next PostgreSQL test in this backend.
+    let _ = workflow_cancellation(
+        "SELECT * FROM graph.traverse(
+           'graph_test_users_pgtest'::regclass, 'u1', 1, hydrate := false)",
+    );
+
+    Spi::run(
+        "RESET ROLE;
+         CREATE OR REPLACE FUNCTION public.graph_gql_p46_policy_guard()
+         RETURNS boolean LANGUAGE plpgsql AS $$
+         BEGIN
+           IF current_setting('graph.test_p46_policy_error', true) = 'on' THEN
+             RAISE division_by_zero;
+           END IF;
+           RETURN true;
+         END
+         $$;
+         DROP POLICY graph_gql_p46_nodes ON public.graph_test_users_pgtest;
+         CREATE POLICY graph_gql_p46_nodes
+           ON public.graph_test_users_pgtest
+           TO graph_gql_p46_reader
+           USING (id <> 'u3' AND public.graph_gql_p46_policy_guard());
+         GRANT EXECUTE ON FUNCTION public.graph_gql_p46_policy_guard()
+           TO graph_gql_p46_reader;
+         SET graph.test_p46_policy_error = 'on';
+         SET ROLE graph_gql_p46_reader",
+    )
+    .expect("configure P4.6 policy error failed");
+    let policy_state = p46_captured_sqlstate(statement);
+    let empty_after_error =
+        Spi::get_one::<bool>("SELECT graph._test_visibility_resolution_state_empty()")
+            .expect("inspect P4.6 policy error state failed")
+            .unwrap_or(false);
+    Spi::run("SET graph.test_p46_policy_error = 'off'")
+        .expect("disable P4.6 policy error failed");
+    let retry = p46_graph_query_rows(
+        "gql",
+        "MATCH (u:graph_test_users_pgtest {id: 'u1'})-[:friend]->(v:graph_test_users_pgtest)
+         RETURN v.id AS id",
+    );
+    let metrics = p46_visibility_metrics();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore P4.6 cancellation strategy failed");
+
+    assert!(cancelled);
+    assert!(empty_after_cancel);
+    assert_eq!(policy_state.as_deref(), Some("22012"));
+    assert!(empty_after_error);
+    assert_eq!(retry.as_array().map(Vec::len), Some(1));
+    assert_eq!(metrics["selected_strategy"].as_str(), Some("lazy"));
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_identity_bounded_acl_denial_precedes_null_missing_and_invalid_identity_values() {
+    build_p46_gql_rls_fixture(false);
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_gql_p46_denied;
+         CREATE ROLE graph_gql_p46_denied;
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_p46_denied;
+         SET ROLE graph_gql_p46_denied;
+         SELECT graph._test_set_visibility_strategy('lazy')",
+    )
+    .expect("configure denied P4.6 role failed");
+    let statements = [
+        "SELECT * FROM graph.gql(
+           'MATCH (u:graph_test_users_pgtest {id: $id}) RETURN u.id AS id',
+           '{\"id\":null}'::jsonb)",
+        "SELECT * FROM graph.gql(
+           'MATCH (u:graph_test_users_pgtest {id: $id}) RETURN u.id AS id',
+           '{}'::jsonb)",
+        "SELECT * FROM graph.gql(
+           'MATCH (u:graph_test_users_pgtest {id: $id}) RETURN u.id AS id',
+           '{\"id\":{\"bad\":true}}'::jsonb)",
+    ];
+    let states = statements
+        .iter()
+        .map(|statement| p46_captured_sqlstate(statement))
+        .collect::<Vec<_>>();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore denied P4.6 role failed");
+    assert_eq!(states, vec![Some("42501".into()); 3]);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_whole_source_scan_remains_eager_under_forced_lazy() {
+    build_p46_gql_rls_fixture(false);
+    Spi::run(
+        "SET ROLE graph_gql_p46_reader;
+         SELECT graph._test_set_visibility_strategy('lazy')",
+    )
+    .expect("force P4.6 whole-source strategy failed");
+    let rows = p46_graph_query_rows(
+        "gql",
+        "MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+         RETURN u.id AS source, v.id AS target ORDER BY source, target",
+    );
+    let metrics = p46_visibility_metrics();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore P4.6 whole-source strategy failed");
+
+    assert_eq!(rows.as_array().map(Vec::len), Some(1));
+    assert_eq!(metrics["selected_strategy"].as_str(), Some("eager"));
+    assert!(metrics["source_rows"].as_u64().unwrap_or_default() > 0);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_no_rls_identity_bounded_fast_path_has_zero_resolver_spi() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    create_error_sqlstate_helper();
+    Spi::run("SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("set P4.6 no-RLS strategy failed");
+    let rows = p46_graph_query_rows(
+        "gql",
+        "MATCH (u:graph_test_users_pgtest {id: 'u1'})-[:friend]->(v:graph_test_users_pgtest)
+         RETURN v.id AS id",
+    );
+    let metrics = p46_visibility_metrics();
+
+    assert_eq!(rows.as_array().map(Vec::len), Some(1));
+    assert_eq!(metrics["spi_calls"].as_u64(), Some(0));
+    assert_eq!(metrics["requested_keys"].as_u64(), Some(0));
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_identity_filtered_join_eager_fallback_preserves_result_row_cap() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         SELECT 'cap-' || i::text, 'cap', i
+           FROM generate_series(1, 101) AS i;
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         SELECT 'cap-edge-' || i::text, 'u1', 'cap-' || i::text
+           FROM generate_series(1, 101) AS i",
+    )
+    .expect("create P4.6 row-cap fixture failed");
+    build_friendship_fixture_graph();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_gql_p46_cap_reader;
+         CREATE ROLE graph_gql_p46_cap_reader;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_gql_p46_cap_nodes
+           ON public.graph_test_users_pgtest TO graph_gql_p46_cap_reader
+           USING (true);
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_p46_cap_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest,
+                         public.graph_test_friendships_pgtest
+           TO graph_gql_p46_cap_reader;
+         SET ROLE graph_gql_p46_cap_reader",
+    )
+    .expect("configure P4.6 row-cap role failed");
+    let statement = "SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest),
+               (u)-[:friend]->(w:graph_test_users_pgtest)
+         WHERE u.id = ''u1''
+         RETURN v.id AS target, w.id AS peer')";
+    Spi::run("SELECT graph._test_set_visibility_strategy('eager')")
+        .expect("force eager P4.6 row-cap strategy failed");
+    let eager_state = p46_captured_sqlstate(statement);
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')")
+        .expect("force lazy P4.6 row-cap strategy failed");
+    let lazy_state = p46_captured_sqlstate(statement);
+    let metrics = p46_visibility_metrics();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore P4.6 row-cap strategy failed");
+
+    assert!(eager_state.is_some(), "eager GQL must enforce the result row cap");
+    assert_eq!(lazy_state, eager_state);
+    assert_eq!(metrics["selected_strategy"].as_str(), Some("eager"));
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn gql_identity_bounded_parallel_edge_after_distinct_node_cap_matches_eager_error() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         SELECT 'p46-cap-' || lpad(i::text, 5, '0'), 'cap', i
+           FROM generate_series(1, 10000) AS i;
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         SELECT 'p46-edge-' || lpad(i::text, 5, '0'), 'u1',
+                'p46-cap-' || lpad(i::text, 5, '0')
+           FROM generate_series(1, 10000) AS i;
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('p46-edge-zz-parallel', 'u1', 'p46-cap-10000')",
+    )
+    .expect("create P4.6 cap/parallel fixture failed");
+    build_friendship_fixture_graph();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_gql_p46_cap_parallel;
+         CREATE ROLE graph_gql_p46_cap_parallel;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_gql_p46_cap_parallel_nodes
+           ON public.graph_test_users_pgtest TO graph_gql_p46_cap_parallel USING (true);
+         ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_gql_p46_cap_parallel_edges
+           ON public.graph_test_friendships_pgtest TO graph_gql_p46_cap_parallel USING (true);
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_p46_cap_parallel;
+         GRANT SELECT ON public.graph_test_users_pgtest,
+                         public.graph_test_friendships_pgtest
+           TO graph_gql_p46_cap_parallel;
+         SET ROLE graph_gql_p46_cap_parallel",
+    )
+    .expect("configure P4.6 cap/parallel role failed");
+    let statement = "SELECT * FROM graph.gql(
+        'MATCH (u:graph_test_users_pgtest {id: ''u1''})-[:friend]->(v:graph_test_users_pgtest)
+         RETURN v.id AS id')";
+    Spi::run("SELECT graph._test_set_visibility_strategy('eager')")
+        .expect("force eager P4.6 cap/parallel strategy failed");
+    let eager_state = p46_captured_sqlstate(statement);
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')")
+        .expect("force lazy P4.6 cap/parallel strategy failed");
+    let lazy_state = p46_captured_sqlstate(statement);
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore P4.6 cap/parallel strategy failed");
+    assert!(eager_state.is_some());
+    assert_eq!(lazy_state, eager_state);
+}

@@ -132,6 +132,8 @@ pub(crate) struct PhysicalPlan {
     pub(crate) distinct: bool,
     /// Optional hydrated-row predicate.
     pub(crate) predicate: Option<Predicate>,
+    /// Optional direct identity lookup for the source node.
+    pub(crate) source_identity_lookup: Option<ValueExpr>,
     /// Sort keys in requested order.
     pub(crate) order_by: Vec<SortBinding>,
     /// Number of rows to skip after ordering.
@@ -268,6 +270,8 @@ pub(crate) struct PhysicalSetProperty {
     pub(crate) label: String,
     /// Optional hydrated-row predicate selecting the row.
     pub(crate) predicate: Option<Predicate>,
+    /// Identity value extracted from the predicate for bounded matching.
+    pub(crate) identity_lookup: Option<ValueExpr>,
     /// Source table column name to update.
     pub(crate) property: String,
     /// New property value.
@@ -287,6 +291,8 @@ pub(crate) struct PhysicalRemoveProperty {
     pub(crate) label: String,
     /// Optional hydrated-row predicate selecting the row.
     pub(crate) predicate: Option<Predicate>,
+    /// Identity value extracted from the predicate for bounded matching.
+    pub(crate) identity_lookup: Option<ValueExpr>,
     /// Source table column or registered JSONB property path to remove.
     pub(crate) property: String,
     /// Return slots in requested order.

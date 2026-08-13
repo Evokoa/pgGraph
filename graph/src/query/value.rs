@@ -79,6 +79,52 @@ pub(crate) fn identity_lookup_text(
     }
 }
 
+pub(crate) fn bounded_identity_lookup_text(
+    expr: &ValueExpr,
+    params: &QueryParams,
+    max_bytes: usize,
+) -> GraphResult<Option<String>> {
+    let value = match expr {
+        ValueExpr::Literal(value) => value,
+        ValueExpr::Param(name) => params.get(name).ok_or_else(|| GraphError::GqlParameter {
+            reason: format!("missing GQL parameter `{name}`"),
+        })?,
+        _ => return Ok(None),
+    };
+    if let serde_json::Value::String(value) = value {
+        if value.len() > max_bytes {
+            return Err(GraphError::ResourceLimit {
+                resource: "gql_identity_key_bytes".into(),
+                phase: crate::resource::ResourcePhase::QueryCandidates
+                    .as_str()
+                    .into(),
+                used: 0,
+                requested: u64::try_from(value.len()).unwrap_or(u64::MAX),
+                limit: u64::try_from(max_bytes).unwrap_or(u64::MAX),
+            });
+        }
+    }
+    let identity = scalar_identity_text(value)?;
+    if identity
+        .as_ref()
+        .is_some_and(|value| value.len() > max_bytes)
+    {
+        return Err(GraphError::ResourceLimit {
+            resource: "gql_identity_key_bytes".into(),
+            phase: crate::resource::ResourcePhase::QueryCandidates
+                .as_str()
+                .into(),
+            used: 0,
+            requested: identity
+                .as_ref()
+                .and_then(|value| u64::try_from(value.len()).ok())
+                .unwrap_or(u64::MAX),
+            limit: u64::try_from(max_bytes).unwrap_or(u64::MAX),
+        });
+    }
+    Ok(identity)
+}
+
 /// Project coordinate matches into canonical JSON rows.
 ///
 /// # Errors

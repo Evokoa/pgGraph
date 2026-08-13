@@ -189,6 +189,50 @@ fn node_scan_identity_lookup(
     .filter(|expr| matches!(expr, ValueExpr::Literal(_) | ValueExpr::Param(_)))
 }
 
+pub(crate) fn predicate_identity_lookup(
+    predicate: Option<&super::logical_plan::Predicate>,
+    side: super::logical_plan::BindingSide,
+    id_columns: &[String],
+) -> Option<super::logical_plan::ValueExpr> {
+    use super::logical_plan::{BoundCmpOp, Predicate, ValueExpr};
+
+    let predicate = predicate?;
+    match predicate {
+        Predicate::And(lhs, rhs) => predicate_identity_lookup(Some(lhs), side, id_columns)
+            .or_else(|| predicate_identity_lookup(Some(rhs), side, id_columns)),
+        Predicate::Compare {
+            lhs,
+            op: BoundCmpOp::Eq,
+            rhs: Some(rhs),
+        } => physical_identity_lookup_rhs(lhs, rhs, side, id_columns)
+            .or_else(|| physical_identity_lookup_rhs(rhs, lhs, side, id_columns)),
+        _ => None,
+    }
+    .filter(|expr| matches!(expr, ValueExpr::Literal(_) | ValueExpr::Param(_)))
+}
+
+fn physical_identity_lookup_rhs(
+    lhs: &super::logical_plan::ValueExpr,
+    rhs: &super::logical_plan::ValueExpr,
+    side: super::logical_plan::BindingSide,
+    id_columns: &[String],
+) -> Option<super::logical_plan::ValueExpr> {
+    use super::logical_plan::ValueExpr;
+
+    match lhs {
+        ValueExpr::NodeId {
+            side: candidate_side,
+        } if *candidate_side == side && id_columns.len() == 1 => Some(rhs.clone()),
+        ValueExpr::Property {
+            side: candidate_side,
+            property,
+        } if *candidate_side == side && id_columns.len() == 1 && id_columns[0] == *property => {
+            Some(rhs.clone())
+        }
+        _ => None,
+    }
+}
+
 fn identity_lookup_rhs(
     lhs: &super::logical_plan::ValueExpr,
     rhs: &super::logical_plan::ValueExpr,
@@ -212,6 +256,11 @@ fn identity_lookup_rhs(
 
 /// Lower a bound logical plan into the executable 1.0 single-hop physical plan.
 pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
+    let source_identity_lookup = predicate_identity_lookup(
+        plan.predicate.as_ref(),
+        super::logical_plan::BindingSide::Source,
+        &plan.source.primary_key_columns,
+    );
     PhysicalPlan {
         optional: plan.optional,
         source_var: plan.source.var,
@@ -226,6 +275,7 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
         target_table_oid: plan.target.table_oid,
         target_label: plan.target.label,
         predicate: plan.predicate,
+        source_identity_lookup,
         order_by: plan.order_by,
         skip: plan.skip,
         limit: plan.limit,
@@ -266,11 +316,17 @@ fn lower_merge_node(plan: LogicalMergeNode) -> PhysicalMergeNode {
 }
 
 fn lower_set_property(plan: LogicalSetProperty) -> PhysicalSetProperty {
+    let identity_lookup = predicate_identity_lookup(
+        plan.predicate.as_ref(),
+        super::logical_plan::BindingSide::Source,
+        &plan.node.primary_key_columns,
+    );
     PhysicalSetProperty {
         var: plan.node.var,
         table_oid: plan.node.table_oid,
         label: plan.node.label,
         predicate: plan.predicate,
+        identity_lookup,
         property: plan.property,
         value: match plan.value {
             CreateValue::Literal(value) => CreateValueSlot::Literal(literal_value_json(value)),
@@ -281,11 +337,17 @@ fn lower_set_property(plan: LogicalSetProperty) -> PhysicalSetProperty {
 }
 
 fn lower_remove_property(plan: LogicalRemoveProperty) -> PhysicalRemoveProperty {
+    let identity_lookup = predicate_identity_lookup(
+        plan.predicate.as_ref(),
+        super::logical_plan::BindingSide::Source,
+        &plan.node.primary_key_columns,
+    );
     PhysicalRemoveProperty {
         var: plan.node.var,
         table_oid: plan.node.table_oid,
         label: plan.node.label,
         predicate: plan.predicate,
+        identity_lookup,
         property: plan.property,
         returns: lower_create_returns(plan.returns),
     }
@@ -447,5 +509,26 @@ fn literal_value_json(value: crate::gql::ast::LiteralValue) -> serde_json::Value
             .unwrap_or(serde_json::Value::Null),
         crate::gql::ast::LiteralValue::Bool(value) => serde_json::Value::Bool(value),
         crate::gql::ast::LiteralValue::Null => serde_json::Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::logical_plan::{BindingSide, BoundCmpOp, Predicate, ValueExpr};
+
+    #[test]
+    fn composite_node_id_predicates_remain_on_the_typed_eager_oracle() {
+        let predicate = Predicate::Compare {
+            lhs: ValueExpr::NodeId {
+                side: BindingSide::Source,
+            },
+            op: BoundCmpOp::Eq,
+            rhs: Some(ValueExpr::Param("id".to_string())),
+        };
+        let columns = vec!["tenant_id".to_string(), "local_id".to_string()];
+        assert!(
+            super::predicate_identity_lookup(Some(&predicate), BindingSide::Source, &columns,)
+                .is_none()
+        );
     }
 }

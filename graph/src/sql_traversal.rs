@@ -365,6 +365,7 @@ fn execute_lazy_traversal_candidates(
             target_table_oid: root_table.table_oid,
             target_source_key: request.root_id.to_string(),
             edge_type: 0,
+            schema_reversed: false,
             relationship_id: None,
             relationship_mapping_id: None,
             relationship_source_key: None,

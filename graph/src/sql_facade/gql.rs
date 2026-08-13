@@ -351,11 +351,38 @@ fn execute_statement_governed(
         statement => statement,
     };
     debug_assert!(statement_uses_projection_matching(&statement));
-    let coordinator =
-        crate::sql_visibility::prepare_eager_visibility(catalog_tables, catalog_edges, governor)?;
-    let context = coordinator.context(governor);
     match statement {
         crate::query::physical_plan::PhysicalStatement::Read(plan) => {
+            if let Some(matches) = execute_identity_one_hop_lazy(
+                &plan,
+                tenant_scope,
+                params,
+                governor,
+                catalog_tables,
+                catalog_edges,
+            )? {
+                let hydrated = hydrate_gql_rows_governed(
+                    &matches,
+                    crate::query::value::requires_hydration(&plan, hydrate),
+                    governor,
+                    catalog_tables,
+                )?;
+                let hydrated_relationships =
+                    hydrate_gql_relationship_rows_governed(&matches, &plan, hydrate, governor)?;
+                return crate::query::value::project_rows_with_relationships_governed(
+                    matches,
+                    &plan,
+                    &hydrated,
+                    &hydrated_relationships,
+                    params,
+                    hydrate,
+                    governor,
+                );
+            }
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            crate::sql_visibility::record_selected_visibility_strategy(false);
+            let context = coordinator.context(governor);
             check_plan_acl(&plan);
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_in_context(
@@ -386,6 +413,28 @@ fn execute_statement_governed(
             )
         }
         crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
+            if let Some(matches) = execute_identity_node_scan_lazy(
+                &plan,
+                tenant_scope,
+                params,
+                governor,
+                catalog_tables,
+                catalog_edges,
+            )? {
+                let hydrated = hydrate_gql_node_rows_governed(
+                    &matches,
+                    crate::query::value::node_scan_requires_hydration(&plan, hydrate),
+                    governor,
+                    catalog_tables,
+                )?;
+                return crate::query::value::project_node_rows_governed(
+                    matches, &plan, &hydrated, params, hydrate, governor,
+                );
+            }
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            crate::sql_visibility::record_selected_visibility_strategy(false);
+            let context = coordinator.context(governor);
             check_node_scan_acl(&plan);
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_node_scan_in_context(
@@ -408,6 +457,10 @@ fn execute_statement_governed(
             )
         }
         crate::query::physical_plan::PhysicalStatement::JoinRead(plan) => {
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            crate::sql_visibility::record_selected_visibility_strategy(false);
+            let context = coordinator.context(governor);
             check_join_acl(&plan);
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_join_in_context(
@@ -430,6 +483,10 @@ fn execute_statement_governed(
             )
         }
         crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            crate::sql_visibility::record_selected_visibility_strategy(false);
+            let context = coordinator.context(governor);
             check_wildcard_path_acl(&plan);
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_wildcard_path_in_context(
@@ -456,6 +513,9 @@ fn execute_statement_governed(
             unreachable!("node-only CREATE/MERGE returns before topology visibility preparation")
         }
         crate::query::physical_plan::PhysicalStatement::CreateRelationship(plan) => {
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            let context = coordinator.context(governor);
             check_create_relationship_acl(&plan);
             execute_create_relationship(
                 &plan,
@@ -467,6 +527,28 @@ fn execute_statement_governed(
             )
         }
         crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
+            let scan = set_property_node_scan(&plan);
+            if let Some(prepared) =
+                prepare_identity_node_scan_lazy(&scan, governor, catalog_tables, catalog_edges)?
+            {
+                crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+                    || check_set_acl(&plan),
+                ));
+                return execute_set_property_identity(
+                    &plan,
+                    &scan,
+                    prepared,
+                    tenant_scope,
+                    params,
+                    hydrate,
+                    governor,
+                    catalog_tables,
+                );
+            }
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            crate::sql_visibility::record_selected_visibility_strategy(false);
+            let context = coordinator.context(governor);
             check_set_acl(&plan);
             execute_set_property(
                 &plan,
@@ -478,6 +560,9 @@ fn execute_statement_governed(
             )
         }
         crate::query::physical_plan::PhysicalStatement::RemoveProperty(plan) => {
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            let context = coordinator.context(governor);
             check_remove_acl(&plan);
             execute_remove_property(
                 &plan,
@@ -489,6 +574,9 @@ fn execute_statement_governed(
             )
         }
         crate::query::physical_plan::PhysicalStatement::DeleteEdge(plan) => {
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            let context = coordinator.context(governor);
             check_delete_acl(&plan);
             execute_delete_edge(
                 &plan,
@@ -501,6 +589,9 @@ fn execute_statement_governed(
             )
         }
         crate::query::physical_plan::PhysicalStatement::DetachDeleteNode(plan) => {
+            let coordinator =
+                prepare_gql_eager_visibility(catalog_tables, catalog_edges, governor)?;
+            let context = coordinator.context(governor);
             check_detach_delete_acl(&plan);
             execute_detach_delete_node(
                 &plan,
@@ -513,6 +604,393 @@ fn execute_statement_governed(
             )
         }
     }
+}
+
+const GQL_VISIBILITY_CANDIDATE_KEY_BYTES: usize = 1024 * 1024;
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bounded GQL expansion keeps the plan, caller scope, catalog, and governor explicit"
+)]
+fn execute_identity_one_hop_lazy(
+    plan: &crate::query::physical_plan::PhysicalPlan,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
+    catalog_edges: &[crate::builder::RegisteredEdge],
+) -> safety::GraphResult<Option<Vec<crate::query::execute::GqlRow>>> {
+    if plan.hops.variable
+        || plan.hops.min != 1
+        || plan.hops.max != 1
+        || matches!(
+            plan.direction,
+            crate::query::logical_plan::BoundDirection::Undirected
+        )
+    {
+        return Ok(None);
+    }
+    let Some(identity_lookup) = plan.source_identity_lookup.as_ref() else {
+        return Ok(None);
+    };
+    let mut lazy =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::sql_visibility::prepare_bfs_visibility(catalog_tables, catalog_edges)
+        }))?;
+    if !crate::sql_visibility::lazy_bfs_strategy_enabled(&lazy) {
+        return Ok(None);
+    }
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        check_plan_acl(plan)
+    }));
+    let Some(source_id) = crate::query::value::bounded_identity_lookup_text(
+        identity_lookup,
+        params,
+        GQL_VISIBILITY_CANDIDATE_KEY_BYTES,
+    )?
+    else {
+        crate::sql_visibility::record_selected_visibility_strategy(true);
+        return Ok(Some(Vec::new()));
+    };
+    let source_idx = ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        engine
+            .resolve(plan.source_table_oid, &source_id)
+            .or_else(|| {
+                let table_is_tenanted = engine.tenanted_table_oids.contains(&plan.source_table_oid);
+                crate::projection::tx_delta::resolve_added_node(
+                    plan.source_table_oid,
+                    &source_id,
+                    tenant_scope,
+                    table_is_tenanted,
+                )
+            })
+    });
+    let Some(source_idx) = source_idx else {
+        crate::sql_visibility::record_selected_visibility_strategy(true);
+        return Ok(Some(Vec::new()));
+    };
+    crate::sql_visibility::reserve_direct_visibility_candidate(governor, &source_id)?;
+    let source_batch = crate::bfs::BfsAdjacencyCandidateBatch::try_new(
+        vec![crate::bfs::BfsAdjacencyCandidate {
+            sequence: 0,
+            parent_node: source_idx,
+            parent_depth: 0,
+            target_node: source_idx,
+            target_table_oid: plan.source_table_oid,
+            target_source_key: source_id.clone(),
+            edge_type: 0,
+            schema_reversed: false,
+            relationship_id: None,
+            relationship_mapping_id: None,
+            relationship_source_key: None,
+        }],
+        true,
+        crate::bfs::BfsCandidateLimits {
+            max_candidates: 1,
+            max_key_bytes: GQL_VISIBILITY_CANDIDATE_KEY_BYTES,
+        },
+    )?;
+    let source_verdicts = crate::sql_visibility::resolve_bfs_visibility_batch(
+        &mut lazy,
+        &source_batch,
+        catalog_tables,
+        catalog_edges,
+        governor,
+    )?;
+    crate::sql_visibility::record_selected_visibility_strategy(true);
+    if !source_verdicts
+        .first()
+        .is_some_and(|verdict| verdict.visible())
+    {
+        return Ok(Some(Vec::new()));
+    }
+    let direction = match plan.direction {
+        crate::query::logical_plan::BoundDirection::Out => crate::types::TraversalDirection::Out,
+        crate::query::logical_plan::BoundDirection::In => crate::types::TraversalDirection::In,
+        crate::query::logical_plan::BoundDirection::Undirected => unreachable!(),
+    };
+    let prepared = ENGINE.with(|engine| {
+        engine.borrow().prepare_resumable_bfs(
+            plan.source_table_oid,
+            &source_id,
+            1,
+            2,
+            2,
+            Some(vec![plan.rel_type.clone()]),
+            Vec::new(),
+            tenant_scope,
+            direction,
+            governor,
+        )
+    })?;
+    let Some((config, mut machine)) = prepared else {
+        return Ok(None);
+    };
+    let output_lease = ENGINE.with(|engine| {
+        crate::query::execute::reserve_identity_one_hop_rows(
+            governor,
+            &engine.borrow(),
+            plan.execution_row_cap(),
+        )
+    })?;
+    let mut rows = Vec::new();
+    rows.try_reserve(plan.execution_row_cap().min(1024))
+        .map_err(|_| safety::GraphError::ResourceLimit {
+            resource: "gql_rows".into(),
+            phase: crate::resource::ResourcePhase::QueryCandidates
+                .as_str()
+                .into(),
+            used: 0,
+            requested: u64::try_from(plan.execution_row_cap()).unwrap_or(u64::MAX),
+            limit: u64::try_from(plan.execution_row_cap()).unwrap_or(u64::MAX),
+        })?;
+    loop {
+        if !plan.cap_exhaustion_is_error() && rows.len() >= plan.execution_row_cap() {
+            break;
+        }
+        let remaining_matches = plan
+            .execution_row_cap()
+            .saturating_add(usize::from(plan.cap_exhaustion_is_error()))
+            .saturating_sub(rows.len())
+            .max(1);
+        let materialization = ENGINE.with(|engine| {
+            engine.borrow().materialize_resumable_bfs_batch(
+                &mut machine,
+                &config,
+                direction,
+                crate::bfs::BfsCandidateLimits {
+                    max_candidates: crate::bfs::RESUMABLE_BFS_PAGE_CAPACITY.min(remaining_matches),
+                    max_key_bytes: GQL_VISIBILITY_CANDIDATE_KEY_BYTES,
+                },
+                governor,
+            )
+        })?;
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::resource::check_postgres_interrupts()
+        }));
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryExpand)
+            .map_err(crate::safety::resource_limit_error)?;
+        match materialization {
+            crate::bfs::BfsMaterialization::Batch(batch) => {
+                let mut verdicts = crate::sql_visibility::resolve_bfs_visibility_batch(
+                    &mut lazy,
+                    &batch,
+                    catalog_tables,
+                    catalog_edges,
+                    governor,
+                )?;
+                for (candidate, verdict) in batch.candidates.iter().zip(&verdicts) {
+                    if verdict.visible() {
+                        if let Some(row) = ENGINE.with(|engine| {
+                            crate::query::execute::project_visible_one_hop_candidate(
+                                &engine.borrow(),
+                                plan,
+                                tenant_scope,
+                                candidate,
+                            )
+                        })? {
+                            if rows.len() >= plan.execution_row_cap() {
+                                if plan.cap_exhaustion_is_error() {
+                                    return Err(safety::GraphError::GqlExecution {
+                                        reason: format!(
+                                            "GQL result row cap exceeded ({})",
+                                            plan.execution_row_cap()
+                                        ),
+                                    });
+                                }
+                                break;
+                            }
+                            rows.push(row);
+                        }
+                    }
+                }
+                for verdict in &mut verdicts {
+                    verdict.node_visible = false;
+                    verdict.relationship_visible = false;
+                }
+                ENGINE.with(|engine| {
+                    engine.borrow().admit_resumable_bfs_batch(
+                        &mut machine,
+                        &batch,
+                        &verdicts,
+                        &config,
+                    )
+                })?;
+            }
+            crate::bfs::BfsMaterialization::Progress => continue,
+            crate::bfs::BfsMaterialization::Complete => break,
+        }
+    }
+    if rows.is_empty() && plan.optional {
+        rows.push(ENGINE.with(|engine| {
+            crate::query::execute::project_optional_one_hop_source(&engine.borrow(), source_idx)
+        })?);
+    }
+    output_lease.retain_until_governor_drop();
+    Ok(Some(rows))
+}
+
+fn prepare_gql_eager_visibility(
+    catalog_tables: &[crate::builder::RegisteredTable],
+    catalog_edges: &[crate::builder::RegisteredEdge],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<crate::visibility::VisibilityCoordinator> {
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::sql_visibility::prepare_eager_visibility(catalog_tables, catalog_edges, governor)
+    }))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "identity-bounded GQL execution keeps the plan, caller scope, catalog, and governor explicit"
+)]
+fn execute_identity_node_scan_lazy(
+    plan: &crate::query::physical_plan::PhysicalNodeScan,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
+    catalog_edges: &[crate::builder::RegisteredEdge],
+) -> safety::GraphResult<Option<Vec<crate::query::execute::GqlNodeRow>>> {
+    let Some(prepared) =
+        prepare_identity_node_scan_lazy(plan, governor, catalog_tables, catalog_edges)?
+    else {
+        return Ok(None);
+    };
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        check_node_scan_acl(plan)
+    }));
+    execute_prepared_identity_node_scan(prepared, plan, tenant_scope, params, governor).map(Some)
+}
+
+struct PreparedGqlIdentityNodeScan {
+    lazy: crate::visibility::LazyVisibilityCoordinator,
+    probe_plan: Option<crate::sql_visibility::NodeProbePlan>,
+}
+
+fn prepare_identity_node_scan_lazy(
+    plan: &crate::query::physical_plan::PhysicalNodeScan,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
+    catalog_edges: &[crate::builder::RegisteredEdge],
+) -> safety::GraphResult<Option<PreparedGqlIdentityNodeScan>> {
+    if plan.identity_lookup.is_none() {
+        return Ok(None);
+    }
+    let table = catalog_tables
+        .iter()
+        .find(|table| table.table_oid == plan.table_oid)
+        .ok_or_else(|| safety::GraphError::Internal("unregistered GQL node table".into()))?;
+    let lazy =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::sql_visibility::prepare_direct_identity_visibility(
+                table,
+                catalog_tables,
+                catalog_edges,
+                false,
+                true,
+            )
+        }))?;
+    if !crate::sql_visibility::lazy_bfs_strategy_enabled(&lazy) {
+        return Ok(None);
+    }
+    let probe_plan = if lazy.table_requires_probe(table.table_oid) {
+        crate::sql_visibility::reserve_direct_probe_plan(governor)?;
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::sql_visibility::prepare_direct_node_probe(table)
+        }))?
+    } else {
+        None
+    };
+    if lazy.table_requires_probe(table.table_oid) && probe_plan.is_none() {
+        return Err(crate::sql_visibility::unsupported_rls_identity_type(
+            &table.table_name,
+        ));
+    }
+    Ok(Some(PreparedGqlIdentityNodeScan { lazy, probe_plan }))
+}
+
+fn execute_prepared_identity_node_scan(
+    mut prepared: PreparedGqlIdentityNodeScan,
+    plan: &crate::query::physical_plan::PhysicalNodeScan,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<crate::query::execute::GqlNodeRow>> {
+    crate::sql_visibility::record_selected_visibility_strategy(true);
+    let identity_lookup = plan.identity_lookup.as_ref().ok_or_else(|| {
+        safety::GraphError::Internal("prepared GQL identity scan lost its identity".into())
+    })?;
+    let Some(node_id) = crate::query::value::bounded_identity_lookup_text(
+        identity_lookup,
+        params,
+        GQL_VISIBILITY_CANDIDATE_KEY_BYTES,
+    )?
+    else {
+        return Ok(optional_identity_node_scan_row(plan));
+    };
+    let node_idx = ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        engine.resolve(plan.table_oid, &node_id).or_else(|| {
+            let table_is_tenanted = engine.tenanted_table_oids.contains(&plan.table_oid);
+            crate::projection::tx_delta::resolve_added_node(
+                plan.table_oid,
+                &node_id,
+                tenant_scope,
+                table_is_tenanted,
+            )
+        })
+    });
+    let Some(node_idx) = node_idx else {
+        return Ok(optional_identity_node_scan_row(plan));
+    };
+    crate::sql_visibility::reserve_direct_visibility_candidate(governor, &node_id)?;
+    let batch = crate::sql_visibility::direct_visibility_batch(vec![
+        crate::visibility::VisibilityCandidate::Node {
+            sequence: 0,
+            table_oid: plan.table_oid,
+            source_key: node_id,
+            node_idx,
+        },
+    ])?;
+    let verdicts = crate::sql_visibility::resolve_lazy_visibility_batch(
+        &mut prepared.lazy,
+        batch,
+        prepared.probe_plan.as_ref(),
+        governor,
+    )?;
+    if verdicts.verdict(0)? != crate::visibility::VisibilityVerdict::Visible {
+        return Ok(optional_identity_node_scan_row(plan));
+    }
+    let visible_node = prepared.lazy.prove_visible_node(node_idx)?;
+    let coordinator = crate::sql_visibility::direct_node_visibility_coordinator(visible_node);
+    let context = coordinator.context(governor);
+    ENGINE.with(|engine| {
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            plan,
+            tenant_scope,
+            params,
+            &context,
+        )
+    })
+}
+
+fn optional_identity_node_scan_row(
+    plan: &crate::query::physical_plan::PhysicalNodeScan,
+) -> Vec<crate::query::execute::GqlNodeRow> {
+    if !plan.optional {
+        return Vec::new();
+    }
+    vec![crate::query::execute::GqlNodeRow {
+        node: crate::query::execute::GqlNodeCoordinate {
+            table_oid: plan.table_oid,
+            node_id: String::new(),
+        },
+        optional_null: true,
+    }]
 }
 
 fn statement_uses_projection_matching(
@@ -665,13 +1143,69 @@ fn execute_set_property(
             context,
         )
     })?;
+    finish_set_property(
+        plan,
+        &scan,
+        matches,
+        tenant_scope,
+        params,
+        hydrate,
+        context.governor,
+        catalog_tables,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mapped GQL writes keep PostgreSQL DML inputs and the statement governor explicit"
+)]
+fn execute_set_property_identity(
+    plan: &crate::query::physical_plan::PhysicalSetProperty,
+    scan: &crate::query::physical_plan::PhysicalNodeScan,
+    prepared: PreparedGqlIdentityNodeScan,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    ensure_mutable_projection("GQL SET")?;
+    crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
+    let matches =
+        execute_prepared_identity_node_scan(prepared, scan, tenant_scope, params, governor)?;
+    finish_set_property(
+        plan,
+        scan,
+        matches,
+        tenant_scope,
+        params,
+        hydrate,
+        governor,
+        catalog_tables,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mapped GQL writes keep PostgreSQL DML inputs and the statement governor explicit"
+)]
+fn finish_set_property(
+    plan: &crate::query::physical_plan::PhysicalSetProperty,
+    scan: &crate::query::physical_plan::PhysicalNodeScan,
+    matches: Vec<crate::query::execute::GqlNodeRow>,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
+) -> safety::GraphResult<Vec<serde_json::Value>> {
     let hydrated = hydrate_gql_node_rows_governed(
         &matches,
         scan.predicate.is_some(),
-        context.governor,
+        governor,
         catalog_tables,
     )?;
-    let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
+    let matches = crate::query::value::filter_node_rows(matches, scan, &hydrated, params)?;
     let [row] = matches.as_slice() else {
         return Err(safety::GraphError::GqlExecution {
             reason: format!(
@@ -761,7 +1295,7 @@ fn set_property_node_scan(
         distinct_stages: Vec::new(),
         distinct: false,
         predicate: plan.predicate.clone(),
-        identity_lookup: None,
+        identity_lookup: plan.identity_lookup.clone(),
         order_by: Vec::new(),
         skip: None,
         limit: None,
@@ -780,7 +1314,7 @@ fn remove_property_node_scan(
         distinct_stages: Vec::new(),
         distinct: false,
         predicate: plan.predicate.clone(),
-        identity_lookup: None,
+        identity_lookup: plan.identity_lookup.clone(),
         order_by: Vec::new(),
         skip: None,
         limit: None,
@@ -966,6 +1500,7 @@ fn delete_edge_read_plan(
         distinct_stages: Vec::new(),
         distinct: false,
         predicate: plan.predicate.clone(),
+        source_identity_lookup: None,
         order_by: Vec::new(),
         skip: None,
         limit: None,
@@ -1447,6 +1982,7 @@ fn apply_merge_match_branch(
             table_oid: plan.table_oid,
             label: plan.label.clone(),
             predicate: None,
+            identity_lookup: None,
             property: on_match.property.clone(),
             value: on_match.value.clone(),
             returns: Vec::new(),
@@ -1634,51 +2170,54 @@ fn read_node_after_statement_triggers(
            FROM {table_sql} AS src
           WHERE {pk_expr} = $1"
     );
-    pgrx::Spi::connect(|client| {
-        let rows = client
-            .select(&query, None, &[returned_node_id.into()])
-            .map_err(|err| safety::GraphError::GqlExecution {
-                reason: format!(
+    let args = vec![returned_node_id.into()];
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        pgrx::Spi::connect(|client| {
+            let rows = client.select(&query, None, &args).map_err(|err| {
+                safety::GraphError::GqlExecution {
+                    reason: format!(
                     "{operation} post-trigger source-row verification failed for {table_sql}: {err}"
                 ),
+                }
             })?;
-        if rows.len() != 1 {
-            return Err(safety::GraphError::GqlExecution {
+            if rows.len() != 1 {
+                return Err(safety::GraphError::GqlExecution {
                 reason: format!(
                     "{operation} was rejected because PostgreSQL statement triggers removed or changed registered node identity `{returned_node_id}`; the source write was rolled back"
                 ),
             });
-        }
-        let row = rows.first();
-        let row_json = row
-            .get::<pgrx::JsonB>(1)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!(
-                    "{operation} post-trigger row read failed: {err}"
-                ))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal(format!(
-                    "{operation} post-trigger verification returned no row JSON"
-                ))
-            })?;
-        let node_id = row
-            .get::<String>(2)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!(
-                    "{operation} post-trigger primary key read failed: {err}"
-                ))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal(format!(
-                    "{operation} post-trigger verification returned no primary key"
-                ))
-            })?;
-        Ok(LockedNodeRow {
-            node_id,
-            row: row_json.0,
+            }
+            let row = rows.first();
+            let row_json = row
+                .get::<pgrx::JsonB>(1)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "{operation} post-trigger row read failed: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(format!(
+                        "{operation} post-trigger verification returned no row JSON"
+                    ))
+                })?;
+            let node_id = row
+                .get::<String>(2)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "{operation} post-trigger primary key read failed: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(format!(
+                        "{operation} post-trigger verification returned no primary key"
+                    ))
+                })?;
+            Ok(LockedNodeRow {
+                node_id,
+                row: row_json.0,
+            })
         })
-    })
+    }))
 }
 
 fn ensure_unchanged_tenant_identity(
@@ -1869,54 +2408,61 @@ fn lock_node_coordinate(
         table_name.as_sql(),
         pk_expr
     );
-    pgrx::Spi::connect_mut(|client| {
-        let rows = client
-            .update(&query, None, &[node_id.into()])
-            .map_err(|err| safety::GraphError::GqlExecution {
-                reason: format!(
-                    "{operation} row lock failed for {}: {}",
-                    table_name.as_sql(),
-                    err
-                ),
+    let args = vec![node_id.into()];
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        pgrx::Spi::connect_mut(|client| {
+            let rows = client.update(&query, None, &args).map_err(|err| {
+                safety::GraphError::GqlExecution {
+                    reason: format!(
+                        "{operation} row lock failed for {}: {}",
+                        table_name.as_sql(),
+                        err
+                    ),
+                }
             })?;
-        if rows.is_empty() {
-            return Err(safety::GraphError::GqlExecution {
-                reason: format!("{operation} matched node `{node_id}` but PostgreSQL found no row"),
-            });
-        }
-        let row = rows.first();
-        let row_json = row
-            .get::<pgrx::JsonB>(1)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!("{operation} locked row read failed: {err}"))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal(format!("{operation} locked row returned no JSON"))
-            })?;
-        recheck_locked_row_tenant(
-            &row_json.0,
-            table.tenant_column.as_deref(),
-            tenant_scope,
-            operation,
-            node_id,
-        )?;
-        let node_id = row
-            .get::<String>(2)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!(
-                    "{operation} locked primary key read failed: {err}"
-                ))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal(format!(
-                    "{operation} locked row returned no primary key"
-                ))
-            })?;
-        Ok(LockedNodeRow {
-            node_id,
-            row: row_json.0,
+            if rows.is_empty() {
+                return Err(safety::GraphError::GqlExecution {
+                    reason: format!(
+                        "{operation} matched node `{node_id}` but PostgreSQL found no row"
+                    ),
+                });
+            }
+            let row = rows.first();
+            let row_json = row
+                .get::<pgrx::JsonB>(1)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "{operation} locked row read failed: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(format!("{operation} locked row returned no JSON"))
+                })?;
+            recheck_locked_row_tenant(
+                &row_json.0,
+                table.tenant_column.as_deref(),
+                tenant_scope,
+                operation,
+                node_id,
+            )?;
+            let node_id = row
+                .get::<String>(2)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "{operation} locked primary key read failed: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(format!(
+                        "{operation} locked row returned no primary key"
+                    ))
+                })?;
+            Ok(LockedNodeRow {
+                node_id,
+                row: row_json.0,
+            })
         })
-    })
+    }))
 }
 
 fn recheck_locked_row_tenant(
@@ -2001,51 +2547,61 @@ fn update_mapped_property(
         pk_expr,
         pk_expr
     );
-    let returned = pgrx::Spi::connect_mut(|client| {
-        let rows = client
-            .update(&query, None, &[node_id.into(), pgrx::JsonB(values).into()])
-            .map_err(|err| safety::GraphError::GqlExecution {
-                reason: format!(
-                    "GQL SET update failed for {}.{}: {}",
-                    table_name.as_sql(),
-                    quote_ident(&plan.property),
-                    err
-                ),
-            })?;
-        if rows.is_empty() {
-            return Err(safety::GraphError::GqlExecution {
-                reason: format!(
-                    "GQL SET matched node `{}` but PostgreSQL updated no row",
-                    node_id
-                ),
-            });
-        }
-        let row = rows.first();
-        let row_json = row
-            .get::<pgrx::JsonB>(1)
-            .map_err(|err| safety::GraphError::Internal(format!("GQL SET row read failed: {err}")))?
-            .ok_or_else(|| safety::GraphError::Internal("GQL SET returned no row JSON".into()))?;
-        let returned_node_id = row
-            .get::<String>(2)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!("GQL SET primary key read failed: {err}"))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal("GQL SET returned no primary key".to_string())
-            })?;
-        ensure_unchanged_node_identity("GQL SET", node_id, &returned_node_id)?;
-        recheck_locked_row_tenant(
-            &row_json.0,
-            table.tenant_column.as_deref(),
-            tenant_scope,
-            "GQL SET",
-            node_id,
-        )?;
-        Ok(UpdatedNode {
-            node_id: returned_node_id,
-            row: row_json.0,
-        })
-    })?;
+    let args = vec![node_id.into(), pgrx::JsonB(values).into()];
+    let returned =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            pgrx::Spi::connect_mut(|client| {
+                let rows = client.update(&query, None, &args).map_err(|err| {
+                    safety::GraphError::GqlExecution {
+                        reason: format!(
+                            "GQL SET update failed for {}.{}: {}",
+                            table_name.as_sql(),
+                            quote_ident(&plan.property),
+                            err
+                        ),
+                    }
+                })?;
+                if rows.is_empty() {
+                    return Err(safety::GraphError::GqlExecution {
+                        reason: format!(
+                            "GQL SET matched node `{}` but PostgreSQL updated no row",
+                            node_id
+                        ),
+                    });
+                }
+                let row = rows.first();
+                let row_json = row
+                    .get::<pgrx::JsonB>(1)
+                    .map_err(|err| {
+                        safety::GraphError::Internal(format!("GQL SET row read failed: {err}"))
+                    })?
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal("GQL SET returned no row JSON".into())
+                    })?;
+                let returned_node_id = row
+                    .get::<String>(2)
+                    .map_err(|err| {
+                        safety::GraphError::Internal(format!(
+                            "GQL SET primary key read failed: {err}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal("GQL SET returned no primary key".to_string())
+                    })?;
+                ensure_unchanged_node_identity("GQL SET", node_id, &returned_node_id)?;
+                recheck_locked_row_tenant(
+                    &row_json.0,
+                    table.tenant_column.as_deref(),
+                    tenant_scope,
+                    "GQL SET",
+                    node_id,
+                )?;
+                Ok(UpdatedNode {
+                    node_id: returned_node_id,
+                    row: row_json.0,
+                })
+            })
+        }))?;
     let final_row = read_node_after_statement_triggers(
         table,
         table_name.as_sql(),
@@ -3837,7 +4393,9 @@ where
     let mut source_keys = Vec::with_capacity(relationship_ids.len());
     for (index, relationship_id) in relationship_ids.into_iter().enumerate() {
         if index.is_multiple_of(1_024) {
-            crate::resource::check_postgres_interrupts();
+            crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(
+                crate::resource::check_postgres_interrupts,
+            ));
             governor
                 .check_elapsed(crate::resource::ResourcePhase::QueryHydrate)
                 .map_err(crate::safety::resource_limit_error)?;
@@ -3870,7 +4428,10 @@ where
         .map_err(crate::safety::resource_limit_error)?;
 
     acl::check_table_acl(edge_mapping.edge_table_oid)?;
-    let table_name = regclass_text(edge_mapping.edge_table_oid)?;
+    let table_name =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            regclass_text(edge_mapping.edge_table_oid)
+        }))?;
     let source_key_predicate = relationship_source_key_predicate(edge_mapping);
     let query = format!(
         "SELECT {source_key_predicate} AS graph_relationship_id
@@ -3878,43 +4439,42 @@ where
           WHERE {source_key_predicate} = ANY($1::text[])
           LIMIT $2"
     );
+    let args = vec![
+        source_keys.clone().into(),
+        i64::try_from(source_keys.len()).unwrap_or(i64::MAX).into(),
+    ];
     let mut visible = std::collections::HashSet::new();
-    Spi::connect(|client| {
-        let result = client
-            .select(
-                &query,
-                None,
-                &[
-                    source_keys.clone().into(),
-                    i64::try_from(source_keys.len()).unwrap_or(i64::MAX).into(),
-                ],
-            )
-            .map_err(|err| {
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        Spi::connect(|client| {
+            let result = client.select(&query, None, &args).map_err(|err| {
                 safety::GraphError::Internal(format!("relationship visibility check failed: {err}"))
             })?;
-        for (index, row) in result.into_iter().enumerate() {
-            if index.is_multiple_of(1_024) {
-                crate::resource::check_postgres_interrupts();
-                governor
-                    .check_elapsed(crate::resource::ResourcePhase::QueryHydrate)
-                    .map_err(crate::safety::resource_limit_error)?;
+            for (index, row) in result.into_iter().enumerate() {
+                if index.is_multiple_of(1_024) {
+                    crate::sql_visibility::postgres_error_as_rust_unwind(
+                        std::panic::AssertUnwindSafe(crate::resource::check_postgres_interrupts),
+                    );
+                    governor
+                        .check_elapsed(crate::resource::ResourcePhase::QueryHydrate)
+                        .map_err(crate::safety::resource_limit_error)?;
+                }
+                let source_key = row
+                    .get::<String>(1)
+                    .map_err(|err| {
+                        safety::GraphError::Internal(format!(
+                            "relationship visibility key read failed: {err}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        safety::GraphError::Internal(
+                            "relationship visibility returned NULL key".to_string(),
+                        )
+                    })?;
+                visible.insert(source_key);
             }
-            let source_key = row
-                .get::<String>(1)
-                .map_err(|err| {
-                    safety::GraphError::Internal(format!(
-                        "relationship visibility key read failed: {err}"
-                    ))
-                })?
-                .ok_or_else(|| {
-                    safety::GraphError::Internal(
-                        "relationship visibility returned NULL key".to_string(),
-                    )
-                })?;
-            visible.insert(source_key);
-        }
-        Ok::<(), safety::GraphError>(())
-    })?;
+            Ok::<(), safety::GraphError>(())
+        })
+    }))?;
     if source_keys
         .into_iter()
         .any(|source_key| !visible.contains(&source_key))
@@ -4016,7 +4576,9 @@ fn check_query_hydrate_progress(
     index: usize,
 ) -> safety::GraphResult<()> {
     if index.is_multiple_of(1_024) {
-        crate::resource::check_postgres_interrupts();
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::resource::check_postgres_interrupts()
+        }));
         governor
             .check_elapsed(crate::resource::ResourcePhase::QueryHydrate)
             .map_err(crate::safety::resource_limit_error)?;
@@ -4030,45 +4592,52 @@ fn hydrate_required_relationship(
     workspace: &mut crate::resource::ResourceLease<'_>,
 ) -> safety::GraphResult<pgrx::JsonB> {
     let identity = relationship_source_identity_owned(edge_mapping, relationship_id, workspace)?;
-    let table_name = regclass_text(edge_mapping.edge_table_oid)?;
+    let table_name =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            regclass_text(edge_mapping.edge_table_oid)
+        }))?;
     let source_key_predicate = relationship_source_key_predicate(edge_mapping);
-    let json_sizes = Spi::connect(|client| {
-        let query = format!(
-            "SELECT pg_catalog.pg_column_size(pg_catalog.to_jsonb(edge_row.*))::bigint,
+    let size_query = format!(
+        "SELECT pg_catalog.pg_column_size(pg_catalog.to_jsonb(edge_row.*))::bigint,
                     pg_catalog.octet_length(pg_catalog.to_jsonb(edge_row.*)::text)::bigint
                FROM {table_name} edge_row
               WHERE {source_key_predicate} = $1
               LIMIT 1"
-        );
-        let result = client
-            .select(&query, None, &[identity.source_key.as_str().into()])
-            .map_err(|err| {
-                safety::GraphError::Internal(format!(
-                    "relationship hydration size preflight failed: {err}"
-                ))
-            })?;
-        if result.is_empty() {
-            return Ok(None);
-        }
-        let row = result.first();
-        let binary = row.get::<i64>(1).map_err(|err| {
-            safety::GraphError::Internal(format!(
-                "relationship hydration JSONB size read failed: {err}"
-            ))
+    );
+    let size_args = vec![identity.source_key.as_str().into()];
+    let json_sizes =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            Spi::connect(|client| {
+                let result = client
+                    .select(&size_query, None, &size_args)
+                    .map_err(|err| {
+                        safety::GraphError::Internal(format!(
+                            "relationship hydration size preflight failed: {err}"
+                        ))
+                    })?;
+                if result.is_empty() {
+                    return Ok(None);
+                }
+                let row = result.first();
+                let binary = row.get::<i64>(1).map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "relationship hydration JSONB size read failed: {err}"
+                    ))
+                })?;
+                let text = row.get::<i64>(2).map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "relationship hydration JSON text size read failed: {err}"
+                    ))
+                })?;
+                Ok::<_, safety::GraphError>(binary.zip(text))
+            })
+        }))?
+        .ok_or_else(|| safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL relationship source row `{}` is not visible in edge table OID {}",
+                identity.source_key, edge_mapping.edge_table_oid
+            ),
         })?;
-        let text = row.get::<i64>(2).map_err(|err| {
-            safety::GraphError::Internal(format!(
-                "relationship hydration JSON text size read failed: {err}"
-            ))
-        })?;
-        Ok::<_, safety::GraphError>(binary.zip(text))
-    })?
-    .ok_or_else(|| safety::GraphError::GqlExecution {
-        reason: format!(
-            "GQL relationship source row `{}` is not visible in edge table OID {}",
-            identity.source_key, edge_mapping.edge_table_oid
-        ),
-    })?;
     crate::sql_hydration::reserve_jsonb_materialization(
         workspace,
         1,
@@ -4082,30 +4651,34 @@ fn hydrate_required_relationship(
     );
     let args = vec![identity.source_key.as_str().into()];
     sql.push_str(" LIMIT 1");
-    Spi::connect(|client| {
-        let result = client.select(&sql, None, &args).map_err(|err| {
-            safety::GraphError::Internal(format!("relationship hydration failed: {err}"))
-        })?;
-        if result.is_empty() {
-            return Err(safety::GraphError::GqlExecution {
-                reason: format!(
-                    "GQL relationship source row `{}` is not visible in edge table OID {}",
-                    identity.source_key, edge_mapping.edge_table_oid
-                ),
-            });
-        }
-        result
-            .first()
-            .get::<pgrx::JsonB>(1)
-            .map_err(|err| {
-                safety::GraphError::Internal(format!("relationship hydration read failed: {err}"))
-            })?
-            .ok_or_else(|| {
-                safety::GraphError::Internal(
-                    "relationship hydration returned a NULL json row".to_string(),
-                )
-            })
-    })
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        Spi::connect(|client| {
+            let result = client.select(&sql, None, &args).map_err(|err| {
+                safety::GraphError::Internal(format!("relationship hydration failed: {err}"))
+            })?;
+            if result.is_empty() {
+                return Err(safety::GraphError::GqlExecution {
+                    reason: format!(
+                        "GQL relationship source row `{}` is not visible in edge table OID {}",
+                        identity.source_key, edge_mapping.edge_table_oid
+                    ),
+                });
+            }
+            result
+                .first()
+                .get::<pgrx::JsonB>(1)
+                .map_err(|err| {
+                    safety::GraphError::Internal(format!(
+                        "relationship hydration read failed: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    safety::GraphError::Internal(
+                        "relationship hydration returned a NULL json row".to_string(),
+                    )
+                })
+        })
+    }))
 }
 
 fn relationship_source_identity<'a>(
@@ -4401,6 +4974,7 @@ fn test_recheck_delete_edge_predicate(
                     serde_json::json!(expected_target_value),
                 )),
             }),
+            source_identity_lookup: None,
             order_by: Vec::new(),
             skip: None,
             limit: None,

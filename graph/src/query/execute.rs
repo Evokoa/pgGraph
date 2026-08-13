@@ -1097,6 +1097,50 @@ fn reserve_execution_rows<'a>(
         .map_err(crate::safety::resource_limit_error)
 }
 
+pub(crate) fn reserve_identity_one_hop_rows<'a>(
+    governor: &'a crate::resource::ResourceGovernor,
+    engine: &Engine,
+    row_cap: usize,
+) -> GraphResult<crate::resource::ResourceLease<'a>> {
+    let max_primary_key_bytes = engine
+        .node_store
+        .max_primary_key_bytes()
+        .max(crate::projection::tx_delta::max_added_node_primary_key_bytes());
+    let max_relationship_label_bytes = engine
+        .edge_type_registry
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or_default();
+    let (coordinates_per_row, relationships_per_row) = one_hop_row_shape(1)?;
+    let coordinate_bytes = std::mem::size_of::<GqlNodeCoordinate>()
+        .checked_add(max_primary_key_bytes)
+        .ok_or_else(|| GraphError::Internal("GQL coordinate estimate overflowed".to_string()))?;
+    let relationship_bytes = std::mem::size_of::<GqlPathRelationship>()
+        .checked_add(max_relationship_label_bytes)
+        .ok_or_else(|| GraphError::Internal("GQL relationship estimate overflowed".to_string()))?;
+    let row_bytes = std::mem::size_of::<GqlRow>()
+        .checked_add(
+            coordinates_per_row
+                .checked_mul(coordinate_bytes)
+                .ok_or_else(|| GraphError::Internal("GQL row estimate overflowed".to_string()))?,
+        )
+        .and_then(|bytes| {
+            relationships_per_row
+                .checked_mul(relationship_bytes)
+                .and_then(|relationships| bytes.checked_add(relationships))
+        })
+        .ok_or_else(|| GraphError::Internal("GQL row estimate overflowed".to_string()))?;
+    let bytes = row_cap
+        .checked_add(1)
+        .and_then(|rows| rows.checked_mul(row_bytes))
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("GQL result workspace overflowed".to_string()))?;
+    governor
+        .reserve_memory(crate::resource::ResourcePhase::QueryCandidates, bytes)
+        .map_err(crate::safety::resource_limit_error)
+}
+
 fn one_hop_row_shape(max_hops: u32) -> GraphResult<(usize, usize)> {
     let hops = usize::try_from(max_hops)
         .map_err(|_| GraphError::Internal("GQL hop bound does not fit usize".to_string()))?;
@@ -1770,6 +1814,66 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
     })
 }
 
+/// Convert one caller-visible bounded adjacency candidate into the established
+/// fixed-hop GQL row shape.
+pub(crate) fn project_visible_one_hop_candidate(
+    engine: &Engine,
+    plan: &PhysicalPlan,
+    tenant: Option<&str>,
+    candidate: &crate::bfs::BfsAdjacencyCandidate,
+) -> GraphResult<Option<GqlRow>> {
+    if node_table_oid(engine, candidate.target_node) != Some(plan.target_table_oid)
+        || !node_active(engine, candidate.target_node)
+        || !tenant_allows_node(engine, candidate.target_node, tenant)
+        || crate::projection::tx_delta::node_deleted(candidate.target_node)
+    {
+        return Ok(None);
+    }
+    let orientation = match plan.direction {
+        BoundDirection::Out => EdgeOrientation::Forward,
+        BoundDirection::In => EdgeOrientation::Reverse,
+        BoundDirection::Undirected => {
+            return Err(GraphError::Internal(
+                "undirected GQL candidates require directional metadata".into(),
+            ));
+        }
+    };
+    let step = GqlStepTarget {
+        node_idx: candidate.target_node,
+        orientation,
+        type_id: candidate.edge_type,
+        schema_reversed: candidate.schema_reversed,
+        relationship_id: candidate.relationship_id,
+    };
+    Ok(Some(project_row(
+        engine,
+        candidate.parent_node,
+        GqlTarget {
+            node_idx: step.node_idx,
+            orientation: step.orientation,
+            type_id: step.type_id,
+            schema_reversed: step.schema_reversed,
+            relationship_id: step.relationship_id,
+            path_nodes: vec![candidate.parent_node, step.node_idx],
+            path_relationships: vec![GqlRelationshipStep {
+                from_idx: candidate.parent_node,
+                to_idx: step.node_idx,
+                orientation: step.orientation,
+                type_id: step.type_id,
+                schema_reversed: step.schema_reversed,
+                relationship_id: step.relationship_id,
+            }],
+        },
+    )?))
+}
+
+pub(crate) fn project_optional_one_hop_source(
+    engine: &Engine,
+    source_idx: u32,
+) -> GraphResult<GqlRow> {
+    project_optional_row(engine, source_idx)
+}
+
 fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> {
     let join_node_slots = state
         .node_slots
@@ -2126,6 +2230,7 @@ mod resource_accounting_tests {
             distinct_stages: Vec::new(),
             distinct: false,
             predicate: None,
+            source_identity_lookup: None,
             order_by: Vec::new(),
             skip: None,
             limit: None,

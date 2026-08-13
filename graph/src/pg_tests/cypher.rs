@@ -169,6 +169,31 @@ fn cypher_write_uses_shared_mutable_overlay_execution() {
     assert_eq!(tx_added_nodes, 1);
 }
 
+#[cfg(feature = "development")]
+#[pg_test]
+fn cypher_identity_bounded_expansion_selects_lazy_and_matches_gql_under_rls() {
+    build_p46_gql_rls_fixture(false);
+    let query = "MATCH (u:graph_test_users_pgtest {id: 'u1'})-[r:friend]->(v:graph_test_users_pgtest)
+                 RETURN u.id AS source, r, v.id AS target ORDER BY target";
+    Spi::run(
+        "SET ROLE graph_gql_p46_reader;
+         SELECT graph._test_set_visibility_strategy('eager')",
+    )
+    .expect("force eager P4.6 Cypher comparison failed");
+    let gql = p46_graph_query_rows("gql", query);
+    Spi::run("SELECT graph._test_set_visibility_strategy('lazy')")
+        .expect("force lazy P4.6 Cypher comparison failed");
+    let cypher = p46_graph_query_rows("cypher", query);
+    let metrics = p46_visibility_metrics();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore P4.6 Cypher strategy failed");
+
+    assert_eq!(cypher, gql);
+    assert_eq!(cypher.as_array().map(Vec::len), Some(1));
+    assert_eq!(metrics["selected_strategy"].as_str(), Some("lazy"));
+    assert!(metrics["spi_calls"].as_u64().unwrap_or_default() > 0);
+}
+
 #[pg_test]
 fn cypher_rejects_unsupported_cypher_only_syntax() {
     reset_and_create_fixtures();

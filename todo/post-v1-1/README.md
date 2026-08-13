@@ -143,7 +143,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P1 | Complete | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
 | P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
-| P4 | In progress (P4.5 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
+| P4 | In progress (P4.6 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL/Cypher expansions preserve exact result ordering and semantics; P4.7 retained evidence and closure remain. |
 | P5 | Not started | Targeted queries select lazy and global analytics select eager; redundant read checks are removed only if proven; 1M/10M evidence meets the accepted latency and memory budgets. |
 | P6 | Not started | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
@@ -431,8 +431,17 @@ behavior have PostgreSQL differential coverage. The retained
 [`10k PG17 checkpoint`](../measurements/2026-08-13-p4-weighted-path-10k/README.md)
 records one functional/performance sample; it is not a statistical benchmark.
 
-- Extend to direct workflows, mutable segments, transaction-local identities,
-  and eligible projection-backed GQL/Cypher expansions and write MATCH.
+P4.6 completed on 2026-08-13. Scalar-identity node scans, fixed one-hop
+directed GQL/Cypher reads, optional matches, and identity-bounded mapped `SET`
+matches now select bounded caller-policy probes. The implementation preserves
+PostgreSQL ACL and RLS ordering, optional null extension, relationship-row
+ordering, result caps, cancellation and policy-error cleanup, and the mapped
+write DML/recheck boundary. Whole-source scans, joins, wildcard and variable
+paths, undirected expansion, and other write shapes remain on the eager oracle.
+The PostgreSQL corpus covers real-role node and relationship RLS, hidden nodes
+and edges, GQL/Cypher parity, mapped writes, cancellation/retry, row-cap eager
+fallback, and the unrestricted resolver fast path.
+
 - Keep connected components, component statistics, whole-table GQL scans,
   all-possible-path enumeration, and path-count analytics eager until they have
   purpose-built resumable executors.

@@ -117,34 +117,49 @@ pub(crate) fn hydrate_node_governed_with_tables(
             ))
         })?;
 
-    acl::check_table_acl(table_oid)?;
-    let table_name = sql_table_name_from_oid(table.table_oid)?;
+    crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+        acl::check_table_acl(table_oid)
+    }))?;
+    let table_name =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            sql_table_name_from_oid(table.table_oid)
+        }))?;
     let pk_expr = primary_key_expr("src", &table.id_columns);
-    let json_sizes = Spi::connect(|client| {
-        let query = format!(
-            "SELECT pg_catalog.pg_column_size(pg_catalog.to_jsonb(src.*))::bigint,
+    let size_query = format!(
+        "SELECT pg_catalog.pg_column_size(pg_catalog.to_jsonb(src.*))::bigint,
                     pg_catalog.octet_length(pg_catalog.to_jsonb(src.*)::text)::bigint
                FROM {} src WHERE {} = $1 LIMIT 1",
-            table_name.as_sql(),
-            pk_expr
-        );
-        let result = client
-            .select(&query, None, &[node_id.into()])
-            .map_err(|error| {
-                safety::GraphError::Internal(format!("hydration size preflight failed: {error}"))
-            })?;
-        if result.is_empty() {
-            return Ok(None);
-        }
-        let row = result.first();
-        let binary = row.get::<i64>(1).map_err(|error| {
-            safety::GraphError::Internal(format!("hydration JSONB size read failed: {error}"))
-        })?;
-        let text = row.get::<i64>(2).map_err(|error| {
-            safety::GraphError::Internal(format!("hydration JSON text size read failed: {error}"))
-        })?;
-        Ok::<_, safety::GraphError>(binary.zip(text))
-    })?;
+        table_name.as_sql(),
+        pk_expr
+    );
+    let size_args = vec![node_id.into()];
+    let json_sizes =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            Spi::connect(|client| {
+                let result = client
+                    .select(&size_query, None, &size_args)
+                    .map_err(|error| {
+                        safety::GraphError::Internal(format!(
+                            "hydration size preflight failed: {error}"
+                        ))
+                    })?;
+                if result.is_empty() {
+                    return Ok(None);
+                }
+                let row = result.first();
+                let binary = row.get::<i64>(1).map_err(|error| {
+                    safety::GraphError::Internal(format!(
+                        "hydration JSONB size read failed: {error}"
+                    ))
+                })?;
+                let text = row.get::<i64>(2).map_err(|error| {
+                    safety::GraphError::Internal(format!(
+                        "hydration JSON text size read failed: {error}"
+                    ))
+                })?;
+                Ok::<_, safety::GraphError>(binary.zip(text))
+            })
+        }))?;
     let Some((binary_bytes, text_bytes)) = json_sizes else {
         return Ok(None);
     };
@@ -154,28 +169,33 @@ pub(crate) fn hydrate_node_governed_with_tables(
         u64::try_from(binary_bytes.max(0)).unwrap_or(0),
         u64::try_from(text_bytes.max(0)).unwrap_or(0),
     )?;
-    let hydrated = Spi::connect(|client| {
-        let query = format!(
-            "SELECT to_jsonb(src.*) FROM {} src WHERE {} = $1 LIMIT 1",
-            table_name.as_sql(),
-            pk_expr
-        );
-        let result = client
-            .select(&query, None, &[node_id.into()])
-            .map_err(|e| {
-                safety::GraphError::Internal(format!(
-                    "hydration failed for {}: {}",
-                    table_name.as_sql(),
-                    e
-                ))
-            })?;
-        if result.is_empty() {
-            return Ok(None);
-        }
-        let row = result.first();
-        row.get::<pgrx::JsonB>(1)
-            .map_err(|e| safety::GraphError::Internal(format!("hydration read failed: {}", e)))
-    })?;
+    let hydrate_query = format!(
+        "SELECT to_jsonb(src.*) FROM {} src WHERE {} = $1 LIMIT 1",
+        table_name.as_sql(),
+        pk_expr
+    );
+    let hydrate_args = vec![node_id.into()];
+    let hydrated =
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            Spi::connect(|client| {
+                let result = client
+                    .select(&hydrate_query, None, &hydrate_args)
+                    .map_err(|e| {
+                        safety::GraphError::Internal(format!(
+                            "hydration failed for {}: {}",
+                            table_name.as_sql(),
+                            e
+                        ))
+                    })?;
+                if result.is_empty() {
+                    return Ok(None);
+                }
+                let row = result.first();
+                row.get::<pgrx::JsonB>(1).map_err(|e| {
+                    safety::GraphError::Internal(format!("hydration read failed: {}", e))
+                })
+            })
+        }))?;
     workspace.retain_until_governor_drop();
     Ok(hydrated)
 }
