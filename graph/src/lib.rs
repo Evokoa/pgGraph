@@ -170,11 +170,11 @@ pub mod fuzz_support {
 /// Benchmarks link against the `rlib` and need access to internal data
 /// structures. This module is available only to tests and builds that opt into
 /// the `benchmarks` feature; it is not part of the pgrx extension surface.
-#[cfg(any(test, feature = "benchmarks"))]
 #[allow(
     clippy::expect_used,
     reason = "benchmark-only fixtures use compile-time-valid v6 IDs and explicit setup assertions"
 )]
+#[cfg(any(test, feature = "benchmarks"))]
 pub mod bench_support {
     use std::collections::{HashMap, HashSet};
 

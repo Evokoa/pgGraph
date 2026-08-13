@@ -232,17 +232,25 @@ width fixture:
 ```bash
 cd graph
 cargo bench --features "pg17 benchmarks" --bench edge_type_width_bench --no-run
+cargo bench --features "pg17 benchmarks" --bench edge_type_width_bench
 ```
 
 It compares one-, two-, and four-byte encoded type sections at the reserved-ID
-boundaries without changing the production artifact format.
+boundaries without changing the production artifact format. The traversal
+group is a synthetic encoded-section access microbenchmark across filter
+selectivity, degree, direction, and depth; it is not production graph traversal
+or RLS latency. The retained P6 evidence and predeclared acceptance budgets are
+in `todo/measurements/2026-08-13-p6-edge-type-width/`.
 
-Each run retains raw samples, percentile summaries, fixture metadata, source
-policy plans, and the exact commit. Development builds expose visibility time
-and hidden-identity counts. Exact nested SPI-call, requested-key, and byte-scan
-counts are recorded as `NA` until dedicated instrumentation exists; do not
-infer them from elapsed time. A cancelled or timed-out eager run is censored
-evidence and must not be reported as a completed latency sample.
+The heavy RLS runner retains raw samples, percentile summaries, fixture
+metadata, source policy plans, and the exact commit. Development builds expose
+visibility time and hidden-identity counts. Exact nested SPI-call,
+requested-key, and byte-scan counts are recorded as `NA` until dedicated
+instrumentation exists; do not infer them from elapsed time. A cancelled or
+timed-out eager run is censored evidence and must not be reported as a completed
+latency sample. The P6 width checkpoint instead retains extracted Criterion
+medians and confidence intervals, its synthetic matrix, host metadata, and
+predeclared budgets.
 
 ## Internal Rust Benchmarks
 

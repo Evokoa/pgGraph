@@ -126,9 +126,10 @@ The contract-review direction is:
 - keep one checked logical `EdgeTypeId` across traversal, paths, overlays,
   sync, compaction, and query execution, with raw IDs confined to named storage
   adapters;
-- select a `u32` or width-adaptive `u8`/`u16`/`u32` representation from measured
-  memory, artifact-size, and traversal results; do not select `u16` alone unless
-  its public capacity satisfies the open-vocabulary contract;
+- use the measured width-adaptive `u8`/`u16`/`u32` representation selected in
+  P6: one-byte sections through 254 user labels, two-byte sections through
+  65,534, then four-byte sections. P7 implements that physical format while
+  logical IDs remain `u32`;
 - intern each distinct source string once and compare `LabelId` values in the
   traversal hot loop;
 - preserve exact filtering through `graph.traverse(edge_types := ...)` and GQL

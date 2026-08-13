@@ -5,6 +5,7 @@
 //! the later P7 storage migration and require retained width evidence before
 //! P6 can be closed.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -456,13 +457,18 @@ fn p6_width_benchmark_keeps_reserved_boundaries_and_low_cardinality_control() {
 }
 
 #[test]
-#[ignore = "P6.4 retained multidimensional width evidence checkpoint"]
 fn p6_retains_width_measurement_evidence_before_closure() {
     let evidence = repo_path("todo/measurements/2026-08-13-p6-edge-type-width");
     let readme = fs::read_to_string(evidence.join("README.md"))
         .expect("P6 must retain a reproducible edge-type-width measurement README");
     let summary = fs::read_to_string(evidence.join("summary.csv"))
         .expect("P6 must retain machine-readable edge-type-width results");
+    let traversal = fs::read_to_string(evidence.join("traversal.csv"))
+        .expect("P6 must retain the multidimensional traversal sweep");
+    let criterion = fs::read_to_string(evidence.join("criterion-estimates.csv"))
+        .expect("P6 must retain extracted Criterion estimates");
+    let budgets = fs::read_to_string(evidence.join("budgets.json"))
+        .expect("P6 must retain predeclared acceptance budgets");
 
     for required in [
         "exact commit",
@@ -473,6 +479,8 @@ fn p6_retains_width_measurement_evidence_before_closure() {
         "artifact bytes",
         "decode",
         "copy",
+        "synthetic encoded edge-type section",
+        "adaptive 1/2/4-byte",
     ] {
         assert!(
             readme.to_ascii_lowercase().contains(required),
@@ -502,4 +510,155 @@ fn p6_retains_width_measurement_evidence_before_closure() {
             "P6 summary is missing width-boundary case `{case}`"
         );
     }
+    let traversal_header = traversal
+        .lines()
+        .next()
+        .expect("P6 traversal evidence must have a header");
+    for column in [
+        "degree",
+        "depth",
+        "direction",
+        "filter_selectivity",
+        "traversal_median_ns",
+    ] {
+        assert!(
+            traversal_header
+                .split(',')
+                .any(|candidate| candidate == column),
+            "P6 traversal evidence is missing `{column}`"
+        );
+    }
+
+    let summary_rows = summary
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let fields = line.split(',').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 7, "invalid P6 summary row: {line}");
+            ((fields[0], fields[1]), fields)
+        })
+        .collect::<HashMap<_, _>>();
+    let criterion_rows = criterion
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let fields = line.split(',').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 4, "invalid Criterion row: {line}");
+            (
+                fields[0],
+                fields[1]
+                    .parse::<f64>()
+                    .expect("Criterion median must be numeric"),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let fixtures = [
+        ("u8", "254", "1000000"),
+        ("u16", "255", "2000000"),
+        ("u16", "65534", "2000000"),
+        ("u32", "65535", "4000000"),
+        ("u32", "254", "4000000"),
+    ];
+    let expected_cases = [
+        "1,4,out,none",
+        "8,1,out,none",
+        "8,4,in,none",
+        "8,4,out,all",
+        "8,4,out,none",
+        "8,4,out,one",
+        "8,16,out,none",
+        "64,4,out,none",
+        "1024,4,out,none",
+    ]
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let mut observed = HashMap::<(&str, &str), HashSet<String>>::new();
+    let mut baseline = HashMap::<(&str, &str), f64>::new();
+    let mut traversal_count = 0;
+    for line in traversal.lines().skip(1).filter(|line| !line.is_empty()) {
+        let fields = line.split(',').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 11, "invalid traversal row: {line}");
+        let key = (fields[0], fields[1]);
+        let case = format!("{},{},{},{}", fields[4], fields[5], fields[6], fields[7]);
+        observed.entry(key).or_default().insert(case.clone());
+        let median = fields[9]
+            .parse::<f64>()
+            .expect("traversal median must be numeric");
+        let criterion_name = format!(
+            "edge_type_width_traversal/{}_{}_labels_{}_artifact_bytes/degree_{}_depth_{}_{}_filter_{}",
+            fields[0], fields[1], fields[3], fields[4], fields[5], fields[6], fields[7]
+        );
+        let raw_median = criterion_rows
+            .get(criterion_name.as_str())
+            .expect("traversal row must have a retained Criterion estimate");
+        assert!((median - raw_median).abs() <= 0.001);
+        if case == "8,4,out,none" {
+            baseline.insert(key, median);
+        }
+        traversal_count += 1;
+    }
+    assert_eq!(traversal_count, 45);
+    for (width, labels, artifact_bytes) in fixtures {
+        assert_eq!(
+            observed.get(&(width, labels)),
+            Some(
+                &expected_cases
+                    .iter()
+                    .map(|case| (*case).to_owned())
+                    .collect()
+            ),
+            "P6 traversal matrix differs for {width}/{labels}"
+        );
+        let row = summary_rows
+            .get(&(width, labels))
+            .expect("every fixture must have a summary row");
+        assert_eq!(row[3], artifact_bytes);
+        for (group, column) in [
+            ("edge_type_width_decode", 4),
+            ("edge_type_width_artifact_copy", 5),
+        ] {
+            let name = format!("{group}/{width}_{labels}_labels_{artifact_bytes}_artifact_bytes");
+            let retained = row[column]
+                .parse::<f64>()
+                .expect("summary median must be numeric");
+            let raw = criterion_rows
+                .get(name.as_str())
+                .expect("summary row must have a retained Criterion estimate");
+            assert!((retained - raw).abs() <= 0.001);
+        }
+    }
+
+    let budget_json: serde_json::Value =
+        serde_json::from_str(&budgets).expect("P6 budgets must be valid JSON");
+    let controls = &budget_json["low_cardinality_control"];
+    let parse_summary = |width, column: usize| {
+        summary_rows[&(width, "254")][column]
+            .parse::<f64>()
+            .expect("control median must be numeric")
+    };
+    let decode_ratio = parse_summary("u32", 4) / parse_summary("u8", 4);
+    let copy_throughput_ratio =
+        (4_000_000.0 / parse_summary("u32", 5)) / (1_000_000.0 / parse_summary("u8", 5));
+    let traversal_ratio = baseline[&("u32", "254")] / baseline[&("u8", "254")];
+    assert!(
+        decode_ratio
+            <= controls["u32_to_u8_decode_median_ratio_max"]
+                .as_f64()
+                .expect("numeric decode budget")
+    );
+    assert!(
+        traversal_ratio
+            <= controls["u32_to_u8_baseline_traversal_median_ratio_max"]
+                .as_f64()
+                .expect("numeric traversal budget")
+    );
+    assert!(
+        copy_throughput_ratio
+            >= controls["u32_to_u8_copy_throughput_per_byte_ratio_min"]
+                .as_f64()
+                .expect("numeric copy budget")
+    );
 }

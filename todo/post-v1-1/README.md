@@ -145,7 +145,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
 | P4 | In progress (P4.6 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL/Cypher expansions preserve exact result ordering and semantics; P4.7 retained evidence and closure remain. |
 | P5 | In progress (P5.2 complete) | Targeted queries select lazy and global analytics select eager; relationship-identity completeness uses fixed projection summaries; retained 1M/10M evidence remains. |
-| P6 | In progress (P6.3 complete) | The existing `EdgeTypeId` is the one production checked authority across logical consumers and v6 adapters; behavior and artifact bytes remain unchanged while width candidates are measured. |
+| P6 | Complete | The existing `EdgeTypeId` is the one production checked authority across logical consumers and v6 adapters; behavior and v6 bytes remain unchanged, and retained evidence selects adaptive 1/2/4-byte physical storage for P7. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
 | P8 | Not started | Persistent dictionaries, mutable segments, compaction, reload, and transaction-local/savepoint state support unseen labels atomically and within resource limits. |
 | P9 | Not started | SQL traversal, paths, and GQL preserve exact filtering beyond 254 labels; migration, diagnostics, docs, fuzz/property, and performance evidence are complete. |
@@ -517,8 +517,17 @@ named v6 CSR, segment, direct-run, and artifact codecs, where decoding rejects
 the reserved physical value and encoding rejects logical IDs wider than v6.
 The v6 byte/checksum golden, full behavioral suite, and a synthetic traversal
 with logical IDs 255 and 65,534 prove that logical consumers no longer narrow.
-Multidimensional width evidence remains P6.4 work; physical CSR widening stays
-assigned to P7.
+At that checkpoint, multidimensional width evidence remained P6.4 work and
+physical CSR widening stayed assigned to P7.
+
+P6.4 completed on 2026-08-13. The retained one-million-edge synthetic
+encoded-section benchmark covers the reserved 254/255 and 65,534/65,535
+boundaries plus filter selectivity, degree, Out/In direction, and depth. The
+predeclared low-cardinality budgets passed: fixed u32 was 3.806x the u8
+sequential decode median, 2.115x the representative bounded-access median, and
+0.997x the u8 copy throughput per byte. P7 therefore uses adaptive 1/2/4-byte
+physical sections while logical IDs remain u32. The evidence is a storage
+microbenchmark, not production traversal or RLS latency.
 
 - Benchmark logical `u32` with adaptive 1/2/4-byte base storage against the
   current `u8` representation across cardinality, degree, direction, and depth.

@@ -1,0 +1,12 @@
+exact_commit=487b7d64633b58719f0eb1a7ec302642a84b7de9
+git_status=clean
+date=2026-08-13
+host_model=MacBook Pro Mac16,7
+chip=Apple M4 Pro
+cores=14
+memory_gb=24
+os=macOS 26.5 (25F71)
+arch=arm64
+rustc=1.95.0
+cargo=1.95.0
+command=cargo bench --features 'pg17 benchmarks' --bench edge_type_width_bench
