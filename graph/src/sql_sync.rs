@@ -705,6 +705,7 @@ fn required_sync_string(value: Option<String>, column: &str) -> safety::GraphRes
 }
 
 pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
+    crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.apply_sync()")?;
     ensure_engine_loaded_for_apply_sync(None)?;
     let target_sync_id = max_sync_log_id()?;
     apply_sync_to_high_watermark(target_sync_id)
@@ -886,6 +887,7 @@ fn install_loaded_engine_for_selected_graph(
     mut loaded: engine::Engine,
     query_catalog_fingerprint: Option<u64>,
 ) -> safety::GraphResult<()> {
+    crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.apply_sync()")?;
     if let Some(catalog_fingerprint) = query_catalog_fingerprint {
         loaded.set_catalog_fingerprint(catalog_fingerprint);
     } else if let Ok((tables, edges, filters)) = read_catalog() {

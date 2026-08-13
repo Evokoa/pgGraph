@@ -1788,10 +1788,21 @@ pub fn reconstruct_edge_path(
 ///
 /// Returns [`GraphError::CorruptFile`] when a visited node or reconstructed
 /// path index has no corresponding node metadata.
+#[cfg(any(test, feature = "benchmarks"))]
 pub fn to_traversal_results(
     bfs_result: &BfsResult,
     node_store: &NodeStore,
     edge_type_registry: &[String],
+) -> GraphResult<Vec<TraversalResult>> {
+    to_traversal_results_with(bfs_result, node_store, |type_id| {
+        edge_type_registry.get(type_id.get() as usize).cloned()
+    })
+}
+
+pub(crate) fn to_traversal_results_with(
+    bfs_result: &BfsResult,
+    node_store: &NodeStore,
+    edge_type_label: impl Fn(EdgeTypeId) -> Option<String>,
 ) -> GraphResult<Vec<TraversalResult>> {
     let mut results = Vec::with_capacity(bfs_result.visited.len() as usize);
 
@@ -1822,12 +1833,7 @@ pub fn to_traversal_results(
             node_idx,
         )
         .into_iter()
-        .map(|type_id| {
-            edge_type_registry
-                .get(type_id.get() as usize)
-                .cloned()
-                .unwrap_or_else(|| type_id.to_string())
-        })
+        .map(|type_id| edge_type_label(type_id).unwrap_or_else(|| type_id.to_string()))
         .collect();
 
         let (node_table, node_id) = node_coordinate(node_store, node_idx)?;

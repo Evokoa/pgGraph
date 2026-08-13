@@ -2194,7 +2194,7 @@ fn bind_create_relationship(
         "relationship CREATE requires a concrete relationship type",
         "relationship type alternation is outside the 1.0 CREATE profile; name one registered relationship type",
     )?;
-    let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
+    let rel_info = resolve_create_relationship(catalog, rel_pat, rel_type, &source, &target)?;
     let edge_mapping = rel_info.edge_mapping.clone().ok_or_else(|| {
         GqlError::unsupported(
             rel_pat.span,
@@ -3089,6 +3089,80 @@ fn resolve_relationship(
                     rel_type.span,
                 )
             }),
+    }
+}
+
+fn resolve_create_relationship(
+    catalog: &impl CatalogSnapshot,
+    rel_pat: &RelPat,
+    rel_type: &crate::gql::ast::Ident,
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<super::catalog_snapshot::RelTypeInfo, GqlError> {
+    if let Ok(exact) = resolve_relationship(catalog, rel_pat, rel_type, source, target) {
+        return Ok(exact);
+    }
+
+    let endpoint_matches =
+        |candidate: &super::catalog_snapshot::RelTypeInfo| match rel_pat.direction {
+            Direction::Out => {
+                candidate.from_table_oid == source.table_oid
+                    && candidate.to_table_oid == target.table_oid
+            }
+            Direction::In => {
+                candidate.from_table_oid == target.table_oid
+                    && candidate.to_table_oid == source.table_oid
+            }
+            Direction::Undirected => {
+                (candidate.from_table_oid == source.table_oid
+                    && candidate.to_table_oid == target.table_oid)
+                    || (candidate.from_table_oid == target.table_oid
+                        && candidate.to_table_oid == source.table_oid)
+            }
+        };
+    let mut candidates = Vec::new();
+    for candidate in catalog.rel_types().into_iter().filter(endpoint_matches) {
+        let Some(mapping) = candidate.edge_mapping.as_ref() else {
+            continue;
+        };
+        if mapping.label_column.is_none() || !mapping.has_standalone_edge_row() {
+            continue;
+        }
+        if candidates
+            .iter()
+            .any(|existing: &super::catalog_snapshot::RelTypeInfo| {
+                existing
+                    .edge_mapping
+                    .as_ref()
+                    .is_some_and(|existing_mapping| {
+                        existing_mapping.mapping_id == mapping.mapping_id
+                    })
+            })
+        {
+            continue;
+        }
+        candidates.push(candidate);
+    }
+
+    match candidates.as_mut_slice() {
+        [candidate] => {
+            candidate.rel_type.clone_from(&rel_type.text);
+            Ok(candidate.clone())
+        }
+        [] => Err(GqlError::bind(
+            rel_type.span,
+            format!(
+                "unknown relationship type `{}` from table {} to {}",
+                rel_type.text, source.table_oid, target.table_oid
+            ),
+        )),
+        _ => Err(GqlError::bind(
+            rel_type.span,
+            format!(
+                "relationship type `{}` is ambiguous across dynamic relationship mappings",
+                rel_type.text
+            ),
+        )),
     }
 }
 

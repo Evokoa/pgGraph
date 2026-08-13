@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::edge_store::{RelationshipId, RelationshipIdentity};
+use crate::edge_type_registry::EdgeTypeRegistry;
 use crate::filter_index::EncodedFilterValue;
 use crate::projection::neighbors::{EdgeOverlay, OverlayDeletes, OverlayInserts};
 use crate::safety::{GraphError, GraphResult};
@@ -55,6 +56,13 @@ pub(crate) struct TxGraphDelta {
     filter_updates: HashMap<(usize, u32), Option<EncodedFilterValue>>,
     relationship_identities: Vec<RelationshipIdentity>,
     missing_relationship_identity_edge_types: RoaringBitmap,
+    edge_type_base_len: Option<usize>,
+    edge_type_base_fingerprint: Option<u64>,
+    edge_type_base_payload_bytes: usize,
+    appended_edge_type_payload_bytes: usize,
+    appended_edge_type_max_label_bytes: usize,
+    appended_edge_type_labels: Vec<String>,
+    appended_edge_type_ids: HashMap<String, EdgeTypeId>,
 }
 
 impl Default for TxGraphDelta {
@@ -68,6 +76,13 @@ impl Default for TxGraphDelta {
             filter_updates: HashMap::new(),
             relationship_identities: Vec::new(),
             missing_relationship_identity_edge_types: RoaringBitmap::new(),
+            edge_type_base_len: None,
+            edge_type_base_fingerprint: None,
+            edge_type_base_payload_bytes: 0,
+            appended_edge_type_payload_bytes: 0,
+            appended_edge_type_max_label_bytes: 0,
+            appended_edge_type_labels: Vec::new(),
+            appended_edge_type_ids: HashMap::new(),
         }
     }
 }
@@ -114,9 +129,282 @@ pub(crate) fn topology_revision() -> u64 {
     TX_TOPOLOGY_REVISION.with(Cell::get)
 }
 
+/// Resolve a transaction-local relationship type appended after the loaded
+/// base registry. The base length pins provisional IDs to this transaction's
+/// projection generation.
+pub(crate) fn edge_type_id(
+    base_len: usize,
+    base_fingerprint: u64,
+    label: &str,
+) -> Option<EdgeTypeId> {
+    TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().and_then(|delta| {
+            (delta.edge_type_base_len == Some(base_len)
+                && delta.edge_type_base_fingerprint == Some(base_fingerprint))
+            .then(|| delta.appended_edge_type_ids.get(label).copied())
+            .flatten()
+        })
+    })
+}
+
+/// Resolve a provisional transaction-local relationship type ID to its exact
+/// source spelling.
+pub(crate) fn edge_type_label(
+    base_len: usize,
+    base_fingerprint: u64,
+    type_id: EdgeTypeId,
+) -> Option<String> {
+    let id = type_id.get() as usize;
+    let offset = id.checked_sub(base_len)?;
+    TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().and_then(|delta| {
+            (delta.edge_type_base_len == Some(base_len)
+                && delta.edge_type_base_fingerprint == Some(base_fingerprint))
+            .then(|| delta.appended_edge_type_labels.get(offset).cloned())
+            .flatten()
+        })
+    })
+}
+
+/// Total logical relationship-type slots visible against the pinned base
+/// registry, including the reserved untyped slot.
+pub(crate) fn edge_type_count(base_len: usize, base_fingerprint: u64) -> usize {
+    TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().map_or(base_len, |delta| {
+            if delta.edge_type_base_len == Some(base_len)
+                && delta.edge_type_base_fingerprint == Some(base_fingerprint)
+            {
+                base_len.saturating_add(delta.appended_edge_type_labels.len())
+            } else {
+                base_len
+            }
+        })
+    })
+}
+
+pub(crate) fn max_edge_type_label_bytes(base_len: usize, base_fingerprint: u64) -> usize {
+    TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().map_or(0, |delta| {
+            if delta.edge_type_base_len == Some(base_len)
+                && delta.edge_type_base_fingerprint == Some(base_fingerprint)
+            {
+                delta.appended_edge_type_max_label_bytes
+            } else {
+                0
+            }
+        })
+    })
+}
+
+/// Return whether transaction-local relationship types pin the currently
+/// loaded projection registry.
+pub(crate) fn has_provisional_edge_types() -> bool {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .is_some_and(|delta| !delta.appended_edge_type_labels.is_empty())
+    })
+}
+
+/// Reject replacing the loaded projection while provisional type IDs depend
+/// on its exact registry ordering.
+pub(crate) fn ensure_engine_replacement_allowed(operation: &str) -> GraphResult<()> {
+    if has_provisional_edge_types() {
+        return Err(GraphError::ReadOnly {
+            reason: format!(
+                "{operation} cannot replace a graph pinned by transaction-local relationship types; commit or roll back first"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Intern one unseen exact source spelling into transaction-local state.
+/// PostgreSQL DML must have accepted the relationship row before this is
+/// called. Subtransaction snapshots own the appended dictionary automatically.
+pub(crate) fn intern_edge_type(
+    base_registry: &EdgeTypeRegistry,
+    label: &str,
+) -> GraphResult<EdgeTypeId> {
+    let base_labels = base_registry.as_slice();
+    let base_fingerprint = base_registry.fingerprint();
+    if label.is_empty() {
+        return Err(GraphError::EdgeTypeLimit);
+    }
+    if let Some(id) = edge_type_id(base_labels.len(), base_fingerprint, label) {
+        return Ok(id);
+    }
+    let base_payload_bytes = base_registry.label_bytes();
+    let (appended_count, appended_payload_bytes, initialized_base_len) = TX_DELTA.with(|delta| {
+        let borrowed = delta.borrow();
+        let delta = borrowed.as_ref();
+        (
+            delta.map_or(0, |delta| delta.appended_edge_type_labels.len()),
+            delta.map_or(0, |delta| delta.appended_edge_type_payload_bytes),
+            delta.and_then(|delta| delta.edge_type_base_len),
+        )
+    });
+    let initialized_fingerprint = TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .and_then(|delta| delta.edge_type_base_fingerprint)
+    });
+    if initialized_base_len.is_some_and(|base_len| base_len != base_labels.len())
+        || initialized_fingerprint.is_some_and(|fingerprint| fingerprint != base_fingerprint)
+    {
+        return Err(GraphError::UnsupportedOperation {
+            operation: "transaction-local relationship type".into(),
+            reason: "the loaded relationship-type registry changed during this transaction".into(),
+        });
+    }
+    let user_count = base_labels
+        .len()
+        .saturating_sub(1)
+        .saturating_add(appended_count)
+        .saturating_add(1);
+    let payload_bytes = base_payload_bytes
+        .checked_add(appended_payload_bytes)
+        .and_then(|bytes| bytes.checked_add(label.len()))
+        .ok_or(GraphError::EdgeTypeLimit)?;
+    if user_count > crate::edge_type_registry::EdgeTypeRegistry::MAX_USER_EDGE_TYPES
+        || label.len() > crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES
+        || payload_bytes
+            > crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_DICTIONARY_BYTES
+    {
+        return Err(GraphError::EdgeTypeLimit);
+    }
+    let growth = TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().map_or_else(
+            || provisional_edge_type_growth_bound(0, 0, 0, 0, label.len()),
+            |delta| {
+                provisional_edge_type_growth_bound(
+                    delta.appended_edge_type_labels.len(),
+                    delta.appended_edge_type_labels.capacity(),
+                    delta.appended_edge_type_ids.len(),
+                    delta.appended_edge_type_ids.capacity(),
+                    label.len(),
+                )
+            },
+        )
+    })?;
+    ensure_write_capacity(0, 0, growth)?;
+    let result = TX_DELTA.with(|delta| {
+        let mut borrowed = delta.borrow_mut();
+        let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        if delta.edge_type_base_len.is_none() {
+            delta.edge_type_base_len = Some(base_labels.len());
+            delta.edge_type_base_fingerprint = Some(base_fingerprint);
+            delta.edge_type_base_payload_bytes = base_payload_bytes;
+        }
+        if let Some(id) = delta.appended_edge_type_ids.get(label).copied() {
+            return Ok(id);
+        }
+        delta
+            .appended_edge_type_labels
+            .try_reserve(1)
+            .map_err(|error| {
+                GraphError::Internal(format!("edge type label allocation failed: {error}"))
+            })?;
+        delta
+            .appended_edge_type_ids
+            .try_reserve(1)
+            .map_err(|error| {
+                GraphError::Internal(format!("edge type lookup allocation failed: {error}"))
+            })?;
+        let raw_id = base_labels
+            .len()
+            .checked_add(delta.appended_edge_type_labels.len())
+            .ok_or(GraphError::EdgeTypeLimit)?;
+        let id =
+            EdgeTypeId::try_from(u32::try_from(raw_id).map_err(|_| GraphError::EdgeTypeLimit)?)
+                .map_err(|_| GraphError::EdgeTypeLimit)?;
+        let next_appended_payload_bytes = delta
+            .appended_edge_type_payload_bytes
+            .checked_add(label.len())
+            .ok_or(GraphError::EdgeTypeLimit)?;
+        let ordered = try_clone_edge_type_label(label)?;
+        let lookup = try_clone_edge_type_label(label)?;
+        delta.appended_edge_type_labels.push(ordered);
+        delta.appended_edge_type_ids.insert(lookup, id);
+        delta.appended_edge_type_payload_bytes = next_appended_payload_bytes;
+        delta.appended_edge_type_max_label_bytes =
+            delta.appended_edge_type_max_label_bytes.max(label.len());
+        Ok(id)
+    });
+    if result.is_ok() {
+        bump_topology_revision();
+    }
+    result
+}
+
+fn try_clone_edge_type_label(label: &str) -> GraphResult<String> {
+    let mut owned = String::new();
+    owned.try_reserve_exact(label.len()).map_err(|error| {
+        GraphError::Internal(format!("edge type label allocation failed: {error}"))
+    })?;
+    owned.push_str(label);
+    Ok(owned)
+}
+
+fn provisional_edge_type_growth_bound(
+    ordered_len: usize,
+    ordered_capacity: usize,
+    lookup_len: usize,
+    lookup_capacity: usize,
+    label_bytes: usize,
+) -> GraphResult<usize> {
+    let next_ordered = ordered_len
+        .checked_add(1)
+        .ok_or(GraphError::EdgeTypeLimit)?;
+    let next_lookup = lookup_len.checked_add(1).ok_or(GraphError::EdgeTypeLimit)?;
+    let ordered_target = provisional_collection_capacity_bound(ordered_capacity, next_ordered)?;
+    let lookup_target = provisional_collection_capacity_bound(lookup_capacity, next_lookup)?;
+    let ordered_growth = ordered_target
+        .saturating_sub(ordered_capacity)
+        .checked_mul(std::mem::size_of::<String>())
+        .ok_or(GraphError::EdgeTypeLimit)?;
+    let lookup_growth = lookup_target
+        .saturating_sub(lookup_capacity)
+        .checked_mul(std::mem::size_of::<(String, EdgeTypeId)>() + 32)
+        .ok_or(GraphError::EdgeTypeLimit)?;
+    ordered_growth
+        .checked_add(lookup_growth)
+        .and_then(|bytes| bytes.checked_add(label_bytes.checked_mul(2)?))
+        .ok_or(GraphError::EdgeTypeLimit)
+}
+
+fn provisional_collection_capacity_bound(current: usize, required: usize) -> GraphResult<usize> {
+    if current >= required {
+        return Ok(current);
+    }
+    required
+        .max(1)
+        .checked_next_power_of_two()
+        .and_then(|capacity| capacity.checked_mul(4))
+        .ok_or(GraphError::EdgeTypeLimit)
+}
+
 static CALLBACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 impl TxGraphDelta {
+    fn estimated_appended_edge_type_heap_bytes(&self) -> usize {
+        self.appended_edge_type_labels.capacity() * std::mem::size_of::<String>()
+            + self
+                .appended_edge_type_labels
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>()
+            + self.appended_edge_type_ids.capacity()
+                * (std::mem::size_of::<(String, EdgeTypeId)>() + 32)
+            + self
+                .appended_edge_type_ids
+                .keys()
+                .map(String::capacity)
+                .sum::<usize>()
+    }
+
     fn refresh_relationship_identity_completeness_summary(&mut self) {
         self.missing_relationship_identity_edge_types.clear();
         for edge in self.added_edges.values().flatten() {
@@ -177,6 +465,7 @@ impl TxGraphDelta {
                     + std::mem::size_of::<Option<EncodedFilterValue>>())
             + self.relationship_identities.capacity() * std::mem::size_of::<RelationshipIdentity>()
             + relationship_identity_key_bytes
+            + self.estimated_appended_edge_type_heap_bytes()
     }
 
     fn is_dirty(&self) -> bool {
@@ -186,6 +475,7 @@ impl TxGraphDelta {
             || !self.deleted_edges.is_empty()
             || !self.filter_updates.is_empty()
             || !self.relationship_identities.is_empty()
+            || !self.appended_edge_type_labels.is_empty()
     }
 
     #[cfg(test)]
@@ -1072,6 +1362,171 @@ pub(crate) fn clear_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn base_edge_type_registry() -> EdgeTypeRegistry {
+        EdgeTypeRegistry::try_from_labels(vec![String::new(), "base".to_string()])
+            .expect("base registry")
+    }
+
+    #[test]
+    fn tx_unseen_labels_allocate_deterministically_without_mutating_base_registry() {
+        clear_for_test();
+        let base = base_edge_type_registry();
+        let zeta = intern_edge_type(&base, "zeta").expect("intern zeta");
+        let alpha = intern_edge_type(&base, "alpha").expect("intern alpha");
+        assert_eq!((zeta.get(), alpha.get()), (2, 3));
+        assert_eq!(
+            edge_type_id(base.len(), base.fingerprint(), "zeta"),
+            Some(zeta)
+        );
+        assert_eq!(
+            edge_type_label(base.len(), base.fingerprint(), alpha).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(base.as_slice(), base_edge_type_registry().as_slice());
+        clear_for_test();
+    }
+
+    #[test]
+    fn tx_unseen_label_savepoint_abort_restores_dictionary_and_edges() {
+        clear_for_test();
+        let base = base_edge_type_registry();
+        set_subtransaction_depth_for_test(1);
+        let type_id = intern_edge_type(&base, "aborted").expect("intern in savepoint");
+        record_added_edge(
+            0,
+            DeltaEdge {
+                target: 1,
+                type_id,
+                schema_reversed: false,
+                weight: None,
+                relationship_id: Some(1),
+            },
+        )
+        .expect("record edge in savepoint");
+        finish_subtransaction(true);
+        assert_eq!(
+            edge_type_id(base.len(), base.fingerprint(), "aborted"),
+            None
+        );
+        assert_eq!(stats().added_edges, 0);
+        clear_for_test();
+    }
+
+    #[test]
+    fn tx_unseen_label_savepoint_release_and_nested_abort_preserve_outer_slots() {
+        clear_for_test();
+        let base = base_edge_type_registry();
+        set_subtransaction_depth_for_test(1);
+        let outer = intern_edge_type(&base, "outer").expect("intern outer");
+        finish_subtransaction(false);
+        set_subtransaction_depth_for_test(1);
+        let nested = intern_edge_type(&base, "nested").expect("intern nested");
+        finish_subtransaction(true);
+        assert_eq!(
+            edge_type_id(base.len(), base.fingerprint(), "outer"),
+            Some(outer)
+        );
+        assert_eq!(edge_type_id(base.len(), base.fingerprint(), "nested"), None);
+        assert_eq!(
+            edge_type_label(base.len(), base.fingerprint(), nested),
+            None
+        );
+        clear_for_test();
+    }
+
+    #[test]
+    fn tx_unseen_label_top_abort_discards_every_provisional_slot() {
+        clear_for_test();
+        let base = base_edge_type_registry();
+        intern_edge_type(&base, "temporary").expect("intern temporary");
+        clear_current_transaction_state();
+        assert_eq!(
+            edge_type_id(base.len(), base.fingerprint(), "temporary"),
+            None
+        );
+        assert!(!stats().dirty);
+    }
+
+    #[test]
+    fn tx_unseen_label_policy_and_resource_failures_are_atomic() {
+        clear_for_test();
+        let base = base_edge_type_registry();
+        let oversized =
+            "x".repeat(crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES + 1);
+        assert!(matches!(
+            intern_edge_type(&base, &oversized),
+            Err(GraphError::EdgeTypeLimit)
+        ));
+        set_test_limits(100, 100, 1);
+        assert!(matches!(
+            intern_edge_type(&base, "resource-limited"),
+            Err(GraphError::OverlayLimit { .. })
+        ));
+        assert_eq!(
+            edge_type_id(base.len(), base.fingerprint(), "resource-limited"),
+            None
+        );
+        clear_for_test();
+    }
+
+    #[test]
+    fn provisional_edge_type_growth_bound_covers_capacity_transitions() {
+        clear_for_test();
+        let base = base_edge_type_registry();
+        for index in 0..64 {
+            let before = stats().memory_bytes;
+            let (ordered_len, ordered_capacity, lookup_len, lookup_capacity) =
+                TX_DELTA.with(|slot| {
+                    let borrowed = slot.borrow();
+                    let delta = borrowed.as_ref();
+                    (
+                        delta.map_or(0, |value| value.appended_edge_type_labels.len()),
+                        delta.map_or(0, |value| value.appended_edge_type_labels.capacity()),
+                        delta.map_or(0, |value| value.appended_edge_type_ids.len()),
+                        delta.map_or(0, |value| value.appended_edge_type_ids.capacity()),
+                    )
+                });
+            let label = format!("provisional_{index}");
+            let allowance = provisional_edge_type_growth_bound(
+                ordered_len,
+                ordered_capacity,
+                lookup_len,
+                lookup_capacity,
+                label.len(),
+            )
+            .expect("growth bound");
+            intern_edge_type(&base, &label).expect("intern provisional label");
+            assert!(stats().memory_bytes <= before.saturating_add(allowance));
+        }
+        clear_for_test();
+    }
+
+    #[test]
+    fn tx_unseen_label_durable_apply_conflict_remaps_or_fails_without_aliasing() {
+        clear_for_test();
+        let base = base_edge_type_registry();
+        let provisional = intern_edge_type(&base, "pending").expect("intern pending");
+        assert!(matches!(
+            ensure_engine_replacement_allowed("test replacement"),
+            Err(GraphError::ReadOnly { .. })
+        ));
+        let rebuilt = EdgeTypeRegistry::try_from_labels(vec![String::new(), "other".to_string()])
+            .expect("rebuilt registry");
+        assert!(matches!(
+            intern_edge_type(&rebuilt, "pending"),
+            Err(GraphError::UnsupportedOperation { .. })
+        ));
+        assert_eq!(
+            edge_type_label(base.len(), base.fingerprint(), provisional).as_deref(),
+            Some("pending")
+        );
+        assert_eq!(
+            edge_type_id(rebuilt.len(), rebuilt.fingerprint(), "pending"),
+            None
+        );
+        clear_for_test();
+    }
 
     #[test]
     fn empty_delta_reports_clean_stats() {

@@ -837,6 +837,11 @@ pub(crate) fn selected_or_default_graph_metadata_for_role(
 /// Returns [`safety::GraphError::Internal`] when PostgreSQL rejects the session
 /// setting write.
 pub(crate) fn set_selected_graph_id(graph_id: &str) -> safety::GraphResult<()> {
+    if crate::projection::tx_delta::has_provisional_edge_types()
+        && crate::runtime_state::loaded_graph_id().is_some_and(|loaded| loaded != graph_id)
+    {
+        crate::projection::tx_delta::ensure_engine_replacement_allowed("selected graph change")?;
+    }
     Spi::run_with_args(
         "SELECT set_config('graph.current_graph_id', $1, false)",
         &[graph_id.into()],

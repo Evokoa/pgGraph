@@ -412,6 +412,7 @@ fn execute_build_inner(
     build_message: &'static str,
     progress: &mut ProgressCallback<'_>,
 ) -> safety::GraphResult<BuildExecutionResult> {
+    crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.build()")?;
     let start = std::time::Instant::now();
     let graph = selected_or_default_graph_metadata()?;
     let sync_mode = current_sync_mode()?;
@@ -573,6 +574,7 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
 }
 
 pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumExecutionResult> {
+    crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.vacuum()")?;
     let start = std::time::Instant::now();
     let graph = selected_or_default_graph_metadata()?;
     acquire_build_lock_for_replacement()?;

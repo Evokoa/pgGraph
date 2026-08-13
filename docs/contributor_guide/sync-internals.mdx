@@ -237,8 +237,16 @@ lexically, and appends them to the cumulative relationship-type dictionary.
 It resolves row IDs only from that candidate dictionary, then stages the
 dictionary and adaptive-width segments in the same generation. Candidate
 validation happens before the manifest compare-and-swap; failures leave the
-current dictionary, serving engine, and watermark unchanged. Transaction-local
-provisional labels are deliberately separate work in P8.3.
+current dictionary, serving engine, and watermark unchanged.
+
+Before commit, a backend keeps unseen relationship spellings in a separate
+transaction-local append dictionary. Its provisional IDs are pinned to the
+exact loaded base dictionary and are restored with the rest of the graph delta
+on savepoint abort. They never enter a segment or manifest. Reset, unload,
+graph selection, reload, and explicit sync reject replacement while those IDs
+are live. After commit, the sync log's source spelling is authoritative and
+durable ingestion assigns the label from the cumulative dictionary; it does
+not depend on the provisional number used by the originating backend.
 
 Every generated source trigger takes a shared transaction-scoped advisory lock
 before it appends a sync row. Durable ingestion and persisted builds use the

@@ -129,3 +129,37 @@ fn p8_unseen_sync_labels_survive_reload_and_fail_closed_on_corruption() {
     let roadmap = repo_source("todo/post-v1-1/README.md");
     assert!(roadmap.contains("### P8: Persist dictionaries and incremental labels"));
 }
+
+#[test]
+fn p8_transaction_labels_are_savepoint_aware_and_never_mutate_the_base_registry() {
+    let tx_delta = crate_source("src/projection/tx_delta.rs");
+    for gate in [
+        "tx_unseen_labels_allocate_deterministically_without_mutating_base_registry",
+        "tx_unseen_label_savepoint_abort_restores_dictionary_and_edges",
+        "tx_unseen_label_savepoint_release_and_nested_abort_preserve_outer_slots",
+        "tx_unseen_label_top_abort_discards_every_provisional_slot",
+        "tx_unseen_label_policy_and_resource_failures_are_atomic",
+        "tx_unseen_label_durable_apply_conflict_remaps_or_fails_without_aliasing",
+    ] {
+        assert!(
+            tx_delta.contains(gate),
+            "P8.3 transaction dictionary contract is missing `{gate}`"
+        );
+    }
+
+    let pg_tests = crate_source("src/pg_tests/p8_transaction_labels.rs");
+    for gate in [
+        "tx_unseen_dynamic_label_filters_and_returns_exact_type",
+        "tx_unseen_dynamic_labels_follow_savepoint_abort_release_and_nesting",
+        "tx_unseen_dynamic_label_edge_limit_leaves_no_source_or_delta",
+        "tx_unseen_dynamic_label_rls_policy_is_enforced",
+        "tx_unseen_dynamic_label_missing_relationship_identity_is_pg023",
+        "tx_unseen_dynamic_label_durable_apply_conflict_does_not_alias_ids",
+        "tx_unseen_dynamic_label_blocks_graph_selection_without_changing_session_state",
+    ] {
+        assert!(
+            pg_tests.contains(gate),
+            "P8.3 PostgreSQL transaction-label boundary is missing `{gate}`"
+        );
+    }
+}

@@ -192,10 +192,21 @@ impl ResumableSingleDirectionBfs {
         self.state == ResumablePathState::Complete
     }
 
+    #[cfg(any(test, feature = "benchmarks"))]
     pub(crate) fn finish(
         self,
         node_store: &NodeStore,
         edge_type_registry: &[String],
+    ) -> GraphResult<Option<Vec<PathStep>>> {
+        self.finish_with(node_store, |type_id| {
+            edge_type_registry.get(type_id.get() as usize).cloned()
+        })
+    }
+
+    pub(crate) fn finish_with(
+        self,
+        node_store: &NodeStore,
+        edge_type_label: impl Fn(EdgeTypeId) -> Option<String>,
     ) -> GraphResult<Option<Vec<PathStep>>> {
         if !self.found {
             return Ok(None);
@@ -205,7 +216,7 @@ impl ResumableSingleDirectionBfs {
             self.source,
             self.target,
             &self.parent,
-            edge_type_registry,
+            edge_type_label,
         )
         .map(Some)
     }
@@ -297,10 +308,21 @@ impl ResumableBidirectionalBfs {
         self.state == ResumablePathState::Complete
     }
 
+    #[cfg(any(test, feature = "benchmarks"))]
     pub(crate) fn finish(
         self,
         node_store: &NodeStore,
         edge_type_registry: &[String],
+    ) -> GraphResult<Option<Vec<PathStep>>> {
+        self.finish_with(node_store, |type_id| {
+            edge_type_registry.get(type_id.get() as usize).cloned()
+        })
+    }
+
+    pub(crate) fn finish_with(
+        self,
+        node_store: &NodeStore,
+        edge_type_label: impl Fn(EdgeTypeId) -> Option<String>,
     ) -> GraphResult<Option<Vec<PathStep>>> {
         if !self.found {
             return Ok(None);
@@ -312,7 +334,7 @@ impl ResumableBidirectionalBfs {
             self.meeting_node,
             &self.forward.parent,
             &self.backward.parent,
-            edge_type_registry,
+            edge_type_label,
         )
         .map(Some)
     }
@@ -1211,7 +1233,7 @@ fn path_from_single_parents(
     source: u32,
     target: u32,
     parent: &HashMap<u32, ParentStep>,
-    edge_type_registry: &[String],
+    edge_type_label: impl Fn(EdgeTypeId) -> Option<String>,
 ) -> GraphResult<Vec<PathStep>> {
     let mut path = Vec::new();
     let mut current = target;
@@ -1228,7 +1250,7 @@ fn path_from_single_parents(
         current = step.parent;
     }
     path.reverse();
-    path_steps(node_store, &path, edge_type_registry)
+    path_steps(node_store, &path, edge_type_label)
 }
 
 fn path_from_bidirectional_parents(
@@ -1238,7 +1260,7 @@ fn path_from_bidirectional_parents(
     meeting_node: Option<u32>,
     forward: &HashMap<u32, ParentStep>,
     backward: &HashMap<u32, ParentStep>,
-    edge_type_registry: &[String],
+    edge_type_label: impl Fn(EdgeTypeId) -> Option<String>,
 ) -> GraphResult<Vec<PathStep>> {
     let meet =
         meeting_node.ok_or_else(|| GraphError::Internal("path has no meeting node".into()))?;
@@ -1285,13 +1307,13 @@ fn path_from_bidirectional_parents(
         }
     }
     forward_path.extend(backward_path);
-    path_steps(node_store, &forward_path, edge_type_registry)
+    path_steps(node_store, &forward_path, edge_type_label)
 }
 
 fn path_steps(
     node_store: &NodeStore,
     path: &[(u32, EdgeTypeId)],
-    edge_type_registry: &[String],
+    edge_type_label: impl Fn(EdgeTypeId) -> Option<String>,
 ) -> GraphResult<Vec<PathStep>> {
     path.iter()
         .enumerate()
@@ -1312,10 +1334,7 @@ fn path_steps(
                 node_table: TableOid(table_oid),
                 node_id,
                 edge_label: (index != 0).then(|| {
-                    edge_type_registry
-                        .get(edge_type.get() as usize)
-                        .cloned()
-                        .unwrap_or_else(|| format!("type_{edge_type}"))
+                    edge_type_label(edge_type).unwrap_or_else(|| format!("type_{edge_type}"))
                 }),
             })
         })
@@ -1434,10 +1453,24 @@ impl ResumableDijkstra {
         self.state == ResumablePathState::Complete
     }
 
+    #[cfg(any(test, feature = "benchmarks"))]
     pub(crate) fn finish(
         self,
         node_store: &NodeStore,
         edge_type_registry: &[String],
+        governor: &ResourceGovernor,
+    ) -> GraphResult<Option<Vec<WeightedPathStep>>> {
+        self.finish_with(
+            node_store,
+            |type_id| edge_type_registry.get(type_id.get() as usize).cloned(),
+            governor,
+        )
+    }
+
+    pub(crate) fn finish_with(
+        self,
+        node_store: &NodeStore,
+        edge_type_label: impl Fn(EdgeTypeId) -> Option<String>,
         governor: &ResourceGovernor,
     ) -> GraphResult<Option<Vec<WeightedPathStep>>> {
         if self.source_visible != Some(true)
@@ -1452,7 +1485,7 @@ impl ResumableDijkstra {
             self.target,
             &self.dist,
             &self.parent,
-            edge_type_registry,
+            edge_type_label,
             governor,
         )
         .map(Some)
@@ -1505,6 +1538,7 @@ pub(crate) fn shortest_path_with_neighbors(
             max_depth,
             has_unidirectional_edges,
             edge_type_registry,
+            edge_type_label: None,
         },
         None,
         VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
@@ -1518,6 +1552,18 @@ pub(crate) struct UnweightedPathRequest<'a> {
     pub(crate) max_depth: i32,
     pub(crate) has_unidirectional_edges: bool,
     pub(crate) edge_type_registry: &'a [String],
+    pub(crate) edge_type_label: Option<&'a dyn Fn(EdgeTypeId) -> Option<String>>,
+}
+
+fn resolve_edge_type_label(
+    registry: &[String],
+    resolver: Option<&dyn Fn(EdgeTypeId) -> Option<String>>,
+    edge_type: EdgeTypeId,
+) -> String {
+    resolver
+        .and_then(|resolve| resolve(edge_type))
+        .or_else(|| registry.get(edge_type.get() as usize).cloned())
+        .unwrap_or_else(|| format!("type_{edge_type}"))
 }
 
 /// Find an unweighted path while enforcing expansion and elapsed-time limits.
@@ -1559,10 +1605,12 @@ fn shortest_path_with_neighbors_inner(
     visibility: &VisibilityScope,
     edge_type_filter: Option<&RoaringBitmap>,
 ) -> Option<Vec<PathStep>> {
+    let edge_type_label = request.edge_type_label;
     let admission = PathAdmission {
         budget,
         visibility,
         edge_type_filter,
+        edge_type_label,
     };
     let UnweightedPathRequest {
         source,
@@ -1570,6 +1618,7 @@ fn shortest_path_with_neighbors_inner(
         max_depth,
         has_unidirectional_edges,
         edge_type_registry,
+        edge_type_label: _,
     } = request;
     if source >= node_store.node_count()
         || target >= node_store.node_count()
@@ -1616,6 +1665,7 @@ struct PathAdmission<'a, 'governor> {
     budget: Option<&'a PathWorkBudget<'governor>>,
     visibility: &'a VisibilityScope,
     edge_type_filter: Option<&'a RoaringBitmap>,
+    edge_type_label: Option<&'a dyn Fn(EdgeTypeId) -> Option<String>>,
 }
 
 fn bidirectional_bfs(
@@ -1805,12 +1855,11 @@ fn bidirectional_bfs(
             edge_label: if i == 0 {
                 None
             } else {
-                Some(
-                    edge_type_registry
-                        .get(edge_type.get() as usize)
-                        .cloned()
-                        .unwrap_or_else(|| format!("type_{}", edge_type)),
-                )
+                Some(resolve_edge_type_label(
+                    edge_type_registry,
+                    admission.edge_type_label,
+                    edge_type,
+                ))
             },
         });
     }
@@ -1820,12 +1869,11 @@ fn bidirectional_bfs(
             step: (offset + i) as i32,
             node_table: TableOid(node_store.table_oid(node)?),
             node_id: node_store.primary_key(node)?.to_string(),
-            edge_label: Some(
-                edge_type_registry
-                    .get(edge_type.get() as usize)
-                    .cloned()
-                    .unwrap_or_else(|| format!("type_{}", edge_type)),
-            ),
+            edge_label: Some(resolve_edge_type_label(
+                edge_type_registry,
+                admission.edge_type_label,
+                edge_type,
+            )),
         });
     }
 
@@ -1909,12 +1957,11 @@ fn single_direction_bfs(
                             edge_label: if i == 0 {
                                 None
                             } else {
-                                Some(
-                                    edge_type_registry
-                                        .get(et.get() as usize)
-                                        .cloned()
-                                        .unwrap_or_else(|| format!("type_{}", et)),
-                                )
+                                Some(resolve_edge_type_label(
+                                    edge_type_registry,
+                                    admission.edge_type_label,
+                                    et,
+                                ))
                             },
                         })
                     })
@@ -2201,7 +2248,7 @@ fn weighted_path_from_parents(
     target: u32,
     dist: &[u64],
     parent: &HashMap<u32, WeightedParentStep>,
-    edge_type_registry: &[String],
+    edge_type_label: impl Fn(EdgeTypeId) -> Option<String>,
     governor: &ResourceGovernor,
 ) -> GraphResult<Vec<WeightedPathStep>> {
     let total_cost = dist[target as usize];
@@ -2229,8 +2276,8 @@ fn weighted_path_from_parents(
                 })?;
             string_bytes = string_bytes
                 .checked_add(
-                    edge_type_registry
-                        .get(edge_type.get() as usize)
+                    edge_type_label(edge_type)
+                        .as_ref()
                         .map_or_else(|| "type_255".len(), String::len),
                 )
                 .ok_or_else(|| {
@@ -2299,9 +2346,7 @@ fn weighted_path_from_parents(
                 })?
                 .to_owned(),
             edge_label: (step != 0).then(|| {
-                edge_type_registry
-                    .get(parent_step.edge_type.get() as usize)
-                    .cloned()
+                edge_type_label(parent_step.edge_type)
                     .unwrap_or_else(|| format!("type_{}", parent_step.edge_type))
             }),
             edge_weight: (step != 0).then_some(parent_step.edge_weight),
@@ -3241,6 +3286,7 @@ mod tests {
                     max_depth: 10,
                     has_unidirectional_edges: false,
                     edge_type_registry: &["".to_string(), "REL".to_string()],
+                    edge_type_label: None,
                 },
                 None,
                 &visibility,
@@ -3307,6 +3353,7 @@ mod tests {
                 max_depth: 5,
                 has_unidirectional_edges: true,
                 edge_type_registry: &["REL".to_string(), "REL".to_string()],
+                edge_type_label: None,
             },
             &context,
         )
@@ -3323,6 +3370,7 @@ mod tests {
                 max_depth: 5,
                 has_unidirectional_edges: true,
                 edge_type_registry: &["REL".to_string(), "REL".to_string()],
+                edge_type_label: None,
             },
             &absent_context,
         )
@@ -3382,6 +3430,7 @@ mod tests {
                 max_depth: 5,
                 has_unidirectional_edges: false,
                 edge_type_registry: &["REL".to_string(), "REL".to_string()],
+                edge_type_label: None,
             },
             &context,
         )
@@ -3489,6 +3538,7 @@ mod tests {
                 max_depth: 5,
                 has_unidirectional_edges: true,
                 edge_type_registry: &registry,
+                edge_type_label: None,
             },
             &context,
         )
@@ -3528,6 +3578,7 @@ mod tests {
                 max_depth: 5,
                 has_unidirectional_edges: true,
                 edge_type_registry: &registry,
+                edge_type_label: None,
             },
             &empty_context,
         )
@@ -3578,6 +3629,7 @@ mod tests {
                 max_depth: 4,
                 has_unidirectional_edges: true,
                 edge_type_registry: &["".to_string(), "edge".to_string()],
+                edge_type_label: None,
             },
             &path_governor(1),
         )

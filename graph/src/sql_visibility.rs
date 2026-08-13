@@ -364,6 +364,9 @@ pub(crate) fn prepare_eager_visibility(
         let engine = engine.borrow();
         let mut relationship_rls_edge_types = RoaringBitmap::new();
         for edge in &active_edges {
+            if edge.label_column.is_some() {
+                continue;
+            }
             let edge_type = engine.edge_type_registry.id(&edge.label).ok_or_else(|| {
                 GraphError::Internal(format!(
                     "registered RLS edge label '{}' is absent from the loaded projection",
@@ -373,7 +376,7 @@ pub(crate) fn prepare_eager_visibility(
             relationship_rls_edge_types.insert(edge_type.get());
         }
         if active_edges.iter().any(|edge| edge.label_column.is_some()) {
-            for edge_type in 1..engine.edge_type_registry.len() {
+            for edge_type in 1..engine.edge_type_count() {
                 relationship_rls_edge_types.insert(u32::try_from(edge_type).map_err(|_| {
                     GraphError::Internal("edge type index exceeds u32".to_string())
                 })?);
@@ -545,7 +548,7 @@ pub(crate) fn prepare_direct_identity_visibility(
                 let missing_identity = ENGINE.with(|engine| {
                     let engine = engine.borrow();
                     if has_dynamic_mapping {
-                        for edge_type in 1..engine.edge_type_registry.len() {
+                        for edge_type in 1..engine.edge_type_count() {
                             active_edge_types.insert(edge_type as u32);
                         }
                     }
@@ -645,15 +648,22 @@ pub(crate) fn prepare_bfs_visibility(
                             &edge.source_key_columns,
                             &edge.from_table,
                         )?;
-                        let edge_type = ENGINE.with(|engine| {
-                            engine.borrow().edge_type_registry.id(&edge.label)
-                        });
-                        let edge_type = edge_type.ok_or_else(|| {
-                            GraphError::Internal(format!(
-                                "registered RLS edge label '{}' is absent from the loaded projection",
-                                edge.label
-                            ))
-                        })?;
+                        let edge_type = if edge.label_column.is_some() {
+                            None
+                        } else {
+                            Some(
+                                ENGINE
+                                    .with(|engine| {
+                                        engine.borrow().edge_type_registry.id(&edge.label)
+                                    })
+                                    .ok_or_else(|| {
+                                        GraphError::Internal(format!(
+                                            "registered RLS edge label '{}' is absent from the loaded projection",
+                                            edge.label
+                                        ))
+                                    })?,
+                            )
+                        };
                         BFS_VISIBILITY_PREPARATION_SLOT.with(|slot| {
                             let mut slot = slot.borrow_mut();
                             let frame = slot.as_deref_mut().ok_or_else(|| {
@@ -662,7 +672,9 @@ pub(crate) fn prepare_bfs_visibility(
                                 )
                             })?;
                             frame.mappings.insert(edge.mapping_id);
-                            frame.edge_types.insert(edge_type);
+                            if let Some(edge_type) = edge_type {
+                                frame.edge_types.insert(edge_type);
+                            }
                             frame.has_dynamic_relationship_mapping |= edge.label_column.is_some();
                             Ok::<_, GraphError>(())
                         })?;
@@ -690,8 +702,7 @@ pub(crate) fn prepare_bfs_visibility(
                 has_dynamic_relationship_mapping,
             } = *frame;
             if has_dynamic_relationship_mapping && !mappings.is_empty() {
-                let edge_type_count =
-                    ENGINE.with(|engine| engine.borrow().edge_type_registry.len());
+                let edge_type_count = ENGINE.with(|engine| engine.borrow().edge_type_count());
                 for edge_type in 1..edge_type_count {
                     edge_types.insert(
                         crate::types::EdgeTypeId::try_from(u32::try_from(edge_type).map_err(

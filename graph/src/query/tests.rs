@@ -568,6 +568,85 @@ fn binder_accepts_create_for_mapped_edge_row() {
 }
 
 #[test]
+fn binder_accepts_unseen_create_for_one_dynamic_edge_mapping() {
+    let catalog = FakeCatalog::new()
+        .with_writable_label("users", 10, ["id"], std::iter::empty::<&str>())
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "fallback",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: Some("rel_type"),
+        });
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users {id: 'u1'}), (v:users {id: 'u2'})
+         CREATE (u)-[r:new_type {id: 'f2'}]->(v) RETURN r",
+    )
+    .unwrap();
+    let plan = bind_statement(&ast, &catalog).unwrap();
+    let super::logical_plan::LogicalStatement::CreateRelationship(create) = plan else {
+        panic!("expected create relationship plan");
+    };
+    assert_eq!(create.relationship.rel_type, "new_type");
+    assert_eq!(create.edge.edge_table_oid, 30);
+}
+
+#[test]
+fn binder_keeps_unseen_match_fail_closed() {
+    let catalog = FakeCatalog::new()
+        .with_label("users", 10, ["id"])
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "fallback",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: Some("rel_type"),
+        });
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users)-[r:new_type]->(v:users) RETURN r").unwrap();
+    assert!(bind_statement(&ast, &catalog).is_err());
+}
+
+#[test]
+fn binder_rejects_unseen_create_with_ambiguous_dynamic_mappings() {
+    let catalog = FakeCatalog::new()
+        .with_writable_label("users", 10, ["id"], std::iter::empty::<&str>())
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "fallback_a",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: Some("rel_type"),
+        })
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "fallback_b",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 31,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: Some("kind"),
+        });
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users {id: 'u1'}), (v:users {id: 'u2'})
+         CREATE (u)-[r:new_type {id: 'f2'}]->(v) RETURN r",
+    )
+    .unwrap();
+    let error = bind_statement(&ast, &catalog).unwrap_err();
+    assert!(error.to_string().contains("ambiguous"));
+}
+
+#[test]
 fn binder_rejects_create_for_node_backed_foreign_key_relationship() {
     let catalog = FakeCatalog::new()
         .with_writable_label("users", 10, ["id", "manager_id"], ["manager_id"])

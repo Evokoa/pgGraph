@@ -3298,14 +3298,21 @@ fn record_added_relationship_delta(
             tenant_scope,
             "target",
         )?;
-        let type_id = engine.edge_type_id(&plan.rel_type).ok_or_else(|| {
-            safety::GraphError::GqlExecution {
-                reason: format!(
-                    "relationship type `{}` is not present in the built graph",
-                    plan.rel_type
-                ),
+        let type_id = match engine.edge_type_id(&plan.rel_type) {
+            Some(type_id) => type_id,
+            None if plan.label_column.is_some() => crate::projection::tx_delta::intern_edge_type(
+                &engine.edge_type_registry,
+                &plan.rel_type,
+            )?,
+            None => {
+                return Err(safety::GraphError::GqlExecution {
+                    reason: format!(
+                        "relationship type `{}` is not present in the built graph",
+                        plan.rel_type
+                    ),
+                });
             }
-        })?;
+        };
         Ok::<_, safety::GraphError>((
             source,
             target,

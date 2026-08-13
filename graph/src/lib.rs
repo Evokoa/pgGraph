@@ -944,6 +944,7 @@ mod tests {
     include!("pg_tests/workflow_validation.rs");
     include!("pg_tests/synthetic_release.rs");
     include!("pg_tests/named_graphs.rs");
+    include!("pg_tests/p8_transaction_labels.rs");
     include!("pg_tests/gql.rs");
     include!("pg_tests/cypher.rs");
 }

@@ -971,12 +971,7 @@ fn reserve_execution_rows<'a>(
         .node_store
         .max_primary_key_bytes()
         .max(crate::projection::tx_delta::max_added_node_primary_key_bytes());
-    let max_relationship_label_bytes = engine
-        .edge_type_registry
-        .iter()
-        .map(String::len)
-        .max()
-        .unwrap_or_default();
+    let max_relationship_label_bytes = engine.max_edge_type_label_bytes();
     let coordinate_bytes = std::mem::size_of::<GqlNodeCoordinate>()
         .checked_add(max_primary_key_bytes)
         .ok_or_else(|| GraphError::Internal("GQL coordinate estimate overflowed".to_string()))?;
@@ -1103,12 +1098,7 @@ pub(crate) fn reserve_identity_one_hop_rows<'a>(
         .node_store
         .max_primary_key_bytes()
         .max(crate::projection::tx_delta::max_added_node_primary_key_bytes());
-    let max_relationship_label_bytes = engine
-        .edge_type_registry
-        .iter()
-        .map(String::len)
-        .max()
-        .unwrap_or_default();
+    let max_relationship_label_bytes = engine.max_edge_type_label_bytes();
     let (coordinates_per_row, relationships_per_row) = one_hop_row_shape(1)?;
     let coordinate_bytes = std::mem::size_of::<GqlNodeCoordinate>()
         .checked_add(max_primary_key_bytes)
@@ -2085,14 +2075,15 @@ fn coordinate(engine: &Engine, node_idx: u32) -> GraphResult<GqlNodeCoordinate> 
 }
 
 fn edge_type_label(engine: &Engine, type_id: crate::types::EdgeTypeId) -> GraphResult<String> {
-    engine
-        .edge_type_registry
-        .get(type_id.get() as usize)
+    if let Some(label) = engine
+        .edge_type_label(type_id)
         .filter(|label| !label.is_empty())
-        .cloned()
-        .ok_or_else(|| GraphError::GqlExecution {
-            reason: format!("relationship type id `{type_id}` is not present in the built graph"),
-        })
+    {
+        return Ok(label);
+    }
+    Err(GraphError::GqlExecution {
+        reason: format!("relationship type id `{type_id}` is not present in the built graph"),
+    })
 }
 
 #[cfg(test)]

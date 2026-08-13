@@ -555,7 +555,9 @@ impl Engine {
         machine.require_projection_epoch(self.bfs_projection_epoch())?;
         let result = machine.finish();
         let truncated = result.truncated;
-        let rows = bfs::to_traversal_results(&result, &self.node_store, &self.edge_type_registry)?;
+        let rows = bfs::to_traversal_results_with(&result, &self.node_store, |type_id| {
+            self.edge_type_label(type_id)
+        })?;
         Ok(TraverseOutcome { rows, truncated })
     }
 
@@ -696,7 +698,11 @@ impl Engine {
     ) -> GraphResult<Vec<WeightedPathStep>> {
         machine.require_projection_epoch(self.bfs_projection_epoch())?;
         Ok(machine
-            .finish(&self.node_store, &self.edge_type_registry, governor)?
+            .finish_with(
+                &self.node_store,
+                |type_id| self.edge_type_label(type_id),
+                governor,
+            )?
             .unwrap_or_default())
     }
 
@@ -899,13 +905,13 @@ impl Engine {
             ResumableUnweightedPathMachine::Single(machine) => {
                 machine.require_projection_epoch(epoch)?;
                 Ok(machine
-                    .finish(&self.node_store, &self.edge_type_registry)?
+                    .finish_with(&self.node_store, |type_id| self.edge_type_label(type_id))?
                     .unwrap_or_default())
             }
             ResumableUnweightedPathMachine::Bidirectional(machine) => {
                 machine.require_projection_epoch(epoch)?;
                 Ok(machine
-                    .finish(&self.node_store, &self.edge_type_registry)?
+                    .finish_with(&self.node_store, |type_id| self.edge_type_label(type_id))?
                     .unwrap_or_default())
             }
         }
@@ -1464,7 +1470,45 @@ impl Engine {
     }
 
     pub(crate) fn edge_type_id(&self, label: &str) -> Option<EdgeTypeId> {
-        self.edge_type_registry.id(label)
+        self.edge_type_registry.id(label).or_else(|| {
+            tx_delta::edge_type_id(
+                self.edge_type_registry.len(),
+                self.edge_type_registry.fingerprint(),
+                label,
+            )
+        })
+    }
+
+    pub(crate) fn edge_type_count(&self) -> usize {
+        tx_delta::edge_type_count(
+            self.edge_type_registry.len(),
+            self.edge_type_registry.fingerprint(),
+        )
+    }
+
+    pub(crate) fn edge_type_label(&self, type_id: EdgeTypeId) -> Option<String> {
+        self.edge_type_registry
+            .get(type_id.get() as usize)
+            .cloned()
+            .or_else(|| {
+                tx_delta::edge_type_label(
+                    self.edge_type_registry.len(),
+                    self.edge_type_registry.fingerprint(),
+                    type_id,
+                )
+            })
+    }
+
+    pub(crate) fn max_edge_type_label_bytes(&self) -> usize {
+        self.edge_type_registry
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap_or_default()
+            .max(tx_delta::max_edge_type_label_bytes(
+                self.edge_type_registry.len(),
+                self.edge_type_registry.fingerprint(),
+            ))
     }
 
     /// Resolve a (table_oid, pk) → node_idx.
@@ -1986,8 +2030,9 @@ impl Engine {
                 output_bytes,
             )
             .map_err(crate::safety::resource_limit_error)?;
-        let results =
-            bfs::to_traversal_results(&bfs_result, &self.node_store, &self.edge_type_registry)?;
+        let results = bfs::to_traversal_results_with(&bfs_result, &self.node_store, |type_id| {
+            self.edge_type_label(type_id)
+        })?;
         let truncated = bfs_result.truncated;
         output_lease.retain_until_governor_drop();
         Ok(TraverseOutcome {
@@ -2007,15 +2052,9 @@ impl Engine {
             .saturating_add(1);
         let primary_key = u64::try_from(self.node_store.max_primary_key_bytes())
             .map_err(|_| GraphError::Internal("primary-key width does not fit u64".to_string()))?;
-        let edge_label = self
-            .edge_type_registry
-            .iter()
-            .map(String::len)
-            .max()
-            .map(u64::try_from)
-            .transpose()
+        let edge_label = u64::try_from(self.max_edge_type_label_bytes())
             .map_err(|_| GraphError::Internal("edge-label width does not fit u64".to_string()))?
-            .unwrap_or(3);
+            .max(3);
         let row_bytes = u64::try_from(std::mem::size_of::<TraversalResult>())
             .unwrap_or(u64::MAX)
             .checked_add(primary_key)
@@ -2344,6 +2383,7 @@ impl Engine {
             )
             .map_err(crate::safety::resource_limit_error)?;
 
+        let edge_type_label = |edge_type| self.edge_type_label(edge_type);
         let result = if !self.has_edge_overlay() {
             if let Some(neighbors) = self.layered_neighbors()? {
                 path_finder::shortest_path_with_neighbors_governed_with_context(
@@ -2355,6 +2395,7 @@ impl Engine {
                         max_depth,
                         has_unidirectional_edges: true,
                         edge_type_registry: &self.edge_type_registry,
+                        edge_type_label: Some(&edge_type_label),
                     },
                     context,
                 )
@@ -2369,6 +2410,7 @@ impl Engine {
                         max_depth,
                         has_unidirectional_edges: self.has_unidirectional_edges,
                         edge_type_registry: &self.edge_type_registry,
+                        edge_type_label: Some(&edge_type_label),
                     },
                     context,
                 )
@@ -2383,6 +2425,7 @@ impl Engine {
                     max_depth,
                     has_unidirectional_edges: true,
                     edge_type_registry: &self.edge_type_registry,
+                    edge_type_label: Some(&edge_type_label),
                 },
                 context,
             )
@@ -2403,6 +2446,7 @@ impl Engine {
                     max_depth,
                     has_unidirectional_edges: self.has_unidirectional_edges,
                     edge_type_registry: &self.edge_type_registry,
+                    edge_type_label: Some(&edge_type_label),
                 },
                 context,
             )
@@ -2428,7 +2472,7 @@ impl Engine {
         };
         let mut filter = roaring::RoaringBitmap::new();
         for edge_type in edge_types {
-            let Some(type_id) = self.edge_type_registry.id(edge_type) else {
+            let Some(type_id) = self.edge_type_id(edge_type) else {
                 return Err(GraphError::InvalidFilter {
                     reason: format!("unknown edge type '{edge_type}'"),
                 });

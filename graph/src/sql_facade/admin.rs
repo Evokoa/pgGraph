@@ -1854,6 +1854,7 @@ fn projection_recovery_action_text(
 }
 
 fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::GraphResult<()> {
+    crate::projection::tx_delta::ensure_engine_replacement_allowed("projection recovery reload")?;
     let graph = catalog::selected_or_default_graph_metadata()?;
     let resident = ENGINE
         .with(|engine| {
@@ -5044,7 +5045,7 @@ fn run_sync_policy_with_mode(
     })?;
     let graph = require_admin_for_graph_id(&policy.graph_id)?;
     catalog::set_selected_graph_id(&graph.graph_id)?;
-    super::runtime::clear_loaded_graph_if_mismatched(&graph.graph_id);
+    super::runtime::clear_loaded_graph_if_mismatched(&graph.graph_id)?;
     let job = generic_job_rows(Some(&policy.job_id), None, 1)?
         .into_iter()
         .next()

@@ -39,6 +39,8 @@ pub(crate) fn record_query_start_pending_probe() {
 fn reset() {
     with_panic_boundary("reset()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
+        crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.reset()")
+            .unwrap_or_else(|err| err.report());
         ENGINE.with(|e| {
             *e.borrow_mut() = Engine::new();
         });
@@ -75,6 +77,8 @@ fn select_graph(
         let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
         let graph =
             resolve_visible_runtime_graph_for_role(graph_name, tenant, namespace, caller_oid);
+        crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.select_graph()")
+            .unwrap_or_else(|err| err.report());
         catalog::set_selected_graph_id(&graph.graph_id).unwrap_or_else(|err| err.report());
         let mut loaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
         if !loaded && crate::runtime_state::loaded_graph_id().is_some() {
@@ -184,6 +188,8 @@ fn unload_graph(
         .unwrap_or_else(|err| err.report());
         let unloaded = crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id);
         if unloaded {
+            crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.unload_graph()")
+                .unwrap_or_else(|err| err.report());
             ENGINE.with(|engine| {
                 *engine.borrow_mut() = Engine::new();
             });
@@ -553,7 +559,10 @@ pub(super) fn hydrate_component_page_governed(
 /// backend-local heap, and the reverse EdgeStore CSR is rebuilt into heap for
 /// inbound traversal.
 pub(super) fn maybe_auto_load(graph: &catalog::GraphMetadata, catalog_fingerprint: u64) {
-    clear_loaded_graph_if_mismatched(&graph.graph_id);
+    if let Err(err) = clear_loaded_graph_if_mismatched(&graph.graph_id) {
+        pgrx::warning!("graph: auto-load skipped: {}", err);
+        return;
+    }
 
     if !config::AUTO_LOAD.get() {
         return;
@@ -568,7 +577,14 @@ pub(super) fn maybe_auto_load(graph: &catalog::GraphMetadata, catalog_fingerprin
     }
 }
 
-pub(super) fn clear_loaded_graph_if_mismatched(graph_id: &str) {
+pub(super) fn clear_loaded_graph_if_mismatched(graph_id: &str) -> safety::GraphResult<()> {
+    if crate::projection::tx_delta::has_provisional_edge_types()
+        && crate::runtime_state::loaded_graph_id().is_some_and(|loaded| loaded != graph_id)
+    {
+        crate::projection::tx_delta::ensure_engine_replacement_allowed(
+            "selected graph replacement",
+        )?;
+    }
     if let Some(loaded_graph_id) = crate::runtime_state::loaded_graph_id() {
         if loaded_graph_id != graph_id {
             ENGINE.with(|engine| {
@@ -577,6 +593,7 @@ pub(super) fn clear_loaded_graph_if_mismatched(graph_id: &str) {
             crate::runtime_state::clear_loaded_graph();
         }
     }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -591,6 +608,7 @@ fn load_selected_graph_from_disk(
     quiet_missing: bool,
     catalog_fingerprint: CatalogFingerprintForLoad,
 ) -> safety::GraphResult<bool> {
+    crate::projection::tx_delta::ensure_engine_replacement_allowed("graph.load_graph()")?;
     if quiet_missing && graph.residency == "cold" {
         return Ok(false);
     }
@@ -736,6 +754,9 @@ fn reconcile_interrupted_replacement_with_catalog_fingerprint(
     ) {
         crate::runtime_state::ReplacementRecoveryAction::PreserveResident => {}
         crate::runtime_state::ReplacementRecoveryAction::ReloadPublished => {
+            crate::projection::tx_delta::ensure_engine_replacement_allowed(
+                "graph replacement recovery",
+            )?;
             ENGINE.with(|engine| {
                 *engine.borrow_mut() = Engine::new();
             });
@@ -792,7 +813,7 @@ fn prepare_current_graph(
     allow_auto_load: bool,
 ) -> safety::GraphResult<QueryStartState> {
     let graph = catalog::selected_or_default_graph_metadata_via_definer()?;
-    clear_loaded_graph_if_mismatched(&graph.graph_id);
+    clear_loaded_graph_if_mismatched(&graph.graph_id)?;
     catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Read)?;
     let query_start = match load_query_start_state(graph.clone()) {
         Ok(query_start) => query_start,
@@ -850,7 +871,7 @@ pub(crate) fn ensure_current_graph() -> safety::GraphResult<QueryStartState> {
 
 pub(super) fn refresh_current_graph_status() -> safety::GraphResult<config::SyncMode> {
     let graph = catalog::selected_or_default_graph_metadata_via_definer()?;
-    clear_loaded_graph_if_mismatched(&graph.graph_id);
+    clear_loaded_graph_if_mismatched(&graph.graph_id)?;
     catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Read)?;
     let disabled = disabled_graph_trigger_count()?;
     let query_start = match load_query_start_state(graph.clone()) {

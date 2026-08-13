@@ -4,6 +4,26 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::EdgeTypeId;
 use std::collections::HashMap;
 
+const REGISTRY_FINGERPRINT_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+
+fn fingerprint_append(mut fingerprint: u64, label: &str) -> u64 {
+    for byte in (label.len() as u64)
+        .to_le_bytes()
+        .into_iter()
+        .chain(label.bytes())
+    {
+        fingerprint ^= u64::from(byte);
+        fingerprint = fingerprint.wrapping_mul(0x100_0000_01b3);
+    }
+    fingerprint
+}
+
+fn registry_fingerprint<'a>(labels: impl IntoIterator<Item = &'a str>) -> u64 {
+    labels
+        .into_iter()
+        .fold(REGISTRY_FINGERPRINT_SEED, fingerprint_append)
+}
+
 /// Ordered labels plus an O(1) label-to-logical-ID lookup.
 #[derive(Debug, Clone)]
 pub(crate) struct EdgeTypeRegistry {
@@ -12,6 +32,7 @@ pub(crate) struct EdgeTypeRegistry {
     label_bytes: usize,
     ordered_label_capacity_bytes: usize,
     lookup_label_capacity_bytes: usize,
+    fingerprint: u64,
 }
 
 impl EdgeTypeRegistry {
@@ -27,6 +48,7 @@ impl EdgeTypeRegistry {
             label_bytes: 0,
             ordered_label_capacity_bytes: 0,
             lookup_label_capacity_bytes: 0,
+            fingerprint: registry_fingerprint(std::iter::once("")),
         }
     }
 
@@ -86,6 +108,7 @@ impl EdgeTypeRegistry {
         let ordered_label_capacity_bytes = labels.iter().map(String::capacity).sum();
         let lookup_label_capacity_bytes = ids_by_label.keys().map(String::capacity).sum();
         Ok(Self {
+            fingerprint: registry_fingerprint(labels.iter().map(String::as_str)),
             labels,
             ids_by_label,
             label_bytes,
@@ -152,6 +175,7 @@ impl EdgeTypeRegistry {
             .ok_or(GraphError::EdgeTypeLimit)?;
         self.labels.push(ordered_label);
         self.ids_by_label.insert(lookup_label, id);
+        self.fingerprint = fingerprint_append(self.fingerprint, label);
         Ok(id)
     }
 
@@ -164,6 +188,16 @@ impl EdgeTypeRegistry {
 
     pub(crate) fn as_slice(&self) -> &[String] {
         &self.labels
+    }
+
+    /// Stable identity of the exact ordered registry contents.
+    pub(crate) fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
+    /// Total UTF-8 payload bytes in the ordered registry.
+    pub(crate) fn label_bytes(&self) -> usize {
+        self.label_bytes
     }
 
     pub(crate) fn into_labels(self) -> Vec<String> {
