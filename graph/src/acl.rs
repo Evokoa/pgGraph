@@ -5,9 +5,10 @@
 //! Write helpers call `check_table_insert_acl()`, `check_table_update_acl()`,
 //! or `check_table_delete_acl()` before modifying mapped rows.
 //!
-//! `row_security_applies_to_outer_caller()` is the single unsafe adapter to
-//! PostgreSQL's policy-enablement decision. Query-time visibility scans use it
-//! before projected topology can influence results.
+//! `row_security_applies_to_effective_caller()` is the unsafe adapter used for
+//! query-time policy enablement. It matches the execution identity seen by
+//! source SQL, including user-created `SECURITY DEFINER` wrappers. The outer
+//! caller adapter remains development-only evidence for catalog mediators.
 //!
 //! See: `docs/contributor_guide/safety-security.mdx`
 //! See: `docs/user_guide/administration-and-security.mdx`
@@ -77,6 +78,7 @@ pub fn check_table_delete_acl(table_oid: u32) -> GraphResult<()> {
 /// `row_security = off` cannot be honored safely. `RLS_NONE_ENV` means the
 /// caller currently bypasses policies through ownership or `BYPASSRLS` and is
 /// therefore unrestricted for this statement.
+#[cfg(feature = "development")]
 pub(crate) fn row_security_applies_to_outer_caller(table_oid: u32) -> bool {
     let caller_oid = unsafe {
         // SAFETY: This code runs inside a PostgreSQL backend. GetOuterUserId
@@ -90,6 +92,23 @@ pub(crate) fn row_security_applies_to_outer_caller(table_oid: u32) -> bool {
         // active snapshot and policy caches. `noError = false` requests normal
         // PostgreSQL error behavior instead of suppressing unsafe environments.
         pgrx::pg_sys::check_enable_rls(pgrx::pg_sys::Oid::from_u32(table_oid), caller_oid, false)
+    };
+    result == pgrx::pg_sys::CheckEnableRlsResult::RLS_ENABLED as i32
+}
+
+/// Return whether PostgreSQL RLS applies to the effective SQL execution role.
+///
+/// Visibility SPI runs as this role, including inside a user-created
+/// `SECURITY DEFINER` wrapper, so lazy planning must use the same identity.
+pub(crate) fn row_security_applies_to_effective_caller(table_oid: u32) -> bool {
+    let role_oid = unsafe {
+        // SAFETY: This runs inside a PostgreSQL backend and retains no pointer.
+        pgrx::pg_sys::GetUserId()
+    };
+    let result = unsafe {
+        // SAFETY: the relation OID is validated catalog state and role_oid is
+        // the backend's effective execution identity.
+        pgrx::pg_sys::check_enable_rls(pgrx::pg_sys::Oid::from_u32(table_oid), role_oid, false)
     };
     result == pgrx::pg_sys::CheckEnableRlsResult::RLS_ENABLED as i32
 }

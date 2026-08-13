@@ -187,6 +187,40 @@ cancelled, the previous published generation remains authoritative, but RLS
 queries that require the missing identity continue to fail closed until a
 successful rebuild.
 
+## Recursive RLS Visibility Resolution
+
+Symptom:
+
+```text
+SQLSTATE 55000
+DETAIL: pgGraph diagnostic: PG024
+```
+
+An RLS policy on a registered source table called a pgGraph topology function
+while pgGraph was already asking PostgreSQL to evaluate that policy. pgGraph
+rejects this recursion instead of re-entering traversal with partially built
+visibility state. Move the nested graph query out of the policy, or compute the
+policy predicate from ordinary PostgreSQL relations and session settings.
+
+## Direct RLS Probe Does Not Support This Primary-Key Type
+
+Symptom:
+
+```text
+SQLSTATE 0A000
+DETAIL: pgGraph diagnostic: PG018
+```
+
+RLS identity matching supports built-in boolean, integer, text, character,
+numeric, OID, and UUID primary-key columns. Date/time, array, domain,
+extension, and custom types can format the same value differently under
+session settings or custom I/O code. A 1.1 projection stores only the formatted
+identity, so pgGraph cannot safely match those types. A topology shape fails
+closed when it can consume the affected RLS-active mapping; direct node probes
+validate only their requested node mapping. Use a stable supported key column
+for the graph identity. `graph.rls_mode = 'legacy_bypass'` is only an authorized
+maintenance escape hatch and must not be used to serve tenant-isolated reads.
+
 ## Schema Invalid Or Needs Rebuild
 
 Symptoms:

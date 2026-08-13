@@ -46,6 +46,7 @@ pub(crate) fn hydrate_node(
     hydrate_node_governed(table_oid, node_id, &governor)
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn hydrate_node_with_tables(
     table_oid: u32,
     node_id: &str,

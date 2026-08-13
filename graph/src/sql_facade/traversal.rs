@@ -110,6 +110,17 @@ pub(super) fn traverse(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
+        if max_depth == 0 {
+            let rows = execute_depth_zero_lazy(
+                &request,
+                &query_start.tables,
+                &query_start.edges,
+                &query_start.filter_columns,
+                &governor,
+            )
+            .unwrap_or_else(|err| err.report());
+            return TableIterator::new(rows);
+        }
         let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
@@ -127,6 +138,79 @@ pub(super) fn traverse(
 
         TableIterator::new(rows)
     })
+}
+
+fn execute_depth_zero_lazy(
+    request: &TraverseRequest<'_>,
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    filter_columns: &[builder::RegisteredFilterColumn],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
+    let table = tables
+        .iter()
+        .find(|table| table.table_oid == request.root_table.to_u32())
+        .ok_or_else(|| safety::GraphError::Internal("unregistered traversal root table".into()))?;
+    let mut lazy = crate::sql_visibility::prepare_direct_identity_visibility(
+        table, tables, edges, false, true,
+    )?;
+    let probe_plan = if lazy.table_requires_probe(table.table_oid) {
+        crate::sql_visibility::reserve_direct_probe_plan(governor)?;
+        crate::sql_visibility::prepare_direct_node_probe(table)?
+    } else {
+        None
+    };
+    let node_idx = ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        engine
+            .resolve(request.root_table.to_u32(), request.root_id)
+            .or_else(|| {
+                let table_is_tenanted = engine
+                    .tenanted_table_oids
+                    .contains(&request.root_table.to_u32());
+                crate::projection::tx_delta::resolve_added_node(
+                    request.root_table.to_u32(),
+                    request.root_id,
+                    request.tenant,
+                    table_is_tenanted,
+                )
+            })
+    });
+    let Some(node_idx) = node_idx else {
+        return Err(safety::GraphError::NodeNotFound {
+            table: request.root_table.to_u32().to_string(),
+            pk: request.root_id.to_string(),
+        });
+    };
+    if lazy.table_requires_probe(table.table_oid) && probe_plan.is_none() {
+        return Err(unsupported_direct_rls_key_type(table));
+    }
+    crate::sql_visibility::reserve_direct_visibility_candidate(governor, request.root_id)?;
+    let batch = crate::sql_visibility::direct_visibility_batch(vec![
+        crate::visibility::VisibilityCandidate::Node {
+            sequence: 0,
+            table_oid: request.root_table.to_u32(),
+            source_key: request.root_id.to_string(),
+            node_idx,
+        },
+    ])?;
+    let verdicts = crate::sql_visibility::resolve_lazy_visibility_batch(
+        &mut lazy,
+        batch,
+        probe_plan.as_ref(),
+        governor,
+    )?;
+    if verdicts.verdicts() != [(0, crate::visibility::VisibilityVerdict::Visible)] {
+        return Ok(Vec::new());
+    }
+    let visible_node = lazy.prove_visible_node(node_idx)?;
+    let coordinator = crate::sql_visibility::direct_node_visibility_coordinator(visible_node);
+    execute_traverse_rows_in_context(
+        request,
+        &coordinator.context(governor),
+        tables,
+        filter_columns,
+    )
 }
 
 /// Resolve one registered node by graph name, label, and business id.
@@ -762,29 +846,85 @@ fn direct_get_node_rows(
         else {
             return Ok(Vec::new());
         };
-        if !source_row_visible(&matched.table, id)? {
-            return Ok(Vec::new());
-        }
-        let node = if hydrate {
-            crate::sql_hydration::hydrate_node_with_tables(
-                matched.table_oid,
-                id,
-                &query_start.tables,
-            )?
+        let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+        let mut coordinator = crate::sql_visibility::prepare_direct_identity_visibility(
+            &matched.table,
+            &query_start.tables,
+            &query_start.edges,
+            true,
+            false,
+        )?;
+        let probe_plan = if coordinator.table_requires_probe(matched.table_oid) {
+            crate::sql_visibility::reserve_direct_probe_plan(&governor)?;
+            crate::sql_visibility::prepare_direct_node_probe(&matched.table)?
         } else {
             None
         };
-        let row = (
-            matched.graph.graph_id,
-            matched.graph.graph_name,
-            pgrx::pg_sys::Oid::from_u32(matched.table_oid),
-            relation_name(matched.table_oid)?,
-            id.to_string(),
-            i64::from(matched.node_idx),
-            node,
-        );
-        Ok(vec![row])
+        if coordinator.table_requires_probe(matched.table_oid) && probe_plan.is_none() {
+            if coordinator.table_has_policy_rls(matched.table_oid) {
+                return Err(unsupported_direct_rls_key_type(&matched.table));
+            }
+            // In no-RLS/authorized-bypass mode this preserves get_node's 1.1
+            // stale-projection existence check; it is not an authorization
+            // oracle. RLS-active unsupported key types fail closed above.
+            if !source_row_exists_for_projection_key(&matched.table, id)? {
+                return Ok(Vec::new());
+            }
+            return direct_node_row(matched, id, hydrate, &governor, &query_start.tables);
+        }
+        crate::sql_visibility::reserve_direct_visibility_candidate(&governor, id)?;
+        let batch = crate::sql_visibility::direct_visibility_batch(vec![
+            crate::visibility::VisibilityCandidate::Node {
+                sequence: 0,
+                table_oid: matched.table_oid,
+                source_key: id.to_string(),
+                node_idx: matched.node_idx,
+            },
+        ])?;
+        let verdicts = crate::sql_visibility::resolve_lazy_visibility_batch(
+            &mut coordinator,
+            batch,
+            probe_plan.as_ref(),
+            &governor,
+        )?;
+        if verdicts.verdicts() != [(0, crate::visibility::VisibilityVerdict::Visible)] {
+            return Ok(Vec::new());
+        }
+        direct_node_row(matched, id, hydrate, &governor, &query_start.tables)
     })
+}
+
+fn unsupported_direct_rls_key_type(table: &builder::RegisteredTable) -> safety::GraphError {
+    crate::sql_visibility::unsupported_rls_identity_type(&table.table_name)
+}
+
+fn direct_node_row(
+    matched: DirectNodeMatch,
+    id: &str,
+    hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+    tables: &[builder::RegisteredTable],
+) -> safety::GraphResult<Vec<DirectNodeRow>> {
+    let node = if hydrate {
+        crate::sql_hydration::hydrate_node_governed_with_tables(
+            matched.table_oid,
+            id,
+            governor,
+            tables,
+        )?
+    } else {
+        None
+    };
+    let row = (
+        matched.graph.graph_id,
+        matched.graph.graph_name,
+        pgrx::pg_sys::Oid::from_u32(matched.table_oid),
+        relation_name(matched.table_oid)?,
+        id.to_string(),
+        i64::from(matched.node_idx),
+        node,
+    );
+    Ok(vec![row])
 }
 
 #[allow(clippy::too_many_arguments, reason = "mirrors SQL API parameters")]
@@ -812,7 +952,7 @@ fn direct_get_neighbors_rows(
         else {
             return Ok(Vec::new());
         };
-        if !source_row_visible(&matched.table, id)? {
+        if !source_row_exists_for_projection_key(&matched.table, id)? {
             return Ok(Vec::new());
         }
         let (direction, strategy, _uniqueness) = crate::sql_traversal::validate_traverse_options(
@@ -903,7 +1043,15 @@ fn resolve_direct_node(
     acl::check_table_acl(table_oid)?;
     let node_idx = ENGINE.with(|engine| {
         let engine = engine.borrow();
-        let node_idx = engine.resolve(table_oid, id)?;
+        let table_is_tenanted = engine.tenanted_table_oids.contains(&table_oid);
+        let node_idx = engine.resolve(table_oid, id).or_else(|| {
+            crate::projection::tx_delta::resolve_added_node(
+                table_oid,
+                id,
+                tenant,
+                table_is_tenanted,
+            )
+        })?;
         tenant_allows_direct_node(&engine, node_idx, tenant).then_some(node_idx)
     });
     Ok(node_idx.map(|node_idx| DirectNodeMatch {
@@ -942,7 +1090,10 @@ fn tenant_allows_direct_node(engine: &Engine, node_idx: u32, tenant: Option<&str
     }
 }
 
-fn source_row_visible(table: &builder::RegisteredTable, id: &str) -> safety::GraphResult<bool> {
+fn source_row_exists_for_projection_key(
+    table: &builder::RegisteredTable,
+    id: &str,
+) -> safety::GraphResult<bool> {
     let table_name = catalog::sql_table_name_from_oid(table.table_oid)?;
     let pk_expr = catalog::primary_key_expr("src", &table.id_columns);
     let sql = format!(

@@ -141,7 +141,7 @@ public documentation, retained evidence, and independent Rust review are green.
 |---|---|---|
 | P0 | Complete | Contracts, surface inventory, semantic corpus, and representative large-table baselines are frozen before production behavior changes. |
 | P1 | Complete | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
-| P2 | Not started | Direct identity and endpoint resolution use bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
+| P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Not started | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent. |
 | P4 | Not started | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
 | P5 | Not started | Targeted queries select lazy and global analytics select eager; redundant read checks are removed only if proven; 1M/10M evidence meets the accepted latency and memory budgets. |
@@ -251,17 +251,48 @@ silently omitting visibility, while eager behavior remains equivalent.
   statement-local caches, charged to `QueryVisibility` with fallible reserves.
 - Deduplicate probe keys while preserving candidate order.
 - Remove the eager `max(octet_length(...))` preflight from lazy mode.
-- Benchmark and select typed scalar `ANY` and composite `VALUES`/`unnest` probe
-  shapes that retain source indexes.
+- For the one-identity P2 slice, use one typed scalar/composite equality probe
+  and retain `EXPLAIN` evidence that PostgreSQL selects the source primary-key
+  index. P3 benchmarks batched `ANY` versus `VALUES`/`unnest` when frontier
+  batches contain more than one identity.
 - Add a narrow recursive-visibility guard cleared with
   `PgTryBuilder::finally`; never keep Rust borrows or ordinary stack-owned
   graph-sized state across PostgreSQL ERROR/longjmp.
-- Use lazy probes for `get_node`, depth-zero seeds, and shortest-path endpoints.
+- Use lazy probes for `get_node` and true depth-zero seeds. Positive-depth
+  shortest paths remain eager until P4's resumable bidirectional and weighted
+  executors can resolve endpoints and intermediates under one policy snapshot;
+  an endpoint-only pre-probe would duplicate policy evaluation without
+  reducing source work.
 - Add negative-cache, cancellation, policy error, recursion, memory exhaustion,
   current-setting, role, snapshot, and transaction-delta tests.
 
 **Exit:** direct identities are lazy/eager equivalent and source work scales
 with requested identities rather than table membership.
+
+**P2 evidence (2026-08-12):**
+
+- `get_node()` and true single-root `traverse(max_depth := 0)` use a bounded,
+  statement-local tri-state resolver. Positive-depth traversal and paths remain
+  on the eager oracle until their engines become resumable.
+- Candidate count, key bytes, probe-plan scratch, cache growth, copied payloads,
+  returned work, elapsed time, and PostgreSQL interrupts are governed under
+  `query.visibility`. The lazy path has no table-wide maximum-key preflight.
+- Scalar and composite probes compare registered primary-key columns to typed
+  requested components. A retained PostgreSQL `EXPLAIN` regression requires an
+  index or index-only scan. Date/time, array, domain, extension, and custom key
+  types fail closed under RLS because the v1.1 artifact stores only text and
+  cannot safely reconstruct values across changed session I/O settings.
+- The shared recursion guard covers eager and lazy policy evaluation. Resolver
+  state is TLS-owned across PostgreSQL longjmp and cleared in
+  `PgTryBuilder::finally`; synthetic and policy-originated cancellation tests
+  prove cleanup and successful retry.
+- PostgreSQL tests cover effective `SECURITY DEFINER` identity, current-setting
+  policies, visible/hidden/absent eager parity, stale no-RLS and legacy-bypass
+  source rows, composite keys, GUC-sensitive date identity rejection, resource
+  exhaustion before probing, transaction-local nodes with subtransaction
+  rollback, same-statement command changes, concurrent REPEATABLE READ snapshot
+  isolation, arbitrary policy-error propagation and cleanup,
+  relationship-identity failure, and depth-zero diagnostics.
 
 ### P3: Add resumable one-hop and BFS traversal
 

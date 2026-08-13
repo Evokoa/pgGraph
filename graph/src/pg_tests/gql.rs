@@ -234,6 +234,827 @@ fn direct_node_lookup_resolves_business_id_without_hydration_scan() {
 }
 
 #[pg_test]
+fn direct_identity_lazy_matches_eager_for_visible_hidden_and_absent_rows() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_direct_lazy_reader;
+         CREATE ROLE graph_direct_lazy_reader;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_direct_lazy_policy
+             ON public.graph_test_users_pgtest
+             USING (id = current_setting('graph.test_visible_id', true));
+         GRANT USAGE ON SCHEMA graph, public TO graph_direct_lazy_reader;
+         GRANT USAGE ON SCHEMA public TO graph_direct_lazy_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_direct_lazy_reader;
+         SET graph.test_visible_id = 'u1'",
+    )
+    .expect("configure direct lazy RLS fixture failed");
+    Spi::run("SET ROLE graph_direct_lazy_reader").expect("set direct lazy reader failed");
+
+    let visible = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    )
+    .expect("visible direct lazy lookup failed")
+    .unwrap_or_default();
+    let hidden = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u2', hydrate := false)",
+    )
+    .expect("hidden direct lazy lookup failed")
+    .unwrap_or_default();
+    let absent = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'missing', hydrate := false)",
+    )
+    .expect("absent direct lazy lookup failed")
+    .unwrap_or_default();
+    let eager_visible = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+            'graph_test_users_pgtest'::regclass, 'u1',
+            max_depth := 1, hydrate := false)
+         WHERE depth = 0",
+    )
+    .expect("eager visibility oracle lookup failed")
+    .unwrap_or_default();
+    let eager_hidden = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+            'graph_test_users_pgtest'::regclass, 'u2',
+            max_depth := 1, hydrate := false)
+         WHERE depth = 0",
+    )
+    .expect("eager hidden visibility oracle lookup failed")
+    .unwrap_or_default();
+    Spi::run("RESET ROLE").expect("reset direct lazy reader failed");
+
+    assert_eq!((visible, hidden, absent), (1, 0, 0));
+    assert_eq!((visible, hidden), (eager_visible, eager_hidden));
+}
+
+#[pg_test]
+fn direct_identity_probe_observes_enclosing_statement_command_changes() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "CREATE TABLE public.graph_test_visibility_control_pgtest (
+             visible_id text PRIMARY KEY
+         );
+         INSERT INTO public.graph_test_visibility_control_pgtest VALUES ('u1');
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_statement_snapshot_policy
+             ON public.graph_test_users_pgtest
+             USING (id IN (
+                 SELECT visible_id
+                 FROM public.graph_test_visibility_control_pgtest
+             ));
+         CREATE FUNCTION public.graph_statement_snapshot_source(candidate text)
+             RETURNS bigint
+             LANGUAGE sql VOLATILE
+             AS $$
+                 SELECT count(*)
+                 FROM public.graph_test_users_pgtest
+                 WHERE id = candidate
+             $$;
+         DROP ROLE IF EXISTS graph_statement_snapshot_reader;
+         CREATE ROLE graph_statement_snapshot_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_statement_snapshot_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest,
+             public.graph_test_visibility_control_pgtest
+             TO graph_statement_snapshot_reader;
+         GRANT UPDATE ON public.graph_test_visibility_control_pgtest
+             TO graph_statement_snapshot_reader;
+         GRANT EXECUTE ON FUNCTION public.graph_statement_snapshot_source(text)
+             TO graph_statement_snapshot_reader;
+         SET ROLE graph_statement_snapshot_reader",
+    )
+    .expect("configure statement-snapshot visibility fixture failed");
+
+    // PostgreSQL makes the statement's own data-modifying CTE visible after
+    // its command-counter advance, including to nested SPI policy evaluation.
+    let (same_statement, source_oracle) = Spi::connect(|client| {
+        let row = client
+            .select(
+        "WITH changed AS MATERIALIZED (
+             UPDATE public.graph_test_visibility_control_pgtest
+                SET visible_id = 'u2'
+              RETURNING 1 AS marker
+         )
+         SELECT (SELECT count(*)
+                   FROM graph.get_node(
+                     'default', 'graph_test_users_pgtest',
+                     CASE WHEN changed.marker = 1 THEN 'u1' END,
+                     hydrate := false
+                   )),
+                public.graph_statement_snapshot_source(
+                    CASE WHEN changed.marker = 1 THEN 'u1' END
+                )
+           FROM changed
+          ",
+                None,
+                &[],
+            )
+            .expect("same-statement visibility command-change lookup failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i64>(1)?.unwrap_or_default(),
+            row.get::<i64>(2)?.unwrap_or_default(),
+        ))
+    })
+    .expect("same-statement visibility command-change result failed");
+    let stale = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    )
+    .expect("stale statement-snapshot lookup failed")
+    .unwrap_or_default();
+    let fresh = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u2', hydrate := false)",
+    )
+    .expect("fresh statement-snapshot lookup failed")
+    .unwrap_or_default();
+    Spi::run("RESET ROLE").expect("reset statement-snapshot reader failed");
+
+    assert_eq!(same_statement, source_oracle);
+    assert_eq!((same_statement, stale, fresh), (0, 0, 1));
+}
+
+#[pg_test]
+fn depth_zero_lazy_matches_eager_for_visible_hidden_and_absent_rows() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_depth_zero_lazy_reader;
+         CREATE ROLE graph_depth_zero_lazy_reader;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_depth_zero_lazy_policy
+             ON public.graph_test_users_pgtest USING (id = 'u1');
+         GRANT USAGE ON SCHEMA graph, public TO graph_depth_zero_lazy_reader;
+         GRANT USAGE ON SCHEMA public TO graph_depth_zero_lazy_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_depth_zero_lazy_reader",
+    )
+    .expect("configure depth-zero lazy RLS fixture failed");
+    Spi::run("SET ROLE graph_depth_zero_lazy_reader").expect("set depth-zero reader failed");
+
+    let visible = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+            'graph_test_users_pgtest'::regclass, 'u1', max_depth := 0, hydrate := false)",
+    )
+    .expect("visible depth-zero traversal failed")
+    .unwrap_or_default();
+    let hidden = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.traverse(
+            'graph_test_users_pgtest'::regclass, 'u2', max_depth := 0, hydrate := false)",
+    )
+    .expect("hidden depth-zero traversal failed")
+    .unwrap_or_default();
+    let absent_sqlstate = Spi::get_one::<String>(
+        "SELECT public.graph_test_sqlstate(
+            $sql$SELECT * FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass, 'missing',
+                max_depth := 0, hydrate := false)$sql$)",
+    )
+    .expect("capture absent depth-zero SQLSTATE failed");
+    Spi::run("RESET ROLE").expect("reset depth-zero reader failed");
+
+    assert_eq!((visible, hidden), (1, 0));
+    assert_eq!(absent_sqlstate.as_deref(), Some("P0002"));
+}
+
+#[test]
+fn hidden_and_absent_direct_identity_preserve_1_1_diagnostic_distinction() {
+    // The 1.1 public contract keeps projection-absent seeds as PG010/P0002,
+    // while a projected row hidden by RLS returns no topology row.
+    assert_eq!(crate::safety::GraphError::NodeNotFound {
+        table: "1".into(),
+        pk: "missing".into(),
+    }
+    .sqlstate(), "P0002");
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn lazy_visibility_cancellation_clears_statement_state() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_lazy_cancel_policy
+             ON public.graph_test_users_pgtest USING (true);
+         SELECT graph._test_arm_lazy_visibility_cancel()",
+    )
+    .expect("arm lazy visibility cancellation failed");
+
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        Spi::run(
+            "SELECT * FROM graph.get_node(
+                'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+        )
+        .expect("armed lazy lookup unexpectedly returned an SPI error");
+    }))
+    .catch_when(
+        pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+        |_| cancelled.store(true, std::sync::atomic::Ordering::Relaxed),
+    )
+    .execute();
+    let state_empty = Spi::get_one::<bool>(
+        "SELECT graph._test_visibility_resolution_state_empty()",
+    )
+    .expect("read lazy visibility state failed")
+    .unwrap_or(false);
+    let retry_count = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    )
+    .expect("retry direct lookup after cancellation failed")
+    .unwrap_or_default();
+
+    assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(state_empty);
+    assert_eq!(retry_count, 1);
+}
+
+#[pg_test]
+fn recursive_rls_policy_graph_lookup_fails_closed_and_cleans_up() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_recursive_visibility_reader;
+         CREATE ROLE graph_recursive_visibility_reader;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE FUNCTION public.graph_recursive_visibility_policy()
+             RETURNS boolean
+             LANGUAGE sql STABLE
+             AS $$
+                 SELECT EXISTS (
+                     SELECT 1 FROM graph.get_node(
+                         'default', 'graph_test_users_pgtest', 'u1', hydrate := false)
+                 )
+             $$;
+         CREATE POLICY graph_recursive_visibility_policy
+             ON public.graph_test_users_pgtest
+             USING (public.graph_recursive_visibility_policy());
+         GRANT USAGE ON SCHEMA graph, public TO graph_recursive_visibility_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest
+             TO graph_recursive_visibility_reader;
+         GRANT EXECUTE ON FUNCTION public.graph_recursive_visibility_policy()
+             TO graph_recursive_visibility_reader;
+         SET ROLE graph_recursive_visibility_reader",
+    )
+    .expect("configure recursive RLS policy failed");
+
+    let rejected = std::sync::atomic::AtomicBool::new(false);
+    pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        Spi::run(
+            "SELECT * FROM graph.get_node(
+                'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+        )
+        .expect("recursive visibility query unexpectedly returned an SPI error");
+    }))
+    .catch_when(
+        pgrx::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+        |_| rejected.store(true, std::sync::atomic::Ordering::Relaxed),
+    )
+    .execute();
+    Spi::run("RESET ROLE").expect("reset recursive visibility reader failed");
+    let detail = sql_error_detail(
+        "SET ROLE graph_recursive_visibility_reader;
+         SELECT * FROM graph.get_node(
+             'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    );
+    Spi::run(
+        "RESET ROLE;
+         DROP POLICY graph_recursive_visibility_policy
+             ON public.graph_test_users_pgtest;
+         CREATE POLICY graph_recursive_visibility_policy
+             ON public.graph_test_users_pgtest USING (true)",
+    )
+    .expect("replace recursive visibility policy failed");
+    #[cfg(feature = "development")]
+    let state_empty = Spi::get_one::<bool>(
+        "SELECT graph._test_visibility_resolution_state_empty()",
+    )
+    .expect("read recursive visibility state failed")
+    .unwrap_or(false);
+    let retry = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    )
+    .expect("retry after recursive policy failed")
+    .unwrap_or_default();
+    assert!(rejected.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(detail.as_deref(), Some("pgGraph diagnostic: PG024"));
+    #[cfg(feature = "development")]
+    assert!(state_empty);
+    assert_eq!(retry, 1);
+}
+
+#[pg_test]
+fn direct_identity_lazy_uses_effective_security_definer_role() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_lazy_wrapper_owner;
+         CREATE ROLE graph_lazy_wrapper_owner;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_lazy_wrapper_policy
+             ON public.graph_test_users_pgtest USING (id = 'u1');
+         GRANT USAGE ON SCHEMA graph, public TO graph_lazy_wrapper_owner;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_lazy_wrapper_owner;
+         CREATE FUNCTION public.graph_lazy_wrapper_lookup(candidate text)
+             RETURNS bigint
+             LANGUAGE sql
+             SECURITY DEFINER
+             SET search_path = pg_catalog, pg_temp
+             AS $$
+                 SELECT count(*) FROM graph.get_node(
+                     'default', 'graph_test_users_pgtest', candidate, hydrate := false)
+             $$;
+         ALTER FUNCTION public.graph_lazy_wrapper_lookup(text)
+             OWNER TO graph_lazy_wrapper_owner",
+    )
+    .expect("configure security-definer lazy visibility fixture failed");
+
+    let visible = Spi::get_one_with_args::<i64>(
+        "SELECT public.graph_lazy_wrapper_lookup($1)",
+        &["u1".into()],
+    )
+    .expect("visible wrapper lookup failed")
+    .unwrap_or_default();
+    let hidden = Spi::get_one_with_args::<i64>(
+        "SELECT public.graph_lazy_wrapper_lookup($1)",
+        &["u2".into()],
+    )
+    .expect("hidden wrapper lookup failed")
+    .unwrap_or_default();
+
+    assert_eq!((visible, hidden), (1, 0));
+}
+
+#[pg_test]
+fn direct_identity_lazy_supports_composite_keys_without_text_casting_columns() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SELECT graph.add_table(
+             'graph_test_composite_pgtest'::regclass,
+             id_columns := ARRAY['org_id', 'user_id'],
+             columns := ARRAY['label']
+         );
+         SELECT * FROM graph.build();
+         DROP ROLE IF EXISTS graph_composite_lazy_reader;
+         CREATE ROLE graph_composite_lazy_reader;
+         ALTER TABLE public.graph_test_composite_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_composite_lazy_policy
+             ON public.graph_test_composite_pgtest
+             USING (user_id = 'emp1');
+         GRANT USAGE ON SCHEMA graph, public TO graph_composite_lazy_reader;
+         GRANT SELECT ON public.graph_test_composite_pgtest TO graph_composite_lazy_reader;
+         SET ROLE graph_composite_lazy_reader",
+    )
+    .expect("configure composite lazy visibility fixture failed");
+
+    let visible = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_composite_pgtest', '[\"org1\", \"emp1\"]',
+            hydrate := false)",
+    )
+    .expect("visible composite lookup failed")
+    .unwrap_or_default();
+    let hidden = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_composite_pgtest', '[\"org1\", \"emp2\"]',
+            hydrate := false)",
+    )
+    .expect("hidden composite lookup failed")
+    .unwrap_or_default();
+    Spi::run("RESET ROLE").expect("reset composite reader failed");
+
+    assert_eq!((visible, hidden), (1, 0));
+}
+
+#[pg_test]
+fn direct_identity_probe_plan_retains_primary_key_index_lookup() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    let table_oid = Spi::get_one::<pgrx::pg_sys::Oid>(
+        "SELECT 'public.graph_test_users_pgtest'::regclass::oid",
+    )
+    .expect("read direct visibility table OID failed")
+    .expect("direct visibility table OID was NULL")
+    .to_u32();
+    let (tables, _, _) = crate::catalog::read_catalog().expect("read graph catalog failed");
+    let (payload, query) =
+        crate::sql_visibility::_test_build_node_probe_query(table_oid, &tables, "u1")
+            .expect("build production direct visibility probe failed");
+    let explain = format!("EXPLAIN (FORMAT JSON, COSTS OFF) {query}");
+    let plan = Spi::connect(|client| {
+        client
+            .select(&explain, None, &[payload.into()])?
+            .first()
+            .get::<pgrx::Json>(1)
+    })
+    .expect("explain production direct visibility probe failed")
+    .expect("direct visibility EXPLAIN returned no plan");
+    let rendered = plan.0.to_string();
+    assert!(
+        rendered.contains("Index Only Scan") || rendered.contains("Index Scan"),
+        "direct visibility probe did not retain the primary-key index: {rendered}"
+    );
+}
+
+#[pg_test]
+fn direct_identity_no_rls_rejects_a_stale_projected_source_row() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "DELETE FROM public.graph_test_friendships_pgtest
+          WHERE user_id = 'u1' OR friend_id = 'u1';
+         DELETE FROM public.graph_test_users_pgtest WHERE id = 'u1'",
+    )
+        .expect("delete source row without syncing projection failed");
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    )
+    .expect("stale projected lookup failed")
+    .unwrap_or_default();
+    assert_eq!(count, 0);
+}
+
+#[pg_test]
+fn direct_identity_legacy_bypass_still_checks_source_existence() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "DELETE FROM public.graph_test_friendships_pgtest
+          WHERE user_id = 'u1' OR friend_id = 'u1';
+         DELETE FROM public.graph_test_users_pgtest WHERE id = 'u1';
+         SET LOCAL graph.rls_mode = 'legacy_bypass'",
+    )
+    .expect("configure stale legacy-bypass fixture failed");
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    )
+    .expect("legacy-bypass stale projected lookup failed")
+    .unwrap_or_default();
+    assert_eq!(count, 0);
+}
+
+#[pg_test]
+fn direct_identity_probe_memory_limit_fails_before_policy_spi() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest(id, name, age)
+         VALUES (repeat('k', 200000), 'large key', 1)",
+    )
+    .expect("insert large direct-identity key failed");
+    build_friendship_fixture_graph();
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_lazy_memory_policy
+             ON public.graph_test_users_pgtest USING (true);
+         SET LOCAL graph.query_memory_mb = 1",
+    )
+    .expect("configure lazy probe memory fixture failed");
+    let sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', repeat('k', 200000), hydrate := false)",
+    );
+    assert_eq!(sqlstate.as_deref(), Some("54000"));
+}
+
+#[pg_test]
+fn direct_identity_rls_fails_closed_for_guc_dependent_key_text() {
+    reset_and_create_fixtures();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP TABLE IF EXISTS public.graph_test_date_identity_pgtest CASCADE;
+         CREATE TABLE public.graph_test_date_identity_pgtest (
+             id date PRIMARY KEY,
+             name text NOT NULL
+         );
+         SET LOCAL datestyle = 'SQL, MDY';
+         INSERT INTO public.graph_test_date_identity_pgtest VALUES
+             (DATE '2020-01-02', 'January'),
+             (DATE '2020-02-01', 'February');
+         SELECT graph.add_table(
+             'graph_test_date_identity_pgtest'::regclass,
+             id_column := 'id', columns := ARRAY['name']
+         );
+         SELECT * FROM graph.build();
+         ALTER TABLE public.graph_test_date_identity_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_date_identity_policy
+             ON public.graph_test_date_identity_pgtest
+             USING (id = DATE '2020-02-01');
+         DROP ROLE IF EXISTS graph_date_identity_reader;
+         CREATE ROLE graph_date_identity_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_date_identity_reader;
+         GRANT USAGE ON SCHEMA public TO graph_date_identity_reader;
+         GRANT SELECT ON public.graph_test_date_identity_pgtest
+             TO graph_date_identity_reader;
+         SET LOCAL datestyle = 'ISO, DMY';
+         SET ROLE graph_date_identity_reader",
+    )
+    .expect("configure GUC-dependent identity fixture failed");
+
+    // This projected key meant January 2 at build time, but parsing it under
+    // DMY would mean February 1 and could authorize the wrong row. The direct
+    // resolver must not attempt that cast.
+    let sqlstate = Spi::get_one::<String>(
+        "SELECT public.graph_test_sqlstate(
+            $sql$SELECT * FROM graph.get_node(
+                'default', 'graph_test_date_identity_pgtest', '01/02/2020',
+                hydrate := false)$sql$)",
+    )
+    .expect("capture unsupported date identity SQLSTATE failed");
+    let eager_sqlstate = Spi::get_one::<String>(
+        "SELECT public.graph_test_sqlstate(
+            $sql$SELECT * FROM graph.traverse(
+                'graph_test_date_identity_pgtest'::regclass, '01/02/2020',
+                max_depth := 1, hydrate := false)$sql$)",
+    )
+    .expect("capture eager unsupported date identity SQLSTATE failed");
+    Spi::run("RESET ROLE").expect("reset date identity reader failed");
+    assert_eq!(sqlstate.as_deref(), Some("0A000"));
+    assert_eq!(eager_sqlstate.as_deref(), Some("0A000"));
+}
+
+#[pg_test]
+fn eager_relationship_rls_fails_closed_for_guc_dependent_identity_text() {
+    reset_and_create_fixtures();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP TABLE IF EXISTS public.graph_test_date_edges_pgtest CASCADE;
+         CREATE TABLE public.graph_test_date_edges_pgtest (
+             edge_date date PRIMARY KEY,
+             source_id text NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+             target_id text NOT NULL REFERENCES public.graph_test_users_pgtest(id)
+         );
+         SET LOCAL datestyle = 'SQL, MDY';
+         INSERT INTO public.graph_test_date_edges_pgtest VALUES
+             (DATE '2020-01-02', 'u1', 'u2'),
+             (DATE '2020-02-01', 'u2', 'u1');
+         SELECT graph.add_table(
+             'graph_test_users_pgtest'::regclass,
+             id_column := 'id', columns := ARRAY['name', 'age']
+         );
+         SELECT graph.add_edge(
+             'graph_test_date_edges_pgtest'::regclass,
+             'source_id', 'graph_test_users_pgtest'::regclass,
+             'target_id', 'dated'
+         );
+         SELECT * FROM graph.build();
+         ALTER TABLE public.graph_test_date_edges_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_date_edge_policy
+             ON public.graph_test_date_edges_pgtest
+             USING (edge_date = DATE '2020-02-01');
+         DROP ROLE IF EXISTS graph_date_edge_reader;
+         CREATE ROLE graph_date_edge_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_date_edge_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest,
+             public.graph_test_date_edges_pgtest TO graph_date_edge_reader;
+         SET LOCAL datestyle = 'ISO, DMY';
+         SET ROLE graph_date_edge_reader",
+    )
+    .expect("configure GUC-dependent relationship identity fixture failed");
+
+    let sqlstate = Spi::get_one::<String>(
+        "SELECT public.graph_test_sqlstate(
+            $sql$SELECT * FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass, 'u1',
+                max_depth := 1, hydrate := false)$sql$)",
+    )
+    .expect("capture unsupported relationship identity SQLSTATE failed");
+    Spi::run("RESET ROLE").expect("reset date edge reader failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("0A000"));
+}
+
+#[pg_test]
+fn eager_visibility_checks_outer_acl_before_unstable_identity_details() {
+    reset_and_create_fixtures();
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP TABLE IF EXISTS public.graph_test_acl_date_identity_pgtest CASCADE;
+         CREATE TABLE public.graph_test_acl_date_identity_pgtest (
+             id date PRIMARY KEY,
+             name text NOT NULL
+         );
+         INSERT INTO public.graph_test_acl_date_identity_pgtest
+         VALUES (DATE '2020-01-02', 'hidden');
+         SELECT graph.add_table(
+             'graph_test_acl_date_identity_pgtest'::regclass,
+             id_column := 'id', columns := ARRAY['name']
+         );
+         SELECT * FROM graph.build();
+         ALTER TABLE public.graph_test_acl_date_identity_pgtest
+             ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_acl_date_identity_policy
+             ON public.graph_test_acl_date_identity_pgtest USING (true);
+         DROP ROLE IF EXISTS graph_acl_date_identity_reader;
+         CREATE ROLE graph_acl_date_identity_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_acl_date_identity_reader;
+         SET ROLE graph_acl_date_identity_reader",
+    )
+    .expect("configure ACL-before-identity fixture failed");
+
+    let sqlstate = Spi::get_one::<String>(
+        "SELECT public.graph_test_sqlstate(
+            $sql$SELECT * FROM graph.traverse(
+                'graph_test_acl_date_identity_pgtest'::regclass,
+                '2020-01-02', max_depth := 1, hydrate := false)$sql$)",
+    )
+    .expect("capture ACL-before-identity SQLSTATE failed");
+    Spi::run("RESET ROLE").expect("reset ACL-before-identity reader failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("42501"));
+}
+
+#[pg_test]
+fn direct_identity_lazy_observes_transaction_delta_and_savepoint_rollback() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SET graph.mutable_enabled = on;
+         SELECT graph.add_table(
+             'graph_test_users_pgtest'::regclass,
+             id_column := 'id', columns := ARRAY['name', 'age']
+         );
+         SELECT * FROM graph.build(mode := 'mutable_overlay');
+         SELECT * FROM graph.gql(
+             'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u'
+         );
+         DO $block$
+         BEGIN
+             PERFORM * FROM graph.gql(
+                 'CREATE (u:graph_test_users_pgtest {id: ''u4'', name: ''Drew'', age: 31}) RETURN u'
+             );
+             RAISE EXCEPTION 'rollback nested write';
+         EXCEPTION WHEN others THEN
+             NULL;
+         END
+         $block$;
+         ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_lazy_tx_policy ON public.graph_test_users_pgtest
+             USING (id IN ('u3', 'u4'));
+         DROP ROLE IF EXISTS graph_lazy_tx_reader;
+         CREATE ROLE graph_lazy_tx_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_lazy_tx_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_lazy_tx_reader;
+         SET ROLE graph_lazy_tx_reader",
+    )
+    .expect("configure transaction-local lazy identity fixture failed");
+
+    let committed_in_transaction = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u3', hydrate := false)",
+    )
+    .expect("transaction-local direct identity failed")
+    .unwrap_or_default();
+    let rolled_back = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u4', hydrate := false)",
+    )
+    .expect("rolled-back direct identity lookup failed")
+    .unwrap_or_default();
+    Spi::run("RESET ROLE").expect("reset transaction-local lazy reader failed");
+
+    assert_eq!((committed_in_transaction, rolled_back), (1, 0));
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn lazy_visibility_policy_error_propagates_without_caching_or_stranding_state() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE FUNCTION public.graph_lazy_error_policy()
+             RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
+             BEGIN
+                 PERFORM 1 / 0;
+                 RETURN true;
+             END
+             $$;
+         CREATE POLICY graph_lazy_error_policy
+             ON public.graph_test_users_pgtest
+             USING (public.graph_lazy_error_policy());
+         DROP ROLE IF EXISTS graph_lazy_error_reader;
+         CREATE ROLE graph_lazy_error_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_lazy_error_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_lazy_error_reader;
+         GRANT EXECUTE ON FUNCTION public.graph_lazy_error_policy()
+             TO graph_lazy_error_reader;
+         SET ROLE graph_lazy_error_reader",
+    )
+    .expect("configure policy-error fixture failed");
+
+    let rejected = std::sync::atomic::AtomicBool::new(false);
+    pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        Spi::run(
+            "SELECT * FROM graph.get_node(
+                'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+        )
+        .expect("errored policy unexpectedly returned an SPI error");
+    }))
+    .catch_when(
+        pgrx::PgSqlErrorCode::ERRCODE_DIVISION_BY_ZERO,
+        |_| rejected.store(true, std::sync::atomic::Ordering::Relaxed),
+    )
+    .execute();
+    Spi::run(
+        "RESET ROLE;
+         DROP POLICY graph_lazy_error_policy ON public.graph_test_users_pgtest;
+         CREATE POLICY graph_lazy_error_policy
+             ON public.graph_test_users_pgtest USING (true);
+         SET ROLE graph_lazy_error_reader",
+    )
+    .expect("replace errored policy failed");
+    let state_empty = Spi::get_one::<bool>(
+        "SELECT graph._test_visibility_resolution_state_empty()",
+    )
+    .expect("read post-error visibility state failed")
+    .unwrap_or(false);
+    let retry = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    )
+    .expect("retry after policy error failed")
+    .unwrap_or_default();
+    Spi::run("RESET ROLE").expect("reset policy-error reader failed");
+
+    assert!(rejected.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(state_empty);
+    assert_eq!(retry, 1);
+}
+
+#[cfg(feature = "development")]
+#[pg_test]
+fn lazy_visibility_policy_cancellation_cleans_state_during_spi() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE FUNCTION public.graph_lazy_cancel_policy()
+             RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
+             BEGIN
+                 RAISE SQLSTATE '57014' USING MESSAGE = 'cancel inside RLS policy';
+             END
+             $$;
+         CREATE POLICY graph_lazy_cancel_policy
+             ON public.graph_test_users_pgtest
+             USING (public.graph_lazy_cancel_policy());
+         DROP ROLE IF EXISTS graph_lazy_timeout_reader;
+         CREATE ROLE graph_lazy_timeout_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_lazy_timeout_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest TO graph_lazy_timeout_reader;
+         SET ROLE graph_lazy_timeout_reader",
+    )
+    .expect("configure policy-timeout fixture failed");
+
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        Spi::run(
+            "SELECT * FROM graph.get_node(
+                'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+        )
+        .expect("policy cancellation unexpectedly returned an SPI error");
+    }))
+    .catch_when(
+        pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+        |_| cancelled.store(true, std::sync::atomic::Ordering::Relaxed),
+    )
+    .execute();
+    Spi::run(
+        "RESET ROLE;
+         DROP POLICY graph_lazy_cancel_policy ON public.graph_test_users_pgtest;
+         CREATE POLICY graph_lazy_cancel_policy
+             ON public.graph_test_users_pgtest USING (true);
+         SET ROLE graph_lazy_timeout_reader",
+    )
+    .expect("replace timed-out policy failed");
+    let state_empty = Spi::get_one::<bool>(
+        "SELECT graph._test_visibility_resolution_state_empty()",
+    )
+    .expect("read post-timeout visibility state failed")
+    .unwrap_or(false);
+    let retry = Spi::get_one::<i64>(
+        "SELECT count(*) FROM graph.get_node(
+            'default', 'graph_test_users_pgtest', 'u1', hydrate := false)",
+    )
+    .expect("retry after policy timeout failed")
+    .unwrap_or_default();
+    Spi::run("RESET ROLE").expect("reset policy-timeout reader failed");
+
+    assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(state_empty);
+    assert_eq!(retry, 1);
+}
+
+#[pg_test]
 fn direct_neighbor_lookup_expands_after_business_id_resolution() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

@@ -71,6 +71,7 @@ pub(crate) enum GraphDiagnosticCode {
     RlsTopologyBoundary,
     SyncLogPruned,
     RlsRelationshipIdentityMissing,
+    RecursiveVisibilityResolution,
 }
 
 impl GraphDiagnosticCode {
@@ -101,6 +102,7 @@ impl GraphDiagnosticCode {
             Self::RlsTopologyBoundary => "PG021",
             Self::SyncLogPruned => "PG022",
             Self::RlsRelationshipIdentityMissing => "PG023",
+            Self::RecursiveVisibilityResolution => "PG024",
         }
     }
 }
@@ -208,6 +210,9 @@ pub enum GraphError {
         "RLS enforcement found a projected relationship without a durable source-row identity"
     )]
     RlsRelationshipIdentityMissing, // PG023
+
+    #[error("recursive graph visibility resolution is not supported")]
+    RecursiveVisibilityResolution, // PG024
 
     #[error("Internal error: {0}")]
     Internal(String),
@@ -328,6 +333,11 @@ impl GraphError {
             ),
             GraphError::RlsRelationshipIdentityMissing => (
                 GraphDiagnosticCode::RlsRelationshipIdentityMissing,
+                "55000",
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ),
+            GraphError::RecursiveVisibilityResolution => (
+                GraphDiagnosticCode::RecursiveVisibilityResolution,
                 "55000",
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             ),
@@ -459,6 +469,10 @@ impl GraphError {
             }
             GraphError::RlsRelationshipIdentityMissing => {
                 "Run graph.build() to rebuild the projection with durable relationship identities before retrying with graph.rls_mode = 'enforce'."
+                    .to_string()
+            }
+            GraphError::RecursiveVisibilityResolution => {
+                "Do not call pgGraph topology functions from a row-level security policy used by the same graph query."
                     .to_string()
             }
             GraphError::Internal(_) => {

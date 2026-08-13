@@ -180,7 +180,7 @@ they would to a direct `SELECT`.
 
 The 1.1 topology APIs build one statement-scoped
 visibility scope after freshness handling. For each registered source relation
-where PostgreSQL says RLS applies to the outer caller, pgGraph scans
+where PostgreSQL says RLS applies to the effective SQL execution role, pgGraph scans
 caller-visible source keys and intersects them with projected node and
 relationship identities. Hidden seeds and targets behave as nonexistent, and
 hidden nodes or relationship rows are rejected before they affect
@@ -201,20 +201,38 @@ derived workflows, path enumeration, and topology-producing mapped-write
 matching. PostgreSQL DML then rechecks source-table RLS, ACLs, constraints, and
 triggers before a mapped write commits.
 
+Post-1.1 direct probes for `get_node()` and true depth-zero traversal use
+ordinary primary-key equality for built-in key types whose text representation
+is independent of session formatting settings. If a topology shape can consume
+an RLS-active node or relationship mapping whose projected identity uses a
+date/time, array, domain, extension, or custom type, that shape fails closed
+with `0A000` instead of matching text produced under possibly different session
+settings. Direct `get_node()` probes validate the requested node mapping;
+expanding and whole-graph shapes validate every mapping they can consume.
+Positive-depth and whole-graph shapes continue to use eager scans for supported
+stable key types while the resumable traversal work proceeds.
+
 An RLS-active projected relationship must carry its durable source-row
 identity. A legacy artifact that lacks that identity fails closed with SQLSTATE
 `55000`, diagnostic `PG023`, and a rebuild-required hint.
 
+An RLS policy must not call a pgGraph topology function that resolves the same
+policy recursively. pgGraph rejects that shape with SQLSTATE `55000` and
+diagnostic `PG024`; keep policy predicates in ordinary PostgreSQL relations or
+session settings and invoke topology outside the policy.
+
 ## Query Identity And Telemetry Authorization
 
 In pgGraph 1.1 query entry points execute as the PostgreSQL caller. Source-table
-SQL used for hydration and visibility checks therefore sees the application
-role and its normal ACL/RLS environment. pgGraph does not switch Rust user IDs.
+SQL used for hydration and visibility checks therefore sees the effective SQL
+role for policy evaluation and source SQL. pgGraph does not switch Rust user IDs.
 If an application deliberately calls pgGraph from its own `SECURITY DEFINER`
 wrapper, PostgreSQL changes the effective `current_user` to that wrapper's
 owner. Source-table policy queries observe that effective role, just like a
 direct `SELECT` executed inside the same wrapper; granting such a wrapper is
-therefore a security decision by its owner.
+therefore a security decision by its owner. pgGraph's explicit source-table ACL
+preflight still authorizes the outer application role, so a wrapper does not
+delegate source-table `SELECT` privileges that its invoker lacks.
 Selected-graph resolution and private catalog maintenance use small
 `SECURITY DEFINER` mediators that capture the outer role, pin `search_path` to
 `pg_catalog, pg_temp`, and enforce graph grants before accessing internal
@@ -317,6 +335,7 @@ operators to distinguish pgGraph conditions that share a standard SQLSTATE.
 | `55000` | `PG021` | Legacy 1.0 row-level security build boundary | Upgrade to the 1.1 behavior; `graph.allow_rls_tables` is retained only as a no-op compatibility setting |
 | `55000` | `PG022` | Sync replay position predates a prune | Run `graph.build()` or `graph.vacuum()` for a fresh consistent base, then resume normal sync |
 | `55000` | `PG023` | RLS relationship identity missing | Rebuild the projection so every relationship has a durable source-row identity |
+| `55000` | `PG024` | Recursive RLS visibility resolution | Remove nested pgGraph topology calls from the source-table RLS policy |
 | `XX000` | `PG000` | Internal error | Report with full message and reproduction |
 
 ## Disable Query Functions

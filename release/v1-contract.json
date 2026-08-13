@@ -124,6 +124,11 @@
       "diagnostic": "PG023",
       "sqlstate": "55000",
       "variant": "RlsRelationshipIdentityMissing"
+    },
+    {
+      "diagnostic": "PG024",
+      "sqlstate": "55000",
+      "variant": "RecursiveVisibilityResolution"
     }
   ],
   "distribution": {
@@ -136,7 +141,7 @@
       "GitHub release archive"
     ]
   },
-  "gql_implementation_sha256": "47abb8fc122e10f9899e23a4d60f4d280c20a28a8cafde61756bcfcdb8fafda7",
+  "gql_implementation_sha256": "2552ead666aea1776a7bcde1d7bb8c01cc4dff2b23fb7d618132e859ac85668e",
   "gql_profile": {
     "assurance_profiles": {
       "read": {
