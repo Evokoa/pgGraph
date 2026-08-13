@@ -392,8 +392,10 @@ fn execute_statement_governed(
                     &context,
                 )
             })?;
-            ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
-            ensure_gql_relationship_rows_visible(&matches, &plan, governor)?;
+            measure_gql_read_recheck(matches.len(), || {
+                ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
+                ensure_gql_relationship_rows_visible(&matches, &plan, governor)
+            })?;
             let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::requires_hydration(&plan, hydrate),
@@ -445,7 +447,9 @@ fn execute_statement_governed(
                     &context,
                 )
             })?;
-            ensure_gql_node_rows_visible(&matches, governor, catalog_tables)?;
+            measure_gql_read_recheck(matches.len(), || {
+                ensure_gql_node_rows_visible(&matches, governor, catalog_tables)
+            })?;
             let hydrated = hydrate_gql_node_rows_governed(
                 &matches,
                 crate::query::value::node_scan_requires_hydration(&plan, hydrate),
@@ -470,8 +474,10 @@ fn execute_statement_governed(
                     &context,
                 )
             })?;
-            ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
-            ensure_gql_join_relationship_rows_visible(&matches, &plan, governor)?;
+            measure_gql_read_recheck(matches.len(), || {
+                ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
+                ensure_gql_join_relationship_rows_visible(&matches, &plan, governor)
+            })?;
             let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::join_requires_hydration(&plan, hydrate),
@@ -496,8 +502,10 @@ fn execute_statement_governed(
                     &context,
                 )
             })?;
-            ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
-            ensure_gql_wildcard_relationship_rows_visible(&matches, &plan, governor)?;
+            measure_gql_read_recheck(matches.len(), || {
+                ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
+                ensure_gql_wildcard_relationship_rows_visible(&matches, &plan, governor)
+            })?;
             let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::wildcard_path_requires_hydration(&plan, hydrate),
@@ -4062,6 +4070,24 @@ fn hydrate_gql_rows_governed(
         }
     }
     Ok(hydrated)
+}
+
+fn measure_gql_read_recheck<T>(
+    rows: usize,
+    recheck: impl FnOnce() -> safety::GraphResult<T>,
+) -> safety::GraphResult<T> {
+    #[cfg(feature = "development")]
+    {
+        let started_at = std::time::Instant::now();
+        let result = recheck();
+        crate::sql_visibility::record_gql_read_recheck(rows, started_at.elapsed());
+        result
+    }
+    #[cfg(not(feature = "development"))]
+    {
+        let _ = rows;
+        recheck()
+    }
 }
 
 /// Check source-row visibility before exposing graph coordinates or topology.

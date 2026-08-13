@@ -7856,13 +7856,20 @@ fn gql_identity_bounded_expansion_lazy_matches_eager_rls_optional_multipattern_o
         .expect("force lazy P4.6 GQL failed");
     let mut lazy = Vec::with_capacity(queries.len());
     let mut selected = Vec::with_capacity(queries.len());
+    let mut read_recheck_calls = Vec::with_capacity(queries.len());
     for query in queries {
         lazy.push(p46_graph_query_rows("gql", query));
+        let metrics = p46_visibility_metrics();
         selected.push(
-            p46_visibility_metrics()["selected_strategy"]
+            metrics["selected_strategy"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
+        );
+        read_recheck_calls.push(
+            metrics["gql_read_recheck_calls"]
+                .as_u64()
+                .unwrap_or_default(),
         );
     }
     let metrics = p46_visibility_metrics();
@@ -7874,6 +7881,8 @@ fn gql_identity_bounded_expansion_lazy_matches_eager_rls_optional_multipattern_o
     assert_eq!(lazy[1].as_array().map(Vec::len), Some(1));
     assert_eq!(lazy[2].as_array().map(Vec::len), Some(1));
     assert_eq!(selected, ["lazy", "lazy", "eager"]);
+    assert_eq!(read_recheck_calls[..2], [0, 0]);
+    assert!(read_recheck_calls[2] > 0);
     assert!(metrics["spi_calls"].as_u64().unwrap_or_default() > 0);
 }
 
@@ -8095,6 +8104,8 @@ fn gql_no_rls_identity_bounded_fast_path_has_zero_resolver_spi() {
     assert_eq!(rows.as_array().map(Vec::len), Some(1));
     assert_eq!(metrics["spi_calls"].as_u64(), Some(0));
     assert_eq!(metrics["requested_keys"].as_u64(), Some(0));
+    assert_eq!(metrics["gql_read_recheck_calls"].as_u64(), Some(1));
+    assert!(metrics["gql_read_recheck_rows"].as_u64().unwrap_or_default() > 0);
 }
 
 #[cfg(feature = "development")]

@@ -48,6 +48,17 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     panic!("function `{signature}` has unbalanced braces")
 }
 
+fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start_offset = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing section start `{start}`"));
+    let remaining = &source[start_offset..];
+    let end_offset = remaining
+        .find(end)
+        .unwrap_or_else(|| panic!("missing section end `{end}` after `{start}`"));
+    &remaining[..end_offset + end.len()]
+}
+
 fn csv_column<'a>(header: &[&str], row: &'a [&str], name: &str) -> &'a str {
     let index = header
         .iter()
@@ -206,7 +217,6 @@ fn any_future_adaptive_selector_reuses_known_verdicts_instead_of_restarting_poli
 }
 
 #[test]
-#[ignore = "P5.2 release runner and metrics checkpoint"]
 fn p5_runner_records_gql_selector_resource_and_relationship_summary_metrics() {
     let runner = repo_source("graph/tests/heavy/rls_large_table_baseline.sh");
     for required in [
@@ -217,6 +227,7 @@ fn p5_runner_records_gql_selector_resource_and_relationship_summary_metrics() {
         "memory_peak_bytes",
         "work_units",
         "relationship_completeness_checks",
+        "selector_class",
     ] {
         assert!(
             runner.contains(required),
@@ -226,6 +237,120 @@ fn p5_runner_records_gql_selector_resource_and_relationship_summary_metrics() {
     assert!(
         runner.contains("NODE_COUNT:-1000000") && runner.contains("10000000"),
         "the retained runner must own explicit 1M and 10M release profiles"
+    );
+    assert!(
+        runner.contains("full|compact|p3_selective|p5_release")
+            && runner.contains("RUN_PROFILE must be full, compact, p3_selective, or p5_release"),
+        "p5_release must be an explicit validated runner profile"
+    );
+
+    let sample_schema = section(
+        &runner,
+        "CREATE TABLE public.rls_bench_samples",
+        "GRANT INSERT ON public.rls_bench_samples TO :role_name;",
+    );
+    for column in [
+        "selected_strategy text NOT NULL",
+        "selector_class text NOT NULL",
+        "memory_peak_bytes bigint NOT NULL",
+        "work_units bigint NOT NULL",
+        "relationship_completeness_checks bigint NOT NULL",
+        "gql_read_recheck_calls bigint NOT NULL",
+        "gql_read_recheck_rows bigint NOT NULL",
+        "gql_read_recheck_elapsed_micros bigint NOT NULL",
+    ] {
+        assert!(
+            sample_schema.contains(column),
+            "P5 sample schema must retain `{column}`"
+        );
+    }
+
+    let measure = section(
+        &runner,
+        "CREATE FUNCTION public.rls_bench_measure",
+        "GRANT EXECUTE ON FUNCTION public.rls_bench_measure(text,text,text,text,text,text,text,text,bigint,integer) TO :role_name;",
+    );
+    for metric in [
+        "metrics->>'selected_strategy'",
+        "metrics->>'memory_peak_bytes'",
+        "metrics->>'work_units'",
+        "metrics->>'relationship_completeness_checks'",
+        "metrics->>'gql_read_recheck_calls'",
+        "metrics->>'gql_read_recheck_rows'",
+        "metrics->>'gql_read_recheck_elapsed_micros'",
+    ] {
+        assert!(
+            measure.contains(metric),
+            "P5 measurement must persist the runtime metric `{metric}`"
+        );
+    }
+    assert!(
+        measure.contains("selector_class text")
+            && measure.contains("selector_class, key_shape")
+            && !measure.contains("WHEN 'lazy' THEN 'targeted'"),
+        "selector_class must be supplied by the workload shape, independently of its oracle strategy"
+    );
+    assert!(
+        measure.contains("PERFORM graph._test_set_visibility_strategy(visibility_strategy)")
+            && measure.find("EXECUTE query_sql INTO observed")
+                < measure.find("metrics := graph._test_visibility_metrics()"),
+        "each sample must reset metrics before execution and read them immediately afterward"
+    );
+
+    for required_case in [
+        "p5_gql_identity_one_hop_auto",
+        "p5_gql_whole_source_auto",
+        "p5_no_rls_auto",
+    ] {
+        assert!(
+            runner.contains(required_case),
+            "P5 runner must execute `{required_case}`"
+        );
+    }
+    assert!(
+        runner.contains("selected_strategy <> 'lazy'")
+            && runner.contains("selected_strategy <> 'eager'")
+            && runner.contains("spi_calls <> 0")
+            && runner.contains("source_rows <> 0")
+            && runner.contains("relationship_completeness_checks"),
+        "P5 runner must fail when selector, no-RLS, or completeness telemetry is semantically wrong"
+    );
+}
+
+#[test]
+fn p5_metrics_surface_resets_statement_counters_and_reports_resource_snapshot() {
+    let visibility = crate_source("src/sql_visibility.rs");
+    let setter = function_body(&visibility, "fn test_set_visibility_strategy");
+    let metrics = function_body(&visibility, "fn test_visibility_metrics");
+
+    for reset in [
+        "VISIBILITY_SELECTED_STRATEGY",
+        "VISIBILITY_LAST_METRICS",
+        "BFS_VISIBILITY_LAST_METRICS",
+        "GQL_READ_RECHECK_METRICS",
+    ] {
+        assert!(
+            setter.contains(reset),
+            "strategy reset must clear `{reset}` before each retained sample"
+        );
+    }
+    for field in [
+        "selected_strategy",
+        "relationship_completeness_checks",
+        "memory_peak_bytes",
+        "work_units",
+        "gql_read_recheck_calls",
+        "gql_read_recheck_rows",
+        "gql_read_recheck_elapsed_micros",
+    ] {
+        assert!(
+            metrics.contains(field),
+            "development metrics JSON must expose `{field}`"
+        );
+    }
+    assert!(
+        metrics.contains("last_operation_snapshot"),
+        "resource telemetry must come from the completed operation snapshot"
     );
 }
 

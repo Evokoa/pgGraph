@@ -75,6 +75,8 @@ thread_local! {
 
     #[cfg(feature = "development")]
     static BFS_VISIBILITY_LAST_METRICS: Cell<BfsVisibilityMetrics> = const { Cell::new(BfsVisibilityMetrics::EMPTY) };
+    #[cfg(feature = "development")]
+    static GQL_READ_RECHECK_METRICS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
 
     #[cfg(feature = "development")]
     static BFS_VISIBILITY_RESOLUTION_DROPPED: Cell<bool> = const { Cell::new(true) };
@@ -2213,6 +2215,8 @@ fn test_visibility_metrics() -> pgrx::JsonB {
     let strategy = VISIBILITY_STRATEGY_OVERRIDE.with(Cell::get);
     let selected_strategy = VISIBILITY_SELECTED_STRATEGY.with(Cell::get);
     let resource = crate::resource::last_operation_snapshot();
+    let (gql_read_recheck_calls, gql_read_recheck_rows, gql_read_recheck_elapsed_micros) =
+        GQL_READ_RECHECK_METRICS.with(Cell::get);
     pgrx::JsonB(serde_json::json!({
         "strategy": match strategy {
             VisibilityStrategyOverride::Auto => "auto",
@@ -2236,6 +2240,9 @@ fn test_visibility_metrics() -> pgrx::JsonB {
         "relationship_completeness_checks": bfs.relationship_completeness_checks,
         "memory_peak_bytes": resource.as_ref().map(|snapshot| snapshot.memory_peak_bytes).unwrap_or(0),
         "work_units": resource.as_ref().map(|snapshot| snapshot.work_units).unwrap_or(0),
+        "gql_read_recheck_calls": gql_read_recheck_calls,
+        "gql_read_recheck_rows": gql_read_recheck_rows,
+        "gql_read_recheck_elapsed_micros": gql_read_recheck_elapsed_micros,
     }))
 }
 
@@ -2253,8 +2260,22 @@ fn test_set_visibility_strategy(strategy: &str) -> bool {
     };
     VISIBILITY_STRATEGY_OVERRIDE.with(|slot| slot.set(strategy));
     VISIBILITY_SELECTED_STRATEGY.with(|slot| slot.set(VisibilityStrategyOverride::Auto));
+    VISIBILITY_LAST_METRICS.with(|metrics| metrics.set((0, 0, 0)));
     BFS_VISIBILITY_LAST_METRICS.with(|metrics| metrics.set(BfsVisibilityMetrics::EMPTY));
+    GQL_READ_RECHECK_METRICS.with(|metrics| metrics.set((0, 0, 0)));
     true
+}
+
+#[cfg(feature = "development")]
+pub(crate) fn record_gql_read_recheck(rows: usize, elapsed: std::time::Duration) {
+    GQL_READ_RECHECK_METRICS.with(|metrics| {
+        let (calls, prior_rows, elapsed_micros) = metrics.get();
+        metrics.set((
+            calls.saturating_add(1),
+            prior_rows.saturating_add(u64::try_from(rows).unwrap_or(u64::MAX)),
+            elapsed_micros.saturating_add(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)),
+        ));
+    });
 }
 
 #[cfg(feature = "development")]

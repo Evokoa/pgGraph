@@ -462,6 +462,16 @@ and static/dynamic mapping selection preserves the established ACL and error
 ordering. P5.2 owns runner telemetry and read-recheck measurement; P5.3 owns
 the retained 1M/10M release matrix and public closure.
 
+P5.2 completed on 2026-08-13. The release runner now records the selected
+physical strategy separately from the workload class, exact ordered result
+digests, visibility time and source work, governed peak memory/work, and
+relationship-completeness checks. Development telemetry also measures the
+remaining eager GQL read-result rechecks without adding production timing
+overhead. The focused release profile proves bounded identity-seeded GQL
+selection against its eager PostgreSQL oracle, retains whole-source eager
+selection, and checks the unrestricted zero-resolver-SPI path. P5.3 remains
+open for clean statistical 1M and dedicated-host 10M evidence.
+
 - Start with deterministic targeted-lazy/global-eager selection.
 - Add adaptive fallback only if retained benchmarks beat the deterministic
   strategy; reuse known verdicts and never restart policy work from zero.
