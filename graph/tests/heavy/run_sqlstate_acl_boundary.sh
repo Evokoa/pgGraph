@@ -3,6 +3,7 @@ set -euo pipefail
 
 DBNAME="${DBNAME:-pggraph_boundary}"
 ROLE_NAME="${ROLE_NAME:-${DBNAME}_restricted}"
+WRAPPER_ROLE_NAME="${WRAPPER_ROLE_NAME:-${DBNAME}_definer}"
 GQL_SQLSTATE_REQUIRED="${GQL_SQLSTATE_REQUIRED:-0}"
 
 run_sql() {
@@ -219,7 +220,7 @@ run_sql "CREATE TABLE public.graph_boundary_public_nodes (id TEXT PRIMARY KEY, s
 run_sql "INSERT INTO public.graph_boundary_nodes VALUES ('c', 't1', 'Carol', 30, NULL), ('b', 't2', 'Bob', 20, 'c'), ('a', 't1', 'Alice', 10, 'b'), ('d', 't1', 'Dana', 40, NULL), ('e', 't1', 'Eve', 50, NULL), ('f', 't1', 'Frank', 60, NULL);"
 run_sql "INSERT INTO public.graph_boundary_edges (from_id, to_id, visible_to, edge_weight) VALUES ('a', 'c', 'graph_boundary_other', 1), ('a', 'd', '$ROLE_NAME', 2), ('d', 'c', '$ROLE_NAME', 2), ('e', 'f', 'graph_boundary_other', 1);"
 run_sql "INSERT INTO public.graph_boundary_output_nodes VALUES ('o1');"
-run_sql "INSERT INTO public.graph_boundary_identity_nodes VALUES ('visible', '$ROLE_NAME', 'Visible'), ('hidden', 'graph_boundary_other', 'Hidden');"
+run_sql "INSERT INTO public.graph_boundary_identity_nodes VALUES ('visible', '$ROLE_NAME', 'Visible'), ('wrapper', '$WRAPPER_ROLE_NAME', 'Wrapper'), ('hidden', 'graph_boundary_other', 'Hidden');"
 run_sql "INSERT INTO public.graph_boundary_sparse_nodes SELECT 's' || value::text, value FROM generate_series(0, 999) AS value;"
 run_sql "INSERT INTO public.graph_boundary_secret_nodes VALUES ('s1', 'o1', 1);"
 run_sql "INSERT INTO public.graph_boundary_public_nodes VALUES ('p1', 's1', 1);"
@@ -257,7 +258,9 @@ fi
 expect_sqlstate "55000" "SET graph.enabled = off; SELECT * FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 1);"
 
 run_sql "DROP ROLE IF EXISTS $ROLE_NAME;"
+run_sql "DROP ROLE IF EXISTS $WRAPPER_ROLE_NAME;"
 run_sql "CREATE ROLE $ROLE_NAME LOGIN;"
+run_sql "CREATE ROLE $WRAPPER_ROLE_NAME NOLOGIN;"
 run_sql "GRANT USAGE ON SCHEMA graph TO $ROLE_NAME;"
 run_sql "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graph TO $ROLE_NAME;"
 run_sql "GRANT SELECT ON public.graph_boundary_nodes TO $ROLE_NAME;"
@@ -265,12 +268,15 @@ run_sql "GRANT SELECT ON public.graph_boundary_edges TO $ROLE_NAME;"
 run_sql "GRANT SELECT ON public.graph_boundary_public_nodes, public.graph_boundary_output_nodes TO $ROLE_NAME;"
 run_sql "ALTER TABLE public.graph_boundary_identity_nodes ENABLE ROW LEVEL SECURITY;"
 run_sql "CREATE POLICY graph_boundary_identity_rls ON public.graph_boundary_identity_nodes FOR SELECT TO $ROLE_NAME USING (visible_to = current_user);"
+run_sql "CREATE POLICY graph_boundary_identity_definer_rls ON public.graph_boundary_identity_nodes FOR SELECT TO $WRAPPER_ROLE_NAME USING (visible_to = current_user);"
 run_sql "GRANT SELECT ON public.graph_boundary_identity_nodes TO $ROLE_NAME;"
 run_sql "GRANT DELETE ON public.graph_boundary_identity_nodes TO $ROLE_NAME;"
 run_sql "CREATE POLICY graph_boundary_identity_delete_rls ON public.graph_boundary_identity_nodes FOR DELETE TO $ROLE_NAME USING (visible_to = current_user);"
 run_sql "GRANT SELECT ON public.graph_boundary_sparse_nodes TO $ROLE_NAME;"
 run_sql "ALTER TABLE public.graph_boundary_sparse_nodes ENABLE ROW LEVEL SECURITY;"
 run_sql "CREATE POLICY graph_boundary_sparse_rls ON public.graph_boundary_sparse_nodes FOR SELECT TO $ROLE_NAME USING (CASE current_setting('graph.boundary_policy', true) WHEN 'sparse_allow' THEN ordinal % 100 = 0 WHEN 'sparse_deny' THEN ordinal % 100 <> 0 ELSE false END);"
+run_sql "CREATE POLICY graph_boundary_sparse_extra_permissive ON public.graph_boundary_sparse_nodes AS PERMISSIVE FOR SELECT TO $ROLE_NAME USING (current_setting('graph.boundary_policy', true) = 'combined' AND ordinal IN (7, 250));"
+run_sql "CREATE POLICY graph_boundary_sparse_restrictive ON public.graph_boundary_sparse_nodes AS RESTRICTIVE FOR SELECT TO $ROLE_NAME USING ((NULLIF(current_setting('graph.boundary_min', true), '') IS NULL OR ordinal >= NULLIF(current_setting('graph.boundary_min', true), '')::int) AND (NULLIF(current_setting('graph.boundary_max', true), '') IS NULL OR ordinal <= NULLIF(current_setting('graph.boundary_max', true), '')::int));"
 
 expect_value_as_login "$ROLE_NAME" "1" "SELECT count(*) FROM graph.traverse('public.graph_boundary_identity_nodes'::regclass, 'visible', 0, hydrate := true) WHERE node->>'name' = 'Visible';"
 expect_value_as_login "$ROLE_NAME" "0" "SELECT count(*) FROM graph.traverse('public.graph_boundary_identity_nodes'::regclass, 'hidden', 0, hydrate := true);"
@@ -279,6 +285,19 @@ expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_policy = 'sparse_allo
 expect_value_as_login "$ROLE_NAME" "0" "SET graph.boundary_policy = 'sparse_allow'; SELECT count(*) FROM graph.traverse('public.graph_boundary_sparse_nodes'::regclass, 's1', 0, hydrate := false);"
 expect_value_as_login "$ROLE_NAME" "0" "SET graph.boundary_policy = 'sparse_deny'; SELECT count(*) FROM graph.traverse('public.graph_boundary_sparse_nodes'::regclass, 's0', 0, hydrate := false);"
 expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_policy = 'sparse_deny'; SELECT count(*) FROM graph.traverse('public.graph_boundary_sparse_nodes'::regclass, 's1', 0, hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_policy = 'combined'; SET graph.boundary_min = '0'; SET graph.boundary_max = '100'; SELECT count(*) FROM graph.traverse('public.graph_boundary_sparse_nodes'::regclass, 's7', 0, hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "1" "SET graph.boundary_policy = 'combined'; SET graph.boundary_min = '0'; SET graph.boundary_max = '100'; SELECT count(*) FROM graph.traverse('public.graph_boundary_sparse_nodes'::regclass, 's7', 0, hydrate := true) WHERE node->>'ordinal' = '7';"
+expect_value_as_login "$ROLE_NAME" "0" "SET graph.boundary_policy = 'combined'; SET graph.boundary_min = '0'; SET graph.boundary_max = '100'; SELECT count(*) FROM graph.traverse('public.graph_boundary_sparse_nodes'::regclass, 's8', 0, hydrate := false);"
+expect_value_as_login "$ROLE_NAME" "0" "SET graph.boundary_policy = 'combined'; SET graph.boundary_min = '0'; SET graph.boundary_max = '100'; SELECT count(*) FROM graph.traverse('public.graph_boundary_sparse_nodes'::regclass, 's250', 0, hydrate := false);"
+
+run_sql "GRANT USAGE ON SCHEMA graph TO $WRAPPER_ROLE_NAME;"
+run_sql "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graph TO $WRAPPER_ROLE_NAME;"
+run_sql "GRANT SELECT ON public.graph_boundary_identity_nodes, public.graph_boundary_sparse_nodes TO $WRAPPER_ROLE_NAME;"
+run_sql "CREATE OR REPLACE FUNCTION public.graph_boundary_definer_visibility() RETURNS text LANGUAGE sql SECURITY DEFINER SET search_path TO pg_catalog, pg_temp AS 'SELECT concat_ws('','', current_user::text, graph._test_rls_applies_to_outer_caller(''public.graph_boundary_identity_nodes''::regclass)::text, (SELECT string_agg(node_id, '','' ORDER BY node_id) FROM graph.traverse(ARRAY[''public.graph_boundary_identity_nodes''::regclass::oid, ''public.graph_boundary_identity_nodes''::regclass::oid, ''public.graph_boundary_identity_nodes''::regclass::oid], ARRAY[''visible'', ''wrapper'', ''hidden''], max_depth := 0, hydrate := false)))';"
+run_sql "ALTER FUNCTION public.graph_boundary_definer_visibility() OWNER TO $WRAPPER_ROLE_NAME;"
+run_sql "REVOKE ALL ON FUNCTION public.graph_boundary_definer_visibility() FROM PUBLIC;"
+run_sql "GRANT EXECUTE ON FUNCTION public.graph_boundary_definer_visibility() TO $ROLE_NAME;"
+expect_value_as_login "$ROLE_NAME" "$WRAPPER_ROLE_NAME,true,wrapper" "SELECT public.graph_boundary_definer_visibility();"
 
 expect_value_as_login "$ROLE_NAME" "3" "SELECT count(*) FROM graph.traverse('public.graph_boundary_nodes'::regclass, 'a', 2, edge_types := ARRAY['boundary'], hydrate := false);"
 

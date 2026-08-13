@@ -72,6 +72,10 @@ proptest = "=1.11.0"
 name = "bfs_bench"
 harness = false
 
+[[bench]]
+name = "edge_type_width_bench"
+harness = false
+
 [profile.dev]
 panic = "unwind"
 

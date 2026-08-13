@@ -1,0 +1,2 @@
+postgres_major,node_count,composite_count,edge_count,projected_nodes,projected_directed_edges,node_table_bytes,composite_table_bytes,edge_table_bytes,build_time_ms,projection_memory_mib
+17,1000000,1000000,999999,2000000,1999998,107003904,116080640,82771968,111477,176.25

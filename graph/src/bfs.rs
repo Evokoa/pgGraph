@@ -1139,6 +1139,11 @@ fn node_coordinate(node_store: &NodeStore, node_idx: u32) -> GraphResult<(TableO
 mod tests {
     //! Covers breadth-first traversal semantics, including depth limits,
     //! directionality, active-node filtering, and edge-type constraints.
+    //!
+    //! Hidden-versus-absent comparisons below cover caller-visible rows,
+    //! chosen paths, counts, caps, and truncation. They deliberately do not
+    //! claim equal physical work, timing, or client diagnostics; PostgreSQL
+    //! boundary tests own those contracts.
 
     use super::*;
     use crate::edge_store::RawEdge;
@@ -1257,6 +1262,94 @@ mod tests {
         assert!(!result.visited.contains(2));
         assert!(!result.visited.contains(3));
         assert!(!result.truncated);
+    }
+
+    #[test]
+    fn hidden_candidate_matches_absent_topology_at_the_bfs_output_boundary() {
+        let mut nodes = NodeStore::new();
+        for id in ["seed", "hidden", "visible", "later"] {
+            nodes.add_node(100, id.to_string());
+        }
+        let raw = |target| RawEdge {
+            source: 0,
+            target,
+            type_id: 1,
+            weight: None,
+            schema_reversed: false,
+        };
+        let projected = EdgeStore::from_edges(4, vec![raw(1), raw(2), raw(3)], false);
+        let physically_absent = EdgeStore::from_edges(4, vec![raw(2), raw(3)], false);
+        let filter_index = FilterIndex::new();
+        let config = BfsConfig {
+            seed_node: 0,
+            max_depth: 1,
+            max_nodes: 2,
+            max_frontier: 100,
+            edge_type_filter: crate::types::EdgeTypeFilter::All,
+            filter_ops: vec![],
+            tenant: None,
+            tenanted_table_oids: HashSet::new(),
+            tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
+            overlay_insert_edges: std::collections::HashMap::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
+        };
+        let governor = crate::resource::ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1_024 * 1_024)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::new(1_000),
+            ElapsedBudget::new(Duration::from_secs(1)),
+        ));
+        let mut hidden_nodes = RoaringBitmap::new();
+        hidden_nodes.insert(1);
+        let hidden_scope =
+            VisibilityScope::enforced(hidden_nodes, RoaringBitmap::new(), RoaringBitmap::new());
+        let hidden_context = QueryExecutionContext::new(&governor, &hidden_scope);
+        let absent_context = QueryExecutionContext::new(&governor, &VisibilityScope::Unrestricted);
+
+        let hidden = execute_governed_with_context(
+            &nodes,
+            &projected,
+            &filter_index,
+            &config,
+            &hidden_context,
+        )
+        .unwrap();
+        let absent = execute_governed_with_context(
+            &nodes,
+            &physically_absent,
+            &filter_index,
+            &config,
+            &absent_context,
+        )
+        .unwrap();
+        let registry = [String::new(), "REL".to_string()];
+        let summarize = |result: &BfsResult| {
+            to_traversal_results(result, &nodes, &registry)
+                .unwrap()
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.node_id,
+                        row.depth,
+                        row.path
+                            .into_iter()
+                            .map(|coordinate| coordinate.node_id)
+                            .collect::<Vec<_>>(),
+                        row.edge_path,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(summarize(&hidden), summarize(&absent));
+        assert_eq!(hidden.visited.len(), absent.visited.len());
+        assert_eq!(hidden.truncated, absent.truncated);
+        assert!(
+            hidden.truncated,
+            "the shared max_nodes cap must be exercised"
+        );
     }
 
     #[test]

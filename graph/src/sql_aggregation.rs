@@ -1099,6 +1099,47 @@ mod tests {
 
         assert_eq!(paths.len(), 1);
         assert_eq!(&*paths[0], &[0]);
+
+        let mut absent_engine = Engine::new();
+        absent_engine.node_store.add_node(100, "A".to_string());
+        absent_engine.node_store.add_node(100, "B".to_string());
+        absent_engine.edge_store = SortedEdgeStoreBuilder::new(2, false).finish();
+        absent_engine.reverse_edge_store = absent_engine.edge_store.reversed();
+        absent_engine.built = true;
+        let absent_overlays = aggregation_edge_overlay(&absent_engine);
+        let absent_visibility = crate::visibility::VisibilityScope::Unrestricted;
+        let absent_context =
+            crate::visibility::QueryExecutionContext::new(&governor, &absent_visibility);
+        let mut absent_path = vec![0];
+        let mut absent_paths = Vec::new();
+        let mut absent_seen = HashSet::new();
+        enumerate_all_paths_dfs(
+            &absent_engine,
+            &request,
+            0,
+            0,
+            &mut absent_path,
+            &mut absent_paths,
+            &mut absent_seen,
+            10,
+            None,
+            None,
+            &absent_overlays,
+            None,
+            &absent_context,
+        )
+        .unwrap();
+
+        assert_eq!(
+            paths
+                .iter()
+                .map(|path| path.as_ref())
+                .collect::<Vec<&[u32]>>(),
+            absent_paths
+                .iter()
+                .map(|path| path.as_ref())
+                .collect::<Vec<&[u32]>>()
+        );
     }
 
     #[test]

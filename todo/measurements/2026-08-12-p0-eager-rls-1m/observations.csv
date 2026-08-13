@@ -1,0 +1,3 @@
+case_name,status,total_ms,visibility_us,result_rows,hidden_nodes,hidden_relationships,lower_bound_seconds,provenance
+none_no_rls_scalar_depth0,complete,3712,9,1,0,0,,manual run notes; total_ms rounded to the recorded millisecond
+node_broad_allow_scalar_depth0,censored_manual_cancel,,,,,,600,manual run notes; cancellation occurred after more than 600 seconds

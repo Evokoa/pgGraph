@@ -16,6 +16,7 @@ This is the quick index for repository scripts. The detailed maintainer guide is
 | `scripts/check_rust_doc_map_drift.py` | Checks contributor documentation against the Rust source map. |
 | `scripts/check_release_contract.py` | Checks the machine-readable 1.x SQL, GUC, diagnostic, distribution, and GQL-profile inventory. |
 | `scripts/check_sql_api_drift.py` | Checks SQL API and GUC documentation against implementation. |
+| `scripts/check_topology_security_inventory.py` | Exhaustively classifies public SQL functions, exact-matches topology entrypoints and overloads, and checks each body-scoped route to visibility composition; Rust context types and semantic tests prove the execution boundary. |
 | `scripts/clean_generated_artifacts.sh` | Deletes generated local artifacts: `graph/target/`, `graph/fuzz/target/`, and `.DS_Store` files. |
 | `scripts/inspect_pggraph_artifact.py` | Prints JSON metadata for a `.pggraph` persistence artifact. |
 | `scripts/quickstart.sh` | Runs quickstart workflows: full local demo, install into existing Docker Postgres, local pgrx install, and one-click playground preset setup. |
@@ -36,6 +37,10 @@ PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
 The heavy inventory includes `playground_release_gate.sh`, which prepares the
 Docker-backed Panama playground in CSR or mutable mode and verifies every shared
 playground SQL example against fixed release-gate result summaries.
+
+`rls_large_table_baseline.sh` retains correctness-checked scalar, composite-key,
+and relationship-row RLS latency evidence. Use its compact profile for staged
+1M-row work and reserve the 10M profile for a benchmark host.
 
 The aggregate release gate runs secret scanning by default. Run it directly
 from any repository directory when needed:

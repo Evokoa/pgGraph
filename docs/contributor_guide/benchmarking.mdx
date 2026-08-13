@@ -202,6 +202,48 @@ generated `report.json`, the exact command you ran, machine and Docker details,
 and any relevant notes about local load, Docker resource limits, storage, or
 cache state.
 
+## Caller-Scoped RLS Baseline
+
+Use the dedicated heavy runner before changing visibility strategy or its
+resource accounting:
+
+```bash
+cd graph
+NODE_COUNT=1000000 RUN_PROFILE=compact \
+  ./tests/heavy/rls_large_table_baseline.sh
+```
+
+The runner builds scalar-key, composite-key, and standalone relationship-row
+sources, then executes correctness-checked no-RLS, node-only, relationship-only,
+and combined RLS cases as a real login. `RUN_PROFILE=full` adds shallow/deep
+traversal and shortest-path cases. Set `NODE_COUNT=10000000` only on a benchmark
+host sized for the resulting source tables and backend-local projection.
+
+If a case reaches `STATEMENT_TIMEOUT_MS`, the runner exits nonzero but retains
+the earlier samples, a `censored_statement_timeout` attempt, the PostgreSQL
+error log, metadata, and source-query plans. This is a censored lower bound, not
+a latency sample. Exact SPI-call, scanned-key, scanned-byte, graph-only-time,
+and peak-governed-byte metrics remain `NA` until coordinator instrumentation is
+available.
+
+Before changing relationship-type storage, compile or run the benchmark-only
+width fixture:
+
+```bash
+cd graph
+cargo bench --features pg17 --bench edge_type_width_bench --no-run
+```
+
+It compares one-, two-, and four-byte encoded type sections at the reserved-ID
+boundaries without changing the production artifact format.
+
+Each run retains raw samples, percentile summaries, fixture metadata, source
+policy plans, and the exact commit. Development builds expose visibility time
+and hidden-identity counts. Exact nested SPI-call, requested-key, and byte-scan
+counts are recorded as `NA` until dedicated instrumentation exists; do not
+infer them from elapsed time. A cancelled or timed-out eager run is censored
+evidence and must not be reported as a completed latency sample.
+
 ## Internal Rust Benchmarks
 
 The Criterion benchmark target lives in `graph/benches/bfs_bench.rs`.

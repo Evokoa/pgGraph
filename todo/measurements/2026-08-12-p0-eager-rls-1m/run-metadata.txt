@@ -1,0 +1,14 @@
+date=2026-08-12
+commit=577ef2a plus uncommitted P0 benchmark/test changes
+dirty=true
+platform=local Apple Silicon
+postgres_major=17
+run_profile=compact
+samples=1
+warmups=0
+query_memory_mb=1024
+node_count=1000000
+composite_count=1000000
+raw_statement_log_retained=false
+exact_unrounded_sample_retained=false
+source_explain_plans_retained=false

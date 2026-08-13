@@ -210,6 +210,11 @@ identity. A legacy artifact that lacks that identity fails closed with SQLSTATE
 In pgGraph 1.1 query entry points execute as the PostgreSQL caller. Source-table
 SQL used for hydration and visibility checks therefore sees the application
 role and its normal ACL/RLS environment. pgGraph does not switch Rust user IDs.
+If an application deliberately calls pgGraph from its own `SECURITY DEFINER`
+wrapper, PostgreSQL changes the effective `current_user` to that wrapper's
+owner. Source-table policy queries observe that effective role, just like a
+direct `SELECT` executed inside the same wrapper; granting such a wrapper is
+therefore a security decision by its owner.
 Selected-graph resolution and private catalog maintenance use small
 `SECURITY DEFINER` mediators that capture the outer role, pin `search_path` to
 `pg_catalog, pg_temp`, and enforce graph grants before accessing internal

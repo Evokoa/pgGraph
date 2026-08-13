@@ -877,6 +877,11 @@ mod tests {
                 (raw(4, 3), 14),
             ],
         );
+        let absent_shortcut = identified_store(
+            5,
+            false,
+            vec![(raw(0, 2), 12), (raw(2, 4), 13), (raw(4, 3), 14)],
+        );
         let mut hidden_nodes = RoaringBitmap::new();
         hidden_nodes.insert(1);
         let visibility =
@@ -897,6 +902,28 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let absent_context = QueryExecutionContext::new(&governor, &VisibilityScope::Unrestricted);
+        let absent_result = shortest_path_with_neighbors_governed_with_context(
+            &nodes,
+            &CsrNeighbors::new(&absent_shortcut),
+            UnweightedPathRequest {
+                source: 0,
+                target: 3,
+                max_depth: 5,
+                has_unidirectional_edges: true,
+                edge_type_registry: &["REL".to_string(), "REL".to_string()],
+            },
+            &absent_context,
+        )
+        .unwrap()
+        .unwrap();
+        let summarize = |path: &[crate::types::PathStep]| {
+            path.iter()
+                .map(|step| (step.step, step.node_id.clone(), step.edge_label.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(summarize(&result), summarize(&absent_result));
         assert_eq!(
             result
                 .iter()

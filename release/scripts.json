@@ -877,6 +877,38 @@
       "decision": "keep"
     },
     {
+      "path": "graph/tests/heavy/rls_large_table_baseline.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash",
+        "cargo-pgrx",
+        "pg_config",
+        "psql",
+        "createdb",
+        "dropdb",
+        "git"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
       "path": "graph/tests/heavy/run_crash_matrix.sh",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -2177,6 +2209,31 @@
     },
     {
       "path": "scripts/check_sql_api_drift.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/check_topology_security_inventory.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
       "tier": "pr",

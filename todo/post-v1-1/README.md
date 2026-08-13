@@ -37,9 +37,13 @@ contracts:
 - Algorithms never invoke SPI while holding an `ENGINE` borrow. Lazy execution
   materializes a bounded ordered candidate batch, releases the borrow, resolves
   through PostgreSQL, and resumes in the original order.
-- Caller-visible topology results and documented diagnostics do not distinguish
-  hidden from absent rows. Timing and physical work are not claimed to be
-  noninterfering; the governor may charge examined projection entries.
+- After an input coordinate resolves in the projection, caller-visible
+  topology results and documented diagnostics do not distinguish a
+  policy-hidden source row from the same source row absent at the PostgreSQL
+  visibility snapshot. A coordinate absent from the projection retains the
+  existing unresolved-coordinate diagnostic. Timing and physical work are not
+  claimed to be noninterfering; the governor may charge examined projection
+  entries.
 - New allocations and inputs are checked and charged before allocation or
   authoritative DML. Less memory produces smaller batches or a typed resource
   error, never an ungoverned allocation.
@@ -135,8 +139,8 @@ public documentation, retained evidence, and independent Rust review are green.
 
 | Phase | Status | Exit gate |
 |---|---|---|
-| P0 | In progress | Contracts, surface inventory, semantic corpus, and representative large-table baselines are frozen before production behavior changes. |
-| P1 | Not started | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
+| P0 | Complete | Contracts, surface inventory, semantic corpus, and representative large-table baselines are frozen before production behavior changes. |
+| P1 | In progress | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
 | P2 | Not started | Direct identity and endpoint resolution use bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Not started | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent. |
 | P4 | Not started | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
@@ -162,20 +166,52 @@ public documentation, retained evidence, and independent Rust review are green.
   sealed proof produced by policy preparation.
 - Add missing real-role policy cases: combined permissive/restrictive policies
   and user-created `SECURITY DEFINER` wrappers.
-- Add output-equivalence fixtures for hidden versus absent topology covering
-  rows, exact paths, counts, caps, truncation, and documented diagnostics. Do
-  not assert equal timing or physical work.
-- Add representative large-table RLS benchmarks for 1M and 10M source rows,
+- Add output-equivalence fixtures for a policy-hidden topology candidate versus
+  the same candidate absent from the projected topology, covering rows, exact
+  paths, counts, caps, and truncation. Keep the public unresolved-seed
+  diagnostic contract separate; do not assert equal timing or physical work.
+- Freeze a reproducible large-table RLS runner for 1M and 10M source rows,
   sparse-allow and sparse-deny policies, shallow/deep traversal, scalar and
   composite identities, node-only and relationship RLS, and no-RLS controls.
-- Record visibility time, graph time, SPI calls, keys/bytes scanned, p50/p95,
-  peak governed bytes, and query plans.
+  Retain a local 1M lower bound even when the eager query is censored by the
+  statement timeout; P5 owns completed 1M/10M comparative runs.
+- Record available visibility time, total time, p50/p95, result/hidden counts,
+  table sizes, and source-query plans. Mark unavailable SPI-call, scanned-key,
+  scanned-byte, graph-only-time, and peak-governed-byte fields `NA`; P1 adds
+  bounded coordinator instrumentation before P5 makes comparative claims.
 - Freeze batch API/resource/diagnostic decisions and EdgeTypeId width/artifact
   benchmark fixtures without changing production behavior.
 
-**Exit:** the safety corpus and measurements can detect both a visibility
-regression and a performance improvement. No optimization claim is based on a
-small fixture alone.
+**Exit:** the safety corpus detects visibility regressions, the runner can
+retain complete or censored large-table evidence, and the width/artifact
+benchmark candidates are reproducible. This phase makes no optimization claim;
+P5 requires completed 1M/10M comparative evidence on a suitable host.
+
+**P0 evidence (2026-08-12):**
+
+- `scripts/check_topology_security_inventory.py` exhaustively partitions the
+  public SQL contract, exactly matches topology `#[pg_extern]` entry points and
+  overloads, and checks each function's body-scoped route through visibility
+  composition. Rust context types and PostgreSQL semantic tests remain the
+  execution-boundary proof.
+- `graph/tests/heavy/run_sqlstate_acl_boundary.sh` covers PostgreSQL's combined
+  permissive/restrictive policy semantics and user-created `SECURITY DEFINER`
+  effective-role behavior through real login sessions.
+- Focused BFS, unweighted-path, and exact-path enumeration tests compare a
+  policy-hidden candidate or relationship with the same topology physically
+  absent, including returned coordinates, selected paths, counts, caps, and
+  truncation. Timing, physical work, and unresolved-coordinate diagnostics are
+  intentionally outside that equivalence contract.
+- `graph/tests/heavy/rls_large_table_baseline.sh` owns the parameterized scalar,
+  composite, relationship-row, node-only, edge-only, combined, and no-RLS
+  baseline. The retained [1M result](../measurements/2026-08-12-p0-eager-rls-1m/README.md)
+  records a completed no-RLS control and a cancelled `>600s` eager RLS query.
+  The 10M graph run remains a dedicated-host P5 exit gate because the current
+  eager 1M query already exceeded ten minutes.
+- `graph/benches/edge_type_width_bench.rs` freezes decode and artifact-copy
+  fixtures at the one-/two-/four-byte boundaries (254, 255, 65,534, and 65,535
+  labels), including a fixed-`u32` low-cardinality comparison, without changing
+  production types or artifact bytes.
 
 ### P1: Introduce the eager coordinator
 

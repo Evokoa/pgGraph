@@ -28,7 +28,7 @@ subject to the documented SQL, security, freshness, and resource contracts.
 |---|---|---|
 | Playground portability and stability fixes | Implemented in 1.1 | Docker and Podman setup, deterministic Panama data, Python-shim handling, policy-compliant reuse of pre-provisioned virtual environments, cached initialization, scoped statement timeouts, and stable data-frame rendering |
 | Cancellation-safe graph replacement | Implemented in 1.1 | Build, vacuum, foreground/background maintenance, projection compaction/repair, and durable sync ingestion publish only validated generations under one per-graph writer lock. Cancellation before publication retains the previous generation and removes only the recorded unpublished candidate; interruption after publication reconciles the backend to the new generation. Low-memory eviction is rejected unless the serving base, projection files, and relationship-identity sidecar pass recovery validation. |
-| Caller-preserving query boundary | Implemented in 1.1 | Topology query entry points run as `SECURITY INVOKER`, so hydration and other source-table SQL observe the outer application role. Narrow `SECURITY DEFINER` catalog mediators pin `search_path`, capture the outer role, and expose only authorized graph metadata; they do not switch Rust user IDs. |
+| Caller-preserving query boundary | Implemented in 1.1 | Topology query entry points run as `SECURITY INVOKER`, so direct calls execute hydration and source-table SQL as the application role. A caller-authored `SECURITY DEFINER` wrapper deliberately changes PostgreSQL's effective `current_user` to its owner, as direct SQL in that wrapper does. Narrow pgGraph catalog mediators pin `search_path`, capture the outer role for graph authorization, and do not switch Rust user IDs. |
 | Caller-scoped topology RLS | Implemented in 1.1 | Every topology-producing surface intersects projected nodes and relationship identities with caller-visible source rows before admission. This includes direct traversal and path APIs, workflows, components and statistics, aggregation and path estimates, GQL node/identity scans, optional and multi-pattern matches, wildcard paths, Cypher lowering, and the projected MATCH phase of mapped GQL writes. PostgreSQL DML remains the final write authority. |
 | Operational telemetry authorization | Implemented in 1.1 | Selected/named-graph status requires read authorization, artifact and build-resource status requires selected-graph admin authorization, cluster/resource telemetry requires graph-schema administration, and runtime rows are filtered to caller-readable graphs. These are physical totals, not RLS-row-filtered query results. |
 | Query-start catalog deduplication | Implemented in 1.1 | Each topology query initialization composes one owned state from the selected graph and one registered-catalog read. Fingerprints, schema drift, tenant scope, and applicable sync relations derive from that state; caller/graph-bound sync mediators and automatic replay reuse it without weakening freshness, ACL, or sync checks. |
@@ -38,7 +38,8 @@ subject to the documented SQL, security, freshness, and resource contracts.
 ## Current RLS Boundary
 
 The 1.1 topology, GQL, Cypher, workflow, component, and analytics APIs
-evaluate applicable node and relationship policies as the caller, then exclude
+evaluate applicable node and relationship policies in the effective PostgreSQL
+execution context, then exclude
 hidden identities before reachability, limits, paths, costs, component unions,
 statistics, or aggregate inputs are computed. Hidden seeds and targets behave
 as nonexistent, a hidden intermediate blocks visible nodes behind it,
