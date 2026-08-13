@@ -145,7 +145,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
 | P4 | In progress (P4.6 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL/Cypher expansions preserve exact result ordering and semantics; P4.7 retained evidence and closure remain. |
 | P5 | In progress (P5.2 complete) | Targeted queries select lazy and global analytics select eager; relationship-identity completeness uses fixed projection summaries; retained 1M/10M evidence remains. |
-| P6 | In progress (P6.2 complete) | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
+| P6 | In progress (P6.3 complete) | The existing `EdgeTypeId` is the one production checked authority across logical consumers and v6 adapters; behavior and artifact bytes remain unchanged while width candidates are measured. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
 | P8 | Not started | Persistent dictionaries, mutable segments, compaction, reload, and transaction-local/savepoint state support unseen labels atomically and within resource limits. |
 | P9 | Not started | SQL traversal, paths, and GQL preserve exact filtering beyond 254 labels; migration, diagnostics, docs, fuzz/property, and performance evidence are complete. |
@@ -509,14 +509,23 @@ loaded labels fail closed, and the duplicated lookup strings are included in
 engine/build memory accounting. Logical consumer migration and
 multidimensional width evidence remain P6 work.
 
+P6.3 completed on 2026-08-13. Runtime and query-layer relationship type IDs now
+use the checked logical `EdgeTypeId` across filters, neighbors, overlays,
+durable and transaction deltas, traversal and path metadata, visibility,
+aggregation, sync, and GQL execution. Raw `u8` values remain only inside the
+named v6 CSR, segment, direct-run, and artifact codecs, where decoding rejects
+the reserved physical value and encoding rejects logical IDs wider than v6.
+The v6 byte/checksum golden, full behavioral suite, and a synthetic traversal
+with logical IDs 255 and 65,534 prove that logical consumers no longer narrow.
+Multidimensional width evidence remains P6.4 work; physical CSR widening stays
+assigned to P7.
+
 - Benchmark logical `u32` with adaptive 1/2/4-byte base storage against the
   current `u8` representation across cardinality, degree, direction, and depth.
 - Freeze reserved values, maximum label count, individual label length,
   cumulative dictionary bytes, diagnostics, and artifact migration policy.
-- Promote the existing `EdgeTypeId` from its development/test boundary, widen
-  it to `u32`, and replace raw `u8` conversions across registry, edges,
-  neighbors, filters, visibility, paths, overlays, and sync while adapters
-  still encode/decode v6 `u8` bytes.
+- Keep raw type bytes confined to named, checked v6 storage adapters until P7
+  widens the physical CSR and segment formats.
 - Keep logical `UNTYPED = 0` and `SENTINEL = u32::MAX`. Sentinels are never
   serialized as edge type IDs. Each physical width reserves its all-ones code
   as invalid (`255`, `65,535`, or `u32::MAX`), so a section widens before a

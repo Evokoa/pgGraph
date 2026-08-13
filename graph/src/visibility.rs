@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::edge_store::RelationshipId;
 use crate::safety::{GraphError, GraphResult};
+use crate::types::EdgeTypeId;
 
 /// Caller-visible intersection of the loaded projection and source-table RLS.
 #[derive(Debug, Clone)]
@@ -203,7 +204,7 @@ pub(crate) struct LazyVisibilityCoordinator {
     probe_tables: std::collections::HashSet<u32>,
     policy_rls_tables: std::collections::HashSet<u32>,
     probe_mappings: std::collections::HashSet<u64>,
-    probe_edge_types: std::collections::HashSet<u8>,
+    probe_edge_types: std::collections::HashSet<crate::types::EdgeTypeId>,
 }
 
 pub(crate) struct ProvenVisibleNode {
@@ -239,7 +240,7 @@ impl LazyVisibilityCoordinator {
         probe_tables: std::collections::HashSet<u32>,
         policy_rls_tables: std::collections::HashSet<u32>,
         probe_mappings: std::collections::HashSet<u64>,
-        probe_edge_types: std::collections::HashSet<u8>,
+        probe_edge_types: std::collections::HashSet<crate::types::EdgeTypeId>,
     ) -> Self {
         Self {
             cache: VisibilityStatementCache::new(limits),
@@ -267,7 +268,7 @@ impl LazyVisibilityCoordinator {
         self.mode == LazyVisibilityMode::Enforced && self.probe_mappings.contains(&mapping_id)
     }
 
-    pub(crate) fn edge_type_requires_relationship_identity(&self, edge_type: u8) -> bool {
+    pub(crate) fn edge_type_requires_relationship_identity(&self, edge_type: EdgeTypeId) -> bool {
         self.mode == LazyVisibilityMode::Enforced && self.probe_edge_types.contains(&edge_type)
     }
 
@@ -428,7 +429,7 @@ pub(crate) enum VisibilityCandidate {
         mapping_id: u64,
         source_key: String,
         relationship_id: Option<RelationshipId>,
-        edge_type: u8,
+        edge_type: crate::types::EdgeTypeId,
     },
 }
 
@@ -717,7 +718,7 @@ impl VisibilityScope {
     #[inline(always)]
     pub(crate) fn allows_relationship(
         &self,
-        edge_type: u8,
+        edge_type: EdgeTypeId,
         relationship_id: Option<RelationshipId>,
     ) -> GraphResult<bool> {
         match &self.0 {
@@ -727,7 +728,7 @@ impl VisibilityScope {
                 hidden_relationships: _,
                 relationship_rls_edge_types,
                 ..
-            } if !relationship_rls_edge_types.contains(u32::from(edge_type)) => Ok(true),
+            } if !relationship_rls_edge_types.contains(edge_type.get()) => Ok(true),
             VisibilityState::Enforced {
                 hidden_relationships,
                 ..
@@ -834,7 +835,9 @@ mod tests {
     fn unrestricted_scope_allows_nodes_and_identityless_relationships() {
         let scope = VisibilityScope::unrestricted_for_test();
         assert!(scope.allows_node(7));
-        assert!(scope.allows_relationship(3, None).unwrap());
+        assert!(scope
+            .allows_relationship(crate::types::EdgeTypeId::test_v6(3), None)
+            .unwrap());
     }
 
     #[test]
@@ -850,11 +853,17 @@ mod tests {
 
         assert!(!scope.allows_node(7));
         assert!(scope.allows_node(8));
-        assert!(!scope.allows_relationship(3, Some(11)).unwrap());
-        assert!(scope.allows_relationship(3, Some(12)).unwrap());
-        assert!(scope.allows_relationship(4, None).unwrap());
+        assert!(!scope
+            .allows_relationship(crate::types::EdgeTypeId::test_v6(3), Some(11))
+            .unwrap());
+        assert!(scope
+            .allows_relationship(crate::types::EdgeTypeId::test_v6(3), Some(12))
+            .unwrap());
+        assert!(scope
+            .allows_relationship(crate::types::EdgeTypeId::test_v6(4), None)
+            .unwrap());
         assert!(matches!(
-            scope.allows_relationship(3, None),
+            scope.allows_relationship(crate::types::EdgeTypeId::test_v6(3), None),
             Err(GraphError::RlsRelationshipIdentityMissing)
         ));
     }
@@ -866,7 +875,9 @@ mod tests {
             RoaringBitmap::new(),
             RoaringBitmap::new(),
         );
-        assert!(scope.allows_relationship(3, None).unwrap());
+        assert!(scope
+            .allows_relationship(crate::types::EdgeTypeId::test_v6(3), None)
+            .unwrap());
     }
 
     #[test]
@@ -953,14 +964,14 @@ mod tests {
                     mapping_id: 1,
                     source_key: "same".into(),
                     relationship_id: Some(1),
-                    edge_type: 1,
+                    edge_type: crate::types::EdgeTypeId::test_v6(1),
                 },
                 VisibilityCandidate::Relationship {
                     sequence: 3,
                     mapping_id: 2,
                     source_key: "same".into(),
                     relationship_id: Some(2),
-                    edge_type: 1,
+                    edge_type: crate::types::EdgeTypeId::test_v6(1),
                 },
             ],
             VisibilityBatchLimits {
@@ -1038,7 +1049,7 @@ mod tests {
                 mapping_id: 1,
                 source_key: "edge-1".into(),
                 relationship_id: None,
-                edge_type: 3,
+                edge_type: crate::types::EdgeTypeId::test_v6(3),
             }],
             VisibilityBatchLimits {
                 max_candidates: 1,

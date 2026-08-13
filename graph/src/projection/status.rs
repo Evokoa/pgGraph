@@ -503,14 +503,14 @@ mod tests {
         edge_segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
         });
         edge_segment.edge_deletes.push(SegmentEdge {
             source: 1,
             target: 0,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
         });

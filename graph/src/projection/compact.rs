@@ -21,9 +21,14 @@ use crate::projection::manifest::{
 use crate::projection::neighbors::{NeighborSource, WeightedNeighborSource};
 use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentEdgeWeight, SegmentKind};
 use crate::safety::{GraphError, GraphResult};
-use crate::types::TraversalDirection;
+use crate::types::{EdgeTypeId, TraversalDirection};
 
-type CompactionEdgeKey = (u32, u8, bool, Option<crate::edge_store::RelationshipId>);
+type CompactionEdgeKey = (
+    u32,
+    EdgeTypeId,
+    bool,
+    Option<crate::edge_store::RelationshipId>,
+);
 const COMPACTION_FILESYSTEM_WORKSPACE_BYTES: usize = 64 * 1024;
 
 /// Bounds for one compaction pass.
@@ -1615,6 +1620,10 @@ fn compaction_tick(
     Ok(())
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "owned and mmap edge stores reject reserved v6 type bytes before publication"
+)]
 fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<CompactionEdgeKey, Option<u32>> {
     let (targets, type_ids, schema_reversed, weights) =
         store.neighbors_weighted_with_schema(source);
@@ -1628,7 +1637,8 @@ fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<CompactionEdgeKey, Optio
             (
                 (
                     target,
-                    type_id,
+                    EdgeTypeId::from_v6_storage(type_id)
+                        .expect("published topology contains validated v6 type IDs"),
                     schema_reversed != 0,
                     relationship_ids
                         .get(idx)
@@ -1979,7 +1989,7 @@ mod tests {
         weighted.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             relationship_id: None,
             weight: 11,
             schema_reversed: false,
@@ -1987,7 +1997,7 @@ mod tests {
         weighted.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             relationship_id: None,
             weight: 13,
             schema_reversed: false,
@@ -2013,14 +2023,14 @@ mod tests {
             vec![
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 11,
                     schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 13,
                     schema_reversed: false,
@@ -2039,7 +2049,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(91),
         });
@@ -2063,7 +2073,7 @@ mod tests {
             actual.neighbors(0).collect::<Vec<_>>(),
             vec![crate::projection::neighbors::Neighbor {
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(91),
             }]
@@ -2085,14 +2095,14 @@ mod tests {
             inserted.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(relationship_id),
             });
             inserted.edge_weights.push(SegmentEdgeWeight {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(relationship_id),
                 weight: relationship_id,
@@ -2103,7 +2113,7 @@ mod tests {
         deleted.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(91),
         });
@@ -2177,14 +2187,14 @@ mod tests {
             segment.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(relationship_id),
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(relationship_id),
                 weight,
@@ -2240,21 +2250,21 @@ mod tests {
         weighted.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         weighted.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: true,
             relationship_id: None,
         });
         weighted.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
             weight: 11,
@@ -2262,7 +2272,7 @@ mod tests {
         weighted.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: true,
             relationship_id: None,
             weight: 13,
@@ -2288,14 +2298,14 @@ mod tests {
             vec![
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 11,
                     schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 13,
                     schema_reversed: true,
@@ -2609,7 +2619,7 @@ mod tests {
         edge_segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             relationship_id: None,
             weight: 11,
             schema_reversed: false,
@@ -2617,7 +2627,7 @@ mod tests {
         edge_segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             relationship_id: None,
             weight: 13,
             schema_reversed: false,
@@ -2657,14 +2667,14 @@ mod tests {
             vec![
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 11,
                     schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 3,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 13,
                     schema_reversed: false,
@@ -2687,21 +2697,21 @@ mod tests {
         edge_segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         edge_segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: true,
             relationship_id: None,
         });
         edge_segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
             weight: 11,
@@ -2709,7 +2719,7 @@ mod tests {
         edge_segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: true,
             relationship_id: None,
             weight: 13,
@@ -2739,14 +2749,14 @@ mod tests {
             vec![
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 11,
                     schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 13,
                     schema_reversed: true,
@@ -2826,7 +2836,7 @@ mod tests {
                 .map(|&(source, target, type_id)| SegmentEdge {
                     source,
                     target,
-                    type_id,
+                    type_id: EdgeTypeId::test_v6(type_id),
                     schema_reversed: false,
                     relationship_id: None,
                 }),
@@ -2837,7 +2847,7 @@ mod tests {
                 .map(|&(source, target, type_id)| SegmentEdge {
                     source,
                     target,
-                    type_id,
+                    type_id: EdgeTypeId::test_v6(type_id),
                     schema_reversed: false,
                     relationship_id: None,
                 }),

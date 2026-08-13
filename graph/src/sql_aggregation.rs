@@ -13,6 +13,7 @@ use crate::sql_traversal::{
     optional_string_array, parse_node_ref_json_string, path_node_field, required_string_field,
     usize_from_nonnegative,
 };
+use crate::types::EdgeTypeId;
 use crate::{acl, safety, sql_facade::check_enabled_result, types, Engine, ENGINE};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -357,7 +358,7 @@ pub(crate) fn enumerate_all_paths_dfs(
     paths: &mut Vec<IndexedPath>,
     seen_paths: &mut HashSet<IndexedPath>,
     edge_limit: usize,
-    edge_type_filter: Option<&HashSet<u8>>,
+    edge_type_filter: Option<&HashSet<EdgeTypeId>>,
     node_table_filter: Option<&HashSet<u32>>,
     edge_overlays: &AggregationEdgeOverlay,
     layered_neighbors: Option<&LayeredNeighbors<'_>>,
@@ -450,7 +451,7 @@ fn record_indexed_path(
 pub(crate) fn aggregation_edge_type_filter(
     eng: &Engine,
     request: &AggregationTraversalRequest,
-) -> safety::GraphResult<Option<HashSet<u8>>> {
+) -> safety::GraphResult<Option<HashSet<crate::types::EdgeTypeId>>> {
     let Some(edge_types) = request
         .edge_types
         .as_ref()
@@ -1059,7 +1060,7 @@ mod tests {
                 edge: RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -1156,7 +1157,7 @@ mod tests {
                 edge: RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -1178,14 +1179,14 @@ mod tests {
         segment.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: Some(4),
         });
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: Some(9),
         });
@@ -1256,7 +1257,7 @@ mod tests {
             vec![RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             }],

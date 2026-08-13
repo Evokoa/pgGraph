@@ -14,6 +14,7 @@ use crate::builder::{RegisteredEdge, RegisteredTable};
 use crate::catalog::{primary_key_expr, sql_table_name_from_oid};
 use crate::resource::{ByteCount, ResourceGovernor, ResourcePhase, WorkUnits};
 use crate::safety::{GraphError, GraphResult};
+use crate::types::EdgeTypeId;
 use crate::visibility::{
     LazyVisibilityCoordinator, LazyVisibilityMode, ProvenVisibleNode, VisibilityBatchLimits,
     VisibilityCacheLimits, VisibilityCandidate, VisibilityCandidateBatch, VisibilityCoordinator,
@@ -164,7 +165,7 @@ struct BfsVisibilityPreparationFrame {
     node_tables: HashSet<u32>,
     policy_tables: HashSet<u32>,
     mappings: HashSet<u64>,
-    edge_types: HashSet<u8>,
+    edge_types: HashSet<EdgeTypeId>,
     has_dynamic_relationship_mapping: bool,
 }
 
@@ -378,12 +379,7 @@ pub(crate) fn prepare_eager_visibility(
                 })?);
             }
         }
-        let mut active_edge_types = [false; 256];
-        for edge_type in relationship_rls_edge_types.iter() {
-            active_edge_types[usize::try_from(edge_type).map_err(|_| {
-                GraphError::Internal("edge type index exceeds usize".to_string())
-            })?] = true;
-        }
+        let active_edge_types = relationship_rls_edge_types.clone();
         record_relationship_completeness_check();
         if !active_edges.is_empty()
             && (force_missing_relationship_identity_for_test()
@@ -529,7 +525,7 @@ pub(crate) fn prepare_direct_identity_visibility(
                         acl::check_table_acl(edge.from_table_oid)?;
                     }
                 }
-                let mut active_edge_types = [false; 256];
+                let mut active_edge_types = RoaringBitmap::new();
                 let mut has_dynamic_mapping = false;
                 for edge in edges {
                     if !acl::row_security_applies_to_effective_caller(edge.from_table_oid) {
@@ -543,13 +539,15 @@ pub(crate) fn prepare_direct_identity_visibility(
                             ))
                         })
                     })?;
-                    active_edge_types[usize::from(edge_type)] = true;
+                    active_edge_types.insert(edge_type.get());
                     has_dynamic_mapping |= edge.label_column.is_some();
                 }
                 let missing_identity = ENGINE.with(|engine| {
                     let engine = engine.borrow();
                     if has_dynamic_mapping {
-                        active_edge_types[1..engine.edge_type_registry.len()].fill(true);
+                        for edge_type in 1..engine.edge_type_registry.len() {
+                            active_edge_types.insert(edge_type as u32);
+                        }
                     }
                     force_missing_relationship_identity_for_test()
                         || engine.has_missing_relationship_identity_for_types(&active_edge_types)
@@ -656,9 +654,6 @@ pub(crate) fn prepare_bfs_visibility(
                                 edge.label
                             ))
                         })?;
-                        let edge_type = edge_type.to_v6_storage().map_err(|_| {
-                            GraphError::Internal("edge type index exceeds v6 storage".into())
-                        })?;
                         BFS_VISIBILITY_PREPARATION_SLOT.with(|slot| {
                             let mut slot = slot.borrow_mut();
                             let frame = slot.as_deref_mut().ok_or_else(|| {
@@ -699,17 +694,18 @@ pub(crate) fn prepare_bfs_visibility(
                     ENGINE.with(|engine| engine.borrow().edge_type_registry.len());
                 for edge_type in 1..edge_type_count {
                     edge_types.insert(
-                        u8::try_from(edge_type).map_err(|_| {
-                            GraphError::Internal("edge type index exceeds u8".into())
-                        })?,
+                        crate::types::EdgeTypeId::try_from(u32::try_from(edge_type).map_err(
+                            |_| GraphError::Internal("edge type index exceeds u32".into()),
+                        )?)
+                        .map_err(|_| GraphError::Internal("edge type uses sentinel".into()))?,
                     );
                 }
             }
             let missing_identity = ENGINE.with(|engine| {
                 let engine = engine.borrow();
-                let mut active = [false; 256];
+                let mut active = RoaringBitmap::new();
                 for edge_type in &edge_types {
-                    active[usize::from(*edge_type)] = true;
+                    active.insert(edge_type.get());
                 }
                 engine.has_missing_relationship_identity_for_types(&active)
             });

@@ -687,7 +687,7 @@ fn execute_identity_one_hop_lazy(
             target_node: source_idx,
             target_table_oid: plan.source_table_oid,
             target_source_key: source_id.clone(),
-            edge_type: 0,
+            edge_type: crate::types::EdgeTypeId::UNTYPED,
             schema_reversed: false,
             relationship_id: None,
             relationship_mapping_id: None,

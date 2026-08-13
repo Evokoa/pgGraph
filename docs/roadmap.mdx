@@ -97,10 +97,12 @@ For example, an LLM may emit `works_at`, `founded`, `acquired_by`, or
 `co_authored_with` as free-form structured output. These values must remain
 filterable during traversal instead of becoming opaque relationship properties.
 
-### Current 1.1 Boundary
+### Current Physical Boundary
 
-The 1.1 engine stores relationship-label IDs as `u8`. ID 0 is untyped and ID
-255 is reserved, so each graph can use 254 user-facing relationship labels.
+The runtime uses a checked logical `EdgeTypeId(u32)`, while the v6 CSR and
+segment formats still store relationship-label IDs as `u8`. ID 0 is untyped
+and physical ID 255 is reserved, so each graph can use 254 user-facing
+relationship labels until the P7 format migration.
 `label_column` interns every distinct nonempty source value into this registry.
 A build or sync path that needs another ID fails with SQLSTATE `54000` and
 diagnostic `PG004`.
@@ -121,9 +123,9 @@ while pgGraph assigns checked compact IDs for exact topology filtering.
 
 The contract-review direction is:
 
-- replace the production `u8` relationship type with one checked `LabelId`
-  across CSR stores, traversal, paths, overlays, sync segments, compaction, and
-  persistence;
+- keep one checked logical `EdgeTypeId` across traversal, paths, overlays,
+  sync, compaction, and query execution, with raw IDs confined to named storage
+  adapters;
 - select a `u32` or width-adaptive `u8`/`u16`/`u32` representation from measured
   memory, artifact-size, and traversal results; do not select `u16` alone unless
   its public capacity satisfies the open-vocabulary contract;

@@ -52,8 +52,10 @@ index 1..254 = user edge labels
 ```
 
 `Engine::register_edge_type()` returns existing IDs when labels are reused and
-raises `EdgeTypeLimit` after 254 user labels. The `u8` ID is stored in CSR
-parallel to each target edge.
+raises `EdgeTypeLimit` after 254 user labels. Runtime consumers use the checked
+logical `EdgeTypeId(u32)` authority. The v6 CSR and segment codecs retain a
+one-byte physical ID parallel to each target edge and perform checked
+encode/decode at that storage boundary.
 
 ## Traversal Dispatch
 
@@ -61,7 +63,8 @@ Engine traversal does:
 
 1. Verify the engine is built.
 2. Resolve the seed table+PK to `node_idx`.
-3. Resolve the requested edge label strings to compact `u8` IDs.
+3. Resolve the requested edge label strings to checked logical `EdgeTypeId`
+   values.
 4. Reserve candidate, overlay, frontier, and result workspace under the query
    governor.
 5. Borrow the installed generation's pinned layered snapshot and build only
@@ -93,7 +96,7 @@ Engine traversal does:
 pub struct EdgeMutation {
     pub source: u32,
     pub target: u32,
-    pub type_id: u8,
+    pub type_id: EdgeTypeId,
     pub schema_reversed: bool,
     pub relationship_id: Option<RelationshipId>,
     pub kind: MutationKind,

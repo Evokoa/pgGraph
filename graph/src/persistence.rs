@@ -1534,7 +1534,7 @@ fn write_edge_sections(
     writer.begin_section(base + 1)?;
     writer.write_u32_values(store.targets_slice())?;
     writer.begin_section(base + 2)?;
-    writer.write_body(store.type_ids_slice())?;
+    writer.write_body(store.v6_type_ids_bytes())?;
     writer.begin_section(base + 3)?;
     writer.write_body(store.schema_reversed_slice())?;
     writer.begin_section(base + 4)?;
@@ -2253,9 +2253,9 @@ fn load_graph_file_internal(
     )?)?;
     let registry_len = edge_type_registry.len();
     if edge_store
-        .type_ids_slice()
+        .v6_type_ids_bytes()
         .iter()
-        .chain(reverse_edge_store.type_ids_slice())
+        .chain(reverse_edge_store.v6_type_ids_bytes())
         .any(|type_id| {
             EdgeTypeId::from_v6_storage(*type_id)
                 .ok()
@@ -3578,7 +3578,7 @@ mod tests {
             vec![RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(7),
                 schema_reversed: false,
             }],

@@ -2911,11 +2911,14 @@ fn wildcard_path_executor_filters_relationship_type_alternation() {
         panic!("expected physical wildcard path plan");
     };
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     let friend = engine.register_edge_type("friend").unwrap();
     let owns = engine.register_edge_type("owns").unwrap();
     engine.edge_store = EdgeStore::from_edges(
@@ -3194,11 +3197,14 @@ fn wildcard_path_executor_projects_fixed_multi_segment_paths() {
         panic!("expected physical wildcard path plan");
     };
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -3263,11 +3269,14 @@ fn wildcard_path_executor_projects_bounded_variable_length_paths() {
         panic!("expected physical wildcard path plan");
     };
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -3324,11 +3333,14 @@ fn wildcard_path_executor_projects_multi_segment_variable_length_paths() {
         panic!("expected physical wildcard path plan");
     };
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -3386,11 +3398,14 @@ fn wildcard_path_variable_length_named_segment_projects_path_and_endpoint() {
         panic!("expected physical wildcard path plan");
     };
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -3483,11 +3498,14 @@ fn wildcard_path_variable_length_target_label_filters_only_emitted_endpoint() {
         panic!("expected physical wildcard path plan");
     };
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -3538,11 +3556,14 @@ fn wildcard_path_executor_bounds_variable_length_walks() {
         panic!("expected physical wildcard path plan");
     };
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -3596,11 +3617,14 @@ fn wildcard_path_variable_length_reports_row_cap_exhaustion() {
     };
     assert!(physical.cap_exhaustion_is_error());
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -3662,11 +3686,14 @@ fn wildcard_path_variable_length_filters_tenant_and_overlay_hops() {
     engine.insert_tenant_membership("tenant-a", 0);
     engine.insert_tenant_membership("tenant-b", 2);
     engine.insert_tenant_membership("tenant-a", 1);
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -3723,11 +3750,14 @@ fn executor_propagates_relationship_ids_into_rows_and_paths() {
     let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
     let physical = lower(logical);
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = identified_edge_store(
         engine.node_store.node_count(),
         [
@@ -3770,11 +3800,14 @@ fn executor_deduplicates_bidirectional_orientation_but_preserves_parallel_rows()
     let logical = bind_query("MATCH (u:users)-[r:works_at]-(c:companies) RETURN u, r, c");
     let physical = lower(logical);
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = identified_edge_store(
         engine.node_store.node_count(),
         [41, 42].into_iter().flat_map(|relationship_id| {
@@ -3826,11 +3859,14 @@ fn wildcard_path_executor_preserves_parallel_relationship_ids() {
         panic!("expected physical wildcard path plan");
     };
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = identified_edge_store(
         engine.node_store.node_count(),
         [
@@ -4031,7 +4067,7 @@ fn gql_relationship_expansion_uses_layered_manifest_snapshot() {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4055,7 +4091,7 @@ fn gql_relationship_expansion_layered_manifest_preserves_pending_edge_buffer_ove
     engine.edge_buffer.push(EdgeMutation {
         source: 1,
         target: 2,
-        type_id: 1,
+        type_id: crate::types::EdgeTypeId::test_v6(1),
         schema_reversed: false,
         relationship_id: None,
         kind: MutationKind::Insert,
@@ -4345,11 +4381,14 @@ fn path_projection_returns_stable_path_value_and_functions() {
     );
     let physical = lower(logical);
     let mut engine = engine_fixture();
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![
@@ -5029,7 +5068,7 @@ fn executor_traverses_transaction_created_node_entry_points() {
         node_idx,
         crate::projection::tx_delta::DeltaEdge {
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             weight: None,
             relationship_id: None,
@@ -5115,7 +5154,7 @@ fn executor_traverses_tx_nodes_matching_source_id_disjunctions() {
         node_idx,
         crate::projection::tx_delta::DeltaEdge {
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             weight: None,
             relationship_id: None,
@@ -5157,7 +5196,7 @@ fn multi_pattern_join_traverses_transaction_created_node_entry_points() {
         node_idx,
         crate::projection::tx_delta::DeltaEdge {
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             weight: None,
             relationship_id: None,
@@ -5225,7 +5264,7 @@ fn wildcard_path_traverses_transaction_created_node_entry_points() {
         node_idx,
         crate::projection::tx_delta::DeltaEdge {
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             weight: None,
             relationship_id: None,
@@ -5409,11 +5448,14 @@ fn executor_applies_tenant_scope_to_var_len_and_undirected_frontiers() {
     engine.insert_tenant_membership("tenant-a", 1);
     engine.insert_tenant_membership("tenant-b", 2);
     engine.insert_tenant_membership("tenant-a", 3);
-    let works_at = engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == "works_at")
-        .expect("works_at edge type missing") as u8;
+    let works_at = crate::types::EdgeTypeId::try_from(
+        engine
+            .edge_type_registry
+            .iter()
+            .position(|label| label == "works_at")
+            .expect("works_at edge type missing") as u32,
+    )
+    .expect("fixture edge type is logical");
     engine.edge_store = EdgeStore::from_edges(
         engine.node_store.node_count(),
         vec![

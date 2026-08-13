@@ -24,6 +24,7 @@
 
 use crate::mapped_bytes::MappedBytes;
 use crate::safety::{GraphError, GraphResult};
+use crate::types::EdgeTypeId;
 use std::ops::Range;
 
 /// Dense identifier for one relationship source row in a graph projection.
@@ -127,6 +128,9 @@ impl MmapEdgeArrays {
                 .is_some_and(|range| !range_in_region(range, parts.mmap.len()))
             || !range_in_region(&parts.relationship_ids_range, parts.mmap.len())
         {
+            return None;
+        }
+        if parts.mmap.as_slice()[parts.type_ids_range.clone()].contains(&u8::MAX) {
             return None;
         }
         let base = parts.mmap.as_slice().as_ptr() as usize;
@@ -251,7 +255,7 @@ pub struct RawEdge {
     /// Target node index.
     pub target: u32,
     /// Registered edge type identifier.
-    pub type_id: u8,
+    pub type_id: EdgeTypeId,
     /// Optional edge weight; unweighted stores ignore this value.
     pub weight: Option<u32>,
     /// Whether this adjacency is the generated reverse copy of a registered
@@ -462,6 +466,10 @@ impl SortedEdgeStoreBuilder {
     pub(crate) fn try_push_identified(&mut self, identified: IdentifiedRawEdge) -> GraphResult<()> {
         let edge = identified.edge;
         validate_raw_edge(self.node_count, &edge)?;
+        let type_id = edge
+            .type_id
+            .to_v6_storage()
+            .map_err(|_| GraphError::EdgeTypeLimit)?;
         if self
             .edge_capacity
             .is_some_and(|capacity| self.targets.len() >= capacity)
@@ -486,7 +494,7 @@ impl SortedEdgeStoreBuilder {
             self.edge_offsets.push(self.targets.len() as u32);
         }
         self.targets.push(edge.target);
-        self.type_ids.push(edge.type_id);
+        self.type_ids.push(type_id);
         self.schema_reversed.push(u8::from(edge.schema_reversed));
         self.relationship_ids.push(identified.relationship_id);
         if self.has_weights {
@@ -596,6 +604,10 @@ impl EdgeStore {
     }
 
     #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
+    #[allow(
+        clippy::expect_used,
+        reason = "try_from_edges validates every logical type before this infallible builder"
+    )]
     fn from_valid_edges(node_count: u32, mut edges: Vec<RawEdge>, has_weights: bool) -> Self {
         // Sort by source, then target, then type_id, then registered-direction
         // flag so real opposite rows do not collapse with synthetic reverse
@@ -626,7 +638,12 @@ impl EdgeStore {
             edge_offsets.push(targets.len() as u32);
             while edge_idx < edges.len() && edges[edge_idx].source == node {
                 targets.push(edges[edge_idx].target);
-                type_ids.push(edges[edge_idx].type_id);
+                type_ids.push(
+                    edges[edge_idx]
+                        .type_id
+                        .to_v6_storage()
+                        .expect("validated raw edge type fits v6 storage"),
+                );
                 schema_reversed.push(u8::from(edges[edge_idx].schema_reversed));
                 if has_weights {
                     weights.push(edges[edge_idx].weight.unwrap_or(1));
@@ -1015,7 +1032,7 @@ impl EdgeStore {
     }
 
     /// Get type_ids as a slice. Used by persistence.
-    pub fn type_ids_slice(&self) -> &[u8] {
+    pub fn v6_type_ids_bytes(&self) -> &[u8] {
         match &self.backing {
             EdgeBacking::Owned { type_ids, .. } => type_ids,
             EdgeBacking::Mmap { arrays } => arrays.type_ids(),
@@ -1051,9 +1068,31 @@ impl EdgeStore {
             EdgeBacking::Mmap { arrays } => arrays.relationship_ids(),
         }
     }
+
+    /// Summarize incomplete identities behind the validated v6 adapter.
+    #[allow(
+        clippy::expect_used,
+        reason = "owned and mmap constructors reject reserved v6 type bytes before publication"
+    )]
+    pub(crate) fn missing_relationship_identity_edge_types(&self) -> roaring::RoaringBitmap {
+        self.v6_type_ids_bytes()
+            .iter()
+            .copied()
+            .zip(self.relationship_ids_slice().iter().copied())
+            .filter(|(_, relationship_id)| *relationship_id == NO_RELATIONSHIP_ID)
+            .map(|(stored_type, _)| {
+                EdgeTypeId::from_v6_storage(stored_type)
+                    .expect("published topology contains validated v6 type IDs")
+                    .get()
+            })
+            .collect()
+    }
 }
 
 fn validate_raw_edge(node_count: u32, edge: &RawEdge) -> GraphResult<()> {
+    edge.type_id
+        .to_v6_storage()
+        .map_err(|_| GraphError::EdgeTypeLimit)?;
     if edge.source >= node_count {
         return Err(GraphError::Internal(format!(
             "edge source {} is outside node range 0..{}",
@@ -1189,7 +1228,7 @@ mod tests {
                 .try_push(RawEdge {
                     source,
                     target,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     weight: Some(7),
                     schema_reversed: false,
                 })
@@ -1210,7 +1249,7 @@ mod tests {
             .try_push(RawEdge {
                 source: 2,
                 target: 0,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: Some(7),
                 schema_reversed: false,
             })
@@ -1236,14 +1275,14 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
@@ -1263,14 +1302,14 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 7,
+                type_id: EdgeTypeId::from_v6_storage(7).expect("fixture type ID is valid v6"),
                 weight: Some(3),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
-                type_id: 9,
+                type_id: EdgeTypeId::from_v6_storage(9).expect("fixture type ID is valid v6"),
                 weight: Some(5),
                 schema_reversed: false,
             },
@@ -1291,21 +1330,21 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             }, // duplicate
             RawEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
@@ -1321,14 +1360,14 @@ mod tests {
             RawEdge {
                 source: 2,
                 target: 0,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
@@ -1344,14 +1383,14 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: Some(10),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: Some(20),
                 schema_reversed: false,
             },
@@ -1369,14 +1408,14 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: Some(8),
                 schema_reversed: false,
             },
@@ -1394,7 +1433,7 @@ mod tests {
         let edges = vec![RawEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             weight: Some(99),
             schema_reversed: false,
         }];
@@ -1512,7 +1551,7 @@ mod tests {
         assert_eq!(store.neighbors_weighted(0), (&[1][..], &[7][..], &[9][..]));
         assert_eq!(store.offsets_slice(), &[0, 1, 1]);
         assert_eq!(store.targets_slice(), &[1]);
-        assert_eq!(store.type_ids_slice(), &[7]);
+        assert_eq!(store.v6_type_ids_bytes(), &[7]);
         assert_eq!(store.schema_reversed_slice(), &[0]);
         assert_eq!(store.weights_slice(), &[9]);
         assert_eq!(store.relationship_ids_slice(), &[41]);
@@ -1524,21 +1563,21 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 99,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 99,
                 target: 0,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
@@ -1557,14 +1596,14 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
@@ -1584,7 +1623,7 @@ mod tests {
         let result = builder.try_push(RawEdge {
             source: 2,
             target: 0,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             weight: None,
             schema_reversed: false,
         });
@@ -1614,21 +1653,21 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 2,
+                type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
@@ -1649,7 +1688,7 @@ mod tests {
         let edges = vec![RawEdge {
             source: 0,
             target: 0,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             weight: None,
             schema_reversed: false,
         }];
@@ -1689,7 +1728,7 @@ mod tests {
                 .map(|(source, target, type_id, weight)| RawEdge {
                     source,
                     target,
-                    type_id,
+                    type_id: EdgeTypeId::test_v6(type_id),
                     weight,
                 schema_reversed: false,
                 })
@@ -1726,7 +1765,7 @@ mod tests {
 
             prop_assert_eq!(sorted.offsets_slice(), unsorted.offsets_slice());
             prop_assert_eq!(sorted.targets_slice(), unsorted.targets_slice());
-            prop_assert_eq!(sorted.type_ids_slice(), unsorted.type_ids_slice());
+            prop_assert_eq!(sorted.v6_type_ids_bytes(), unsorted.v6_type_ids_bytes());
             prop_assert_eq!(sorted.weights_slice(), unsorted.weights_slice());
         }
     }
@@ -1739,28 +1778,28 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: Some(2),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: Some(3),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: Some(99),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 0,
-                type_id: 2,
+                type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
                 weight: Some(4),
                 schema_reversed: false,
             },
@@ -1783,7 +1822,7 @@ mod tests {
 
         assert_eq!(sorted.offsets_slice(), unsorted.offsets_slice());
         assert_eq!(sorted.targets_slice(), unsorted.targets_slice());
-        assert_eq!(sorted.type_ids_slice(), unsorted.type_ids_slice());
+        assert_eq!(sorted.v6_type_ids_bytes(), unsorted.v6_type_ids_bytes());
         assert_eq!(sorted.weights_slice(), unsorted.weights_slice());
     }
 }

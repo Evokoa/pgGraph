@@ -52,7 +52,7 @@ fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
         direction: TraversalDirection::Out,
         source: 0,
         target: 1,
-        type_id: 2,
+        type_id: crate::types::EdgeTypeId::test_v6(2),
         schema_reversed: false,
         weight: Some(7),
         tombstone: false,
@@ -164,7 +164,7 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
         direction: TraversalDirection::Out,
         source: 0,
         target: 1,
-        type_id: 2,
+        type_id: crate::types::EdgeTypeId::test_v6(2),
         weight: None,
         relationship_identity: None,
         table_oid: None,
@@ -192,7 +192,7 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
         vec![SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 2,
+            type_id: crate::types::EdgeTypeId::test_v6(2),
             schema_reversed: false,
             relationship_id: None,
         }]
@@ -207,7 +207,7 @@ fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {
     insert.edge_inserts.push(SegmentEdge {
         source: 0,
         target: 3,
-        type_id: 1,
+        type_id: crate::types::EdgeTypeId::test_v6(1),
         schema_reversed: false,
         relationship_id: None,
     });
@@ -216,7 +216,7 @@ fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {
     delete.edge_deletes.push(SegmentEdge {
         source: 0,
         target: 1,
-        type_id: 1,
+        type_id: crate::types::EdgeTypeId::test_v6(1),
         schema_reversed: false,
         relationship_id: None,
     });
@@ -239,14 +239,14 @@ fn status_reports_manifest_watermark_segments_chunks_gc_and_repair() {
     segment.edge_inserts.push(SegmentEdge {
         source: 0,
         target: 1,
-        type_id: 1,
+        type_id: crate::types::EdgeTypeId::test_v6(1),
         schema_reversed: false,
         relationship_id: None,
     });
     segment.edge_deletes.push(SegmentEdge {
         source: 1,
         target: 0,
-        type_id: 1,
+        type_id: crate::types::EdgeTypeId::test_v6(1),
         schema_reversed: false,
         relationship_id: None,
     });

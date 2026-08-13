@@ -2460,7 +2460,8 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
         .push(crate::projection::segment::SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                .expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -2686,7 +2687,8 @@ fn write_projection_status_segment(path: &std::path::Path, level: u8) {
         .push(crate::projection::segment::SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                .expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -2695,7 +2697,8 @@ fn write_projection_status_segment(path: &std::path::Path, level: u8) {
         .push(crate::projection::segment::SegmentEdge {
             source: 1,
             target: 0,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::from_v6_storage(1)
+                .expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });

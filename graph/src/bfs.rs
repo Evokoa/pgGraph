@@ -24,7 +24,7 @@ use crate::projection::neighbors::{
     NeighborSource, OverlayDeletes, OverlayInserts, OverlayNeighbors, OwnedNeighborCursor,
 };
 use crate::safety::{GraphError, GraphResult};
-use crate::types::{FilterOp, PathCoordinate, TableOid, TraversalResult};
+use crate::types::{EdgeTypeId, FilterOp, PathCoordinate, TableOid, TraversalResult};
 #[cfg(any(test, feature = "benchmarks"))]
 use crate::visibility::VisibilityCoordinator;
 use crate::visibility::{QueryExecutionContext, VisibilityScope};
@@ -62,7 +62,7 @@ pub(crate) struct BfsAdjacencyCandidate {
     pub(crate) target_node: u32,
     pub(crate) target_table_oid: u32,
     pub(crate) target_source_key: String,
-    pub(crate) edge_type: u8,
+    pub(crate) edge_type: EdgeTypeId,
     pub(crate) schema_reversed: bool,
     pub(crate) relationship_id: Option<crate::edge_store::RelationshipId>,
     pub(crate) relationship_mapping_id: Option<u64>,
@@ -210,7 +210,7 @@ impl ResumableBfsMachine {
             visited.insert(config.seed_node);
             depth.set(config.seed_node, 0);
             parent.set(config.seed_node, config.seed_node);
-            parent_edge_type.set(config.seed_node, 0);
+            parent_edge_type.set(config.seed_node, crate::types::EdgeTypeId::UNTYPED);
         }
         let complete_without_expansion = !seed_valid
             || config.max_depth <= 0
@@ -824,9 +824,9 @@ impl TraversalParentMap {
 /// Parent edge-type metadata for traversal path reconstruction.
 pub enum TraversalParentEdgeTypes {
     /// Dense mode stores one edge-type slot per graph node.
-    Dense(Vec<u8>),
+    Dense(Vec<crate::types::EdgeTypeId>),
     /// Sparse mode stores edge types only for visited nodes.
-    Sparse(HashMap<u32, u8>),
+    Sparse(HashMap<u32, crate::types::EdgeTypeId>),
 }
 
 impl TraversalParentEdgeTypes {
@@ -838,11 +838,14 @@ impl TraversalParentEdgeTypes {
                 .map_err(traversal_allocation_error)?;
             Ok(Self::Sparse(edge_types))
         } else {
-            Ok(Self::Dense(try_filled_vec(node_count, 0u8)?))
+            Ok(Self::Dense(try_filled_vec(
+                node_count,
+                crate::types::EdgeTypeId::SENTINEL,
+            )?))
         }
     }
 
-    fn set(&mut self, node_idx: u32, edge_type: u8) {
+    fn set(&mut self, node_idx: u32, edge_type: crate::types::EdgeTypeId) {
         match self {
             Self::Dense(edge_types) => edge_types[node_idx as usize] = edge_type,
             Self::Sparse(edge_types) => {
@@ -851,9 +854,12 @@ impl TraversalParentEdgeTypes {
         }
     }
 
-    fn get(&self, node_idx: u32) -> Option<u8> {
+    fn get(&self, node_idx: u32) -> Option<crate::types::EdgeTypeId> {
         match self {
-            Self::Dense(edge_types) => edge_types.get(node_idx as usize).copied(),
+            Self::Dense(edge_types) => edge_types
+                .get(node_idx as usize)
+                .copied()
+                .filter(|edge_type| *edge_type != crate::types::EdgeTypeId::SENTINEL),
             Self::Sparse(edge_types) => edge_types.get(&node_idx).copied(),
         }
     }
@@ -898,7 +904,7 @@ pub(crate) fn estimated_workspace_bytes(
     let metadata_per_node = if use_sparse_metadata(node_count, max_nodes) {
         128usize
     } else {
-        std::mem::size_of::<i32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u8>()
+        std::mem::size_of::<i32>() + std::mem::size_of::<u32>() + std::mem::size_of::<EdgeTypeId>()
     };
     let metadata_nodes = if use_sparse_metadata(node_count, max_nodes) {
         visits
@@ -1055,7 +1061,7 @@ fn execute_inner(
     visited.insert(seed);
     depth_map.set(seed, 0);
     parent.set(seed, seed);
-    parent_edge_type.set(seed, 0);
+    parent_edge_type.set(seed, crate::types::EdgeTypeId::UNTYPED);
     frontier.push_back(seed);
     nodes_visited += 1;
 
@@ -1266,7 +1272,7 @@ fn execute_with_neighbors_inner(
     visited.insert(seed);
     depth_map.set(seed, 0);
     parent.set(seed, seed); // Self-referential root
-    parent_edge_type.set(seed, 0);
+    parent_edge_type.set(seed, crate::types::EdgeTypeId::UNTYPED);
     frontier.push_back(seed);
     nodes_visited += 1;
 
@@ -1493,7 +1499,7 @@ fn execute_dfs_with_neighbors_inner(
     visited.insert(seed);
     depth_map.set(seed, 0);
     parent.set(seed, seed);
-    parent_edge_type.set(seed, 0);
+    parent_edge_type.set(seed, crate::types::EdgeTypeId::UNTYPED);
 
     if matches!(
         config.edge_type_filter,
@@ -1566,7 +1572,7 @@ fn candidate_allowed(
     filter_index: &FilterIndex,
     config: &BfsConfig,
     neighbor: u32,
-    edge_type: u8,
+    edge_type: crate::types::EdgeTypeId,
     relationship_id: Option<crate::edge_store::RelationshipId>,
     visited: &RoaringBitmap,
     has_filters: bool,
@@ -1650,7 +1656,7 @@ impl DfsPushContext<'_> {
         current: u32,
         current_depth: i32,
         neighbor: u32,
-        edge_type: u8,
+        edge_type: crate::types::EdgeTypeId,
         relationship_id: Option<crate::edge_store::RelationshipId>,
     ) -> GraphResult<bool> {
         if !candidate_allowed(
@@ -1753,7 +1759,7 @@ pub fn reconstruct_edge_path(
     parent_edge_type: &TraversalParentEdgeTypes,
     seed: u32,
     target: u32,
-) -> Vec<u8> {
+) -> Vec<crate::types::EdgeTypeId> {
     let mut edge_path = Vec::new();
     let mut current = target;
 
@@ -1764,7 +1770,11 @@ pub fn reconstruct_edge_path(
         if parent_node == current {
             break;
         }
-        edge_path.push(parent_edge_type.get(current).unwrap_or(0));
+        edge_path.push(
+            parent_edge_type
+                .get(current)
+                .unwrap_or(crate::types::EdgeTypeId::UNTYPED),
+        );
         current = parent_node;
     }
 
@@ -1814,7 +1824,7 @@ pub fn to_traversal_results(
         .into_iter()
         .map(|type_id| {
             edge_type_registry
-                .get(type_id as usize)
+                .get(type_id.get() as usize)
                 .cloned()
                 .unwrap_or_else(|| type_id.to_string())
         })
@@ -1906,56 +1916,56 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 4,
-                type_id: 2,
+                type_id: crate::types::EdgeTypeId::test_v6(2),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 4,
                 target: 0,
-                type_id: 2,
+                type_id: crate::types::EdgeTypeId::test_v6(2),
                 weight: None,
                 schema_reversed: false,
             },
@@ -1990,6 +2000,63 @@ mod tests {
             overlay_deleted_edges: HashMap::new(),
             any_direction_overlays: None,
         }
+    }
+
+    #[test]
+    fn logical_edge_type_ids_above_v6_width_survive_filtering_and_parent_metadata() {
+        struct LogicalNeighbors;
+
+        impl NeighborSource for LogicalNeighbors {
+            fn neighbors(&self, node_idx: u32) -> crate::projection::neighbors::NeighborIter<'_> {
+                let neighbors = match node_idx {
+                    0 => vec![crate::projection::neighbors::Neighbor {
+                        target: 1,
+                        type_id: EdgeTypeId::try_from(255_u32).expect("logical 255 is valid"),
+                        schema_reversed: false,
+                        relationship_id: None,
+                    }],
+                    1 => vec![crate::projection::neighbors::Neighbor {
+                        target: 2,
+                        type_id: EdgeTypeId::try_from(65_534_u32).expect("logical 65534 is valid"),
+                        schema_reversed: false,
+                        relationship_id: None,
+                    }],
+                    _ => Vec::new(),
+                };
+                crate::projection::neighbors::NeighborIter::Owned(neighbors.into_iter())
+            }
+
+            fn neighbors_reversed(
+                &self,
+                node_idx: u32,
+            ) -> crate::projection::neighbors::NeighborIter<'_> {
+                self.neighbors(node_idx)
+            }
+        }
+
+        let mut nodes = NodeStore::new();
+        for node in 0..3 {
+            nodes.add_node(100, format!("node-{node}"));
+        }
+        let high_types = HashSet::from([
+            EdgeTypeId::try_from(255_u32).expect("logical 255 is valid"),
+            EdgeTypeId::try_from(65_534_u32).expect("logical 65534 is valid"),
+        ]);
+        let mut config = resumable_test_config(2, 10, 10);
+        config.edge_type_filter = crate::types::EdgeTypeFilter::Only(high_types);
+
+        let result =
+            execute_with_neighbors(&nodes, &LogicalNeighbors, &FilterIndex::new(), &config);
+
+        assert_eq!(result.visited.iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(
+            result.parent_edge_type.get(1),
+            Some(EdgeTypeId::try_from(255_u32).expect("logical 255 is valid"))
+        );
+        assert_eq!(
+            result.parent_edge_type.get(2),
+            Some(EdgeTypeId::try_from(65_534_u32).expect("logical 65534 is valid"))
+        );
     }
 
     fn run_resumable_all_visible(
@@ -2099,7 +2166,14 @@ mod tests {
                 let mut bytes = node.to_le_bytes().to_vec();
                 bytes.extend_from_slice(&result.depth.get(node).unwrap_or(-1).to_le_bytes());
                 bytes.extend_from_slice(&result.parent.get(node).unwrap_or(u32::MAX).to_le_bytes());
-                bytes.push(result.parent_edge_type.get(node).unwrap_or(u8::MAX));
+                bytes.extend_from_slice(
+                    &result
+                        .parent_edge_type
+                        .get(node)
+                        .unwrap_or(crate::types::EdgeTypeId::SENTINEL)
+                        .get()
+                        .to_le_bytes(),
+                );
                 bytes
             })
             .chain([u8::from(result.truncated)])
@@ -2131,42 +2205,42 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 2,
+                    type_id: crate::types::EdgeTypeId::test_v6(2),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 1,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 2,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 3,
                     target: 0,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -2275,7 +2349,7 @@ mod tests {
             target_node: target,
             target_table_oid: 100,
             target_source_key: key.to_owned(),
-            edge_type: 1,
+            edge_type: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: Some(sequence.saturating_add(1)),
             relationship_mapping_id: Some(7),
@@ -2401,21 +2475,21 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 2,
+                    type_id: crate::types::EdgeTypeId::test_v6(2),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 2,
+                    type_id: crate::types::EdgeTypeId::test_v6(2),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -2426,7 +2500,10 @@ mod tests {
         let relationships =
             crate::relationship_identity_store::RelationshipIdentityStore::default();
         let mut config = resumable_test_config(1, 10, 10);
-        config.edge_type_filter = crate::types::EdgeTypeFilter::Only(HashSet::from([1]));
+        config.edge_type_filter =
+            crate::types::EdgeTypeFilter::Only(HashSet::from([crate::types::EdgeTypeId::test_v6(
+                1,
+            )]));
         let governor = resumable_test_governor();
         let mut machine = ResumableBfsMachine::try_new(4, &config).unwrap();
 
@@ -2459,7 +2536,7 @@ mod tests {
             vec![RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 2,
+                type_id: crate::types::EdgeTypeId::test_v6(2),
                 weight: None,
                 schema_reversed: false,
             }],
@@ -2469,7 +2546,10 @@ mod tests {
         let relationships =
             crate::relationship_identity_store::RelationshipIdentityStore::default();
         let mut config = resumable_test_config(1, 10, 10);
-        config.edge_type_filter = crate::types::EdgeTypeFilter::Only(HashSet::from([1]));
+        config.edge_type_filter =
+            crate::types::EdgeTypeFilter::Only(HashSet::from([crate::types::EdgeTypeId::test_v6(
+                1,
+            )]));
         let governor = resumable_test_governor();
         let mut machine = ResumableBfsMachine::try_new(2, &config).unwrap();
 
@@ -2503,7 +2583,7 @@ mod tests {
                 .map(|target| RawEdge {
                     source: 0,
                     target,
-                    type_id: 2,
+                    type_id: crate::types::EdgeTypeId::test_v6(2),
                     weight: None,
                     schema_reversed: false,
                 })
@@ -2514,7 +2594,10 @@ mod tests {
         let relationships =
             crate::relationship_identity_store::RelationshipIdentityStore::default();
         let mut config = resumable_test_config(1, 10, 10);
-        config.edge_type_filter = crate::types::EdgeTypeFilter::Only(HashSet::from([1]));
+        config.edge_type_filter =
+            crate::types::EdgeTypeFilter::Only(HashSet::from([crate::types::EdgeTypeId::test_v6(
+                1,
+            )]));
         let governor = resumable_test_governor();
         let mut machine = ResumableBfsMachine::try_new(6, &config).unwrap();
         let limits = BfsCandidateLimits {
@@ -2565,14 +2648,14 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -2725,7 +2808,15 @@ mod tests {
             },
         )
         .expect("transaction relationship identity should allocate");
-        let inserts = HashMap::from([(0, vec![(1, 1, false, Some(relationship_id))])]);
+        let inserts = HashMap::from([(
+            0,
+            vec![(
+                1,
+                crate::types::EdgeTypeId::test_v6(1),
+                false,
+                Some(relationship_id),
+            )],
+        )]);
         let deletes = HashMap::new();
         let neighbors = OverlayNeighbors::new(&edges, &inserts, &deletes);
         let config = resumable_test_config(1, 10, 10);
@@ -2784,7 +2875,7 @@ mod tests {
         let edge = |source, target| RawEdge {
             source,
             target,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: None,
             schema_reversed: false,
         };
@@ -2911,7 +3002,7 @@ mod tests {
         let raw = |target| RawEdge {
             source: 0,
             target,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: None,
             schema_reversed: false,
         };
@@ -3059,7 +3150,8 @@ mod tests {
                         &result
                             .parent_edge_type
                             .get(node)
-                            .unwrap_or(u8::MAX)
+                            .unwrap_or(crate::types::EdgeTypeId::SENTINEL)
+                            .get()
                             .to_le_bytes(),
                     );
                     bytes
@@ -3152,7 +3244,7 @@ mod tests {
         let (ns, es) = build_test_graph();
         let fi = FilterIndex::new();
         let mut edge_filter = HashSet::new();
-        edge_filter.insert(1u8); // Only type 1 edges
+        edge_filter.insert(crate::types::EdgeTypeId::test_v6(1)); // Only type 1 edges
 
         let config = BfsConfig {
             seed_node: 0,
@@ -3181,9 +3273,18 @@ mod tests {
         let (ns, es) = build_test_graph();
         let fi = FilterIndex::new();
         let mut overlay_insert_edges = std::collections::HashMap::new();
-        overlay_insert_edges.insert(0, vec![(3, 1, false, None), (1, 1, false, None)]);
+        overlay_insert_edges.insert(
+            0,
+            vec![
+                (3, crate::types::EdgeTypeId::test_v6(1), false, None),
+                (1, crate::types::EdgeTypeId::test_v6(1), false, None),
+            ],
+        );
         let mut overlay_deleted_edges = std::collections::HashMap::new();
-        overlay_deleted_edges.insert(0, HashSet::from([(1, 1, false, None)]));
+        overlay_deleted_edges.insert(
+            0,
+            HashSet::from([(1, crate::types::EdgeTypeId::test_v6(1), false, None)]),
+        );
 
         let config = BfsConfig {
             seed_node: 0,
@@ -3230,14 +3331,14 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -3249,9 +3350,9 @@ mod tests {
         overlay_insert_edges.insert(
             0,
             vec![
-                (3, 1, false, None),
-                (2, 1, false, None),
-                (3, 1, false, None),
+                (3, crate::types::EdgeTypeId::test_v6(1), false, None),
+                (2, crate::types::EdgeTypeId::test_v6(1), false, None),
+                (3, crate::types::EdgeTypeId::test_v6(1), false, None),
             ],
         );
 
@@ -3347,28 +3448,28 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
@@ -3596,7 +3697,7 @@ mod tests {
         let edges = vec![RawEdge {
             source: 0,
             target: 0,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: None,
             schema_reversed: false,
         }];
@@ -3753,28 +3854,28 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },

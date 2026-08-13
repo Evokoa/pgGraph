@@ -14,6 +14,7 @@ use crate::filter_index::{FilterColumnType, FILTER_CATALOG_HEADER_SIZE, FILTER_D
 use crate::persistence::{write_direct_graph_file, DirectArtifactMetadata, DirectArtifactWriter};
 use crate::resource::{ResourceGovernor, ResourcePhase};
 use crate::safety::{GraphError, GraphResult};
+use crate::types::EdgeTypeId;
 
 const SECTION_COUNT: usize = 26;
 const EDGE_RECORD_KEY_BYTES: usize = 14;
@@ -517,7 +518,7 @@ fn emit_primary_key_offsets(
 struct DecodedEdge {
     source: u32,
     target: u32,
-    type_id: u8,
+    type_id: EdgeTypeId,
     schema_reversed: u8,
     weight: u32,
     relationship_id: u32,
@@ -532,13 +533,18 @@ fn decode_edge(record: &crate::build_runs::RunRecord) -> GraphResult<DecodedEdge
     let edge = DecodedEdge {
         source: u32::from_be_bytes(read_array(&record.key, 0)?),
         target: u32::from_le_bytes(read_array(&record.value, 0)?),
-        type_id: record.value[4],
+        type_id: EdgeTypeId::from_v6_storage(record.value[4])
+            .map_err(|_| GraphError::Internal("direct edge type ID is reserved".into()))?,
         schema_reversed: record.value[5],
         weight: u32::from_le_bytes(read_array(&record.value, 6)?),
         relationship_id: u32::from_le_bytes(read_array(&record.value, 10)?),
     };
     if u32::from_be_bytes(read_array(&record.key, 4)?) != edge.target
-        || record.key[8] != edge.type_id
+        || record.key[8]
+            != edge
+                .type_id
+                .to_v6_storage()
+                .map_err(|_| GraphError::Internal("direct edge type ID exceeds v6".into()))?
         || record.key[9] != edge.schema_reversed
         || u32::from_be_bytes(read_array(&record.key, 10)?) != edge.relationship_id
         || edge.schema_reversed > 1
@@ -630,7 +636,12 @@ fn emit_csr(
         build.node_count,
         edge_count,
         build.max_record_bytes,
-        |edge| writer.write_bytes(&[edge.type_id]),
+        |edge| {
+            writer.write_bytes(&[edge
+                .type_id
+                .to_v6_storage()
+                .map_err(|_| GraphError::Internal("direct edge type ID exceeds v6".into()))?])
+        },
     )?;
     writer.begin_section(base + 3)?;
     replay_edges(
@@ -1555,6 +1566,12 @@ mod tests {
         };
 
         write_semantic_artifact(&path, &build).expect("semantic artifact writes");
+        let artifact_bytes = std::fs::read(&path).expect("semantic artifact reads");
+        assert_eq!(
+            format!("crc32:{:08x}", crc32fast::hash(&artifact_bytes)),
+            "crc32:c51d6ece",
+            "the direct semantic v6 artifact bytes must remain stable"
+        );
         let loaded = crate::persistence::load_graph_file(&path).expect("artifact loads");
         assert_eq!(loaded.node_store.primary_key(0), Some("a"));
         assert_eq!(loaded.node_store.primary_key(1), Some("b"));

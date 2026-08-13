@@ -13,7 +13,7 @@ use crc32fast::Hasher;
 use crate::filter_index::PersistedFilterValue;
 use crate::projection::normalize::NormalizedMutationBatch;
 use crate::safety::{GraphError, GraphResult};
-use crate::types::TraversalDirection;
+use crate::types::{EdgeTypeId, TraversalDirection};
 
 const MAGIC: &[u8; 8] = b"PGGSEG01";
 const VERSION: u32 = 6;
@@ -72,7 +72,7 @@ pub(crate) struct SegmentEdge {
     /// Target node index.
     pub(crate) target: u32,
     /// Edge type identifier.
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     /// Whether this row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
     /// Stable relationship identity when this edge is backed by a source row.
@@ -87,7 +87,7 @@ pub(crate) struct SegmentEdgeWeight {
     /// Target node index.
     pub(crate) target: u32,
     /// Edge type identifier.
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     /// Whether this row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
     /// Stable relationship identity for this weighted source row.
@@ -281,9 +281,9 @@ impl DeltaSegment {
                     .ok_or_else(|| segment_corrupt("encoded segment length overflowed"))
             })?;
         let mut sections = EncodedSections::with_capacities(section_lengths);
-        encode_edges(&mut sections.edge_inserts, &self.edge_inserts);
-        encode_edges(&mut sections.edge_deletes, &self.edge_deletes);
-        encode_edge_weights(&mut sections.edge_weights, &self.edge_weights);
+        encode_edges(&mut sections.edge_inserts, &self.edge_inserts)?;
+        encode_edges(&mut sections.edge_deletes, &self.edge_deletes)?;
+        encode_edge_weights(&mut sections.edge_weights, &self.edge_weights)?;
         encode_node_states(&mut sections.node_states, &self.node_states);
         encode_resolutions(&mut sections.resolutions, &self.resolutions)?;
         encode_filters(&mut sections.filters, &self.filters)?;
@@ -548,21 +548,21 @@ pub(crate) fn fuzz_seed_bytes(name: &str) -> Option<Vec<u8>> {
             segment.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             });
             segment.edge_deletes.push(SegmentEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 relationship_id: None,
                 weight: 5,
                 schema_reversed: false,
@@ -727,9 +727,7 @@ fn validate_header_shape(header: &SegmentHeader) -> GraphResult<()> {
 
 fn validate_edge_bounds(header: &SegmentHeader, edge: &SegmentEdge) -> GraphResult<()> {
     validate_node_bounds(header, edge.source)?;
-    if edge.type_id == 255 {
-        return Err(segment_corrupt("edge type 255 is reserved"));
-    }
+    encode_v6_type_id(edge.type_id)?;
     Ok(())
 }
 
@@ -862,11 +860,11 @@ fn section(bytes: &[u8], range: std::ops::Range<usize>) -> GraphResult<&[u8]> {
         .ok_or_else(|| segment_corrupt("section range is out of bounds"))
 }
 
-fn encode_edges(out: &mut Vec<u8>, rows: &[SegmentEdge]) {
+fn encode_edges(out: &mut Vec<u8>, rows: &[SegmentEdge]) -> GraphResult<()> {
     for row in rows {
         push_u32(out, row.source);
         push_u32(out, row.target);
-        out.push(row.type_id);
+        out.push(encode_v6_type_id(row.type_id)?);
         out.push(u8::from(row.schema_reversed));
         push_u32(
             out,
@@ -874,13 +872,14 @@ fn encode_edges(out: &mut Vec<u8>, rows: &[SegmentEdge]) {
                 .unwrap_or(crate::edge_store::NO_RELATIONSHIP_ID),
         );
     }
+    Ok(())
 }
 
-fn encode_edge_weights(out: &mut Vec<u8>, rows: &[SegmentEdgeWeight]) {
+fn encode_edge_weights(out: &mut Vec<u8>, rows: &[SegmentEdgeWeight]) -> GraphResult<()> {
     for row in rows {
         push_u32(out, row.source);
         push_u32(out, row.target);
-        out.push(row.type_id);
+        out.push(encode_v6_type_id(row.type_id)?);
         out.push(u8::from(row.schema_reversed));
         push_u32(
             out,
@@ -889,6 +888,7 @@ fn encode_edge_weights(out: &mut Vec<u8>, rows: &[SegmentEdgeWeight]) {
         );
         push_u32(out, row.weight);
     }
+    Ok(())
 }
 
 fn encode_node_states(out: &mut Vec<u8>, rows: &[SegmentNodeState]) {
@@ -980,7 +980,7 @@ fn decode_edges(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdge>> {
         rows.push(SegmentEdge {
             source: read_u32(bytes, offset)?,
             target: read_u32(bytes, offset + 4)?,
-            type_id: read_u8(bytes, offset + 8)?,
+            type_id: decode_v6_type_id(read_u8(bytes, offset + 8)?)?,
             schema_reversed: schema_reversed != 0,
             relationship_id: (relationship_id != crate::edge_store::NO_RELATIONSHIP_ID)
                 .then_some(relationship_id),
@@ -1002,7 +1002,7 @@ fn decode_edge_weights(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdgeW
         rows.push(SegmentEdgeWeight {
             source: read_u32(bytes, offset)?,
             target: read_u32(bytes, offset + 4)?,
-            type_id: read_u8(bytes, offset + 8)?,
+            type_id: decode_v6_type_id(read_u8(bytes, offset + 8)?)?,
             schema_reversed: schema_reversed != 0,
             relationship_id: match read_u32(bytes, offset + 10)? {
                 crate::edge_store::NO_RELATIONSHIP_ID => None,
@@ -1012,6 +1012,17 @@ fn decode_edge_weights(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdgeW
         });
     }
     Ok(rows)
+}
+
+fn encode_v6_type_id(type_id: EdgeTypeId) -> GraphResult<u8> {
+    type_id
+        .to_v6_storage()
+        .map_err(|_| segment_corrupt("edge type identifier exceeds v6 storage"))
+}
+
+fn decode_v6_type_id(value: u8) -> GraphResult<EdgeTypeId> {
+    EdgeTypeId::from_v6_storage(value)
+        .map_err(|_| segment_corrupt("edge type identifier uses the reserved v6 sentinel"))
 }
 
 fn decode_node_states(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentNodeState>> {
@@ -1292,9 +1303,12 @@ fn segment_corrupt(reason: impl Into<String>) -> GraphError {
 #[cfg(test)]
 pub(crate) fn encode_version_5_segment_for_test(segment: &DeltaSegment) -> Vec<u8> {
     let mut sections = EncodedSections::default();
-    encode_edges(&mut sections.edge_inserts, &segment.edge_inserts);
-    encode_edges(&mut sections.edge_deletes, &segment.edge_deletes);
-    encode_edge_weights(&mut sections.edge_weights, &segment.edge_weights);
+    encode_edges(&mut sections.edge_inserts, &segment.edge_inserts)
+        .expect("test segment edge insert IDs fit v6");
+    encode_edges(&mut sections.edge_deletes, &segment.edge_deletes)
+        .expect("test segment edge delete IDs fit v6");
+    encode_edge_weights(&mut sections.edge_weights, &segment.edge_weights)
+        .expect("test segment edge weight IDs fit v6");
     encode_node_states(&mut sections.node_states, &segment.node_states);
     for row in &segment.resolutions {
         push_u32(&mut sections.resolutions, row.table_oid);
@@ -1341,21 +1355,21 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(42),
         });
         segment.edge_deletes.push(SegmentEdge {
             source: 2,
             target: 3,
-            type_id: 4,
+            type_id: EdgeTypeId::from_v6_storage(4).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 1,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             relationship_id: Some(42),
             weight: 7,
             schema_reversed: false,
@@ -1381,21 +1395,21 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 1,
             target: 0,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             schema_reversed: true,
             relationship_id: None,
         });
         segment.edge_deletes.push(SegmentEdge {
             source: 3,
             target: 2,
-            type_id: 4,
+            type_id: EdgeTypeId::from_v6_storage(4).expect("fixture type ID is valid v6"),
             schema_reversed: true,
             relationship_id: None,
         });
         segment.edge_weights.push(SegmentEdgeWeight {
             source: 1,
             target: 0,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             schema_reversed: true,
             relationship_id: None,
             weight: 17,
@@ -1598,7 +1612,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -1642,7 +1656,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 99,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -1693,7 +1707,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 2,
             target: 0,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -1770,7 +1784,7 @@ mod tests {
             direction: TraversalDirection::Out,
             source,
             target,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             weight,
             relationship_id: None,
             operation,

@@ -5,6 +5,7 @@
 //! read adoption is handled by a later phase; this module provides the pure
 //! runtime surface and real segment loading boundary.
 
+use roaring::RoaringBitmap;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -20,13 +21,22 @@ use crate::projection::neighbors::{
 use crate::projection::segment::{DeltaSegment, SegmentKind};
 use crate::projection::tx_delta;
 use crate::safety::{GraphError, GraphResult};
-use crate::types::TraversalDirection;
+use crate::types::{EdgeTypeId, TraversalDirection};
+
+#[inline(always)]
+#[allow(
+    clippy::expect_used,
+    reason = "owned and mmap edge stores reject reserved v6 type bytes before publication"
+)]
+fn logical_type_id_from_validated_v6(value: u8) -> EdgeTypeId {
+    EdgeTypeId::from_v6_storage(value).expect("published topology contains validated v6 type IDs")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EdgeKey {
     source: u32,
     target: u32,
-    type_id: u8,
+    type_id: EdgeTypeId,
     schema_reversed: bool,
     relationship_id: Option<RelationshipId>,
 }
@@ -34,7 +44,7 @@ struct EdgeKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LayeredEdge {
     target: u32,
-    type_id: u8,
+    type_id: EdgeTypeId,
     schema_reversed: bool,
     weight: Option<u32>,
     relationship_id: Option<crate::edge_store::RelationshipId>,
@@ -52,10 +62,10 @@ enum DurableEdgeState {
 #[derive(Debug, Clone, Default)]
 struct DurableEdges {
     inserts: Vec<LayeredEdge>,
-    deletes: HashSet<(u32, u8, bool, Option<RelationshipId>)>,
+    deletes: HashSet<(u32, EdgeTypeId, bool, Option<RelationshipId>)>,
 }
 
-type MergedEdgeKey = (u32, u8, bool, Option<RelationshipId>);
+type MergedEdgeKey = (u32, EdgeTypeId, bool, Option<RelationshipId>);
 
 fn any_base_layer_winner(
     next_key: MergedEdgeKey,
@@ -89,7 +99,7 @@ pub(crate) struct LayeredSnapshot {
     durable_in: HashMap<u32, DurableEdges>,
     active_nodes: HashMap<u32, bool>,
     tenant_memberships: HashMap<u64, HashSet<u32>>,
-    missing_relationship_identity_edge_types: [bool; 256],
+    missing_relationship_identity_edge_types: RoaringBitmap,
 }
 
 /// Allocation preflight for constructing an immutable layered snapshot.
@@ -127,8 +137,8 @@ impl LayeredSnapshot {
         &self,
         base: &EdgeStore,
         page: &mut Vec<Neighbor>,
-    ) -> [bool; 256] {
-        let mut missing = [false; 256];
+    ) -> RoaringBitmap {
+        let mut missing = RoaringBitmap::new();
         let layered = LayeredNeighbors::from_snapshot(base, self);
         for (direction, first, second) in [
             (
@@ -156,7 +166,7 @@ impl LayeredSnapshot {
                     );
                     for edge in &*page {
                         if edge.relationship_id.is_none() {
-                            missing[usize::from(edge.type_id)] = true;
+                            missing.insert(edge.type_id.get());
                         }
                     }
                     if exhausted {
@@ -194,14 +204,12 @@ impl LayeredSnapshot {
     /// adjacency.
     pub(crate) fn has_missing_relationship_identity_for_types(
         &self,
-        active_edge_types: &[bool; 256],
+        active_edge_types: &RoaringBitmap,
     ) -> bool {
-        active_edge_types
-            .iter()
-            .enumerate()
-            .any(|(edge_type, active)| {
-                *active && self.missing_relationship_identity_edge_types[edge_type]
-            })
+        active_edge_types.iter().any(|edge_type| {
+            self.missing_relationship_identity_edge_types
+                .contains(edge_type)
+        })
     }
 
     /// Derive the immutable serving snapshot from validated decoded segments.
@@ -242,7 +250,7 @@ impl LayeredSnapshot {
             durable_in: output.durable_in,
             active_nodes: output.active_nodes,
             tenant_memberships: output.tenant_memberships,
-            missing_relationship_identity_edge_types: [false; 256],
+            missing_relationship_identity_edge_types: RoaringBitmap::new(),
         };
         snapshot.refresh_relationship_identity_completeness_summary(base);
         snapshot
@@ -331,7 +339,7 @@ impl LayeredSnapshot {
             durable_in: output.durable_in,
             active_nodes: output.active_nodes,
             tenant_memberships: output.tenant_memberships,
-            missing_relationship_identity_edge_types: [false; 256],
+            missing_relationship_identity_edge_types: RoaringBitmap::new(),
         };
         snapshot.try_refresh_relationship_identity_completeness_summary(base)?;
         Ok(snapshot)
@@ -352,7 +360,7 @@ impl LayeredSnapshot {
                             .saturating_mul(std::mem::size_of::<LayeredEdge>()),
                     )
                     .saturating_add(edges.deletes.capacity().saturating_mul(
-                        std::mem::size_of::<(u32, u8, bool, Option<RelationshipId>)>() * 2,
+                        std::mem::size_of::<(u32, EdgeTypeId, bool, Option<RelationshipId>)>() * 2,
                     ))
             });
             buckets.saturating_add(payloads)
@@ -841,7 +849,7 @@ impl<'a> LayeredNeighbors<'a> {
         while examined < limit {
             let base_edge = (!base_hidden && base_pos < targets.len()).then(|| LayeredEdge {
                 target: targets[base_pos],
-                type_id: type_ids[base_pos],
+                type_id: logical_type_id_from_validated_v6(type_ids[base_pos]),
                 schema_reversed: schema_reversed[base_pos] != 0,
                 weight: weights.and_then(|weights| weights.get(base_pos).copied()),
                 relationship_id: relationship_ids
@@ -972,6 +980,7 @@ impl<'a> LayeredNeighbors<'a> {
                 .zip(schema_reversed.iter())
                 .enumerate()
                 .filter_map(|(idx, ((&target, &type_id), &schema_reversed))| {
+                    let type_id = logical_type_id_from_validated_v6(type_id);
                     self.node_visible(target).then_some((
                         target,
                         LayeredEdge {
@@ -1031,6 +1040,7 @@ impl<'a> LayeredNeighbors<'a> {
                         .zip(schema_reversed.iter())
                         .enumerate()
                     {
+                        let type_id = logical_type_id_from_validated_v6(type_id);
                         merged.insert(
                             (
                                 target,
@@ -1066,6 +1076,7 @@ impl<'a> LayeredNeighbors<'a> {
                         .zip(schema_reversed.iter())
                         .enumerate()
                     {
+                        let type_id = logical_type_id_from_validated_v6(type_id);
                         if self.base_chunk_covers(target) {
                             continue;
                         }
@@ -1121,6 +1132,7 @@ impl<'a> LayeredNeighbors<'a> {
                 .zip(schema_reversed.iter())
                 .enumerate()
             {
+                let type_id = logical_type_id_from_validated_v6(type_id);
                 if target == node_idx {
                     merged.insert(
                         (
@@ -1363,7 +1375,7 @@ impl<'a> LayeredNeighbors<'a> {
             }
             let base_edge = (!base_hidden && base_pos < targets.len()).then(|| LayeredEdge {
                 target: targets[base_pos],
-                type_id: type_ids[base_pos],
+                type_id: logical_type_id_from_validated_v6(type_ids[base_pos]),
                 schema_reversed: schema_reversed[base_pos] != 0,
                 weight: None,
                 relationship_id: relationship_ids
@@ -1545,7 +1557,7 @@ impl<'a> LayeredNeighbors<'a> {
                          pos: usize| {
             (pos < targets.len()).then(|| LayeredEdge {
                 target: targets[pos],
-                type_id: types[pos],
+                type_id: logical_type_id_from_validated_v6(types[pos]),
                 schema_reversed: reversed[pos] != 0,
                 weight: None,
                 relationship_id: identities
@@ -1813,7 +1825,7 @@ impl<'a> LayeredNeighbors<'a> {
                 let pos = targets.len() - 1 - bc;
                 LayeredEdge {
                     target: targets[pos],
-                    type_id: type_ids[pos],
+                    type_id: logical_type_id_from_validated_v6(type_ids[pos]),
                     schema_reversed: schema_reversed[pos] != 0,
                     weight: None,
                     relationship_id: relationship_ids
@@ -1975,7 +1987,7 @@ impl<'a> LayeredNeighbors<'a> {
                 .and_then(|offset| targets.len().checked_sub(offset))
                 .map(|pos| LayeredEdge {
                     target: targets[pos],
-                    type_id: types[pos],
+                    type_id: logical_type_id_from_validated_v6(types[pos]),
                     schema_reversed: reversed[pos] != 0,
                     weight: None,
                     relationship_id: ids.get(pos).copied().filter(|id| *id != NO_RELATIONSHIP_ID),
@@ -2413,7 +2425,7 @@ impl LayeredBuilderCapacity {
                 .ok_or_else(layered_size_overflow)?;
         let delete_payloads = checked_bytes(
             self.edge_mutations,
-            std::mem::size_of::<(u32, u8, bool, Option<RelationshipId>)>(),
+            std::mem::size_of::<(u32, EdgeTypeId, bool, Option<RelationshipId>)>(),
         )?
         .checked_mul(4)
         .ok_or_else(layered_size_overflow)?;
@@ -2768,7 +2780,7 @@ impl<'a> LayeredBuilder<'a> {
         direction: TraversalDirection,
         source: u32,
         target: u32,
-        type_id: u8,
+        type_id: EdgeTypeId,
         schema_reversed: bool,
         relationship_id: Option<RelationshipId>,
     ) {
@@ -3039,7 +3051,7 @@ fn base_edge_exists(base: &EdgeStore, key: EdgeKey) -> bool {
         .enumerate()
         .any(|(idx, ((&target, &type_id), &schema_reversed))| {
             target == key.target
-                && type_id == key.type_id
+                && logical_type_id_from_validated_v6(type_id) == key.type_id
                 && (schema_reversed != 0) == key.schema_reversed
                 && relationship_ids
                     .get(idx)
@@ -3149,14 +3161,14 @@ mod tests {
             SegmentEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(10),
             },
             SegmentEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(11),
             },
@@ -3168,14 +3180,14 @@ mod tests {
             SegmentEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             },
             SegmentEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(10),
             },
@@ -3183,7 +3195,7 @@ mod tests {
         newer_out.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(12),
         });
@@ -3193,7 +3205,7 @@ mod tests {
         older_in.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(20),
         });
@@ -3202,14 +3214,14 @@ mod tests {
         newer_in.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(20),
         });
         newer_in.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 4,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(21),
         });
@@ -3222,13 +3234,15 @@ mod tests {
                 TraversalDirection::Out => vec![
                     Neighbor {
                         target: 2,
-                        type_id: 1,
+                        type_id: EdgeTypeId::from_v6_storage(1)
+                            .expect("fixture type ID is valid v6"),
                         schema_reversed: false,
                         relationship_id: Some(11),
                     },
                     Neighbor {
                         target: 3,
-                        type_id: 1,
+                        type_id: EdgeTypeId::from_v6_storage(1)
+                            .expect("fixture type ID is valid v6"),
                         schema_reversed: false,
                         relationship_id: Some(12),
                     },
@@ -3236,13 +3250,15 @@ mod tests {
                 TraversalDirection::In => vec![
                     Neighbor {
                         target: 1,
-                        type_id: 1,
+                        type_id: EdgeTypeId::from_v6_storage(1)
+                            .expect("fixture type ID is valid v6"),
                         schema_reversed: false,
                         relationship_id: None,
                     },
                     Neighbor {
                         target: 4,
-                        type_id: 1,
+                        type_id: EdgeTypeId::from_v6_storage(1)
+                            .expect("fixture type ID is valid v6"),
                         schema_reversed: false,
                         relationship_id: Some(21),
                     },
@@ -3293,7 +3309,7 @@ mod tests {
             .extend((1..=3).map(|target| SegmentEdge {
                 source: 0,
                 target,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             }));
@@ -3354,7 +3370,8 @@ mod tests {
                     edge: RawEdge {
                         source: 0,
                         target: 1,
-                        type_id: 1,
+                        type_id: EdgeTypeId::from_v6_storage(1)
+                            .expect("fixture type ID is valid v6"),
                         weight: None,
                         schema_reversed: false,
                     },
@@ -3368,7 +3385,7 @@ mod tests {
         durable.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(30),
         });
@@ -3388,7 +3405,7 @@ mod tests {
                 .try_push(RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     weight: None,
                     schema_reversed: false,
                 })
@@ -3400,7 +3417,7 @@ mod tests {
         durable.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(40),
         });
@@ -3422,14 +3439,14 @@ mod tests {
             SegmentEdge {
                 source: 0,
                 target: 3,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(31),
             },
             SegmentEdge {
                 source: 0,
                 target: 4,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(32),
             },
@@ -3486,27 +3503,31 @@ mod tests {
         durable.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         durable.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(50),
         });
         let mut overlay_inserts = OverlayInserts::new();
-        overlay_inserts
-            .entry(0)
-            .or_default()
-            .push((1, 1, false, None));
+        overlay_inserts.entry(0).or_default().push((
+            1,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            None,
+        ));
         let mut overlay_deletes = OverlayDeletes::new();
-        overlay_deletes
-            .entry(0)
-            .or_default()
-            .insert((2, 1, false, None));
+        overlay_deletes.entry(0).or_default().insert((
+            2,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            None,
+        ));
         let layered = LayeredNeighbors::new_with_options(
             &base,
             None,
@@ -3540,27 +3561,31 @@ mod tests {
         durable.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         durable.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(60),
         });
         let mut overlay_inserts = OverlayInserts::new();
-        overlay_inserts
-            .entry(0)
-            .or_default()
-            .push((1, 1, false, None));
+        overlay_inserts.entry(0).or_default().push((
+            1,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            None,
+        ));
         let mut overlay_deletes = OverlayDeletes::new();
-        overlay_deletes
-            .entry(0)
-            .or_default()
-            .insert((2, 1, false, None));
+        overlay_deletes.entry(0).or_default().insert((
+            2,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            None,
+        ));
         let layered = LayeredNeighbors::new_with_options(
             &base,
             Some(&base_in),
@@ -3598,14 +3623,14 @@ mod tests {
             SegmentEdge {
                 source: 0,
                 target: 3,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(30),
             },
             SegmentEdge {
                 source: 0,
                 target: 4,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(31),
             },
@@ -3616,7 +3641,7 @@ mod tests {
         chunk_in.edge_inserts.push(SegmentEdge {
             source: 5,
             target: 0,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(32),
         });
@@ -3627,7 +3652,7 @@ mod tests {
         durable_out.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -3635,14 +3660,14 @@ mod tests {
             durable_out.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(relationship_id),
             });
             durable_out.edge_weights.push(SegmentEdgeWeight {
                 source: 0,
                 target,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(relationship_id),
                 weight: 7,
@@ -3655,7 +3680,7 @@ mod tests {
             durable_in.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(relationship_id),
             });
@@ -3663,39 +3688,47 @@ mod tests {
         durable_in.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 7,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(70),
         });
         durable_in.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 7,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(70),
             weight: 9,
         });
 
         let mut overlay_out_inserts = OverlayInserts::new();
-        overlay_out_inserts
-            .entry(0)
-            .or_default()
-            .push((3, 1, false, None));
+        overlay_out_inserts.entry(0).or_default().push((
+            3,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            None,
+        ));
         let mut overlay_out_deletes = OverlayDeletes::new();
-        overlay_out_deletes
-            .entry(0)
-            .or_default()
-            .insert((6, 1, false, None));
+        overlay_out_deletes.entry(0).or_default().insert((
+            6,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            None,
+        ));
         let mut overlay_in_inserts = OverlayInserts::new();
-        overlay_in_inserts
-            .entry(0)
-            .or_default()
-            .push((6, 1, false, Some(60)));
+        overlay_in_inserts.entry(0).or_default().push((
+            6,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            Some(60),
+        ));
         let mut overlay_in_deletes = OverlayDeletes::new();
-        overlay_in_deletes
-            .entry(0)
-            .or_default()
-            .insert((2, 1, false, Some(62)));
+        overlay_in_deletes.entry(0).or_default().insert((
+            2,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            Some(62),
+        ));
 
         let layered = LayeredNeighbors::new_with_base_chunks(
             &base,
@@ -3713,43 +3746,43 @@ mod tests {
             vec![
                 Neighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(63)
                 },
                 Neighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(64)
                 },
                 Neighbor {
                     target: 3,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None
                 },
                 Neighbor {
                     target: 4,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(31)
                 },
                 Neighbor {
                     target: 5,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(32)
                 },
                 Neighbor {
                     target: 6,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(60)
                 },
                 Neighbor {
                     target: 7,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(70)
                 },
@@ -3781,10 +3814,10 @@ mod tests {
 
     #[test]
     fn owned_layered_any_base_layer_applies_complete_out_before_in() {
-        let key = (3, 1, false, Some(30));
+        let key = (3, crate::types::EdgeTypeId::test_v6(1), false, Some(30));
         let out_chunk = LayeredEdge {
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             weight: Some(7),
             relationship_id: Some(30),
@@ -3811,28 +3844,28 @@ mod tests {
             SegmentEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             },
             SegmentEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             },
             SegmentEdge {
                 source: 0,
                 target: 3,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             },
             SegmentEdge {
                 source: 0,
                 target: 4,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             },
@@ -3892,7 +3925,7 @@ mod tests {
             durable.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target: 6,
-                type_id: 2,
+                type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: Some(90),
             });
@@ -3951,7 +3984,7 @@ mod tests {
                 let edge = SegmentEdge {
                     source: 0,
                     target,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: (identity_variant != 0)
                         .then_some(u32::from(identity_variant)),
@@ -3992,7 +4025,7 @@ mod tests {
         older.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(10),
         });
@@ -4001,14 +4034,14 @@ mod tests {
         newer.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         newer.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(11),
         });
@@ -4024,13 +4057,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(10),
                 },
                 Neighbor {
                     target: 3,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(11),
                 },
@@ -4046,7 +4079,7 @@ mod tests {
         chunk.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4056,7 +4089,7 @@ mod tests {
         delete_chunk.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4065,7 +4098,7 @@ mod tests {
         inbound.edge_inserts.push(SegmentEdge {
             source: 4,
             target: 5,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             schema_reversed: true,
             relationship_id: None,
         });
@@ -4073,10 +4106,8 @@ mod tests {
         let segment_refs = [&delete_chunk, &inbound];
         let snapshot = LayeredSnapshot::try_build_from_refs(&base, &chunk_refs, &segment_refs)
             .expect("summarized snapshot");
-        let mut type_one = [false; 256];
-        type_one[1] = true;
-        let mut type_two = [false; 256];
-        type_two[2] = true;
+        let type_one = roaring::RoaringBitmap::from_iter([1]);
+        let type_two = roaring::RoaringBitmap::from_iter([2]);
 
         assert!(!snapshot.has_missing_relationship_identity_for_types(&type_one));
         assert!(snapshot.has_missing_relationship_identity_for_types(&type_two));
@@ -4091,7 +4122,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4099,8 +4130,7 @@ mod tests {
         let snapshot = LayeredSnapshot::try_build_from_refs(&base, &[], &[&segment])
             .expect("snapshot summary must ignore tx visibility");
         tx_delta::clear_for_test();
-        let mut active = [false; 256];
-        active[1] = true;
+        let active = roaring::RoaringBitmap::from_iter([1]);
         assert!(snapshot.has_missing_relationship_identity_for_types(&active));
     }
 
@@ -4113,7 +4143,7 @@ mod tests {
         edge_segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4127,8 +4157,7 @@ mod tests {
         let snapshot =
             LayeredSnapshot::try_build_from_refs(&base, &[], &[&edge_segment, &node_segment])
                 .expect("snapshot with tombstoned target");
-        let mut active = [false; 256];
-        active[1] = true;
+        let active = roaring::RoaringBitmap::from_iter([1]);
         assert!(!snapshot.has_missing_relationship_identity_for_types(&active));
     }
 
@@ -4140,7 +4169,7 @@ mod tests {
         insert.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4149,7 +4178,7 @@ mod tests {
         delete.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4168,7 +4197,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: Some(77),
         });
@@ -4179,13 +4208,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
                 Neighbor {
                     target: 3,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: Some(77),
                 },
@@ -4202,16 +4231,17 @@ mod tests {
         durable.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
-        tx_delta::record_deleted_edge(0, 2, 1).expect("record tx delete");
+        tx_delta::record_deleted_edge(0, 2, crate::types::EdgeTypeId::test_v6(1))
+            .expect("record tx delete");
         tx_delta::record_added_edge(
             0,
             tx_delta::DeltaEdge {
                 target: 3,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -4225,13 +4255,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
                 Neighbor {
                     target: 3,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
@@ -4248,7 +4278,7 @@ mod tests {
         inbound.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4268,13 +4298,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
                 Neighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
@@ -4290,21 +4320,21 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4315,13 +4345,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
                 Neighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
@@ -4337,14 +4367,14 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             relationship_id: None,
             weight: 3,
             schema_reversed: false,
@@ -4356,14 +4386,14 @@ mod tests {
             vec![
                 WeightedNeighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 10,
                     schema_reversed: false,
                 },
                 WeightedNeighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 3,
                     schema_reversed: false,
@@ -4381,21 +4411,21 @@ mod tests {
         segment.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 2,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
         segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 3,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             relationship_id: None,
             weight: 3,
             schema_reversed: false,
@@ -4405,7 +4435,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 4,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4448,7 +4478,7 @@ mod tests {
             target_deleted.neighbors(0).collect::<Vec<_>>(),
             vec![Neighbor {
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             }]
@@ -4464,7 +4494,7 @@ mod tests {
             0,
             tx_delta::DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: Some(4),
                 schema_reversed: false,
                 relationship_id: None,
@@ -4478,14 +4508,14 @@ mod tests {
             vec![
                 WeightedNeighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 10,
                     schema_reversed: false,
                 },
                 WeightedNeighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     relationship_id: None,
                     weight: 4,
                     schema_reversed: false,
@@ -4531,7 +4561,7 @@ mod tests {
             layered.neighbors(0).collect::<Vec<_>>(),
             vec![Neighbor {
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             }]
@@ -4547,7 +4577,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4564,7 +4594,7 @@ mod tests {
             layered.neighbors(0).collect::<Vec<_>>(),
             vec![Neighbor {
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             }]
@@ -4580,7 +4610,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4608,7 +4638,7 @@ mod tests {
         delete.edge_deletes.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4617,7 +4647,7 @@ mod tests {
         insert.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });
@@ -4627,7 +4657,7 @@ mod tests {
             layered.neighbors(0).collect::<Vec<_>>(),
             vec![Neighbor {
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 schema_reversed: false,
                 relationship_id: None,
             }]

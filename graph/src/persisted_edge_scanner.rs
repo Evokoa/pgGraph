@@ -9,6 +9,7 @@ use crate::edge_type_registry::EdgeTypeRegistry;
 use crate::quote::quote_ident;
 use crate::resource::{ByteCount, ResourceGovernor, ResourceLease, ResourcePhase};
 use crate::safety::{GraphError, GraphResult};
+use crate::types::EdgeTypeId;
 
 const RAW_FIXED_BYTES: usize = 18;
 const EDGE_VALUE_BYTES: usize = 14;
@@ -328,7 +329,7 @@ struct DecodedRaw<'a> {
     source_key: &'a str,
     source: u32,
     target: u32,
-    type_id: u8,
+    type_id: EdgeTypeId,
     weight: u32,
     bidirectional: bool,
     identity_key_len: usize,
@@ -339,10 +340,13 @@ fn encode_raw_edge(
     source_key: &str,
     source: u32,
     target: u32,
-    type_id: u8,
+    type_id: EdgeTypeId,
     weight: Option<u32>,
     bidirectional: bool,
 ) -> GraphResult<RunRecord> {
+    let stored_type_id = type_id
+        .to_v6_storage()
+        .map_err(|_| GraphError::Internal("edge type registry exceeds v6 artifact width".into()))?;
     let key_len = u32::try_from(source_key.len())
         .map_err(|_| GraphError::Internal("relationship key exceeds u32".into()))?;
     let mut key = Vec::new();
@@ -354,14 +358,14 @@ fn encode_raw_edge(
     let identity_key_len = key.len();
     key.extend_from_slice(&source.to_be_bytes());
     key.extend_from_slice(&target.to_be_bytes());
-    key.push(type_id);
+    key.push(stored_type_id);
     let mut value = Vec::new();
     value
         .try_reserve_exact(RAW_FIXED_BYTES)
         .map_err(allocation_error)?;
     value.extend_from_slice(&source.to_le_bytes());
     value.extend_from_slice(&target.to_le_bytes());
-    value.push(type_id);
+    value.push(stored_type_id);
     value.extend_from_slice(&weight.unwrap_or(0).to_le_bytes());
     value.push(u8::from(bidirectional));
     value.extend_from_slice(&(identity_key_len as u32).to_le_bytes());
@@ -395,7 +399,8 @@ fn decode_raw_edge(record: &RunRecord) -> GraphResult<DecodedRaw<'_>> {
         source_key,
         source: read_le_u32(&record.value, 0)?,
         target: read_le_u32(&record.value, 4)?,
-        type_id: record.value[8],
+        type_id: EdgeTypeId::from_v6_storage(record.value[8])
+            .map_err(|_| corrupt("raw relationship type ID is reserved"))?,
         weight: read_le_u32(&record.value, 9)?,
         bidirectional: record.value[13] != 0,
         identity_key_len: key_end,
@@ -421,16 +426,19 @@ fn push_oriented(
     collector: &mut RunCollector<'_, '_>,
     source: u32,
     target: u32,
-    type_id: u8,
+    type_id: EdgeTypeId,
     schema_reversed: bool,
     weight: u32,
     relationship_id: u32,
 ) -> GraphResult<()> {
+    let stored_type_id = type_id
+        .to_v6_storage()
+        .map_err(|_| GraphError::Internal("edge type registry exceeds v6 artifact width".into()))?;
     let mut key = Vec::new();
     key.try_reserve_exact(14).map_err(allocation_error)?;
     key.extend_from_slice(&source.to_be_bytes());
     key.extend_from_slice(&target.to_be_bytes());
-    key.push(type_id);
+    key.push(stored_type_id);
     key.push(u8::from(schema_reversed));
     key.extend_from_slice(&relationship_id.to_be_bytes());
     let mut value = Vec::new();
@@ -438,7 +446,7 @@ fn push_oriented(
         .try_reserve_exact(EDGE_VALUE_BYTES)
         .map_err(allocation_error)?;
     value.extend_from_slice(&target.to_le_bytes());
-    value.push(type_id);
+    value.push(stored_type_id);
     value.push(u8::from(schema_reversed));
     value.extend_from_slice(&weight.to_le_bytes());
     value.extend_from_slice(&relationship_id.to_le_bytes());
@@ -450,11 +458,9 @@ fn intern_edge_type(
     memory: &mut ResourceLease<'_>,
     label: &str,
     max_record_bytes: usize,
-) -> GraphResult<u8> {
+) -> GraphResult<EdgeTypeId> {
     if let Some(type_id) = registry.id(label) {
-        return type_id.to_v6_storage().map_err(|_| {
-            GraphError::Internal("edge type registry exceeds v6 artifact width".into())
-        });
+        return Ok(type_id);
     }
     if label.len() > max_record_bytes {
         return Err(GraphError::Internal(
@@ -466,10 +472,7 @@ fn intern_edge_type(
     memory
         .try_grow_in(ResourcePhase::EdgeResolve, bytes)
         .map_err(resource_error)?;
-    registry
-        .register_v6(label)?
-        .to_v6_storage()
-        .map_err(|_| GraphError::EdgeTypeLimit)
+    registry.register_v6(label)
 }
 
 fn aliased_column(alias: &str, column: &str) -> String {
@@ -591,7 +594,8 @@ mod tests {
 
     #[test]
     fn edge_codec_round_trips() {
-        let record = encode_raw_edge(7, "key", 1, 2, 3, Some(4), true).unwrap();
+        let record =
+            encode_raw_edge(7, "key", 1, 2, EdgeTypeId::test_v6(3), Some(4), true).unwrap();
         let decoded = decode_raw_edge(&record).unwrap();
         assert_eq!(
             (
@@ -603,7 +607,7 @@ mod tests {
                 decoded.weight,
                 decoded.bidirectional
             ),
-            (7, "key", 1, 2, 3, 4, true)
+            (7, "key", 1, 2, EdgeTypeId::test_v6(3), 4, true)
         );
     }
 

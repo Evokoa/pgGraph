@@ -425,7 +425,7 @@ fn expand_join_pattern(
     engine: &Engine,
     neighbors: &GqlNeighbors<'_>,
     plan: &PhysicalJoinPlan,
-    rel_type_ids: &[u8],
+    rel_type_ids: &[crate::types::EdgeTypeId],
     tenant: Option<&str>,
     state: JoinState,
     pattern_idx: usize,
@@ -558,7 +558,7 @@ fn expand_join_pattern_hops(
     engine: &Engine,
     neighbors: &GqlNeighbors<'_>,
     plan: &PhysicalJoinPlan,
-    rel_type_ids: &[u8],
+    rel_type_ids: &[crate::types::EdgeTypeId],
     tenant: Option<&str>,
     state: JoinState,
     pattern_idx: usize,
@@ -748,13 +748,13 @@ struct WildcardExpansion<'a> {
     engine: &'a Engine,
     neighbors: &'a GqlNeighbors<'a>,
     plan: &'a PhysicalWildcardPathPlan,
-    segment_filters: &'a [std::collections::BTreeSet<u8>],
+    segment_filters: &'a [std::collections::BTreeSet<crate::types::EdgeTypeId>],
     tenant: Option<&'a str>,
     row_cap: usize,
     context: &'a QueryExecutionContext<'a>,
 }
 
-type WildcardPathStepKey = (u32, u32, u8, Option<RelationshipId>);
+type WildcardPathStepKey = (u32, u32, crate::types::EdgeTypeId, Option<RelationshipId>);
 type SeenWildcardPaths = std::collections::HashSet<Vec<WildcardPathStepKey>>;
 
 fn expand_wildcard_segments(
@@ -788,7 +788,7 @@ fn expand_wildcard_segment(
     engine: &Engine,
     neighbors: &GqlNeighbors<'_>,
     plan: &PhysicalWildcardPathPlan,
-    segment_filters: &[std::collections::BTreeSet<u8>],
+    segment_filters: &[std::collections::BTreeSet<crate::types::EdgeTypeId>],
     tenant: Option<&str>,
     state: PathState,
     segment_idx: usize,
@@ -847,7 +847,7 @@ fn expand_wildcard_segment_hops(
     engine: &Engine,
     neighbors: &GqlNeighbors<'_>,
     plan: &PhysicalWildcardPathPlan,
-    segment_filters: &[std::collections::BTreeSet<u8>],
+    segment_filters: &[std::collections::BTreeSet<crate::types::EdgeTypeId>],
     tenant: Option<&str>,
     segment: &PhysicalWildcardPathSegment,
     state: PathState,
@@ -945,7 +945,7 @@ fn wildcard_segment_endpoint_matches(
             .is_none_or(|table_oid| node_table_oid(engine, target_idx) == Some(table_oid))
 }
 
-fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<u8> {
+fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<crate::types::EdgeTypeId> {
     engine
         .edge_type_id(rel_type)
         .ok_or_else(|| GraphError::GqlExecution {
@@ -1246,7 +1246,7 @@ struct TargetExpansion<'a> {
     neighbors: &'a GqlNeighbors<'a>,
     engine: &'a Engine,
     plan: &'a PhysicalPlan,
-    rel_type_id: u8,
+    rel_type_id: crate::types::EdgeTypeId,
     tenant: Option<&'a str>,
     result_cap: usize,
     context: &'a QueryExecutionContext<'a>,
@@ -1443,7 +1443,7 @@ impl<'a> GqlNeighbors<'a> {
         &self,
         direction: BoundDirection,
         node_idx: u32,
-        rel_type_id: u8,
+        rel_type_id: crate::types::EdgeTypeId,
     ) -> GraphResult<Vec<GqlStepTarget>> {
         let mut neighbors = Vec::new();
         if matches!(direction, BoundDirection::Out | BoundDirection::Undirected) {
@@ -1521,7 +1521,7 @@ impl<'a> GqlNeighbors<'a> {
         &self,
         direction: TraversalDirection,
         node_idx: u32,
-        rel_type_id: u8,
+        rel_type_id: crate::types::EdgeTypeId,
         orientation: EdgeOrientation,
         out: &mut Vec<GqlStepTarget>,
     ) -> GraphResult<()> {
@@ -1598,7 +1598,7 @@ impl<'a> GqlNeighbors<'a> {
 struct GqlTarget {
     node_idx: u32,
     orientation: EdgeOrientation,
-    type_id: u8,
+    type_id: crate::types::EdgeTypeId,
     schema_reversed: bool,
     relationship_id: Option<RelationshipId>,
     path_nodes: Vec<u32>,
@@ -1609,7 +1609,7 @@ struct GqlTarget {
 struct GqlStepTarget {
     node_idx: u32,
     orientation: EdgeOrientation,
-    type_id: u8,
+    type_id: crate::types::EdgeTypeId,
     schema_reversed: bool,
     relationship_id: Option<RelationshipId>,
 }
@@ -1637,7 +1637,7 @@ struct GqlRelationshipStep {
     from_idx: u32,
     to_idx: u32,
     orientation: EdgeOrientation,
-    type_id: u8,
+    type_id: crate::types::EdgeTypeId,
     schema_reversed: bool,
     relationship_id: Option<RelationshipId>,
 }
@@ -1651,7 +1651,7 @@ enum EdgeOrientation {
 fn append_matching_neighbors(
     source: &impl NeighborSource,
     node_idx: u32,
-    rel_type_id: u8,
+    rel_type_id: crate::types::EdgeTypeId,
     orientation: EdgeOrientation,
     visibility: &VisibilityScope,
     out: &mut Vec<GqlStepTarget>,
@@ -2084,10 +2084,10 @@ fn coordinate(engine: &Engine, node_idx: u32) -> GraphResult<GqlNodeCoordinate> 
     })
 }
 
-fn edge_type_label(engine: &Engine, type_id: u8) -> GraphResult<String> {
+fn edge_type_label(engine: &Engine, type_id: crate::types::EdgeTypeId) -> GraphResult<String> {
     engine
         .edge_type_registry
-        .get(type_id as usize)
+        .get(type_id.get() as usize)
         .filter(|label| !label.is_empty())
         .cloned()
         .ok_or_else(|| GraphError::GqlExecution {
@@ -2158,7 +2158,7 @@ mod resource_accounting_tests {
                 edge: crate::edge_store::RawEdge {
                     source,
                     target: hidden_target,
-                    type_id: 0,
+                    type_id: crate::types::EdgeTypeId::test_v6(0),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -2170,7 +2170,7 @@ mod resource_accounting_tests {
                 edge: crate::edge_store::RawEdge {
                     source,
                     target: visible_target,
-                    type_id: 0,
+                    type_id: crate::types::EdgeTypeId::test_v6(0),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -2184,7 +2184,7 @@ mod resource_accounting_tests {
                 edge: crate::edge_store::RawEdge {
                     source: hidden_target,
                     target: source,
-                    type_id: 0,
+                    type_id: crate::types::EdgeTypeId::test_v6(0),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -2196,7 +2196,7 @@ mod resource_accounting_tests {
                 edge: crate::edge_store::RawEdge {
                     source: visible_target,
                     target: source,
-                    type_id: 0,
+                    type_id: crate::types::EdgeTypeId::test_v6(0),
                     weight: None,
                     schema_reversed: false,
                 },

@@ -14,7 +14,7 @@ use crate::projection::manifest::{
 };
 use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentEdgeWeight, SegmentKind};
 use crate::safety::{GraphError, GraphResult};
-use crate::types::TraversalDirection;
+use crate::types::{EdgeTypeId, TraversalDirection};
 
 /// Inclusive/exclusive source-node range covered by one base chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +132,11 @@ impl BaseChunkSource for EdgeStoreChunkSource<'_> {
                     edge: RawEdge {
                         source,
                         target,
-                        type_id,
+                        type_id: EdgeTypeId::from_v6_storage(type_id).map_err(|_| {
+                            GraphError::CorruptFile {
+                                reason: "base chunk contains reserved v6 edge type".into(),
+                            }
+                        })?,
                         weight: weights.get(idx).copied(),
                         schema_reversed: schema_reversed != 0,
                     },
@@ -993,7 +997,7 @@ mod tests {
         segment.edge_inserts.push(SegmentEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             schema_reversed: false,
             relationship_id: None,
         });

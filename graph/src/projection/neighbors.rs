@@ -7,14 +7,24 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::edge_store::{EdgeStore, RelationshipId, NO_RELATIONSHIP_ID};
+use crate::types::EdgeTypeId;
+
+#[inline(always)]
+#[allow(
+    clippy::expect_used,
+    reason = "owned and mmap edge stores reject reserved v6 type bytes before publication"
+)]
+fn logical_type_id_from_validated_v6(value: u8) -> EdgeTypeId {
+    EdgeTypeId::from_v6_storage(value).expect("published topology contains validated v6 type IDs")
+}
 
 /// Pending edge inserts keyed by source node.
-pub(crate) type OverlayInsert = (u32, u8, bool, Option<RelationshipId>);
+pub(crate) type OverlayInsert = (u32, EdgeTypeId, bool, Option<RelationshipId>);
 /// Pending edge inserts keyed by source node.
 pub(crate) type OverlayInserts = HashMap<u32, Vec<OverlayInsert>>;
 /// One pending edge tombstone. `relationship_id = None` is a legacy
 /// topology-wide tombstone; identified tombstones remove only one source row.
-pub(crate) type OverlayDelete = (u32, u8, bool, Option<RelationshipId>);
+pub(crate) type OverlayDelete = (u32, EdgeTypeId, bool, Option<RelationshipId>);
 /// Pending edge deletes keyed by source node.
 pub(crate) type OverlayDeletes = HashMap<u32, HashSet<OverlayDelete>>;
 /// Insert and delete overlay maps for one edge orientation.
@@ -96,14 +106,14 @@ pub(crate) enum OwnedNeighborCursor {
         chunk_pos: usize,
         durable_pos: usize,
         overlay_pos: usize,
-        last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
+        last_key: Option<(u32, EdgeTypeId, bool, Option<RelationshipId>)>,
     },
     LayeredReverse {
         base_consumed: usize,
         chunk_consumed: usize,
         durable_consumed: usize,
         overlay_consumed: usize,
-        last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
+        last_key: Option<(u32, EdgeTypeId, bool, Option<RelationshipId>)>,
     },
     LayeredAny {
         out_base_pos: usize,
@@ -114,7 +124,7 @@ pub(crate) enum OwnedNeighborCursor {
         in_durable_pos: usize,
         out_overlay_pos: usize,
         in_overlay_pos: usize,
-        last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
+        last_key: Option<(u32, EdgeTypeId, bool, Option<RelationshipId>)>,
     },
     LayeredAnyReverse {
         out_base_consumed: usize,
@@ -125,7 +135,7 @@ pub(crate) enum OwnedNeighborCursor {
         in_durable_consumed: usize,
         out_overlay_consumed: usize,
         in_overlay_consumed: usize,
-        last_key: Option<(u32, u8, bool, Option<RelationshipId>)>,
+        last_key: Option<(u32, EdgeTypeId, bool, Option<RelationshipId>)>,
     },
     Logical {
         pos: usize,
@@ -209,7 +219,7 @@ impl NeighborSource for CsrNeighbors<'_> {
         output.extend((pos.min(targets.len())..end).map(|pos| {
             Neighbor {
                 target: targets[pos],
-                type_id: type_ids[pos],
+                type_id: logical_type_id_from_validated_v6(type_ids[pos]),
                 schema_reversed: schema_reversed[pos] != 0,
                 relationship_id: relationship_ids
                     .get(pos)
@@ -240,7 +250,7 @@ impl NeighborSource for CsrNeighbors<'_> {
             let pos = targets.len() - 1 - offset;
             Neighbor {
                 target: targets[pos],
-                type_id: type_ids[pos],
+                type_id: logical_type_id_from_validated_v6(type_ids[pos]),
                 schema_reversed: schema_reversed[pos] != 0,
                 relationship_id: relationship_ids
                     .get(pos)
@@ -364,7 +374,7 @@ impl NeighborSource for OverlayNeighbors<'_> {
                 .filter(|id| *id != NO_RELATIONSHIP_ID);
             let candidate = Neighbor {
                 target: targets[pos],
-                type_id: type_ids[pos],
+                type_id: logical_type_id_from_validated_v6(type_ids[pos]),
                 schema_reversed: schema_reversed[pos] != 0,
                 relationship_id,
             };
@@ -392,12 +402,18 @@ impl NeighborSource for OverlayNeighbors<'_> {
             };
             if !duplicate_check_initialized {
                 let key_before = |idx: usize| {
-                    (targets[idx], type_ids[idx], schema_reversed[idx] != 0)
-                        < (target, type_id, reversed)
+                    (
+                        targets[idx],
+                        logical_type_id_from_validated_v6(type_ids[idx]),
+                        schema_reversed[idx] != 0,
+                    ) < (target, type_id, reversed)
                 };
                 let key_after = |idx: usize| {
-                    (targets[idx], type_ids[idx], schema_reversed[idx] != 0)
-                        <= (target, type_id, reversed)
+                    (
+                        targets[idx],
+                        logical_type_id_from_validated_v6(type_ids[idx]),
+                        schema_reversed[idx] != 0,
+                    ) <= (target, type_id, reversed)
                 };
                 let mut low = 0usize;
                 let mut high = targets.len();
@@ -538,12 +554,18 @@ impl NeighborSource for OverlayNeighbors<'_> {
             let &(target, type_id, reversed, relationship_id) = &inserted[pos];
             if !duplicate_check_initialized {
                 let key_before = |idx: usize| {
-                    (targets[idx], type_ids[idx], schema_reversed[idx] != 0)
-                        < (target, type_id, reversed)
+                    (
+                        targets[idx],
+                        logical_type_id_from_validated_v6(type_ids[idx]),
+                        schema_reversed[idx] != 0,
+                    ) < (target, type_id, reversed)
                 };
                 let key_after = |idx: usize| {
-                    (targets[idx], type_ids[idx], schema_reversed[idx] != 0)
-                        <= (target, type_id, reversed)
+                    (
+                        targets[idx],
+                        logical_type_id_from_validated_v6(type_ids[idx]),
+                        schema_reversed[idx] != 0,
+                    ) <= (target, type_id, reversed)
                 };
                 let mut low = 0usize;
                 let mut high = targets.len();
@@ -626,7 +648,7 @@ impl NeighborSource for OverlayNeighbors<'_> {
                 .filter(|id| *id != NO_RELATIONSHIP_ID);
             let candidate = Neighbor {
                 target: targets[pos],
-                type_id: type_ids[pos],
+                type_id: logical_type_id_from_validated_v6(type_ids[pos]),
                 schema_reversed: schema_reversed[pos] != 0,
                 relationship_id,
             };
@@ -666,7 +688,7 @@ pub(crate) struct Neighbor {
     /// Target node index.
     pub(crate) target: u32,
     /// Edge type identifier.
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     /// Whether this edge row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
     /// Durable relationship identity for the source row when available.
@@ -679,7 +701,7 @@ pub(crate) struct WeightedNeighbor {
     /// Target node index.
     pub(crate) target: u32,
     /// Edge type identifier.
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     /// Edge weight.
     pub(crate) weight: u32,
     /// Whether this edge row is a synthetic reverse of the schema edge.
@@ -726,7 +748,7 @@ impl WeightedNeighborSource for EdgeStore {
             .map(
                 |(idx, (((&target, &type_id), &schema_reversed), &weight))| WeightedNeighbor {
                     target,
-                    type_id,
+                    type_id: logical_type_id_from_validated_v6(type_id),
                     weight,
                     schema_reversed: schema_reversed != 0,
                     relationship_id: relationship_ids
@@ -757,7 +779,7 @@ impl WeightedNeighborSource for EdgeStore {
             if let Some(&weight) = weights.get(position) {
                 output.push(WeightedNeighbor {
                     target: targets[position],
-                    type_id: type_ids[position],
+                    type_id: logical_type_id_from_validated_v6(type_ids[position]),
                     weight,
                     schema_reversed: schema_reversed[position] != 0,
                     relationship_id: relationship_ids
@@ -856,7 +878,7 @@ impl Iterator for CsrNeighborIter<'_> {
         };
         Some(Neighbor {
             target: self.targets[pos],
-            type_id: self.type_ids[pos],
+            type_id: logical_type_id_from_validated_v6(self.type_ids[pos]),
             schema_reversed: self.schema_reversed[pos] != 0,
             relationship_id: self
                 .relationship_ids
@@ -927,7 +949,7 @@ impl<'a> OverlayNeighborIter<'a> {
     fn base_contains(
         &self,
         target: u32,
-        type_id: u8,
+        type_id: EdgeTypeId,
         schema_reversed: bool,
         relationship_id: Option<RelationshipId>,
     ) -> bool {
@@ -939,7 +961,7 @@ impl<'a> OverlayNeighborIter<'a> {
             .any(
                 |(idx, ((&base_target, &base_type), &base_schema_reversed))| {
                     base_target == target
-                        && base_type == type_id
+                        && logical_type_id_from_validated_v6(base_type) == type_id
                         && (base_schema_reversed != 0) == schema_reversed
                         && self
                             .base
@@ -956,7 +978,7 @@ impl<'a> OverlayNeighborIter<'a> {
         &self,
         pos: usize,
         target: u32,
-        type_id: u8,
+        type_id: EdgeTypeId,
         schema_reversed: bool,
         relationship_id: Option<RelationshipId>,
     ) -> bool {
@@ -1058,14 +1080,14 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
-                type_id: 2,
+                type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             },
@@ -1080,13 +1102,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
                 Neighbor {
                     target: 2,
-                    type_id: 2,
+                    type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 }
@@ -1102,14 +1124,14 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -1120,13 +1142,16 @@ mod tests {
         inserts.insert(
             0,
             vec![
-                (3, 1, false, None),
-                (2, 1, false, None),
-                (3, 1, false, None),
+                (3, crate::types::EdgeTypeId::test_v6(1), false, None),
+                (2, crate::types::EdgeTypeId::test_v6(1), false, None),
+                (3, crate::types::EdgeTypeId::test_v6(1), false, None),
             ],
         );
         let mut deletes = OverlayDeletes::new();
-        deletes.insert(0, HashSet::from([(1, 1, false, None)]));
+        deletes.insert(
+            0,
+            HashSet::from([(1, crate::types::EdgeTypeId::test_v6(1), false, None)]),
+        );
         let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
 
         let actual = neighbors.neighbors(0).collect::<Vec<_>>();
@@ -1136,13 +1161,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
                 Neighbor {
                     target: 3,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 }
@@ -1157,14 +1182,17 @@ mod tests {
             vec![RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
             }],
             false,
         );
         let mut inserts = OverlayInserts::new();
-        inserts.insert(0, vec![(1, 1, true, None)]);
+        inserts.insert(
+            0,
+            vec![(1, crate::types::EdgeTypeId::test_v6(1), true, None)],
+        );
         let deletes = OverlayDeletes::new();
         let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
 
@@ -1175,13 +1203,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
                 Neighbor {
                     target: 1,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     schema_reversed: true,
                     relationship_id: None,
                 },
@@ -1196,7 +1224,7 @@ mod tests {
             .map(|target| RawEdge {
                 source: 0,
                 target,
-                type_id: (target % 7) as u8,
+                type_id: EdgeTypeId::test_v6((target % 7) as u8),
                 weight: None,
                 schema_reversed: target % 2 == 0,
             })
@@ -1241,15 +1269,21 @@ mod tests {
                 .map(|target| RawEdge {
                     source: 0,
                     target,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     weight: None,
                     schema_reversed: false,
                 })
                 .collect(),
             false,
         );
-        let inserts = OverlayInserts::from([(0, vec![(5, 1, false, None)])]);
-        let deletes = OverlayDeletes::from([(0, HashSet::from([(2, 1, false, None)]))]);
+        let inserts = OverlayInserts::from([(
+            0,
+            vec![(5, crate::types::EdgeTypeId::test_v6(1), false, None)],
+        )]);
+        let deletes = OverlayDeletes::from([(
+            0,
+            HashSet::from([(2, crate::types::EdgeTypeId::test_v6(1), false, None)]),
+        )]);
         let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
         let expected = neighbors.neighbors(0).collect::<Vec<_>>();
         let mut cursor = OwnedNeighborCursor::default();
@@ -1285,15 +1319,31 @@ mod tests {
                     .map(|(target, type_id, schema_reversed)| RawEdge {
                         source: 0,
                         target,
-                        type_id,
+                        type_id: EdgeTypeId::test_v6(type_id),
                         weight: None,
                         schema_reversed,
                     })
                     .collect(),
                 false,
             );
-            let inserts = OverlayInserts::from([(0, raw_inserts)]);
-            let deletes = OverlayDeletes::from([(0, raw_deletes.into_iter().collect())]);
+            let inserts = OverlayInserts::from([(
+                0,
+                raw_inserts
+                    .into_iter()
+                    .map(|(target, type_id, reversed, identity)| {
+                        (target, EdgeTypeId::test_v6(type_id), reversed, identity)
+                    })
+                    .collect(),
+            )]);
+            let deletes = OverlayDeletes::from([(
+                0,
+                raw_deletes
+                    .into_iter()
+                    .map(|(target, type_id, reversed, identity)| {
+                        (target, EdgeTypeId::test_v6(type_id), reversed, identity)
+                    })
+                    .collect(),
+            )]);
             let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
             let expected = neighbors.neighbors(0).collect::<Vec<_>>();
             let mut actual = Vec::new();
@@ -1343,7 +1393,7 @@ mod tests {
                 .map(|(source, target, type_id)| RawEdge {
                     source,
                     target,
-                    type_id,
+                    type_id: EdgeTypeId::test_v6(type_id),
                     weight: None,
                 schema_reversed: false,
                 })

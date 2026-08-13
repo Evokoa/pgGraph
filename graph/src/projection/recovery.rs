@@ -1543,7 +1543,7 @@ mod tests {
             segment.edge_inserts.push(SegmentEdge {
                 source,
                 target,
-                type_id,
+                type_id: crate::types::EdgeTypeId::test_v6(type_id),
                 schema_reversed: false,
                 relationship_id: None,
             });

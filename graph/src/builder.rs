@@ -162,7 +162,7 @@ struct UnresolvedEdge {
     to_pk: String,
     mapping_id: u64,
     source_key: String,
-    type_id: u8,
+    type_id: crate::types::EdgeTypeId,
     weight: Option<u32>,
     bidirectional: bool,
 }
@@ -861,7 +861,7 @@ fn register_edge_type_governed(
     engine: &mut Engine,
     persistent_memory: &mut crate::resource::ResourceLease<'_>,
     label: &str,
-) -> GraphResult<u8> {
+) -> GraphResult<crate::types::EdgeTypeId> {
     let growth = engine
         .edge_type_registry
         .registration_heap_upper_bound(label)
@@ -1066,7 +1066,7 @@ impl<'a> EdgeSpoolBatch<'a> {
         self.try_reserve_row()?;
         self.sources.push(i64::from(edge.source));
         self.targets.push(i64::from(edge.target));
-        self.type_ids.push(i64::from(edge.type_id));
+        self.type_ids.push(i64::from(edge.type_id.get()));
         self.weights.push(i64::from(edge.weight.unwrap_or(0)));
         self.schema_reversed.push(edge.schema_reversed);
         self.mapping_ids
@@ -1287,8 +1287,13 @@ fn load_edge_store_from_spool(
                         target: u32::try_from(target).map_err(|_| {
                             GraphError::Internal(format!("edge target out of range: {}", target))
                         })?,
-                        type_id: u8::try_from(type_id).map_err(|_| {
-                            GraphError::Internal(format!("edge type out of range: {}", type_id))
+                        type_id: crate::types::EdgeTypeId::try_from(
+                            u32::try_from(type_id).map_err(|_| {
+                                GraphError::Internal(format!("edge type out of range: {type_id}"))
+                            })?,
+                        )
+                        .map_err(|_| {
+                            GraphError::Internal(format!("edge type uses sentinel: {type_id}"))
                         })?,
                         weight: weight
                             .map(|value| {

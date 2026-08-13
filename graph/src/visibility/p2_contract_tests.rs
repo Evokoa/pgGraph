@@ -107,7 +107,7 @@ fn missing_relationship_identity_stays_fail_closed_before_any_probe() {
             mapping_id: 9,
             source_key: "relationship-key".into(),
             relationship_id: None,
-            edge_type: 3,
+            edge_type: crate::types::EdgeTypeId::test_v6(3),
         }],
         VisibilityBatchLimits {
             max_candidates: 1,

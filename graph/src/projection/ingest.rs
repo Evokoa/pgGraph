@@ -30,7 +30,7 @@ use crate::projection::segment::{
 };
 use crate::resource::{ByteCount, ResourceGovernor, ResourcePhase};
 use crate::safety::{GraphError, GraphResult};
-use crate::types::TraversalDirection;
+use crate::types::{EdgeTypeId, TraversalDirection};
 
 const INGEST_ROW_BYTES: usize = std::mem::size_of::<ProjectionSyncRow>();
 static ACTIVE_INGEST_ROOTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -45,7 +45,7 @@ pub(crate) struct ProjectionSyncRow {
     pub(crate) direction: TraversalDirection,
     pub(crate) source: u32,
     pub(crate) target: u32,
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     pub(crate) schema_reversed: bool,
     pub(crate) weight: Option<u32>,
     pub(crate) relationship_identity: Option<RelationshipIdentity>,
@@ -1335,7 +1335,7 @@ mod tests {
                 direction: TraversalDirection::Any,
                 source: 2,
                 target: 2,
-                type_id: 0,
+                type_id: EdgeTypeId::from_v6_storage(0).expect("fixture type ID is valid v6"),
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
@@ -1358,7 +1358,7 @@ mod tests {
                 direction: TraversalDirection::Any,
                 source: 2,
                 target: 2,
-                type_id: 0,
+                type_id: EdgeTypeId::from_v6_storage(0).expect("fixture type ID is valid v6"),
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
@@ -1381,7 +1381,7 @@ mod tests {
                 direction: TraversalDirection::Any,
                 source: 4,
                 target: 4,
-                type_id: 0,
+                type_id: EdgeTypeId::from_v6_storage(0).expect("fixture type ID is valid v6"),
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(100),
@@ -1404,7 +1404,7 @@ mod tests {
                 direction: TraversalDirection::Any,
                 source: 4,
                 target: 4,
-                type_id: 0,
+                type_id: EdgeTypeId::from_v6_storage(0).expect("fixture type ID is valid v6"),
                 weight: None,
                 relationship_identity: None,
                 table_oid: Some(101),
@@ -2004,7 +2004,7 @@ mod tests {
             direction: TraversalDirection::Out,
             source,
             target,
-            type_id: 2,
+            type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
             weight,
             relationship_identity: None,
             table_oid: None,

@@ -184,10 +184,24 @@ pub mod bench_support {
     pub use crate::types::{EdgeTypeFilter, FilterCondition, FilterOp};
     use crate::types::{TraversalDirection, WeightedPathStep};
 
-    type OverlayInserts =
-        HashMap<u32, Vec<(u32, u8, bool, Option<crate::edge_store::RelationshipId>)>>;
-    type OverlayDeletes =
-        HashMap<u32, HashSet<(u32, u8, bool, Option<crate::edge_store::RelationshipId>)>>;
+    type OverlayInserts = HashMap<
+        u32,
+        Vec<(
+            u32,
+            crate::types::EdgeTypeId,
+            bool,
+            Option<crate::edge_store::RelationshipId>,
+        )>,
+    >;
+    type OverlayDeletes = HashMap<
+        u32,
+        HashSet<(
+            u32,
+            crate::types::EdgeTypeId,
+            bool,
+            Option<crate::edge_store::RelationshipId>,
+        )>,
+    >;
 
     pub(crate) struct BenchmarkVisibilityProof(());
 
@@ -334,7 +348,7 @@ pub mod bench_support {
                     segment.edge_inserts.push(SegmentEdge {
                         source,
                         target,
-                        type_id: 1,
+                        type_id: crate::types::EdgeTypeId::test_v6(1),
                         schema_reversed: false,
                         relationship_id: None,
                     });
@@ -342,7 +356,7 @@ pub mod bench_support {
                         segment.edge_deletes.push(SegmentEdge {
                             source,
                             target: source + 1,
-                            type_id: 1,
+                            type_id: crate::types::EdgeTypeId::test_v6(1),
                             schema_reversed: false,
                             relationship_id: None,
                         });
@@ -375,7 +389,7 @@ pub mod bench_support {
             segment.edge_inserts.push(SegmentEdge {
                 source,
                 target: source.wrapping_add(3) % node_count,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 schema_reversed: false,
                 relationship_id: None,
             });
@@ -404,14 +418,14 @@ pub mod bench_support {
             segment.edge_inserts.push(SegmentEdge {
                 source,
                 target,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 schema_reversed: false,
                 relationship_id: None,
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source,
                 target,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 schema_reversed: false,
                 relationship_id: None,
                 weight: 1,
@@ -427,7 +441,7 @@ pub mod bench_support {
             segment.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 schema_reversed: false,
                 relationship_id: None,
             });
@@ -441,11 +455,21 @@ pub mod bench_support {
         for source in (0..node_count).step_by(509) {
             inserts.insert(
                 source,
-                vec![(source.wrapping_add(23) % node_count, 1, false, None)],
+                vec![(
+                    source.wrapping_add(23) % node_count,
+                    crate::types::EdgeTypeId::test_v6(1),
+                    false,
+                    None,
+                )],
             );
             deletes.insert(
                 source,
-                HashSet::from([(source.wrapping_add(1) % node_count, 1, false, None)]),
+                HashSet::from([(
+                    source.wrapping_add(1) % node_count,
+                    crate::types::EdgeTypeId::test_v6(1),
+                    false,
+                    None,
+                )]),
             );
         }
         (inserts, deletes)
@@ -524,7 +548,7 @@ pub mod bench_support {
                 edges.push(RawEdge {
                     source,
                     target: source + 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 });
@@ -601,7 +625,7 @@ pub mod bench_support {
                     direction: TraversalDirection::Out,
                     source: idx,
                     target: (idx + 1) % 64,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     relationship_identity: None,
                     table_oid: None,
@@ -703,7 +727,7 @@ pub mod bench_support {
                     .map(|source| RawEdge {
                         source,
                         target: source + 1,
-                        type_id: 1,
+                        type_id: crate::types::EdgeTypeId::test_v6(1),
                         weight: Some(1),
                         schema_reversed: false,
                     })

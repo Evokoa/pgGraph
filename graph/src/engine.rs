@@ -93,7 +93,7 @@ pub struct Engine {
     pub(crate) relationship_identities: RelationshipIdentityStore,
     /// Per-type summary for immutable base edges that lack relationship
     /// identities. Rebuilt when a base edge store is installed.
-    relationship_identity_missing_edge_types: [bool; 256],
+    relationship_identity_missing_edge_types: RoaringBitmap,
     pub(crate) has_unidirectional_edges: bool,
     pub(crate) built: bool,
     pub(crate) sync_status: SyncStatus,
@@ -121,9 +121,10 @@ pub struct Engine {
     pub(crate) edge_buffer: Vec<EdgeMutation>,
     /// Monotonic backend-local revision for committed overlay substitutions.
     edge_buffer_revision: u64,
-    edge_buffer_missing_relationship_identity_edge_types: [bool; 256],
-    edge_buffer_missing_relationship_identity_keys: HashSet<(u32, u32, u8, bool)>,
-    edge_buffer_missing_relationship_identity_counts: [u32; 256],
+    edge_buffer_missing_relationship_identity_edge_types: HashSet<EdgeTypeId>,
+    edge_buffer_missing_relationship_identity_keys:
+        HashSet<(u32, u32, crate::types::EdgeTypeId, bool)>,
+    edge_buffer_missing_relationship_identity_counts: HashMap<crate::types::EdgeTypeId, u32>,
     /// Runtime projection mode selected at build/load time.
     pub(crate) projection_mode: crate::config::ProjectionMode,
     /// Durable projection generation loaded with the base artifact, if any.
@@ -173,7 +174,7 @@ pub struct Engine {
 pub struct EdgeMutation {
     pub(crate) source: u32,
     pub(crate) target: u32,
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     pub(crate) schema_reversed: bool,
     pub(crate) relationship_id: Option<crate::edge_store::RelationshipId>,
     pub(crate) kind: MutationKind,
@@ -920,7 +921,7 @@ impl Engine {
             filter_index: FilterIndex::new(),
             edge_type_registry,
             relationship_identities: RelationshipIdentityStore::default(),
-            relationship_identity_missing_edge_types: [false; 256],
+            relationship_identity_missing_edge_types: RoaringBitmap::new(),
             has_unidirectional_edges: false,
             built: false,
             sync_status: SyncStatus::Idle,
@@ -935,9 +936,9 @@ impl Engine {
             _mmap: None,
             edge_buffer: Vec::new(),
             edge_buffer_revision: 0,
-            edge_buffer_missing_relationship_identity_edge_types: [false; 256],
+            edge_buffer_missing_relationship_identity_edge_types: HashSet::new(),
             edge_buffer_missing_relationship_identity_keys: HashSet::new(),
-            edge_buffer_missing_relationship_identity_counts: [0; 256],
+            edge_buffer_missing_relationship_identity_counts: HashMap::new(),
             projection_mode: crate::config::ProjectionMode::CsrReadonly,
             projection_manifest: None,
             projection_manifest_full: None,
@@ -1038,18 +1039,8 @@ impl Engine {
     }
 
     fn refresh_relationship_identity_completeness_summary(&mut self) {
-        self.relationship_identity_missing_edge_types.fill(false);
-        for (edge_type, relationship_id) in self
-            .edge_store
-            .type_ids_slice()
-            .iter()
-            .copied()
-            .zip(self.edge_store.relationship_ids_slice().iter().copied())
-        {
-            if relationship_id == crate::edge_store::NO_RELATIONSHIP_ID {
-                self.relationship_identity_missing_edge_types[usize::from(edge_type)] = true;
-            }
-        }
+        self.relationship_identity_missing_edge_types =
+            self.edge_store.missing_relationship_identity_edge_types();
     }
 
     fn update_edge_buffer_relationship_identity_completeness_summary(
@@ -1068,11 +1059,13 @@ impl Engine {
                     .edge_buffer_missing_relationship_identity_keys
                     .insert(key)
                 {
-                    let count = &mut self.edge_buffer_missing_relationship_identity_counts
-                        [usize::from(mutation.type_id)];
+                    let count = self
+                        .edge_buffer_missing_relationship_identity_counts
+                        .entry(mutation.type_id)
+                        .or_default();
                     *count = count.saturating_add(1);
                     self.edge_buffer_missing_relationship_identity_edge_types
-                        [usize::from(mutation.type_id)] = true;
+                        .insert(mutation.type_id);
                 }
             }
             (MutationKind::Delete, None)
@@ -1080,11 +1073,17 @@ impl Engine {
                     .edge_buffer_missing_relationship_identity_keys
                     .remove(&key) =>
             {
-                let count = &mut self.edge_buffer_missing_relationship_identity_counts
-                    [usize::from(mutation.type_id)];
+                let count = self
+                    .edge_buffer_missing_relationship_identity_counts
+                    .entry(mutation.type_id)
+                    .or_default();
                 *count = count.saturating_sub(1);
-                self.edge_buffer_missing_relationship_identity_edge_types
-                    [usize::from(mutation.type_id)] = *count != 0;
+                if *count == 0 {
+                    self.edge_buffer_missing_relationship_identity_counts
+                        .remove(&mutation.type_id);
+                    self.edge_buffer_missing_relationship_identity_edge_types
+                        .remove(&mutation.type_id);
+                }
             }
             _ => {}
         }
@@ -1094,30 +1093,26 @@ impl Engine {
     /// overlays for a relationship identity gap in any requested edge type.
     pub(crate) fn has_missing_relationship_identity_for_types(
         &self,
-        active_edge_types: &[bool; 256],
+        active_edge_types: &RoaringBitmap,
     ) -> bool {
         // Preserve the established conservative PG023 contract: a legacy base
         // identity gap remains incomplete until rebuild, even when a later
         // tombstone masks that row. Durable state adds newly introduced gaps.
-        let immutable_missing = active_edge_types
-            .iter()
-            .enumerate()
-            .any(|(edge_type, active)| {
-                *active && self.relationship_identity_missing_edge_types[edge_type]
-            })
-            || self.projection_snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.has_missing_relationship_identity_for_types(active_edge_types)
-            });
+        let immutable_missing = active_edge_types.iter().any(|edge_type| {
+            self.relationship_identity_missing_edge_types
+                .contains(edge_type)
+        }) || self.projection_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.has_missing_relationship_identity_for_types(active_edge_types)
+        });
         if immutable_missing {
             return true;
         }
-        if active_edge_types
-            .iter()
-            .enumerate()
-            .any(|(edge_type, active)| {
-                *active && self.edge_buffer_missing_relationship_identity_edge_types[edge_type]
+        if active_edge_types.iter().any(|edge_type| {
+            EdgeTypeId::try_from(edge_type).is_ok_and(|logical_type| {
+                self.edge_buffer_missing_relationship_identity_edge_types
+                    .contains(&logical_type)
             })
-        {
+        }) {
             return true;
         }
         crate::projection::tx_delta::has_missing_relationship_identity_for_types(active_edge_types)
@@ -1458,17 +1453,12 @@ impl Engine {
     }
 
     /// Register a new edge type label. Returns its v6 storage ID.
-    pub fn register_edge_type(&mut self, label: &str) -> GraphResult<u8> {
-        self.edge_type_registry
-            .register_v6(label)?
-            .to_v6_storage()
-            .map_err(|_| GraphError::EdgeTypeLimit)
+    pub fn register_edge_type(&mut self, label: &str) -> GraphResult<crate::types::EdgeTypeId> {
+        self.edge_type_registry.register_v6(label)
     }
 
-    pub(crate) fn edge_type_id(&self, label: &str) -> Option<u8> {
-        self.edge_type_registry
-            .id(label)
-            .and_then(|logical| logical.to_v6_storage().ok())
+    pub(crate) fn edge_type_id(&self, label: &str) -> Option<EdgeTypeId> {
+        self.edge_type_registry.id(label)
     }
 
     /// Resolve a (table_oid, pk) → node_idx.
@@ -2068,6 +2058,20 @@ impl Engine {
                 need_mb: 1,
                 limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
             })?;
+        self.edge_buffer_missing_relationship_identity_counts
+            .try_reserve(additional)
+            .map_err(|_| GraphError::Oom {
+                used_mb: 0,
+                need_mb: 1,
+                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+            })?;
+        self.edge_buffer_missing_relationship_identity_edge_types
+            .try_reserve(additional)
+            .map_err(|_| GraphError::Oom {
+                used_mb: 0,
+                need_mb: 1,
+                limit_mb: crate::config::MEMORY_LIMIT_MB.get().max(1) as u64,
+            })?;
         Ok(())
     }
 
@@ -2094,14 +2098,14 @@ impl Engine {
         let mut inserts: HashSet<(
             u32,
             u32,
-            u8,
+            crate::types::EdgeTypeId,
             bool,
             Option<crate::edge_store::RelationshipId>,
         )> = HashSet::new();
         let mut deletes: HashSet<(
             u32,
             u32,
-            u8,
+            crate::types::EdgeTypeId,
             bool,
             Option<crate::edge_store::RelationshipId>,
         )> = HashSet::new();
@@ -2669,6 +2673,22 @@ impl Engine {
         }
     }
 
+    fn edge_buffer_summary_heap_bytes(&self) -> usize {
+        self.edge_buffer_missing_relationship_identity_keys
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(u32, u32, EdgeTypeId, bool)>() * 2)
+            .saturating_add(
+                self.edge_buffer_missing_relationship_identity_counts
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(EdgeTypeId, u32)>() * 2),
+            )
+            .saturating_add(
+                self.edge_buffer_missing_relationship_identity_edge_types
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<EdgeTypeId>() * 2),
+            )
+    }
+
     pub fn estimated_heap_bytes(&self) -> usize {
         let resolution_bytes = match &self.resolution_store {
             ResolutionStore::Builder(builder) => builder.estimated_heap_bytes(),
@@ -2677,10 +2697,7 @@ impl Engine {
         } + self.resolution_delta.estimated_heap_bytes();
         let registry_bytes = self.edge_type_registry.heap_bytes();
         let edge_buffer_bytes = self.edge_buffer.capacity() * std::mem::size_of::<EdgeMutation>();
-        let edge_buffer_summary_bytes = self
-            .edge_buffer_missing_relationship_identity_keys
-            .capacity()
-            .saturating_mul(std::mem::size_of::<(u32, u32, u8, bool)>() * 2);
+        let edge_buffer_summary_bytes = self.edge_buffer_summary_heap_bytes();
         let table_membership_bytes = self.table_membership.capacity()
             * (std::mem::size_of::<u32>() + std::mem::size_of::<RoaringBitmap>());
         let tenant_bytes = self.tenant_membership.capacity()
@@ -2938,7 +2955,7 @@ mod tests {
             edges.push(crate::edge_store::RawEdge {
                 source: i,
                 target: i + 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             });
@@ -2965,7 +2982,7 @@ mod tests {
             vec![crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             }],
@@ -3088,7 +3105,7 @@ mod tests {
         engine.edge_buffer.push(crate::engine::EdgeMutation {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -3096,7 +3113,7 @@ mod tests {
         engine.edge_buffer.push(crate::engine::EdgeMutation {
             source: 1,
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Delete,
@@ -3115,7 +3132,7 @@ mod tests {
             .try_push(crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             })
@@ -3125,7 +3142,7 @@ mod tests {
                 edge: crate::edge_store::RawEdge {
                     source: 1,
                     target: 2,
-                    type_id: 2,
+                    type_id: crate::types::EdgeTypeId::test_v6(2),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -3138,24 +3155,39 @@ mod tests {
             .replace_edge_stores(builder.finish())
             .expect("install base edges");
 
-        let mut type_one = [false; 256];
-        type_one[1] = true;
-        let mut type_two = [false; 256];
-        type_two[2] = true;
+        let type_one = roaring::RoaringBitmap::from_iter([1]);
+        let type_two = roaring::RoaringBitmap::from_iter([2]);
         assert!(engine.has_missing_relationship_identity_for_types(&type_one));
         assert!(!engine.has_missing_relationship_identity_for_types(&type_two));
 
         let missing_overlay = EdgeMutation {
             source: 2,
             target: 0,
-            type_id: 2,
+            type_id: crate::types::EdgeTypeId::test_v6(2),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
         };
+        let before_overlay_summary = engine.edge_buffer_summary_heap_bytes();
         engine
             .push_edge_mutation(missing_overlay.clone())
             .expect("insert missing overlay identity");
+        assert!(engine.edge_buffer_summary_heap_bytes() > before_overlay_summary);
+        assert!(
+            engine.edge_buffer_summary_heap_bytes()
+                >= engine
+                    .edge_buffer_missing_relationship_identity_keys
+                    .capacity()
+                    * std::mem::size_of::<(u32, u32, EdgeTypeId, bool)>()
+                    + engine
+                        .edge_buffer_missing_relationship_identity_counts
+                        .capacity()
+                        * std::mem::size_of::<(EdgeTypeId, u32)>()
+                    + engine
+                        .edge_buffer_missing_relationship_identity_edge_types
+                        .capacity()
+                        * std::mem::size_of::<EdgeTypeId>()
+        );
         assert!(engine.has_missing_relationship_identity_for_types(&type_two));
         assert!(engine.estimated_heap_bytes() > before_summary);
         engine
@@ -3173,7 +3205,7 @@ mod tests {
         engine.edge_buffer.push(EdgeMutation {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Delete,
@@ -3181,15 +3213,31 @@ mod tests {
         engine.edge_buffer.push(EdgeMutation {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: Some(9),
             kind: MutationKind::Insert,
         });
 
         let (inserts, deletes) = engine.traversal_edge_overlay(TraversalDirection::Out);
-        assert_eq!(inserts.get(&0), Some(&vec![(1, 1, false, Some(9))]));
-        assert_eq!(deletes.get(&0), Some(&HashSet::from([(1, 1, false, None)])));
+        assert_eq!(
+            inserts.get(&0),
+            Some(&vec![(
+                1,
+                crate::types::EdgeTypeId::test_v6(1),
+                false,
+                Some(9)
+            )])
+        );
+        assert_eq!(
+            deletes.get(&0),
+            Some(&HashSet::from([(
+                1,
+                crate::types::EdgeTypeId::test_v6(1),
+                false,
+                None
+            )]))
+        );
     }
 
     #[test]
@@ -3230,56 +3278,56 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 4,
-                type_id: 2,
+                type_id: crate::types::EdgeTypeId::test_v6(2),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 4,
                 target: 0,
-                type_id: 2,
+                type_id: crate::types::EdgeTypeId::test_v6(2),
                 weight: None,
                 schema_reversed: false,
             },
@@ -3494,7 +3542,7 @@ mod tests {
         overlay.edge_buffer.push(EdgeMutation {
             source: 4,
             target: 3,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -3515,7 +3563,7 @@ mod tests {
                     .push(crate::projection::segment::SegmentEdge {
                         source: 4,
                         target: 3,
-                        type_id: 1,
+                        type_id: crate::types::EdgeTypeId::test_v6(1),
                         schema_reversed: false,
                         relationship_id: None,
                     });
@@ -3534,7 +3582,7 @@ mod tests {
             4,
             tx_delta::DeltaEdge {
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -3578,7 +3626,7 @@ mod tests {
         engine.edge_buffer.push(EdgeMutation {
             source: 4,
             target: 3,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -3599,7 +3647,7 @@ mod tests {
                     .push(crate::projection::segment::SegmentEdge {
                         source: 4,
                         target: 3,
-                        type_id: 1,
+                        type_id: crate::types::EdgeTypeId::test_v6(1),
                         schema_reversed: false,
                         relationship_id: None,
                     });
@@ -3618,7 +3666,7 @@ mod tests {
             4,
             tx_delta::DeltaEdge {
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -3639,7 +3687,7 @@ mod tests {
             4,
             tx_delta::DeltaEdge {
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -4125,7 +4173,7 @@ mod tests {
             vec![crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             }],
@@ -4153,7 +4201,7 @@ mod tests {
         eng.push_edge_mutation(EdgeMutation {
             source: 1,
             target: 0,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -4184,7 +4232,7 @@ mod tests {
             4,
             tx_delta::DeltaEdge {
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -4215,7 +4263,8 @@ mod tests {
     fn traverse_hides_transaction_delta_edge_delete() {
         let eng = build_test_engine();
         tx_delta::clear_for_test();
-        tx_delta::record_deleted_edge(1, 2, 1).expect("record tx edge delete");
+        tx_delta::record_deleted_edge(1, 2, crate::types::EdgeTypeId::test_v6(1))
+            .expect("record tx edge delete");
 
         let results = eng
             .traverse(
@@ -4349,7 +4398,7 @@ mod tests {
         eng.edge_buffer.push(EdgeMutation {
             source: 4,
             target: 3,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -4373,7 +4422,7 @@ mod tests {
         eng.edge_buffer.push(EdgeMutation {
             source: 1,
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Delete,
@@ -4393,7 +4442,7 @@ mod tests {
             4,
             tx_delta::DeltaEdge {
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -4418,7 +4467,8 @@ mod tests {
         let mut eng = build_test_engine();
         eng.has_unidirectional_edges = true;
         tx_delta::clear_for_test();
-        tx_delta::record_deleted_edge(1, 2, 1).expect("record tx edge delete");
+        tx_delta::record_deleted_edge(1, 2, crate::types::EdgeTypeId::test_v6(1))
+            .expect("record tx edge delete");
 
         let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
 
@@ -4450,7 +4500,7 @@ mod tests {
             vec![crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(1),
                 schema_reversed: false,
             }],
@@ -4459,7 +4509,7 @@ mod tests {
         eng.edge_buffer.push(EdgeMutation {
             source: 1,
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -4481,7 +4531,7 @@ mod tests {
             vec![crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(1),
                 schema_reversed: false,
             }],
@@ -4490,7 +4540,7 @@ mod tests {
         eng.edge_buffer.push(EdgeMutation {
             source: 1,
             target: 2,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -4524,7 +4574,7 @@ mod tests {
             vec![crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(1),
                 schema_reversed: false,
             }],
@@ -4535,7 +4585,7 @@ mod tests {
             1,
             tx_delta::DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(1),
                 schema_reversed: false,
                 relationship_id: None,
@@ -4561,7 +4611,7 @@ mod tests {
                 .push(crate::projection::segment::SegmentEdge {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     schema_reversed: false,
                     relationship_id: None,
                 });
@@ -4607,7 +4657,7 @@ mod tests {
                 .push(crate::projection::segment::SegmentEdge {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     schema_reversed: false,
                     relationship_id: None,
                 });
@@ -4634,7 +4684,7 @@ mod tests {
                 .push(crate::projection::segment::SegmentEdge {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     schema_reversed: false,
                     relationship_id: None,
                 });
@@ -4665,7 +4715,7 @@ mod tests {
         eng.edge_buffer.push(EdgeMutation {
             source: 4,
             target: 3,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -4698,7 +4748,7 @@ mod tests {
                 .push(crate::projection::segment::SegmentEdge {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     schema_reversed: false,
                     relationship_id: None,
                 });
@@ -4754,7 +4804,7 @@ mod tests {
         eng.edge_buffer.push(EdgeMutation {
             source: 4,
             target: 3,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -4779,7 +4829,7 @@ mod tests {
             vec![crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(10),
                 schema_reversed: false,
             }],
@@ -4792,7 +4842,7 @@ mod tests {
                 .push(crate::projection::segment::SegmentEdge {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     schema_reversed: false,
                     relationship_id: None,
                 });
@@ -4801,7 +4851,7 @@ mod tests {
                 .push(crate::projection::segment::SegmentEdgeWeight {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     relationship_id: None,
                     weight: 2,
                     schema_reversed: false,
@@ -4832,7 +4882,7 @@ mod tests {
             vec![crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             }],
@@ -4846,7 +4896,7 @@ mod tests {
                 .push(crate::projection::segment::SegmentEdge {
                     source: 2,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     schema_reversed: false,
                     relationship_id: None,
                 });
@@ -4871,7 +4921,7 @@ mod tests {
             vec![crate::edge_store::RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             }],
@@ -4884,7 +4934,7 @@ mod tests {
         eng.edge_buffer.push(EdgeMutation {
             source: 2,
             target: 3,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             schema_reversed: false,
             relationship_id: None,
             kind: MutationKind::Insert,
@@ -4920,7 +4970,7 @@ mod tests {
             eng.edge_buffer.push(EdgeMutation {
                 source,
                 target,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 schema_reversed: false,
                 relationship_id: None,
                 kind: MutationKind::Delete,
@@ -4937,7 +4987,8 @@ mod tests {
         let eng = build_test_engine();
         tx_delta::clear_for_test();
         for (source, target) in [(1, 2), (2, 1)] {
-            tx_delta::record_deleted_edge(source, target, 1).expect("record tx edge delete");
+            tx_delta::record_deleted_edge(source, target, crate::types::EdgeTypeId::test_v6(1))
+                .expect("record tx edge delete");
         }
 
         let result = eng.connected_components().unwrap();
@@ -4983,7 +5034,7 @@ mod tests {
                 edges.push(crate::edge_store::RawEdge {
                     source: i - 1,
                     target: i,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 });

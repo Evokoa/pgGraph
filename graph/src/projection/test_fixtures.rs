@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::edge_store::{EdgeStore, RawEdge};
 use crate::projection::neighbors::{Neighbor, NeighborSource};
-use crate::types::TraversalDirection;
+use crate::types::{EdgeTypeId, TraversalDirection};
 
 static NEXT_ARTIFACT_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -99,7 +99,7 @@ pub(crate) struct NormalizedMutation {
     /// Target node index.
     pub(crate) target: u32,
     /// Edge type identifier.
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     /// Whether this edge row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
     /// Optional edge weight.
@@ -117,7 +117,8 @@ pub(crate) fn edge_store_from_tuples(node_count: u32, edges: &[(u32, u32, u8)]) 
             .map(|&(source, target, type_id)| RawEdge {
                 source,
                 target,
-                type_id,
+                type_id: EdgeTypeId::from_v6_storage(type_id)
+                    .expect("fixture edge type must be a valid v6 identifier"),
                 weight: None,
                 schema_reversed: false,
             })
@@ -138,7 +139,8 @@ pub(crate) fn weighted_edge_store_from_tuples(
             .map(|&(source, target, type_id, weight)| RawEdge {
                 source,
                 target,
-                type_id,
+                type_id: EdgeTypeId::from_v6_storage(type_id)
+                    .expect("fixture edge type must be a valid v6 identifier"),
                 weight: Some(weight),
                 schema_reversed: false,
             })
@@ -200,13 +202,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 1,
-                    type_id: 2,
+                    type_id: EdgeTypeId::from_v6_storage(2).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },
                 Neighbor {
                     target: 2,
-                    type_id: 3,
+                    type_id: EdgeTypeId::from_v6_storage(3).expect("fixture type ID is valid v6"),
                     schema_reversed: false,
                     relationship_id: None,
                 },

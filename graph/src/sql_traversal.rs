@@ -364,7 +364,7 @@ fn execute_lazy_traversal_candidates(
             target_node: config.seed_node,
             target_table_oid: root_table.table_oid,
             target_source_key: request.root_id.to_string(),
-            edge_type: 0,
+            edge_type: crate::types::EdgeTypeId::UNTYPED,
             schema_reversed: false,
             relationship_id: None,
             relationship_mapping_id: None,

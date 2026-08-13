@@ -757,7 +757,7 @@ fn prove_lazy_path_source_visible(
             target_node: node_idx,
             target_table_oid: table_oid,
             target_source_key: source_id.to_owned(),
-            edge_type: 0,
+            edge_type: crate::types::EdgeTypeId::UNTYPED,
             schema_reversed: false,
             relationship_id: None,
             relationship_mapping_id: None,

@@ -24,7 +24,7 @@ use crate::projection::neighbors::{
 };
 use crate::resource::{ResourceGovernor, ResourcePhase, WorkUnits};
 use crate::safety::{GraphError, GraphResult};
-use crate::types::{PathStep, TableOid, WeightedPathStep};
+use crate::types::{EdgeTypeId, PathStep, TableOid, WeightedPathStep};
 #[cfg(any(test, feature = "benchmarks"))]
 use crate::visibility::VisibilityCoordinator;
 use crate::visibility::{QueryExecutionContext, VisibilityScope};
@@ -32,7 +32,7 @@ use crate::visibility::{QueryExecutionContext, VisibilityScope};
 #[derive(Debug, Clone, Copy)]
 struct ParentStep {
     parent: u32,
-    edge_type: u8,
+    edge_type: EdgeTypeId,
     /// Hop distance from this step's own BFS root (source for `fwd_parent`,
     /// target for `bwd_parent`). Needed so `bidirectional_bfs` can compare
     /// the combined distance of multiple meeting candidates discovered in
@@ -83,7 +83,7 @@ impl PathSideState {
             root,
             ParentStep {
                 parent: root,
-                edge_type: 0,
+                edge_type: EdgeTypeId::UNTYPED,
                 depth: 0,
             },
         );
@@ -144,7 +144,7 @@ impl ResumableSingleDirectionBfs {
                 source,
                 ParentStep {
                     parent: source,
-                    edge_type: 0,
+                    edge_type: EdgeTypeId::UNTYPED,
                     depth: 0,
                 },
             );
@@ -377,7 +377,7 @@ pub(crate) fn materialize_single_direction_path_batch(
         let mut key_bytes = 0usize;
         let mut stopped_at_target = false;
         while let Some(neighbor) = machine.pending_adjacency.pop_front() {
-            if edge_type_filter.is_some_and(|allowed| !allowed.contains(neighbor.type_id as u32)) {
+            if edge_type_filter.is_some_and(|allowed| !allowed.contains(neighbor.type_id.get())) {
                 consume_path_work_without_interrupt(governor)?;
                 continue;
             }
@@ -610,7 +610,7 @@ pub(crate) fn materialize_bidirectional_path_batch(
         let mut candidates = path_candidate_vec(limits)?;
         let mut key_bytes = 0usize;
         while let Some(neighbor) = machine.pending_adjacency.pop_front() {
-            if edge_type_filter.is_some_and(|allowed| !allowed.contains(neighbor.type_id as u32)) {
+            if edge_type_filter.is_some_and(|allowed| !allowed.contains(neighbor.type_id.get())) {
                 consume_path_work_without_interrupt(governor)?;
                 continue;
             }
@@ -829,7 +829,7 @@ fn materialize_endpoint_batch(
             target_node: node,
             target_table_oid: table_oid,
             target_source_key: source_key.to_owned(),
-            edge_type: 0,
+            edge_type: EdgeTypeId::UNTYPED,
             schema_reversed: false,
             relationship_id: None,
             relationship_mapping_id: None,
@@ -1253,7 +1253,7 @@ fn path_from_bidirectional_parents(
         forward_path.push((current, step.edge_type));
         current = step.parent;
     }
-    forward_path.push((source, 0));
+    forward_path.push((source, EdgeTypeId::UNTYPED));
     forward_path.reverse();
 
     let mut backward_path = Vec::new();
@@ -1290,7 +1290,7 @@ fn path_from_bidirectional_parents(
 
 fn path_steps(
     node_store: &NodeStore,
-    path: &[(u32, u8)],
+    path: &[(u32, EdgeTypeId)],
     edge_type_registry: &[String],
 ) -> GraphResult<Vec<PathStep>> {
     path.iter()
@@ -1313,7 +1313,7 @@ fn path_steps(
                 node_id,
                 edge_label: (index != 0).then(|| {
                     edge_type_registry
-                        .get(edge_type as usize)
+                        .get(edge_type.get() as usize)
                         .cloned()
                         .unwrap_or_else(|| format!("type_{edge_type}"))
                 }),
@@ -1347,7 +1347,7 @@ pub(crate) fn weighted_shortest_path_with_neighbors_for_benchmark(
 #[derive(Debug, Clone, Copy)]
 struct WeightedParentStep {
     parent: u32,
-    edge_type: u8,
+    edge_type: EdgeTypeId,
     edge_weight: u32,
 }
 
@@ -1393,7 +1393,7 @@ impl ResumableDijkstra {
             source,
             WeightedParentStep {
                 parent: source,
-                edge_type: 0,
+                edge_type: EdgeTypeId::UNTYPED,
                 edge_weight: 0,
             },
         );
@@ -1640,7 +1640,7 @@ fn bidirectional_bfs(
         source,
         ParentStep {
             parent: source,
-            edge_type: 0,
+            edge_type: EdgeTypeId::UNTYPED,
             depth: 0,
         },
     );
@@ -1648,7 +1648,7 @@ fn bidirectional_bfs(
         target,
         ParentStep {
             parent: target,
-            edge_type: 0,
+            edge_type: EdgeTypeId::UNTYPED,
             depth: 0,
         },
     );
@@ -1777,7 +1777,7 @@ fn bidirectional_bfs(
         fwd_path.push((current, step.edge_type));
         current = step.parent;
     }
-    fwd_path.push((source, 0));
+    fwd_path.push((source, EdgeTypeId::UNTYPED));
     fwd_path.reverse();
 
     let mut bwd_path = Vec::new();
@@ -1807,7 +1807,7 @@ fn bidirectional_bfs(
             } else {
                 Some(
                     edge_type_registry
-                        .get(edge_type as usize)
+                        .get(edge_type.get() as usize)
                         .cloned()
                         .unwrap_or_else(|| format!("type_{}", edge_type)),
                 )
@@ -1822,7 +1822,7 @@ fn bidirectional_bfs(
             node_id: node_store.primary_key(node)?.to_string(),
             edge_label: Some(
                 edge_type_registry
-                    .get(edge_type as usize)
+                    .get(edge_type.get() as usize)
                     .cloned()
                     .unwrap_or_else(|| format!("type_{}", edge_type)),
             ),
@@ -1850,7 +1850,7 @@ fn single_direction_bfs(
         source,
         ParentStep {
             parent: source,
-            edge_type: 0,
+            edge_type: EdgeTypeId::UNTYPED,
             depth: 0,
         },
     );
@@ -1911,7 +1911,7 @@ fn single_direction_bfs(
                             } else {
                                 Some(
                                     edge_type_registry
-                                        .get(et as usize)
+                                        .get(et.get() as usize)
                                         .cloned()
                                         .unwrap_or_else(|| format!("type_{}", et)),
                                 )
@@ -2017,7 +2017,7 @@ pub(crate) fn materialize_resumable_dijkstra_batch(
                 schema_reversed: weighted_neighbor.schema_reversed,
                 relationship_id: weighted_neighbor.relationship_id,
             };
-            if edge_type_filter.is_some_and(|allowed| !allowed.contains(neighbor.type_id as u32)) {
+            if edge_type_filter.is_some_and(|allowed| !allowed.contains(neighbor.type_id.get())) {
                 consume_path_work_without_interrupt(governor)?;
                 machine.pending_adjacency.pop_front();
                 continue;
@@ -2230,7 +2230,7 @@ fn weighted_path_from_parents(
             string_bytes = string_bytes
                 .checked_add(
                     edge_type_registry
-                        .get(edge_type as usize)
+                        .get(edge_type.get() as usize)
                         .map_or_else(|| "type_255".len(), String::len),
                 )
                 .ok_or_else(|| {
@@ -2281,7 +2281,7 @@ fn weighted_path_from_parents(
     for (step, node) in nodes.into_iter().enumerate() {
         let parent_step = parent.get(&node).copied().unwrap_or(WeightedParentStep {
             parent: node,
-            edge_type: 0,
+            edge_type: EdgeTypeId::UNTYPED,
             edge_weight: 0,
         });
         output.push(WeightedPathStep {
@@ -2300,7 +2300,7 @@ fn weighted_path_from_parents(
                 .to_owned(),
             edge_label: (step != 0).then(|| {
                 edge_type_registry
-                    .get(parent_step.edge_type as usize)
+                    .get(parent_step.edge_type.get() as usize)
                     .cloned()
                     .unwrap_or_else(|| format!("type_{}", parent_step.edge_type))
             }),
@@ -2434,7 +2434,7 @@ fn weighted_shortest_path_with_neighbors_inner(
         source,
         WeightedParentStep {
             parent: source,
-            edge_type: 0,
+            edge_type: EdgeTypeId::UNTYPED,
             edge_weight: 0,
         },
     );
@@ -2454,7 +2454,7 @@ fn weighted_shortest_path_with_neighbors_inner(
             }
             let neighbor = edge.target;
             if !path_weighted_candidate_visible(budget, visibility, edge)
-                || edge_type_filter.is_some_and(|filter| !filter.contains(u32::from(edge.type_id)))
+                || edge_type_filter.is_some_and(|filter| !filter.contains(edge.type_id.get()))
             {
                 continue;
             }
@@ -2504,7 +2504,7 @@ fn weighted_shortest_path_with_neighbors_inner(
         .map(|(step, node)| {
             let parent_step = parent.get(&node).copied().unwrap_or(WeightedParentStep {
                 parent: node,
-                edge_type: 0,
+                edge_type: EdgeTypeId::UNTYPED,
                 edge_weight: 0,
             });
             Some(WeightedPathStep {
@@ -2516,7 +2516,7 @@ fn weighted_shortest_path_with_neighbors_inner(
                 } else {
                     Some(
                         edge_type_registry
-                            .get(parent_step.edge_type as usize)
+                            .get(parent_step.edge_type.get() as usize)
                             .cloned()
                             .unwrap_or_else(|| format!("type_{}", parent_step.edge_type)),
                     )
@@ -2570,7 +2570,7 @@ fn path_candidate_visible(
                 && admission.visibility.allows_node(edge.target)
                 && admission
                     .edge_type_filter
-                    .is_none_or(|filter| filter.contains(u32::from(edge.type_id)))
+                    .is_none_or(|filter| filter.contains(edge.type_id.get()))
         }
         Err(error) => {
             if let Some(budget) = admission.budget {
@@ -2813,14 +2813,14 @@ mod tests {
                     RawEdge {
                         source: left,
                         target: right,
-                        type_id: 1,
+                        type_id: crate::types::EdgeTypeId::test_v6(1),
                         weight: None,
                         schema_reversed: false,
                     },
                     RawEdge {
                         source: right,
                         target: left,
-                        type_id: 1,
+                        type_id: crate::types::EdgeTypeId::test_v6(1),
                         weight: None,
                         schema_reversed: true,
                     },
@@ -2839,7 +2839,7 @@ mod tests {
         let raw = |source, target| RawEdge {
             source,
             target,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: None,
             schema_reversed: false,
         };
@@ -2946,7 +2946,7 @@ mod tests {
         let raw = |source, target| RawEdge {
             source,
             target,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: None,
             schema_reversed: false,
         };
@@ -3148,7 +3148,7 @@ mod tests {
             &mut 0,
             Neighbor {
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 schema_reversed: false,
                 relationship_id: None,
             },
@@ -3184,7 +3184,7 @@ mod tests {
             &mut 0,
             Neighbor {
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 schema_reversed: false,
                 relationship_id: Some(1),
             },
@@ -3269,7 +3269,7 @@ mod tests {
         let raw = |source, target| RawEdge {
             source,
             target,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: None,
             schema_reversed: false,
         };
@@ -3353,7 +3353,7 @@ mod tests {
         let raw = |source, target| RawEdge {
             source,
             target,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: None,
             schema_reversed: false,
         };
@@ -3405,7 +3405,7 @@ mod tests {
         let weighted = |source, target, weight| RawEdge {
             source,
             target,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: Some(weight),
             schema_reversed: false,
         };
@@ -3466,10 +3466,10 @@ mod tests {
             4,
             true,
             vec![
-                (edge(0, 3, 1, 1), 10),
-                (edge(0, 1, 2, 2), 11),
-                (edge(1, 2, 2, 2), 12),
-                (edge(2, 3, 2, 2), 13),
+                (edge(0, 3, EdgeTypeId::test_v6(1), 1), 10),
+                (edge(0, 1, EdgeTypeId::test_v6(2), 2), 11),
+                (edge(1, 2, EdgeTypeId::test_v6(2), 2), 12),
+                (edge(2, 3, EdgeTypeId::test_v6(2), 2), 13),
             ],
         );
         let mut only_long = RoaringBitmap::new();
@@ -3547,21 +3547,21 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 1,
                     target: 2,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 2,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: None,
                     schema_reversed: false,
                 },
@@ -3600,42 +3600,42 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
@@ -3691,14 +3691,14 @@ mod tests {
             edges.push(RawEdge {
                 source: a,
                 target: b,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             });
             edges.push(RawEdge {
                 source: b,
                 target: a,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             });
@@ -3803,28 +3803,28 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(100),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(1),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(5),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(5),
                 schema_reversed: false,
             },
@@ -3868,14 +3868,14 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(u32::MAX - 1),
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(1),
                 schema_reversed: false,
             },
@@ -3955,35 +3955,35 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(10),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(2),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(2),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 1,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(2),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 2,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(2),
                     schema_reversed: false,
                 },
@@ -4042,28 +4042,28 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 1,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(3),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 2,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(3),
                     schema_reversed: false,
                 },
@@ -4121,28 +4121,28 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 1,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 2,
+                    type_id: crate::types::EdgeTypeId::test_v6(2),
                     weight: Some(3),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 2,
                     target: 3,
-                    type_id: 2,
+                    type_id: crate::types::EdgeTypeId::test_v6(2),
                     weight: Some(3),
                     schema_reversed: false,
                 },
@@ -4192,28 +4192,28 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(2),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 3,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(3),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 3,
                     target: 4,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 },
@@ -4247,21 +4247,21 @@ mod tests {
                 RawEdge {
                     source: 0,
                     target: 1,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
-                    type_id: 1,
+                    type_id: crate::types::EdgeTypeId::test_v6(1),
                     weight: Some(1),
                     schema_reversed: false,
                 },
                 RawEdge {
                     source: 2,
                     target: 3,
-                    type_id: 2,
+                    type_id: crate::types::EdgeTypeId::test_v6(2),
                     weight: Some(1),
                     schema_reversed: false,
                 },
@@ -4371,7 +4371,7 @@ mod tests {
             vec![RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: Some(1),
                 schema_reversed: false,
             }],
@@ -4404,14 +4404,14 @@ mod tests {
             edges.push(RawEdge {
                 source: i,
                 target: i + 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             });
             edges.push(RawEdge {
                 source: i + 1,
                 target: i,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             });
@@ -4442,28 +4442,28 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
@@ -4484,7 +4484,7 @@ mod tests {
         let edges = vec![RawEdge {
             source: 0,
             target: 1,
-            type_id: 1,
+            type_id: crate::types::EdgeTypeId::test_v6(1),
             weight: None,
             schema_reversed: false,
         }];
@@ -4523,14 +4523,14 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
@@ -4598,21 +4598,21 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
@@ -4638,21 +4638,21 @@ mod tests {
             RawEdge {
                 source: 0,
                 target: 1,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 0,
-                type_id: 1,
+                type_id: crate::types::EdgeTypeId::test_v6(1),
                 weight: None,
                 schema_reversed: false,
             },

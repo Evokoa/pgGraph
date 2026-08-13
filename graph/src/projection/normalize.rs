@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 
 use crate::edge_store::RelationshipId;
 use crate::safety::{GraphError, GraphResult};
-use crate::types::TraversalDirection;
+use crate::types::{EdgeTypeId, TraversalDirection};
 
-const NORMALIZED_ROW_BYTES: usize = 41;
+const NORMALIZED_ROW_BYTES: usize = 44;
 
 /// Committed mutation operation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -55,7 +55,7 @@ pub(crate) struct CommittedMutation {
     /// Target node index.
     pub(crate) target: u32,
     /// Edge type identifier.
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     /// Whether this edge row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
     /// Optional edge weight.
@@ -80,7 +80,7 @@ pub(crate) struct NormalizedMutation {
     /// Target node index.
     pub(crate) target: u32,
     /// Edge type identifier.
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     /// Whether this edge row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
     /// Optional edge weight.
@@ -262,7 +262,7 @@ struct MutationKey {
     direction: TraversalDirection,
     source: u32,
     target: u32,
-    type_id: u8,
+    type_id: EdgeTypeId,
     schema_reversed: bool,
     relationship_id: Option<RelationshipId>,
 }
@@ -434,7 +434,7 @@ mod tests {
                 ..mutation(2, 1, 1, 2, MutationOperation::InsertEdge)
             },
             CommittedMutation {
-                type_id: 3,
+                type_id: EdgeTypeId::from_v6_storage(3).expect("fixture type ID is valid v6"),
                 ..mutation(3, 1, 1, 2, MutationOperation::InsertEdge)
             },
         ];
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(normalized.rows.len(), 3);
         assert_eq!(normalized.rows[0].direction, TraversalDirection::Out);
         assert_eq!(normalized.rows[1].direction, TraversalDirection::In);
-        assert_eq!(normalized.rows[2].type_id, 3);
+        assert_eq!(normalized.rows[2].type_id, EdgeTypeId::test_v6(3));
     }
 
     #[test]
@@ -563,7 +563,7 @@ mod tests {
             direction: TraversalDirection::Out,
             source,
             target,
-            type_id: 1,
+            type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
             weight,
             relationship_id: None,
             operation,

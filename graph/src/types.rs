@@ -100,6 +100,12 @@ impl EdgeTypeId {
         }
         u8::try_from(self.0).map_err(|_| EdgeTypeIdError::DoesNotFitV6)
     }
+
+    #[cfg(test)]
+    pub(crate) const fn test_v6(value: u8) -> Self {
+        assert!(value < u8::MAX, "v6 edge-type sentinel is invalid");
+        Self(value as u32)
+    }
 }
 
 impl fmt::Display for EdgeTypeId {
@@ -346,7 +352,7 @@ pub enum EdgeTypeFilter {
     /// Traverse every registered edge type.
     All,
     /// Traverse only the listed edge type identifiers.
-    Only(std::collections::HashSet<u8>),
+    Only(std::collections::HashSet<EdgeTypeId>),
     /// Traverse no edges because the caller requested labels that do not exist.
     NoneMatched,
 }

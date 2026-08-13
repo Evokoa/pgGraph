@@ -4,6 +4,7 @@
 //! accepts the write, this module records the backend-local graph delta that
 //! makes read-your-own-writes possible until transaction end.
 
+use roaring::RoaringBitmap;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +13,7 @@ use crate::edge_store::{RelationshipId, RelationshipIdentity};
 use crate::filter_index::EncodedFilterValue;
 use crate::projection::neighbors::{EdgeOverlay, OverlayDeletes, OverlayInserts};
 use crate::safety::{GraphError, GraphResult};
-use crate::types::TraversalDirection;
+use crate::types::{EdgeTypeId, TraversalDirection};
 
 /// Transaction-local node created by a graph write.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +34,7 @@ pub(crate) struct DeltaEdge {
     /// Target graph node index.
     pub(crate) target: u32,
     /// Edge type identifier.
-    pub(crate) type_id: u8,
+    pub(crate) type_id: EdgeTypeId,
     /// Whether this row is a synthetic reverse of the schema edge.
     pub(crate) schema_reversed: bool,
     /// Optional weight captured from a mapped edge row.
@@ -50,10 +51,10 @@ pub(crate) struct TxGraphDelta {
     max_added_node_primary_key_bytes: usize,
     deleted_nodes: HashSet<u32>,
     added_edges: HashMap<u32, Vec<DeltaEdge>>,
-    deleted_edges: HashSet<(u32, u32, u8, bool, Option<RelationshipId>)>,
+    deleted_edges: HashSet<(u32, u32, EdgeTypeId, bool, Option<RelationshipId>)>,
     filter_updates: HashMap<(usize, u32), Option<EncodedFilterValue>>,
     relationship_identities: Vec<RelationshipIdentity>,
-    missing_relationship_identity_edge_types: [bool; 256],
+    missing_relationship_identity_edge_types: RoaringBitmap,
 }
 
 impl Default for TxGraphDelta {
@@ -66,7 +67,7 @@ impl Default for TxGraphDelta {
             deleted_edges: HashSet::new(),
             filter_updates: HashMap::new(),
             relationship_identities: Vec::new(),
-            missing_relationship_identity_edge_types: [false; 256],
+            missing_relationship_identity_edge_types: RoaringBitmap::new(),
         }
     }
 }
@@ -117,10 +118,11 @@ static CALLBACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 impl TxGraphDelta {
     fn refresh_relationship_identity_completeness_summary(&mut self) {
-        self.missing_relationship_identity_edge_types.fill(false);
+        self.missing_relationship_identity_edge_types.clear();
         for edge in self.added_edges.values().flatten() {
             if edge.relationship_id.is_none() {
-                self.missing_relationship_identity_edge_types[usize::from(edge.type_id)] = true;
+                self.missing_relationship_identity_edge_types
+                    .insert(edge.type_id.get());
             }
         }
     }
@@ -169,7 +171,7 @@ impl TxGraphDelta {
                 * (std::mem::size_of::<u32>() + std::mem::size_of::<Vec<DeltaEdge>>())
             + added_edge_bytes
             + self.deleted_edges.capacity()
-                * std::mem::size_of::<(u32, u32, u8, bool, Option<RelationshipId>)>()
+                * std::mem::size_of::<(u32, u32, EdgeTypeId, bool, Option<RelationshipId>)>()
             + self.filter_updates.capacity()
                 * (std::mem::size_of::<(usize, u32)>()
                     + std::mem::size_of::<Option<EncodedFilterValue>>())
@@ -201,7 +203,8 @@ impl TxGraphDelta {
     #[cfg(test)]
     fn add_edge_for_test(&mut self, source: u32, edge: DeltaEdge) {
         if edge.relationship_id.is_none() {
-            self.missing_relationship_identity_edge_types[usize::from(edge.type_id)] = true;
+            self.missing_relationship_identity_edge_types
+                .insert(edge.type_id.get());
         }
         self.added_edges.entry(source).or_default().push(edge);
     }
@@ -547,7 +550,9 @@ pub(crate) fn record_added_edge(source: u32, edge: DeltaEdge) -> GraphResult<()>
             return;
         }
         if edge.relationship_id.is_none() {
-            delta.missing_relationship_identity_edge_types[usize::from(edge.type_id)] = true;
+            delta
+                .missing_relationship_identity_edge_types
+                .insert(edge.type_id.get());
         }
         delta.added_edges.entry(source).or_default().push(edge);
     });
@@ -636,15 +641,16 @@ pub(crate) fn for_each_relationship_identity(
 /// Transaction deltas are bounded independently of the base projection. This
 /// check deliberately stays inside the delta owner so subtransaction restore
 /// and abort semantics remain authoritative.
-pub(crate) fn has_missing_relationship_identity_for_types(active_edge_types: &[bool; 256]) -> bool {
+pub(crate) fn has_missing_relationship_identity_for_types(
+    active_edge_types: &RoaringBitmap,
+) -> bool {
     TX_DELTA.with(|delta| {
         delta.borrow().as_ref().is_some_and(|delta| {
-            active_edge_types
-                .iter()
-                .enumerate()
-                .any(|(edge_type, active)| {
-                    *active && delta.missing_relationship_identity_edge_types[edge_type]
-                })
+            active_edge_types.iter().any(|edge_type| {
+                delta
+                    .missing_relationship_identity_edge_types
+                    .contains(edge_type)
+            })
         })
     })
 }
@@ -670,7 +676,11 @@ pub(crate) fn find_relationship_identity_id(
     dead_code,
     reason = "Phase 2E write operators call this after PostgreSQL accepts edge DML"
 )]
-pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> GraphResult<()> {
+pub(crate) fn record_deleted_edge(
+    source: u32,
+    target: u32,
+    type_id: EdgeTypeId,
+) -> GraphResult<()> {
     record_deleted_edge_with_identity(source, target, type_id, false, None)
 }
 
@@ -678,7 +688,7 @@ pub(crate) fn record_deleted_edge(source: u32, target: u32, type_id: u8) -> Grap
 pub(crate) fn record_deleted_edge_with_identity(
     source: u32,
     target: u32,
-    type_id: u8,
+    type_id: EdgeTypeId,
     schema_reversed: bool,
     relationship_id: Option<RelationshipId>,
 ) -> GraphResult<()> {
@@ -834,7 +844,23 @@ fn estimated_added_edge_bytes() -> usize {
 }
 
 fn estimated_deleted_edge_bytes() -> usize {
-    std::mem::size_of::<(u32, u32, u8)>()
+    type DeletedEdge = (u32, u32, EdgeTypeId, bool, Option<RelationshipId>);
+    let (len, capacity) = TX_DELTA.with(|delta| {
+        delta.borrow().as_ref().map_or((0, 0), |delta| {
+            (delta.deleted_edges.len(), delta.deleted_edges.capacity())
+        })
+    });
+    if len.saturating_add(1) <= capacity {
+        return 0;
+    }
+    let target_capacity = len
+        .saturating_add(1)
+        .next_power_of_two()
+        .saturating_mul(2)
+        .max(4);
+    target_capacity
+        .saturating_sub(capacity)
+        .saturating_mul(std::mem::size_of::<DeletedEdge>() * 2)
 }
 
 fn estimated_filter_update_bytes() -> usize {
@@ -1061,7 +1087,7 @@ mod tests {
             0,
             DeltaEdge {
                 target: 1,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -1069,12 +1095,13 @@ mod tests {
         )
         .expect("first edge insert");
         let first_revision = topology_revision();
-        record_deleted_edge_with_identity(0, 1, 1, false, None).expect("cancel first edge insert");
+        record_deleted_edge_with_identity(0, 1, crate::types::EdgeTypeId::test_v6(1), false, None)
+            .expect("cancel first edge insert");
         record_added_edge(
             0,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -1097,13 +1124,15 @@ mod tests {
                 42,
                 DeltaEdge {
                     target: 7,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     weight: Some(3),
                     schema_reversed: false,
                     relationship_id: None,
                 },
             );
-            delta.deleted_edges.insert((1, 2, 1, false, None));
+            delta
+                .deleted_edges
+                .insert((1, 2, EdgeTypeId::test_v6(1), false, None));
         });
 
         let stats = stats();
@@ -1119,13 +1148,12 @@ mod tests {
     #[test]
     fn relationship_identity_summary_tracks_transaction_insert_and_cancellation() {
         clear_current_transaction_state();
-        let mut active = [false; 256];
-        active[3] = true;
+        let active = roaring::RoaringBitmap::from_iter([3]);
         record_added_edge(
             0,
             DeltaEdge {
                 target: 1,
-                type_id: 3,
+                type_id: EdgeTypeId::from_v6_storage(3).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -1133,8 +1161,32 @@ mod tests {
         )
         .expect("record missing transaction identity");
         assert!(has_missing_relationship_identity_for_types(&active));
-        record_deleted_edge_with_identity(0, 1, 3, false, None).expect("cancel transaction edge");
+        record_deleted_edge_with_identity(0, 1, EdgeTypeId::test_v6(3), false, None)
+            .expect("cancel transaction edge");
         assert!(!has_missing_relationship_identity_for_types(&active));
+        clear_current_transaction_state();
+    }
+
+    #[test]
+    fn deleted_edge_preflight_covers_the_actual_widened_hash_entry() {
+        clear_current_transaction_state();
+        for index in 0..64_u32 {
+            let before = stats().memory_bytes;
+            let allowance = estimated_deleted_edge_bytes();
+            record_deleted_edge_with_identity(
+                index,
+                index + 1,
+                EdgeTypeId::try_from(65_534_u32).expect("logical type is valid"),
+                true,
+                Some(index + 1),
+            )
+            .expect("record widened logical edge deletion");
+            let growth = stats().memory_bytes.saturating_sub(before);
+            assert!(
+                growth <= allowance,
+                "insertion {index} grew deleted-edge storage by {growth} beyond {allowance}"
+            );
+        }
         clear_current_transaction_state();
     }
 
@@ -1259,14 +1311,14 @@ mod tests {
             1,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
             },
         )
         .expect("record insert");
-        record_deleted_edge(1, 2, 1).expect("record delete");
+        record_deleted_edge(1, 2, crate::types::EdgeTypeId::test_v6(1)).expect("record delete");
         let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
         assert!(inserts.is_empty());
         assert!(deletes.is_empty());
@@ -1275,7 +1327,7 @@ mod tests {
             1,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -1284,11 +1336,15 @@ mod tests {
         .expect("record insert after delete");
         let (inserts, deletes) = edge_overlay(TraversalDirection::In);
         assert!(deletes.is_empty());
-        assert!(inserts
-            .get(&2)
-            .is_some_and(|edges| edges.contains(&(1, 1, false, None))));
+        assert!(inserts.get(&2).is_some_and(|edges| edges.contains(&(
+            1,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            None
+        ))));
 
-        record_deleted_edge(1, 2, 1).expect("record delete after insert");
+        record_deleted_edge(1, 2, crate::types::EdgeTypeId::test_v6(1))
+            .expect("record delete after insert");
         let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
         assert!(inserts.is_empty());
         assert!(deletes.is_empty());
@@ -1302,7 +1358,7 @@ mod tests {
                 1,
                 DeltaEdge {
                     target: 2,
-                    type_id: 1,
+                    type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                     weight: None,
                     schema_reversed: false,
                     relationship_id: Some(relationship_id),
@@ -1311,11 +1367,25 @@ mod tests {
             .expect("record parallel insert");
         }
 
-        record_deleted_edge_with_identity(1, 2, 1, false, Some(11))
-            .expect("record identified delete");
+        record_deleted_edge_with_identity(
+            1,
+            2,
+            crate::types::EdgeTypeId::test_v6(1),
+            false,
+            Some(11),
+        )
+        .expect("record identified delete");
         let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
 
-        assert_eq!(inserts.get(&1), Some(&vec![(2, 1, false, Some(12))]));
+        assert_eq!(
+            inserts.get(&1),
+            Some(&vec![(
+                2,
+                crate::types::EdgeTypeId::test_v6(1),
+                false,
+                Some(12)
+            )])
+        );
         assert!(deletes.is_empty());
         clear_current_transaction_state();
     }
@@ -1323,12 +1393,13 @@ mod tests {
     #[test]
     fn wildcard_delete_coexists_with_later_identified_insert() {
         clear_current_transaction_state();
-        record_deleted_edge(1, 2, 1).expect("record wildcard delete");
+        record_deleted_edge(1, 2, crate::types::EdgeTypeId::test_v6(1))
+            .expect("record wildcard delete");
         record_added_edge(
             1,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: Some(12),
@@ -1337,8 +1408,24 @@ mod tests {
         .expect("record identified insert");
 
         let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
-        assert_eq!(inserts.get(&1), Some(&vec![(2, 1, false, Some(12))]));
-        assert_eq!(deletes.get(&1), Some(&HashSet::from([(2, 1, false, None)])));
+        assert_eq!(
+            inserts.get(&1),
+            Some(&vec![(
+                2,
+                crate::types::EdgeTypeId::test_v6(1),
+                false,
+                Some(12)
+            )])
+        );
+        assert_eq!(
+            deletes.get(&1),
+            Some(&HashSet::from([(
+                2,
+                crate::types::EdgeTypeId::test_v6(1),
+                false,
+                None
+            )]))
+        );
         clear_current_transaction_state();
     }
 
@@ -1347,12 +1434,13 @@ mod tests {
         clear_current_transaction_state();
         set_test_limits(100_000, 1, 256 * 1_048_576);
 
-        record_deleted_edge(1, 2, 1).expect("record delete at limit");
+        record_deleted_edge(1, 2, crate::types::EdgeTypeId::test_v6(1))
+            .expect("record delete at limit");
         record_added_edge(
             1,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -1366,14 +1454,15 @@ mod tests {
             1,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
             },
         )
         .expect("record insert at limit");
-        record_deleted_edge(1, 2, 1).expect("insert plus delete should be net neutral at limit");
+        record_deleted_edge(1, 2, crate::types::EdgeTypeId::test_v6(1))
+            .expect("insert plus delete should be net neutral at limit");
         assert_eq!(stats().deleted_edges, 0);
         assert_eq!(stats().added_edges, 0);
 
@@ -1413,7 +1502,7 @@ mod tests {
             1,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -1437,7 +1526,7 @@ mod tests {
             1,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
@@ -1482,7 +1571,7 @@ mod tests {
             1,
             DeltaEdge {
                 target: 2,
-                type_id: 1,
+                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
                 weight: None,
                 schema_reversed: false,
                 relationship_id: None,
