@@ -11,8 +11,24 @@ use crate::resource::{ByteCount, ResourceGovernor, ResourceLease, ResourcePhase}
 use crate::safety::{GraphError, GraphResult};
 use crate::types::EdgeTypeId;
 
-const RAW_FIXED_BYTES: usize = 18;
-const EDGE_VALUE_BYTES: usize = 14;
+const LOGICAL_EDGE_TYPE_BYTES: usize = 4;
+const RAW_FIXED_BYTES: usize = 17 + LOGICAL_EDGE_TYPE_BYTES;
+const EDGE_VALUE_BYTES: usize = 17;
+/// Smallest encoded run record produced by the relationship scanner: the
+/// length prefixes, an empty relationship identity key, and its fixed value.
+pub(crate) const MIN_EDGE_RUN_RECORD_BYTES: usize = 8 + 24 + RAW_FIXED_BYTES;
+
+fn encode_logical_edge_type(type_id: EdgeTypeId) -> GraphResult<[u8; LOGICAL_EDGE_TYPE_BYTES]> {
+    if type_id == EdgeTypeId::SENTINEL {
+        return Err(corrupt("logical relationship type ID is reserved"));
+    }
+    Ok(type_id.get().to_le_bytes())
+}
+
+fn decode_logical_edge_type(bytes: &[u8], offset: usize) -> GraphResult<EdgeTypeId> {
+    EdgeTypeId::try_from(read_le_u32(bytes, offset)?)
+        .map_err(|_| corrupt("logical relationship type ID is reserved"))
+}
 
 /// Final relationship runs and bounded registry metadata.
 pub(crate) struct PersistedEdgeRuns<'governor> {
@@ -344,13 +360,10 @@ fn encode_raw_edge(
     weight: Option<u32>,
     bidirectional: bool,
 ) -> GraphResult<RunRecord> {
-    let stored_type_id = type_id
-        .to_v6_storage()
-        .map_err(|_| GraphError::Internal("edge type registry exceeds v6 artifact width".into()))?;
     let key_len = u32::try_from(source_key.len())
         .map_err(|_| GraphError::Internal("relationship key exceeds u32".into()))?;
     let mut key = Vec::new();
-    key.try_reserve_exact(12 + source_key.len() + 9)
+    key.try_reserve_exact(12 + source_key.len() + 12)
         .map_err(allocation_error)?;
     key.extend_from_slice(&mapping_id.to_be_bytes());
     key.extend_from_slice(&key_len.to_be_bytes());
@@ -358,14 +371,14 @@ fn encode_raw_edge(
     let identity_key_len = key.len();
     key.extend_from_slice(&source.to_be_bytes());
     key.extend_from_slice(&target.to_be_bytes());
-    key.push(stored_type_id);
+    key.extend_from_slice(&type_id.get().to_be_bytes());
     let mut value = Vec::new();
     value
         .try_reserve_exact(RAW_FIXED_BYTES)
         .map_err(allocation_error)?;
     value.extend_from_slice(&source.to_le_bytes());
     value.extend_from_slice(&target.to_le_bytes());
-    value.push(stored_type_id);
+    value.extend_from_slice(&encode_logical_edge_type(type_id)?);
     value.extend_from_slice(&weight.unwrap_or(0).to_le_bytes());
     value.push(u8::from(bidirectional));
     value.extend_from_slice(&(identity_key_len as u32).to_le_bytes());
@@ -389,20 +402,51 @@ fn decode_raw_edge(record: &RunRecord) -> GraphResult<DecodedRaw<'_>> {
     let key_end = 12usize
         .checked_add(key_len)
         .ok_or_else(|| corrupt("identity key overflow"))?;
-    if record.key.len() != key_end + 9 {
+    if record.key.len() != key_end + 12 {
         return Err(corrupt("raw relationship key length mismatch"));
     }
     let source_key = std::str::from_utf8(&record.key[12..key_end])
         .map_err(|_| corrupt("relationship key is not UTF-8"))?;
+    let key_source = u32::from_be_bytes(
+        record.key[key_end..key_end + 4]
+            .try_into()
+            .map_err(|_| corrupt("raw relationship source width"))?,
+    );
+    let key_target = u32::from_be_bytes(
+        record.key[key_end + 4..key_end + 8]
+            .try_into()
+            .map_err(|_| corrupt("raw relationship target width"))?,
+    );
+    let key_type = EdgeTypeId::try_from(u32::from_be_bytes(
+        record.key[key_end + 8..key_end + 12]
+            .try_into()
+            .map_err(|_| corrupt("raw relationship type width"))?,
+    ))
+    .map_err(|_| corrupt("raw relationship type ID is reserved"))?;
+    let source = read_le_u32(&record.value, 0)?;
+    let target = read_le_u32(&record.value, 4)?;
+    let type_id = decode_logical_edge_type(&record.value, 8)?;
+    let bidirectional = match record.value[16] {
+        0 => false,
+        1 => true,
+        _ => return Err(corrupt("raw relationship direction flag is invalid")),
+    };
+    let identity_key_len = read_le_u32(&record.value, 17)? as usize;
+    if identity_key_len != key_end
+        || key_source != source
+        || key_target != target
+        || key_type != type_id
+    {
+        return Err(corrupt("raw relationship key/value mismatch"));
+    }
     Ok(DecodedRaw {
         mapping_id,
         source_key,
-        source: read_le_u32(&record.value, 0)?,
-        target: read_le_u32(&record.value, 4)?,
-        type_id: EdgeTypeId::from_v6_storage(record.value[8])
-            .map_err(|_| corrupt("raw relationship type ID is reserved"))?,
-        weight: read_le_u32(&record.value, 9)?,
-        bidirectional: record.value[13] != 0,
+        source,
+        target,
+        type_id,
+        weight: read_le_u32(&record.value, 12)?,
+        bidirectional,
         identity_key_len: key_end,
     })
 }
@@ -431,14 +475,11 @@ fn push_oriented(
     weight: u32,
     relationship_id: u32,
 ) -> GraphResult<()> {
-    let stored_type_id = type_id
-        .to_v6_storage()
-        .map_err(|_| GraphError::Internal("edge type registry exceeds v6 artifact width".into()))?;
     let mut key = Vec::new();
-    key.try_reserve_exact(14).map_err(allocation_error)?;
+    key.try_reserve_exact(17).map_err(allocation_error)?;
     key.extend_from_slice(&source.to_be_bytes());
     key.extend_from_slice(&target.to_be_bytes());
-    key.push(stored_type_id);
+    key.extend_from_slice(&type_id.get().to_be_bytes());
     key.push(u8::from(schema_reversed));
     key.extend_from_slice(&relationship_id.to_be_bytes());
     let mut value = Vec::new();
@@ -446,7 +487,7 @@ fn push_oriented(
         .try_reserve_exact(EDGE_VALUE_BYTES)
         .map_err(allocation_error)?;
     value.extend_from_slice(&target.to_le_bytes());
-    value.push(stored_type_id);
+    value.extend_from_slice(&encode_logical_edge_type(type_id)?);
     value.push(u8::from(schema_reversed));
     value.extend_from_slice(&weight.to_le_bytes());
     value.extend_from_slice(&relationship_id.to_le_bytes());
@@ -609,6 +650,102 @@ mod tests {
             ),
             (7, "key", 1, 2, EdgeTypeId::test_v6(3), 4, true)
         );
+    }
+
+    #[test]
+    fn direct_run_codec_roundtrips_logical_edge_type_boundaries() {
+        for raw in [0, 254, 255, 65_534, 65_535, u32::MAX - 1] {
+            let type_id = EdgeTypeId::try_from(raw).expect("logical type is valid");
+            let record =
+                encode_raw_edge(7, "k", 1, 2, type_id, Some(3), false).expect("raw record encodes");
+            assert_eq!(
+                decode_raw_edge(&record)
+                    .expect("raw record decodes")
+                    .type_id,
+                type_id
+            );
+        }
+        assert!(encode_logical_edge_type(EdgeTypeId::SENTINEL).is_err());
+        assert!(decode_logical_edge_type(&u32::MAX.to_le_bytes(), 0).is_err());
+    }
+
+    #[test]
+    fn direct_run_codec_rejects_sentinel_truncation_and_key_value_mismatch() {
+        let valid = encode_raw_edge(7, "key", 1, 2, EdgeTypeId::test_v6(3), Some(4), true)
+            .expect("raw record encodes");
+        for key_len in 0..valid.key.len() {
+            let mut truncated = valid.clone();
+            truncated.key.truncate(key_len);
+            assert!(decode_raw_edge(&truncated).is_err());
+        }
+        for value_len in 0..valid.value.len() {
+            let mut truncated = valid.clone();
+            truncated.value.truncate(value_len);
+            assert!(decode_raw_edge(&truncated).is_err());
+        }
+        for offset in [12 + 3, 12 + 3 + 4, 12 + 3 + 8] {
+            let mut mismatch = valid.clone();
+            mismatch.key[offset] ^= 1;
+            assert!(decode_raw_edge(&mismatch).is_err());
+        }
+        let mut bad_identity_len = valid.clone();
+        bad_identity_len.value[17..21].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(decode_raw_edge(&bad_identity_len).is_err());
+        let mut bad_direction = valid.clone();
+        bad_direction.value[16] = 2;
+        assert!(decode_raw_edge(&bad_direction).is_err());
+        let mut sentinel = valid;
+        sentinel.value[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_raw_edge(&sentinel).is_err());
+    }
+
+    #[test]
+    fn direct_run_codec_accounts_for_widened_type_fields() {
+        let raw = encode_raw_edge(7, "", 1, 2, EdgeTypeId::test_v6(3), None, false)
+            .expect("raw record encodes");
+        assert_eq!(
+            8 + raw.key.len() + raw.value.len(),
+            MIN_EDGE_RUN_RECORD_BYTES
+        );
+        let mut temp = std::env::temp_dir();
+        temp.push(format!(
+            "pggraph-p7-run-codec-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).expect("tempdir");
+        let governor = ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(ByteCount::from_bytes(64 * 1024)),
+        ));
+        let workspace = RunWorkspace::create(&temp, [1; 16], [2; 16], 3, 4).expect("workspace");
+        let mut collector = RunCollector::new(
+            &workspace,
+            &governor,
+            RunKind::RelationshipsOutbound,
+            ByteCount::from_bytes(1024),
+            64,
+        )
+        .expect("collector");
+        push_oriented(
+            &mut collector,
+            1,
+            2,
+            EdgeTypeId::try_from(65_535).unwrap(),
+            false,
+            4,
+            5,
+        )
+        .expect("oriented record encodes");
+        let run = collector.finish().unwrap().pop().unwrap();
+        run.replay(64, |record| {
+            assert_eq!(record.key.len(), 17);
+            assert_eq!(record.value.len(), EDGE_VALUE_BYTES);
+            assert_eq!(8 + record.key.len() + record.value.len(), 42);
+            Ok(())
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

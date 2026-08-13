@@ -303,7 +303,6 @@ fn p6_raw_v6_edge_type_bytes_are_confined_to_named_storage_adapters() {
     let adapter_sources = [
         "src/edge_store.rs",
         "src/persisted_build.rs",
-        "src/persisted_edge_scanner.rs",
         "src/persistence.rs",
         "src/projection/segment.rs",
     ];

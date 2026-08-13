@@ -7,7 +7,7 @@ use crate::builder::{RegisteredEdge, RegisteredFilterColumn, RegisteredTable};
 use crate::config::ProjectionMode;
 use crate::persisted_build::{write_semantic_artifact, SemanticDirectBuild};
 use crate::persisted_build_scanner::scan_persisted_sources;
-use crate::persisted_edge_scanner::scan_persisted_edges;
+use crate::persisted_edge_scanner::{scan_persisted_edges, MIN_EDGE_RUN_RECORD_BYTES};
 use crate::resource::{ByteCount, ResourceGovernor};
 use crate::safety::{GraphError, GraphResult};
 
@@ -35,7 +35,7 @@ pub(crate) fn build_persisted_candidate(
     governor: &ResourceGovernor,
     options: &DirectBuildOptions,
 ) -> GraphResult<DirectBuildResult> {
-    if options.max_run_files < 4 || options.max_record_bytes < 32 {
+    if options.max_run_files < 4 || options.max_record_bytes < MIN_EDGE_RUN_RECORD_BYTES {
         return Err(GraphError::Internal(
             "direct persisted build run limits are too small".into(),
         ));

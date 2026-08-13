@@ -17,15 +17,15 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::EdgeTypeId;
 
 const SECTION_COUNT: usize = 26;
-const EDGE_RECORD_KEY_BYTES: usize = 14;
-const EDGE_RECORD_VALUE_BYTES: usize = 14;
+const EDGE_RECORD_KEY_BYTES: usize = 17;
+const EDGE_RECORD_VALUE_BYTES: usize = 17;
 const IDENTITY_VALUE_HEADER_BYTES: usize = 12;
 
 /// Bounded run inputs used to assemble every semantic v6 artifact section.
 ///
 /// Edge records have a stable manual codec. Their key is
-/// `source:u32be | target:u32be | type:u8 | schema_reversed:u8 |
-/// relationship_id:u32be`; their value is `target:u32le | type:u8 |
+/// `source:u32be | target:u32be | type:u32be | schema_reversed:u8 |
+/// relationship_id:u32be`; their value is `target:u32le | type:u32le |
 /// schema_reversed:u8 | weight:u32le | relationship_id:u32le`. A zero weight
 /// represents an absent source weight and is normalized to the runtime default
 /// of one when the graph has a weighted CSR. Identity values are
@@ -533,20 +533,16 @@ fn decode_edge(record: &crate::build_runs::RunRecord) -> GraphResult<DecodedEdge
     let edge = DecodedEdge {
         source: u32::from_be_bytes(read_array(&record.key, 0)?),
         target: u32::from_le_bytes(read_array(&record.value, 0)?),
-        type_id: EdgeTypeId::from_v6_storage(record.value[4])
+        type_id: EdgeTypeId::try_from(u32::from_le_bytes(read_array(&record.value, 4)?))
             .map_err(|_| GraphError::Internal("direct edge type ID is reserved".into()))?,
-        schema_reversed: record.value[5],
-        weight: u32::from_le_bytes(read_array(&record.value, 6)?),
-        relationship_id: u32::from_le_bytes(read_array(&record.value, 10)?),
+        schema_reversed: record.value[8],
+        weight: u32::from_le_bytes(read_array(&record.value, 9)?),
+        relationship_id: u32::from_le_bytes(read_array(&record.value, 13)?),
     };
     if u32::from_be_bytes(read_array(&record.key, 4)?) != edge.target
-        || record.key[8]
-            != edge
-                .type_id
-                .to_v6_storage()
-                .map_err(|_| GraphError::Internal("direct edge type ID exceeds v6".into()))?
-        || record.key[9] != edge.schema_reversed
-        || u32::from_be_bytes(read_array(&record.key, 10)?) != edge.relationship_id
+        || u32::from_be_bytes(read_array(&record.key, 8)?) != edge.type_id.get()
+        || record.key[12] != edge.schema_reversed
+        || u32::from_be_bytes(read_array(&record.key, 13)?) != edge.relationship_id
         || edge.schema_reversed > 1
     {
         return Err(GraphError::Internal(
@@ -1280,8 +1276,8 @@ fn allocation_error(_label: &str, _error: std::collections::TryReserveError) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        write_prepared_artifact, write_semantic_artifact, DirectBuildArtifact, DirectSection,
-        SemanticDirectBuild,
+        decode_edge, write_prepared_artifact, write_semantic_artifact, DirectBuildArtifact,
+        DirectSection, SemanticDirectBuild, EDGE_RECORD_KEY_BYTES, EDGE_RECORD_VALUE_BYTES,
     };
     use crate::build_runs::{RunCollector, RunKind, RunRecord, RunWorkspace};
     use crate::builder::RegisteredFilterColumn;
@@ -1290,6 +1286,195 @@ mod tests {
         ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
         RowCount, WorkUnits,
     };
+
+    fn assert_wide_v6_rejection(existing_destination: bool) {
+        let temp = std::env::temp_dir().join(format!(
+            "pggraph-p7-wide-v6-{}-{}-{existing_destination}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).expect("tempdir");
+        let path = temp.join("candidate.pggraph");
+        let last_good_path = temp.join("last-good.pggraph");
+        let original = b"existing artifact";
+        if existing_destination {
+            std::fs::write(&last_good_path, original).expect("existing artifact writes");
+        }
+        let governor = ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(128 * 1024)),
+            DiskBudget::new(ByteCount::from_bytes(2 * 1024 * 1024)),
+            RowCount::UNLIMITED,
+            WorkUnits::UNLIMITED,
+            ElapsedBudget::new(Duration::MAX),
+        ));
+        let workspace = RunWorkspace::create(&temp, [7; 16], [8; 16], 11, 16).expect("workspace");
+        let stage = |kind, records: Vec<RunRecord>| {
+            let mut collector = RunCollector::new(
+                &workspace,
+                &governor,
+                kind,
+                ByteCount::from_bytes(4096),
+                128,
+            )
+            .expect("collector");
+            for record in records {
+                collector.push(record).expect("record stages");
+            }
+            collector.finish().unwrap().pop().unwrap()
+        };
+        let node = |index: u32, key: u8| {
+            let mut value = Vec::new();
+            value.extend_from_slice(&index.to_le_bytes());
+            value.extend_from_slice(&42_u32.to_le_bytes());
+            value.extend_from_slice(&1_u32.to_le_bytes());
+            value.push(key);
+            RunRecord::new(index.to_be_bytes().to_vec(), value)
+        };
+        let nodes = stage(RunKind::Nodes, vec![node(0, b'a'), node(1, b'b')]);
+        let resolution = stage(
+            RunKind::Resolution,
+            [0_u32, 1]
+                .into_iter()
+                .map(|node_idx| {
+                    let mut key = Vec::new();
+                    key.extend_from_slice(&42_u32.to_be_bytes());
+                    key.extend_from_slice(&u64::from(node_idx).to_be_bytes());
+                    key.extend_from_slice(&node_idx.to_be_bytes());
+                    let mut value = Vec::new();
+                    value.extend_from_slice(&42_u32.to_le_bytes());
+                    value.extend_from_slice(&u64::from(node_idx).to_le_bytes());
+                    value.extend_from_slice(&node_idx.to_le_bytes());
+                    RunRecord::new(key, value)
+                })
+                .collect(),
+        );
+        let edge = |source: u32, target: u32| {
+            let mut key = Vec::new();
+            key.extend_from_slice(&source.to_be_bytes());
+            key.extend_from_slice(&target.to_be_bytes());
+            key.extend_from_slice(&255_u32.to_be_bytes());
+            key.push(0);
+            key.extend_from_slice(&0_u32.to_be_bytes());
+            let mut value = Vec::new();
+            value.extend_from_slice(&target.to_le_bytes());
+            value.extend_from_slice(&255_u32.to_le_bytes());
+            value.push(0);
+            value.extend_from_slice(&1_u32.to_le_bytes());
+            value.extend_from_slice(&0_u32.to_le_bytes());
+            RunRecord::new(key, value)
+        };
+        let forward = stage(RunKind::RelationshipsOutbound, vec![edge(0, 1)]);
+        let inbound = stage(RunKind::RelationshipsInbound, vec![edge(1, 0)]);
+        let registry = vec![String::new()];
+        let build = SemanticDirectBuild {
+            node_count: 2,
+            forward_edge_count: 1,
+            inbound_edge_count: 1,
+            has_forward_weights: false,
+            has_inbound_weights: false,
+            has_unidirectional_edges: true,
+            applied_sync_id: 0,
+            projection_mode: ProjectionMode::CsrReadonly,
+            nodes: Some(&nodes),
+            forward_edges: Some(&forward),
+            inbound_edges: Some(&inbound),
+            resolution: Some(&resolution),
+            filters: None,
+            filter_dictionary: None,
+            relationship_identities: None,
+            tenant_tokens: None,
+            tenant_dictionary: None,
+            filter_columns: &[],
+            edge_type_registry: &registry,
+            tenanted_table_oids: &[],
+            max_record_bytes: 128,
+            governor: &governor,
+        };
+        let error = write_semantic_artifact(&path, &build).expect_err("v6 narrowing must reject");
+        assert!(error.to_string().contains("exceeds v6"));
+        assert!(!path.exists(), "failed candidate must not be published");
+        if existing_destination {
+            assert_eq!(std::fs::read(&last_good_path).unwrap(), original);
+        }
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn direct_build_v6_rejects_wide_type_before_candidate_publication() {
+        assert_wide_v6_rejection(false);
+    }
+
+    #[test]
+    fn direct_build_v6_rejection_leaves_existing_artifact_unchanged() {
+        assert_wide_v6_rejection(true);
+    }
+
+    #[test]
+    fn direct_build_logical_run_accounting_matches_encoded_width() {
+        for raw in [0, 254, 255, 65_534, 65_535, u32::MAX - 1] {
+            let mut key = Vec::new();
+            key.extend_from_slice(&1_u32.to_be_bytes());
+            key.extend_from_slice(&2_u32.to_be_bytes());
+            key.extend_from_slice(&raw.to_be_bytes());
+            key.push(0);
+            key.extend_from_slice(&3_u32.to_be_bytes());
+            let mut value = Vec::new();
+            value.extend_from_slice(&2_u32.to_le_bytes());
+            value.extend_from_slice(&raw.to_le_bytes());
+            value.push(0);
+            value.extend_from_slice(&4_u32.to_le_bytes());
+            value.extend_from_slice(&3_u32.to_le_bytes());
+            let record = RunRecord::new(key, value);
+            assert_eq!(record.key.len(), EDGE_RECORD_KEY_BYTES);
+            assert_eq!(record.value.len(), EDGE_RECORD_VALUE_BYTES);
+            assert_eq!(decode_edge(&record).unwrap().type_id.get(), raw);
+        }
+    }
+
+    #[test]
+    fn direct_build_logical_run_decoder_rejects_corruption() {
+        let valid = || {
+            let mut key = Vec::new();
+            key.extend_from_slice(&1_u32.to_be_bytes());
+            key.extend_from_slice(&2_u32.to_be_bytes());
+            key.extend_from_slice(&255_u32.to_be_bytes());
+            key.push(0);
+            key.extend_from_slice(&3_u32.to_be_bytes());
+            let mut value = Vec::new();
+            value.extend_from_slice(&2_u32.to_le_bytes());
+            value.extend_from_slice(&255_u32.to_le_bytes());
+            value.push(0);
+            value.extend_from_slice(&4_u32.to_le_bytes());
+            value.extend_from_slice(&3_u32.to_le_bytes());
+            RunRecord::new(key, value)
+        };
+        for length in 0..EDGE_RECORD_KEY_BYTES {
+            let mut record = valid();
+            record.key.truncate(length);
+            assert!(decode_edge(&record).is_err());
+        }
+        for length in 0..EDGE_RECORD_VALUE_BYTES {
+            let mut record = valid();
+            record.value.truncate(length);
+            assert!(decode_edge(&record).is_err());
+        }
+        for offset in [4, 8, 13] {
+            let mut record = valid();
+            record.key[offset] ^= 1;
+            assert!(decode_edge(&record).is_err());
+        }
+        let mut sentinel_value = valid();
+        sentinel_value.value[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_edge(&sentinel_value).is_err());
+        let mut sentinel_key = valid();
+        sentinel_key.key[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(decode_edge(&sentinel_key).is_err());
+        let mut bad_schema = valid();
+        bad_schema.value[8] = 2;
+        bad_schema.key[12] = 2;
+        assert!(decode_edge(&bad_schema).is_err());
+    }
     use std::time::Duration;
 
     #[test]
@@ -1394,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_assembly_streams_nodes_csr_registry_and_identities() {
+    fn direct_build_logical_u32_runs_preserve_v6_artifact_bytes_and_semantics() {
         let temp = std::env::temp_dir().join(format!(
             "pggraph-semantic-direct-{}-{}",
             std::process::id(),
@@ -1460,11 +1645,13 @@ mod tests {
             let mut key = Vec::new();
             key.extend_from_slice(&source.to_be_bytes());
             key.extend_from_slice(&target.to_be_bytes());
-            key.extend_from_slice(&[1, 0]);
+            key.extend_from_slice(&1_u32.to_be_bytes());
+            key.push(0);
             key.extend_from_slice(&1_u32.to_be_bytes());
             let mut value = Vec::new();
             value.extend_from_slice(&target.to_le_bytes());
-            value.extend_from_slice(&[1, 0]);
+            value.extend_from_slice(&1_u32.to_le_bytes());
+            value.push(0);
             value.extend_from_slice(&5_u32.to_le_bytes());
             value.extend_from_slice(&1_u32.to_le_bytes());
             RunRecord::new(key, value)

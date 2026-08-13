@@ -226,7 +226,10 @@ fn direct_build_options(
     let divisor = u64::try_from((MERGE_FANOUT + 1) * 4)
         .map_err(|_| safety::GraphError::Internal("merge reservation divisor overflowed".into()))?;
     let max_record_bytes = usize::try_from(
-        (memory_plan.replacement_budget_bytes.as_u64() / divisor).clamp(32, MAX_RECORD_CEILING),
+        (memory_plan.replacement_budget_bytes.as_u64() / divisor).clamp(
+            crate::persisted_edge_scanner::MIN_EDGE_RUN_RECORD_BYTES as u64,
+            MAX_RECORD_CEILING,
+        ),
     )
     .map_err(|_| safety::GraphError::Internal("maximum run record size overflowed".into()))?;
     Ok(crate::persisted_build_pipeline::DirectBuildOptions {

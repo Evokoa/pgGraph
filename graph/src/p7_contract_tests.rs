@@ -130,8 +130,49 @@ fn p7_manifest_recovery_and_sync_use_the_parsed_base_artifact_version() {
 }
 
 #[test]
-#[ignore = "P7.3 direct build, migration, evidence, and documentation checkpoint"]
-fn p7_direct_build_and_public_contract_support_more_than_254_types() {
+fn p7_direct_build_runs_use_logical_u32_before_the_v6_artifact_boundary() {
+    let persisted = crate_source("src/persisted_build.rs");
+    let scanner = crate_source("src/persisted_edge_scanner.rs");
+    for seam in [
+        "const LOGICAL_EDGE_TYPE_BYTES: usize = 4",
+        "fn encode_logical_edge_type",
+        "fn decode_logical_edge_type",
+        "direct_run_codec_roundtrips_logical_edge_type_boundaries",
+        "direct_run_codec_rejects_sentinel_truncation_and_key_value_mismatch",
+        "direct_run_codec_accounts_for_widened_type_fields",
+    ] {
+        assert!(
+            scanner.contains(seam),
+            "P7.3 scanner/run codec is missing `{seam}`"
+        );
+    }
+
+    for seam in [
+        "direct_build_logical_u32_runs_preserve_v6_artifact_bytes_and_semantics",
+        "direct_build_v6_rejects_wide_type_before_candidate_publication",
+        "direct_build_v6_rejection_leaves_existing_artifact_unchanged",
+        "direct_build_logical_run_accounting_matches_encoded_width",
+    ] {
+        assert!(
+            persisted.contains(seam),
+            "P7.3 direct assembly is missing `{seam}`"
+        );
+    }
+
+    assert!(
+        persisted.contains("to_v6_storage") && persisted.contains("direct edge type ID exceeds v6"),
+        "P7.3 must keep the checked v6 narrowing boundary in artifact emission"
+    );
+    assert!(
+        scanner.contains("EdgeTypeRegistry::new_v6()")
+            && scanner.contains("registry.register_v6(label)"),
+        "P7.3 must continue rejecting more than 254 source labels before v7 activation"
+    );
+}
+
+#[test]
+#[ignore = "P7.4 v7 emission, public activation, migration evidence, and documentation checkpoint"]
+fn p7_v7_direct_build_and_public_contract_support_more_than_254_types() {
     let persisted = crate_source("src/persisted_build.rs");
     let scanner = crate_source("src/persisted_edge_scanner.rs");
     let tests = crate_source("src/pg_tests/maintenance_admin.rs");
@@ -142,7 +183,7 @@ fn p7_direct_build_and_public_contract_support_more_than_254_types() {
     ] {
         assert!(
             persisted.contains(seam) || scanner.contains(seam),
-            "P7.3 is missing `{seam}`"
+            "P7.4 is missing `{seam}`"
         );
     }
     for gate in [
@@ -151,7 +192,7 @@ fn p7_direct_build_and_public_contract_support_more_than_254_types() {
     ] {
         assert!(
             tests.contains(gate),
-            "P7.3 is missing PostgreSQL gate `{gate}`"
+            "P7.4 is missing PostgreSQL gate `{gate}`"
         );
     }
     assert!(roadmap.contains("| P7 | Complete |"));
