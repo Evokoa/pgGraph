@@ -305,6 +305,7 @@ pub struct FilterOp {
 
 /// Typed filter predicate applied to a single filter column.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
 pub enum FilterCondition {
     /// Unsigned numeric column is greater than the threshold.
     Gt(u32),
@@ -378,6 +379,7 @@ pub enum FilterCondition {
 
 /// Legacy unsigned numeric filter operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
 pub enum UnsignedFilterOp {
     /// Unsigned numeric column is greater than the threshold.
     Gt(usize, u32),
@@ -395,6 +397,7 @@ pub enum UnsignedFilterOp {
     Between(usize, u32, u32),
 }
 
+#[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
 impl UnsignedFilterOp {
     /// Evaluate this unsigned numeric filter against a value.
     #[inline]
@@ -443,6 +446,7 @@ impl FilterOp {
 
     /// Convert this filter to the legacy unsigned numeric evaluator shape.
     #[inline]
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn as_unsigned(&self) -> Option<UnsignedFilterOp> {
         match &self.condition {
             FilterCondition::Gt(threshold) => {

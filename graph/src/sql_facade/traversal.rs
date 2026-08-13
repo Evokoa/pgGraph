@@ -110,13 +110,13 @@ pub(super) fn traverse(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
         let rows = execute_traverse_rows_in_context(
             &request,
             &context,
@@ -303,13 +303,13 @@ fn traverse_many(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
         let mut candidates = Vec::new();
         for (table, id) in start_tables.into_iter().zip(start_ids) {
             let request = TraverseRequest {
@@ -442,7 +442,7 @@ fn shortest_path_typed(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
@@ -451,11 +451,8 @@ fn shortest_path_typed(
         let edge_type_filter = ENGINE
             .with(|engine| engine.borrow().resolve_edge_type_filter(Some(&edge_types)))
             .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::with_edge_type_filter(
-            &governor,
-            &visibility,
-            edge_type_filter.as_ref(),
-        );
+        let context =
+            coordinator.context_with_edge_type_filter(&governor, edge_type_filter.as_ref());
         let rows = shortest_path_rows_in_context(
             source_table,
             source_id,
@@ -486,8 +483,8 @@ pub(super) fn shortest_path_rows_governed(
     tables: &[builder::RegisteredTable],
     edges: &[builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
-    let visibility = crate::sql_visibility::build_visibility_scope(tables, edges, governor)?;
-    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    let coordinator = crate::sql_visibility::prepare_eager_visibility(tables, edges, governor)?;
+    let context = coordinator.context(governor);
     shortest_path_rows_in_context(
         source_table,
         source_id,
@@ -618,13 +615,13 @@ fn weighted_shortest_path(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
         let steps = ENGINE.with(|e| {
             let eng = e.borrow();
             eng.weighted_shortest_path_governed_in_context(
@@ -688,7 +685,7 @@ fn weighted_shortest_path_typed(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
@@ -697,11 +694,8 @@ fn weighted_shortest_path_typed(
         let edge_type_filter = ENGINE
             .with(|engine| engine.borrow().resolve_edge_type_filter(Some(&edge_types)))
             .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::with_edge_type_filter(
-            &governor,
-            &visibility,
-            edge_type_filter.as_ref(),
-        );
+        let context =
+            coordinator.context_with_edge_type_filter(&governor, edge_type_filter.as_ref());
         let steps = ENGINE.with(|engine| {
             engine
                 .borrow()
@@ -845,15 +839,15 @@ fn direct_get_neighbors_rows(
             max_frontier: config::MAX_FRONTIER.get(),
         };
         let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )?;
-        if !visibility.allows_node(matched.node_idx) {
+        if !coordinator.allows_node(matched.node_idx) {
             return Ok(Vec::new());
         }
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
         execute_traverse_rows_in_context(
             &request,
             &context,

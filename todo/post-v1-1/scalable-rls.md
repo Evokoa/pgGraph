@@ -20,8 +20,8 @@ verdicts across statements, or weakening the eager implementation.
 
 | Module | Current responsibility | Post-1.1 direction |
 |---|---|---|
-| `visibility.rs` | Pure immutable `VisibilityScope` and admission methods | Retain pure resolved verdicts; add candidate/verdict domain types without SPI |
-| `sql_visibility.rs` | Caller RLS detection, governed source scans, source-key resolution | Own immutable policy plans, eager resolver, bounded lazy oracle, and PostgreSQL error cleanup |
+| `visibility.rs` | Pure `VisibilityCoordinator`, immutable admission scope, execution context, and bounded ordered candidate/verdict types | Retain pure resolved verdicts and make the coordinator the only context factory |
+| `sql_visibility.rs` | Sole production constructor for prepared visibility, caller RLS detection, governed source scans, and source-key resolution | Own immutable policy plans, eager resolver, bounded lazy oracle, and PostgreSQL error cleanup |
 | SQL facades | Build scope, borrow engine, execute algorithms | Own the coordinator loop that alternates engine candidate production and SPI resolution |
 | Core traversal/path/GQL algorithms | Synchronous per-candidate admission | Become resumable only for targeted lazy paths; consume resolved batches in stable order |
 | Components/global analytics | Eager graph-wide work | Stay eager until a dedicated measured executor justifies change |
@@ -52,6 +52,16 @@ SPI must never be hidden inside `allows_node()` or
 `allows_relationship()`. Every PostgreSQL ERROR/cancellation boundary must own
 graph-sized Rust state through an explicit backend-local slot or PostgreSQL
 memory/resource-owner mechanism and clear it through `PgTryBuilder::finally`.
+
+P1 keeps eager behavior unchanged but seals the composition boundary:
+`prepare_eager_visibility()` returns a `VisibilityCoordinator`, SQL facades ask
+that coordinator for `QueryExecutionContext`, and raw unrestricted scope
+construction is confined to the pure visibility module plus the PostgreSQL
+preparation authority. Pure Rust compatibility APIs also route through the
+coordinator. Candidate batches own their keys, require strictly increasing
+sequence numbers, and reject row/key-byte overflow; verdict batches reject
+`Unknown`, count mismatch, and sequence mismatch. No SPI runs inside an
+`ENGINE.with` closure.
 
 ## Domain state
 

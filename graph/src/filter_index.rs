@@ -802,6 +802,7 @@ impl FilterIndex {
     }
 
     /// Register a new filter column. Returns the column index.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn register_column(
         &mut self,
         table_oid: u32,
@@ -821,6 +822,7 @@ impl FilterIndex {
     /// Returns the new column index. All node slots start as SQL NULL until
     /// [`FilterIndex::set_value`] or [`FilterIndex::set_encoded_value`] writes
     /// a value.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn register_typed_column(
         &mut self,
         table_oid: u32,
@@ -862,6 +864,7 @@ impl FilterIndex {
     }
 
     /// Set the value for a specific node in a specific column.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn set_value(&mut self, column_idx: usize, node_idx: u32, value: u32) {
         self.set_encoded_value(
             column_idx,
@@ -1066,6 +1069,7 @@ impl FilterIndex {
 
     /// Get the value for a specific node in a specific column.
     #[inline(always)]
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn get_value(&self, column_idx: usize, node_idx: u32) -> u32 {
         self.persistent_value(column_idx, node_idx)
             .and_then(|value| match value {
@@ -1197,6 +1201,7 @@ impl FilterIndex {
     /// and synchronization paths because a display name can occur on more
     /// than one relation. Use [`Self::find_column_for_table`] whenever source
     /// relation identity is available.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn find_first_column_by_name(&self, column_name: &str) -> Option<usize> {
         self.columns
             .iter()
@@ -1303,6 +1308,7 @@ impl FilterIndex {
     }
 
     /// Number of registered filter columns.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn column_count(&self) -> usize {
         self.columns.len()
     }

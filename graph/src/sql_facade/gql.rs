@@ -339,12 +339,21 @@ fn execute_statement_governed(
     catalog_tables: &[crate::builder::RegisteredTable],
     catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
-    let visibility = if statement_uses_projection_matching(&statement) {
-        crate::sql_visibility::build_visibility_scope(catalog_tables, catalog_edges, governor)?
-    } else {
-        crate::visibility::VisibilityScope::Unrestricted
+    let statement = match statement {
+        crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
+            check_create_acl(&plan);
+            return execute_create_node(&plan, tenant_scope, params, hydrate, catalog_tables);
+        }
+        crate::query::physical_plan::PhysicalStatement::MergeNode(plan) => {
+            check_merge_acl(&plan);
+            return execute_merge_node(&plan, tenant_scope, params, hydrate, catalog_tables);
+        }
+        statement => statement,
     };
-    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    debug_assert!(statement_uses_projection_matching(&statement));
+    let coordinator =
+        crate::sql_visibility::prepare_eager_visibility(catalog_tables, catalog_edges, governor)?;
+    let context = coordinator.context(governor);
     match statement {
         crate::query::physical_plan::PhysicalStatement::Read(plan) => {
             check_plan_acl(&plan);
@@ -442,9 +451,9 @@ fn execute_statement_governed(
                 matches, &plan, &hydrated, params, hydrate, governor,
             )
         }
-        crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
-            check_create_acl(&plan);
-            execute_create_node(&plan, tenant_scope, params, hydrate, catalog_tables)
+        crate::query::physical_plan::PhysicalStatement::CreateNode(_)
+        | crate::query::physical_plan::PhysicalStatement::MergeNode(_) => {
+            unreachable!("node-only CREATE/MERGE returns before topology visibility preparation")
         }
         crate::query::physical_plan::PhysicalStatement::CreateRelationship(plan) => {
             check_create_relationship_acl(&plan);
@@ -456,10 +465,6 @@ fn execute_statement_governed(
                 &context,
                 catalog_tables,
             )
-        }
-        crate::query::physical_plan::PhysicalStatement::MergeNode(plan) => {
-            check_merge_acl(&plan);
-            execute_merge_node(&plan, tenant_scope, params, hydrate, catalog_tables)
         }
         crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
             check_set_acl(&plan);

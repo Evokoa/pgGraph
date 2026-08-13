@@ -1011,8 +1011,8 @@ impl Engine {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code, reason = "compatibility entry point")]
     pub fn traverse_with_filter_ops(
         &self,
         seed_table_oid: u32,
@@ -1046,6 +1046,7 @@ impl Engine {
     ///
     /// SQL callers use this variant to keep execution, result conversion,
     /// blocking operators, and hydration inside one operation budget.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn traverse_with_filter_ops_governed(
         &self,
@@ -1061,6 +1062,9 @@ impl Engine {
         direction: TraversalDirection,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<TraverseOutcome> {
+        let coordinator =
+            crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+        let context = coordinator.context(governor);
         self.traverse_with_filter_ops_in_context(
             seed_table_oid,
             seed_id,
@@ -1072,10 +1076,7 @@ impl Engine {
             tenant,
             strategy,
             direction,
-            &crate::visibility::QueryExecutionContext::new(
-                governor,
-                &crate::visibility::VisibilityScope::Unrestricted,
-            ),
+            &context,
         )
     }
 
@@ -1479,7 +1480,7 @@ impl Engine {
     }
 
     /// Find shortest path between two nodes.
-    #[allow(dead_code, reason = "compatibility entry point")]
+    #[cfg(test)]
     pub fn shortest_path(
         &self,
         source_table_oid: u32,
@@ -1500,6 +1501,7 @@ impl Engine {
     }
 
     /// Finds an unweighted path within a caller-owned operation budget.
+    #[cfg(test)]
     pub(crate) fn shortest_path_governed(
         &self,
         source_table_oid: u32,
@@ -1509,8 +1511,9 @@ impl Engine {
         max_depth: i32,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<Vec<PathStep>> {
-        let visibility = crate::visibility::VisibilityScope::Unrestricted;
-        let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+        let coordinator =
+            crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+        let context = coordinator.context(governor);
         self.shortest_path_governed_in_context(
             source_table_oid,
             source_id,
@@ -1668,7 +1671,7 @@ impl Engine {
     }
 
     /// Find weighted shortest path between two nodes.
-    #[allow(dead_code, reason = "compatibility entry point")]
+    #[cfg(test)]
     pub fn weighted_shortest_path(
         &self,
         source_table_oid: u32,
@@ -1687,6 +1690,7 @@ impl Engine {
     }
 
     /// Finds a weighted path within a caller-owned operation budget.
+    #[cfg(test)]
     pub(crate) fn weighted_shortest_path_governed(
         &self,
         source_table_oid: u32,
@@ -1695,8 +1699,9 @@ impl Engine {
         target_id: &str,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<Vec<WeightedPathStep>> {
-        let visibility = crate::visibility::VisibilityScope::Unrestricted;
-        let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+        let coordinator =
+            crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+        let context = coordinator.context(governor);
         self.weighted_shortest_path_governed_in_context(
             source_table_oid,
             source_id,
@@ -1995,7 +2000,7 @@ impl Engine {
     }
 
     /// Compute connected components.
-    #[allow(dead_code, reason = "compatibility entry point")]
+    #[cfg(test)]
     pub fn connected_components(
         &self,
     ) -> GraphResult<crate::connected_components::ComponentResult> {
@@ -2004,12 +2009,14 @@ impl Engine {
     }
 
     /// Computes connected components within a caller-owned analytics budget.
+    #[cfg(test)]
     pub(crate) fn connected_components_governed(
         &self,
         governor: &crate::resource::ResourceGovernor,
     ) -> GraphResult<crate::connected_components::ComponentResult> {
-        let visibility = crate::visibility::VisibilityScope::Unrestricted;
-        let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+        let coordinator =
+            crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+        let context = coordinator.context(governor);
         self.connected_components_governed_in_context(&context)
     }
 
@@ -3343,7 +3350,7 @@ mod tests {
         });
         let mut hidden_nodes = roaring::RoaringBitmap::new();
         hidden_nodes.insert(0);
-        let visibility = crate::visibility::VisibilityScope::enforced(
+        let visibility = crate::visibility::VisibilityScope::enforced_for_test(
             hidden_nodes,
             roaring::RoaringBitmap::new(),
             roaring::RoaringBitmap::new(),

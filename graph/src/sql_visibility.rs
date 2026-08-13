@@ -15,11 +15,18 @@ use crate::builder::{RegisteredEdge, RegisteredTable};
 use crate::catalog::{primary_key_expr, sql_table_name_from_oid};
 use crate::resource::{ByteCount, ResourceGovernor, ResourcePhase, WorkUnits};
 use crate::safety::{GraphError, GraphResult};
-use crate::visibility::VisibilityScope;
+use crate::visibility::{VisibilityCoordinator, VisibilityScope};
 use crate::{acl, config, ENGINE};
 
 const VISIBILITY_CURSOR_ROWS: i64 = 256;
 const BITMAP_BYTES_PER_ID_UPPER_BOUND: u64 = 8;
+
+/// Unforgeable evidence that PostgreSQL policy preparation selected a scope.
+pub(crate) struct PreparedVisibilityProof(());
+
+fn prepared_coordinator(scope: VisibilityScope) -> VisibilityCoordinator {
+    VisibilityCoordinator::from_prepared_scope(PreparedVisibilityProof(()), scope)
+}
 
 #[cfg(feature = "development")]
 type VisibilityTimer = Instant;
@@ -42,19 +49,20 @@ thread_local! {
 }
 
 /// Build one eager caller-visibility scope under the query governor.
-pub(crate) fn build_visibility_scope(
+pub(crate) fn prepare_eager_visibility(
     tables: &[RegisteredTable],
     edges: &[RegisteredEdge],
     governor: &ResourceGovernor,
-) -> GraphResult<VisibilityScope> {
+) -> GraphResult<VisibilityCoordinator> {
     let started_at = start_visibility_timer();
     match config::parsed_rls_mode() {
         Some(config::RlsMode::LegacyBypass) => {
             acl::require_rls_bypass_privilege()?;
-            return Ok(record_visibility_metrics(
-                VisibilityScope::Unrestricted,
-                started_at,
-            ));
+            let proof = PreparedVisibilityProof(());
+            let scope = VisibilityScope::unrestricted(&proof);
+            return Ok(prepared_coordinator(record_visibility_metrics(
+                scope, started_at,
+            )));
         }
         Some(config::RlsMode::Enforce) => {}
         None => {
@@ -79,10 +87,11 @@ pub(crate) fn build_visibility_scope(
             })
             .any(|edge| acl::row_security_applies_to_outer_caller(edge.from_table_oid));
     if !any_rls_active {
-        return Ok(record_visibility_metrics(
-            VisibilityScope::Unrestricted,
-            started_at,
-        ));
+        let proof = PreparedVisibilityProof(());
+        let scope = VisibilityScope::unrestricted(&proof);
+        return Ok(prepared_coordinator(record_visibility_metrics(
+            scope, started_at,
+        )));
     }
 
     let active_node_tables = tables
@@ -153,7 +162,9 @@ pub(crate) fn build_visibility_scope(
 
     let initial_scope = ENGINE.with(|engine| {
         let engine = engine.borrow();
+        let proof = PreparedVisibilityProof(());
         let mut scope = VisibilityScope::enforced(
+            &proof,
             RoaringBitmap::new(),
             RoaringBitmap::new(),
             relationship_rls_edge_types,
@@ -217,7 +228,9 @@ pub(crate) fn build_visibility_scope(
     })
     .execute()?;
     bitmap_lease.retain_until_governor_drop();
-    Ok(record_visibility_metrics(scope, started_at))
+    Ok(prepared_coordinator(record_visibility_metrics(
+        scope, started_at,
+    )))
 }
 
 #[cfg(feature = "development")]

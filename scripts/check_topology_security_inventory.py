@@ -26,7 +26,7 @@ STRATEGIES = {
     "conditional_statement",
 }
 TERMINAL_CALLS = {
-    "build_visibility_scope(",
+    "prepare_eager_visibility(",
     "source_row_visible(",
 }
 

@@ -19,6 +19,8 @@ use crate::projection::neighbors::{NeighborSource, WeightedNeighborSource};
 use crate::resource::{ResourceGovernor, ResourcePhase, WorkUnits};
 use crate::safety::GraphResult;
 use crate::types::{PathStep, TableOid, WeightedPathStep};
+#[cfg(any(test, feature = "benchmarks"))]
+use crate::visibility::VisibilityCoordinator;
 use crate::visibility::{QueryExecutionContext, VisibilityScope};
 
 #[derive(Debug, Clone, Copy)]
@@ -30,6 +32,28 @@ struct ParentStep {
     /// the combined distance of multiple meeting candidates discovered in
     /// the same level, rather than accepting whichever is found first.
     depth: i32,
+}
+
+#[cfg(any(test, feature = "benchmarks"))]
+pub(crate) fn weighted_shortest_path_with_neighbors_for_benchmark(
+    node_store: &NodeStore,
+    neighbors: &impl WeightedNeighborSource,
+    source: u32,
+    target: u32,
+    edge_type_registry: &[String],
+    proof: &crate::bench_support::BenchmarkVisibilityProof,
+) -> Option<Vec<WeightedPathStep>> {
+    let coordinator = VisibilityCoordinator::unrestricted_for_benchmark(proof);
+    weighted_shortest_path_with_neighbors_inner(
+        node_store,
+        neighbors,
+        source,
+        target,
+        edge_type_registry,
+        None,
+        coordinator.scope_for_benchmark(proof),
+        None,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,7 +111,7 @@ pub(crate) fn shortest_path_with_neighbors(
             edge_type_registry,
         },
         None,
-        &VisibilityScope::Unrestricted,
+        VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
         None,
     )
 }
@@ -101,15 +125,15 @@ pub(crate) struct UnweightedPathRequest<'a> {
 }
 
 /// Find an unweighted path while enforcing expansion and elapsed-time limits.
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
 pub(crate) fn shortest_path_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
     request: UnweightedPathRequest<'_>,
     governor: &ResourceGovernor,
 ) -> GraphResult<Option<Vec<PathStep>>> {
-    let visibility = VisibilityScope::Unrestricted;
-    let context = QueryExecutionContext::new(governor, &visibility);
+    let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     shortest_path_with_neighbors_governed_with_context(node_store, neighbors, request, &context)
 }
 
@@ -527,6 +551,7 @@ pub fn weighted_shortest_path(
 }
 
 /// Dijkstra's algorithm over a supplied weighted neighbor source.
+#[cfg(test)]
 pub(crate) fn weighted_shortest_path_with_neighbors(
     node_store: &NodeStore,
     neighbors: &impl WeightedNeighborSource,
@@ -541,13 +566,14 @@ pub(crate) fn weighted_shortest_path_with_neighbors(
         target,
         edge_type_registry,
         None,
-        &VisibilityScope::Unrestricted,
+        VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
         None,
     )
 }
 
 /// Run Dijkstra while enforcing expansion and elapsed-time limits.
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn weighted_shortest_path_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl WeightedNeighborSource,
@@ -556,8 +582,8 @@ pub(crate) fn weighted_shortest_path_with_neighbors_governed(
     edge_type_registry: &[String],
     governor: &ResourceGovernor,
 ) -> GraphResult<Option<Vec<WeightedPathStep>>> {
-    let visibility = VisibilityScope::Unrestricted;
-    let context = QueryExecutionContext::new(governor, &visibility);
+    let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     weighted_shortest_path_with_neighbors_governed_with_context(
         node_store,
         neighbors,
@@ -884,8 +910,11 @@ mod tests {
         );
         let mut hidden_nodes = RoaringBitmap::new();
         hidden_nodes.insert(1);
-        let visibility =
-            VisibilityScope::enforced(hidden_nodes, RoaringBitmap::new(), RoaringBitmap::new());
+        let visibility = VisibilityScope::enforced_for_test(
+            hidden_nodes,
+            RoaringBitmap::new(),
+            RoaringBitmap::new(),
+        );
         let governor = path_governor(1_000);
         let context = QueryExecutionContext::new(&governor, &visibility);
         let result = shortest_path_with_neighbors_governed_with_context(
@@ -902,7 +931,8 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let absent_context = QueryExecutionContext::new(&governor, &VisibilityScope::Unrestricted);
+        let absent_coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+        let absent_context = absent_coordinator.context(&governor);
         let absent_result = shortest_path_with_neighbors_governed_with_context(
             &nodes,
             &CsrNeighbors::new(&absent_shortcut),
@@ -948,17 +978,18 @@ mod tests {
         };
         let pairs = [(0, 1), (1, 3), (0, 2), (2, 4), (4, 3)];
         let mut identified = Vec::new();
-        let mut relationship_id = 20;
-        for (source, target) in pairs {
+        for (relationship_id, (source, target)) in (20..).zip(pairs) {
             identified.push((raw(source, target), relationship_id));
             identified.push((raw(target, source), relationship_id));
-            relationship_id += 1;
         }
         let edges = identified_store(5, false, identified);
         let mut hidden_nodes = RoaringBitmap::new();
         hidden_nodes.insert(1);
-        let visibility =
-            VisibilityScope::enforced(hidden_nodes, RoaringBitmap::new(), RoaringBitmap::new());
+        let visibility = VisibilityScope::enforced_for_test(
+            hidden_nodes,
+            RoaringBitmap::new(),
+            RoaringBitmap::new(),
+        );
         let governor = path_governor(1_000);
         let context = QueryExecutionContext::new(&governor, &visibility);
         let result = shortest_path_with_neighbors_governed_with_context(
@@ -1010,8 +1041,11 @@ mod tests {
         hidden_relationships.insert(10);
         let mut rls_edge_types = RoaringBitmap::new();
         rls_edge_types.insert(1);
-        let visibility =
-            VisibilityScope::enforced(RoaringBitmap::new(), hidden_relationships, rls_edge_types);
+        let visibility = VisibilityScope::enforced_for_test(
+            RoaringBitmap::new(),
+            hidden_relationships,
+            rls_edge_types,
+        );
         let governor = path_governor(1_000);
         let context = QueryExecutionContext::new(&governor, &visibility);
         let result = weighted_shortest_path_with_neighbors_governed_with_context(
@@ -1060,7 +1094,7 @@ mod tests {
         let mut only_long = RoaringBitmap::new();
         only_long.insert(2);
         let governor = path_governor(1_000);
-        let visibility = VisibilityScope::Unrestricted;
+        let visibility = VisibilityScope::unrestricted_for_test();
         let context =
             QueryExecutionContext::with_edge_type_filter(&governor, &visibility, Some(&only_long));
         let registry = ["".to_string(), "direct".to_string(), "long".to_string()];

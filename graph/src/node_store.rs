@@ -223,6 +223,7 @@ impl NodeStore {
     }
 
     /// Create a NodeStore pre-allocated for `capacity` nodes.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             backing: ArrayBacking::Owned {
@@ -514,6 +515,7 @@ impl NodeStore {
     // ── Persistence helpers (for write_graph_file) ──
 
     /// Get is_active raw bytes. Used by persistence.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn is_active_bytes(&self) -> Vec<u8> {
         match &self.backing {
             ArrayBacking::Owned { is_active, .. } => {
@@ -529,6 +531,7 @@ impl NodeStore {
     }
 
     /// Get table_oids as a slice. Used by persistence.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn table_oids_slice(&self) -> &[u32] {
         match &self.backing {
             ArrayBacking::Owned { table_oids, .. } => table_oids,

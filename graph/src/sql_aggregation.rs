@@ -52,8 +52,8 @@ pub(crate) fn aggregate_impl(
     let scope = parse_aggregate_scope(scope)?;
     let path_limit = usize_from_nonnegative(path_limit, "path_limit")?;
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    let visibility = crate::sql_visibility::build_visibility_scope(tables, edges, &governor)?;
-    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let coordinator = crate::sql_visibility::prepare_eager_visibility(tables, edges, &governor)?;
+    let context = coordinator.context(&governor);
     match scope {
         AggregateScope::ReturnedNodes | AggregateScope::ChosenParentPath => {}
         AggregateScope::AllPossiblePaths => {
@@ -167,8 +167,8 @@ pub(crate) fn path_count_estimate_impl(
     let request = parse_aggregation_traversal_request(traversal)?;
     let path_limit = usize_from_nonnegative(path_limit, "graph.max_exact_path_count")?;
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    let visibility = crate::sql_visibility::build_visibility_scope(tables, edges, &governor)?;
-    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let coordinator = crate::sql_visibility::prepare_eager_visibility(tables, edges, &governor)?;
+    let context = coordinator.context(&governor);
     path_count_for_request_in_context(&request, path_limit, &context)
 }
 
@@ -184,14 +184,16 @@ fn check_analytics_source_acls(
     )
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "test compatibility entry point")]
 pub(crate) fn path_count_for_request(
     request: &AggregationTraversalRequest,
     path_limit: usize,
 ) -> safety::GraphResult<(i64, bool, bool)> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    let visibility = crate::visibility::VisibilityScope::Unrestricted;
-    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let coordinator =
+        crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(&governor);
     path_count_for_request_in_context(request, path_limit, &context)
 }
 
@@ -209,14 +211,16 @@ fn path_count_for_request_in_context(
     }
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "test compatibility entry point")]
 pub(crate) fn indexed_paths_for_request(
     request: &AggregationTraversalRequest,
     path_limit: usize,
 ) -> safety::GraphResult<(Vec<IndexedPath>, bool, bool)> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    let visibility = crate::visibility::VisibilityScope::Unrestricted;
-    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let coordinator =
+        crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(&governor);
     indexed_paths_for_request_in_context(request, path_limit, &context)
 }
 
@@ -652,15 +656,17 @@ pub(crate) fn indexed_path_coordinates(
     })
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "test compatibility entry point")]
 pub(crate) fn execute_aggregation_traversal(
     request: &AggregationTraversalRequest,
     limit: usize,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
     let (tables, _edges, filter_columns) = crate::catalog::read_catalog()?;
-    let visibility = crate::visibility::VisibilityScope::Unrestricted;
-    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let coordinator =
+        crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(&governor);
     execute_aggregation_traversal_governed(request, limit, &context, &tables, &filter_columns)
 }
 
@@ -1079,7 +1085,7 @@ mod tests {
         hidden_relationships.insert(9);
         let mut relationship_rls_edge_types = roaring::RoaringBitmap::new();
         relationship_rls_edge_types.insert(1);
-        let visibility = crate::visibility::VisibilityScope::enforced(
+        let visibility = crate::visibility::VisibilityScope::enforced_for_test(
             roaring::RoaringBitmap::new(),
             hidden_relationships,
             relationship_rls_edge_types,
@@ -1107,7 +1113,7 @@ mod tests {
         absent_engine.reverse_edge_store = absent_engine.edge_store.reversed();
         absent_engine.built = true;
         let absent_overlays = aggregation_edge_overlay(&absent_engine);
-        let absent_visibility = crate::visibility::VisibilityScope::Unrestricted;
+        let absent_visibility = crate::visibility::VisibilityScope::unrestricted_for_test();
         let absent_context =
             crate::visibility::QueryExecutionContext::new(&governor, &absent_visibility);
         let mut absent_path = vec![0];
@@ -1200,7 +1206,7 @@ mod tests {
         hidden_relationships.insert(9);
         let mut relationship_rls_edge_types = roaring::RoaringBitmap::new();
         relationship_rls_edge_types.insert(1);
-        let visibility = crate::visibility::VisibilityScope::enforced(
+        let visibility = crate::visibility::VisibilityScope::enforced_for_test(
             roaring::RoaringBitmap::new(),
             hidden_relationships,
             relationship_rls_edge_types,
@@ -1272,7 +1278,7 @@ mod tests {
             node_tables: None,
         };
         let governor = aggregation_governor();
-        let visibility = crate::visibility::VisibilityScope::Unrestricted;
+        let visibility = crate::visibility::VisibilityScope::unrestricted_for_test();
         let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
         let overlays = aggregation_edge_overlay(&engine);
         let mut path = vec![0];

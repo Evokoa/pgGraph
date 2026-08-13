@@ -44,13 +44,13 @@ fn connected_components() -> Result<
         let governor = ENGINE
             .with(|e| e.borrow().analytics_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
@@ -136,13 +136,13 @@ fn component_stats() -> Result<
         let governor = ENGINE
             .with(|e| e.borrow().analytics_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
 
         let result = ENGINE.with(|e| {
             let eng = e.borrow();
@@ -207,13 +207,13 @@ fn components(
         let governor = ENGINE
             .with(|e| e.borrow().analytics_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
@@ -371,13 +371,13 @@ fn isolated_nodes(
         let governor = ENGINE
             .with(|e| e.borrow().analytics_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
         let page = ENGINE.with(|e| {
             let eng = e.borrow();
             let cc_result = eng

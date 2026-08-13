@@ -372,12 +372,12 @@ pub(super) fn largest_component_rows(
     let offset = usize_from_nonnegative(offset, "offset")?;
     let limit = usize_from_nonnegative(limit, "limit")?;
     let governor = ENGINE.with(|e| e.borrow().analytics_resource_governor())?;
-    let visibility = crate::sql_visibility::build_visibility_scope(
+    let coordinator = crate::sql_visibility::prepare_eager_visibility(
         &query_start.tables,
         &query_start.edges,
         &governor,
     )?;
-    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let context = coordinator.context(&governor);
     let page = ENGINE.with(|e| {
         let eng = e.borrow();
         let cc_result = eng.connected_components_governed_in_context(&context)?;
@@ -437,12 +437,12 @@ pub(super) fn component_rows(
     let limit = usize_from_nonnegative(limit, "limit")?;
 
     let governor = ENGINE.with(|e| e.borrow().analytics_resource_governor())?;
-    let visibility = crate::sql_visibility::build_visibility_scope(
+    let coordinator = crate::sql_visibility::prepare_eager_visibility(
         &query_start.tables,
         &query_start.edges,
         &governor,
     )?;
-    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    let context = coordinator.context(&governor);
     let page = ENGINE.with(|e| {
         let eng = e.borrow();
         let cc_result = eng.connected_components_governed_in_context(&context)?;

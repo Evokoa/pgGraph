@@ -7,6 +7,8 @@ use crate::projection::neighbors::EdgeOverlay;
 use crate::projection::neighbors::{CsrNeighbors, NeighborSource, OverlayNeighbors};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
+#[cfg(test)]
+use crate::visibility::VisibilityCoordinator;
 use crate::visibility::{QueryExecutionContext, VisibilityScope};
 
 use super::logical_plan::BoundDirection;
@@ -97,8 +99,8 @@ pub(crate) fn execute_governed(
     tenant: Option<&str>,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<GqlRow>> {
-    let visibility = VisibilityScope::Unrestricted;
-    let context = QueryExecutionContext::new(governor, &visibility);
+    let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     execute_in_context(engine, plan, tenant, &context)
 }
 
@@ -196,8 +198,8 @@ pub(crate) fn execute_node_scan_governed(
     params: &crate::query::value::QueryParams,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<GqlNodeRow>> {
-    let visibility = VisibilityScope::Unrestricted;
-    let context = QueryExecutionContext::new(governor, &visibility);
+    let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     execute_node_scan_in_context(engine, plan, tenant, params, &context)
 }
 
@@ -234,7 +236,7 @@ pub(crate) fn execute_node_scan_in_context(
             }
         } else {
             let table_is_tenanted = engine.tenanted_table_oids.contains(&plan.table_oid);
-            let visible_added = if matches!(context.visibility, VisibilityScope::Unrestricted) {
+            let visible_added = if context.visibility.is_unrestricted() {
                 crate::projection::tx_delta::added_node_keys(
                     plan.table_oid,
                     tenant,
@@ -305,7 +307,7 @@ pub(crate) fn execute_node_scan_in_context(
             table_is_tenanted,
         );
         if node_idx.is_some_and(|node_idx| !context.visibility.allows_node(node_idx))
-            || (node_idx.is_none() && !matches!(context.visibility, VisibilityScope::Unrestricted))
+            || (node_idx.is_none() && !context.visibility.is_unrestricted())
         {
             continue;
         }
@@ -369,8 +371,8 @@ pub(crate) fn execute_join_governed(
     tenant: Option<&str>,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<GqlRow>> {
-    let visibility = VisibilityScope::Unrestricted;
-    let context = QueryExecutionContext::new(governor, &visibility);
+    let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     execute_join_in_context(engine, plan, tenant, &context)
 }
 
@@ -671,8 +673,8 @@ pub(crate) fn execute_wildcard_path_governed(
     tenant: Option<&str>,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<Vec<GqlRow>> {
-    let visibility = VisibilityScope::Unrestricted;
-    let context = QueryExecutionContext::new(governor, &visibility);
+    let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     execute_wildcard_path_in_context(engine, plan, tenant, &context)
 }
 
@@ -2136,7 +2138,7 @@ mod resource_accounting_tests {
         let mut rls_edge_types = roaring::RoaringBitmap::new();
         rls_edge_types.insert(0);
         let visibility =
-            VisibilityScope::enforced(hidden_nodes, hidden_relationships, rls_edge_types);
+            VisibilityScope::enforced_for_test(hidden_nodes, hidden_relationships, rls_edge_types);
         let context = QueryExecutionContext::new(&governor, &visibility);
 
         let rows = execute_in_context(&engine, &plan, None, &context).expect("visible execution");

@@ -123,20 +123,22 @@ pub(crate) fn compute_components_with_neighbors(
         node_store,
         neighbors,
         None,
-        &crate::visibility::VisibilityScope::Unrestricted,
+        crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
     )
     .expect("unbounded component accounting should not fail")
 }
 
 /// Compute components with hard work and elapsed-time accounting.
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn compute_components_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<ComponentResult> {
-    let visibility = crate::visibility::VisibilityScope::Unrestricted;
-    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    let coordinator =
+        crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     compute_components_with_neighbors_in_context(node_store, neighbors, &context)
 }
 
@@ -521,7 +523,7 @@ mod tests {
         let neighbors = CsrNeighbors::new(&edges);
         let mut hidden_nodes = roaring::RoaringBitmap::new();
         hidden_nodes.insert(1);
-        let visibility = crate::visibility::VisibilityScope::enforced(
+        let visibility = crate::visibility::VisibilityScope::enforced_for_test(
             hidden_nodes,
             roaring::RoaringBitmap::new(),
             roaring::RoaringBitmap::new(),
@@ -562,7 +564,7 @@ mod tests {
         hidden_relationships.insert(7);
         let mut relationship_rls_edge_types = roaring::RoaringBitmap::new();
         relationship_rls_edge_types.insert(1);
-        let visibility = crate::visibility::VisibilityScope::enforced(
+        let visibility = crate::visibility::VisibilityScope::enforced_for_test(
             roaring::RoaringBitmap::new(),
             hidden_relationships,
             relationship_rls_edge_types,

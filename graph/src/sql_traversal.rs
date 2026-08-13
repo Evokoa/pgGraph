@@ -56,7 +56,8 @@ pub(crate) fn validate_traverse_options(
     Ok((direction, strategy, uniqueness))
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_traverse_rows(
     request: &TraverseRequest<'_>,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
@@ -66,16 +67,19 @@ pub(crate) fn execute_traverse_rows(
 }
 
 /// Executes and materializes one traversal under a single operation budget.
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_traverse_rows_governed(
     request: &TraverseRequest<'_>,
     governor: &crate::resource::ResourceGovernor,
     tables: &[crate::builder::RegisteredTable],
     filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<Vec<TraverseRow>> {
-    let visibility = crate::visibility::VisibilityScope::Unrestricted;
+    let coordinator =
+        crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
     execute_traverse_rows_in_context(
         request,
-        &crate::visibility::QueryExecutionContext::new(governor, &visibility),
+        &coordinator.context(governor),
         tables,
         filter_columns,
     )
@@ -99,7 +103,8 @@ pub(crate) fn execute_traverse_rows_in_context(
     )
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_traverse_candidates(
     request: &TraverseRequest<'_>,
 ) -> safety::GraphResult<Vec<TraverseCandidate>> {
@@ -109,16 +114,19 @@ pub(crate) fn execute_traverse_candidates(
 }
 
 /// Executes a traversal while preserving the caller's work and elapsed clocks.
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_traverse_candidates_governed(
     request: &TraverseRequest<'_>,
     governor: &crate::resource::ResourceGovernor,
     tables: &[crate::builder::RegisteredTable],
     filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<Vec<TraverseCandidate>> {
-    let visibility = crate::visibility::VisibilityScope::Unrestricted;
+    let coordinator =
+        crate::visibility::VisibilityCoordinator::unrestricted_for_test_or_benchmark();
     execute_traverse_candidates_in_context(
         request,
-        &crate::visibility::QueryExecutionContext::new(governor, &visibility),
+        &coordinator.context(governor),
         tables,
         filter_columns,
     )

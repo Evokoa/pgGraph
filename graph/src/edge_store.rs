@@ -450,6 +450,7 @@ impl SortedEdgeStoreBuilder {
     ///
     /// Returns [`GraphError::Internal`] when `edge.source` or `edge.target`
     /// is greater than or equal to the builder's node count.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn try_push(&mut self, edge: RawEdge) -> GraphResult<()> {
         self.try_push_identified(IdentifiedRawEdge {
             edge,
@@ -582,6 +583,7 @@ impl EdgeStore {
     }
 
     /// Build a CSR EdgeStore from unsorted raw edges, rejecting invalid endpoints.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn try_from_edges(
         node_count: u32,
         edges: Vec<RawEdge>,
@@ -593,6 +595,7 @@ impl EdgeStore {
         Ok(Self::from_valid_edges(node_count, edges, has_weights))
     }
 
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     fn from_valid_edges(node_count: u32, mut edges: Vec<RawEdge>, has_weights: bool) -> Self {
         // Sort by source, then target, then type_id, then registered-direction
         // flag so real opposite rows do not collapse with synthetic reverse
@@ -658,6 +661,7 @@ impl EdgeStore {
     }
 
     /// Build a CSR EdgeStore from sorted raw edges, rejecting invalid endpoints.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn try_from_sorted_edges<I>(
         node_count: u32,
         edges: I,
@@ -969,6 +973,7 @@ impl EdgeStore {
 
     /// Degree (number of outgoing edges) for a node.
     #[inline]
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn degree(&self, node_idx: u32) -> u32 {
         match &self.backing {
             EdgeBacking::Owned { edge_offsets, .. } => {
@@ -1001,6 +1006,7 @@ impl EdgeStore {
     }
 
     /// Get targets as a slice. Used by persistence.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn targets_slice(&self) -> &[u32] {
         match &self.backing {
             EdgeBacking::Owned { targets, .. } => targets,
@@ -1017,6 +1023,7 @@ impl EdgeStore {
     }
 
     /// Get schema-reversed flags as a slice.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn schema_reversed_slice(&self) -> &[u8] {
         match &self.backing {
             EdgeBacking::Owned {
@@ -1027,6 +1034,7 @@ impl EdgeStore {
     }
 
     /// Get weights as a slice. Empty means unweighted.
+    #[cfg_attr(not(any(test, feature = "benchmarks")), allow(dead_code))]
     pub fn weights_slice(&self) -> &[u32] {
         match &self.backing {
             EdgeBacking::Owned { weights, .. } => weights,

@@ -140,7 +140,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | Phase | Status | Exit gate |
 |---|---|---|
 | P0 | Complete | Contracts, surface inventory, semantic corpus, and representative large-table baselines are frozen before production behavior changes. |
-| P1 | In progress | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
+| P1 | Complete | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
 | P2 | Not started | Direct identity and endpoint resolution use bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Not started | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent. |
 | P4 | Not started | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
@@ -215,9 +215,6 @@ P5 requires completed 1M/10M comparative evidence on a suitable host.
 
 ### P1: Introduce the eager coordinator
 
-- Separate immutable per-mapping policy preparation from resolved verdicts.
-- Preflight table and edge-source ACLs independent of whether a frontier is
-  reached.
 - Add a query-scoped coordinator API required by topology execution. Initially
   it delegates only to the eager oracle. Production unrestricted execution
   requires a sealed no-RLS/bypass proof created by policy preparation; direct
@@ -231,6 +228,22 @@ P5 requires completed 1M/10M comparative evidence on a suitable host.
 
 **Exit:** compiler-visible composition prevents a new public topology path from
 silently omitting visibility, while eager behavior remains equivalent.
+
+**P1 evidence (2026-08-12):**
+
+- SQL topology entry points receive a `VisibilityCoordinator` from
+  `prepare_eager_visibility()` and can no longer construct execution contexts
+  directly; the exhaustive topology inventory tracks the renamed preparation
+  boundary.
+- Test-only and explicit `benchmarks`-feature APIs route unrestricted execution
+  through the same coordinator. Normal production builds do not compile those
+  escape hatches.
+- Bounded owned candidate and resolved-verdict batches enforce stable sequence,
+  candidate/key-byte limits, and fail-closed alignment before P2 adds SPI
+  probes.
+- Architectural tests reject raw production unrestricted constructors, direct
+  context construction, and SPI calls inside `ENGINE` closures. A
+  BFS oracle compares coordinator and direct eager output byte for byte.
 
 ### P2: Build the lazy oracle and direct-identity slice
 

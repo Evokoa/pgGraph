@@ -195,6 +195,7 @@ pub enum GraphError {
     Disabled, // ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
 
     #[error("table {table} has row-level security enabled; graph.build() refuses it unless graph.allow_rls_tables = on")]
+    #[allow(dead_code, reason = "retained for stable diagnostic compatibility")]
     RlsTopologyBoundary { table: String }, // PG021
 
     #[error("this backend's sync replay position ({applied_sync_id}) predates a sync-log pruning pass (pruned below {pruned_before_id}); rebuild or vacuum to catch up")]

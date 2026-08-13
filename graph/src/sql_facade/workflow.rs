@@ -173,13 +173,13 @@ fn expand(
             max_nodes: config::MAX_NODES.get(),
             max_frontier: config::MAX_FRONTIER.get(),
         };
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
         let rows = execute_traverse_rows_in_context(
             &request,
             &context,
@@ -304,13 +304,13 @@ fn find_related(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
         let filtered = traverse_search_rows_in_context(
             property_key,
             property_value,
@@ -575,13 +575,13 @@ fn connection(
             &query_start,
         )
         .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
 
         for (source_oid, source_id, _match_type, _score, source_verified, _node, source_name) in
             &sources
@@ -709,13 +709,13 @@ fn neighborhood(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let visibility = crate::sql_visibility::build_visibility_scope(
+        let coordinator = crate::sql_visibility::prepare_eager_visibility(
             &query_start.tables,
             &query_start.edges,
             &governor,
         )
         .unwrap_or_else(|err| err.report());
-        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let context = coordinator.context(&governor);
         let rows = traverse_search_rows_in_context(
             property_key,
             property_value,

@@ -166,13 +166,14 @@ pub mod fuzz_support {
 
 /// Public re-exports for criterion benchmarks.
 ///
-/// Benchmarks link against the `rlib` and need access to internal
-/// data structures. This module is always available (bench targets
-/// compile with `--lib`) but not part of the pgrx extension surface.
+/// Benchmarks link against the `rlib` and need access to internal data
+/// structures. This module is available only to tests and builds that opt into
+/// the `benchmarks` feature; it is not part of the pgrx extension surface.
+#[cfg(any(test, feature = "benchmarks"))]
 pub mod bench_support {
     use std::collections::{HashMap, HashSet};
 
-    pub use crate::bfs::{execute as bfs_execute, BfsConfig, BfsResult};
+    pub use crate::bfs::{BfsConfig, BfsResult};
     pub use crate::edge_store::{EdgeStore as EdgeStoreBuilder, RawEdge};
     pub use crate::filter_index::{FilterColumnType, FilterIndex as FilterIndexBuilder};
     pub use crate::node_store::NodeStore as NodeStoreBuilder;
@@ -186,6 +187,25 @@ pub mod bench_support {
         HashMap<u32, Vec<(u32, u8, bool, Option<crate::edge_store::RelationshipId>)>>;
     type OverlayDeletes =
         HashMap<u32, HashSet<(u32, u8, bool, Option<crate::edge_store::RelationshipId>)>>;
+
+    pub(crate) struct BenchmarkVisibilityProof(());
+
+    /// Execute base-CSR BFS for Criterion without exposing an unrestricted
+    /// topology constructor to normal extension code.
+    pub fn bfs_execute(
+        node_store: &NodeStoreBuilder,
+        edge_store: &EdgeStoreBuilder,
+        filter_index: &FilterIndexBuilder,
+        config: &BfsConfig,
+    ) -> BfsResult {
+        crate::bfs::execute_for_benchmark(
+            node_store,
+            edge_store,
+            filter_index,
+            config,
+            &BenchmarkVisibilityProof(()),
+        )
+    }
 
     /// Durable projection shape exercised by release-readiness benchmarks.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,7 +239,13 @@ pub mod bench_support {
         scenario: LayeredProjectionBenchScenario,
     ) -> BfsResult {
         let layered = layered_neighbors(edge_store, scenario);
-        crate::bfs::execute_with_neighbors(node_store, &layered, filter_index, config)
+        crate::bfs::execute_with_neighbors_for_benchmark(
+            node_store,
+            &layered,
+            filter_index,
+            config,
+            &BenchmarkVisibilityProof(()),
+        )
     }
 
     /// Execute a weighted shortest path over a durable layered projection.
@@ -231,8 +257,13 @@ pub mod bench_support {
     ) -> Option<Vec<WeightedPathStep>> {
         let layered = layered_neighbors(edge_store, LayeredProjectionBenchScenario::WeightedPath);
         let registry = ["".to_string(), "weighted".to_string()];
-        crate::path_finder::weighted_shortest_path_with_neighbors(
-            node_store, &layered, source, target, &registry,
+        crate::path_finder::weighted_shortest_path_with_neighbors_for_benchmark(
+            node_store,
+            &layered,
+            source,
+            target,
+            &registry,
+            &BenchmarkVisibilityProof(()),
         )
     }
 

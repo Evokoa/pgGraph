@@ -25,6 +25,8 @@ use crate::projection::neighbors::{
 };
 use crate::safety::{GraphError, GraphResult};
 use crate::types::{FilterOp, PathCoordinate, TableOid, TraversalResult};
+#[cfg(any(test, feature = "benchmarks"))]
+use crate::visibility::VisibilityCoordinator;
 use crate::visibility::{QueryExecutionContext, VisibilityScope};
 
 const SPARSE_METADATA_MIN_NODES: usize = 4_096;
@@ -290,6 +292,7 @@ pub(crate) fn estimated_workspace_bytes(
 /// # Returns
 /// BfsResult containing visited set, depth map, and parent metadata.
 #[inline]
+#[cfg(test)]
 #[allow(
     clippy::expect_used,
     reason = "legacy test and benchmark wrapper has no resource governor; production uses execute_governed"
@@ -306,12 +309,37 @@ pub fn execute(
         filter_index,
         config,
         None,
-        &VisibilityScope::Unrestricted,
+        VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
     )
     .expect("unbounded traversal accounting should not fail")
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[allow(
+    clippy::expect_used,
+    reason = "Criterion bridge uses an unbounded governor-free traversal"
+)]
+#[cfg(any(test, feature = "benchmarks"))]
+pub(crate) fn execute_for_benchmark(
+    node_store: &NodeStore,
+    edge_store: &EdgeStore,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    proof: &crate::bench_support::BenchmarkVisibilityProof,
+) -> BfsResult {
+    let coordinator = VisibilityCoordinator::unrestricted_for_benchmark(proof);
+    execute_inner(
+        node_store,
+        edge_store,
+        filter_index,
+        config,
+        None,
+        coordinator.scope_for_benchmark(proof),
+    )
+    .expect("unbounded benchmark traversal accounting should not fail")
+}
+
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_governed(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
@@ -325,7 +353,7 @@ pub(crate) fn execute_governed(
         filter_index,
         config,
         Some(governor),
-        &VisibilityScope::Unrestricted,
+        VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
     )
 }
 
@@ -473,7 +501,9 @@ fn execute_inner(
 
 /// Execute BFS traversal over a supplied neighbor source.
 #[inline]
+#[cfg(test)]
 #[allow(
+    dead_code,
     clippy::expect_used,
     reason = "legacy test and benchmark wrapper has no resource governor; production uses execute_with_neighbors_governed"
 )]
@@ -489,12 +519,37 @@ pub(crate) fn execute_with_neighbors(
         filter_index,
         config,
         None,
-        &VisibilityScope::Unrestricted,
+        VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
     )
     .expect("unbounded traversal accounting should not fail")
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[allow(
+    clippy::expect_used,
+    reason = "Criterion bridge uses an unbounded governor-free traversal"
+)]
+#[cfg(any(test, feature = "benchmarks"))]
+pub(crate) fn execute_with_neighbors_for_benchmark(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+    proof: &crate::bench_support::BenchmarkVisibilityProof,
+) -> BfsResult {
+    let coordinator = VisibilityCoordinator::unrestricted_for_benchmark(proof);
+    execute_with_neighbors_inner(
+        node_store,
+        neighbors,
+        filter_index,
+        config,
+        None,
+        coordinator.scope_for_benchmark(proof),
+    )
+    .expect("unbounded layered benchmark traversal accounting should not fail")
+}
+
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
@@ -508,7 +563,7 @@ pub(crate) fn execute_with_neighbors_governed(
         filter_index,
         config,
         Some(governor),
-        &VisibilityScope::Unrestricted,
+        VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
     )
 }
 
@@ -671,7 +726,8 @@ pub fn execute_dfs(
     execute_dfs_with_neighbors(node_store, &neighbors, filter_index, config)
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_dfs_governed(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
@@ -679,8 +735,8 @@ pub(crate) fn execute_dfs_governed(
     config: &BfsConfig,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<BfsResult> {
-    let visibility = VisibilityScope::Unrestricted;
-    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     execute_dfs_governed_with_context(node_store, edge_store, filter_index, config, &context)
 }
 
@@ -720,12 +776,13 @@ pub(crate) fn execute_dfs_with_neighbors(
         filter_index,
         config,
         None,
-        &VisibilityScope::Unrestricted,
+        VisibilityCoordinator::unrestricted_for_test_or_benchmark().scope(),
     )
     .expect("unbounded traversal accounting should not fail")
 }
 
-#[allow(dead_code, reason = "compatibility entry point")]
+#[cfg(test)]
+#[allow(dead_code, reason = "legacy test compatibility entry point")]
 pub(crate) fn execute_dfs_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
@@ -733,8 +790,8 @@ pub(crate) fn execute_dfs_with_neighbors_governed(
     config: &BfsConfig,
     governor: &crate::resource::ResourceGovernor,
 ) -> GraphResult<BfsResult> {
-    let visibility = VisibilityScope::Unrestricted;
-    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    let coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+    let context = coordinator.context(governor);
     execute_dfs_with_neighbors_governed_with_context(
         node_store,
         neighbors,
@@ -1249,8 +1306,11 @@ mod tests {
         ));
         let mut hidden_nodes = RoaringBitmap::new();
         hidden_nodes.insert(1);
-        let visibility =
-            VisibilityScope::enforced(hidden_nodes, RoaringBitmap::new(), RoaringBitmap::new());
+        let visibility = VisibilityScope::enforced_for_test(
+            hidden_nodes,
+            RoaringBitmap::new(),
+            RoaringBitmap::new(),
+        );
         let context = QueryExecutionContext::new(&governor, &visibility);
         let result =
             execute_dfs_governed_with_context(&nodes, &edges, &filter_index, &config, &context)
@@ -1303,10 +1363,14 @@ mod tests {
         ));
         let mut hidden_nodes = RoaringBitmap::new();
         hidden_nodes.insert(1);
-        let hidden_scope =
-            VisibilityScope::enforced(hidden_nodes, RoaringBitmap::new(), RoaringBitmap::new());
+        let hidden_scope = VisibilityScope::enforced_for_test(
+            hidden_nodes,
+            RoaringBitmap::new(),
+            RoaringBitmap::new(),
+        );
         let hidden_context = QueryExecutionContext::new(&governor, &hidden_scope);
-        let absent_context = QueryExecutionContext::new(&governor, &VisibilityScope::Unrestricted);
+        let absent_coordinator = VisibilityCoordinator::unrestricted_for_test_or_benchmark();
+        let absent_context = absent_coordinator.context(&governor);
 
         let hidden = execute_governed_with_context(
             &nodes,
@@ -1350,6 +1414,80 @@ mod tests {
             hidden.truncated,
             "the shared max_nodes cap must be exercised"
         );
+    }
+
+    #[test]
+    fn eager_coordinator_matches_direct_scope_byte_for_byte() {
+        let (nodes, edges) = build_test_graph();
+        let governor = crate::resource::ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1_024 * 1_024)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::new(10_000),
+            ElapsedBudget::new(Duration::from_secs(1)),
+        ));
+        let scope = VisibilityScope::enforced_for_test(
+            RoaringBitmap::new(),
+            RoaringBitmap::new(),
+            RoaringBitmap::new(),
+        );
+        let direct_context = QueryExecutionContext::new(&governor, &scope);
+        let coordinator =
+            crate::visibility::VisibilityCoordinator::from_scope_for_test(scope.clone());
+        let coordinated_context = coordinator.context(&governor);
+        let config = BfsConfig {
+            seed_node: 0,
+            max_depth: 3,
+            max_nodes: 100,
+            max_frontier: 100,
+            edge_type_filter: crate::types::EdgeTypeFilter::All,
+            filter_ops: vec![],
+            tenant: None,
+            tenanted_table_oids: HashSet::new(),
+            tenant_membership: std::collections::HashMap::new(),
+            tenant_membership_removals: std::collections::HashMap::new(),
+            overlay_insert_edges: std::collections::HashMap::new(),
+            overlay_deleted_edges: std::collections::HashMap::new(),
+        };
+        let direct = execute_governed_with_context(
+            &nodes,
+            &edges,
+            &FilterIndex::new(),
+            &config,
+            &direct_context,
+        )
+        .unwrap();
+        let coordinated = execute_governed_with_context(
+            &nodes,
+            &edges,
+            &FilterIndex::new(),
+            &config,
+            &coordinated_context,
+        )
+        .unwrap();
+        let encode = |result: &BfsResult| {
+            result
+                .visited
+                .iter()
+                .flat_map(|node| {
+                    let mut bytes = node.to_le_bytes().to_vec();
+                    bytes.extend_from_slice(&result.depth.get(node).unwrap_or(-1).to_le_bytes());
+                    bytes.extend_from_slice(
+                        &result.parent.get(node).unwrap_or(u32::MAX).to_le_bytes(),
+                    );
+                    bytes.extend_from_slice(
+                        &result
+                            .parent_edge_type
+                            .get(node)
+                            .unwrap_or(u8::MAX)
+                            .to_le_bytes(),
+                    );
+                    bytes
+                })
+                .chain([u8::from(result.truncated)])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(encode(&direct), encode(&coordinated));
     }
 
     #[test]
