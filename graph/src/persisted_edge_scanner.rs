@@ -65,7 +65,7 @@ pub(crate) fn scan_persisted_edges<'governor>(
         run_target,
         max_record_bytes,
     )?;
-    let mut registry = EdgeTypeRegistry::new_v6();
+    let mut registry = EdgeTypeRegistry::new();
     let mut registry_memory = governor
         .reserve_memory(
             ResourcePhase::EdgeResolve,
@@ -498,22 +498,17 @@ fn intern_edge_type(
     registry: &mut EdgeTypeRegistry,
     memory: &mut ResourceLease<'_>,
     label: &str,
-    max_record_bytes: usize,
+    _max_record_bytes: usize,
 ) -> GraphResult<EdgeTypeId> {
     if let Some(type_id) = registry.id(label) {
         return Ok(type_id);
-    }
-    if label.len() > max_record_bytes {
-        return Err(GraphError::Internal(
-            "edge type registry exceeds bounded artifact limits".into(),
-        ));
     }
     let bytes = ByteCount::from_usize(registry.registration_heap_upper_bound(label)?)
         .ok_or_else(|| GraphError::Internal("edge type registry memory overflowed".into()))?;
     memory
         .try_grow_in(ResourcePhase::EdgeResolve, bytes)
         .map_err(resource_error)?;
-    registry.register_v6(label)
+    registry.register(label)
 }
 
 fn aliased_column(alias: &str, column: &str) -> String {
@@ -749,19 +744,34 @@ mod tests {
     }
 
     #[test]
-    fn edge_type_registry_reserves_slot_zero_and_rejects_entry_256() {
+    fn edge_type_registry_reserves_slot_zero_and_crosses_entry_256() {
         let governor = ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
             crate::resource::MemoryBudget::new(ByteCount::from_bytes(256 * 1024)),
         ));
         let mut memory = governor
             .reserve_memory(ResourcePhase::EdgeResolve, ByteCount::ZERO)
             .unwrap();
-        let mut registry = EdgeTypeRegistry::new_v6();
+        let mut registry = EdgeTypeRegistry::new();
         for index in 0..254 {
             let label = format!("type-{index}");
             assert!(intern_edge_type(&mut registry, &mut memory, &label, 128).is_ok());
         }
         assert_eq!(registry.len(), 255);
-        assert!(intern_edge_type(&mut registry, &mut memory, "overflow", 128).is_err());
+        assert!(intern_edge_type(&mut registry, &mut memory, "type-255", 128).is_ok());
+        assert_eq!(registry.id("type-255").map(EdgeTypeId::get), Some(255));
+    }
+
+    #[test]
+    fn direct_scan_accounts_registry_policy_before_interning() {
+        let governor = ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
+            crate::resource::MemoryBudget::new(ByteCount::from_bytes(256 * 1024)),
+        ));
+        let mut memory = governor
+            .reserve_memory(ResourcePhase::EdgeResolve, ByteCount::ZERO)
+            .unwrap();
+        let mut registry = EdgeTypeRegistry::new();
+        let oversized = "x".repeat(EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES + 1);
+        assert!(intern_edge_type(&mut registry, &mut memory, &oversized, usize::MAX).is_err());
+        assert_eq!(registry.len(), 1);
     }
 }

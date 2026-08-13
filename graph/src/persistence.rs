@@ -70,9 +70,8 @@ use crate::types::EdgeTypeId;
 const MAGIC: &[u8; 4] = b"PGGH";
 const V6_VERSION: u32 = 6;
 const V7_VERSION: u32 = 7;
-/// Current production writer format. P7.2 reads v7 test artifacts but keeps
-/// production emission on v6 until the direct-build pipeline is widened.
-const VERSION: u32 = V6_VERSION;
+/// Current production writer format. The dual loader continues to accept v6.
+const VERSION: u32 = V7_VERSION;
 /// Header size in bytes.
 const HEADER_SIZE: usize = 512;
 /// Number of sections.
@@ -238,6 +237,7 @@ pub(crate) struct DirectArtifactMetadata {
     pub(crate) has_unidirectional_edges: bool,
     pub(crate) applied_sync_id: i64,
     pub(crate) projection_mode: config::ProjectionMode,
+    pub(crate) edge_type_width: EdgeTypeWidth,
 }
 
 /// Section-oriented sink used by the bounded persisted builder.
@@ -491,6 +491,7 @@ impl GraphArtifactWriter {
         inbound_edge_count: u32,
         flags: u32,
         governor: &crate::resource::ResourceGovernor,
+        edge_type_width: EdgeTypeWidth,
     ) -> GraphResult<fs::File> {
         self.finish_internal(
             node_count,
@@ -500,7 +501,7 @@ impl GraphArtifactWriter {
             Some(governor),
             GraphArtifactMetadata {
                 version: VERSION,
-                edge_type_width: EdgeTypeWidth::One,
+                edge_type_width,
                 body_crc: 0,
             },
         )
@@ -1355,6 +1356,11 @@ fn validate_filter_sections(
 /// Uses atomic rename: writes to `<path>.tmp`, then renames to `path`.
 #[cfg(test)]
 pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
+    let max_id = EdgeTypeId::try_from(
+        u32::try_from(engine.edge_type_registry.len().saturating_sub(1))
+            .map_err(|_| GraphError::EdgeTypeLimit)?,
+    )
+    .map_err(|_| GraphError::EdgeTypeLimit)?;
     write_graph_file_internal(
         engine,
         path,
@@ -1362,14 +1368,14 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
         None,
         GraphArtifactMetadata {
             version: VERSION,
-            edge_type_width: EdgeTypeWidth::One,
+            edge_type_width: EdgeTypeWidth::select_for_max_id(max_id),
             body_crc: 0,
         },
     )
 }
 
-/// Assemble one unpublished v6 candidate from bounded section streams without
-/// constructing an owned [`Engine`].
+/// Assemble one unpublished adaptive candidate from bounded section streams
+/// without constructing an owned [`Engine`].
 ///
 /// The destination is created exclusively and is never overwritten. The
 /// callback must emit all 26 sections in numeric order. A failed callback
@@ -1449,6 +1455,7 @@ pub(crate) fn write_direct_graph_file(
         metadata.inbound_edge_count,
         flags,
         governor,
+        metadata.edge_type_width,
     )?;
     file.sync_all()
         .map_err(|error| GraphError::Internal(format!("Sync failed: {error}")))?;
@@ -2635,7 +2642,7 @@ fn graph_artifact_checksum(crc: u32) -> String {
     not(test),
     allow(
         dead_code,
-        reason = "P7.2 retains the v6 writer-version seam until P7.4 activates v7 emission"
+        reason = "internal verification reads the active writer version without parsing an artifact"
     )
 )]
 pub(crate) fn graph_artifact_version() -> u32 {
@@ -4503,7 +4510,7 @@ mod tests {
     #[test]
     fn parsed_artifact_metadata_reports_actual_version_and_widths() {
         let v6 = temp_graph_path("p7-metadata-v6");
-        write_graph_file(&graph_with_relationship(), &v6).expect("v6 writes");
+        write_v6_graph(&graph_with_relationship(), &v6);
         let metadata = graph_artifact_metadata_for_path(&v6).expect("v6 metadata");
         assert_eq!(metadata.version, V6_VERSION);
         assert_eq!(metadata.edge_type_width, EdgeTypeWidth::One);
@@ -4517,13 +4524,62 @@ mod tests {
     #[test]
     fn v6_artifact_remains_loadable_after_v7_activation() {
         let path = temp_graph_path("p7-v6-compatibility");
-        write_graph_file(&graph_with_relationship(), &path).expect("v6 writes");
+        write_graph_file_internal(
+            &graph_with_relationship(),
+            &path,
+            false,
+            None,
+            GraphArtifactMetadata {
+                version: V6_VERSION,
+                edge_type_width: EdgeTypeWidth::One,
+                body_crc: 0,
+            },
+        )
+        .expect("v6 writes");
         let loaded = load_graph_file(&path).expect("v6 still loads");
         assert_eq!(loaded.edge_store.neighbors(0).0, [1]);
         assert_eq!(
             std::fs::read(&path).unwrap()[4..8],
             V6_VERSION.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn v6_to_v7_rebuild_migration_keeps_v6_loadable() {
+        v6_artifact_remains_loadable_after_v7_activation();
+        let path = temp_graph_path("p7-v7-rebuild");
+        write_graph_file(&graph_with_relationship(), &path).expect("v7 rebuild writes");
+        assert_eq!(
+            graph_artifact_metadata_for_path(&path).unwrap().version,
+            V7_VERSION
+        );
+        assert_eq!(
+            load_graph_file(&path).unwrap().edge_store.neighbors(0).0,
+            [1]
+        );
+    }
+
+    #[test]
+    fn v7_candidate_corruption_preserves_current_v6_generation() {
+        let current = temp_graph_path("p7-current-v6");
+        write_graph_file_internal(
+            &graph_with_relationship(),
+            &current,
+            false,
+            None,
+            GraphArtifactMetadata {
+                version: V6_VERSION,
+                edge_type_width: EdgeTypeWidth::One,
+                body_crc: 0,
+            },
+        )
+        .unwrap();
+        let original = std::fs::read(&current).unwrap();
+        let candidate = temp_graph_path("p7-corrupt-candidate");
+        write_graph_file(&graph_with_relationship(), &candidate).unwrap();
+        overwrite_bytes(&candidate, 48, &3_u32.to_le_bytes());
+        assert!(load_graph_file(&candidate).is_err());
+        assert_eq!(std::fs::read(&current).unwrap(), original);
     }
 
     #[test]
@@ -4734,13 +4790,28 @@ mod tests {
     #[test]
     fn p6_logical_edge_type_promotion_preserves_v6_artifact_bytes() {
         let path = temp_graph_path("p6-v6-edge-type-golden");
-        write_graph_file(&graph_with_relationship(), &path).expect("v6 fixture writes");
+        write_v6_graph(&graph_with_relationship(), &path);
         load_graph_file(&path).expect("v6 fixture validates and reloads");
         let bytes = std::fs::read(&path).expect("v6 fixture reads");
         let checksum = graph_artifact_checksum(crc32fast::hash(&bytes));
         let _ = std::fs::remove_dir_all(path.parent().expect("fixture has parent"));
 
         assert_eq!(checksum, "crc32:37f0afd6");
+    }
+
+    fn write_v6_graph(engine: &Engine, path: &Path) {
+        write_graph_file_internal(
+            engine,
+            path,
+            false,
+            None,
+            GraphArtifactMetadata {
+                version: V6_VERSION,
+                edge_type_width: EdgeTypeWidth::One,
+                body_crc: 0,
+            },
+        )
+        .expect("v6 fixture writes");
     }
 
     fn temp_graph_path(name: &str) -> PathBuf {
@@ -5139,6 +5210,7 @@ mod tests {
             has_unidirectional_edges: false,
             applied_sync_id: 0,
             projection_mode: config::ProjectionMode::CsrReadonly,
+            edge_type_width: EdgeTypeWidth::One,
         }
     }
 

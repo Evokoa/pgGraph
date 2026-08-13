@@ -135,7 +135,7 @@ pub enum GraphError {
     #[error("Graph not built. Call graph.build() first.")]
     NotBuilt, // PG003
 
-    #[error("Edge type limit exceeded (max 254)")]
+    #[error("Relationship type policy limit exceeded")]
     EdgeTypeLimit, // PG004
 
     #[error("Invalid filter condition: {reason}")]
@@ -386,7 +386,7 @@ impl GraphError {
             }
             GraphError::NotBuilt => "Run: SELECT graph.build();".to_string(),
             GraphError::EdgeTypeLimit => {
-                "Reduce the number of distinct edge labels. Maximum is 254.".to_string()
+                "Reduce the relationship type count, UTF-8 label size, or cumulative dictionary payload; see the documented relationship type limits.".to_string()
             }
             GraphError::InvalidFilter { .. } => {
                 "Use JSONB filter helpers such as graph.eq(), graph.gt(), graph.gte(), graph.lt(), graph.lte(), graph.between(), graph.on_node(), and graph.all(); referenced columns must be registered with graph.add_filter_column().".to_string()

@@ -89,9 +89,9 @@ remains outside the pgGraph graph-projection boundary. For vector and embedding
 indexing, search, and hybrid retrieval inside PostgreSQL, see
 [pgContext](https://github.com/evokoa/pgcontext).
 
-## Proposed Post-1.1 Track: Open-Vocabulary Relationship Types
+## Post-1.1 Track: Open-Vocabulary Relationship Types
 
-This proposed post-1.1 delivery track addresses ingestion systems whose
+This post-1.1 delivery track addresses ingestion systems whose
 relationship types come from data rather than a closed application dictionary.
 For example, an LLM may emit `works_at`, `founded`, `acquired_by`, or
 `co_authored_with` as free-form structured output. These values must remain
@@ -99,13 +99,15 @@ filterable during traversal instead of becoming opaque relationship properties.
 
 ### Current Physical Boundary
 
-The runtime uses a checked logical `EdgeTypeId(u32)`, while the v6 CSR and
-segment formats still store relationship-label IDs as `u8`. ID 0 is untyped
-and physical ID 255 is reserved, so each graph can use 254 user-facing
-relationship labels until the P7 format migration.
+The runtime uses a checked logical `EdgeTypeId(u32)`. New immutable CSR bases
+use the v7 adaptive one-, two-, or four-byte encoding, while v6 bases remain
+read compatible. The mutable segment format still stores relationship-label
+IDs as `u8`; consequently, rebuilt `csr_readonly` graphs can exceed 254 labels,
+but wide mutable bases are rejected until P8 upgrades segment and sync storage.
 `label_column` interns every distinct nonempty source value into this registry.
-A build or sync path that needs another ID fails with SQLSTATE `54000` and
-diagnostic `PG004`.
+A build that exceeds the public count, label, or dictionary-byte policy fails
+with SQLSTATE `54000` and diagnostic `PG004`. Incremental sync accepts labels
+already present in the base dictionary and rejects unseen labels until P8.
 
 All type-aware topology paths use the same registry. This includes
 `graph.traverse(edge_types := ...)`, GQL relationship-type matching, path
@@ -115,7 +117,7 @@ does not support relationship-property predicates such as
 the exact type in the source edge table therefore makes pgGraph traversal
 type-blind to that exact value.
 
-### Proposed Outcome
+### Delivery Outcome
 
 The target is a resource-governed open vocabulary, not a literally unbounded
 allocation. Source relationship strings remain authoritative in PostgreSQL,
@@ -158,13 +160,15 @@ an ID, exhausting a backend, or silently grouping unrelated types.
 | Regression gate | Exact-type CSR traversal must remain within an approved regression threshold for representative hot workloads before a wider representation becomes the default. |
 | Release evidence | Parser/binder, traversal, artifact, sync/reload, compaction, transaction, ACL/RLS, fuzz/property, documentation, packaging, and PostgreSQL 14–18 matrix evidence are complete. |
 
-### Supported Guidance Until This Track Ships
+### Supported Guidance at the P7 Cut Line
 
 Applications should choose the current path by required semantics:
 
-| Need | Recommended 1.1 path |
+| Need | Recommended path |
 |---|---|
-| Exact relationship types fit within 254 labels | Register the exact source value with `label_column` and filter with `edge_types` or a concrete GQL relationship type. |
+| Exact relationship types are known at rebuild time | Use a `csr_readonly` projection with `label_column`; v7 selects one, two, or four bytes and exact `edge_types`/GQL filters remain available. |
+| A mutable projection needs more than 254 labels | Keep the mutable dictionary within the v6 segment boundary until P8, or rebuild a read-only v7 base. |
+| Incremental ingestion introduces unseen labels | Rebuild the base dictionary, or normalize new source values to labels already present; P8 owns governed incremental dictionary growth. |
 | Family-level traversal is sufficient | Store a bounded semantic family in a separate `graph_label` column, register that column, and retain the exact `relationship_name` in PostgreSQL. Prefer meaningful families such as `employment`, `ownership`, or `collaboration` over hash buckets. |
 | Exact free-form type is required at every hop | Normalize the string once to a PostgreSQL relationship-type ID and use a bounded recursive SQL query that filters the ID before each expansion. Index `(relationship_type_id, source_id) INCLUDE (target_id)` and the reverse direction when required. |
 | Most traffic targets a stable hot set | Keep hot exact types as pgGraph labels, map the long tail to a semantic or `other` label, and use indexed recursive SQL for exact long-tail traversals. Measure the crossover with `EXPLAIN (ANALYZE, BUFFERS)`. |
@@ -177,6 +181,10 @@ the bucket itself has useful graph meaning or the caller accepts candidate-set
 semantics.
 
 ## Post-1.1 Direction
+
+P7 ships adaptive rebuilt immutable bases. P8 owns mutable segments and
+incremental labels; P9 owns the full query, listing, release-matrix, and public
+feature closure.
 
 | Area | Direction |
 |---|---|

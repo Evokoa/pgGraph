@@ -15,6 +15,7 @@ subject to the documented SQL, security, freshness, and resource contracts.
 | Search | Source-table search with `contains`, `exact`, `prefix`, and `token` modes |
 | Traversal | Bounded BFS and DFS with direction, relationship type, table, tenant, indexed filters, hydration, pagination, and resource limits |
 | Paths | Unweighted and weighted shortest paths across all registered relationship types, with optional relationship-type restriction through backward-compatible overloads |
+| Open-vocabulary relationship types | Rebuilt read-only bases use adaptive v7 relationship type storage. See the relationship type limits; incremental unseen labels remain assigned to P8. |
 | GQL and Cypher | The documented GQL-compatible read/write subset and Cypher compatibility entry point |
 | Analytics | Connected components, path counting, and server-side aggregation |
 | Synchronization | Manual rebuild, trigger-log synchronization, maintenance, vacuum, and transaction-local overlays |

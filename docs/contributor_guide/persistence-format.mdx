@@ -1,5 +1,11 @@
 # Persistence Format
 
+Artifact version 7 declares one edge-type width (1, 2, or 4 bytes) in the
+header. Forward and inbound sections share it. Validation covers canonical
+width, lengths, alignment, physical sentinels, registry bounds, checksums, and
+reverse-topology equivalence. Version 6 remains readable with an implicit
+one-byte edge-type width.
+
 The `.pggraph` file is the launch artifact for fast backend startup. Format v6
 stores graph-sized topology, filters, dictionaries, relationship identities,
 and tenant metadata in explicitly described mmap-friendly sections. The file

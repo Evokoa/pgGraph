@@ -3435,7 +3435,9 @@ pub(crate) fn apply_row_edge_mutations(
             .and_then(|column| row_text_value(row, column))
             .filter(|label| !label.trim().is_empty())
             .unwrap_or_else(|| edge.label.clone());
-        let type_id = eng.register_edge_type(&edge_label)?;
+        let type_id = eng
+            .edge_type_id(&edge_label)
+            .ok_or(safety::GraphError::EdgeTypeLimit)?;
         let source = resolve_sync_endpoint(eng, source_oid, &from_pk, &context.all_table_oids);
         let target = resolve_sync_endpoint(eng, Some(target_oid), &to_pk, &context.all_table_oids);
         if let (Some(source), Some(target)) = (source, target) {

@@ -1,5 +1,8 @@
 # Schema Registration
 
+Dynamic relationship labels are subject to the relationship type limits in
+[Limitations And Fit](./limitations-and-fit).
+
 The extension builds its graph from explicit registration metadata stored in
 extension catalog tables. Register node tables, edge relationships, and optional
 filter columns before calling `graph.build()`.
@@ -170,10 +173,10 @@ SELECT graph.add_edge(
 );
 ```
 
-Edge labels are assigned compact IDs. A graph can use up to 254 distinct
-user-facing labels. The untyped slot and internal sentinel reserve the remaining
-`u8` values, so registering or building a graph that would require another label
-fails cleanly with SQLSTATE `54000` and diagnostic `PG004`.
+Edge labels are assigned compact logical IDs within the documented count,
+per-label, and cumulative dictionary limits. New v7 bases select a one-, two-,
+or four-byte physical width. Exceeding a policy fails cleanly with SQLSTATE
+`54000` and diagnostic `PG004`.
 
 ## Weighted Edges
 

@@ -9,16 +9,30 @@ use std::collections::HashMap;
 pub(crate) struct EdgeTypeRegistry {
     labels: Vec<String>,
     ids_by_label: HashMap<String, EdgeTypeId>,
+    label_bytes: usize,
+    ordered_label_capacity_bytes: usize,
+    lookup_label_capacity_bytes: usize,
 }
 
 impl EdgeTypeRegistry {
     const HASH_ENTRY_OVERHEAD_BYTES: usize = 32;
+    pub(crate) const MAX_USER_EDGE_TYPES: usize = 1_000_000;
+    pub(crate) const MAX_EDGE_TYPE_LABEL_BYTES: usize = 1_024;
+    pub(crate) const MAX_EDGE_TYPE_DICTIONARY_BYTES: usize = 256 * 1024 * 1024;
 
-    pub(crate) fn new_v6() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             labels: vec![String::new()],
             ids_by_label: HashMap::new(),
+            label_bytes: 0,
+            ordered_label_capacity_bytes: 0,
+            lookup_label_capacity_bytes: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_v6() -> Self {
+        Self::new()
     }
 
     pub(crate) fn try_from_v6_labels(labels: Vec<String>) -> GraphResult<Self> {
@@ -39,6 +53,14 @@ impl EdgeTypeRegistry {
                 reason: "edge type registry contains invalid labels".into(),
             });
         }
+        let label_bytes = labels.iter().try_fold(0_usize, |total, label| {
+            total
+                .checked_add(label.len())
+                .ok_or_else(|| GraphError::CorruptFile {
+                    reason: "edge type registry payload overflows".into(),
+                })
+        })?;
+        validate_policy(labels.len(), label_bytes, labels.iter().map(String::as_str))?;
         let mut ids_by_label = HashMap::new();
         ids_by_label
             .try_reserve(labels.len().saturating_sub(1))
@@ -61,12 +83,18 @@ impl EdgeTypeRegistry {
                 });
             }
         }
+        let ordered_label_capacity_bytes = labels.iter().map(String::capacity).sum();
+        let lookup_label_capacity_bytes = ids_by_label.keys().map(String::capacity).sum();
         Ok(Self {
             labels,
             ids_by_label,
+            label_bytes,
+            ordered_label_capacity_bytes,
+            lookup_label_capacity_bytes,
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn register_v6(&mut self, label: &str) -> GraphResult<EdgeTypeId> {
         if let Some(id) = self.id(label) {
             return Ok(id);
@@ -74,6 +102,29 @@ impl EdgeTypeRegistry {
         if label.is_empty() || self.labels.len() > EdgeTypeId::V6_MAX_USER_ID as usize {
             return Err(GraphError::EdgeTypeLimit);
         }
+        self.register(label)
+    }
+
+    pub(crate) fn register(&mut self, label: &str) -> GraphResult<EdgeTypeId> {
+        if let Some(id) = self.id(label) {
+            return Ok(id);
+        }
+        let next_user_labels = self.labels.len();
+        let next_bytes = self
+            .label_bytes
+            .checked_add(label.len())
+            .ok_or(GraphError::EdgeTypeLimit)?;
+        if label.is_empty()
+            || label.len() > Self::MAX_EDGE_TYPE_LABEL_BYTES
+            || next_user_labels > Self::MAX_USER_EDGE_TYPES
+            || next_bytes > Self::MAX_EDGE_TYPE_DICTIONARY_BYTES
+        {
+            return Err(GraphError::EdgeTypeLimit);
+        }
+        self.register_inner(label)
+    }
+
+    fn register_inner(&mut self, label: &str) -> GraphResult<EdgeTypeId> {
         let id =
             EdgeTypeId::try_from(u32::try_from(self.labels.len()).map_err(|_| {
                 GraphError::Internal("edge type registry index exceeds u32".into())
@@ -87,6 +138,18 @@ impl EdgeTypeRegistry {
         })?;
         let ordered_label = try_clone_label(label)?;
         let lookup_label = try_clone_label(label)?;
+        self.label_bytes = self
+            .label_bytes
+            .checked_add(label.len())
+            .ok_or(GraphError::EdgeTypeLimit)?;
+        self.ordered_label_capacity_bytes = self
+            .ordered_label_capacity_bytes
+            .checked_add(ordered_label.capacity())
+            .ok_or(GraphError::EdgeTypeLimit)?;
+        self.lookup_label_capacity_bytes = self
+            .lookup_label_capacity_bytes
+            .checked_add(lookup_label.capacity())
+            .ok_or(GraphError::EdgeTypeLimit)?;
         self.labels.push(ordered_label);
         self.ids_by_label.insert(lookup_label, id);
         Ok(id)
@@ -108,13 +171,23 @@ impl EdgeTypeRegistry {
     }
 
     pub(crate) fn ordered_heap_bytes(&self) -> usize {
-        self.labels.capacity() * std::mem::size_of::<String>()
-            + self.labels.iter().map(String::capacity).sum::<usize>()
+        self.labels.capacity() * std::mem::size_of::<String>() + self.ordered_label_capacity_bytes
     }
 
     pub(crate) fn registration_heap_upper_bound(&self, label: &str) -> GraphResult<usize> {
         if self.id(label).is_some() {
             return Ok(0);
+        }
+        let next_bytes = self
+            .label_bytes
+            .checked_add(label.len())
+            .ok_or(GraphError::EdgeTypeLimit)?;
+        if label.is_empty()
+            || label.len() > Self::MAX_EDGE_TYPE_LABEL_BYTES
+            || self.labels.len() > Self::MAX_USER_EDGE_TYPES
+            || next_bytes > Self::MAX_EDGE_TYPE_DICTIONARY_BYTES
+        {
+            return Err(GraphError::EdgeTypeLimit);
         }
         let next_labels =
             self.labels.len().checked_add(1).ok_or_else(|| {
@@ -130,23 +203,14 @@ impl EdgeTypeRegistry {
             collection_capacity_upper_bound(self.ids_by_label.capacity(), next_lookup)?;
         let target = label_slots
             .checked_mul(std::mem::size_of::<String>())
-            .and_then(|bytes| {
-                bytes.checked_add(self.labels.iter().map(String::capacity).sum::<usize>())
-            })
+            .and_then(|bytes| bytes.checked_add(self.ordered_label_capacity_bytes))
             .and_then(|bytes| bytes.checked_add(label.len()))
             .and_then(|bytes| {
                 bytes.checked_add(lookup_slots.checked_mul(
                     std::mem::size_of::<(String, EdgeTypeId)>() + Self::HASH_ENTRY_OVERHEAD_BYTES,
                 )?)
             })
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    self.ids_by_label
-                        .keys()
-                        .map(String::capacity)
-                        .sum::<usize>(),
-                )
-            })
+            .and_then(|bytes| bytes.checked_add(self.lookup_label_capacity_bytes))
             .and_then(|bytes| bytes.checked_add(label.len()))
             .ok_or_else(|| GraphError::Internal("edge type registry growth overflowed".into()))?;
         Ok(target.saturating_sub(self.heap_bytes()))
@@ -156,11 +220,7 @@ impl EdgeTypeRegistry {
         self.ordered_heap_bytes()
             + self.ids_by_label.capacity()
                 * (std::mem::size_of::<(String, EdgeTypeId)>() + Self::HASH_ENTRY_OVERHEAD_BYTES)
-            + self
-                .ids_by_label
-                .keys()
-                .map(String::capacity)
-                .sum::<usize>()
+            + self.lookup_label_capacity_bytes
     }
 
     /// Conservative heap bound for decoding one validated v6 registry section.
@@ -176,7 +236,7 @@ impl EdgeTypeRegistry {
 
     pub(crate) fn load_metadata_upper_bound(encoded: &[u8]) -> GraphResult<usize> {
         let count = registry_encoded_count(encoded)?;
-        if count > u32::MAX as usize {
+        if count > Self::MAX_USER_EDGE_TYPES + 1 {
             return Err(GraphError::CorruptFile {
                 reason: "edge type registry count exceeds logical limits".into(),
             });
@@ -195,6 +255,38 @@ impl EdgeTypeRegistry {
                 .ok_or_else(|| GraphError::CorruptFile {
                     reason: "edge type registry offset table exceeds its section".into(),
                 })?;
+        if payload_bytes > Self::MAX_EDGE_TYPE_DICTIONARY_BYTES {
+            return Err(GraphError::CorruptFile {
+                reason: "edge type registry payload exceeds configured policy".into(),
+            });
+        }
+        let mut previous = 0_usize;
+        for index in 0..count {
+            let offset = 4 + (index + 1) * 8;
+            let end = usize::try_from(u64::from_le_bytes(
+                encoded
+                    .get(offset..offset + 8)
+                    .ok_or_else(|| GraphError::CorruptFile {
+                        reason: "edge type registry offset table is truncated".into(),
+                    })?
+                    .try_into()
+                    .map_err(|_| GraphError::CorruptFile {
+                        reason: "edge type registry offset is malformed".into(),
+                    })?,
+            ))
+            .map_err(|_| GraphError::CorruptFile {
+                reason: "edge type registry offset exceeds usize".into(),
+            })?;
+            if end < previous
+                || end > payload_bytes
+                || (index > 0 && end - previous > Self::MAX_EDGE_TYPE_LABEL_BYTES)
+            {
+                return Err(GraphError::CorruptFile {
+                    reason: "edge type registry label exceeds configured policy".into(),
+                });
+            }
+            previous = end;
+        }
         let lookup_count = count.saturating_sub(1);
         // `HashMap` keeps spare buckets and one control byte per bucket. Two
         // times the next power of two is deliberately above its maximum load
@@ -214,6 +306,24 @@ impl EdgeTypeRegistry {
             })
             .ok_or_else(|| GraphError::Internal("edge type metadata bound overflowed".into()))
     }
+}
+
+fn validate_policy<'a>(
+    count: usize,
+    label_bytes: usize,
+    labels: impl Iterator<Item = &'a str>,
+) -> GraphResult<()> {
+    if count > EdgeTypeRegistry::MAX_USER_EDGE_TYPES + 1
+        || label_bytes > EdgeTypeRegistry::MAX_EDGE_TYPE_DICTIONARY_BYTES
+        || labels
+            .skip(1)
+            .any(|label| label.len() > EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES)
+    {
+        return Err(GraphError::CorruptFile {
+            reason: "edge type registry exceeds configured policy limits".into(),
+        });
+    }
+    Ok(())
 }
 
 fn registry_encoded_count(encoded: &[u8]) -> GraphResult<usize> {
@@ -337,5 +447,36 @@ mod tests {
         let registry = EdgeTypeRegistry::try_from_v6_labels(labels).unwrap();
         let bound = EdgeTypeRegistry::v6_load_metadata_upper_bound(&encoded).unwrap();
         assert!(bound >= registry.heap_bytes());
+    }
+
+    #[test]
+    fn edge_type_policy_rejects_count_label_and_dictionary_limits() {
+        let mut registry = EdgeTypeRegistry::new();
+        let oversized = "x".repeat(EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES + 1);
+        assert!(matches!(
+            registry.register(&oversized),
+            Err(GraphError::EdgeTypeLimit)
+        ));
+        assert!(matches!(
+            EdgeTypeRegistry::try_from_labels(vec![String::new(), oversized]),
+            Err(GraphError::CorruptFile { .. })
+        ));
+        assert_eq!(EdgeTypeRegistry::MAX_USER_EDGE_TYPES, 1_000_000);
+        assert_eq!(
+            EdgeTypeRegistry::MAX_EDGE_TYPE_DICTIONARY_BYTES,
+            256 * 1024 * 1024
+        );
+        assert!(validate_policy(
+            EdgeTypeRegistry::MAX_USER_EDGE_TYPES + 2,
+            0,
+            std::iter::empty()
+        )
+        .is_err());
+        assert!(validate_policy(
+            1,
+            EdgeTypeRegistry::MAX_EDGE_TYPE_DICTIONARY_BYTES + 1,
+            std::iter::once("")
+        )
+        .is_err());
     }
 }

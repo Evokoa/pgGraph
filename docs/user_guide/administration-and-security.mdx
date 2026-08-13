@@ -1,5 +1,9 @@
 # Administration And Security
 
+Build and maintenance operations enforce the relationship type limits in
+[Limitations And Fit](./limitations-and-fit); failures retain the last valid
+generation.
+
 Administrative functions mutate extension catalogs, build state, persisted
 artifacts, sync state, or run global graph algorithms. The code checks graph
 admin privileges before these operations.
@@ -315,7 +319,7 @@ operators to distinguish pgGraph conditions that share a standard SQLSTATE.
 | `53200` | `PG001` | Memory limit exceeded | Raise `graph.memory_limit_mb` or reduce registered graph size |
 | `42501` | `PG002` | ACL denied | Grant `SELECT` on the relevant source table or graph admin privilege for admin functions |
 | `55000` | `PG003` | Graph not built | Run `SELECT * FROM graph.build();` |
-| `54000` | `PG004` | Edge type limit exceeded | Reduce distinct edge labels; max user labels are 254 |
+| `54000` | `PG004` | Edge type limit exceeded | Reduce the relationship type count, label size, or cumulative dictionary payload |
 | `22023` | `PG005` | Invalid filter | Register the filter column and use supported operators/types |
 | `55P03` | `PG006` | Build locked | Wait for current build/vacuum/maintenance |
 | `54000` | `PG007` | Resource limit exceeded | Reduce query/work size or raise the relevant query, maintenance, disk, work, or elapsed limit |

@@ -25,8 +25,8 @@ pub(crate) struct DirectBuildOptions {
     pub(crate) projection_mode: ProjectionMode,
 }
 
-/// Scan authoritative PostgreSQL sources and stream a v6 candidate without an
-/// intermediate owned graph engine.
+/// Scan authoritative PostgreSQL sources and stream an adaptive v7 candidate
+/// without an intermediate owned graph engine.
 pub(crate) fn build_persisted_candidate(
     tables: &[RegisteredTable],
     edges: &[RegisteredEdge],

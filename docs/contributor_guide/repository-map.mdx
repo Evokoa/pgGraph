@@ -34,6 +34,7 @@ beside it in the crate tree.
 | `edge_store.rs` | CSR edge store with owned and mmap backings |
 | `edge_type_registry.rs` | Validated ordered relationship-type dictionary with O(1) logical-ID lookup |
 | `edge_type_contract_tests.rs` | P6 logical-ID, v6 adapter, compatibility, and retained-evidence contracts |
+| `p7_contract_tests.rs` | P7 adaptive storage, dual-format migration, bounded policy, and release contracts |
 | `relationship_identity_store.rs` | Owned, mapped, and mapped-plus-suffix relationship identity storage |
 | `resolution_index.rs` | Build-time and finalized table+PK lookup index |
 | `filter_index.rs` | Typed filter column encoding and hybrid dense/sparse storage |
@@ -45,13 +46,13 @@ beside it in the crate tree.
 | `build_spool.rs` | Governed PostgreSQL temporary lookup spools shared by owned and persisted builders |
 | `persisted_build_scanner.rs` | Bounded node, resolution, filter, dictionary, and tenant source-to-run scanning |
 | `persisted_edge_scanner.rs` | Bounded endpoint resolution and relationship run normalization |
-| `persisted_build.rs` | Checked v6 layout planning and direct 26-section artifact assembly |
+| `persisted_build.rs` | Checked adaptive v7 layout planning and direct 26-section artifact assembly |
 | `persisted_build_pipeline.rs` | Persisted source scan, run merge, and candidate composition boundary |
 | `catalog.rs` | Catalog module boundary for registration reads, writes, and validation |
 | `catalog/read.rs` | Registered table, edge, and filter-column catalog reads |
 | `catalog/validate.rs` | Source table, key, edge, and filter-column validation |
 | `catalog/write.rs` | Catalog inserts and updates for registered graph metadata |
-| `persistence.rs` | v6 `.pggraph` writer/loader, header and body CRCs, 26-section validation, mmap setup |
+| `persistence.rs` | v6/v7 `.pggraph` loader, adaptive v7 writer, CRCs, 26-section validation, and mmap setup |
 | `tenant_store.rs` | Owned/mapped tenant dictionaries, dense tokens, and sparse membership removals |
 | `projection/` | Clean CSR and overlay-aware projection read helpers |
 | `bfs.rs` | BFS and DFS traversal hot loops |

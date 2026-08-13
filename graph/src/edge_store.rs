@@ -1454,7 +1454,7 @@ impl EdgeStore {
     /// Get type_ids as a slice. Used by persistence.
     #[allow(
         dead_code,
-        reason = "P7.2 keeps the byte-identical v6 writer adapter until v7 emission is activated"
+        reason = "the read-compatible v6 codec retains a byte-level adapter after v7 activation"
     )]
     pub fn v6_type_ids_bytes(&self) -> &[u8] {
         match &self.backing {

@@ -1,5 +1,15 @@
 # Limitations And Fit
 
+## Relationship type limits
+
+- Maximum distinct relationship types: 1,000,000 per graph.
+- Maximum relationship type label bytes: 1,024 UTF-8 bytes.
+- Maximum relationship type dictionary bytes: 256 MiB of label payload.
+
+These hard ceilings are also constrained by the configured build and
+maintenance memory budgets. P7 supports them after a read-only base rebuild;
+incremental unseen labels remain a P8 feature.
+
 pgGraph is a PostgreSQL-local graph acceleration layer. It is a good fit when
 your source data already lives in PostgreSQL and you need SQL-accessible
 neighborhood traversal, path explanation, and source-row search without moving
@@ -37,10 +47,10 @@ data into another system.
 | GQL and openCypher | `graph.gql()` supports the documented read subset, including node-only `MATCH`, top-level single-relationship `OPTIONAL MATCH`, multi-pattern joins over concrete labels/types with node-property `WHERE` predicates, bounded variable-length join path variables, relationship variable returns for fixed single-hop join patterns, variable-length relationship variables as path values, path variable returns, path functions, ordering, and projected-row `RETURN DISTINCT`, fixed path variables with optional named nodes and concrete labels/types plus compatible path-node property predicates, bounded wildcard variable-length path variables including unnamed multi-segment variable-length segments, relationship type alternation, and named endpoint variables plus relationship variables as path values on single bounded segments, projection-stage `WITH`, bounded `DISTINCT`, `RETURN` aggregates, JSONB list/map property paths, bounded relationship path values and path functions, single-node mapped `CREATE`, single-relationship mapped `CREATE` for registered edge-row mappings, single-node mapped property `SET`, mapped property `REMOVE`, single-edge mapped `DELETE` including wildcard relationship patterns that resolve to exactly one static-label registered edge-row mapping, single-node `DETACH DELETE` over registered edge-row relationships, and single-node mapped `MERGE`; `graph.cypher()` accepts the overlapping openCypher-shaped subset through the same planner and explicitly does not claim full openCypher compatibility; relationship property expressions and broader writes are future work |
 | SQL/PGQ | Internal typed adapter seam only; no public SQL/PGQ API is exposed until PostgreSQL provides stable graph-pattern hooks pgGraph can consume |
 | Projection modes | `graph.build()` defaults to `csr_readonly`; `mutable_overlay` can be selected when `graph.mutable_enabled = on` and is required for GQL writes |
-| Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
+| Edge labels | Rebuilt v7 bases use adaptive relationship type IDs under the documented policy limits |
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |
-| mmap residency | Format v6 loads both CSR directions, relationship IDs, filters, dictionaries, identities, tenant data, and resolution as a backend-local read-only mapped snapshot; sparse mutable deltas remain backend-local heap |
+| mmap residency | Formats v6 and v7 load both CSR directions, relationship IDs, filters, dictionaries, identities, tenant data, and resolution as a backend-local read-only mapped snapshot; sparse mutable deltas remain backend-local heap |
 | Query catch-up | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; set `graph.query_freshness = 'off'` for compatibility/manual catch-up |
 | Search | Search runs against registered source-table columns through PostgreSQL, not against a full-text graph artifact |
 | Hydration | Hydrated rows come from source tables and require source-table privileges; required GQL hydration fails closed with SQLSTATE `22000` and diagnostic `PG017` if a graph coordinate no longer has a readable source row |

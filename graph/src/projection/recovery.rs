@@ -1218,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_validates_actual_base_artifact_version() {
+    fn v7_recovery_uses_actual_version_and_width() {
         use crate::engine::Engine;
         use crate::persistence::write_graph_file;
         use std::io::{Read, Seek, Write};

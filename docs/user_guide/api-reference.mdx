@@ -1,5 +1,8 @@
 # SQL API Reference
 
+Relationship type arguments and mapped label columns are subject to the
+relationship type limits in [Limitations And Fit](./limitations-and-fit).
+
 {/* Canonical public URL: /user_guide/api-reference. Section ownership is the Function Index below. */}
 
 This page documents the SQL surface implemented by the current `graph` crate.
@@ -869,7 +872,7 @@ graph.add_edge(
 
 Admin-only. Registers a relationship. `weight_column` must be numeric.
 `label_column`, when supplied, provides per-row dynamic edge labels. A graph can
-use up to 254 distinct user-facing edge labels; registering or building a graph
+use relationship types within the documented count and byte limits; registering or building a graph
 that would require another label fails with SQLSTATE `54000` and diagnostic
 `PG004`.
 

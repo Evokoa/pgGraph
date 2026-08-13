@@ -10,6 +10,7 @@ use std::path::Path;
 use crate::build_runs::StagedRun;
 use crate::builder::RegisteredFilterColumn;
 use crate::config::ProjectionMode;
+use crate::edge_store::EdgeTypeWidth;
 use crate::filter_index::{FilterColumnType, FILTER_CATALOG_HEADER_SIZE, FILTER_DESCRIPTOR_SIZE};
 use crate::persistence::{write_direct_graph_file, DirectArtifactMetadata, DirectArtifactWriter};
 use crate::resource::{ResourceGovernor, ResourcePhase};
@@ -165,7 +166,7 @@ impl DirectBuildArtifact<'_, '_> {
     }
 }
 
-/// Stream a prepared direct build into an atomically published v6 artifact.
+/// Stream a prepared direct build into an atomically published artifact.
 ///
 /// Every run is checksum-validated before its values are admitted to the
 /// artifact. The caller should load and validate the resulting candidate
@@ -186,6 +187,7 @@ pub(crate) fn write_prepared_artifact(
         has_unidirectional_edges: artifact.has_unidirectional_edges,
         applied_sync_id: artifact.applied_sync_id,
         projection_mode: artifact.projection_mode,
+        edge_type_width: EdgeTypeWidth::One,
     };
     let mut section_lengths = [0_u64; SECTION_COUNT];
     for (index, section) in artifact.sections.iter().enumerate() {
@@ -206,7 +208,7 @@ pub(crate) fn write_prepared_artifact(
     )
 }
 
-/// Assemble a canonical v6 artifact from validated, bounded scanner runs.
+/// Assemble a canonical v7 artifact from validated, bounded scanner runs.
 ///
 /// Graph-sized output is streamed directly to the candidate. Runs are replayed
 /// when parallel persisted arrays require different projections of the same
@@ -233,7 +235,8 @@ pub(crate) fn write_semantic_artifact(
         .reserve_memory(ResourcePhase::Persistence, plan_bytes)
         .map_err(crate::safety::resource_limit_error)?;
     let filter_plan = plan_filters(build)?;
-    let section_lengths = plan_section_lengths(build, &filter_plan)?;
+    let edge_type_width = build_edge_type_width(build)?;
+    let section_lengths = plan_section_lengths(build, &filter_plan, edge_type_width)?;
     let metadata = DirectArtifactMetadata {
         node_count: build.node_count,
         forward_edge_count: build.forward_edge_count,
@@ -243,6 +246,7 @@ pub(crate) fn write_semantic_artifact(
         has_unidirectional_edges: build.has_unidirectional_edges,
         applied_sync_id: build.applied_sync_id,
         projection_mode: build.projection_mode,
+        edge_type_width,
     };
     write_direct_graph_file(path, &metadata, section_lengths, build.governor, |writer| {
         writer.begin_section(0)?;
@@ -296,7 +300,8 @@ pub(crate) fn write_semantic_artifact(
 fn validate_semantic_shape(build: &SemanticDirectBuild<'_, '_>) -> GraphResult<()> {
     if build.forward_edge_count != build.inbound_edge_count
         || build.has_forward_weights != build.has_inbound_weights
-        || build.edge_type_registry.len() > u8::MAX as usize
+        || build.edge_type_registry.len()
+            > crate::edge_type_registry::EdgeTypeRegistry::MAX_USER_EDGE_TYPES + 1
         || build
             .edge_type_registry
             .first()
@@ -311,15 +316,61 @@ fn validate_semantic_shape(build: &SemanticDirectBuild<'_, '_>) -> GraphResult<(
             "invalid direct artifact counts, weight mode, or edge type registry".into(),
         ));
     }
+    let dictionary_bytes = build
+        .edge_type_registry
+        .iter()
+        .try_fold(0_usize, |total, label| {
+            total
+                .checked_add(label.len())
+                .ok_or_else(|| GraphError::Internal("direct edge type dictionary overflows".into()))
+        })?;
+    if dictionary_bytes
+        > crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_DICTIONARY_BYTES
+        || build.edge_type_registry.iter().skip(1).any(|label| {
+            label.len() > crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES
+        })
+    {
+        return Err(GraphError::Internal(
+            "direct edge type registry exceeds configured policy limits".into(),
+        ));
+    }
+    let validation_bytes = build
+        .edge_type_registry
+        .len()
+        .saturating_sub(1)
+        .checked_mul(std::mem::size_of::<&str>() + 32)
+        .and_then(crate::resource::ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("direct registry validation size overflowed".into()))?;
+    let _validation_memory = build
+        .governor
+        .reserve_memory(ResourcePhase::Persistence, validation_bytes)
+        .map_err(crate::safety::resource_limit_error)?;
+    let mut unique = std::collections::HashSet::new();
+    unique
+        .try_reserve(build.edge_type_registry.len().saturating_sub(1))
+        .map_err(|error| {
+            GraphError::Internal(format!(
+                "direct registry validation allocation failed: {error}"
+            ))
+        })?;
     if build
         .edge_type_registry
         .iter()
-        .enumerate()
-        .any(|(index, label)| build.edge_type_registry[..index].contains(label))
+        .skip(1)
+        .any(|label| !unique.insert(label.as_str()))
     {
         return Err(GraphError::Internal(
             "direct edge type registry contains duplicate labels".into(),
         ));
+    }
+    let width = build_edge_type_width(build)?;
+    if width != EdgeTypeWidth::One && build.projection_mode != ProjectionMode::CsrReadonly {
+        return Err(GraphError::UnsupportedOperation {
+            operation: "wide relationship type build".into(),
+            reason:
+                "wide relationship types require csr_readonly until mutable segment migration completes"
+                    .into(),
+        });
     }
     for (run, count, label) in [
         (build.forward_edges, build.forward_edge_count, "forward"),
@@ -342,9 +393,25 @@ fn validate_semantic_shape(build: &SemanticDirectBuild<'_, '_>) -> GraphResult<(
     Ok(())
 }
 
+fn build_edge_type_width(build: &SemanticDirectBuild<'_, '_>) -> GraphResult<EdgeTypeWidth> {
+    let max_index = build.edge_type_registry.len().saturating_sub(1);
+    let max_id = EdgeTypeId::try_from(u32::try_from(max_index).map_err(|_| {
+        GraphError::Internal("direct edge type registry exceeds logical ID width".into())
+    })?)
+    .map_err(|_| GraphError::Internal("direct edge type registry uses the sentinel".into()))?;
+    Ok(EdgeTypeWidth::select_for_max_id(max_id))
+}
+
+fn edge_type_section_len(edge_count: u32, width: EdgeTypeWidth) -> GraphResult<u64> {
+    u64::from(edge_count)
+        .checked_mul(width.bytes() as u64)
+        .ok_or_else(|| GraphError::Internal("CSR edge type length overflowed".into()))
+}
+
 fn plan_section_lengths(
     build: &SemanticDirectBuild<'_, '_>,
     filters: &[FilterPlan<'_>],
+    edge_type_width: EdgeTypeWidth,
 ) -> GraphResult<[u64; SECTION_COUNT]> {
     let mut lengths = [0_u64; SECTION_COUNT];
     lengths[0] = u64::from(build.node_count).div_ceil(8);
@@ -370,7 +437,7 @@ fn plan_section_lengths(
             .and_then(|nodes| nodes.checked_mul(4))
             .ok_or_else(|| GraphError::Internal("CSR offsets length overflowed".into()))?;
         lengths[base + 1] = u64::from(count) * 4;
-        lengths[base + 2] = u64::from(count);
+        lengths[base + 2] = edge_type_section_len(count, edge_type_width)?;
         lengths[base + 3] = u64::from(count);
         lengths[base + 4] = if weighted { u64::from(count) * 4 } else { 0 };
         lengths[base + 5] = u64::from(count) * 4;
@@ -558,6 +625,7 @@ fn replay_edges(
     node_count: u32,
     edge_count: u32,
     max_record_bytes: usize,
+    registry_len: usize,
     mut visit: impl FnMut(DecodedEdge) -> GraphResult<()>,
 ) -> GraphResult<()> {
     let Some(run) = run else {
@@ -571,6 +639,11 @@ fn replay_edges(
         if edge.source >= node_count || edge.target >= node_count {
             return Err(GraphError::Internal(
                 "direct edge endpoint is out of bounds".into(),
+            ));
+        }
+        if edge.type_id.get() as usize >= registry_len {
+            return Err(GraphError::Internal(
+                "direct edge type ID is outside the registry".into(),
             ));
         }
         visit(edge)?;
@@ -593,6 +666,7 @@ fn emit_csr(
     edge_count: u32,
     has_weights: bool,
 ) -> GraphResult<()> {
+    let edge_type_width = build_edge_type_width(build)?;
     writer.begin_section(base)?;
     write_u32(writer, 0)?;
     let mut current_source = 0_u32;
@@ -603,6 +677,7 @@ fn emit_csr(
         build.node_count,
         edge_count,
         build.max_record_bytes,
+        build.edge_type_registry.len(),
         |edge| {
             while current_source < edge.source {
                 write_u32(writer, seen_edges)?;
@@ -623,6 +698,7 @@ fn emit_csr(
         build.node_count,
         edge_count,
         build.max_record_bytes,
+        build.edge_type_registry.len(),
         |edge| write_u32(writer, edge.target),
     )?;
     writer.begin_section(base + 2)?;
@@ -632,12 +708,8 @@ fn emit_csr(
         build.node_count,
         edge_count,
         build.max_record_bytes,
-        |edge| {
-            writer.write_bytes(&[edge
-                .type_id
-                .to_v6_storage()
-                .map_err(|_| GraphError::Internal("direct edge type ID exceeds v6".into()))?])
-        },
+        build.edge_type_registry.len(),
+        |edge| emit_edge_type(writer, edge.type_id, edge_type_width),
     )?;
     writer.begin_section(base + 3)?;
     replay_edges(
@@ -646,6 +718,7 @@ fn emit_csr(
         build.node_count,
         edge_count,
         build.max_record_bytes,
+        build.edge_type_registry.len(),
         |edge| writer.write_bytes(&[edge.schema_reversed]),
     )?;
     writer.begin_section(base + 4)?;
@@ -656,6 +729,7 @@ fn emit_csr(
             build.node_count,
             edge_count,
             build.max_record_bytes,
+            build.edge_type_registry.len(),
             |edge| write_u32(writer, if edge.weight == 0 { 1 } else { edge.weight }),
         )?;
     }
@@ -666,8 +740,33 @@ fn emit_csr(
         build.node_count,
         edge_count,
         build.max_record_bytes,
+        build.edge_type_registry.len(),
         |edge| write_u32(writer, edge.relationship_id),
     )
+}
+
+fn emit_edge_type(
+    writer: &mut DirectArtifactWriter,
+    type_id: EdgeTypeId,
+    width: EdgeTypeWidth,
+) -> GraphResult<()> {
+    match width {
+        EdgeTypeWidth::One => writer.write_bytes(&[type_id
+            .to_v6_storage()
+            .map_err(|_| GraphError::Internal("direct edge type ID exceeds v6".into()))?]),
+        EdgeTypeWidth::Two => {
+            let value = u16::try_from(type_id.get()).map_err(|_| {
+                GraphError::Internal("direct edge type ID exceeds two-byte storage".into())
+            })?;
+            if value == u16::MAX {
+                return Err(GraphError::Internal(
+                    "direct edge type ID uses the two-byte sentinel".into(),
+                ));
+            }
+            writer.write_bytes(&value.to_le_bytes())
+        }
+        EdgeTypeWidth::Four => writer.write_bytes(&type_id.get().to_le_bytes()),
+    }
 }
 
 fn emit_resolution(
@@ -1282,28 +1381,30 @@ mod tests {
     use crate::build_runs::{RunCollector, RunKind, RunRecord, RunWorkspace};
     use crate::builder::RegisteredFilterColumn;
     use crate::config::ProjectionMode;
+    use crate::edge_store::EdgeTypeWidth;
     use crate::resource::{
         ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
         RowCount, WorkUnits,
     };
+    use crate::safety::GraphError;
+    use crate::types::EdgeTypeId;
 
-    fn assert_wide_v6_rejection(existing_destination: bool) {
+    fn assert_wide_v7_roundtrip(
+        max_type: u32,
+        expected_width: EdgeTypeWidth,
+        projection_mode: ProjectionMode,
+    ) {
         let temp = std::env::temp_dir().join(format!(
-            "pggraph-p7-wide-v6-{}-{}-{existing_destination}",
+            "pggraph-p7-wide-v7-{}-{}-{max_type}",
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).expect("tempdir");
         let path = temp.join("candidate.pggraph");
-        let last_good_path = temp.join("last-good.pggraph");
-        let original = b"existing artifact";
-        if existing_destination {
-            std::fs::write(&last_good_path, original).expect("existing artifact writes");
-        }
         let governor = ResourceGovernor::new(ResourceLimits::bounded(
-            MemoryBudget::new(ByteCount::from_bytes(128 * 1024)),
-            DiskBudget::new(ByteCount::from_bytes(2 * 1024 * 1024)),
+            MemoryBudget::new(ByteCount::from_bytes(64 * 1024 * 1024)),
+            DiskBudget::new(ByteCount::from_bytes(32 * 1024 * 1024)),
             RowCount::UNLIMITED,
             WorkUnits::UNLIMITED,
             ElapsedBudget::new(Duration::MAX),
@@ -1334,16 +1435,18 @@ mod tests {
         let nodes = stage(RunKind::Nodes, vec![node(0, b'a'), node(1, b'b')]);
         let resolution = stage(
             RunKind::Resolution,
-            [0_u32, 1]
+            [(0_u32, "a"), (1, "b")]
                 .into_iter()
-                .map(|node_idx| {
+                .map(|(node_idx, primary_key)| {
+                    let hash =
+                        crate::resolution_index::ResolutionIndexBuilder::hash_pk(primary_key);
                     let mut key = Vec::new();
                     key.extend_from_slice(&42_u32.to_be_bytes());
-                    key.extend_from_slice(&u64::from(node_idx).to_be_bytes());
+                    key.extend_from_slice(&hash.to_be_bytes());
                     key.extend_from_slice(&node_idx.to_be_bytes());
                     let mut value = Vec::new();
                     value.extend_from_slice(&42_u32.to_le_bytes());
-                    value.extend_from_slice(&u64::from(node_idx).to_le_bytes());
+                    value.extend_from_slice(&hash.to_le_bytes());
                     value.extend_from_slice(&node_idx.to_le_bytes());
                     RunRecord::new(key, value)
                 })
@@ -1353,12 +1456,12 @@ mod tests {
             let mut key = Vec::new();
             key.extend_from_slice(&source.to_be_bytes());
             key.extend_from_slice(&target.to_be_bytes());
-            key.extend_from_slice(&255_u32.to_be_bytes());
+            key.extend_from_slice(&max_type.to_be_bytes());
             key.push(0);
             key.extend_from_slice(&0_u32.to_be_bytes());
             let mut value = Vec::new();
             value.extend_from_slice(&target.to_le_bytes());
-            value.extend_from_slice(&255_u32.to_le_bytes());
+            value.extend_from_slice(&max_type.to_le_bytes());
             value.push(0);
             value.extend_from_slice(&1_u32.to_le_bytes());
             value.extend_from_slice(&0_u32.to_le_bytes());
@@ -1366,7 +1469,8 @@ mod tests {
         };
         let forward = stage(RunKind::RelationshipsOutbound, vec![edge(0, 1)]);
         let inbound = stage(RunKind::RelationshipsInbound, vec![edge(1, 0)]);
-        let registry = vec![String::new()];
+        let mut registry = vec![String::new()];
+        registry.extend((1..=max_type).map(|id| format!("type_{id}")));
         let build = SemanticDirectBuild {
             node_count: 2,
             forward_edge_count: 1,
@@ -1375,7 +1479,7 @@ mod tests {
             has_inbound_weights: false,
             has_unidirectional_edges: true,
             applied_sync_id: 0,
-            projection_mode: ProjectionMode::CsrReadonly,
+            projection_mode,
             nodes: Some(&nodes),
             forward_edges: Some(&forward),
             inbound_edges: Some(&inbound),
@@ -1391,23 +1495,56 @@ mod tests {
             max_record_bytes: 128,
             governor: &governor,
         };
-        let error = write_semantic_artifact(&path, &build).expect_err("v6 narrowing must reject");
-        assert!(error.to_string().contains("exceeds v6"));
-        assert!(!path.exists(), "failed candidate must not be published");
-        if existing_destination {
-            assert_eq!(std::fs::read(&last_good_path).unwrap(), original);
+        if projection_mode == ProjectionMode::MutableOverlay && expected_width != EdgeTypeWidth::One
+        {
+            let error =
+                write_semantic_artifact(&path, &build).expect_err("wide mutable build rejects");
+            assert!(matches!(error, GraphError::UnsupportedOperation { .. }));
+            assert!(!path.exists());
+            let _ = std::fs::remove_dir_all(temp);
+            return;
         }
+        write_semantic_artifact(&path, &build).expect("v7 candidate writes");
+        let metadata = crate::persistence::graph_artifact_metadata_for_path(&path).unwrap();
+        assert_eq!(metadata.version, 7);
+        assert_eq!(metadata.edge_type_width, expected_width);
+        let loaded = crate::persistence::load_graph_file(&path).unwrap();
+        assert_eq!(
+            loaded.edge_store.edge_type_at(0).map(EdgeTypeId::get),
+            Some(max_type)
+        );
         let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
-    fn direct_build_v6_rejects_wide_type_before_candidate_publication() {
-        assert_wide_v6_rejection(false);
+    fn direct_build_v7_selects_width_boundaries_and_matches_owned_semantics() {
+        assert_wide_v7_roundtrip(255, EdgeTypeWidth::Two, ProjectionMode::CsrReadonly);
     }
 
     #[test]
-    fn direct_build_v6_rejection_leaves_existing_artifact_unchanged() {
-        assert_wide_v6_rejection(true);
+    fn direct_build_roundtrips_more_than_65534_relationship_types() {
+        assert_wide_v7_roundtrip(65_535, EdgeTypeWidth::Four, ProjectionMode::CsrReadonly);
+    }
+
+    #[test]
+    fn direct_build_wide_mutable_mode_rejects_before_candidate_publication() {
+        assert_wide_v7_roundtrip(255, EdgeTypeWidth::Two, ProjectionMode::MutableOverlay);
+    }
+
+    #[test]
+    fn direct_build_v7_accounting_matches_selected_physical_width() {
+        assert_eq!(
+            super::edge_type_section_len(1_000, EdgeTypeWidth::One).unwrap(),
+            1_000
+        );
+        assert_eq!(
+            super::edge_type_section_len(1_000, EdgeTypeWidth::Two).unwrap(),
+            2_000
+        );
+        assert_eq!(
+            super::edge_type_section_len(1_000, EdgeTypeWidth::Four).unwrap(),
+            4_000
+        );
     }
 
     #[test]
@@ -1579,7 +1716,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_build_logical_u32_runs_preserve_v6_artifact_bytes_and_semantics() {
+    fn direct_build_adaptive_type_width_matches_owned_build_bytes() {
         let temp = std::env::temp_dir().join(format!(
             "pggraph-semantic-direct-{}-{}",
             std::process::id(),
@@ -1756,8 +1893,8 @@ mod tests {
         let artifact_bytes = std::fs::read(&path).expect("semantic artifact reads");
         assert_eq!(
             format!("crc32:{:08x}", crc32fast::hash(&artifact_bytes)),
-            "crc32:c51d6ece",
-            "the direct semantic v6 artifact bytes must remain stable"
+            "crc32:1d7fc6e1",
+            "the direct semantic v7 artifact bytes must remain stable"
         );
         let loaded = crate::persistence::load_graph_file(&path).expect("artifact loads");
         assert_eq!(loaded.node_store.primary_key(0), Some("a"));

@@ -911,7 +911,7 @@ impl Engine {
         }
     }
     pub fn new() -> Self {
-        let edge_type_registry = EdgeTypeRegistry::new_v6();
+        let edge_type_registry = EdgeTypeRegistry::new();
         // Index 0 = untyped (reserved)
 
         Self {
@@ -1452,9 +1452,9 @@ impl Engine {
         Ok(())
     }
 
-    /// Register a new edge type label. Returns its v6 storage ID.
+    /// Register a new edge type label. Returns its logical storage ID.
     pub fn register_edge_type(&mut self, label: &str) -> GraphResult<crate::types::EdgeTypeId> {
-        self.edge_type_registry.register_v6(label)
+        self.edge_type_registry.register(label)
     }
 
     pub(crate) fn edge_type_id(&self, label: &str) -> Option<EdgeTypeId> {
@@ -5008,15 +5008,16 @@ mod tests {
     }
 
     #[test]
-    fn register_edge_type_limit_at_255() {
+    fn register_edge_type_crosses_legacy_v6_limit() {
         let mut engine = Engine::new();
-        // Index 0 is already "" (untyped). Fill up to 255 total.
-        for i in 1..255u16 {
+        for i in 1..=255u16 {
             engine.register_edge_type(&format!("type_{}", i)).unwrap();
         }
-        assert_eq!(engine.edge_type_registry.len(), 255);
-        let result = engine.register_edge_type("one_too_many");
-        assert!(matches!(result, Err(GraphError::EdgeTypeLimit)));
+        assert_eq!(engine.edge_type_registry.len(), 256);
+        assert_eq!(
+            engine.edge_type_id("type_255").map(EdgeTypeId::get),
+            Some(255)
+        );
     }
 
     #[test]

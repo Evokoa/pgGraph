@@ -143,7 +143,7 @@ fn p6_registry_is_validated_ordered_and_constant_time_by_label() {
         "labels: Vec<String>",
         "ids_by_label: HashMap<String, EdgeTypeId>",
         "fn try_from_v6_labels",
-        "fn register_v6",
+        "fn register(&mut self, label: &str)",
         "fn id(&self, label: &str)",
     ] {
         assert!(
@@ -153,7 +153,7 @@ fn p6_registry_is_validated_ordered_and_constant_time_by_label() {
     }
     assert!(
         engine.contains("edge_type_registry: EdgeTypeRegistry")
-            && engine.contains(".register_v6(label)")
+            && engine.contains(".register(label)")
             && !engine.contains("edge_type_registry.iter().position"),
         "Engine must delegate registration and lookup to the O(1) registry authority"
     );
@@ -377,7 +377,7 @@ fn p6_logical_migration_preserves_the_v6_byte_contract() {
     assert!(
         persistence.contains("p6_logical_edge_type_promotion_preserves_v6_artifact_bytes")
             && persistence.contains("const V6_VERSION: u32 = 6")
-            && persistence.contains("const VERSION: u32 = V6_VERSION"),
+            && persistence.contains("v6_artifact_remains_loadable_after_v7_activation"),
         "the full-file v6 compatibility oracle must remain active"
     );
     assert!(

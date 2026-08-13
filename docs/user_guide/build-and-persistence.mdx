@@ -1,5 +1,11 @@
 # Build And Persistence
 
+New base builds write version 7 artifacts with adaptive one-, two-, or
+four-byte relationship type IDs. Version 6 artifacts remain readable and move
+to v7 on rebuild. Candidate validation happens before generation publication,
+so rollback retains the last valid generation. Older extension binaries cannot
+read v7; retain a v6 generation or backup before downgrade.
+
 `graph.build()` constructs a backend-local active engine from registered tables,
 edges, and filter columns. When `graph.persist_on_build = true`, the base graph
 is written atomically under the selected graph's UUID directory and later
@@ -139,7 +145,7 @@ joining internal catalog tables.
     },
     {
       title: "Persist when enabled",
-      description: "Stream a generation-specific v6 candidate, fsync it, validate it through the production loader, and switch the current generation with compare-and-swap.",
+      description: "Stream a generation-specific adaptive v7 candidate, fsync it, validate it through the production loader, and switch the current generation with compare-and-swap.",
       isResult: true
     }
   ]}

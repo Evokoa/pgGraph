@@ -1,4 +1,77 @@
 #[pg_test]
+fn adaptive_edge_types_above_v6_roundtrip_and_filter_exactly() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "TRUNCATE public.graph_test_friendships_pgtest;
+         INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Carol', 43);
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         SELECT 'type_' || value, 'u1', 'u2' FROM generate_series(1, 254) AS value;
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('type_255', 'u1', 'u3');
+         SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name']);
+         SELECT graph.add_edge(
+             'graph_test_friendships_pgtest'::regclass,
+             'user_id', 'graph_test_users_pgtest'::regclass,
+             'friend_id', 'fallback', false, label_column := 'id');
+         SET graph.persist_on_build = on;
+         SELECT * FROM graph.build()",
+    )
+    .expect("build adaptive relationship fixture failed");
+    Spi::run("SELECT graph.unload_graph('default')").expect("unload adaptive graph failed");
+    Spi::run("SELECT * FROM graph.load_graph('default')").expect("reload adaptive graph failed");
+    let node_ids = Spi::get_one::<String>(
+        "SELECT string_agg(node_id, ',' ORDER BY node_id)
+           FROM graph.traverse(
+             'graph_test_users_pgtest'::regclass, 'u1', 1,
+             edge_types := ARRAY['type_255'], hydrate := false)",
+    )
+    .expect("filter adaptive relationship type failed")
+    .unwrap_or_default();
+    assert_eq!(node_ids, "u1,u3");
+}
+
+#[pg_test]
+fn adaptive_edge_type_policy_limits_fail_atomically() {
+    reset_and_create_fixtures();
+    let oversized = "x".repeat(
+        crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES + 1,
+    );
+    Spi::run(&format!(
+        "TRUNCATE public.graph_test_friendships_pgtest;
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ({}, 'u1', 'u2');
+         SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name']);
+         SELECT graph.add_edge(
+             'graph_test_friendships_pgtest'::regclass,
+             'user_id', 'graph_test_users_pgtest'::regclass,
+             'friend_id', 'fallback', false, label_column := 'id');
+         CREATE OR REPLACE FUNCTION public.graph_p7_sqlstate(statement text)
+         RETURNS text LANGUAGE plpgsql AS $$ BEGIN EXECUTE statement; RETURN NULL;
+         EXCEPTION WHEN others THEN RETURN SQLSTATE; END $$",
+        super::sql_literal(&oversized)
+    ))
+    .expect("prepare policy fixture failed");
+    let state = Spi::get_one::<String>(
+        "SELECT public.graph_p7_sqlstate('SELECT * FROM graph.build()')",
+    )
+    .expect("capture policy SQLSTATE failed");
+    assert_eq!(state.as_deref(), Some("54000"));
+    let loaded = Spi::get_one::<i64>("SELECT count(*) FROM graph.loaded_graphs()")
+        .expect("inspect loaded graphs failed")
+        .unwrap_or(-1);
+    assert_eq!(loaded, 0);
+}
+
+#[pg_test]
+fn edge_type_policy_limits_have_stable_sqlstate_and_detail() {
+    let error = crate::safety::GraphError::EdgeTypeLimit;
+    assert_eq!(error.sqlstate(), "54000");
+    assert!(error.to_string().contains("policy"));
+    assert!(error.hint().contains("dictionary"));
+}
+
+#[pg_test]
 fn topology_query_entry_points_run_as_invoker() {
     let unexpected_definers = Spi::get_one::<i64>(
         "SELECT count(*)

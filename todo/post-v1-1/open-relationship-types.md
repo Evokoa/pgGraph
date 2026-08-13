@@ -1,18 +1,23 @@
 # Open-Vocabulary Relationship Types
 
-This document owns the implementation architecture for removing the current
+This document owns the implementation architecture for removing the historical
 254-user-label ceiling. Public direction remains in
 [`docs/roadmap.mdx`](../../docs/roadmap.mdx); phase status lives in
 [`README.md`](./README.md).
 
-## Problem
+## Current delivery state
 
-The production engine represents relationship type IDs as raw `u8` values
-across CSR, neighbors, overlays, transaction deltas, sync rows, and persisted
-segments. ID 0 is untyped and 255 is reserved, leaving 254 user-facing labels.
-The registry also performs repeated linear string lookup, and persisted mutable
-sync currently requires a rebuild when a new dynamic label is absent from the
-loaded projection.
+P6 introduced one checked logical `EdgeTypeId(u32)` authority and O(1) registry
+lookup. P7 now writes adaptive v7 immutable CSR bases with one-, two-, or
+four-byte type sections and continues to read v6 artifacts. Rebuilt
+`csr_readonly` graphs can therefore exceed 254 user-facing labels under the
+documented count and byte policies.
+
+The remaining narrow boundary is the mutable segment codec. Wide mutable bases
+are rejected before publication, and sync accepts only labels already present
+in the loaded dictionary. P8 owns adaptive segment persistence and governed
+incremental dictionary growth. P9 owns the complete query/listing/release
+matrix and final public feature closure.
 
 Open vocabulary means a checked, explicitly bounded dictionary large enough for
 data-driven relationship types. It does not mean unlimited backend memory or an
@@ -30,8 +35,8 @@ EdgeTypeId(u32)
   SENTINEL = u32::MAX
 ```
 
-The final maximum is frozen from explicit dictionary count/byte policy and
-artifact evidence. Raw `u8`, `u16`, or `u32` conversions occur only in checked
+The maximum is frozen by explicit dictionary count/byte policy and artifact
+evidence. Raw `u8`, `u16`, or `u32` conversions occur only in checked
 storage adapters. Query and planner code use `EdgeTypeId`.
 
 Logical `UNTYPED` is 0 and logical `SENTINEL` is `u32::MAX`; neither sentinel is
@@ -69,19 +74,18 @@ accounting must be updated together.
 
 ## Persistence and migration
 
-- Introduce an explicitly versioned base artifact/section for variable-width
-  type IDs with checked `edge_count * width`, alignment, bounds, endian, and
-  checksum validation.
-- Load v6 `u8` IDs through checked conversion when feasible. If a particular
+- The v7 base artifact stores variable-width type IDs with checked
+  `edge_count * width`, alignment, bounds, endian, and checksum validation.
+- Load v6 `u8` IDs through checked conversion. If a particular
   artifact cannot be safely consumed, return a targeted rebuild diagnostic and
   retain the last valid generation.
-- Persist the cumulative label dictionary as a checksummed generation artifact
+- Persist the label dictionary in the checksummed generation artifact
   referenced by the manifest, validation, recovery planner, retention graph,
   and garbage collector.
 - Publish base/segments/dictionary/manifest atomically under the existing
   per-graph writer lock.
-- Decode older segment fixtures through checked widening; emit only the new
-  segment format after migration.
+- P8 will decode older segment fixtures through checked widening and emit the
+  adaptive segment format after migration.
 
 ## Incremental and transaction-local labels
 

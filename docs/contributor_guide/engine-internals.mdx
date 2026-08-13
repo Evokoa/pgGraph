@@ -1,5 +1,9 @@
 # Engine Internals
 
+Immutable base CSR uses adaptive 1/2/4-byte relationship type storage selected
+once from the validated registry maximum. Logical consumers use `EdgeTypeId`;
+only artifact adapters encode the physical width.
+
 `Engine` owns the backend-local active graph and all indexes used by traversal,
 search composition, sync overlays, status reporting, and persistence.
 
@@ -48,14 +52,14 @@ The registry starts as:
 
 ```text
 index 0 = ""
-index 1..254 = user edge labels
+index 1..1,000,000 = user relationship labels (subject to byte limits)
 ```
 
 `Engine::register_edge_type()` returns existing IDs when labels are reused and
-raises `EdgeTypeLimit` after 254 user labels. Runtime consumers use the checked
-logical `EdgeTypeId(u32)` authority. The v6 CSR and segment codecs retain a
-one-byte physical ID parallel to each target edge and perform checked
-encode/decode at that storage boundary.
+raises `EdgeTypeLimit` at the configured count or byte policies. Runtime
+consumers use the checked logical `EdgeTypeId(u32)` authority. New v7 base CSR
+uses adaptive 1/2/4-byte IDs; the v6 reader and mutable segment codecs retain
+checked legacy adapters until P8 completes incremental-label migration.
 
 ## Traversal Dispatch
 
