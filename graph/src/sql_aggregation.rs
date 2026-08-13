@@ -460,16 +460,12 @@ pub(crate) fn aggregation_edge_type_filter(
     };
     let mut ids = HashSet::new();
     for edge_type in edge_types {
-        let Some(pos) = eng
-            .edge_type_registry
-            .iter()
-            .position(|label| label == edge_type)
-        else {
+        let Some(type_id) = eng.edge_type_id(edge_type) else {
             return Err(safety::GraphError::InvalidFilter {
                 reason: format!("unknown edge type '{}'", edge_type),
             });
         };
-        ids.insert(pos as u8);
+        ids.insert(type_id);
     }
     Ok(Some(ids))
 }

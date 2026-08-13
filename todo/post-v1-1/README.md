@@ -144,8 +144,8 @@ public documentation, retained evidence, and independent Rust review are green.
 | P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
 | P4 | In progress (P4.6 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL/Cypher expansions preserve exact result ordering and semantics; P4.7 retained evidence and closure remain. |
-| P5 | In progress (P5.1 complete) | Targeted queries select lazy and global analytics select eager; relationship-identity completeness uses fixed projection summaries; retained 1M/10M evidence and read-recheck measurement remain. |
-| P6 | Not started | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
+| P5 | In progress (P5.2 complete) | Targeted queries select lazy and global analytics select eager; relationship-identity completeness uses fixed projection summaries; retained 1M/10M evidence remains. |
+| P6 | In progress (P6.2 complete) | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
 | P8 | Not started | Persistent dictionaries, mutable segments, compaction, reload, and transaction-local/savepoint state support unseen labels atomically and within resource limits. |
 | P9 | Not started | SQL traversal, paths, and GQL preserve exact filtering beyond 254 labels; migration, diagnostics, docs, fuzz/property, and performance evidence are complete. |
@@ -499,6 +499,15 @@ The current v6 artifact remains byte-for-byte stable under a full-file golden
 checksum and reload test. Registry migration, logical consumer migration, and
 multidimensional width evidence remain P6 work; physical CSR widening remains
 P7.
+
+P6.2 completed on 2026-08-13. The ordered v6 relationship-type dictionary now
+owns a validated O(1) label-to-logical-ID index. Engine registration, query
+filters, visibility preparation, GQL mutation deltas, artifact reload, and the
+direct persisted-build scanner all route through that authority. Dictionary
+order and the v6 254-user-type limit remain unchanged, duplicate and malformed
+loaded labels fail closed, and the duplicated lookup strings are included in
+engine/build memory accounting. Logical consumer migration and
+multidimensional width evidence remain P6 work.
 
 - Benchmark logical `u32` with adaptive 1/2/4-byte base storage against the
   current `u8` representation across cardinality, degree, direction, and depth.

@@ -103,6 +103,56 @@ fn p6_reserved_values_cross_v6_only_through_checked_conversions() {
 }
 
 #[test]
+fn p6_registry_is_validated_ordered_and_constant_time_by_label() {
+    let registry = crate_source("src/edge_type_registry.rs");
+    let engine = crate_source("src/engine.rs");
+    let persistence = crate_source("src/persistence.rs");
+    let persisted_scanner = crate_source("src/persisted_edge_scanner.rs");
+
+    for required in [
+        "struct EdgeTypeRegistry",
+        "labels: Vec<String>",
+        "ids_by_label: HashMap<String, EdgeTypeId>",
+        "fn try_from_v6_labels",
+        "fn register_v6",
+        "fn id(&self, label: &str)",
+    ] {
+        assert!(
+            registry.contains(required),
+            "registry is missing `{required}`"
+        );
+    }
+    assert!(
+        engine.contains("edge_type_registry: EdgeTypeRegistry")
+            && engine.contains(".register_v6(label)")
+            && !engine.contains("edge_type_registry.iter().position"),
+        "Engine must delegate registration and lookup to the O(1) registry authority"
+    );
+    assert!(
+        persistence.contains("EdgeTypeRegistry::try_from_v6_labels"),
+        "artifact load must validate and rebuild the lookup authority"
+    );
+    for (name, source) in [
+        ("engine", engine),
+        ("persisted scanner", persisted_scanner),
+        ("query executor", crate_source("src/query/execute.rs")),
+        ("visibility", crate_source("src/sql_visibility.rs")),
+        ("aggregation", crate_source("src/sql_aggregation.rs")),
+        ("GQL facade", crate_source("src/sql_facade/gql.rs")),
+    ] {
+        let compact = source
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(
+            !compact.contains("edge_type_registry.iter().position")
+                && !compact.contains("registry.iter().position(|value|value==label)"),
+            "{name} must not bypass the O(1) registry authority"
+        );
+    }
+}
+
+#[test]
 fn p6_width_benchmark_keeps_reserved_boundaries_and_low_cardinality_control() {
     let cargo = crate_source("Cargo.toml");
     let benchmark = crate_source("benches/edge_type_width_bench.rs");

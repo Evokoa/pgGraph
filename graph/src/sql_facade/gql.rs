@@ -3065,17 +3065,14 @@ fn record_deleted_edge_delta(
             .ok_or_else(|| safety::GraphError::GqlExecution {
                 reason: format!("GQL DELETE target node `{target_id}` is not in the built graph"),
             })?;
-        let type_id = engine
-            .edge_type_registry
-            .iter()
-            .position(|label| label == &plan.rel_type)
-            .map(|idx| idx as u8)
-            .ok_or_else(|| safety::GraphError::GqlExecution {
+        let type_id = engine.edge_type_id(&plan.rel_type).ok_or_else(|| {
+            safety::GraphError::GqlExecution {
                 reason: format!(
                     "relationship type `{}` is not present in the built graph",
                     plan.rel_type
                 ),
-            })?;
+            }
+        })?;
         Ok::<_, safety::GraphError>((source, target, type_id))
     })?;
     crate::projection::tx_delta::record_deleted_edge_with_identity(
@@ -3102,11 +3099,7 @@ fn record_detach_deleted_edge_delta(edge: &DeletedIncidentEdge) -> safety::Graph
         let engine = engine.borrow();
         let source = engine.resolve(edge.source_table_oid, &edge.source_id)?;
         let target = engine.resolve(edge.target_table_oid, &edge.target_id)?;
-        let type_id = engine
-            .edge_type_registry
-            .iter()
-            .position(|label| label == &edge.rel_type)
-            .map(|idx| idx as u8)?;
+        let type_id = engine.edge_type_id(&edge.rel_type)?;
         Some((source, target, type_id))
     }) else {
         return Ok(());
@@ -3305,17 +3298,14 @@ fn record_added_relationship_delta(
             tenant_scope,
             "target",
         )?;
-        let type_id = engine
-            .edge_type_registry
-            .iter()
-            .position(|label| label == &plan.rel_type)
-            .map(|index| index as u8)
-            .ok_or_else(|| safety::GraphError::GqlExecution {
+        let type_id = engine.edge_type_id(&plan.rel_type).ok_or_else(|| {
+            safety::GraphError::GqlExecution {
                 reason: format!(
                     "relationship type `{}` is not present in the built graph",
                     plan.rel_type
                 ),
-            })?;
+            }
+        })?;
         Ok::<_, safety::GraphError>((
             source,
             target,
@@ -4882,14 +4872,11 @@ fn test_record_tx_edge(
                         table: target_table.to_u32().to_string(),
                         pk: target_id.to_string(),
                     })?;
-                let type_id = engine
-                    .edge_type_registry
-                    .iter()
-                    .position(|label| label == edge_label)
-                    .map(|idx| idx as u8)
-                    .ok_or_else(|| safety::GraphError::InvalidFilter {
+                let type_id = engine.edge_type_id(edge_label).ok_or_else(|| {
+                    safety::GraphError::InvalidFilter {
                         reason: format!("unknown edge type '{edge_label}'"),
-                    })?;
+                    }
+                })?;
                 Ok::<_, safety::GraphError>((
                     source_idx,
                     target_idx,

@@ -363,20 +363,13 @@ pub(crate) fn prepare_eager_visibility(
         let engine = engine.borrow();
         let mut relationship_rls_edge_types = RoaringBitmap::new();
         for edge in &active_edges {
-            let edge_type = engine
-                .edge_type_registry
-                .iter()
-                .position(|label| label == &edge.label)
-                .ok_or_else(|| {
-                    GraphError::Internal(format!(
-                        "registered RLS edge label '{}' is absent from the loaded projection",
-                        edge.label
-                    ))
-                })?;
-            relationship_rls_edge_types
-                .insert(u32::try_from(edge_type).map_err(|_| {
-                    GraphError::Internal("edge type index exceeds u32".to_string())
-                })?);
+            let edge_type = engine.edge_type_registry.id(&edge.label).ok_or_else(|| {
+                GraphError::Internal(format!(
+                    "registered RLS edge label '{}' is absent from the loaded projection",
+                    edge.label
+                ))
+            })?;
+            relationship_rls_edge_types.insert(edge_type.get());
         }
         if active_edges.iter().any(|edge| edge.label_column.is_some()) {
             for edge_type in 1..engine.edge_type_registry.len() {
@@ -655,11 +648,7 @@ pub(crate) fn prepare_bfs_visibility(
                             &edge.from_table,
                         )?;
                         let edge_type = ENGINE.with(|engine| {
-                            engine
-                                .borrow()
-                                .edge_type_registry
-                                .iter()
-                                .position(|label| label == &edge.label)
+                            engine.borrow().edge_type_registry.id(&edge.label)
                         });
                         let edge_type = edge_type.ok_or_else(|| {
                             GraphError::Internal(format!(
@@ -667,8 +656,8 @@ pub(crate) fn prepare_bfs_visibility(
                                 edge.label
                             ))
                         })?;
-                        let edge_type = u8::try_from(edge_type).map_err(|_| {
-                            GraphError::Internal("edge type index exceeds u8".into())
+                        let edge_type = edge_type.to_v6_storage().map_err(|_| {
+                            GraphError::Internal("edge type index exceeds v6 storage".into())
                         })?;
                         BFS_VISIBILITY_PREPARATION_SLOT.with(|slot| {
                             let mut slot = slot.borrow_mut();

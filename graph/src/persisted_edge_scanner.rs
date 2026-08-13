@@ -5,6 +5,7 @@ use pgrx::prelude::*;
 use crate::build_runs::{merge_runs, RunCollector, RunKind, RunRecord, RunWorkspace, StagedRun};
 use crate::builder::{PrimaryKeySpec, RegisteredEdge, RegisteredTable};
 use crate::catalog::sql_table_name_from_oid;
+use crate::edge_type_registry::EdgeTypeRegistry;
 use crate::quote::quote_ident;
 use crate::resource::{ByteCount, ResourceGovernor, ResourceLease, ResourcePhase};
 use crate::safety::{GraphError, GraphResult};
@@ -47,11 +48,14 @@ pub(crate) fn scan_persisted_edges<'governor>(
         run_target,
         max_record_bytes,
     )?;
-    let mut registry = Vec::new();
-    registry.try_reserve(16).map_err(allocation_error)?;
-    registry.push(String::new());
+    let mut registry = EdgeTypeRegistry::new_v6();
     let mut registry_memory = governor
-        .reserve_memory(ResourcePhase::EdgeResolve, ByteCount::ZERO)
+        .reserve_memory(
+            ResourcePhase::EdgeResolve,
+            ByteCount::from_usize(registry.heap_bytes()).ok_or_else(|| {
+                GraphError::Internal("initial edge registry memory exceeds u64".into())
+            })?,
+        )
         .map_err(resource_error)?;
 
     for edge in edges {
@@ -175,11 +179,19 @@ pub(crate) fn scan_persisted_edges<'governor>(
     }
 
     let raw = finish_single(raw, workspace, governor, merge_fanout, max_record_bytes)?;
+    let retained_registry_bytes = registry
+        .ordered_heap_bytes()
+        .checked_add(64)
+        .and_then(ByteCount::from_usize)
+        .ok_or_else(|| GraphError::Internal("edge registry retained size overflowed".into()))?;
+    registry_memory
+        .try_resize(retained_registry_bytes)
+        .map_err(resource_error)?;
     normalize_relationships(
         raw.as_ref(),
         workspace,
         governor,
-        registry,
+        registry.into_labels(),
         registry_memory,
         run_target,
         max_record_bytes,
@@ -434,36 +446,30 @@ fn push_oriented(
 }
 
 fn intern_edge_type(
-    registry: &mut Vec<String>,
+    registry: &mut EdgeTypeRegistry,
     memory: &mut ResourceLease<'_>,
     label: &str,
     max_record_bytes: usize,
 ) -> GraphResult<u8> {
-    if let Some(index) = registry.iter().position(|value| value == label) {
-        return u8::try_from(index)
-            .map_err(|_| GraphError::Internal("edge type registry exceeds 255 entries".into()));
+    if let Some(type_id) = registry.id(label) {
+        return type_id.to_v6_storage().map_err(|_| {
+            GraphError::Internal("edge type registry exceeds v6 artifact width".into())
+        });
     }
-    if registry.len() >= u8::MAX as usize || label.len() > max_record_bytes {
+    if label.len() > max_record_bytes {
         return Err(GraphError::Internal(
             "edge type registry exceeds bounded artifact limits".into(),
         ));
     }
-    let id = registry.len() as u8;
-    let bytes = std::mem::size_of::<String>()
-        .checked_add(label.len())
-        .and_then(ByteCount::from_usize)
+    let bytes = ByteCount::from_usize(registry.registration_heap_upper_bound(label)?)
         .ok_or_else(|| GraphError::Internal("edge type registry memory overflowed".into()))?;
     memory
         .try_grow_in(ResourcePhase::EdgeResolve, bytes)
         .map_err(resource_error)?;
-    registry.try_reserve(1).map_err(allocation_error)?;
-    let mut owned = String::new();
-    owned
-        .try_reserve_exact(label.len())
-        .map_err(allocation_error)?;
-    owned.push_str(label);
-    registry.push(owned);
-    Ok(id)
+    registry
+        .register_v6(label)?
+        .to_v6_storage()
+        .map_err(|_| GraphError::EdgeTypeLimit)
 }
 
 fn aliased_column(alias: &str, column: &str) -> String {
@@ -604,12 +610,12 @@ mod tests {
     #[test]
     fn edge_type_registry_reserves_slot_zero_and_rejects_entry_256() {
         let governor = ResourceGovernor::new(crate::resource::ResourceLimits::memory_only(
-            crate::resource::MemoryBudget::new(ByteCount::from_bytes(64 * 1024)),
+            crate::resource::MemoryBudget::new(ByteCount::from_bytes(256 * 1024)),
         ));
         let mut memory = governor
             .reserve_memory(ResourcePhase::EdgeResolve, ByteCount::ZERO)
             .unwrap();
-        let mut registry = vec![String::new()];
+        let mut registry = EdgeTypeRegistry::new_v6();
         for index in 0..254 {
             let label = format!("type-{index}");
             assert!(intern_edge_type(&mut registry, &mut memory, &label, 128).is_ok());

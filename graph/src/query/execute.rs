@@ -947,10 +947,7 @@ fn wildcard_segment_endpoint_matches(
 
 fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<u8> {
     engine
-        .edge_type_registry
-        .iter()
-        .position(|label| label == rel_type)
-        .map(|idx| idx as u8)
+        .edge_type_id(rel_type)
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("relationship type `{rel_type}` is not present in the built graph"),
         })
@@ -2154,7 +2151,7 @@ mod resource_accounting_tests {
             .entry(10)
             .or_default()
             .insert(visible_target);
-        engine.edge_type_registry.push("knows".to_string());
+        engine.register_edge_type("knows").unwrap();
         let mut outgoing = crate::edge_store::SortedEdgeStoreBuilder::new(3, false);
         outgoing
             .try_push_identified(crate::edge_store::IdentifiedRawEdge {

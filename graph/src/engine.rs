@@ -7,6 +7,7 @@
 
 use crate::bfs;
 use crate::edge_store::EdgeStore;
+use crate::edge_type_registry::EdgeTypeRegistry;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
@@ -66,7 +67,7 @@ pub(crate) struct MmapBackedGraph {
     pub(crate) edge_store: EdgeStore,
     pub(crate) reverse_edge_store: EdgeStore,
     pub(crate) filter_index: FilterIndex,
-    pub(crate) edge_type_registry: Vec<String>,
+    pub(crate) edge_type_registry: EdgeTypeRegistry,
     pub(crate) relationship_identities: RelationshipIdentityStore,
     pub(crate) mmap: Arc<memmap2::Mmap>,
     pub(crate) resolution_state: MmapResolutionState,
@@ -86,7 +87,7 @@ pub struct Engine {
     pub(crate) filter_index: FilterIndex,
     /// Edge label registry. The bounded artifact section is decoded into
     /// backend-local heap after validation.
-    pub(crate) edge_type_registry: Vec<String>,
+    pub(crate) edge_type_registry: EdgeTypeRegistry,
     /// Source-row identities indexed by nonzero CSR relationship IDs. Persisted
     /// base descriptors and keys remain mapped; later identities form a suffix.
     pub(crate) relationship_identities: RelationshipIdentityStore,
@@ -397,16 +398,12 @@ impl Engine {
             Some(types) => {
                 let mut set = HashSet::new();
                 for label in types {
-                    let Some(position) = self
-                        .edge_type_registry
-                        .iter()
-                        .position(|item| item == &label)
-                    else {
+                    let Some(type_id) = self.edge_type_id(&label) else {
                         return Err(GraphError::InvalidFilter {
                             reason: format!("unknown edge type '{label}'"),
                         });
                     };
-                    set.insert(position as u8);
+                    set.insert(type_id);
                 }
                 if set.is_empty() {
                     EdgeTypeFilter::NoneMatched
@@ -913,7 +910,7 @@ impl Engine {
         }
     }
     pub fn new() -> Self {
-        let edge_type_registry = vec!["".to_string()];
+        let edge_type_registry = EdgeTypeRegistry::new_v6();
         // Index 0 = untyped (reserved)
 
         Self {
@@ -1460,25 +1457,18 @@ impl Engine {
         Ok(())
     }
 
-    /// Register a new edge type label. Returns the u8 type ID.
+    /// Register a new edge type label. Returns its v6 storage ID.
     pub fn register_edge_type(&mut self, label: &str) -> GraphResult<u8> {
-        // Check if already registered
-        if let Some(pos) = self.edge_type_registry.iter().position(|l| l == label) {
-            return Ok(pos as u8);
-        }
-        if self.edge_type_registry.len() >= 255 {
-            return Err(GraphError::EdgeTypeLimit);
-        }
-        let id = self.edge_type_registry.len() as u8;
-        self.edge_type_registry.push(label.to_string());
-        Ok(id)
+        self.edge_type_registry
+            .register_v6(label)?
+            .to_v6_storage()
+            .map_err(|_| GraphError::EdgeTypeLimit)
     }
 
     pub(crate) fn edge_type_id(&self, label: &str) -> Option<u8> {
         self.edge_type_registry
-            .iter()
-            .position(|registered| registered == label)
-            .map(|idx| idx as u8)
+            .id(label)
+            .and_then(|logical| logical.to_v6_storage().ok())
     }
 
     /// Resolve a (table_oid, pk) → node_idx.
@@ -1879,12 +1869,12 @@ impl Engine {
             Some(types) => {
                 let mut set = HashSet::new();
                 for t in &types {
-                    let Some(pos) = self.edge_type_registry.iter().position(|l| l == t) else {
+                    let Some(type_id) = self.edge_type_id(t) else {
                         return Err(GraphError::InvalidFilter {
                             reason: format!("unknown edge type '{}'", t),
                         });
                     };
-                    set.insert(pos as u8);
+                    set.insert(type_id);
                 }
                 if set.is_empty() {
                     EdgeTypeFilter::NoneMatched
@@ -2428,19 +2418,12 @@ impl Engine {
         };
         let mut filter = roaring::RoaringBitmap::new();
         for edge_type in edge_types {
-            let Some(index) = self
-                .edge_type_registry
-                .iter()
-                .position(|label| label == edge_type)
-            else {
+            let Some(type_id) = self.edge_type_registry.id(edge_type) else {
                 return Err(GraphError::InvalidFilter {
                     reason: format!("unknown edge type '{edge_type}'"),
                 });
             };
-            filter
-                .insert(u32::try_from(index).map_err(|_| {
-                    GraphError::Internal("edge type index exceeds u32".to_string())
-                })?);
+            filter.insert(type_id.get());
         }
         Ok(Some(filter))
     }
@@ -2692,12 +2675,7 @@ impl Engine {
             ResolutionStore::Finalized(bytes) => bytes.capacity(),
             ResolutionStore::MmapBacked(_) => 0,
         } + self.resolution_delta.estimated_heap_bytes();
-        let registry_bytes = self.edge_type_registry.capacity() * std::mem::size_of::<String>()
-            + self
-                .edge_type_registry
-                .iter()
-                .map(String::capacity)
-                .sum::<usize>();
+        let registry_bytes = self.edge_type_registry.heap_bytes();
         let edge_buffer_bytes = self.edge_buffer.capacity() * std::mem::size_of::<EdgeMutation>();
         let edge_buffer_summary_bytes = self
             .edge_buffer_missing_relationship_identity_keys
@@ -3029,7 +3007,7 @@ mod tests {
         let mut engine = Engine::new();
         engine.node_store.add_node(10, "A".to_string());
         engine.node_store.add_node(10, "B".to_string());
-        engine.edge_type_registry.push("test_edge".to_string());
+        engine.register_edge_type("test_edge").unwrap();
         engine.has_unidirectional_edges = true;
         engine.built = true;
 

@@ -33,6 +33,7 @@ mod connected_components;
 mod cypher;
 mod discover;
 mod edge_store;
+mod edge_type_registry;
 mod engine;
 mod filter_index;
 mod gql;

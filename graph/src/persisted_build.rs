@@ -1560,7 +1560,7 @@ mod tests {
         assert_eq!(loaded.node_store.primary_key(1), Some("b"));
         assert_eq!(loaded.edge_store.neighbors(0), (&[1][..], &[1][..]));
         assert_eq!(loaded.reverse_edge_store.neighbors(1), (&[0][..], &[1][..]));
-        assert_eq!(loaded.edge_type_registry, registry);
+        assert_eq!(loaded.edge_type_registry.as_slice(), registry);
         assert_eq!(loaded.edge_store.weights_slice(), &[5]);
         assert_eq!(
             loaded

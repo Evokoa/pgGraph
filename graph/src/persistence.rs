@@ -51,6 +51,7 @@ use memmap2::{Mmap, MmapMut};
 
 use crate::config;
 use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
+use crate::edge_type_registry::EdgeTypeRegistry;
 use crate::engine::{Engine, MmapBackedGraph, MmapResolutionState};
 use crate::filter_index::FilterIndex;
 use crate::graph_policy::GraphId;
@@ -1481,7 +1482,7 @@ fn write_graph_file_internal(
     release_persistence_workspace(&mut workspace);
 
     writer.begin_section(20)?;
-    write_string_registry(&mut writer, &engine.edge_type_registry)?;
+    write_string_registry(&mut writer, engine.edge_type_registry.as_slice())?;
 
     writer.begin_section(21)?;
     write_relationship_identity_descriptors(&mut writer, &engine.relationship_identities)?;
@@ -2171,9 +2172,9 @@ fn load_graph_file_internal(
     let filter_metadata_bytes = FilterIndex::mapped_load_metadata_upper_bound(
         &mmap[layout.ranges[17].0..layout.ranges[17].1],
     )?;
-    let registry_metadata_bytes = (layout.ranges[20].1 - layout.ranges[20].0)
-        .checked_mul(4)
-        .ok_or_else(|| GraphError::Internal("registry metadata estimate overflowed".into()))?;
+    let registry_metadata_bytes = EdgeTypeRegistry::v6_load_metadata_upper_bound(
+        &mmap[layout.ranges[20].0..layout.ranges[20].1],
+    )?;
     let identity_validation_bytes = (layout.ranges[21].1 - layout.ranges[21].0)
         .checked_mul(4)
         .ok_or_else(|| GraphError::Internal("identity metadata estimate overflowed".into()))?;
@@ -2246,26 +2247,10 @@ fn load_graph_file_internal(
         tenanted_table_oids.insert(read_u32_at(tenanted_oid_bytes, index * 4));
     }
 
-    let edge_type_registry = decode_string_registry(&artifact.mmap, section_ranges[20])?;
-    if edge_type_registry
-        .first()
-        .is_none_or(|label| !label.is_empty())
-    {
-        return Err(GraphError::CorruptFile {
-            reason: "edge type registry must reserve empty label at index 0".to_string(),
-        });
-    }
-    if edge_type_registry.len() > 255
-        || edge_type_registry.iter().skip(1).any(String::is_empty)
-        || edge_type_registry
-            .iter()
-            .enumerate()
-            .any(|(index, label)| edge_type_registry[..index].contains(label))
-    {
-        return Err(GraphError::CorruptFile {
-            reason: "edge type registry contains invalid or duplicate labels".into(),
-        });
-    }
+    let edge_type_registry = EdgeTypeRegistry::try_from_v6_labels(decode_string_registry(
+        &artifact.mmap,
+        section_ranges[20],
+    )?)?;
     let registry_len = edge_type_registry.len();
     if edge_store
         .type_ids_slice()
@@ -2911,12 +2896,12 @@ mod tests {
         assert_eq!(loaded.node_store.primary_key(b), Some("B-2"));
         assert_eq!(loaded.resolve(10, "A-1"), Some(a));
         assert_eq!(loaded.resolve(10, "B-2"), Some(b));
-        assert_eq!(loaded.edge_type_registry, vec!["", "officer_of"]);
+        assert_eq!(loaded.edge_type_registry.as_slice(), ["", "officer_of"]);
         assert!(loaded.edge_store.has_weights());
         assert_eq!(loaded.edge_store.neighbors_weighted(a).2, &[7]);
         assert_eq!(reloaded.node_store.primary_key(a), Some("A-1"));
         assert_eq!(reloaded.node_store.primary_key(b), Some("B-2"));
-        assert_eq!(reloaded.edge_type_registry, vec!["", "officer_of"]);
+        assert_eq!(reloaded.edge_type_registry.as_slice(), ["", "officer_of"]);
         assert_eq!(reloaded.edge_store.neighbors_weighted(a).2, &[7]);
     }
 
@@ -3118,12 +3103,58 @@ mod tests {
         let filter_metadata =
             FilterIndex::mapped_load_metadata_upper_bound(&artifact[catalog_start..catalog_end])
                 .expect("metadata bound computes");
-        let registry_metadata = (read_section_len(&path, 20) as usize) * 4;
+        let registry_start = read_section_offset(&path, 20) as usize;
+        let registry_end = registry_start + read_section_len(&path, 20) as usize;
+        let registry_metadata =
+            EdgeTypeRegistry::v6_load_metadata_upper_bound(&artifact[registry_start..registry_end])
+                .expect("registry metadata bound computes");
         let identity_metadata = (read_section_len(&path, 21) as usize) * 4;
         let metadata = filter_metadata + registry_metadata + identity_metadata;
         let hard = crate::resource::configured_memory_limit_mb().max(1) as u64 * 1_048_576;
         let admitted = artifact.len() as u64 + metadata as u64;
         let resident = crate::resource::ByteCount::from_bytes(hard - admitted + 1);
+
+        let result = load_graph_file_with_residency(&path, resident);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::ResourceLimit { .. })));
+    }
+
+    #[test]
+    fn mapped_registry_lookup_metadata_is_charged_before_near_limit_load() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(10, "A".to_string());
+        engine.resolution_insert(10, "A", 0);
+        engine.edge_store = EdgeStore::from_edges(1, vec![], false);
+        for index in 1..=EdgeTypeId::V6_MAX_USER_ID {
+            engine
+                .register_edge_type(&format!("t{index}"))
+                .expect("v6 registry entry fits");
+        }
+        engine.built = true;
+        let path = temp_graph_path("near-limit-registry-metadata");
+        write_graph_file(&engine, &path).expect("fixture writes");
+
+        let artifact = std::fs::read(&path).expect("artifact reads");
+        let catalog_start = read_section_offset(&path, 17) as usize;
+        let catalog_end = catalog_start + read_section_len(&path, 17) as usize;
+        let filter_metadata =
+            FilterIndex::mapped_load_metadata_upper_bound(&artifact[catalog_start..catalog_end])
+                .expect("filter metadata bound computes");
+        let registry_start = read_section_offset(&path, 20) as usize;
+        let registry_end = registry_start + read_section_len(&path, 20) as usize;
+        let old_registry_metadata = (registry_end - registry_start) * 4;
+        let registry_metadata =
+            EdgeTypeRegistry::v6_load_metadata_upper_bound(&artifact[registry_start..registry_end])
+                .expect("registry metadata bound computes");
+        assert!(registry_metadata > old_registry_metadata);
+        let identity_metadata = (read_section_len(&path, 21) as usize) * 4;
+        let formerly_admitted = artifact.len() as u64
+            + filter_metadata as u64
+            + old_registry_metadata as u64
+            + identity_metadata as u64;
+        let hard = crate::resource::configured_memory_limit_mb().max(1) as u64 * 1_048_576;
+        let resident = crate::resource::ByteCount::from_bytes(hard - formerly_admitted + 1);
 
         let result = load_graph_file_with_residency(&path, resident);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

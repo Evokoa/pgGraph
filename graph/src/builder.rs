@@ -333,6 +333,14 @@ pub(crate) fn build_graph_with_governor(
     let mut persistent_memory = governor
         .reserve_memory(ResourcePhase::Replacement, ByteCount::ZERO)
         .map_err(resource_error_to_graph)?;
+    persistent_memory
+        .try_grow_in(
+            ResourcePhase::Replacement,
+            ByteCount::from_usize(engine.edge_type_registry.heap_bytes()).ok_or_else(|| {
+                GraphError::Internal("initial edge type registry memory exceeds u64".into())
+            })?,
+        )
+        .map_err(resource_error_to_graph)?;
     create_node_lookup_spool()?;
     let mut node_lookup_batch = NodeLookupBatch::with_limits(
         governor,
@@ -515,7 +523,11 @@ pub(crate) fn build_graph_with_governor(
 
     for edge in edges {
         let static_edge_type_id = if edge.label_column.is_none() {
-            Some(engine.register_edge_type(&edge.label)?)
+            Some(register_edge_type_governed(
+                &mut engine,
+                &mut persistent_memory,
+                &edge.label,
+            )?)
         } else {
             None
         };
@@ -616,7 +628,11 @@ pub(crate) fn build_graph_with_governor(
                             })?
                             .filter(|label| !label.trim().is_empty())
                             .unwrap_or_else(|| edge.label.clone());
-                        engine.register_edge_type(&dynamic_label)?
+                        register_edge_type_governed(
+                            &mut engine,
+                            &mut persistent_memory,
+                            &dynamic_label,
+                        )?
                     } else {
                         let Some(edge_type_id) = static_edge_type_id else {
                             return Err(GraphError::Internal(
@@ -839,6 +855,24 @@ fn unresolved_edge_memory_bytes(edge: &UnresolvedEdge) -> GraphResult<ByteCount>
         .ok_or_else(|| {
             GraphError::Internal("unresolved edge memory accounting overflowed".to_string())
         })
+}
+
+fn register_edge_type_governed(
+    engine: &mut Engine,
+    persistent_memory: &mut crate::resource::ResourceLease<'_>,
+    label: &str,
+) -> GraphResult<u8> {
+    let growth = engine
+        .edge_type_registry
+        .registration_heap_upper_bound(label)
+        .and_then(|bytes| {
+            ByteCount::from_usize(bytes)
+                .ok_or_else(|| GraphError::Internal("edge type registry growth exceeds u64".into()))
+        })?;
+    persistent_memory
+        .try_grow_in(ResourcePhase::EdgeResolve, growth)
+        .map_err(resource_error_to_graph)?;
+    engine.register_edge_type(label)
 }
 
 fn resolve_edge_batch(
