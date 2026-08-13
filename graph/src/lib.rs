@@ -925,6 +925,10 @@ mod p7_contract_tests;
 #[path = "p8_contract_tests.rs"]
 mod p8_contract_tests;
 
+#[cfg(test)]
+#[path = "p9_contract_tests.rs"]
+mod p9_contract_tests;
+
 /// Covers SQL API behavior through PostgreSQL, including registration,
 /// discovery, build, search, traversal, path, component, and sync flows.
 #[cfg(feature = "pg_test")]

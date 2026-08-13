@@ -363,15 +363,7 @@ fn validate_semantic_shape(build: &SemanticDirectBuild<'_, '_>) -> GraphResult<(
             "direct edge type registry contains duplicate labels".into(),
         ));
     }
-    let width = build_edge_type_width(build)?;
-    if width != EdgeTypeWidth::One && build.projection_mode != ProjectionMode::CsrReadonly {
-        return Err(GraphError::UnsupportedOperation {
-            operation: "wide relationship type build".into(),
-            reason:
-                "wide relationship types require csr_readonly until mutable segment migration completes"
-                    .into(),
-        });
-    }
+    build_edge_type_width(build)?;
     for (run, count, label) in [
         (build.forward_edges, build.forward_edge_count, "forward"),
         (build.inbound_edges, build.inbound_edge_count, "inbound"),
@@ -1386,7 +1378,6 @@ mod tests {
         ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
         RowCount, WorkUnits,
     };
-    use crate::safety::GraphError;
     use crate::types::EdgeTypeId;
 
     fn assert_wide_v7_roundtrip(
@@ -1495,15 +1486,6 @@ mod tests {
             max_record_bytes: 128,
             governor: &governor,
         };
-        if projection_mode == ProjectionMode::MutableOverlay && expected_width != EdgeTypeWidth::One
-        {
-            let error =
-                write_semantic_artifact(&path, &build).expect_err("wide mutable build rejects");
-            assert!(matches!(error, GraphError::UnsupportedOperation { .. }));
-            assert!(!path.exists());
-            let _ = std::fs::remove_dir_all(temp);
-            return;
-        }
         write_semantic_artifact(&path, &build).expect("v7 candidate writes");
         let metadata = crate::persistence::graph_artifact_metadata_for_path(&path).unwrap();
         assert_eq!(metadata.version, 7);
@@ -1527,8 +1509,9 @@ mod tests {
     }
 
     #[test]
-    fn direct_build_wide_mutable_mode_rejects_before_candidate_publication() {
+    fn direct_build_wide_mutable_mode_roundtrips_adaptive_types() {
         assert_wide_v7_roundtrip(255, EdgeTypeWidth::Two, ProjectionMode::MutableOverlay);
+        assert_wide_v7_roundtrip(65_535, EdgeTypeWidth::Four, ProjectionMode::MutableOverlay);
     }
 
     #[test]

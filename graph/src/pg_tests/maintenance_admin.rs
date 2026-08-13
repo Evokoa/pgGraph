@@ -15,7 +15,8 @@ fn adaptive_edge_types_above_v6_roundtrip_and_filter_exactly() {
              'user_id', 'graph_test_users_pgtest'::regclass,
              'friend_id', 'fallback', false, label_column := 'id');
          SET graph.persist_on_build = on;
-         SELECT * FROM graph.build()",
+         SET graph.mutable_enabled = on;
+         SELECT * FROM graph.build(mode := 'mutable_overlay')",
     )
     .expect("build adaptive relationship fixture failed");
     Spi::run("SELECT graph.unload_graph('default')").expect("unload adaptive graph failed");
