@@ -209,22 +209,71 @@ fn dfs_and_reverse_traversal_freeze_order_and_visited_timing_before_migration() 
 }
 
 #[test]
-#[ignore = "P4 path checkpoints contract"]
-fn targeted_paths_freeze_meeting_heap_and_tie_order_before_migration() {
+fn targeted_unweighted_paths_freeze_level_meeting_and_endpoint_semantics_before_migration() {
     let paths = crate_source("src/path_finder.rs");
+    let engine = crate_source("src/engine.rs");
+    let traversal = crate_source("src/sql_facade/traversal.rs");
+    let postgres_paths = crate_source("src/pg_tests/traversal_paths.rs");
 
     for required in [
+        "resumable_single_direction_bfs_matches_eager_target_discovery_and_ties",
         "resumable_bidirectional_bfs_matches_eager_meeting_node_selection",
-        "resumable_dijkstra_matches_eager_heap_and_tie_order",
+        "resumable_bidirectional_bfs_completes_chosen_level_before_selecting_meeting",
+        "resumable_unweighted_paths_match_eager_hidden_nodes_relationships_and_endpoints",
+        "resumable_unweighted_paths_match_eager_overlay_durable_and_tx",
+        "resumable_unweighted_paths_match_eager_for_generated_graphs_and_visibility_masks",
+        "resumable_unweighted_paths_preserve_max_depth_work_caps_errors_and_epoch_rejection",
     ] {
         assert!(
-            paths.contains(required),
-            "P4 path differential corpus is missing `{required}`"
+            paths.contains(required) || engine.contains(required),
+            "P4.4 unweighted-path differential corpus is missing `{required}`"
         );
     }
     assert!(
-        paths.contains("ResumableBidirectionalBfs") && paths.contains("ResumableDijkstra"),
-        "targeted paths need explicit resumable state; endpoint-only probing is not a substitute for filtering every intermediate during traversal"
+        paths.contains("ResumableSingleDirectionBfs")
+            && paths.contains("ResumableBidirectionalBfs"),
+        "single-direction and bidirectional paths need separate owned resumable state so every intermediate can be policy-resolved outside ENGINE borrows"
+    );
+    assert!(
+        traversal.contains("execute_lazy_shortest_path_rows")
+            && traversal.contains("resolve_bfs_visibility_batch"),
+        "graph.shortest_path must resolve bounded node and relationship candidates through the established PostgreSQL policy oracle"
+    );
+    let shortest_path_rows = function_body(&traversal, "fn shortest_path_rows_governed");
+    assert!(
+        shortest_path_rows.contains("execute_lazy_shortest_path_rows")
+            && !shortest_path_rows.contains("prepare_eager_visibility"),
+        "the direct unweighted path API must select its resumable executor instead of unconditionally preparing the eager oracle"
+    );
+
+    for required in [
+        "unweighted_paths_lazy_match_eager_single_bidirectional_ties_and_order",
+        "unweighted_paths_lazy_node_and_relationship_rls_choose_visible_route",
+        "unweighted_paths_lazy_source_target_visibility_preserves_error_ordering",
+        "unweighted_paths_lazy_overlay_durable_and_tx_match_eager",
+        "unweighted_paths_lazy_resource_cap_and_missing_identity_fail_closed",
+        "unweighted_paths_lazy_cancellation_policy_error_drop_state_then_retry",
+        "unweighted_paths_no_rls_fast_path_has_zero_visibility_spi",
+    ] {
+        assert!(
+            postgres_paths.contains(required),
+            "P4.4 PostgreSQL unweighted-path corpus is missing `{required}`"
+        );
+    }
+}
+
+#[test]
+#[ignore = "P4.5 weighted-path checkpoint contract"]
+fn targeted_weighted_paths_freeze_heap_and_tie_order_before_migration() {
+    let paths = crate_source("src/path_finder.rs");
+
+    assert!(
+        paths.contains("resumable_dijkstra_matches_eager_heap_and_tie_order"),
+        "P4.5 weighted-path differential corpus must preserve eager heap and tie order"
+    );
+    assert!(
+        paths.contains("ResumableDijkstra"),
+        "weighted paths need explicit resumable heap state before policy probes may interrupt expansion"
     );
 }
 

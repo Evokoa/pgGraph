@@ -22,7 +22,7 @@ pub(crate) struct TraverseCandidate {
     capped: bool,
 }
 
-fn relation_name_with_rust_unwind(table_oid: u32) -> safety::GraphResult<String> {
+pub(crate) fn relation_name_with_rust_unwind(table_oid: u32) -> safety::GraphResult<String> {
     crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
         relation_name(table_oid)
     }))

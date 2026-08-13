@@ -474,6 +474,7 @@ fn path(
             target_id,
             max_depth,
             true,
+            None,
             &governor,
             &query_start.tables,
             &query_start.edges,

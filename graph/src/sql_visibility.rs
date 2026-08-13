@@ -81,6 +81,9 @@ thread_local! {
 
     #[cfg(feature = "development")]
     static VISIBILITY_STRATEGY_OVERRIDE: Cell<VisibilityStrategyOverride> = const { Cell::new(VisibilityStrategyOverride::Auto) };
+
+    #[cfg(feature = "development")]
+    static VISIBILITY_SELECTED_STRATEGY: Cell<VisibilityStrategyOverride> = const { Cell::new(VisibilityStrategyOverride::Auto) };
 }
 
 #[cfg(feature = "development")]
@@ -102,6 +105,19 @@ pub(crate) fn lazy_bfs_strategy_enabled(coordinator: &LazyVisibilityCoordinator)
     }
     #[cfg(not(feature = "development"))]
     coordinator.is_enforced()
+}
+
+pub(crate) fn record_selected_visibility_strategy(lazy: bool) {
+    #[cfg(feature = "development")]
+    VISIBILITY_SELECTED_STRATEGY.with(|slot| {
+        slot.set(if lazy {
+            VisibilityStrategyOverride::Lazy
+        } else {
+            VisibilityStrategyOverride::Eager
+        });
+    });
+    #[cfg(not(feature = "development"))]
+    let _ = lazy;
 }
 
 struct VisibilityResolutionGuard;
@@ -2188,8 +2204,14 @@ fn test_visibility_metrics() -> pgrx::JsonB {
         VISIBILITY_LAST_METRICS.with(Cell::get);
     let bfs = BFS_VISIBILITY_LAST_METRICS.with(Cell::get);
     let strategy = VISIBILITY_STRATEGY_OVERRIDE.with(Cell::get);
+    let selected_strategy = VISIBILITY_SELECTED_STRATEGY.with(Cell::get);
     pgrx::JsonB(serde_json::json!({
         "strategy": match strategy {
+            VisibilityStrategyOverride::Auto => "auto",
+            VisibilityStrategyOverride::Eager => "eager",
+            VisibilityStrategyOverride::Lazy => "lazy",
+        },
+        "selected_strategy": match selected_strategy {
             VisibilityStrategyOverride::Auto => "auto",
             VisibilityStrategyOverride::Eager => "eager",
             VisibilityStrategyOverride::Lazy => "lazy",
@@ -2219,6 +2241,7 @@ fn test_set_visibility_strategy(strategy: &str) -> bool {
         .report(),
     };
     VISIBILITY_STRATEGY_OVERRIDE.with(|slot| slot.set(strategy));
+    VISIBILITY_SELECTED_STRATEGY.with(|slot| slot.set(VisibilityStrategyOverride::Auto));
     BFS_VISIBILITY_LAST_METRICS.with(|metrics| metrics.set(BfsVisibilityMetrics::EMPTY));
     true
 }

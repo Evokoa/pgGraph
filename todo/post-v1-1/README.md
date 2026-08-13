@@ -143,7 +143,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P1 | Complete | Every topology-producing internal execution path requires the coordinator; the eager oracle produces byte-for-byte equivalent results and no SPI can run under an engine borrow. |
 | P2 | Complete | Direct identity resolution uses bounded tri-state probes with caller identity, cancellation cleanup, scalar/composite key plans, and eager differential parity. |
 | P3 | Complete | `get_neighbors`, depth-bounded BFS, multi-seed traversal, ordering, caps, parents, and truncation are lazy/eager equivalent on clean CSR. |
-| P4 | In progress (P4.3 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
+| P4 | In progress (P4.4 complete) | DFS, reverse, bidirectional and weighted paths, workflows, overlays, and eligible targeted GQL expansions preserve exact result ordering and semantics. |
 | P5 | Not started | Targeted queries select lazy and global analytics select eager; redundant read checks are removed only if proven; 1M/10M evidence meets the accepted latency and memory budgets. |
 | P6 | Not started | The existing `EdgeTypeId` becomes the one production checked authority for reserved values and conversions; behavior and artifact bytes remain unchanged while width candidates are measured. |
 | P7 | Not started | Runtime topology and a validated versioned base artifact support more than 254 exact relationship types without regressing normal-graph hot paths beyond the accepted budget. |
@@ -258,11 +258,9 @@ silently omitting visibility, while eager behavior remains equivalent.
 - Add a narrow recursive-visibility guard cleared with
   `PgTryBuilder::finally`; never keep Rust borrows or ordinary stack-owned
   graph-sized state across PostgreSQL ERROR/longjmp.
-- Use lazy probes for `get_node` and true depth-zero seeds. Positive-depth
-  shortest paths remain eager until P4's resumable bidirectional and weighted
-  executors can resolve endpoints and intermediates under one policy snapshot;
-  an endpoint-only pre-probe would duplicate policy evaluation without
-  reducing source work.
+- Use lazy probes for `get_node` and true depth-zero seeds. At the P2
+  checkpoint, positive-depth shortest paths remained eager; unweighted paths
+  moved to resumable execution in P4.4, while weighted paths remain eager.
 - Add negative-cache, cancellation, policy error, recursion, memory exhaustion,
   current-setting, role, snapshot, and transaction-delta tests.
 
@@ -274,7 +272,8 @@ with requested identities rather than table membership.
 - `get_node()` and true single-root `traverse(max_depth := 0)` use a bounded,
   statement-local tri-state resolver. At the P2 checkpoint, positive-depth
   traversal and paths remained on the eager oracle; BFS and DFS moved to their
-  resumable engines in P3 and P4.3, while path algorithms remain eager.
+  resumable engines in P3 and P4.3, unweighted paths moved in P4.4, and
+  weighted paths remain eager.
 - Candidate count, key bytes, probe-plan scratch, cache growth, copied payloads,
   returned work, elapsed time, and PostgreSQL interrupts are governed under
   `query.visibility`. The lazy path has no table-wide maximum-key preflight.
@@ -405,10 +404,21 @@ duplicate/cycle/parallel-edge parent choice, caps and truncation, and exact
 Out/In/Any results across committed, durable, and edge-only transaction state.
 PostgreSQL tests cover forced eager/lazy node and relationship RLS, hidden
 intermediates, cancellation and policy-error cleanup with retry, and the no-RLS
-zero-SPI fast path. P4.4 unweighted paths is the active checkpoint.
+zero-SPI fast path.
 
-- Resolve complete bounded bidirectional-BFS levels without changing meeting
-  node selection.
+P4.4 completed on 2026-08-13. Unweighted shortest paths now own bounded
+single-direction or bidirectional search state across caller-policy probes.
+Single-direction search preserves the eager first-visible-target rule;
+bidirectional search freezes and completes the selected level before choosing
+the strictly shortest first-encountered meeting node. Endpoint probes,
+relationship identities, edge-type filters, mutable edge overlays, durable
+segments, transaction-local edge deltas, work caps, cancellation cleanup, and
+projection-epoch rejection have eager/lazy differential coverage. The no-RLS
+route remains eager with zero visibility SPI. P4.5 weighted paths is the active
+checkpoint. The retained
+[`10k PG17 checkpoint`](../measurements/2026-08-13-p4-unweighted-path-10k/README.md)
+records one functional/performance sample; it is not a statistical benchmark.
+
 - Batch weighted path adjacency one popped node at a time until evidence proves
   a wider priority-safe batch; preserve heap/tie order.
 - Extend to direct workflows, mutable segments, transaction-local identities,

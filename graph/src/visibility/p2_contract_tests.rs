@@ -191,13 +191,15 @@ fn direct_identity_and_depth_zero_select_the_narrow_lazy_path() {
 }
 
 #[test]
-fn positive_depth_shortest_path_remains_on_the_eager_oracle() {
+fn positive_depth_unweighted_paths_use_the_later_resumable_oracle() {
     let traversal = crate_source("src/sql_facade/traversal.rs");
     let shortest = function_body(&traversal, "fn shortest_path_rows_governed");
     assert!(
-        shortest.contains("prepare_eager_visibility")
+        shortest.contains("prepare_bfs_visibility")
+            && shortest.contains("execute_lazy_shortest_path_rows")
+            && shortest.contains("prepare_bfs_eager_fallback")
             && !shortest.contains("prepare_direct_identity_visibility")
             && !shortest.contains("resolve_lazy_visibility_batch"),
-        "positive-depth shortest_path remains eager until its traversal is resumable"
+        "P2 direct identities stay separate after P4.4 moves unweighted paths to the resumable policy oracle"
     );
 }

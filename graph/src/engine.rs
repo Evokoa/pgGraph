@@ -245,6 +245,26 @@ impl From<&ProjectionManifest> for ProjectionManifestSnapshot {
     }
 }
 
+pub(crate) enum ResumableUnweightedPathMachine {
+    Single(path_finder::ResumableSingleDirectionBfs),
+    Bidirectional(path_finder::ResumableBidirectionalBfs),
+}
+
+impl ResumableUnweightedPathMachine {
+    pub(crate) fn is_complete(&self) -> bool {
+        match self {
+            Self::Single(machine) => machine.is_complete(),
+            Self::Bidirectional(machine) => machine.is_complete(),
+        }
+    }
+}
+
+pub(crate) struct ResumableUnweightedPathConfig {
+    overlay_insert_edges: OverlayInserts,
+    overlay_deleted_edges: OverlayDeletes,
+    edge_type_filter: Option<roaring::RoaringBitmap>,
+}
+
 impl Engine {
     fn bfs_projection_epoch(&self) -> bfs::BfsProjectionEpoch {
         let tx = tx_delta::stats();
@@ -528,6 +548,217 @@ impl Engine {
         let truncated = result.truncated;
         let rows = bfs::to_traversal_results(&result, &self.node_store, &self.edge_type_registry)?;
         Ok(TraverseOutcome { rows, truncated })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "path preparation keeps both endpoint coordinates, bounds, filters, and governor explicit"
+    )]
+    pub(crate) fn prepare_resumable_unweighted_path(
+        &self,
+        source_table_oid: u32,
+        source_id: &str,
+        target_table_oid: u32,
+        target_id: &str,
+        max_depth: i32,
+        edge_types: Option<&[String]>,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<(
+        ResumableUnweightedPathConfig,
+        ResumableUnweightedPathMachine,
+    )> {
+        if !self.built {
+            return Err(GraphError::NotBuilt);
+        }
+        let source =
+            self.resolve(source_table_oid, source_id)
+                .ok_or_else(|| GraphError::NodeNotFound {
+                    table: source_table_oid.to_string(),
+                    pk: source_id.to_string(),
+                })?;
+        let target =
+            self.resolve(target_table_oid, target_id)
+                .ok_or_else(|| GraphError::NodeNotFound {
+                    table: target_table_oid.to_string(),
+                    pk: target_id.to_string(),
+                })?;
+        let tx = tx_delta::stats();
+        let single_direction = self.has_unidirectional_edges
+            || self.has_edge_overlay()
+            || self.segment_backed_projection_manifest().is_some();
+        governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryPaths,
+                path_finder::estimated_resumable_path_workspace_bytes(!single_direction)?,
+            )
+            .map_err(crate::safety::resource_limit_error)?
+            .retain_until_governor_drop();
+        let (overlay_insert_edges, overlay_deleted_edges) =
+            self.traversal_edge_overlay(TraversalDirection::Out);
+        governor
+            .reserve_memory(
+                crate::resource::ResourcePhase::QueryExpand,
+                self.estimated_traversal_overlay_clone_bytes()?,
+            )
+            .map_err(crate::safety::resource_limit_error)?
+            .retain_until_governor_drop();
+        let edge_type_filter = self.resolve_edge_type_filter(edge_types)?;
+        let mut machine = if single_direction {
+            ResumableUnweightedPathMachine::Single(
+                path_finder::ResumableSingleDirectionBfs::try_new(
+                    self.node_store.node_count() as usize,
+                    source,
+                    target,
+                    max_depth,
+                )?,
+            )
+        } else {
+            ResumableUnweightedPathMachine::Bidirectional(
+                path_finder::ResumableBidirectionalBfs::try_new(
+                    self.node_store.node_count() as usize,
+                    source,
+                    target,
+                    max_depth,
+                )?,
+            )
+        };
+        let epoch = self.bfs_projection_epoch();
+        match &mut machine {
+            ResumableUnweightedPathMachine::Single(machine) => machine.bind_projection_epoch(epoch),
+            ResumableUnweightedPathMachine::Bidirectional(machine) => {
+                machine.bind_projection_epoch(epoch)
+            }
+        }
+        // Node/filter deltas are not representable by the current path cursor.
+        if tx.dirty && (tx.added_nodes > 0 || tx.deleted_nodes > 0 || tx.filter_updates > 0) {
+            return Err(GraphError::Internal(
+                "resumable unweighted path does not support transaction-local node/filter state"
+                    .into(),
+            ));
+        }
+        Ok((
+            ResumableUnweightedPathConfig {
+                overlay_insert_edges,
+                overlay_deleted_edges,
+                edge_type_filter,
+            },
+            machine,
+        ))
+    }
+
+    pub(crate) fn resumable_unweighted_path_eligible(&self) -> bool {
+        let tx = tx_delta::stats();
+        !tx.dirty || (tx.added_nodes == 0 && tx.deleted_nodes == 0 && tx.filter_updates == 0)
+    }
+
+    pub(crate) fn materialize_resumable_unweighted_path_batch(
+        &self,
+        machine: &mut ResumableUnweightedPathMachine,
+        config: &ResumableUnweightedPathConfig,
+        limits: bfs::BfsCandidateLimits,
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<path_finder::ResumablePathMaterialization> {
+        let epoch = self.bfs_projection_epoch();
+        let mut materialize =
+            |neighbors: &dyn crate::projection::neighbors::NeighborSource| match machine {
+                ResumableUnweightedPathMachine::Single(machine) => {
+                    machine.require_projection_epoch(epoch)?;
+                    path_finder::materialize_single_direction_path_batch(
+                        machine,
+                        &self.node_store,
+                        neighbors,
+                        &self.relationship_identities,
+                        config.edge_type_filter.as_ref(),
+                        limits,
+                        governor,
+                    )
+                }
+                ResumableUnweightedPathMachine::Bidirectional(machine) => {
+                    machine.require_projection_epoch(epoch)?;
+                    path_finder::materialize_bidirectional_path_batch(
+                        machine,
+                        &self.node_store,
+                        neighbors,
+                        &self.relationship_identities,
+                        config.edge_type_filter.as_ref(),
+                        limits,
+                        governor,
+                    )
+                }
+            };
+        if self.segment_backed_projection_manifest().is_some() {
+            let snapshot = self.projection_snapshot.as_ref().ok_or_else(|| {
+                GraphError::Internal("projection snapshot is missing".to_string())
+            })?;
+            let layered = LayeredNeighbors::from_snapshot_with_direction_overlay(
+                &self.edge_store,
+                &self.reverse_edge_store,
+                snapshot,
+                TraversalDirection::Out,
+                &config.overlay_insert_edges,
+                &config.overlay_deleted_edges,
+            );
+            return materialize(&layered.for_direction(TraversalDirection::Out));
+        }
+        let neighbors = OverlayNeighbors::new(
+            &self.edge_store,
+            &config.overlay_insert_edges,
+            &config.overlay_deleted_edges,
+        );
+        materialize(&neighbors)
+    }
+
+    pub(crate) fn admit_resumable_unweighted_path_batch(
+        &self,
+        machine: &mut ResumableUnweightedPathMachine,
+        batch: &bfs::BfsAdjacencyCandidateBatch,
+        verdicts: &[bfs::BfsAdjacencyVerdict],
+        governor: &crate::resource::ResourceGovernor,
+    ) -> GraphResult<()> {
+        let epoch = self.bfs_projection_epoch();
+        match machine {
+            ResumableUnweightedPathMachine::Single(machine) => {
+                machine.require_projection_epoch(epoch)?;
+                path_finder::apply_single_direction_path_verdicts(
+                    machine,
+                    batch,
+                    verdicts,
+                    &self.node_store,
+                    governor,
+                )
+            }
+            ResumableUnweightedPathMachine::Bidirectional(machine) => {
+                machine.require_projection_epoch(epoch)?;
+                path_finder::apply_bidirectional_path_verdicts(
+                    machine,
+                    batch,
+                    verdicts,
+                    &self.node_store,
+                    governor,
+                )
+            }
+        }
+    }
+
+    pub(crate) fn finish_resumable_unweighted_path(
+        &self,
+        machine: ResumableUnweightedPathMachine,
+    ) -> GraphResult<Vec<PathStep>> {
+        let epoch = self.bfs_projection_epoch();
+        match machine {
+            ResumableUnweightedPathMachine::Single(machine) => {
+                machine.require_projection_epoch(epoch)?;
+                Ok(machine
+                    .finish(&self.node_store, &self.edge_type_registry)?
+                    .unwrap_or_default())
+            }
+            ResumableUnweightedPathMachine::Bidirectional(machine) => {
+                machine.require_projection_epoch(epoch)?;
+                Ok(machine
+                    .finish(&self.node_store, &self.edge_type_registry)?
+                    .unwrap_or_default())
+            }
+        }
     }
     pub fn new() -> Self {
         let edge_type_registry = vec!["".to_string()];

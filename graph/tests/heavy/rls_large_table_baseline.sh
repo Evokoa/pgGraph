@@ -471,6 +471,8 @@ elif [[ "$RUN_PROFILE" == "p3_selective" ]]; then
     "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := 'out', strategy := 'bfs', hydrate := false)" "auto"
   run_case "no_rls" "none" "p4_dfs_no_rls_auto" "scalar" "dfs_depth_4" 5 \
     "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := 'out', strategy := 'dfs', hydrate := false)" "auto"
+  run_case "no_rls" "none" "p4_path_no_rls_auto" "scalar" "shortest_path" 5 \
+    "SELECT count(*) FROM graph.shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', max_depth := 20, hydrate := false)" "auto"
 fi
 
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c \
@@ -500,6 +502,10 @@ if [[ "$RUN_PROFILE" == "p3_selective" ]]; then
     run_case "sparse_allow" "node" "p4_node_dfs_${direction}_lazy" "scalar" "dfs_${direction}_depth_4" 1 \
       "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 4, edge_types := ARRAY['next'], direction := '${direction}', strategy := 'dfs', hydrate := false)" "lazy"
   done
+  run_case "broad_allow" "node" "p4_node_path_eager" "scalar" "shortest_path" 5 \
+    "SELECT count(*) FROM graph.shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', max_depth := 20, hydrate := false)" "eager"
+  run_case "broad_allow" "node" "p4_node_path_lazy" "scalar" "shortest_path" 5 \
+    "SELECT count(*) FROM graph.shortest_path('public.rls_bench_nodes'::regclass, '100', 'public.rls_bench_nodes'::regclass, '104', max_depth := 20, hydrate := false)" "lazy"
 elif [[ "$RUN_PROFILE" == "compact" ]]; then
   run_case "broad_allow" "node" "node_broad_allow_scalar_depth0" "scalar" "depth0" 1 \
     "SELECT count(*) FROM graph.traverse('public.rls_bench_nodes'::regclass, '100', 0, hydrate := false)"
@@ -593,6 +599,16 @@ BEGIN
           AND source_rows = 0
     ) THEN
         RAISE EXCEPTION 'P4 DFS no-RLS auto route did not retain the zero-probe eager fast path';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.rls_bench_samples
+        WHERE case_name = 'p4_path_no_rls_auto'
+          AND strategy = 'auto'
+          AND spi_calls = 0
+          AND source_rows = 0
+    ) THEN
+        RAISE EXCEPTION 'P4 path no-RLS auto route did not retain the zero-probe eager fast path';
     END IF;
 
     SELECT count(*)

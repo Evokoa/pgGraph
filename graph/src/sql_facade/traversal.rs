@@ -21,6 +21,8 @@ pub(super) type ShortestPathSqlRow = (
     String,
 );
 
+const RESUMABLE_PATH_KEY_BYTE_LIMIT: usize = 1024 * 1024;
+
 /// BFS traversal from a seed node.
 ///
 /// See: `docs/user_guide/querying.mdx`
@@ -541,6 +543,7 @@ pub(super) fn shortest_path(
             target_id,
             max_depth,
             hydrate,
+            None,
             &governor,
             &query_start.tables,
             &query_start.edges,
@@ -582,26 +585,17 @@ fn shortest_path_typed(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let coordinator = crate::sql_visibility::prepare_eager_visibility(
-            &query_start.tables,
-            &query_start.edges,
-            &governor,
-        )
-        .unwrap_or_else(|err| err.report());
-        let edge_type_filter = ENGINE
-            .with(|engine| engine.borrow().resolve_edge_type_filter(Some(&edge_types)))
-            .unwrap_or_else(|err| err.report());
-        let context =
-            coordinator.context_with_edge_type_filter(&governor, edge_type_filter.as_ref());
-        let rows = shortest_path_rows_in_context(
+        let rows = shortest_path_rows_governed(
             source_table,
             source_id,
             target_table,
             target_id,
             max_depth,
             hydrate,
-            &context,
+            Some(&edge_types),
+            &governor,
             &query_start.tables,
+            &query_start.edges,
         )
         .unwrap_or_else(|err| err.report());
         TableIterator::new(rows)
@@ -619,49 +613,172 @@ pub(super) fn shortest_path_rows_governed(
     target_id: &str,
     max_depth: i32,
     hydrate: bool,
+    edge_types: Option<&[String]>,
     governor: &crate::resource::ResourceGovernor,
     tables: &[builder::RegisteredTable],
     edges: &[builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
-    let coordinator = crate::sql_visibility::prepare_eager_visibility(tables, edges, governor)?;
-    let context = coordinator.context(governor);
-    shortest_path_rows_in_context(
-        source_table,
-        source_id,
-        target_table,
-        target_id,
-        max_depth,
-        hydrate,
-        &context,
-        tables,
-    )
+    let mut lazy = crate::sql_visibility::prepare_bfs_visibility(tables, edges)?;
+    let lazy_path_eligible =
+        ENGINE.with(|engine| engine.borrow().resumable_unweighted_path_eligible());
+    let steps = if crate::sql_visibility::lazy_bfs_strategy_enabled(&lazy) && lazy_path_eligible {
+        crate::sql_visibility::record_selected_visibility_strategy(true);
+        execute_lazy_shortest_path_rows(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            max_depth,
+            edge_types,
+            &mut lazy,
+            tables,
+            edges,
+            governor,
+        )?
+    } else {
+        crate::sql_visibility::record_selected_visibility_strategy(false);
+        let coordinator =
+            crate::sql_visibility::prepare_bfs_eager_fallback(&lazy, tables, edges, governor)?;
+        let edge_type_filter =
+            ENGINE.with(|engine| engine.borrow().resolve_edge_type_filter(edge_types))?;
+        let context =
+            coordinator.context_with_edge_type_filter(governor, edge_type_filter.as_ref());
+        return shortest_path_rows_in_context(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            max_depth,
+            hydrate,
+            &context,
+            tables,
+        );
+    };
+    format_shortest_path_rows(steps, hydrate, governor, tables)
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "shortest-path execution keeps SQL coordinates, bounds, context, and query catalog explicit"
-)]
-pub(super) fn shortest_path_rows_in_context(
+#[allow(clippy::too_many_arguments)]
+fn execute_lazy_shortest_path_rows(
     source_table: pgrx::pg_sys::Oid,
     source_id: &str,
     target_table: pgrx::pg_sys::Oid,
     target_id: &str,
     max_depth: i32,
-    hydrate: bool,
-    context: &crate::visibility::QueryExecutionContext<'_>,
+    edge_types: Option<&[String]>,
+    lazy: &mut crate::visibility::LazyVisibilityCoordinator,
     tables: &[builder::RegisteredTable],
-) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
-    let governor = context.governor;
-    let steps = ENGINE.with(|e| {
-        e.borrow().shortest_path_governed_in_context(
+    edges: &[builder::RegisteredEdge],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<Vec<types::PathStep>> {
+    if !prove_lazy_path_source_visible(source_table, source_id, lazy, tables, governor)? {
+        return Ok(Vec::new());
+    }
+    let (config, mut machine) = ENGINE.with(|engine| {
+        engine.borrow().prepare_resumable_unweighted_path(
             source_table.to_u32(),
             source_id,
             target_table.to_u32(),
             target_id,
             max_depth,
-            context,
+            edge_types,
+            governor,
         )
     })?;
+    loop {
+        let materialization = ENGINE.with(|engine| {
+            engine.borrow().materialize_resumable_unweighted_path_batch(
+                &mut machine,
+                &config,
+                crate::bfs::BfsCandidateLimits {
+                    max_candidates: crate::bfs::RESUMABLE_BFS_PAGE_CAPACITY,
+                    max_key_bytes: RESUMABLE_PATH_KEY_BYTE_LIMIT,
+                },
+                governor,
+            )
+        })?;
+        crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::resource::check_postgres_interrupts()
+        }));
+        governor
+            .check_elapsed(crate::resource::ResourcePhase::QueryPaths)
+            .map_err(crate::safety::resource_limit_error)?;
+        match materialization {
+            crate::path_finder::ResumablePathMaterialization::Batch(batch) => {
+                let verdicts = crate::sql_visibility::resolve_bfs_visibility_batch(
+                    lazy, &batch, tables, edges, governor,
+                )?;
+                ENGINE.with(|engine| {
+                    engine.borrow().admit_resumable_unweighted_path_batch(
+                        &mut machine,
+                        &batch,
+                        &verdicts,
+                        governor,
+                    )
+                })?;
+                if machine.is_complete() {
+                    break;
+                }
+            }
+            crate::path_finder::ResumablePathMaterialization::Progress => continue,
+            crate::path_finder::ResumablePathMaterialization::Complete => break,
+        }
+    }
+    ENGINE.with(|engine| engine.borrow().finish_resumable_unweighted_path(machine))
+}
+
+fn prove_lazy_path_source_visible(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    lazy: &mut crate::visibility::LazyVisibilityCoordinator,
+    tables: &[builder::RegisteredTable],
+    governor: &crate::resource::ResourceGovernor,
+) -> safety::GraphResult<bool> {
+    let table_oid = source_table.to_u32();
+    let node_idx = ENGINE
+        .with(|engine| engine.borrow().resolve(table_oid, source_id))
+        .ok_or_else(|| safety::GraphError::NodeNotFound {
+            table: table_oid.to_string(),
+            pk: source_id.to_string(),
+        })?;
+    if !lazy.table_requires_probe(table_oid) {
+        return Ok(true);
+    }
+    if source_id.len() > RESUMABLE_PATH_KEY_BYTE_LIMIT {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: "one path endpoint exceeds the key-byte limit".into(),
+        });
+    }
+    crate::sql_visibility::reserve_direct_visibility_candidate(governor, source_id)?;
+    let batch = crate::bfs::BfsAdjacencyCandidateBatch::try_new(
+        vec![crate::bfs::BfsAdjacencyCandidate {
+            sequence: 0,
+            parent_node: node_idx,
+            parent_depth: 0,
+            target_node: node_idx,
+            target_table_oid: table_oid,
+            target_source_key: source_id.to_owned(),
+            edge_type: 0,
+            relationship_id: None,
+            relationship_mapping_id: None,
+            relationship_source_key: None,
+        }],
+        true,
+        crate::bfs::BfsCandidateLimits {
+            max_candidates: 1,
+            max_key_bytes: RESUMABLE_PATH_KEY_BYTE_LIMIT,
+        },
+    )?;
+    let verdicts =
+        crate::sql_visibility::resolve_bfs_visibility_batch(lazy, &batch, tables, &[], governor)?;
+    Ok(verdicts.first().is_some_and(|verdict| verdict.visible()))
+}
+
+fn format_shortest_path_rows(
+    steps: Vec<types::PathStep>,
+    hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+    tables: &[builder::RegisteredTable],
+) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
     acl::check_table_acls(steps.iter().map(|step| step.node_table.0))?;
     let output_bytes = steps.iter().try_fold(0usize, |bytes, step| {
         bytes
@@ -710,11 +827,39 @@ pub(super) fn shortest_path_rows_in_context(
             step.node_id,
             step.edge_label,
             node,
-            relation_name(step.node_table.0)?,
+            crate::sql_traversal::relation_name_with_rust_unwind(step.node_table.0)?,
         ));
     }
     output_lease.retain_until_governor_drop();
     Ok(rows)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shortest-path execution keeps SQL coordinates, bounds, context, and query catalog explicit"
+)]
+pub(super) fn shortest_path_rows_in_context(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    max_depth: i32,
+    hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    tables: &[builder::RegisteredTable],
+) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
+    let governor = context.governor;
+    let steps = ENGINE.with(|e| {
+        e.borrow().shortest_path_governed_in_context(
+            source_table.to_u32(),
+            source_id,
+            target_table.to_u32(),
+            target_id,
+            max_depth,
+            context,
+        )
+    })?;
+    format_shortest_path_rows(steps, hydrate, governor, tables)
 }
 
 /// Find weighted shortest path between two nodes using Dijkstra.

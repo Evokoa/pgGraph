@@ -1,0 +1,2 @@
+postgres_version,database_name,node_count,composite_count,node_table_bytes,composite_table_bytes,edge_table_bytes
+17.9 (Homebrew),pggraph_p4_path_hb10k,10000,10000,1138688,1228800,892928
