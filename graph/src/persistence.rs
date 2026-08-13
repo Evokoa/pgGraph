@@ -63,6 +63,7 @@ use crate::relationship_identity_store::{
 use crate::resolution_index::{ResolutionIndexBuilder, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
 use crate::safety::{GraphError, GraphResult};
 use crate::tenant_store::{MappedTenantIndex, MappedTenantIndexParts};
+use crate::types::EdgeTypeId;
 
 /// Magic bytes for .pggraph files.
 const MAGIC: &[u8; 4] = b"PGGH";
@@ -2270,7 +2271,11 @@ fn load_graph_file_internal(
         .type_ids_slice()
         .iter()
         .chain(reverse_edge_store.type_ids_slice())
-        .any(|type_id| *type_id as usize >= registry_len)
+        .any(|type_id| {
+            EdgeTypeId::from_v6_storage(*type_id)
+                .ok()
+                .is_none_or(|logical| logical.get() as usize >= registry_len)
+        })
     {
         return Err(GraphError::CorruptFile {
             reason: "CSR edge type ID is outside the edge type registry".into(),
@@ -4191,6 +4196,18 @@ mod tests {
     fn checksum_graph_artifact(path: &Path) -> String {
         let data = std::fs::read(path).unwrap();
         graph_artifact_checksum(crc32fast::hash(&data[HEADER_SIZE..]))
+    }
+
+    #[test]
+    fn p6_logical_edge_type_promotion_preserves_v6_artifact_bytes() {
+        let path = temp_graph_path("p6-v6-edge-type-golden");
+        write_graph_file(&graph_with_relationship(), &path).expect("v6 fixture writes");
+        load_graph_file(&path).expect("v6 fixture validates and reloads");
+        let bytes = std::fs::read(&path).expect("v6 fixture reads");
+        let checksum = graph_artifact_checksum(crc32fast::hash(&bytes));
+        let _ = std::fs::remove_dir_all(path.parent().expect("fixture has parent"));
+
+        assert_eq!(checksum, "crc32:37f0afd6");
     }
 
     fn temp_graph_path(name: &str) -> PathBuf {

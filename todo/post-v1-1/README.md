@@ -491,6 +491,15 @@ weaker than 1.1.
 
 ### P6: Freeze and promote `EdgeTypeId`
 
+P6.1 completed on 2026-08-13. `EdgeTypeId` is now an always-built private-field
+logical `u32` newtype with distinct untyped and all-ones sentinel values. Named
+v6 storage conversions exhaustively round-trip bytes 0 through 254, reject the
+physical 255 sentinel, and reject logical IDs that require a wider artifact.
+The current v6 artifact remains byte-for-byte stable under a full-file golden
+checksum and reload test. Registry migration, logical consumer migration, and
+multidimensional width evidence remain P6 work; physical CSR widening remains
+P7.
+
 - Benchmark logical `u32` with adaptive 1/2/4-byte base storage against the
   current `u8` representation across cardinality, degree, direction, and depth.
 - Freeze reserved values, maximum label count, individual label length,

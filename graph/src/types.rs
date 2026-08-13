@@ -34,33 +34,88 @@ impl fmt::Display for NodeIdx {
     }
 }
 
-/// Edge type ID. Range: `1..=254`. 0 = untyped, 255 = reserved sentinel.
-#[cfg(any(test, feature = "development"))]
-#[allow(
-    dead_code,
-    reason = "development/test type-safety wrappers are kept for direct API checks"
+/// Logical relationship-type identifier.
+///
+/// Zero represents an untyped relationship and [`Self::SENTINEL`] is reserved
+/// for internal state. Version 6 artifacts remain one byte wide and cross this
+/// logical boundary only through the checked `TryFrom` implementations.
+#[repr(transparent)]
+#[cfg_attr(
+    not(any(test, feature = "development")),
+    allow(
+        dead_code,
+        reason = "P6.1 installs the checked logical/v6 boundary before P6.2 migrates all production registries"
+    )
 )]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EdgeTypeId(pub u8);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EdgeTypeId(u32);
 
-#[cfg(any(test, feature = "development"))]
+/// Checked relationship-type conversion failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(
     dead_code,
-    reason = "development/test constants document reserved edge-type ids"
+    reason = "P6.1 installs the complete checked logical/v6 error domain before P6.2 migrates all production registries"
+)]
+pub enum EdgeTypeIdError {
+    /// The logical all-ones value is reserved for internal state.
+    LogicalSentinel,
+    /// A v6 artifact used its reserved all-ones byte.
+    V6Sentinel,
+    /// The logical ID requires a wider artifact representation.
+    DoesNotFitV6,
+}
+
+#[allow(
+    dead_code,
+    reason = "P6.1 installs the complete checked logical/v6 API before P6.2 migrates all production registries"
 )]
 impl EdgeTypeId {
     /// Reserved: untyped/null edge.
     pub const UNTYPED: Self = Self(0);
     /// Reserved: internal sentinel (never used in user-facing edges).
-    pub const SENTINEL: Self = Self(255);
-    /// Maximum number of user-defined edge types.
-    pub const MAX_USER_TYPES: u8 = 254;
+    pub const SENTINEL: Self = Self(u32::MAX);
+    /// Largest user ID representable by the current one-byte v6 artifact.
+    pub const V6_MAX_USER_ID: u32 = u8::MAX as u32 - 1;
+
+    /// Return the checked logical value.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Decode the one-byte relationship-type representation used by v6.
+    pub fn from_v6_storage(value: u8) -> Result<Self, EdgeTypeIdError> {
+        if value == u8::MAX {
+            return Err(EdgeTypeIdError::V6Sentinel);
+        }
+        Ok(Self(u32::from(value)))
+    }
+
+    /// Encode this logical ID for a one-byte v6 artifact.
+    pub fn to_v6_storage(self) -> Result<u8, EdgeTypeIdError> {
+        if self == Self::SENTINEL {
+            return Err(EdgeTypeIdError::LogicalSentinel);
+        }
+        if self.0 > Self::V6_MAX_USER_ID {
+            return Err(EdgeTypeIdError::DoesNotFitV6);
+        }
+        u8::try_from(self.0).map_err(|_| EdgeTypeIdError::DoesNotFitV6)
+    }
 }
 
-#[cfg(any(test, feature = "development"))]
 impl fmt::Display for EdgeTypeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "EdgeTypeId({})", self.0)
+    }
+}
+
+impl TryFrom<u32> for EdgeTypeId {
+    type Error = EdgeTypeIdError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value == Self::SENTINEL.0 {
+            return Err(EdgeTypeIdError::LogicalSentinel);
+        }
+        Ok(Self(value))
     }
 }
 
@@ -661,9 +716,9 @@ mod tests {
 
     #[test]
     fn edge_type_id_constants() {
-        assert_eq!(EdgeTypeId::UNTYPED.0, 0);
-        assert_eq!(EdgeTypeId::SENTINEL.0, 255);
-        assert_eq!(EdgeTypeId::MAX_USER_TYPES, 254);
+        assert_eq!(EdgeTypeId::UNTYPED.get(), 0);
+        assert_eq!(EdgeTypeId::SENTINEL.get(), u32::MAX);
+        assert_eq!(EdgeTypeId::V6_MAX_USER_ID, 254);
     }
 
     #[test]
@@ -726,8 +781,32 @@ mod tests {
 
     #[test]
     fn edge_type_id_display() {
-        let et = EdgeTypeId(7);
+        let et = EdgeTypeId::try_from(7_u32).unwrap();
         assert_eq!(format!("{}", et), "EdgeTypeId(7)");
+    }
+
+    #[test]
+    fn edge_type_id_checked_v6_roundtrip_and_boundaries() {
+        for value in 0_u8..u8::MAX {
+            let logical = EdgeTypeId::from_v6_storage(value).expect("valid v6 edge type widens");
+            assert_eq!(logical.to_v6_storage(), Ok(value));
+        }
+        assert_eq!(
+            EdgeTypeId::from_v6_storage(u8::MAX),
+            Err(EdgeTypeIdError::V6Sentinel)
+        );
+        assert_eq!(
+            EdgeTypeId::try_from(u32::MAX),
+            Err(EdgeTypeIdError::LogicalSentinel)
+        );
+        assert_eq!(
+            EdgeTypeId::SENTINEL.to_v6_storage(),
+            Err(EdgeTypeIdError::LogicalSentinel)
+        );
+        for value in [255_u32, 65_534, 65_535, 65_536, u32::MAX - 1] {
+            let logical = EdgeTypeId::try_from(value).expect("logical edge type is valid");
+            assert_eq!(logical.to_v6_storage(), Err(EdgeTypeIdError::DoesNotFitV6));
+        }
     }
 
     // ─── Newtype identity and ordering ───
