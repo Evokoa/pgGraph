@@ -68,8 +68,11 @@ use crate::types::EdgeTypeId;
 
 /// Magic bytes for .pggraph files.
 const MAGIC: &[u8; 4] = b"PGGH";
-/// Current file format version.
-const VERSION: u32 = 6;
+const V6_VERSION: u32 = 6;
+const V7_VERSION: u32 = 7;
+/// Current production writer format. P7.2 reads v7 test artifacts but keeps
+/// production emission on v6 until the direct-build pipeline is widened.
+const VERSION: u32 = V6_VERSION;
 /// Header size in bytes.
 const HEADER_SIZE: usize = 512;
 /// Number of sections.
@@ -78,6 +81,7 @@ const SECTION_DESCRIPTORS_OFFSET: usize = 64;
 const SECTION_DESCRIPTOR_SIZE: usize = 16;
 const BODY_CRC_OFFSET: usize = 40;
 const HEADER_CRC_OFFSET: usize = 44;
+const EDGE_TYPE_WIDTH_OFFSET: usize = 48;
 const SECTION_ALIGNMENT: usize = 64;
 const FLAG_FORWARD_WEIGHTS: u32 = 1 << 0;
 const FLAG_INBOUND_WEIGHTS: u32 = 1 << 1;
@@ -101,6 +105,21 @@ struct ValidatedGraphLayout {
     inbound_edge_count: u32,
     has_forward_weights: bool,
     has_inbound_weights: bool,
+    artifact_version: u32,
+    edge_type_width: EdgeTypeWidth,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GraphArtifactMetadata {
+    pub(crate) version: u32,
+    pub(crate) edge_type_width: EdgeTypeWidth,
+    body_crc: u32,
+}
+
+impl GraphArtifactMetadata {
+    pub(crate) fn checksum(self) -> String {
+        graph_artifact_checksum(self.body_crc)
+    }
 }
 
 /// Capability proving the full artifact layout passed persistence validation.
@@ -169,7 +188,7 @@ impl MappedGraphArtifact {
                 relationship_ids_range: ranges[base + 5].0..ranges[base + 5].1,
                 node_count: self.layout.node_count,
                 edge_count,
-                type_width: EdgeTypeWidth::One,
+                type_width: self.layout.edge_type_width,
             },
             &self.token,
         )
@@ -447,12 +466,13 @@ impl GraphArtifactWriter {
     }
 
     #[cfg(test)]
-    fn finish(
+    fn finish_with_format(
         self,
         node_count: u32,
         forward_edge_count: u32,
         inbound_edge_count: u32,
         flags: u32,
+        format: GraphArtifactMetadata,
     ) -> GraphResult<fs::File> {
         self.finish_internal(
             node_count,
@@ -460,6 +480,7 @@ impl GraphArtifactWriter {
             inbound_edge_count,
             flags,
             None,
+            format,
         )
     }
 
@@ -477,6 +498,11 @@ impl GraphArtifactWriter {
             inbound_edge_count,
             flags,
             Some(governor),
+            GraphArtifactMetadata {
+                version: VERSION,
+                edge_type_width: EdgeTypeWidth::One,
+                body_crc: 0,
+            },
         )
     }
 
@@ -487,6 +513,7 @@ impl GraphArtifactWriter {
         inbound_edge_count: u32,
         flags: u32,
         recompute: Option<&crate::resource::ResourceGovernor>,
+        format: GraphArtifactMetadata,
     ) -> GraphResult<fs::File> {
         self.finish_active_section()?;
         let body_len = self
@@ -526,7 +553,7 @@ impl GraphArtifactWriter {
         };
         let mut header = [0u8; HEADER_SIZE];
         header[0..4].copy_from_slice(MAGIC);
-        header[4..8].copy_from_slice(&VERSION.to_le_bytes());
+        header[4..8].copy_from_slice(&format.version.to_le_bytes());
         header[8..12].copy_from_slice(&(HEADER_SIZE as u32).to_le_bytes());
         header[12..16].copy_from_slice(&flags.to_le_bytes());
         header[16..20].copy_from_slice(&node_count.to_le_bytes());
@@ -535,6 +562,10 @@ impl GraphArtifactWriter {
         header[28..32].copy_from_slice(&(NUM_SECTIONS as u32).to_le_bytes());
         header[32..40].copy_from_slice(&body_len.to_le_bytes());
         header[BODY_CRC_OFFSET..BODY_CRC_OFFSET + 4].copy_from_slice(&body_crc.to_le_bytes());
+        if format.version == V7_VERSION {
+            header[EDGE_TYPE_WIDTH_OFFSET..EDGE_TYPE_WIDTH_OFFSET + 4]
+                .copy_from_slice(&(format.edge_type_width.bytes() as u32).to_le_bytes());
+        }
         for (i, descriptor) in self.sections.iter().enumerate() {
             let start = SECTION_DESCRIPTORS_OFFSET + i * SECTION_DESCRIPTOR_SIZE;
             header[start..start + 8].copy_from_slice(&descriptor.offset.to_le_bytes());
@@ -581,15 +612,65 @@ fn read_u64_at(mmap: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(read_le_array(mmap, offset))
 }
 
+fn decode_edge_type_width(version: u32, header: &[u8]) -> GraphResult<EdgeTypeWidth> {
+    match version {
+        V6_VERSION => {
+            if header[EDGE_TYPE_WIDTH_OFFSET..64]
+                .iter()
+                .any(|&byte| byte != 0)
+            {
+                return Err(GraphError::CorruptFile {
+                    reason: "v6 header reserved bytes must be zero".into(),
+                });
+            }
+            Ok(EdgeTypeWidth::One)
+        }
+        V7_VERSION => {
+            let raw = read_u32_at(header, EDGE_TYPE_WIDTH_OFFSET);
+            if header[EDGE_TYPE_WIDTH_OFFSET + 4..64]
+                .iter()
+                .any(|&byte| byte != 0)
+            {
+                return Err(GraphError::CorruptFile {
+                    reason: "v7 header reserved bytes must be zero".into(),
+                });
+            }
+            EdgeTypeWidth::from_bytes(raw).ok_or_else(|| GraphError::CorruptFile {
+                reason: format!("unsupported v7 edge type width {raw}; expected 1, 2, or 4"),
+            })
+        }
+        _ => Err(GraphError::IncompatibleVersion(format!(
+            "graph artifact version {version} is unsupported; supported versions are {V6_VERSION} and {V7_VERSION}"
+        ))),
+    }
+}
+
 fn validate_persisted_contents(
     mmap: &[u8],
     ranges: &[(usize, usize); NUM_SECTIONS],
     node_count: u32,
     forward_edge_count: u32,
     inbound_edge_count: u32,
+    edge_type_width: EdgeTypeWidth,
 ) -> GraphResult<()> {
-    validate_csr_contents(mmap, ranges, 4, node_count, forward_edge_count, "forward")?;
-    validate_csr_contents(mmap, ranges, 10, node_count, inbound_edge_count, "inbound")?;
+    validate_csr_contents(
+        mmap,
+        ranges,
+        4,
+        node_count,
+        forward_edge_count,
+        edge_type_width,
+        "forward",
+    )?;
+    validate_csr_contents(
+        mmap,
+        ranges,
+        10,
+        node_count,
+        inbound_edge_count,
+        edge_type_width,
+        "inbound",
+    )?;
 
     let pk_offsets_start = ranges[2].0;
     let pk_bytes_len = ranges[3].1 - ranges[3].0;
@@ -644,6 +725,7 @@ fn validate_csr_contents(
     base: usize,
     node_count: u32,
     edge_count: u32,
+    edge_type_width: EdgeTypeWidth,
     label: &str,
 ) -> GraphResult<()> {
     let edge_offsets_start = ranges[base].0;
@@ -691,11 +773,25 @@ fn validate_csr_contents(
         }
     }
 
+    let physical_sentinel = match edge_type_width {
+        EdgeTypeWidth::One => u8::MAX as u32,
+        EdgeTypeWidth::Two => u16::MAX as u32,
+        EdgeTypeWidth::Four => u32::MAX,
+    };
+    for idx in 0..edge_count as usize {
+        if edge_topology(mmap, ranges, base, idx, edge_type_width).1 == physical_sentinel {
+            return Err(GraphError::CorruptFile {
+                reason: format!("{label} edge type at index {idx} uses the physical sentinel"),
+            });
+        }
+    }
+
     for source in 0..node_count as usize {
         let start = read_u32_at(mmap, edge_offsets_start + source * 4) as usize;
         let end = read_u32_at(mmap, edge_offsets_start + (source + 1) * 4) as usize;
         if (start + 1..end).any(|idx| {
-            edge_topology(mmap, ranges, base, idx - 1) > edge_topology(mmap, ranges, base, idx)
+            edge_topology(mmap, ranges, base, idx - 1, edge_type_width)
+                > edge_topology(mmap, ranges, base, idx, edge_type_width)
         }) {
             return Err(GraphError::CorruptFile {
                 reason: format!("{label} adjacency is not in canonical CSR order"),
@@ -718,10 +814,17 @@ fn edge_topology(
     ranges: &[(usize, usize); NUM_SECTIONS],
     base: usize,
     index: usize,
-) -> (u32, u8, u8) {
+    edge_type_width: EdgeTypeWidth,
+) -> (u32, u32, u8) {
+    let type_offset = ranges[base + 2].0 + index * edge_type_width.bytes();
+    let type_id = match edge_type_width {
+        EdgeTypeWidth::One => u32::from(mmap[type_offset]),
+        EdgeTypeWidth::Two => u32::from(u16::from_le_bytes(read_le_array(mmap, type_offset))),
+        EdgeTypeWidth::Four => read_u32_at(mmap, type_offset),
+    };
     (
         read_u32_at(mmap, ranges[base + 1].0 + index * 4),
-        mmap[ranges[base + 2].0 + index],
+        type_id,
         mmap[ranges[base + 3].0 + index],
     )
 }
@@ -732,6 +835,7 @@ fn validate_csr_reverse_equivalence(
     node_count: u32,
     edge_count: u32,
     has_weights: bool,
+    edge_type_width: EdgeTypeWidth,
 ) -> GraphResult<()> {
     let forward_offsets = ranges[4].0;
     let inbound_offsets = ranges[10].0;
@@ -741,11 +845,11 @@ fn validate_csr_reverse_equivalence(
         let mut inbound_index = inbound_start;
         while inbound_index < inbound_end {
             let (forward_source, type_id, schema_reversed) =
-                edge_topology(mmap, ranges, 10, inbound_index);
+                edge_topology(mmap, ranges, 10, inbound_index, edge_type_width);
             let topology = (inbound_source as u32, type_id, schema_reversed);
             let mut inbound_group_end = inbound_index + 1;
             while inbound_group_end < inbound_end
-                && edge_topology(mmap, ranges, 10, inbound_group_end)
+                && edge_topology(mmap, ranges, 10, inbound_group_end, edge_type_width)
                     == (forward_source, type_id, schema_reversed)
             {
                 inbound_group_end += 1;
@@ -755,10 +859,24 @@ fn validate_csr_reverse_equivalence(
                 read_u32_at(mmap, forward_offsets + forward_source as usize * 4) as usize;
             let forward_end =
                 read_u32_at(mmap, forward_offsets + (forward_source as usize + 1) * 4) as usize;
-            let forward_group_start =
-                lower_bound_topology(mmap, ranges, 4, forward_start, forward_end, topology);
-            let forward_group_end =
-                upper_bound_topology(mmap, ranges, 4, forward_group_start, forward_end, topology);
+            let forward_group_start = lower_bound_topology(
+                mmap,
+                ranges,
+                4,
+                forward_start,
+                forward_end,
+                topology,
+                edge_type_width,
+            );
+            let forward_group_end = upper_bound_topology(
+                mmap,
+                ranges,
+                4,
+                forward_group_start,
+                forward_end,
+                topology,
+                edge_type_width,
+            );
             if forward_group_end - forward_group_start != inbound_group_end - inbound_index {
                 return Err(GraphError::CorruptFile {
                     reason: "forward and inbound CSR topology counts differ".into(),
@@ -796,11 +914,12 @@ fn lower_bound_topology(
     base: usize,
     mut low: usize,
     mut high: usize,
-    expected: (u32, u8, u8),
+    expected: (u32, u32, u8),
+    edge_type_width: EdgeTypeWidth,
 ) -> usize {
     while low < high {
         let middle = low + (high - low) / 2;
-        if edge_topology(mmap, ranges, base, middle) < expected {
+        if edge_topology(mmap, ranges, base, middle, edge_type_width) < expected {
             low = middle + 1;
         } else {
             high = middle;
@@ -815,11 +934,12 @@ fn upper_bound_topology(
     base: usize,
     mut low: usize,
     mut high: usize,
-    expected: (u32, u8, u8),
+    expected: (u32, u32, u8),
+    edge_type_width: EdgeTypeWidth,
 ) -> usize {
     while low < high {
         let middle = low + (high - low) / 2;
-        if edge_topology(mmap, ranges, base, middle) <= expected {
+        if edge_topology(mmap, ranges, base, middle, edge_type_width) <= expected {
             low = middle + 1;
         } else {
             high = middle;
@@ -912,7 +1032,9 @@ fn validate_section_layout(
     forward_edge_count: u32,
     inbound_edge_count: u32,
     flags: u32,
+    format: GraphArtifactMetadata,
 ) -> GraphResult<ValidatedGraphLayout> {
+    let edge_type_width = format.edge_type_width;
     if flags & !KNOWN_FLAGS != 0 {
         return Err(GraphError::CorruptFile {
             reason: format!("unsupported graph artifact flags {flags:#x}"),
@@ -978,6 +1100,7 @@ fn validate_section_layout(
         node_plus_one,
         forward_edge_count,
         flags & FLAG_FORWARD_WEIGHTS != 0,
+        edge_type_width,
         "forward",
     )?;
     validate_csr_section_lengths(
@@ -986,6 +1109,7 @@ fn validate_section_layout(
         node_plus_one,
         inbound_edge_count,
         flags & FLAG_INBOUND_WEIGHTS != 0,
+        edge_type_width,
         "inbound",
     )?;
 
@@ -1011,6 +1135,7 @@ fn validate_section_layout(
         node_count,
         forward_edge_count,
         inbound_edge_count,
+        edge_type_width,
     )?;
     validate_csr_reverse_equivalence(
         mmap,
@@ -1018,6 +1143,7 @@ fn validate_section_layout(
         node_count,
         forward_edge_count,
         flags & FLAG_FORWARD_WEIGHTS != 0,
+        edge_type_width,
     )?;
 
     Ok(ValidatedGraphLayout {
@@ -1027,6 +1153,8 @@ fn validate_section_layout(
         inbound_edge_count,
         has_forward_weights: flags & FLAG_FORWARD_WEIGHTS != 0,
         has_inbound_weights: flags & FLAG_INBOUND_WEIGHTS != 0,
+        artifact_version: format.version,
+        edge_type_width,
     })
 }
 
@@ -1173,6 +1301,7 @@ fn validate_csr_section_lengths(
     node_plus_one: u32,
     edge_count: u32,
     has_weights: bool,
+    edge_type_width: EdgeTypeWidth,
     label: &str,
 ) -> GraphResult<()> {
     require_exact_section_len(
@@ -1187,7 +1316,12 @@ fn validate_csr_section_lengths(
         checked_section_size(edge_count, 4, label)?,
         label,
     )?;
-    require_exact_section_len(ranges, base + 2, edge_count as usize, label)?;
+    require_exact_section_len(
+        ranges,
+        base + 2,
+        checked_section_size(edge_count, edge_type_width.bytes(), label)?,
+        label,
+    )?;
     require_exact_section_len(ranges, base + 3, edge_count as usize, label)?;
     let weight_len = if has_weights {
         checked_section_size(edge_count, 4, label)?
@@ -1221,7 +1355,17 @@ fn validate_filter_sections(
 /// Uses atomic rename: writes to `<path>.tmp`, then renames to `path`.
 #[cfg(test)]
 pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
-    write_graph_file_internal(engine, path, false, None)
+    write_graph_file_internal(
+        engine,
+        path,
+        false,
+        None,
+        GraphArtifactMetadata {
+            version: VERSION,
+            edge_type_width: EdgeTypeWidth::One,
+            body_crc: 0,
+        },
+    )
 }
 
 /// Assemble one unpublished v6 candidate from bounded section streams without
@@ -1360,6 +1504,7 @@ fn write_graph_file_internal(
     path: &Path,
     check_interrupts: bool,
     governor: Option<&crate::resource::ResourceGovernor>,
+    format: GraphArtifactMetadata,
 ) -> GraphResult<()> {
     let mut workspace = governor
         .map(|governor| {
@@ -1439,7 +1584,7 @@ fn write_graph_file_internal(
         writer.write_body(pk.as_bytes())?;
     }
 
-    write_edge_sections(&mut writer, 4, &engine.edge_store)?;
+    write_edge_sections(&mut writer, 4, &engine.edge_store, format.edge_type_width)?;
     let derived_inbound;
     let inbound_store = if engine.reverse_edge_store.node_count() == engine.node_store.node_count()
         && engine.reverse_edge_store.edge_count() == engine.edge_store.edge_count()
@@ -1449,7 +1594,7 @@ fn write_graph_file_internal(
         derived_inbound = engine.edge_store.try_reversed()?;
         &derived_inbound
     };
-    write_edge_sections(&mut writer, 10, inbound_store)?;
+    write_edge_sections(&mut writer, 10, inbound_store, format.edge_type_width)?;
 
     writer.begin_section(16)?;
     reserve_persistence_workspace(
@@ -1505,11 +1650,12 @@ fn write_graph_file_internal(
         flags |= FLAG_HAS_UNIDIRECTIONAL;
     }
 
-    let file = writer.finish(
+    let file = writer.finish_with_format(
         engine.node_store.node_count(),
         engine.edge_store.edge_count(),
         inbound_store.edge_count(),
         flags,
+        format,
     )?;
     file.sync_all()
         .map_err(|e| GraphError::Internal(format!("Sync failed: {}", e)))?;
@@ -1529,13 +1675,42 @@ fn write_edge_sections(
     writer: &mut GraphArtifactWriter,
     base: usize,
     store: &EdgeStore,
+    edge_type_width: EdgeTypeWidth,
 ) -> GraphResult<()> {
     writer.begin_section(base)?;
     writer.write_u32_values(store.offsets_slice())?;
     writer.begin_section(base + 1)?;
     writer.write_u32_values(store.targets_slice())?;
     writer.begin_section(base + 2)?;
-    writer.write_body(store.v6_type_ids_bytes())?;
+    if edge_type_width == EdgeTypeWidth::One {
+        let bytes = store.v6_type_ids_bytes();
+        if bytes.len() != store.edge_count() as usize
+            || store
+                .edge_type_ids()
+                .any(|type_id| type_id.to_v6_storage().is_err())
+        {
+            return Err(GraphError::EdgeTypeLimit);
+        }
+        return writer
+            .write_body(bytes)
+            .and_then(|()| write_edge_sidecars(writer, base, store));
+    }
+    for type_id in store.edge_type_ids() {
+        if EdgeTypeWidth::select_for_max_id(type_id).bytes() > edge_type_width.bytes() {
+            return Err(GraphError::EdgeTypeLimit);
+        }
+        let encoded = type_id.get().to_le_bytes();
+        writer.write_body(&encoded[..edge_type_width.bytes()])?;
+    }
+    write_edge_sidecars(writer, base, store)
+}
+
+#[cfg(test)]
+fn write_edge_sidecars(
+    writer: &mut GraphArtifactWriter,
+    base: usize,
+    store: &EdgeStore,
+) -> GraphResult<()> {
     writer.begin_section(base + 3)?;
     writer.write_body(store.schema_reversed_slice())?;
     writer.begin_section(base + 4)?;
@@ -2078,29 +2253,23 @@ fn load_graph_file_internal(
             reason: "invalid magic bytes".to_string(),
         });
     }
-    let version = read_u32_at(&mmap, 4);
-    if version != VERSION {
-        return Err(GraphError::IncompatibleVersion(format!(
-            "graph artifact version {version} is unsupported; run SELECT graph.build() to create version {VERSION}"
-        )));
-    }
     if file_len < HEADER_SIZE {
         return Err(GraphError::CorruptFile {
-            reason: "file too small for v6 graph artifact header".to_string(),
+            reason: "file too small for graph artifact header".to_string(),
         });
     }
+    let version = read_u32_at(&mmap, 4);
+    let edge_type_width = decode_edge_type_width(version, &mmap[..HEADER_SIZE])?;
     if read_u32_at(&mmap, 8) as usize != HEADER_SIZE
         || read_u32_at(&mmap, 28) as usize != NUM_SECTIONS
     {
         return Err(GraphError::CorruptFile {
-            reason: "invalid v6 header or section count".into(),
+            reason: "invalid graph artifact header or section count".into(),
         });
     }
-    if mmap[48..64].iter().any(|&byte| byte != 0)
-        || mmap[480..HEADER_SIZE].iter().any(|&byte| byte != 0)
-    {
+    if mmap[480..HEADER_SIZE].iter().any(|&byte| byte != 0) {
         return Err(GraphError::CorruptFile {
-            reason: "v6 header reserved bytes must be zero".into(),
+            reason: format!("v{version} header reserved bytes must be zero"),
         });
     }
     let stored_header_crc = read_u32_at(&mmap, HEADER_CRC_OFFSET);
@@ -2164,6 +2333,11 @@ fn load_graph_file_internal(
         forward_edge_count,
         inbound_edge_count,
         flags,
+        GraphArtifactMetadata {
+            version,
+            edge_type_width,
+            body_crc: computed_crc,
+        },
     )?;
     drop(resolution_validation);
     // Mapped value/key bytes are already covered by the full anonymous
@@ -2173,9 +2347,12 @@ fn load_graph_file_internal(
     let filter_metadata_bytes = FilterIndex::mapped_load_metadata_upper_bound(
         &mmap[layout.ranges[17].0..layout.ranges[17].1],
     )?;
-    let registry_metadata_bytes = EdgeTypeRegistry::v6_load_metadata_upper_bound(
-        &mmap[layout.ranges[20].0..layout.ranges[20].1],
-    )?;
+    let registry_section = &mmap[layout.ranges[20].0..layout.ranges[20].1];
+    let registry_metadata_bytes = if version == V6_VERSION {
+        EdgeTypeRegistry::v6_load_metadata_upper_bound(registry_section)?
+    } else {
+        EdgeTypeRegistry::load_metadata_upper_bound(registry_section)?
+    };
     let identity_validation_bytes = (layout.ranges[21].1 - layout.ranges[21].0)
         .checked_mul(4)
         .ok_or_else(|| GraphError::Internal("identity metadata estimate overflowed".into()))?;
@@ -2207,6 +2384,7 @@ fn load_graph_file_internal(
         layout,
         token: ValidatedMappedGraphToken { _private: () },
     };
+    let artifact_version = artifact.layout.artifact_version;
     let section_ranges = &artifact.layout.ranges;
 
     // The artifact is the only production construction boundary for mapped
@@ -2248,20 +2426,31 @@ fn load_graph_file_internal(
         tenanted_table_oids.insert(read_u32_at(tenanted_oid_bytes, index * 4));
     }
 
-    let edge_type_registry = EdgeTypeRegistry::try_from_v6_labels(decode_string_registry(
-        &artifact.mmap,
-        section_ranges[20],
-    )?)?;
+    let labels = decode_string_registry(&artifact.mmap, section_ranges[20])?;
+    let edge_type_registry = if artifact_version == V6_VERSION {
+        EdgeTypeRegistry::try_from_v6_labels(labels)?
+    } else {
+        EdgeTypeRegistry::try_from_labels(labels)?
+    };
     let registry_len = edge_type_registry.len();
+    let max_type_id =
+        EdgeTypeId::try_from(u32::try_from(registry_len.saturating_sub(1)).map_err(|_| {
+            GraphError::CorruptFile {
+                reason: "edge type registry exceeds logical ID width".into(),
+            }
+        })?)
+        .map_err(|_| GraphError::CorruptFile {
+            reason: "edge type registry uses the logical sentinel".into(),
+        })?;
+    if artifact.layout.edge_type_width != EdgeTypeWidth::select_for_max_id(max_type_id) {
+        return Err(GraphError::CorruptFile {
+            reason: "v7 edge type width is not canonical for its registry".into(),
+        });
+    }
     if edge_store
-        .v6_type_ids_bytes()
-        .iter()
-        .chain(reverse_edge_store.v6_type_ids_bytes())
-        .any(|type_id| {
-            EdgeTypeId::from_v6_storage(*type_id)
-                .ok()
-                .is_none_or(|logical| logical.get() as usize >= registry_len)
-        })
+        .edge_type_ids()
+        .chain(reverse_edge_store.edge_type_ids())
+        .any(|type_id| type_id.get() as usize >= registry_len)
     {
         return Err(GraphError::CorruptFile {
             reason: "CSR edge type ID is outside the edge type registry".into(),
@@ -2297,7 +2486,7 @@ fn load_graph_file_internal(
         engine.set_projection_mode(projection_mode);
     }
     if let Some(manifest) = pinned_manifest.as_ref() {
-        validate_projection_manifest_base(path, computed_crc, manifest)?;
+        validate_projection_manifest_base(path, computed_crc, artifact_version, manifest)?;
     }
     let manifest = pinned_manifest;
     let projection_workspace = manifest
@@ -2405,12 +2594,13 @@ fn projection_workspace_bytes(
 fn validate_projection_manifest_base(
     path: &Path,
     artifact_crc: u32,
+    artifact_version: u32,
     manifest: &ProjectionManifest,
 ) -> GraphResult<()> {
-    if manifest.base_artifact_version != VERSION {
+    if manifest.base_artifact_version != artifact_version {
         return Err(GraphError::IncompatibleVersion(format!(
             "projection manifest references base artifact version {}; expected {}",
-            manifest.base_artifact_version, VERSION
+            manifest.base_artifact_version, artifact_version
         )));
     }
     let expected_base = path
@@ -2441,10 +2631,92 @@ fn graph_artifact_checksum(crc: u32) -> String {
     format!("crc32:{crc:08x}")
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "P7.2 retains the v6 writer-version seam until P7.4 activates v7 emission"
+    )
+)]
 pub(crate) fn graph_artifact_version() -> u32 {
     VERSION
 }
 
+pub(crate) fn graph_artifact_metadata_for_path(path: &Path) -> GraphResult<GraphArtifactMetadata> {
+    let mut file = fs::File::open(path)
+        .map_err(|err| GraphError::Internal(format!("open graph artifact metadata: {err}")))?;
+    let file_len = file
+        .metadata()
+        .map_err(|err| GraphError::Internal(format!("stat graph artifact metadata: {err}")))?
+        .len();
+    if file_len < HEADER_SIZE as u64 {
+        return Err(GraphError::CorruptFile {
+            reason: "file too small for graph artifact header".into(),
+        });
+    }
+    let mut header = [0u8; HEADER_SIZE];
+    file.read_exact(&mut header)
+        .map_err(|err| GraphError::Internal(format!("read graph artifact metadata: {err}")))?;
+    if &header[..4] != MAGIC {
+        return Err(GraphError::CorruptFile {
+            reason: "invalid magic bytes".into(),
+        });
+    }
+    let version = read_u32_at(&header, 4);
+    let edge_type_width = decode_edge_type_width(version, &header)?;
+    if read_u32_at(&header, 8) as usize != HEADER_SIZE
+        || read_u32_at(&header, 28) as usize != NUM_SECTIONS
+        || header[480..].iter().any(|&byte| byte != 0)
+    {
+        return Err(GraphError::CorruptFile {
+            reason: "invalid graph artifact metadata header".into(),
+        });
+    }
+    let stored_header_crc = read_u32_at(&header, HEADER_CRC_OFFSET);
+    header[HEADER_CRC_OFFSET..HEADER_CRC_OFFSET + 4].fill(0);
+    let computed_header_crc = crc32fast::hash(&header);
+    if stored_header_crc != computed_header_crc {
+        return Err(GraphError::CorruptFile {
+            reason: "header CRC32 mismatch while reading artifact metadata".into(),
+        });
+    }
+    let body_len = read_u64_at(&header, 32);
+    if body_len != file_len - HEADER_SIZE as u64 {
+        return Err(GraphError::CorruptFile {
+            reason: "graph artifact metadata body length mismatch".into(),
+        });
+    }
+    let stored_body_crc = read_u32_at(&header, BODY_CRC_OFFSET);
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut remaining = body_len;
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
+            GraphError::Internal("graph artifact metadata checksum size overflowed".into())
+        })?;
+        file.read_exact(&mut buffer[..requested]).map_err(|err| {
+            GraphError::Internal(format!("read graph artifact metadata body: {err}"))
+        })?;
+        hasher.update(&buffer[..requested]);
+        remaining -= requested as u64;
+    }
+    let computed_body_crc = hasher.finalize();
+    if stored_body_crc != computed_body_crc {
+        return Err(GraphError::CorruptFile {
+            reason: "body CRC32 mismatch while reading artifact metadata".into(),
+        });
+    }
+    Ok(GraphArtifactMetadata {
+        version,
+        edge_type_width,
+        body_crc: computed_body_crc,
+    })
+}
+
+#[allow(
+    dead_code,
+    reason = "recovery and PostgreSQL test diagnostics retain the checksum-only seam"
+)]
 pub(crate) fn graph_artifact_checksum_for_path(path: &Path) -> GraphResult<String> {
     let mut file = fs::File::open(path)
         .map_err(|err| GraphError::Internal(format!("open graph artifact checksum: {err}")))?;
@@ -3997,7 +4269,7 @@ mod tests {
         use std::io::{Seek, Write};
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.seek(std::io::SeekFrom::Start(4)).unwrap();
-        file.write_all(&(VERSION + 1).to_le_bytes()).unwrap();
+        file.write_all(&(V7_VERSION + 1).to_le_bytes()).unwrap();
         file.seek(std::io::SeekFrom::Start(20)).unwrap();
         file.write_all(&u64::MAX.to_le_bytes()).unwrap();
         file.flush().unwrap();
@@ -4006,7 +4278,7 @@ mod tests {
         match result {
             Err(GraphError::IncompatibleVersion(message)) => {
                 assert!(message.contains("unsupported"));
-                assert!(message.contains("graph.build()"));
+                assert!(message.contains("supported versions"));
             }
             Err(other) => panic!("expected IncompatibleVersion, got {:?}", other),
             Ok(_) => panic!("expected version mismatch to fail"),
@@ -4170,6 +4442,235 @@ mod tests {
         );
         engine.built = true;
         engine
+    }
+
+    fn adaptive_graph(max_type_id: u32) -> Engine {
+        let mut engine = Engine::new();
+        let source = engine.node_store.add_node(10, "A".to_string());
+        let target = engine.node_store.add_node(10, "B".to_string());
+        engine.resolution_insert(10, "A", source);
+        engine.resolution_insert(10, "B", target);
+        let mut labels = Vec::new();
+        labels
+            .try_reserve_exact(max_type_id as usize + 1)
+            .expect("fixture registry allocation");
+        labels.push(String::new());
+        labels.extend((1..=max_type_id).map(|index| format!("type_{index}")));
+        engine.edge_type_registry = EdgeTypeRegistry::try_from_labels(labels).expect("registry");
+        engine.edge_store = EdgeStore::try_from_edges(
+            2,
+            vec![RawEdge {
+                source,
+                target,
+                type_id: EdgeTypeId::try_from(max_type_id).expect("logical type ID"),
+                weight: Some(7),
+                schema_reversed: false,
+            }],
+            true,
+        )
+        .expect("adaptive edge store");
+        engine.built = true;
+        engine
+    }
+
+    fn write_v7_fixture(engine: &Engine, path: &Path, width: EdgeTypeWidth) {
+        write_graph_file_internal(
+            engine,
+            path,
+            false,
+            None,
+            GraphArtifactMetadata {
+                version: V7_VERSION,
+                edge_type_width: width,
+                body_crc: 0,
+            },
+        )
+        .expect("v7 fixture writes");
+    }
+
+    fn overwrite_bytes(path: &Path, offset: usize, bytes: &[u8]) {
+        use std::io::{Seek, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("fixture opens");
+        file.seek(std::io::SeekFrom::Start(offset as u64))
+            .expect("fixture seeks");
+        file.write_all(bytes).expect("fixture mutates");
+        file.flush().expect("fixture flushes");
+    }
+
+    #[test]
+    fn parsed_artifact_metadata_reports_actual_version_and_widths() {
+        let v6 = temp_graph_path("p7-metadata-v6");
+        write_graph_file(&graph_with_relationship(), &v6).expect("v6 writes");
+        let metadata = graph_artifact_metadata_for_path(&v6).expect("v6 metadata");
+        assert_eq!(metadata.version, V6_VERSION);
+        assert_eq!(metadata.edge_type_width, EdgeTypeWidth::One);
+        let v7 = temp_graph_path("p7-metadata-v7");
+        write_v7_fixture(&adaptive_graph(255), &v7, EdgeTypeWidth::Two);
+        let metadata = graph_artifact_metadata_for_path(&v7).expect("v7 metadata");
+        assert_eq!(metadata.version, V7_VERSION);
+        assert_eq!(metadata.edge_type_width, EdgeTypeWidth::Two);
+    }
+
+    #[test]
+    fn v6_artifact_remains_loadable_after_v7_activation() {
+        let path = temp_graph_path("p7-v6-compatibility");
+        write_graph_file(&graph_with_relationship(), &path).expect("v6 writes");
+        let loaded = load_graph_file(&path).expect("v6 still loads");
+        assert_eq!(loaded.edge_store.neighbors(0).0, [1]);
+        assert_eq!(
+            std::fs::read(&path).unwrap()[4..8],
+            V6_VERSION.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn v7_test_fixture_widths_one_two_four_roundtrip() {
+        for (name, max_type_id, width) in [
+            ("one", 254, EdgeTypeWidth::One),
+            ("two", 255, EdgeTypeWidth::Two),
+            ("four", 65_535, EdgeTypeWidth::Four),
+        ] {
+            let path = temp_graph_path(&format!("p7-width-{name}"));
+            write_v7_fixture(&adaptive_graph(max_type_id), &path, width);
+            let loaded = load_graph_file(&path).expect("v7 fixture loads");
+            assert_eq!(loaded.edge_store.edge_type_width(), width);
+            assert_eq!(
+                loaded.edge_store.edge_type_ids().next().unwrap().get(),
+                max_type_id
+            );
+            assert_eq!(loaded.reverse_edge_store.edge_type_width(), width);
+        }
+    }
+
+    #[test]
+    fn v7_rejects_invalid_edge_type_width() {
+        for invalid in [0u32, 3, 255] {
+            let path = temp_graph_path(&format!("p7-invalid-width-{invalid}"));
+            write_v7_fixture(&adaptive_graph(254), &path, EdgeTypeWidth::One);
+            overwrite_bytes(&path, EDGE_TYPE_WIDTH_OFFSET, &invalid.to_le_bytes());
+            rewrite_crc(&path);
+            assert!(matches!(
+                load_graph_file(&path),
+                Err(GraphError::CorruptFile { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn v7_rejects_noncanonical_edge_type_width() {
+        let path = temp_graph_path("p7-noncanonical-width");
+        write_v7_fixture(&adaptive_graph(254), &path, EdgeTypeWidth::Two);
+        let error = match load_graph_file(&path) {
+            Ok(_) => panic!("over-wide v7 must reject"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, GraphError::CorruptFile { reason } if reason.contains("not canonical"))
+        );
+    }
+
+    #[test]
+    fn v7_rejects_physical_edge_type_sentinel() {
+        for (name, max_type_id, width, sentinel) in [
+            ("one", 254, EdgeTypeWidth::One, u8::MAX as u32),
+            ("two", 255, EdgeTypeWidth::Two, u16::MAX as u32),
+            ("four", 65_535, EdgeTypeWidth::Four, u32::MAX),
+        ] {
+            let path = temp_graph_path(&format!("p7-sentinel-{name}"));
+            write_v7_fixture(&adaptive_graph(max_type_id), &path, width);
+            let offset = read_section_offset(&path, 6) as usize;
+            overwrite_bytes(&path, offset, &sentinel.to_le_bytes()[..width.bytes()]);
+            rewrite_crc(&path);
+            assert!(matches!(
+                load_graph_file(&path),
+                Err(GraphError::CorruptFile { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn v7_rejects_widened_edge_type_outside_registry() {
+        let path = temp_graph_path("p7-four-byte-type-outside-registry");
+        write_v7_fixture(&adaptive_graph(65_535), &path, EdgeTypeWidth::Four);
+        let unknown = 65_536u32.to_le_bytes();
+        for section in [6, 12] {
+            overwrite_bytes(
+                &path,
+                read_section_offset(&path, section) as usize,
+                &unknown,
+            );
+        }
+        rewrite_crc(&path);
+        let error = match load_graph_file(&path) {
+            Ok(_) => panic!("widened unknown type must reject"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, GraphError::CorruptFile { reason } if reason.contains("outside the edge type registry"))
+        );
+    }
+
+    #[test]
+    fn v7_rejects_edge_type_section_range_or_alignment() {
+        let path = temp_graph_path("p7-type-range-alignment");
+        write_v7_fixture(&adaptive_graph(255), &path, EdgeTypeWidth::Two);
+        let descriptor = SECTION_DESCRIPTORS_OFFSET + 6 * SECTION_DESCRIPTOR_SIZE;
+        let offset = read_section_offset(&path, 6) + 1;
+        overwrite_bytes(&path, descriptor, &offset.to_le_bytes());
+        rewrite_crc(&path);
+        assert!(matches!(
+            load_graph_file(&path),
+            Err(GraphError::CorruptFile { .. })
+        ));
+    }
+
+    #[test]
+    fn v7_rejects_truncated_edge_type_section() {
+        let path = temp_graph_path("p7-truncated-type-section");
+        write_v7_fixture(&adaptive_graph(255), &path, EdgeTypeWidth::Two);
+        let descriptor = SECTION_DESCRIPTORS_OFFSET + 6 * SECTION_DESCRIPTOR_SIZE + 8;
+        overwrite_bytes(&path, descriptor, &1u64.to_le_bytes());
+        rewrite_crc(&path);
+        assert!(matches!(
+            load_graph_file(&path),
+            Err(GraphError::CorruptFile { .. })
+        ));
+    }
+
+    #[test]
+    fn v7_rejects_forward_inbound_edge_type_width_mismatch() {
+        let path = temp_graph_path("p7-forward-inbound-mismatch");
+        write_v7_fixture(&adaptive_graph(255), &path, EdgeTypeWidth::Two);
+        let inbound_type_length = SECTION_DESCRIPTORS_OFFSET + 12 * SECTION_DESCRIPTOR_SIZE + 8;
+        overwrite_bytes(&path, inbound_type_length, &1u64.to_le_bytes());
+        rewrite_crc(&path);
+        assert!(matches!(
+            load_graph_file(&path),
+            Err(GraphError::CorruptFile { .. })
+        ));
+    }
+
+    #[test]
+    fn manifest_uses_parsed_base_artifact_version() {
+        let path = temp_graph_path("p7-manifest-version");
+        write_v7_fixture(&adaptive_graph(255), &path, EdgeTypeWidth::Two);
+        let manifest = ProjectionManifest::base_only(
+            1,
+            path.file_name().unwrap().to_string_lossy(),
+            checksum_graph_artifact(&path),
+            V7_VERSION,
+            0,
+            1,
+        );
+        load_graph_file_with_projection_candidate_and_residency(
+            &path,
+            &manifest,
+            crate::resource::ByteCount::ZERO,
+        )
+        .expect("manifest matches parsed v7 base");
     }
 
     fn graph_with_identified_relationship() -> Engine {

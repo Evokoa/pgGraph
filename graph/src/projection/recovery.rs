@@ -8,9 +8,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::persistence::{
-    graph_artifact_checksum_for_path, graph_artifact_version, projection_manifest_root,
-};
+#[cfg(test)]
+use crate::persistence::{graph_artifact_checksum_for_path, graph_artifact_version};
+use crate::persistence::{graph_artifact_metadata_for_path, projection_manifest_root};
 use crate::projection::chunk::{
     repair_corrupt_base_chunks, BaseChunkRewriteResult, BaseChunkSource,
 };
@@ -318,11 +318,12 @@ pub(crate) fn prepare_generation_specific_rebuilt_base_manifest(
             plan.candidate_base_path.display()
         )));
     }
+    let candidate_metadata = graph_artifact_metadata_for_path(&plan.candidate_base_path)?;
     let mut manifest = ProjectionManifest::base_only(
         plan.generation_id,
         plan.candidate_base_name.clone(),
-        graph_artifact_checksum_for_path(&plan.candidate_base_path)?,
-        graph_artifact_version(),
+        candidate_metadata.checksum(),
+        candidate_metadata.version,
         sync_watermark,
         now_unix_micros()?,
     );
@@ -364,17 +365,17 @@ pub(crate) fn publish_prepared_generation_specific_rebuilt_base(
     {
         return Err(GraphError::BuildLocked);
     }
+    let candidate_metadata = graph_artifact_metadata_for_path(&plan.candidate_base_path)?;
     if manifest.generation_id != plan.generation_id
         || manifest.base_artifact_path != plan.candidate_base_name
-        || manifest.base_artifact_version != graph_artifact_version()
+        || manifest.base_artifact_version != candidate_metadata.version
         || manifest.previous_generation_id != plan.predecessor_generation
     {
         return Err(GraphError::CorruptFile {
             reason: "prepared rebuilt-base manifest does not match its publication plan".into(),
         });
     }
-    let checksum = graph_artifact_checksum_for_path(&plan.candidate_base_path)?;
-    if manifest.base_artifact_checksum != checksum {
+    if manifest.base_artifact_checksum != candidate_metadata.checksum() {
         return Err(GraphError::CorruptFile {
             reason: "prepared rebuilt-base manifest checksum does not match its candidate".into(),
         });
@@ -425,11 +426,12 @@ pub(crate) fn publish_rebuilt_base_manifest(
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| GraphError::Internal("graph artifact path has no file name".into()))?;
+    let artifact_metadata = graph_artifact_metadata_for_path(graph_path)?;
     let mut manifest = ProjectionManifest::base_only(
         generation_id,
         base_artifact_path,
-        graph_artifact_checksum_for_path(graph_path)?,
-        graph_artifact_version(),
+        artifact_metadata.checksum(),
+        artifact_metadata.version,
         sync_watermark,
         now_unix_micros()?,
     );
@@ -507,14 +509,14 @@ fn validate_manifest_base_metadata(
             ),
         });
     }
-    if manifest.base_artifact_version != graph_artifact_version() {
+    let artifact_metadata = graph_artifact_metadata_for_path(graph_path)?;
+    if manifest.base_artifact_version != artifact_metadata.version {
         return Err(GraphError::IncompatibleVersion(format!(
             "projection manifest references base artifact version {}; expected {}",
-            manifest.base_artifact_version,
-            graph_artifact_version()
+            manifest.base_artifact_version, artifact_metadata.version
         )));
     }
-    let expected_checksum = graph_artifact_checksum_for_path(graph_path)?;
+    let expected_checksum = artifact_metadata.checksum();
     if manifest.base_artifact_checksum != expected_checksum {
         return Err(GraphError::CorruptFile {
             reason: format!(
@@ -1213,6 +1215,42 @@ mod tests {
         assert_eq!(loaded.generation_id, 5);
         assert_eq!(loaded.base_artifact_path, "main.pggraph");
         assert_eq!(loaded.sync_watermark, 42);
+    }
+
+    #[test]
+    fn recovery_validates_actual_base_artifact_version() {
+        use crate::engine::Engine;
+        use crate::persistence::write_graph_file;
+        use std::io::{Read, Seek, Write};
+
+        let dir = ProjectionArtifactDir::new("recovery_validates_actual_base_artifact_version");
+        let graph_path = dir.path().join("main.pggraph");
+        let mut engine = Engine::new();
+        engine.finish_build(None);
+        write_graph_file(&engine, &graph_path).expect("v6 base writes");
+
+        let mut header = [0u8; 512];
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&graph_path)
+            .expect("base opens");
+        file.read_exact(&mut header).expect("header reads");
+        header[4..8].copy_from_slice(&7u32.to_le_bytes());
+        header[48..52].copy_from_slice(&1u32.to_le_bytes());
+        header[44..48].fill(0);
+        let crc = crc32fast::hash(&header);
+        header[44..48].copy_from_slice(&crc.to_le_bytes());
+        file.seek(std::io::SeekFrom::Start(0))
+            .expect("header seeks");
+        file.write_all(&header).expect("v7 header writes");
+        file.flush().expect("v7 header flushes");
+
+        let manifest = publish_rebuilt_base_manifest(&graph_path, 42)
+            .expect("recovery publishes actual-version manifest");
+        assert_eq!(manifest.base_artifact_version, 7);
+        validate_manifest_base_metadata(&graph_path, &manifest)
+            .expect("recovery validates the parsed version");
     }
 
     #[test]

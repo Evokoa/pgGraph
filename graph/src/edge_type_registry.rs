@@ -22,8 +22,17 @@ impl EdgeTypeRegistry {
     }
 
     pub(crate) fn try_from_v6_labels(labels: Vec<String>) -> GraphResult<Self> {
+        if labels.len() > EdgeTypeId::V6_MAX_USER_ID as usize + 1 {
+            return Err(GraphError::CorruptFile {
+                reason: "edge type registry count exceeds v6 limits".into(),
+            });
+        }
+        Self::try_from_labels(labels)
+    }
+
+    pub(crate) fn try_from_labels(labels: Vec<String>) -> GraphResult<Self> {
         if labels.first().is_none_or(|label| !label.is_empty())
-            || labels.len() > usize::try_from(EdgeTypeId::V6_MAX_USER_ID).unwrap_or(usize::MAX) + 1
+            || labels.len() > u32::MAX as usize
             || labels.iter().skip(1).any(String::is_empty)
         {
             return Err(GraphError::CorruptFile {
@@ -156,19 +165,20 @@ impl EdgeTypeRegistry {
 
     /// Conservative heap bound for decoding one validated v6 registry section.
     pub(crate) fn v6_load_metadata_upper_bound(encoded: &[u8]) -> GraphResult<usize> {
-        let count_bytes: [u8; 4] = encoded
-            .get(..4)
-            .ok_or_else(|| GraphError::CorruptFile {
-                reason: "edge type registry is too short".into(),
-            })?
-            .try_into()
-            .map_err(|_| GraphError::CorruptFile {
-                reason: "edge type registry count is malformed".into(),
-            })?;
-        let count = u32::from_le_bytes(count_bytes) as usize;
-        if count == 0 || count > EdgeTypeId::V6_MAX_USER_ID as usize + 1 {
+        let count = registry_encoded_count(encoded)?;
+        if count > EdgeTypeId::V6_MAX_USER_ID as usize + 1 {
             return Err(GraphError::CorruptFile {
                 reason: "edge type registry count exceeds v6 limits".into(),
+            });
+        }
+        Self::load_metadata_upper_bound(encoded)
+    }
+
+    pub(crate) fn load_metadata_upper_bound(encoded: &[u8]) -> GraphResult<usize> {
+        let count = registry_encoded_count(encoded)?;
+        if count > u32::MAX as usize {
+            return Err(GraphError::CorruptFile {
+                reason: "edge type registry count exceeds logical limits".into(),
             });
         }
         let header_bytes = count
@@ -204,6 +214,25 @@ impl EdgeTypeRegistry {
             })
             .ok_or_else(|| GraphError::Internal("edge type metadata bound overflowed".into()))
     }
+}
+
+fn registry_encoded_count(encoded: &[u8]) -> GraphResult<usize> {
+    let count_bytes: [u8; 4] = encoded
+        .get(..4)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "edge type registry is too short".into(),
+        })?
+        .try_into()
+        .map_err(|_| GraphError::CorruptFile {
+            reason: "edge type registry count is malformed".into(),
+        })?;
+    let count = u32::from_le_bytes(count_bytes) as usize;
+    if count == 0 {
+        return Err(GraphError::CorruptFile {
+            reason: "edge type registry must contain the untyped entry".into(),
+        });
+    }
+    Ok(count)
 }
 
 fn collection_capacity_upper_bound(current: usize, required: usize) -> GraphResult<usize> {

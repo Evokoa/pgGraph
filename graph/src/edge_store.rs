@@ -68,6 +68,15 @@ impl EdgeTypeWidth {
             Self::Four
         }
     }
+
+    pub(crate) const fn from_bytes(bytes: u32) -> Option<Self> {
+        match bytes {
+            1 => Some(Self::One),
+            2 => Some(Self::Two),
+            4 => Some(Self::Four),
+            _ => None,
+        }
+    }
 }
 
 /// Owned adaptive physical edge-type array.
@@ -1321,6 +1330,13 @@ impl EdgeStore {
         }
     }
 
+    pub(crate) fn edge_type_ids(&self) -> EdgeTypeIter<'_> {
+        match &self.backing {
+            EdgeBacking::Owned { type_ids, .. } => type_ids.as_slice().iter(),
+            EdgeBacking::Mmap { arrays } => arrays.type_ids().iter(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn edge_type_at(&self, index: usize) -> Option<EdgeTypeId> {
         match &self.backing {
@@ -1436,6 +1452,10 @@ impl EdgeStore {
     }
 
     /// Get type_ids as a slice. Used by persistence.
+    #[allow(
+        dead_code,
+        reason = "P7.2 keeps the byte-identical v6 writer adapter until v7 emission is activated"
+    )]
     pub fn v6_type_ids_bytes(&self) -> &[u8] {
         match &self.backing {
             EdgeBacking::Owned { type_ids, .. } => match type_ids {

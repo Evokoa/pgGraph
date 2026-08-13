@@ -7,10 +7,9 @@ use crate::catalog::{
 };
 use crate::filter_index::{EncodedFilterValue, FilterColumnType, PersistedFilterValue};
 use crate::persistence::{
-    current_base_artifact_path, graph_artifact_checksum_for_path, graph_artifact_version,
-    graph_file_path, load_graph_file, load_graph_file_with_projection_candidate_and_residency,
-    load_graph_file_with_residency, persisted_graph_exists, projection_manifest_root,
-    read_sync_checkpoint,
+    current_base_artifact_path, graph_artifact_metadata_for_path, graph_file_path, load_graph_file,
+    load_graph_file_with_projection_candidate_and_residency, load_graph_file_with_residency,
+    persisted_graph_exists, projection_manifest_root, read_sync_checkpoint,
 };
 use crate::projection::ingest::{ProjectionIngestResult, ProjectionIngester, ProjectionSyncRow};
 use crate::projection::manifest::{
@@ -1118,19 +1117,9 @@ fn ingest_projection_until_internal(
         })?;
     let current_base_path =
         current_base_artifact_path(&graph_path)?.ok_or(safety::GraphError::NotBuilt)?;
-    let base_artifact_path = current_base_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            safety::GraphError::Internal("graph artifact path has no file name".to_string())
-        })?
-        .to_string();
-    let ingester = ProjectionIngester::new(
-        root,
-        base_artifact_path,
-        graph_artifact_checksum_for_path(&current_base_path)?,
-        graph_artifact_version(),
-    );
+    let (base_artifact_path, base_checksum, base_version) =
+        sync_ingest_base_artifact_metadata(&current_base_path)?;
+    let ingester = ProjectionIngester::new(root, base_artifact_path, base_checksum, base_version);
     let candidate_residency = planning_residency
         .checked_add(planning_engine_bytes)
         .ok_or_else(|| {
@@ -1173,6 +1162,20 @@ fn ingest_projection_until_internal(
         stats,
         query_replay: return_query_replay.then_some(context),
     })
+}
+
+fn sync_ingest_base_artifact_metadata(
+    path: &std::path::Path,
+) -> safety::GraphResult<(String, String, u32)> {
+    let base_artifact_path = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            safety::GraphError::Internal("graph artifact path has no file name".to_string())
+        })?
+        .to_string();
+    let metadata = graph_artifact_metadata_for_path(path)?;
+    Ok((base_artifact_path, metadata.checksum(), metadata.version))
 }
 
 fn sync_entries_heap_bytes(entries: &[SyncLogEntry]) -> safety::GraphResult<usize> {
@@ -4222,17 +4225,57 @@ mod tests {
         is_sync_log_prune_recommended, parse_sync_op, parse_sync_properties,
         projected_vec_capacity, required_sync_i64, required_sync_string,
         resize_sync_preflight_memory, resolve_unique_endpoint, sync_context_bound_from_counts,
-        sync_normalization_memory_upper_bound, tenant_change_from_entry,
-        validate_sync_input_row_sizes, ParsedSyncRows, PreparedProjectionEntry,
-        ProjectionNodePlanner, SyncInputRowSize, SyncLogEntry, SyncOp, SyncReplayContext,
-        TenantChange, SYNC_CONTEXT_BYTES_PER_CATALOG_BYTE, SYNC_CONTEXT_FIXED_BYTES_PER_ROW,
-        SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS,
+        sync_ingest_base_artifact_metadata, sync_normalization_memory_upper_bound,
+        tenant_change_from_entry, validate_sync_input_row_sizes, ParsedSyncRows,
+        PreparedProjectionEntry, ProjectionNodePlanner, SyncInputRowSize, SyncLogEntry, SyncOp,
+        SyncReplayContext, TenantChange, SYNC_CONTEXT_BYTES_PER_CATALOG_BYTE,
+        SYNC_CONTEXT_FIXED_BYTES_PER_ROW, SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS,
     };
     use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredEdge, RegisteredTable};
     use crate::engine::Engine;
     use crate::safety::GraphError;
     use proptest::prelude::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn sync_ingester_carries_actual_base_artifact_version() {
+        use crate::persistence::write_graph_file;
+        use std::io::{Read, Seek, Write};
+
+        let root = std::env::temp_dir().join(format!(
+            "pggraph-sync-version-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&root).expect("fixture root");
+        let path = root.join("base.pggraph");
+        let mut engine = Engine::new();
+        engine.finish_build(None);
+        write_graph_file(&engine, &path).expect("v6 base writes");
+
+        let mut header = [0u8; 512];
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("base opens");
+        file.read_exact(&mut header).expect("header reads");
+        header[4..8].copy_from_slice(&7u32.to_le_bytes());
+        header[48..52].copy_from_slice(&1u32.to_le_bytes());
+        header[44..48].fill(0);
+        let crc = crc32fast::hash(&header);
+        header[44..48].copy_from_slice(&crc.to_le_bytes());
+        file.seek(std::io::SeekFrom::Start(0))
+            .expect("header seeks");
+        file.write_all(&header).expect("v7 header writes");
+        file.flush().expect("v7 header flushes");
+
+        let (name, _checksum, version) =
+            sync_ingest_base_artifact_metadata(&path).expect("sync metadata reads");
+        assert_eq!(name, "base.pggraph");
+        assert_eq!(version, 7);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn parse_sync_op_accepts_supported_codes() {

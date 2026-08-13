@@ -44,20 +44,88 @@ fn p7_owned_csr_selects_one_two_or_four_byte_edge_type_storage() {
 }
 
 #[test]
-#[ignore = "P7.2 versioned adaptive base artifact checkpoint"]
-fn p7_base_artifact_declares_validates_and_maps_each_edge_type_width() {
+fn p7_dual_parser_keeps_the_writer_on_v6_and_reports_validated_artifact_metadata() {
     let persistence = crate_source("src/persistence.rs");
+    assert!(
+        persistence.contains("const V6_VERSION: u32 = 6;")
+            && persistence.contains("const VERSION: u32 = V6_VERSION;"),
+        "P7.2 must not switch the production writer away from v6"
+    );
     for seam in [
-        "const VERSION: u32 = 7",
+        "const V7_VERSION: u32 = 7",
+        "struct GraphArtifactMetadata",
+        "version: u32",
+        "edge_type_width: EdgeTypeWidth",
+        "artifact_version: u32",
         "fn decode_edge_type_width",
-        "fn write_edge_type_section",
-        "v7_adaptive_edge_type_width_roundtrips_boundaries",
-        "v7_rejects_invalid_width_reserved_id_alignment_and_truncation",
+        "fn graph_artifact_metadata_for_path",
+        "parsed_artifact_metadata_reports_actual_version_and_widths",
         "v6_artifact_remains_loadable_after_v7_activation",
-        "v7_forward_and_inbound_widths_must_match_registry_capacity",
-        "v7_checksum_and_recovery_preserve_last_valid_generation",
     ] {
-        assert!(persistence.contains(seam), "P7.2 is missing `{seam}`");
+        assert!(
+            persistence.contains(seam),
+            "P7.2 dual-parser metadata is missing `{seam}`"
+        );
+    }
+}
+
+#[test]
+fn p7_v7_fixture_validation_covers_every_width_and_corruption_boundary() {
+    let persistence = crate_source("src/persistence.rs");
+    for gate in [
+        "v7_test_fixture_widths_one_two_four_roundtrip",
+        "v7_rejects_invalid_edge_type_width",
+        "v7_rejects_noncanonical_edge_type_width",
+        "v7_rejects_physical_edge_type_sentinel",
+        "v7_rejects_edge_type_section_range_or_alignment",
+        "v7_rejects_truncated_edge_type_section",
+        "v7_rejects_forward_inbound_edge_type_width_mismatch",
+    ] {
+        assert!(
+            persistence.contains(gate),
+            "P7.2 corruption matrix is missing `{gate}`"
+        );
+    }
+}
+
+#[test]
+fn p7_manifest_recovery_and_sync_use_the_parsed_base_artifact_version() {
+    let persistence = crate_source("src/persistence.rs");
+    let recovery = crate_source("src/projection/recovery.rs");
+    let sync = crate_source("src/sql_sync.rs");
+
+    for (owner, source, seams) in [
+        (
+            "persistence",
+            persistence.as_str(),
+            [
+                "manifest_uses_parsed_base_artifact_version",
+                "graph_artifact_metadata_for_path",
+            ],
+        ),
+        (
+            "recovery",
+            recovery.as_str(),
+            [
+                "recovery_validates_actual_base_artifact_version",
+                "graph_artifact_metadata_for_path",
+            ],
+        ),
+        (
+            "sync",
+            sync.as_str(),
+            [
+                "sync_ingester_carries_actual_base_artifact_version",
+                "graph_artifact_metadata_for_path",
+            ],
+        ),
+    ] {
+        for seam in seams {
+            assert!(
+                source.contains(seam),
+                "P7.2 {owner} actual-version flow is missing `{seam}`"
+            );
+        }
     }
 }
 

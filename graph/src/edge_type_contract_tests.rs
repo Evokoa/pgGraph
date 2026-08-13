@@ -377,7 +377,8 @@ fn p6_logical_migration_preserves_the_v6_byte_contract() {
     );
     assert!(
         persistence.contains("p6_logical_edge_type_promotion_preserves_v6_artifact_bytes")
-            && persistence.contains("const VERSION: u32 = 6"),
+            && persistence.contains("const V6_VERSION: u32 = 6")
+            && persistence.contains("const VERSION: u32 = V6_VERSION"),
         "the full-file v6 compatibility oracle must remain active"
     );
     assert!(
