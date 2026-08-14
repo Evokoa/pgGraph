@@ -21,7 +21,7 @@ trap cleanup EXIT
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "measure_mmap_pss.sh requires Linux /proc/<pid>/smaps_rollup for PSS accounting." >&2
-  echo "macOS RSS/vmmap can confirm file mappings, but cannot prove shared page-cache cost." >&2
+  echo "macOS RSS cannot substitute for retained Linux PSS capacity evidence." >&2
   exit 2
 fi
 
@@ -115,6 +115,6 @@ fi
 
 echo
 echo "Interpretation:"
-echo "- RSS double-counts shared mappings in each backend."
-echo "- PSS divides shared pages across backends and is the value to use for multi-backend capacity evidence."
-echo "- A total PSS far below total RSS supports the mmap/page-cache sharing claim."
+echo "- RSS includes private pages and double-counts any shared mappings in each backend."
+echo "- PSS apportions shared libraries and mappings, so summed PSS is the multi-backend capacity measure."
+echo "- Current graph artifacts are loaded into private anonymous snapshots; do not infer file-page sharing from this output."

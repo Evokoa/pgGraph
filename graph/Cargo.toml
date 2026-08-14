@@ -80,6 +80,11 @@ name = "edge_type_width_bench"
 harness = false
 required-features = ["benchmarks"]
 
+[[bench]]
+name = "open_type_query_bench"
+harness = false
+required-features = ["benchmarks"]
+
 [profile.dev]
 panic = "unwind"
 

@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "status": "predeclared-before-measurement",
+  "criterion_expected_case_count": 65,
+  "criterion": {
+    "registry_lookup": {
+      "label_count": [254, 255, 65534, 65535, 65536],
+      "request": ["first", "last", "missing"]
+    },
+    "filter_resolution": {
+      "label_count": [254, 255, 65534, 65535, 65536],
+      "request_shape": ["empty", "one_exact", "bounded_4096"],
+      "request": ["first", "last", "missing", "32_labels"]
+    },
+    "bfs_oat": {
+      "baseline": {
+        "label_count": 254,
+        "degree": 8,
+        "depth": 4,
+        "csr_direction": "out",
+        "selectivity": "no_filter"
+      },
+      "label_count": [254, 255, 65534, 65535, 65536],
+      "degree": [1, 8, 64, 1024],
+      "depth": [1, 4, 16],
+      "csr_direction": ["out", "in"],
+      "selectivity": [
+        "none_matched",
+        "one_of_32",
+        "half_of_32",
+        "all_matched",
+        "no_filter"
+      ]
+    }
+  },
+  "postgres": {
+    "label_count": [254, 65536],
+    "query_surface": ["traverse", "shortest_path", "gql", "cypher"]
+  },
+  "resources": {
+    "label_count": 65536,
+    "backend_count": [1, 4, 8],
+    "query_surface": "traverse",
+    "filter_shape": "no_filter",
+    "degree": 8,
+    "depth": 4,
+    "projection_artifact_bytes": true,
+    "aggregate_backend_rss_pss": true
+  }
+}

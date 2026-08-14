@@ -196,7 +196,7 @@ pub mod bench_support {
     use crate::projection::layered::{LayeredNeighbors, SegmentProvider};
     use crate::projection::neighbors::NeighborSource;
     use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentEdgeWeight, SegmentKind};
-    pub use crate::types::{EdgeTypeFilter, FilterCondition, FilterOp};
+    pub use crate::types::{EdgeTypeFilter, EdgeTypeId, FilterCondition, FilterOp};
     use crate::types::{TraversalDirection, WeightedPathStep};
 
     type OverlayInserts = HashMap<
@@ -219,6 +219,62 @@ pub mod bench_support {
     >;
 
     pub(crate) struct BenchmarkVisibilityProof(());
+
+    /// Production registry and filter-resolution paths exposed only to the
+    /// Criterion open-type benchmark.
+    pub struct OpenTypeRegistryBench {
+        engine: crate::engine::Engine,
+    }
+
+    impl OpenTypeRegistryBench {
+        /// Build a deterministic registry with labels `type_1..=label_count`.
+        pub fn new(label_count: u32) -> Self {
+            let mut engine = crate::engine::Engine::new();
+            for type_id in 1..=label_count {
+                engine
+                    .register_edge_type(&format!("type_{type_id}"))
+                    .expect("benchmark registry stays within the public policy");
+            }
+            Self { engine }
+        }
+
+        /// Resolve one exact label through the production O(1) registry.
+        pub fn lookup(&self, label: &str) -> Option<u32> {
+            self.engine.edge_type_id(label).map(EdgeTypeId::get)
+        }
+
+        /// Resolve a bounded query filter through the production Engine path.
+        pub fn resolve_filter_len(&self, labels: Option<&[String]>) -> usize {
+            self.engine
+                .resolve_edge_type_filter(labels)
+                .expect("benchmark filter is valid")
+                .map_or(0, |filter| filter.len() as usize)
+        }
+
+        /// Resolve a filter while preserving expected invalid-filter outcomes.
+        pub fn try_resolve_filter_len(&self, labels: &[String]) -> Option<usize> {
+            self.engine
+                .resolve_edge_type_filter(Some(labels))
+                .ok()
+                .flatten()
+                .map(|filter| filter.len() as usize)
+        }
+    }
+
+    /// Return the physical edge-type bytes retained by one CSR direction.
+    pub fn edge_type_bytes_one_direction(edge_store: &EdgeStoreBuilder) -> usize {
+        usize::try_from(edge_store.edge_count())
+            .expect("benchmark edge count fits usize")
+            .checked_mul(edge_store.edge_type_width().bytes())
+            .expect("benchmark edge-type bytes fit usize")
+    }
+
+    /// Build the production reverse CSR for a benchmark fixture.
+    pub fn reverse_edge_store(edge_store: &EdgeStoreBuilder) -> EdgeStoreBuilder {
+        edge_store
+            .try_reversed()
+            .expect("benchmark reverse CSR allocation succeeds")
+    }
 
     /// Execute base-CSR BFS for Criterion without exposing an unrestricted
     /// topology constructor to normal extension code.

@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "status": "predeclared",
+  "measurement_state": "predeclared-before-measurement",
+  "lineage": {
+    "budget_commit_must_precede_measurement_commit": true
+  },
+  "criterion_ratio_limits": [
+    {
+      "id": "bfs_adaptive_u16_boundary",
+      "numerator": {"query_surface": "bfs", "label_count": 255, "selectivity": "no_filter", "degree": 8, "depth": 4, "csr_direction": "out"},
+      "denominator": {"query_surface": "bfs", "label_count": 254, "selectivity": "no_filter", "degree": 8, "depth": 4, "csr_direction": "out"},
+      "max_median_latency_ratio": 1.5,
+      "min_throughput_ratio": 0.67
+    },
+    {
+      "id": "bfs_adaptive_u32_boundary",
+      "numerator": {"query_surface": "bfs", "label_count": 65535, "selectivity": "no_filter", "degree": 8, "depth": 4, "csr_direction": "out"},
+      "denominator": {"query_surface": "bfs", "label_count": 65534, "selectivity": "no_filter", "degree": 8, "depth": 4, "csr_direction": "out"},
+      "max_median_latency_ratio": 1.5,
+      "min_throughput_ratio": 0.67
+    },
+    {
+      "id": "bfs_high_to_low_same_work",
+      "numerator": {"query_surface": "bfs", "label_count": 65536, "selectivity": "no_filter", "degree": 8, "depth": 4, "csr_direction": "out"},
+      "denominator": {"query_surface": "bfs", "label_count": 254, "selectivity": "no_filter", "degree": 8, "depth": 4, "csr_direction": "out"},
+      "max_median_latency_ratio": 2.0,
+      "min_throughput_ratio": 0.5
+    }
+  ],
+  "max_relative_confidence_interval_width": 0.2,
+  "postgres_ratio_limits": [
+    {
+      "query_surface": "traverse",
+      "numerator": {"label_count": 65536},
+      "denominator": {"label_count": 254},
+      "max_median_latency_ratio": 3.0
+    },
+    {
+      "query_surface": "shortest_path",
+      "numerator": {"label_count": 65536},
+      "denominator": {"label_count": 254},
+      "max_median_latency_ratio": 3.0
+    },
+    {
+      "query_surface": "gql",
+      "numerator": {"label_count": 65536},
+      "denominator": {"label_count": 254},
+      "max_median_latency_ratio": 3.0
+    },
+    {
+      "query_surface": "cypher",
+      "numerator": {"label_count": 65536},
+      "denominator": {"label_count": 254},
+      "max_median_latency_ratio": 3.0
+    }
+  ],
+  "high_cardinality_resource_limits": {
+    "max_rss_bytes_per_backend": 536870912,
+    "max_pss_bytes_per_backend": 536870912,
+    "max_projection_artifact_bytes_per_directed_edge": 64.0,
+    "max_eight_to_one_total_query_pss_ratio": 9.0,
+    "max_eight_to_one_query_minus_idle_total_pss_ratio": 9.0,
+    "require_baseline_subtracted_totals": true,
+    "require_linux_pss_samples": true,
+    "require_zero_missing_pss_samples": true
+  },
+  "fixtures": {
+    "label_counts": [254, 255, 65534, 65535, 65536],
+    "backend_counts": [1, 4, 8],
+    "degree": [1, 8, 64, 1024],
+    "depth": [1, 4, 16],
+    "csr_direction": ["out", "in"],
+    "selectivity": [
+      "none_matched",
+      "one_of_32",
+      "half_of_32",
+      "all_matched",
+      "no_filter"
+    ]
+  }
+}

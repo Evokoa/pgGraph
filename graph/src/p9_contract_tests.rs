@@ -273,24 +273,27 @@ fn p9_open_type_codecs_and_query_filters_have_property_and_fuzz_evidence() {
 }
 
 #[test]
-#[ignore = "P9.5c/d activates after benchmark budgets and retained evidence land"]
-fn p9_retains_reproducible_high_cardinality_query_and_resource_evidence() {
+fn p9_open_type_query_benchmark_and_linux_backend_resource_runner_are_declared() {
     let cargo = crate_source("Cargo.toml");
     let benchmark = crate_source("benches/open_type_query_bench.rs");
     assert!(
-        cargo.contains("name = \"open_type_query_bench\"")
-            && cargo.contains("required-features = [\"benchmarks\"]"),
+        cargo.contains(
+            "[[bench]]\nname = \"open_type_query_bench\"\nharness = false\nrequired-features = [\"benchmarks\"]"
+        ),
         "P9 query benchmark must be an explicit benchmark-only target"
     );
     for dimension in [
         "label_count",
+        "query_surface",
         "selectivity",
         "degree",
         "depth",
-        "backend_count",
-        "artifact_bytes",
-        "rss",
-        "pss",
+        "csr_direction",
+        "csr_type_bytes_one_direction",
+        "adaptive_u8",
+        "adaptive_u16",
+        "adaptive_u32",
+        "validate_case_manifest",
     ] {
         assert!(
             benchmark.contains(dimension),
@@ -298,18 +301,249 @@ fn p9_retains_reproducible_high_cardinality_query_and_resource_evidence() {
         );
     }
 
+    let runner = repo_source("graph/tests/heavy/open_type_query_resources.sh");
+    for requirement in [
+        "uname -s",
+        "/proc/",
+        "smaps_rollup",
+        "pg_backend_pid()",
+        "psql -X -v ON_ERROR_STOP=1",
+        "trap cleanup EXIT",
+        "^pggraph_",
+        "MAX_RSS_BYTES",
+        "MAX_PSS_BYTES",
+        "STATEMENT_TIMEOUT_MS",
+        "BACKEND_COUNT",
+        "ARTIFACT_BYTES",
+        "projection_artifact_bytes",
+        "query-started",
+        "query-done",
+        "pg_stat_activity",
+        "state = 'active'",
+        "query LIKE '%graph.traverse%'",
+        "max_query_total_pss_bytes",
+        "query_minus_idle_total_pss_bytes",
+        "label_count",
+        "query_surface",
+        "filter_shape",
+        "degree",
+        "depth",
+    ] {
+        assert!(
+            runner.contains(requirement),
+            "P9 Linux PostgreSQL resource runner is missing `{requirement}`"
+        );
+    }
+    assert!(
+        !runner.contains("\\! while"),
+        "P9 resource workers must use bounded PostgreSQL waits, not orphanable shell loops"
+    );
+}
+
+#[test]
+fn p9_open_type_query_and_resource_budgets_are_predeclared() {
+    let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
+    let cases = fs::read_to_string(evidence.join("cases.json"))
+        .expect("P9 must retain the exact predeclared benchmark case matrix");
+    let case_json: serde_json::Value =
+        serde_json::from_str(&cases).expect("P9 cases must be valid JSON");
+    let budgets = fs::read_to_string(evidence.join("budgets.json"))
+        .expect("P9 must retain predeclared query/resource acceptance budgets");
+    let budget_json: serde_json::Value =
+        serde_json::from_str(&budgets).expect("P9 budgets must be valid JSON");
+    assert_eq!(
+        budget_json
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("predeclared"),
+        "P9 acceptance budgets must be frozen before measurements run"
+    );
+    assert_eq!(
+        case_json
+            .get("criterion_expected_case_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(65),
+        "P9 must freeze the exact Criterion case count before measurement"
+    );
+    for (pointer, expected) in [
+        (
+            "/criterion/registry_lookup/request",
+            serde_json::json!(["first", "last", "missing"]),
+        ),
+        (
+            "/criterion/filter_resolution/request_shape",
+            serde_json::json!(["empty", "one_exact", "bounded_4096"]),
+        ),
+        (
+            "/criterion/filter_resolution/request",
+            serde_json::json!(["first", "last", "missing", "32_labels"]),
+        ),
+        (
+            "/criterion/bfs_oat/label_count",
+            serde_json::json!([254, 255, 65_534, 65_535, 65_536]),
+        ),
+        (
+            "/criterion/bfs_oat/degree",
+            serde_json::json!([1, 8, 64, 1_024]),
+        ),
+        ("/criterion/bfs_oat/depth", serde_json::json!([1, 4, 16])),
+        (
+            "/criterion/bfs_oat/csr_direction",
+            serde_json::json!(["out", "in"]),
+        ),
+        (
+            "/criterion/bfs_oat/selectivity",
+            serde_json::json!([
+                "none_matched",
+                "one_of_32",
+                "half_of_32",
+                "all_matched",
+                "no_filter"
+            ]),
+        ),
+    ] {
+        assert_eq!(
+            case_json.pointer(pointer),
+            Some(&expected),
+            "P9 case matrix drifted at `{pointer}`"
+        );
+    }
+    let ratio_limits = budget_json
+        .get("criterion_ratio_limits")
+        .and_then(serde_json::Value::as_array)
+        .expect("P9 budgets need selector-scoped Criterion ratios");
+    assert_eq!(ratio_limits.len(), 3);
+    for limit in ratio_limits {
+        let numerator = limit
+            .get("numerator")
+            .and_then(serde_json::Value::as_object)
+            .expect("each Criterion ratio needs a numerator selector");
+        let denominator = limit
+            .get("denominator")
+            .and_then(serde_json::Value::as_object)
+            .expect("each Criterion ratio needs a denominator selector");
+        let latency = limit
+            .get("max_median_latency_ratio")
+            .and_then(serde_json::Value::as_f64)
+            .expect("each Criterion ratio needs a latency limit");
+        let throughput = limit
+            .get("min_throughput_ratio")
+            .and_then(serde_json::Value::as_f64)
+            .expect("each Criterion ratio needs a throughput limit");
+        for selector in [numerator, denominator] {
+            for key in [
+                "query_surface",
+                "label_count",
+                "selectivity",
+                "degree",
+                "depth",
+                "csr_direction",
+            ] {
+                assert!(
+                    selector.contains_key(key),
+                    "Criterion selector is missing `{key}`"
+                );
+            }
+        }
+        assert!(latency >= 1.0 && throughput > 0.0 && throughput <= 1.0);
+    }
+    let postgres_limits = budget_json
+        .get("postgres_ratio_limits")
+        .and_then(serde_json::Value::as_array)
+        .expect("P9 budgets need selector-scoped PostgreSQL ratios");
+    assert_eq!(postgres_limits.len(), 4);
+    for surface in ["traverse", "shortest_path", "gql", "cypher"] {
+        assert!(postgres_limits.iter().any(|limit| {
+            limit
+                .get("query_surface")
+                .and_then(serde_json::Value::as_str)
+                == Some(surface)
+                && limit
+                    .pointer("/numerator/label_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(65_536)
+                && limit
+                    .pointer("/denominator/label_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(254)
+        }));
+    }
+    assert!(budget_json
+        .get("max_relative_confidence_interval_width")
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|width| width > 0.0 && width <= 1.0));
+    assert_eq!(
+        budget_json
+            .pointer("/lineage/budget_commit_must_precede_measurement_commit")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    let rss = budget_json
+        .pointer("/high_cardinality_resource_limits/max_rss_bytes_per_backend")
+        .and_then(serde_json::Value::as_u64)
+        .expect("P9 budgets need a per-backend RSS limit");
+    let pss = budget_json
+        .pointer("/high_cardinality_resource_limits/max_pss_bytes_per_backend")
+        .and_then(serde_json::Value::as_u64)
+        .expect("P9 budgets need a per-backend PSS limit");
+    let artifact = budget_json
+        .pointer(
+            "/high_cardinality_resource_limits/max_projection_artifact_bytes_per_directed_edge",
+        )
+        .and_then(serde_json::Value::as_f64)
+        .expect("P9 budgets need an artifact-byte limit");
+    let total_pss_ratio = budget_json
+        .pointer("/high_cardinality_resource_limits/max_eight_to_one_total_query_pss_ratio")
+        .and_then(serde_json::Value::as_f64)
+        .expect("P9 budgets need an aggregate backend PSS scaling limit");
+    let delta_pss_ratio = budget_json
+        .pointer(
+            "/high_cardinality_resource_limits/max_eight_to_one_query_minus_idle_total_pss_ratio",
+        )
+        .and_then(serde_json::Value::as_f64)
+        .expect("P9 budgets need a baseline-subtracted backend PSS scaling limit");
+    let label_counts = budget_json
+        .pointer("/fixtures/label_counts")
+        .and_then(serde_json::Value::as_array)
+        .expect("P9 budgets must bind the measured label-count boundaries");
+    let backend_counts = budget_json
+        .pointer("/fixtures/backend_counts")
+        .and_then(serde_json::Value::as_array)
+        .expect("P9 budgets must bind the measured backend counts");
+    assert!(
+        rss > 0 && pss > 0 && artifact >= 1.0 && total_pss_ratio >= 1.0 && delta_pss_ratio >= 1.0
+    );
+    for boundary in [254_u64, 255, 65_534, 65_535, 65_536] {
+        assert!(
+            label_counts
+                .iter()
+                .any(|candidate| candidate.as_u64() == Some(boundary)),
+            "P9 predeclared fixtures are missing label boundary `{boundary}`"
+        );
+    }
+    assert!(
+        backend_counts.len() >= 2
+            && backend_counts
+                .iter()
+                .all(|candidate| candidate.as_u64().is_some_and(|count| count > 0)),
+        "P9 resource evidence must predeclare at least two positive backend counts"
+    );
+}
+
+#[test]
+#[ignore = "P9.5d activates after retained measurements and budget evaluation land"]
+fn p9_retains_reproducible_high_cardinality_query_and_resource_results() {
     let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
     let readme = fs::read_to_string(evidence.join("README.md"))
         .expect("P9 must retain reproducible open-type measurement instructions");
     let results = fs::read_to_string(evidence.join("results.csv"))
         .expect("P9 must retain machine-readable query/resource results");
-    let budgets = fs::read_to_string(evidence.join("budgets.json"))
-        .expect("P9 must retain predeclared query/resource acceptance budgets");
     for required in [
         "exact commit",
         "cargo bench",
         "254",
         "255",
+        "65534",
         "65535",
         "65536",
         "PostgreSQL",
@@ -338,10 +572,4 @@ fn p9_retains_reproducible_high_cardinality_query_and_resource_evidence() {
             "P9 evidence results are missing `{column}`"
         );
     }
-    let budget_json: serde_json::Value =
-        serde_json::from_str(&budgets).expect("P9 budgets must be valid JSON");
-    assert!(budget_json.get("low_cardinality_regression").is_some());
-    assert!(budget_json
-        .get("high_cardinality_resource_limits")
-        .is_some());
 }

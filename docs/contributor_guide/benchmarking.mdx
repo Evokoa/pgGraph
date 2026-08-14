@@ -252,6 +252,23 @@ latency sample. The P6 width checkpoint instead retains extracted Criterion
 medians and confidence intervals, its synthetic matrix, host metadata, and
 predeclared budgets.
 
+The P9 production-path open-type benchmark is compiled separately:
+
+```bash
+cd graph
+cargo bench --features "pg17 benchmarks" --bench open_type_query_bench --no-run
+```
+
+It measures Engine registry lookup and filter resolution plus CSR BFS across a
+predeclared one-factor-at-a-time matrix. It is still an internal Rust benchmark;
+PostgreSQL SQL latency and Linux multi-backend RSS/PSS are separate retained
+evidence domains. The exact cases and acceptance budgets are frozen in
+`todo/measurements/2026-08-13-p9-open-type-query/` before any result files are
+created. Encoding labels are the current adaptive `u8`, `u16`, and `u32`
+representations, not a synthetic v6 control. Selection cases state their exact
+shape (`one_of_32`, `half_of_32`, and so on) instead of implying percentages
+that the bounded fixture cannot represent exactly.
+
 ## Internal Rust Benchmarks
 
 The Criterion benchmark target lives in `graph/benches/bfs_bench.rs`.

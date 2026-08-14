@@ -30,13 +30,24 @@ MAINTAINER = {
 }
 HOST_MUTATING = {
     "graph/tests/heavy/open_type_package_smoke.sh",
+    "graph/tests/heavy/open_type_query_resources.sh",
     "graph/tests/heavy/rls_large_table_baseline.sh",
     "graph/tests/heavy/phase3_update_smoke.sh",
     "graph/tests/heavy/v1_1_update_artifact_rollback.sh",
 }
+LINUX_ONLY = {
+    "graph/tests/heavy/open_type_query_resources.sh",
+}
 TOOL_OVERRIDES = {
     "graph/tests/heavy/open_type_package_smoke.sh": [
         "bash",
+        "psql",
+        "createdb",
+        "dropdb",
+    ],
+    "graph/tests/heavy/open_type_query_resources.sh": [
+        "bash",
+        "cargo-pgrx",
         "psql",
         "createdb",
         "dropdb",
@@ -101,7 +112,13 @@ def entry(path: Path) -> dict[str, object]:
         "outputs": ["stdout/stderr", "exit status"],
         "destructive": destructive,
         "timeout_seconds": 3600 if heavy else 600,
-        "platforms": ["Linux", "macOS"] if not heavy else ["Linux", "macOS", "Docker"],
+        "platforms": (
+            ["Linux", "Docker"]
+            if relative in LINUX_ONLY
+            else ["Linux", "macOS"]
+            if not heavy
+            else ["Linux", "macOS", "Docker"]
+        ),
         "ci_release_usage": "release gate" if heavy or relative in MAINTAINER else "static inventory gate",
         "decision": "keep",
     }
