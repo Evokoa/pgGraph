@@ -1615,38 +1615,46 @@ mod tests {
 
     #[test]
     fn v7_recovery_uses_actual_version_and_width() {
+        use crate::edge_store::EdgeTypeWidth;
         use crate::engine::Engine;
-        use crate::persistence::write_graph_file;
-        use std::io::{Read, Seek, Write};
+        use crate::persistence::{
+            graph_artifact_metadata_for_path, write_graph_file, write_v6_graph_file_for_test,
+        };
 
         let dir = ProjectionArtifactDir::new("recovery_validates_actual_base_artifact_version");
-        let graph_path = dir.path().join("main.pggraph");
         let mut engine = Engine::new();
         engine.finish_build(None);
-        write_graph_file(&engine, &graph_path).expect("v6 base writes");
 
-        let mut header = [0u8; 512];
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&graph_path)
-            .expect("base opens");
-        file.read_exact(&mut header).expect("header reads");
-        header[4..8].copy_from_slice(&7u32.to_le_bytes());
-        header[48..52].copy_from_slice(&1u32.to_le_bytes());
-        header[44..48].fill(0);
-        let crc = crc32fast::hash(&header);
-        header[44..48].copy_from_slice(&crc.to_le_bytes());
-        file.seek(std::io::SeekFrom::Start(0))
-            .expect("header seeks");
-        file.write_all(&header).expect("v7 header writes");
-        file.flush().expect("v7 header flushes");
+        let v6_path = dir.path().join("base-v6.pggraph");
+        write_v6_graph_file_for_test(&engine, &v6_path).expect("v6 base writes");
+        let v6_metadata = graph_artifact_metadata_for_path(&v6_path).expect("v6 metadata reads");
+        assert_eq!(v6_metadata.version, 6);
+        assert_eq!(v6_metadata.edge_type_width, EdgeTypeWidth::One);
+        crate::persistence::load_graph_file(&v6_path).expect("v6 base reloads");
+        let v6_manifest =
+            publish_rebuilt_base_manifest(&v6_path, 41).expect("recovery publishes v6 manifest");
+        assert_eq!(v6_manifest.base_artifact_version, 6);
+        validate_manifest_base_metadata(&v6_path, &v6_manifest)
+            .expect("recovery validates parsed v6 metadata");
 
-        let manifest = publish_rebuilt_base_manifest(&graph_path, 42)
-            .expect("recovery publishes actual-version manifest");
-        assert_eq!(manifest.base_artifact_version, 7);
-        validate_manifest_base_metadata(&graph_path, &manifest)
-            .expect("recovery validates the parsed version");
+        let mut wide_engine = Engine::new();
+        for type_id in 1..=255 {
+            wide_engine
+                .register_edge_type(&format!("type_{type_id}"))
+                .expect("wide registry grows");
+        }
+        wide_engine.finish_build(None);
+        let v7_path = dir.path().join("base-v7.pggraph");
+        write_graph_file(&wide_engine, &v7_path).expect("v7 base writes");
+        let v7_metadata = graph_artifact_metadata_for_path(&v7_path).expect("v7 metadata reads");
+        assert_eq!(v7_metadata.version, 7);
+        assert_eq!(v7_metadata.edge_type_width, EdgeTypeWidth::Two);
+        crate::persistence::load_graph_file(&v7_path).expect("v7 base reloads");
+        let v7_manifest =
+            publish_rebuilt_base_manifest(&v7_path, 42).expect("recovery publishes v7 manifest");
+        assert_eq!(v7_manifest.base_artifact_version, 7);
+        validate_manifest_base_metadata(&v7_path, &v7_manifest)
+            .expect("recovery validates parsed v7 metadata");
     }
 
     #[test]

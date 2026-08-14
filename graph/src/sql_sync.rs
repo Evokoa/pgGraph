@@ -4346,8 +4346,7 @@ mod tests {
 
     #[test]
     fn sync_ingester_carries_actual_base_artifact_version() {
-        use crate::persistence::write_graph_file;
-        use std::io::{Read, Seek, Write};
+        use crate::persistence::{write_graph_file, write_v6_graph_file_for_test};
 
         let root = std::env::temp_dir().join(format!(
             "pggraph-sync-version-{}-{}",
@@ -4355,31 +4354,21 @@ mod tests {
             std::thread::current().name().unwrap_or("test")
         ));
         std::fs::create_dir_all(&root).expect("fixture root");
-        let path = root.join("base.pggraph");
         let mut engine = Engine::new();
         engine.finish_build(None);
-        write_graph_file(&engine, &path).expect("v6 base writes");
 
-        let mut header = [0u8; 512];
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .expect("base opens");
-        file.read_exact(&mut header).expect("header reads");
-        header[4..8].copy_from_slice(&7u32.to_le_bytes());
-        header[48..52].copy_from_slice(&1u32.to_le_bytes());
-        header[44..48].fill(0);
-        let crc = crc32fast::hash(&header);
-        header[44..48].copy_from_slice(&crc.to_le_bytes());
-        file.seek(std::io::SeekFrom::Start(0))
-            .expect("header seeks");
-        file.write_all(&header).expect("v7 header writes");
-        file.flush().expect("v7 header flushes");
-
+        let v6_path = root.join("base-v6.pggraph");
+        write_v6_graph_file_for_test(&engine, &v6_path).expect("v6 base writes");
         let (name, _checksum, version) =
-            sync_ingest_base_artifact_metadata(&path).expect("sync metadata reads");
-        assert_eq!(name, "base.pggraph");
+            sync_ingest_base_artifact_metadata(&v6_path).expect("v6 sync metadata reads");
+        assert_eq!(name, "base-v6.pggraph");
+        assert_eq!(version, 6);
+
+        let v7_path = root.join("base-v7.pggraph");
+        write_graph_file(&engine, &v7_path).expect("v7 base writes");
+        let (name, _checksum, version) =
+            sync_ingest_base_artifact_metadata(&v7_path).expect("v7 sync metadata reads");
+        assert_eq!(name, "base-v7.pggraph");
         assert_eq!(version, 7);
         let _ = std::fs::remove_dir_all(root);
     }

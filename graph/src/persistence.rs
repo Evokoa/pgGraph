@@ -1374,6 +1374,24 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
     )
 }
 
+#[cfg(test)]
+pub(crate) fn write_v6_graph_file_for_test(engine: &Engine, path: &Path) -> GraphResult<()> {
+    if engine.edge_type_registry.len() > EdgeTypeId::V6_MAX_USER_ID as usize + 1 {
+        return Err(GraphError::EdgeTypeLimit);
+    }
+    write_graph_file_internal(
+        engine,
+        path,
+        false,
+        None,
+        GraphArtifactMetadata {
+            version: V6_VERSION,
+            edge_type_width: EdgeTypeWidth::One,
+            body_crc: 0,
+        },
+    )
+}
+
 /// Assemble one unpublished adaptive candidate from bounded section streams
 /// without constructing an owned [`Engine`].
 ///
@@ -1504,7 +1522,6 @@ fn zero_fill_candidate(
     Ok(())
 }
 
-#[cfg(test)]
 #[cfg(test)]
 fn write_graph_file_internal(
     engine: &Engine,
@@ -4777,6 +4794,23 @@ mod tests {
         let metadata = graph_artifact_metadata_for_path(&v7).expect("v7 metadata");
         assert_eq!(metadata.version, V7_VERSION);
         assert_eq!(metadata.edge_type_width, EdgeTypeWidth::Two);
+    }
+
+    #[test]
+    fn genuine_v6_test_writer_rejects_an_overwide_registry_before_writing() {
+        let mut engine = Engine::new();
+        let labels = std::iter::once(String::new())
+            .chain((1..=255).map(|id| format!("type_{id}")))
+            .collect();
+        engine.edge_type_registry =
+            EdgeTypeRegistry::try_from_labels(labels).expect("valid adaptive registry");
+        let path = temp_graph_path("p9-v6-overwide-registry");
+
+        assert!(matches!(
+            write_v6_graph_file_for_test(&engine, &path),
+            Err(GraphError::EdgeTypeLimit)
+        ));
+        assert!(!path.exists());
     }
 
     #[test]

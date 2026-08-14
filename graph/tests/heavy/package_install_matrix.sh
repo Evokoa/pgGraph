@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PG_VERSIONS="${PG_VERSIONS:-14 15 16 17 18}"
+RUN_OPEN_TYPE_PACKAGE_SMOKE="${RUN_OPEN_TYPE_PACKAGE_SMOKE:-0}"
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/pggraph-package-matrix.XXXXXX")"
 running_pg=""
@@ -52,6 +53,12 @@ for pg in $PG_VERSIONS; do
     PG_CONFIG="$pg_config" \
     SKIP_PACKAGE_INSTALL=1 \
     "$ROOT_DIR/tests/heavy/fresh_install_smoke.sh"
+  if [[ "$RUN_OPEN_TYPE_PACKAGE_SMOKE" == "1" ]]; then
+    PGHOST=localhost \
+      PGPORT="288${pg}" \
+      DBNAME="pggraph_open_type_package_pg${pg}" \
+      "$ROOT_DIR/tests/heavy/open_type_package_smoke.sh"
+  fi
   cargo pgrx stop "pg${pg}"
   running_pg=""
 done

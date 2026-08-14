@@ -130,7 +130,6 @@ fn p9_dynamic_gql_and_cypher_binding_is_independent_of_vocabulary_size() {
 }
 
 #[test]
-#[ignore = "P9.5b activates after compatibility and PostgreSQL-major evidence lands"]
 fn p9_migration_and_rollback_preserve_the_last_good_open_type_generation() {
     let persistence = crate_source("src/persistence.rs");
     for gate in [
@@ -143,21 +142,38 @@ fn p9_migration_and_rollback_preserve_the_last_good_open_type_generation() {
         );
     }
 
-    let pg_tests = crate_source("src/pg_tests/p9_open_types.rs");
-    for gate in [
-        "open_type_v6_to_v7_migration_preserves_last_good_generation",
-        "open_type_rollback_keeps_v6_readable_and_rebuild_diagnostic_stable",
-        "open_type_policy_and_corruption_errors_have_stable_sqlstate_and_detail",
+    let sync = crate_source("src/sql_sync.rs");
+    let recovery = crate_source("src/projection/recovery.rs");
+    for (owner, source, gate) in [
+        (
+            "sync",
+            sync.as_str(),
+            "sync_ingester_carries_actual_base_artifact_version",
+        ),
+        (
+            "recovery",
+            recovery.as_str(),
+            "v7_recovery_uses_actual_version_and_width",
+        ),
     ] {
         assert!(
-            pg_tests.contains(&format!("fn {gate}")),
-            "P9 migration/diagnostic coverage is missing `{gate}`"
+            source.contains(&format!("fn {gate}")),
+            "P9 {owner} compatibility coverage is missing `{gate}`"
+        );
+    }
+    let maintenance = crate_source("src/pg_tests/maintenance_admin.rs");
+    for gate in [
+        "adaptive_edge_type_policy_limits_fail_atomically",
+        "durable_sync_dictionary_corruption_fails_closed_without_advancing_generation",
+    ] {
+        assert!(
+            maintenance.contains(&format!("fn {gate}")),
+            "P9 diagnostic coverage is missing the real PostgreSQL gate `{gate}`"
         );
     }
 }
 
 #[test]
-#[ignore = "P9.5b activates after the PostgreSQL 14 through 18 release runner lands"]
 fn p9_open_type_diagnostics_and_packages_run_on_postgres_14_through_18() {
     let runner = repo_source("graph/tests/heavy/open_type_release_matrix.sh");
     for version in ["14", "15", "16", "17", "18"] {
@@ -170,11 +186,48 @@ fn p9_open_type_diagnostics_and_packages_run_on_postgres_14_through_18() {
         "RUN_PGRX_SQL=1",
         "RUN_PACKAGE_INSTALL_MATRIX=1",
         "open_type_255_traversal_paths_gql_and_cypher_filter_exactly",
-        "open_type_policy_and_corruption_errors_have_stable_sqlstate_and_detail",
+        "adaptive_edge_type_policy_limits_fail_atomically",
+        "durable_sync_dictionary_corruption_fails_closed_without_advancing_generation",
     ] {
         assert!(
             runner.contains(requirement),
             "P9 PostgreSQL package/diagnostic matrix is missing `{requirement}`"
+        );
+    }
+    assert!(runner.contains(
+        "PGRX_TEST_FILTER=\"open_type_ adaptive_edge_type_policy_limits_fail_atomically durable_sync_dictionary_corruption_fails_closed_without_advancing_generation\""
+    ));
+
+    let dockerfile = repo_source("graph/tests/heavy/Dockerfile.pg-matrix");
+    for requirement in [
+        "set -euo pipefail; \\\n    export RUSTFLAGS=\"${RUSTFLAGS:-} -C link-arg=-Wl,--unresolved-symbols=ignore-all\"; \\\n    for pg in ${PG_VERSIONS}",
+        "for test_filter in ${PGRX_TEST_FILTER}",
+        "cargo pgrx test --features development \"${feature}\" \"${test_filter}\"",
+        "RUN_OPEN_TYPE_PACKAGE_SMOKE",
+    ] {
+        assert!(
+            dockerfile.contains(requirement),
+            "P9 Docker matrix wiring is missing `{requirement}`"
+        );
+    }
+
+    let package_matrix = repo_source("graph/tests/heavy/package_install_matrix.sh");
+    assert!(package_matrix.contains("RUN_OPEN_TYPE_PACKAGE_SMOKE"));
+    assert!(package_matrix.contains("open_type_package_smoke.sh"));
+    let package_smoke = repo_source("graph/tests/heavy/open_type_package_smoke.sh");
+    for requirement in [
+        "graph.unload_graph",
+        "graph.load_graph",
+        "graph.edge_types",
+        "graph.traverse",
+        "graph.shortest_path",
+        "graph.gql",
+        "graph.cypher",
+        "PG004",
+    ] {
+        assert!(
+            package_smoke.contains(requirement),
+            "P9 installed-package smoke is missing `{requirement}`"
         );
     }
 }

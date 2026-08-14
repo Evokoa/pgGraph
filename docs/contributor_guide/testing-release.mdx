@@ -103,6 +103,18 @@ It builds 65,536 exact relationship spellings and checks the 65,534, 65,535,
 and 65,536 boundaries across traversal, shortest path, GQL, and Cypher. The
 runner rejects database names outside the `pggraph_*` test namespace.
 
+The focused open-type release matrix runs the routine PostgreSQL tests and then
+packages, installs, unloads, reloads, and queries the extension on every
+supported PostgreSQL major:
+
+```bash
+cd graph
+./tests/heavy/open_type_release_matrix.sh
+```
+
+This Docker-backed gate covers PostgreSQL 14 through 18. The 65,536-label
+runner remains a separate PG17 stress gate so the release matrix stays bounded.
+
 See [SQL Tests](./sql-tests) for the full SQL test inventory and the boundary
 each layer is meant to cover.
 

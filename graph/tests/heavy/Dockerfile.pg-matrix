@@ -128,10 +128,12 @@ USER pggraph
 ARG PG_VERSIONS="14 15 16 17 18"
 ARG RUN_RUST_TESTS=1
 ARG RUN_PGRX_SQL=1
+ARG PGRX_TEST_FILTER=""
 ARG RUN_GQL_WRITE_MATRIX=1
 ARG RUN_POSTGRES_SANITIZER=0
 ARG RUN_DURABLE_PROJECTION_MATRIX=0
 ARG RUN_PACKAGE_INSTALL_MATRIX=0
+ARG RUN_OPEN_TYPE_PACKAGE_SMOKE=0
 ARG RUN_CRASH_MATRIX=0
 ARG RUN_RUNTIME_RESOURCES=0
 ARG RUN_PG_UPGRADE_MATRIX=0
@@ -154,7 +156,13 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
         fi; \
         if [[ "${RUN_PGRX_SQL}" == "1" ]]; then \
             echo "==> cargo pgrx test --features development ${feature} (serial shared cluster)"; \
-            RUST_TEST_THREADS=1 cargo pgrx test --features development "${feature}"; \
+            if [[ -n "${PGRX_TEST_FILTER}" ]]; then \
+                for test_filter in ${PGRX_TEST_FILTER}; do \
+                    RUST_TEST_THREADS=1 cargo pgrx test --features development "${feature}" "${test_filter}"; \
+                done; \
+            else \
+                RUST_TEST_THREADS=1 cargo pgrx test --features development "${feature}"; \
+            fi; \
         fi; \
     done
 
@@ -200,7 +208,9 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
 RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
     --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
     if [[ "${RUN_PACKAGE_INSTALL_MATRIX}" == "1" ]]; then \
-        PG_VERSIONS="${PG_VERSIONS}" ./tests/heavy/package_install_matrix.sh; \
+        PG_VERSIONS="${PG_VERSIONS}" \
+        RUN_OPEN_TYPE_PACKAGE_SMOKE="${RUN_OPEN_TYPE_PACKAGE_SMOKE}" \
+        ./tests/heavy/package_install_matrix.sh; \
     fi
 
 RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \

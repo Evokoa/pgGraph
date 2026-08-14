@@ -29,11 +29,18 @@ MAINTAINER = {
     "scripts/validate_release.py",
 }
 HOST_MUTATING = {
+    "graph/tests/heavy/open_type_package_smoke.sh",
     "graph/tests/heavy/rls_large_table_baseline.sh",
     "graph/tests/heavy/phase3_update_smoke.sh",
     "graph/tests/heavy/v1_1_update_artifact_rollback.sh",
 }
 TOOL_OVERRIDES = {
+    "graph/tests/heavy/open_type_package_smoke.sh": [
+        "bash",
+        "psql",
+        "createdb",
+        "dropdb",
+    ],
     "graph/tests/heavy/rls_large_table_baseline.sh": [
         "bash",
         "cargo-pgrx",

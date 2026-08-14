@@ -11,7 +11,7 @@ edges, and filter columns. When `graph.persist_on_build = true`, the base graph
 is written atomically under the selected graph's UUID directory and later
 backends can load it through read-only mmap.
 
-The current artifact format is v6. Its 512-byte header describes 26 aligned
+The current artifact format is v7. Its 512-byte header describes 26 aligned
 sections explicitly. Loaded node arrays, forward and inbound CSR arrays,
 relationship-ID sidecars, resolution data, filter values and text dictionaries,
 relationship identities, tenant metadata, and per-node tenant tokens remain in
