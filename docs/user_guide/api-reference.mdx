@@ -1769,9 +1769,12 @@ RETURNS TABLE (row jsonb)
 
 Executes the documented GQL-compatible subset over the active graph. Each
 output row is a JSONB object keyed by the `RETURN` aliases or expressions. Node
-labels resolve to registered table names, relationship types resolve to
-registered edge labels, and `$parameters` are read from the `params` JSON
-object. See [GQL JSONB result format](/user_guide/querying#gql-jsonb-result-format)
+labels resolve to registered table names. Static relationship types resolve to
+registered edge labels; explicit types on dynamic label-column mappings bind
+by endpoint structure without enumerating the source vocabulary. Ambiguous
+dynamic mappings fail closed, while an absent valid dynamic spelling produces
+no match. `$parameters` are read from the `params` JSON object. See [GQL JSONB
+result format](/user_guide/querying#gql-jsonb-result-format)
 for the stable node, relationship, path, scalar, and null shapes returned to
 SQL clients and SDKs.
 

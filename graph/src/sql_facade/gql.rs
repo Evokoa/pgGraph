@@ -641,6 +641,20 @@ fn execute_identity_one_hop_lazy(
     let Some(identity_lookup) = plan.source_identity_lookup.as_ref() else {
         return Ok(None);
     };
+    let missing_dynamic_type = ENGINE.with(|engine| {
+        let engine = engine.borrow();
+        engine.edge_type_id(&plan.rel_type).is_none()
+            && plan
+                .edge_mapping
+                .as_ref()
+                .is_some_and(|mapping| mapping.label_column.is_some())
+    });
+    if missing_dynamic_type {
+        // The eager executor uses a non-materializable sentinel filter for an
+        // absent dynamic label. Defer to it so OPTIONAL semantics remain exact
+        // without revealing whether source RLS hid a spelling.
+        return Ok(None);
+    }
     let mut lazy =
         crate::sql_visibility::postgres_error_as_rust_unwind(std::panic::AssertUnwindSafe(|| {
             crate::sql_visibility::prepare_bfs_visibility(catalog_tables, catalog_edges)
@@ -4380,7 +4394,11 @@ fn wildcard_relationship_mapping(
     workspace: &mut crate::resource::ResourceLease<'_>,
 ) -> safety::GraphResult<Option<(crate::edge_store::RelationshipId, u64)>> {
     let Some(relationship_id) = relationship.relationship_id else {
-        if mapped_rel_types.contains(&relationship.rel_type) {
+        if mapped_rel_types.contains(&relationship.rel_type)
+            || edge_mappings_by_id
+                .values()
+                .any(|mapping| mapping.label_column.is_some())
+        {
             return Err(safety::GraphError::GqlExecution {
                 reason: format!(
                     "GQL mapped relationship type `{}` has no stable source identity",

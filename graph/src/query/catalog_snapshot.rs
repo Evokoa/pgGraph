@@ -3,9 +3,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builder::{PrimaryKeySpec, RegisteredEdge, RegisteredTable};
-use crate::catalog::{foreign_key_target_table_oid, read_catalog, sql_table_name_from_oid};
+use crate::catalog::{foreign_key_target_table_oid, read_catalog};
 use crate::gql::errors::{GqlError, Span};
-use crate::quote::quote_ident;
 use crate::safety::GraphError;
 use crate::safety::GraphResult;
 
@@ -157,22 +156,55 @@ impl CatalogSnapshot for CatalogSnapshotImpl {
         to_table_oid: u32,
         span: Span,
     ) -> Result<RelTypeInfo, GqlError> {
-        self.rels
-            .iter()
-            .find(|rel| {
-                rel.rel_type == rel_type
-                    && rel.from_table_oid == from_table_oid
-                    && rel.to_table_oid == to_table_oid
-            })
-            .cloned()
-            .ok_or_else(|| {
-                GqlError::bind(
+        let valid_dynamic_name = gql_identifier_from_text(rel_type).is_some();
+        let mut candidates = Vec::<&RelTypeInfo>::new();
+        for candidate in self.rels.iter().filter(|candidate| {
+            candidate.from_table_oid == from_table_oid
+                && candidate.to_table_oid == to_table_oid
+                && (candidate.rel_type == rel_type
+                    || (valid_dynamic_name
+                        && candidate
+                            .edge_mapping
+                            .as_ref()
+                            .is_some_and(|mapping| mapping.label_column.is_some())))
+        }) {
+            let candidate_mapping = candidate
+                .edge_mapping
+                .as_ref()
+                .map(|mapping| mapping.mapping_id);
+            if candidates.iter().any(|existing| {
+                existing
+                    .edge_mapping
+                    .as_ref()
+                    .map(|mapping| mapping.mapping_id)
+                    == candidate_mapping
+            }) {
+                continue;
+            }
+            candidates.push(candidate);
+        }
+        match candidates.as_slice() {
+            [candidate] => {
+                let mut resolved = (*candidate).clone();
+                resolved.rel_type = rel_type.to_string();
+                return Ok(resolved);
+            }
+            [_, _, ..] => {
+                return Err(GqlError::bind(
                     span,
                     format!(
-                        "unknown relationship type `{rel_type}` from table {from_table_oid} to {to_table_oid}"
+                        "ambiguous relationship type `{rel_type}` from table {from_table_oid} to {to_table_oid}"
                     ),
-                )
-            })
+                ));
+            }
+            [] => {}
+        }
+        Err(GqlError::bind(
+            span,
+            format!(
+                "unknown relationship type `{rel_type}` from table {from_table_oid} to {to_table_oid}"
+            ),
+        ))
     }
 
     fn incident_rel_types(&self, table_oid: u32) -> Vec<RelTypeInfo> {
@@ -300,7 +332,7 @@ fn load_rels(
             bidirectional: edge.bidirectional,
             label_column: edge.label_column.clone(),
         });
-        for rel_type in relationship_type_names(edge)? {
+        for rel_type in relationship_type_names(edge) {
             rels.push(RelTypeInfo {
                 rel_type: rel_type.clone(),
                 from_table_oid: source_table_oid,
@@ -320,45 +352,11 @@ fn load_rels(
     Ok(rels)
 }
 
-fn relationship_type_names(edge: &RegisteredEdge) -> GraphResult<Vec<String>> {
-    let Some(label_column) = edge.label_column.as_deref() else {
-        return Ok(vec![edge.label.clone()]);
-    };
-    let edge_table = sql_table_name_from_oid(edge.from_table_oid)?;
-    let label_expr = quote_ident(label_column);
-    let query = format!(
-        "SELECT DISTINCT COALESCE(NULLIF(BTRIM({label_expr}::text), ''), $1)
-         FROM {}
-         ORDER BY 1",
-        edge_table.as_sql()
-    );
-    pgrx::Spi::connect(|client| {
-        let rows = client
-            .select(&query, None, &[edge.label.clone().into()])
-            .map_err(|err| {
-                crate::safety::GraphError::Internal(format!(
-                    "dynamic relationship label read failed for {}.{}: {err}",
-                    edge.from_table, label_column
-                ))
-            })?;
-        let mut labels = Vec::with_capacity(rows.len());
-        for row in rows {
-            let label = row.get::<String>(1).map_err(|err| {
-                crate::safety::GraphError::Internal(format!(
-                    "dynamic relationship label value read failed: {err}"
-                ))
-            })?;
-            if let Some(label) = label {
-                if gql_identifier_from_text(&label).is_some() {
-                    labels.push(label);
-                }
-            }
-        }
-        if labels.is_empty() && gql_identifier_from_text(&edge.label).is_some() {
-            labels.push(edge.label.clone());
-        }
-        Ok(labels)
-    })
+fn relationship_type_names(edge: &RegisteredEdge) -> Vec<String> {
+    // Dynamic mappings are represented once by their registered fallback.
+    // Explicit GQL/Cypher relationship names resolve structurally against the
+    // mapping, so binding cost is independent of source vocabulary size.
+    vec![edge.label.clone()]
 }
 
 fn gql_identifier_from_text(text: &str) -> Option<String> {
@@ -531,15 +529,40 @@ impl CatalogSnapshot for FakeCatalog {
         to_table_oid: u32,
         span: Span,
     ) -> Result<RelTypeInfo, GqlError> {
-        self.rels
-            .iter()
-            .find(|rel| {
-                rel.rel_type == rel_type
-                    && rel.from_table_oid == from_table_oid
-                    && rel.to_table_oid == to_table_oid
-            })
-            .cloned()
-            .ok_or_else(|| GqlError::bind(span, format!("unknown relationship type `{rel_type}`")))
+        let mut candidates = self.rels.iter().filter(|rel| {
+            rel.from_table_oid == from_table_oid
+                && rel.to_table_oid == to_table_oid
+                && (rel.rel_type == rel_type
+                    || rel
+                        .edge_mapping
+                        .as_ref()
+                        .is_some_and(|mapping| mapping.label_column.is_some()))
+        });
+        let Some(candidate) = candidates.next() else {
+            return Err(GqlError::bind(
+                span,
+                format!("unknown relationship type `{rel_type}`"),
+            ));
+        };
+        let mapping_id = candidate
+            .edge_mapping
+            .as_ref()
+            .map(|mapping| mapping.mapping_id);
+        if candidates.any(|other| {
+            other
+                .edge_mapping
+                .as_ref()
+                .map(|mapping| mapping.mapping_id)
+                != mapping_id
+        }) {
+            return Err(GqlError::bind(
+                span,
+                format!("ambiguous relationship type `{rel_type}`"),
+            ));
+        }
+        let mut resolved = candidate.clone();
+        resolved.rel_type = rel_type.to_string();
+        Ok(resolved)
     }
 
     fn incident_rel_types(&self, table_oid: u32) -> Vec<RelTypeInfo> {
@@ -561,7 +584,7 @@ impl CatalogSnapshot for FakeCatalog {
 
 #[cfg(test)]
 mod tests {
-    use super::gql_label_from_regclass;
+    use super::*;
 
     #[test]
     fn gql_label_from_regclass_accepts_only_simple_unquoted_identifiers() {
@@ -576,5 +599,69 @@ mod tests {
             Some("users")
         );
         assert_eq!(gql_label_from_regclass("123users"), None);
+    }
+
+    fn dynamic_rel(mapping_id: u64) -> RelTypeInfo {
+        RelTypeInfo {
+            rel_type: "fallback".into(),
+            from_table_oid: 10,
+            to_table_oid: 20,
+            edge_mapping: Some(EdgeMappingInfo {
+                mapping_id,
+                edge_table_oid: u32::try_from(mapping_id).unwrap(),
+                source_table_oid: 10,
+                target_table_oid: 20,
+                source_column: "source_id".into(),
+                target_column: "target_id".into(),
+                source_key_columns: PrimaryKeySpec::from_columns(vec!["id".into()]),
+                bidirectional: false,
+                label_column: Some("rel_type".into()),
+            }),
+        }
+    }
+
+    #[test]
+    fn unique_dynamic_mapping_resolves_named_type_without_vocabulary_enumeration() {
+        let snapshot = CatalogSnapshotImpl {
+            labels: HashMap::new(),
+            rels: vec![dynamic_rel(1)],
+        };
+        let resolved = snapshot
+            .resolve_rel_type("type_65536", 10, 20, Span::new(0, 10))
+            .unwrap();
+        assert_eq!(resolved.rel_type, "type_65536");
+        assert_eq!(resolved.edge_mapping.unwrap().mapping_id, 1);
+    }
+
+    #[test]
+    fn dynamic_mapping_resolution_rejects_ambiguous_or_invalid_names() {
+        let snapshot = CatalogSnapshotImpl {
+            labels: HashMap::new(),
+            rels: vec![dynamic_rel(1), dynamic_rel(2)],
+        };
+        assert!(snapshot
+            .resolve_rel_type("type_255", 10, 20, Span::new(0, 8))
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+        assert!(snapshot
+            .resolve_rel_type("not-valid", 10, 20, Span::new(0, 9))
+            .is_err());
+    }
+
+    #[test]
+    fn exact_and_open_dynamic_mapping_collision_is_ambiguous() {
+        let mut exact = dynamic_rel(1);
+        exact.rel_type = "collision".into();
+        exact.edge_mapping.as_mut().unwrap().label_column = None;
+        let snapshot = CatalogSnapshotImpl {
+            labels: HashMap::new(),
+            rels: vec![exact, dynamic_rel(2)],
+        };
+        assert!(snapshot
+            .resolve_rel_type("collision", 10, 20, Span::new(0, 9))
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
     }
 }

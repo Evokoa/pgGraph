@@ -4,7 +4,7 @@ use crate::gql::ast::{
     self, CmpOp, Direction, Expr, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern,
     RelPat, ReturnExpr, ReturnItem, SortItem, SortKey, WithClause,
 };
-use crate::gql::errors::{GqlError, Span};
+use crate::gql::errors::{GqlError, GqlErrorKind, Span};
 
 use super::catalog_snapshot::{CatalogSnapshot, EdgeMappingInfo, NodeLabelInfo, RelTypeInfo};
 use super::logical_plan::{
@@ -1529,6 +1529,7 @@ fn bind_wildcard_path_read(
     let returns =
         bind_wildcard_path_returns(&query.return_.items, &path_var, start.var.as_ref(), tail)?;
     let predicate = bind_wildcard_path_predicate(query.where_.as_ref(), start, tail, catalog)?;
+    let possible_tables = possible_wildcard_node_tables(start, tail, catalog)?;
     let node_labels = catalog.node_labels();
     let table_labels = node_labels
         .iter()
@@ -1544,7 +1545,7 @@ fn bind_wildcard_path_read(
         .map(|rel| rel.rel_type)
         .collect::<std::collections::BTreeSet<_>>();
     let (edge_mappings_by_id, mapped_rel_types) =
-        wildcard_edge_mapping_metadata(catalog, &segments);
+        wildcard_edge_mapping_metadata(catalog, &segments, &possible_tables);
     Ok(LogicalWildcardPathPlan {
         path_var,
         source_var,
@@ -1570,30 +1571,59 @@ fn bind_wildcard_path_read(
 fn wildcard_edge_mapping_metadata(
     catalog: &impl CatalogSnapshot,
     segments: &[LogicalWildcardPathSegment],
+    possible_tables: &[std::collections::BTreeSet<u32>],
 ) -> (
     std::collections::BTreeMap<u64, EdgeMappingInfo>,
     std::collections::BTreeSet<String>,
 ) {
-    let mut rel_type_filters = std::collections::BTreeSet::new();
-    let mut has_unfiltered_segment = false;
-    for segment in segments {
-        if segment.rel_type_filters.is_empty() {
-            has_unfiltered_segment = true;
-            break;
-        }
-        rel_type_filters.extend(segment.rel_type_filters.iter().cloned());
-    }
-
     let mut mappings = std::collections::BTreeMap::new();
     let mut mapped_rel_types = std::collections::BTreeSet::new();
-    for rel in catalog
-        .rel_types()
-        .into_iter()
-        .filter(|rel| has_unfiltered_segment || rel_type_filters.contains(&rel.rel_type))
-    {
-        if let Some(mapping) = rel.edge_mapping {
-            mapped_rel_types.insert(rel.rel_type);
-            mappings.insert(mapping.mapping_id, mapping);
+    let rel_types = catalog.rel_types();
+    for (segment_idx, segment) in segments.iter().enumerate() {
+        let Some(source_tables) = possible_tables.get(segment_idx) else {
+            continue;
+        };
+        let Some(target_tables) = possible_tables.get(segment_idx + 1) else {
+            continue;
+        };
+        for rel in &rel_types {
+            let dynamic = rel
+                .edge_mapping
+                .as_ref()
+                .is_some_and(|mapping| mapping.label_column.is_some());
+            if !segment.rel_type_filters.is_empty()
+                && !segment.rel_type_filters.contains(&rel.rel_type)
+                && !dynamic
+            {
+                continue;
+            }
+            let endpoints_apply = match segment.direction {
+                BoundDirection::Out => {
+                    source_tables.contains(&rel.from_table_oid)
+                        && target_tables.contains(&rel.to_table_oid)
+                }
+                BoundDirection::In => {
+                    source_tables.contains(&rel.to_table_oid)
+                        && target_tables.contains(&rel.from_table_oid)
+                }
+                BoundDirection::Undirected => {
+                    (source_tables.contains(&rel.from_table_oid)
+                        && target_tables.contains(&rel.to_table_oid))
+                        || (source_tables.contains(&rel.to_table_oid)
+                            && target_tables.contains(&rel.from_table_oid))
+                }
+            };
+            if !endpoints_apply {
+                continue;
+            }
+            if let Some(mapping) = rel.edge_mapping.clone() {
+                if dynamic {
+                    mapped_rel_types.extend(segment.rel_type_filters.iter().cloned());
+                } else {
+                    mapped_rel_types.insert(rel.rel_type.clone());
+                }
+                mappings.insert(mapping.mapping_id, mapping);
+            }
         }
     }
     (mappings, mapped_rel_types)
@@ -1728,11 +1758,7 @@ fn wildcard_segment_table_pairs(
 ) -> Vec<(u32, u32)> {
     let mut pairs = std::collections::BTreeSet::new();
     for rel_info in rels {
-        if !rel.rel_types.is_empty()
-            && !rel
-                .rel_types
-                .iter()
-                .any(|filter| filter.text == rel_info.rel_type)
+        if !rel.rel_types.is_empty() && !wildcard_rel_info_matches_filter(rel_info, &rel.rel_types)
         {
             continue;
         }
@@ -1750,6 +1776,19 @@ fn wildcard_segment_table_pairs(
         }
     }
     pairs.into_iter().collect()
+}
+
+fn wildcard_rel_info_matches_filter(
+    rel_info: &super::catalog_snapshot::RelTypeInfo,
+    filters: &[ast::Ident],
+) -> bool {
+    filters
+        .iter()
+        .any(|filter| filter.text == rel_info.rel_type)
+        || rel_info
+            .edge_mapping
+            .as_ref()
+            .is_some_and(|mapping| mapping.label_column.is_some())
 }
 
 fn collect_possible_wildcard_table_paths(
@@ -1961,14 +2000,17 @@ fn bind_wildcard_relationship_filter(
             "wildcard path variables cannot bind relationship properties in this phase",
         ));
     }
-    let known_types = catalog
-        .rel_types()
-        .into_iter()
-        .map(|info| info.rel_type)
-        .collect::<std::collections::BTreeSet<_>>();
+    let rel_types = catalog.rel_types();
     let mut filters = std::collections::BTreeSet::new();
     for rel_type in &rel.rel_types {
-        if !known_types.contains(&rel_type.text) {
+        let structurally_known = rel_types.iter().any(|info| {
+            info.rel_type == rel_type.text
+                || info
+                    .edge_mapping
+                    .as_ref()
+                    .is_some_and(|mapping| mapping.label_column.is_some())
+        });
+        if !structurally_known {
             return Err(GqlError::bind(
                 rel_type.span,
                 format!("unknown relationship type `{}`", rel_type.text),
@@ -3011,6 +3053,12 @@ fn bind_detach_delete_node(
                 "DETACH DELETE for node-backed foreign-key relationships is not supported; update the mapped PostgreSQL source row first",
             ));
         }
+        if edge.label_column.is_some() {
+            return Err(GqlError::unsupported(
+                query.delete.span,
+                "DETACH DELETE over dynamic relationship labels requires authoritative per-row type tombstones and is not supported in this release",
+            ));
+        }
         if !incident_edges.iter().any(|existing: &BoundIncidentEdge| {
             existing.rel_type == rel.rel_type
                 && existing.edge.edge_table_oid == edge.edge_table_oid
@@ -3081,7 +3129,29 @@ fn resolve_relationship(
                 target.table_oid,
                 rel_type.span,
             )
-            .or_else(|_| {
+            .and_then(|forward| {
+                match catalog.resolve_rel_type(
+                    &rel_type.text,
+                    target.table_oid,
+                    source.table_oid,
+                    rel_type.span,
+                ) {
+                    Ok(reverse) if same_relationship_mapping(&forward, &reverse) => Ok(forward),
+                    Ok(_) => Err(GqlError::bind(
+                        rel_type.span,
+                        format!(
+                            "ambiguous undirected relationship type `{}` between tables {} and {}",
+                            rel_type.text, source.table_oid, target.table_oid
+                        ),
+                    )),
+                    Err(error) if gql_error_is_ambiguity(&error) => Err(error),
+                    Err(_) => Ok(forward),
+                }
+            })
+            .or_else(|forward_error| {
+                if gql_error_is_ambiguity(&forward_error) {
+                    return Err(forward_error);
+                }
                 catalog.resolve_rel_type(
                     &rel_type.text,
                     target.table_oid,
@@ -3090,6 +3160,18 @@ fn resolve_relationship(
                 )
             }),
     }
+}
+
+fn same_relationship_mapping(lhs: &RelTypeInfo, rhs: &RelTypeInfo) -> bool {
+    lhs.edge_mapping.as_ref().map(|mapping| mapping.mapping_id)
+        == rhs.edge_mapping.as_ref().map(|mapping| mapping.mapping_id)
+}
+
+fn gql_error_is_ambiguity(error: &GqlError) -> bool {
+    matches!(
+        &error.kind,
+        GqlErrorKind::Bind { message } if message.contains("ambiguous")
+    )
 }
 
 fn resolve_create_relationship(

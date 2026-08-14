@@ -113,6 +113,34 @@ fn binder_accepts_phase1_wildcard_path_return() {
 }
 
 #[test]
+fn binder_accepts_structural_dynamic_type_in_wildcard_path() {
+    let catalog = FakeCatalog::new()
+        .with_label("users", 10, ["id"])
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "fallback",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: Some("rel_type"),
+        });
+    let ast = crate::gql::parse_statement("MATCH p=(u:users)-[:runtime_type]->(v:users) RETURN p")
+        .unwrap();
+    let plan = bind_statement(&ast, &catalog).unwrap();
+    let super::logical_plan::LogicalStatement::WildcardPathRead(plan) = plan else {
+        panic!("expected wildcard path plan");
+    };
+    assert_eq!(
+        plan.rel_type_filters,
+        ["runtime_type".to_string()].into_iter().collect()
+    );
+    assert_eq!(plan.edge_mappings_by_id.len(), 1);
+    assert!(plan.mapped_rel_types.contains("runtime_type"));
+}
+
+#[test]
 fn binder_accepts_phase1_wildcard_path_functions() {
     let plan = bind_statement_query(
         "MATCH p=()-[]->() RETURN nodes(p) AS ns, relationships(p) AS rs, length(p) AS len",
@@ -595,7 +623,7 @@ fn binder_accepts_unseen_create_for_one_dynamic_edge_mapping() {
 }
 
 #[test]
-fn binder_keeps_unseen_match_fail_closed() {
+fn binder_structurally_binds_unseen_dynamic_match() {
     let catalog = FakeCatalog::new()
         .with_label("users", 10, ["id"])
         .with_mapped_edge(MappedEdgeSpec {
@@ -610,7 +638,15 @@ fn binder_keeps_unseen_match_fail_closed() {
         });
     let ast =
         crate::gql::parse_statement("MATCH (u:users)-[r:new_type]->(v:users) RETURN r").unwrap();
-    assert!(bind_statement(&ast, &catalog).is_err());
+    let plan = bind_statement(&ast, &catalog).unwrap();
+    let super::logical_plan::LogicalStatement::Read(plan) = plan else {
+        panic!("expected relationship read");
+    };
+    assert_eq!(plan.relationship.rel_type, "new_type");
+    assert!(plan
+        .relationship
+        .edge_mapping
+        .is_some_and(|mapping| mapping.label_column.as_deref() == Some("rel_type")));
 }
 
 #[test]
@@ -832,6 +868,27 @@ fn binder_accepts_detach_delete_for_node_with_mapped_incident_edges() {
     assert_eq!(delete.incident_edges[0].rel_type, "friend");
     assert_eq!(delete.incident_edges[0].edge.edge_table_oid, 30);
     assert_eq!(delete.returns.len(), 1);
+}
+
+#[test]
+fn binder_rejects_detach_delete_over_dynamic_relationship_types() {
+    let catalog = FakeCatalog::new()
+        .with_writable_label("users", 10, ["id", "name"], ["name"])
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "fallback",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: Some("rel_type"),
+        });
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) DETACH DELETE u RETURN u").unwrap();
+    let error = bind_statement(&ast, &catalog).unwrap_err();
+    assert!(matches!(error.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(error.to_string().contains("per-row type tombstones"));
 }
 
 #[test]

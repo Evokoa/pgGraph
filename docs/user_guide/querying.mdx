@@ -407,10 +407,18 @@ FROM graph.gql(
 ```
 
 Dynamic relationship label-column mappings require fully concrete relationship
-types. For `CREATE`, pgGraph fills the registered label column with the
-relationship type from the GQL pattern. The type must already be present in the
-built graph's dynamic label registry; pgGraph does not create graph-only
-relationship types.
+types. GQL and Cypher bind an explicit type from the endpoint mapping instead
+of scanning every distinct source value. If more than one mapping can supply
+the same type between those endpoints, binding fails as ambiguous. A valid
+type spelling absent from the loaded projection produces no match, which also
+keeps source-RLS-hidden and absent spellings indistinguishable.
+
+For `CREATE`, pgGraph writes the relationship type from the pattern through the
+registered PostgreSQL label column first. Transaction-local projection state
+uses a provisional ID only after that source DML succeeds. Dynamic `DETACH
+DELETE` is rejected until per-row authoritative type tombstones are supported.
+Equality predicates over the registered label column are not yet lowered;
+write the concrete type in the relationship pattern.
 
 ```sql
 SELECT row

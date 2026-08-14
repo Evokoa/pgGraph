@@ -1147,6 +1147,13 @@ fn gql_binds_dynamic_edge_labels_from_registered_label_column() {
     )
     .expect("add dynamic relationship label column failed");
     Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Cara', 29);
+         INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id, rel_type)
+         VALUES ('f2', 'u1', 'u3', 'acquaintance')",
+    )
+    .expect("add second dynamic relationship spelling failed");
+    Spi::run(
         "SELECT graph.add_table(
                 'graph_test_users_pgtest'::regclass,
                 id_column := 'id',
@@ -1168,17 +1175,185 @@ fn gql_binds_dynamic_edge_labels_from_registered_label_column() {
     .expect("add dynamic friendship edge failed");
     Spi::run("SELECT * FROM graph.build()").expect("build dynamic relationship graph failed");
 
-    let count = Spi::get_one::<i64>(
-        "SELECT count(*)::bigint
+    let gql_target = Spi::get_one::<String>(
+        "SELECT row #>> '{target,id}'
          FROM graph.gql(
             'MATCH (u:graph_test_users_pgtest)-[:colleague]->(v:graph_test_users_pgtest)
-             RETURN u.id AS source, v.id AS target'
+             RETURN v AS target'
          )",
     )
     .expect("dynamic GQL relationship query failed")
+    .expect("dynamic GQL relationship query returned no row");
+    let cypher_target = Spi::get_one::<String>(
+        "SELECT row #>> '{target,id}'
+         FROM graph.cypher(
+            'MATCH (u:graph_test_users_pgtest)-[:acquaintance]->(v:graph_test_users_pgtest)
+             RETURN v AS target'
+         )",
+    )
+    .expect("dynamic Cypher relationship query failed")
+    .expect("dynamic Cypher relationship query returned no row");
+    let absent_count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+         FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest)-[:not_loaded]->(v:graph_test_users_pgtest)
+             RETURN v AS target'
+         )",
+    )
+    .expect("absent dynamic relationship query failed")
+    .unwrap_or_default();
+    let wildcard_target = Spi::get_one::<String>(
+        "SELECT COALESCE(
+                    row #>> '{p,_path,nodes,1,_id,id}',
+                    row #>> '{p,_path,nodes,1,id}'
+                )
+         FROM graph.gql(
+            'MATCH p=(u:graph_test_users_pgtest)-[:acquaintance]->(v:graph_test_users_pgtest)
+             RETURN p'
+         )",
+    )
+    .expect("dynamic wildcard path query failed")
+    .expect("dynamic wildcard path query returned no row");
+    let absent_wildcard_count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+         FROM graph.gql(
+            'MATCH p=(u:graph_test_users_pgtest)-[:not_loaded]->(v:graph_test_users_pgtest)
+             RETURN p'
+         )",
+    )
+    .expect("absent dynamic wildcard query failed")
+    .unwrap_or_default();
+    let join_count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+         FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest)-[:colleague]->(v:graph_test_users_pgtest),
+                   (u)-[:acquaintance]->(w:graph_test_users_pgtest)
+             RETURN v, w'
+         )",
+    )
+    .expect("dynamic multi-pattern query failed")
     .unwrap_or_default();
 
-    assert_eq!(count, 1);
+    assert_eq!(gql_target, "u2");
+    assert_eq!(cypher_target, "u3");
+    assert_eq!(absent_count, 0);
+    assert_eq!(wildcard_target, "u3");
+    assert_eq!(absent_wildcard_count, 0);
+    assert_eq!(join_count, 1);
+}
+
+#[pg_test]
+fn gql_rejects_ambiguous_open_dynamic_relationship_mappings() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest
+         ADD COLUMN rel_type text NOT NULL DEFAULT 'first_fallback';
+         CREATE TABLE public.graph_test_other_dynamic_edges_pgtest (
+            id text PRIMARY KEY,
+            user_id text NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+            friend_id text NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+            rel_type text NOT NULL DEFAULT 'second_fallback'
+         );
+         SELECT graph.add_table(
+            'graph_test_users_pgtest'::regclass,
+            id_column := 'id', columns := ARRAY['name', 'age']);
+         SELECT graph.add_edge(
+            from_table := 'graph_test_friendships_pgtest'::regclass,
+            from_column := 'user_id', to_table := 'graph_test_users_pgtest'::regclass,
+            to_column := 'friend_id', label := 'first_fallback', bidirectional := false,
+            label_column := 'rel_type');
+         SELECT graph.add_edge(
+            from_table := 'graph_test_other_dynamic_edges_pgtest'::regclass,
+            from_column := 'user_id', to_table := 'graph_test_users_pgtest'::regclass,
+            to_column := 'friend_id', label := 'second_fallback', bidirectional := false,
+            label_column := 'rel_type');
+         SELECT * FROM graph.build()",
+    )
+    .expect("build ambiguous dynamic mapping fixture failed");
+    create_error_sqlstate_helper();
+
+    let sqlstate = Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest)-[:runtime_type]->(v:graph_test_users_pgtest)
+                 RETURN u, v',
+                hydrate := false
+             )"
+        )
+    ))
+    .expect("capture ambiguous dynamic mapping SQLSTATE failed");
+
+    assert_eq!(sqlstate.as_deref(), Some("22023"));
+}
+
+#[pg_test]
+fn gql_dynamic_hidden_and_absent_types_have_eager_lazy_parity() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest
+         ADD COLUMN rel_type text NOT NULL DEFAULT 'colleague';
+         SELECT graph.add_table(
+            'graph_test_users_pgtest'::regclass,
+            id_column := 'id', columns := ARRAY['name', 'age']);
+         SELECT graph.add_edge(
+            from_table := 'graph_test_friendships_pgtest'::regclass,
+            from_column := 'user_id', to_table := 'graph_test_users_pgtest'::regclass,
+            to_column := 'friend_id', label := 'related_to', bidirectional := false,
+            label_column := 'rel_type');
+         SELECT * FROM graph.build();
+         DROP ROLE IF EXISTS graph_gql_dynamic_hidden_reader;
+         CREATE ROLE graph_gql_dynamic_hidden_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_gql_dynamic_hidden_reader;
+         GRANT SELECT ON public.graph_test_users_pgtest,
+                         public.graph_test_friendships_pgtest
+           TO graph_gql_dynamic_hidden_reader;
+         ALTER TABLE public.graph_test_friendships_pgtest ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY graph_gql_dynamic_hidden_none
+           ON public.graph_test_friendships_pgtest FOR SELECT
+           TO graph_gql_dynamic_hidden_reader USING (false);
+         SET ROLE graph_gql_dynamic_hidden_reader",
+    )
+    .expect("create dynamic hidden/absent fixture failed");
+
+    let query_count = |rel_type: &str| {
+        Spi::get_one::<i64>(&format!(
+            "SELECT count(*)::bigint FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest)-[:{rel_type}]->(v:graph_test_users_pgtest)
+                 WHERE id(u) = ''u1'' RETURN v',
+                hydrate := false
+             )"
+        ))
+        .expect("dynamic hidden/absent query failed")
+        .unwrap_or_default()
+    };
+    let hidden_auto = query_count("colleague");
+    let absent_auto = query_count("not_loaded");
+    let optional_absent = || {
+        Spi::get_one::<i64>(
+            "SELECT count(*)::bigint FROM graph.gql(
+                'OPTIONAL MATCH (u:graph_test_users_pgtest)-[:not_loaded]->(v:graph_test_users_pgtest)
+                 WHERE id(u) = ''u1'' RETURN u, v',
+                hydrate := false
+             )",
+        )
+        .expect("optional absent dynamic query failed")
+        .unwrap_or_default()
+    };
+    let optional_absent_auto = optional_absent();
+    Spi::run("SELECT graph._test_set_visibility_strategy('eager')")
+        .expect("force eager dynamic visibility failed");
+    let hidden_eager = query_count("colleague");
+    let absent_eager = query_count("not_loaded");
+    let optional_absent_eager = optional_absent();
+    Spi::run("RESET ROLE; SELECT graph._test_set_visibility_strategy('auto')")
+        .expect("restore dynamic visibility fixture failed");
+
+    assert_eq!(
+        (hidden_auto, absent_auto, hidden_eager, absent_eager),
+        (0, 0, 0, 0)
+    );
+    assert_eq!((optional_absent_auto, optional_absent_eager), (2, 2));
 }
 
 #[pg_test]
@@ -1911,9 +2086,21 @@ fn gql_wildcard_relationships_fail_closed_when_edge_row_is_not_visible() {
 #[pg_test]
 fn gql_join_and_wildcard_preflight_edge_acl_before_empty_results() {
     reset_and_create_fixtures();
-    Spi::run("DELETE FROM public.graph_test_friendships_pgtest")
-        .expect("clear friendship rows failed");
-    build_friendship_fixture_graph();
+    Spi::run(
+        "DELETE FROM public.graph_test_friendships_pgtest;
+         ALTER TABLE public.graph_test_friendships_pgtest
+         ADD COLUMN rel_type text NOT NULL DEFAULT 'related_to';
+         SELECT graph.add_table(
+            'graph_test_users_pgtest'::regclass,
+            id_column := 'id', columns := ARRAY['name', 'age']);
+         SELECT graph.add_edge(
+            from_table := 'graph_test_friendships_pgtest'::regclass,
+            from_column := 'user_id', to_table := 'graph_test_users_pgtest'::regclass,
+            to_column := 'friend_id', label := 'related_to', bidirectional := false,
+            label_column := 'rel_type');
+         SELECT * FROM graph.build()",
+    )
+    .expect("build empty dynamic-label graph failed");
     Spi::run("DROP ROLE IF EXISTS graph_gql_edge_acl_preflight")
         .expect("drop edge ACL role failed");
     Spi::run("CREATE ROLE graph_gql_edge_acl_preflight").expect("create edge ACL role failed");
@@ -1929,8 +2116,8 @@ fn gql_join_and_wildcard_preflight_edge_acl_before_empty_results() {
         "SELECT public.graph_test_sqlstate({})",
         super::sql_literal(
             "SELECT * FROM graph.gql(
-                'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest),
-                       (u)-[:friend]->(v)
+                'MATCH (u:graph_test_users_pgtest)-[:colleague]->(v:graph_test_users_pgtest),
+                       (u)-[:colleague]->(v)
                  RETURN u, v',
                 hydrate := false
              )"
@@ -1942,7 +2129,7 @@ fn gql_join_and_wildcard_preflight_edge_acl_before_empty_results() {
         super::sql_literal(
             "SELECT EXISTS (
                 SELECT 1 FROM graph.gql(
-                    'MATCH p=(u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                    'MATCH p=(u:graph_test_users_pgtest)-[:colleague]->(v:graph_test_users_pgtest)
                      RETURN p',
                     hydrate := false
                 )

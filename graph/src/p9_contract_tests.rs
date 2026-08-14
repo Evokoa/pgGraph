@@ -76,6 +76,33 @@ fn p9_relationship_type_inventory_and_status_are_explicitly_bounded() {
 }
 
 #[test]
+fn p9_dynamic_gql_and_cypher_binding_is_independent_of_vocabulary_size() {
+    let catalog = crate_source("src/query/catalog_snapshot.rs");
+    let execute = crate_source("src/query/execute.rs");
+    let pg_tests = crate_source("src/pg_tests/gql.rs");
+
+    assert!(catalog
+        .contains("unique_dynamic_mapping_resolves_named_type_without_vocabulary_enumeration"));
+    assert!(!catalog.contains("SELECT DISTINCT COALESCE"));
+    assert!(!catalog.contains("ORDER BY 1"));
+    assert!(catalog.contains("mapping.label_column.is_some()"));
+    assert!(
+        execute.contains("absent_dynamic_label_uses_no_match_sentinel_without_registry_mutation")
+    );
+    assert!(execute.contains("EdgeTypeId::SENTINEL"));
+    assert!(pg_tests.contains("gql_binds_dynamic_edge_labels_from_registered_label_column"));
+    assert!(pg_tests.contains("gql_rejects_ambiguous_open_dynamic_relationship_mappings"));
+    assert!(pg_tests.contains("gql_dynamic_hidden_and_absent_types_have_eager_lazy_parity"));
+    assert!(pg_tests.contains("MATCH p=(u:graph_test_users_pgtest)-[:acquaintance]"));
+    assert!(pg_tests.contains("graph.cypher("));
+    assert!(pg_tests.contains(":not_loaded"));
+    let semantics = crate_source("src/query/semantics.rs");
+    let query_tests = crate_source("src/query/tests.rs");
+    assert!(query_tests.contains("binder_accepts_structural_dynamic_type_in_wildcard_path"));
+    assert!(semantics.contains("per-row type tombstones"));
+}
+
+#[test]
 #[ignore = "P9.5 migration and PostgreSQL release matrix"]
 fn p9_migration_recovery_diagnostics_and_postgres_matrix_ship_together() {
     let pg_tests = crate_source("src/pg_tests/p9_open_types.rs");

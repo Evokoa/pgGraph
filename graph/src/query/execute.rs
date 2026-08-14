@@ -113,7 +113,7 @@ pub(crate) fn execute_in_context(
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
-    let rel_type_id = edge_type_id(engine, &plan.rel_type)?;
+    let rel_type_id = edge_type_id_for_mapping(engine, &plan.rel_type, plan.edge_mapping.as_ref())?;
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
     reserve_execution_rows(
@@ -388,7 +388,9 @@ pub(crate) fn execute_join_in_context(
     let rel_type_ids = plan
         .patterns
         .iter()
-        .map(|pattern| edge_type_id(engine, &pattern.rel_type))
+        .map(|pattern| {
+            edge_type_id_for_mapping(engine, &pattern.rel_type, pattern.edge_mapping.as_ref())
+        })
         .collect::<GraphResult<Vec<_>>>()?;
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
@@ -694,7 +696,19 @@ pub(crate) fn execute_wildcard_path_in_context(
             segment
                 .rel_type_filters
                 .iter()
-                .map(|rel_type| edge_type_id(engine, rel_type))
+                .map(|rel_type| {
+                    if let Some(type_id) = engine.edge_type_id(rel_type) {
+                        return Ok(type_id);
+                    }
+                    if plan
+                        .edge_mappings_by_id
+                        .values()
+                        .any(|mapping| mapping.label_column.is_some())
+                    {
+                        return Ok(crate::types::EdgeTypeId::SENTINEL);
+                    }
+                    edge_type_id(engine, rel_type)
+                })
                 .collect::<GraphResult<std::collections::BTreeSet<_>>>()
         })
         .collect::<GraphResult<Vec<_>>>()?;
@@ -951,6 +965,24 @@ fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<crate::types::Ed
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("relationship type `{rel_type}` is not present in the built graph"),
         })
+}
+
+fn edge_type_id_for_mapping(
+    engine: &Engine,
+    rel_type: &str,
+    mapping: Option<&crate::query::catalog_snapshot::EdgeMappingInfo>,
+) -> GraphResult<crate::types::EdgeTypeId> {
+    match engine.edge_type_id(rel_type) {
+        Some(type_id) => Ok(type_id),
+        None if mapping.is_some_and(|mapping| mapping.label_column.is_some()) => {
+            // A structurally valid dynamic label that is absent from the loaded
+            // projection must be indistinguishable from one hidden by source
+            // RLS. The logical sentinel cannot occur on validated topology, so
+            // it is a safe no-match filter without growing the registry.
+            Ok(crate::types::EdgeTypeId::SENTINEL)
+        }
+        None => edge_type_id(engine, rel_type),
+    }
 }
 
 #[cfg(test)]
@@ -2094,6 +2126,32 @@ mod resource_accounting_tests {
         RowCount, WorkUnits,
     };
     use std::time::Duration;
+
+    fn dynamic_mapping() -> crate::query::catalog_snapshot::EdgeMappingInfo {
+        crate::query::catalog_snapshot::EdgeMappingInfo {
+            mapping_id: 1,
+            edge_table_oid: 30,
+            source_table_oid: 10,
+            target_table_oid: 10,
+            source_column: "source_id".into(),
+            target_column: "target_id".into(),
+            source_key_columns: crate::builder::PrimaryKeySpec::from_columns(vec!["id".into()]),
+            bidirectional: false,
+            label_column: Some("rel_type".into()),
+        }
+    }
+
+    #[test]
+    fn absent_dynamic_label_uses_no_match_sentinel_without_registry_mutation() {
+        let engine = Engine::new();
+        let before = engine.edge_type_count();
+        let type_id =
+            edge_type_id_for_mapping(&engine, "hidden_or_absent", Some(&dynamic_mapping()))
+                .expect("dynamic absence must bind to a no-match filter");
+        assert_eq!(type_id, crate::types::EdgeTypeId::SENTINEL);
+        assert_eq!(engine.edge_type_count(), before);
+        assert!(edge_type_id_for_mapping(&engine, "unknown_static", None).is_err());
+    }
 
     #[test]
     fn execution_preflights_long_ids_and_path_vectors() {
