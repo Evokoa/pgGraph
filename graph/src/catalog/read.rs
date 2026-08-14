@@ -429,6 +429,23 @@ pub(crate) fn current_catalog_state() -> safety::GraphResult<(u64, Option<String
     current_catalog_state_from_rows(&tables, &edges, &filter_columns)
 }
 
+/// Same as [`current_catalog_state`] but reuses an already-resolved graph id.
+///
+/// `read_catalog()` re-resolves the selected graph through a definer SPI call.
+/// Query paths such as `ensure_current_graph()` have already resolved that graph
+/// metadata, so going through `current_catalog_state()` pays for a duplicate
+/// catalog lookup on every traversal call.
+///
+/// # Errors
+///
+/// Returns [`safety::GraphError::Internal`] for SPI failures.
+pub(crate) fn current_catalog_state_for_graph(
+    graph_id: &str,
+) -> safety::GraphResult<(u64, Option<String>)> {
+    let (tables, edges, filter_columns) = read_catalog_for_graph(graph_id)?;
+    current_catalog_state_from_rows(&tables, &edges, &filter_columns)
+}
+
 pub(crate) fn current_catalog_state_from_rows(
     tables: &[builder::RegisteredTable],
     edges: &[builder::RegisteredEdge],

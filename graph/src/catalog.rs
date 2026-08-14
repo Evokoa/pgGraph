@@ -19,8 +19,8 @@ pub(crate) use graphs::{
     GraphMetadata, GraphPrivilege, GraphQuota, GraphQuotaUsage,
 };
 pub(crate) use read::{
-    catalog_fingerprint, current_catalog_state, current_catalog_state_from_rows, read_catalog,
-    read_catalog_for_graph,
+    catalog_fingerprint, current_catalog_state, current_catalog_state_for_graph,
+    current_catalog_state_from_rows, read_catalog, read_catalog_for_graph,
 };
 #[cfg(feature = "pg_test")]
 pub(crate) use validate::validate_numeric_column;

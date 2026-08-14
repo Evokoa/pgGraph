@@ -580,7 +580,7 @@ pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
     let sync_mode = current_sync_mode()?;
 
     let disabled = disabled_graph_trigger_count()?;
-    let catalog_state = current_catalog_state()?;
+    let catalog_state = catalog::current_catalog_state_for_graph(&graph.graph_id)?;
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
     let pending = pending_sync_rows(applied_sync_id)?;
     ENGINE.with(|e| {
