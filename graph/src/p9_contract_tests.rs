@@ -645,6 +645,18 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
     );
     assert_eq!(
         protocol
+            .pointer("/postgres/gql_cypher_query_shape")
+            .and_then(serde_json::Value::as_str),
+        Some("typed_one_hop_return_vertex")
+    );
+    assert_eq!(
+        protocol
+            .pointer("/postgres/gql_cypher_oracle_digest")
+            .and_then(serde_json::Value::as_str),
+        Some("exact_single_target_vertex_id_2")
+    );
+    assert_eq!(
+        protocol
             .pointer("/resources/backend_counts")
             .and_then(serde_json::Value::as_array)
             .map(Vec::len),
@@ -705,7 +717,10 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "latency-postgres-version.txt",
         "latency-settings.json",
         "current_setting('graph.memory_limit_mb')",
-        "replace('MATCH (u@p9_latency_nodes {id: 1})-[r@type_1]",
+        "replace('MATCH (u@p9_latency_nodes {id: 1})-[@type_1]",
+        "row #>> '{v,_id,id}'",
+        "HAVING count(*) = 1",
+        "min(row #>> '{v,_id,id}') = '2'",
         "'@', chr(58)",
     ] {
         assert!(

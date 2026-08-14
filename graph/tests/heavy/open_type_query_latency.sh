@@ -106,10 +106,10 @@ query_sql() {
       printf "SELECT count(*) FROM graph.shortest_path('public.p9_latency_nodes'::regclass, '1', 'public.p9_latency_nodes'::regclass, '33', %s, hydrate := false);\n" "$DEPTH"
       ;;
     gql)
-      printf "SELECT count(*) FROM graph.gql(replace('MATCH (u@p9_latency_nodes {id: 1})-[r@type_1]->(v@p9_latency_nodes) RETURN r, v', '@', chr(58)), hydrate := false);\n"
+      printf "SELECT count(*) FROM graph.gql(replace('MATCH (u@p9_latency_nodes {id: 1})-[@type_1]->(v@p9_latency_nodes) RETURN v', '@', chr(58)), hydrate := false);\n"
       ;;
     cypher)
-      printf "SELECT count(*) FROM graph.cypher(replace('MATCH (u@p9_latency_nodes {id: 1})-[r@type_1]->(v@p9_latency_nodes) RETURN r, v', '@', chr(58)), hydrate := false);\n"
+      printf "SELECT count(*) FROM graph.cypher(replace('MATCH (u@p9_latency_nodes {id: 1})-[@type_1]->(v@p9_latency_nodes) RETURN v', '@', chr(58)), hydrate := false);\n"
       ;;
     *)
       echo "unknown query surface: $1" >&2
@@ -127,10 +127,10 @@ oracle_sql() {
       printf "SELECT count(*), md5(COALESCE(string_agg(step || ':' || node_id || ':' || COALESCE(edge_label, ''), ',' ORDER BY step), '')) FROM graph.shortest_path('public.p9_latency_nodes'::regclass, '1', 'public.p9_latency_nodes'::regclass, '33', %s, hydrate := false);\n" "$DEPTH"
       ;;
     gql)
-      printf "SELECT count(*), md5(COALESCE(string_agg(row::text, ',' ORDER BY row::text), '')) FROM graph.gql(replace('MATCH (u@p9_latency_nodes {id: 1})-[r@type_1]->(v@p9_latency_nodes) RETURN r, v', '@', chr(58)), hydrate := false) WITH ORDINALITY AS exact_rows(row, ordinal);\n"
+      printf "SELECT count(*), md5(string_agg(row #>> '{v,_id,id}', ',' ORDER BY row #>> '{v,_id,id}')) FROM graph.gql(replace('MATCH (u@p9_latency_nodes {id: 1})-[@type_1]->(v@p9_latency_nodes) RETURN v', '@', chr(58)), hydrate := false) AS exact_rows(row) HAVING count(*) = 1 AND count(row #>> '{v,_id,id}') = 1 AND min(row #>> '{v,_id,id}') = '2';\n"
       ;;
     cypher)
-      printf "SELECT count(*), md5(COALESCE(string_agg(row::text, ',' ORDER BY row::text), '')) FROM graph.cypher(replace('MATCH (u@p9_latency_nodes {id: 1})-[r@type_1]->(v@p9_latency_nodes) RETURN r, v', '@', chr(58)), hydrate := false) WITH ORDINALITY AS exact_rows(row, ordinal);\n"
+      printf "SELECT count(*), md5(string_agg(row #>> '{v,_id,id}', ',' ORDER BY row #>> '{v,_id,id}')) FROM graph.cypher(replace('MATCH (u@p9_latency_nodes {id: 1})-[@type_1]->(v@p9_latency_nodes) RETURN v', '@', chr(58)), hydrate := false) AS exact_rows(row) HAVING count(*) = 1 AND count(row #>> '{v,_id,id}') = 1 AND min(row #>> '{v,_id,id}') = '2';\n"
       ;;
   esac
 }
