@@ -705,6 +705,10 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "latency-postgres-version.txt",
         "latency-settings.json",
         "current_setting('graph.memory_limit_mb')",
+        "u\\\\:p9_latency_nodes",
+        "r\\\\:type_1",
+        "v\\\\:p9_latency_nodes",
+        "MATCH (u:p9_latency_nodes {id: 1})-[r:type_1]",
     ] {
         assert!(
             latency.contains(required),
