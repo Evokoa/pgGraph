@@ -419,6 +419,15 @@ and the exact OAT benchmark cases live in
 `todo/measurements/2026-08-13-p9-open-type-query/` and are committed before any
 result files.
 
+`open_type_query_latency.sh` builds identical low- and high-cardinality
+topologies on PostgreSQL 17, keeps warmup and measured transactions in one
+pgbench backend, and records deterministic query-result oracles for traversal,
+shortest path, GQL, and Cypher. `run_open_type_query_resources_docker.sh`
+executes the 1/4/8-backend resource matrix in Linux and copies the raw files,
+image metadata, and logs out of the container. Use the exact commands in the
+measurement directory README; a green console log without retained raw files
+is not P9 evidence.
+
 ### Synthetic Release Dataset
 
 `synthetic_release_smoke.sh` creates a deterministic synthetic relational graph

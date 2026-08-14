@@ -269,6 +269,14 @@ representations, not a synthetic v6 control. Selection cases state their exact
 shape (`one_of_32`, `half_of_32`, and so on) instead of implying percentages
 that the bounded fixture cannot represent exactly.
 
+The retained-evidence workflow has three independent producers. Run
+`tests/heavy/run_open_type_query_criterion.sh` for fresh internal Rust estimates,
+`tests/heavy/open_type_query_latency.sh` for PostgreSQL 17 latency, and
+`tests/heavy/run_open_type_query_resources_docker.sh` for Linux backend RSS/PSS.
+The commands, warmups, sample counts, fixture dimensions, and reconciliation
+rules are declared in the measurement directory README and
+`measurement-protocol.json`. Do not edit budgets after observing a result.
+
 ## Internal Rust Benchmarks
 
 The Criterion benchmark target lives in `graph/benches/bfs_bench.rs`.

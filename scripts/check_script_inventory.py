@@ -30,6 +30,10 @@ MAINTAINER = {
 }
 HOST_MUTATING = {
     "graph/tests/heavy/open_type_package_smoke.sh",
+    "graph/tests/heavy/open_type_query_latency.sh",
+    "graph/tests/heavy/run_open_type_query_criterion.sh",
+    "graph/tests/heavy/run_open_type_query_resource_matrix.sh",
+    "graph/tests/heavy/run_open_type_query_resources_docker.sh",
     "graph/tests/heavy/open_type_query_resources.sh",
     "graph/tests/heavy/rls_large_table_baseline.sh",
     "graph/tests/heavy/phase3_update_smoke.sh",
@@ -37,6 +41,7 @@ HOST_MUTATING = {
 }
 LINUX_ONLY = {
     "graph/tests/heavy/open_type_query_resources.sh",
+    "graph/tests/heavy/run_open_type_query_resource_matrix.sh",
 }
 TOOL_OVERRIDES = {
     "graph/tests/heavy/open_type_package_smoke.sh": [
@@ -52,6 +57,28 @@ TOOL_OVERRIDES = {
         "createdb",
         "dropdb",
     ],
+    "graph/tests/heavy/open_type_query_latency.sh": [
+        "bash",
+        "cargo-pgrx",
+        "pgbench",
+        "psql",
+        "createdb",
+        "dropdb",
+        "python3",
+    ],
+    "graph/tests/heavy/run_open_type_query_criterion.sh": [
+        "bash",
+        "cargo",
+        "python3",
+    ],
+    "graph/tests/heavy/run_open_type_query_resource_matrix.sh": [
+        "bash",
+        "cargo-pgrx",
+        "psql",
+        "createdb",
+        "dropdb",
+    ],
+    "graph/tests/heavy/run_open_type_query_resources_docker.sh": ["bash", "docker"],
     "graph/tests/heavy/rls_large_table_baseline.sh": [
         "bash",
         "cargo-pgrx",

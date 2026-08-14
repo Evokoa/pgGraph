@@ -668,6 +668,38 @@
       "decision": "keep"
     },
     {
+      "path": "graph/tests/heavy/open_type_query_latency.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash",
+        "cargo-pgrx",
+        "pgbench",
+        "psql",
+        "createdb",
+        "dropdb",
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
       "path": "graph/tests/heavy/open_type_query_resources.sh",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -1113,6 +1145,90 @@
         "exit status"
       ],
       "destructive": false,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_open_type_query_criterion.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash",
+        "cargo",
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_open_type_query_resource_matrix.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash",
+        "cargo-pgrx",
+        "psql",
+        "createdb",
+        "dropdb"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
+      "timeout_seconds": 3600,
+      "platforms": [
+        "Linux",
+        "Docker"
+      ],
+      "ci_release_usage": "release gate",
+      "decision": "keep"
+    },
+    {
+      "path": "graph/tests/heavy/run_open_type_query_resources_docker.sh",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "rc",
+      "required_tools": [
+        "bash",
+        "docker"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": true,
       "timeout_seconds": 3600,
       "platforms": [
         "Linux",
@@ -2443,6 +2559,31 @@
       "decision": "keep"
     },
     {
+      "path": "scripts/extract_p9_open_type_criterion.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
       "path": "scripts/inspect_pggraph_artifact.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
@@ -2569,6 +2710,56 @@
     },
     {
       "path": "scripts/run_release.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/summarize_p9_open_type_postgres.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/test_p9_open_type_evidence_tools.py",
       "owner": "pgGraph maintainers",
       "audience": "internal",
       "tier": "pr",
@@ -2749,6 +2940,31 @@
       "tier": "pr",
       "required_tools": [
         "bash"
+      ],
+      "inputs": [
+        "documented CLI arguments",
+        "documented environment variables"
+      ],
+      "outputs": [
+        "stdout/stderr",
+        "exit status"
+      ],
+      "destructive": false,
+      "timeout_seconds": 600,
+      "platforms": [
+        "Linux",
+        "macOS"
+      ],
+      "ci_release_usage": "static inventory gate",
+      "decision": "keep"
+    },
+    {
+      "path": "scripts/write_p9_open_type_run_metadata.py",
+      "owner": "pgGraph maintainers",
+      "audience": "internal",
+      "tier": "pr",
+      "required_tools": [
+        "python3"
       ],
       "inputs": [
         "documented CLI arguments",

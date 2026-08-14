@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "declared-before-measurement",
+  "budget_commit": "dd730b8",
+  "criterion": {
+    "expected_case_count": 65,
+    "command": "cargo +1.96.0 bench --features 'pg17 benchmarks' --bench open_type_query_bench"
+  },
+  "postgres": {
+    "major": 17,
+    "label_counts": [254, 65536],
+    "query_surfaces": ["traverse", "shortest_path", "gql", "cypher"],
+    "transactions_per_case": 50,
+    "warmup_transactions": 10,
+    "measured_samples_per_case": 40,
+    "pgbench_protocol": "extended",
+    "clients": 1,
+    "jobs": 1,
+    "node_count": 131072,
+    "directed_edge_count": 1048576,
+    "degree": 8,
+    "depth": 4
+  },
+  "resources": {
+    "os": "Linux",
+    "postgres_major": 17,
+    "label_count": 65536,
+    "backend_counts": [1, 4, 8],
+    "node_count": 131072,
+    "directed_edge_count": 1048576,
+    "degree": 8,
+    "depth": 4,
+    "query_rounds": 100
+  }
+}

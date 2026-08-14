@@ -35,6 +35,7 @@ exit meanings throughout the pgGraph 1.x compatibility window.
 | `graph/tests/heavy/named_graphs_heavy_gate.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/open_type_high_cardinality_query.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/open_type_package_smoke.sh` | internal | rc | yes | 3600s |
+| `graph/tests/heavy/open_type_query_latency.sh` | internal | rc | yes | 3600s |
 | `graph/tests/heavy/open_type_query_resources.sh` | internal | rc | yes | 3600s |
 | `graph/tests/heavy/open_type_release_matrix.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/package_install_matrix.sh` | internal | rc | yes | 3600s |
@@ -52,6 +53,9 @@ exit meanings throughout the pgGraph 1.x compatibility window.
 | `graph/tests/heavy/run_durable_projection_matrix.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/run_gql_write_matrix.sh` | internal | rc | no | 3600s |
 | `graph/tests/heavy/run_memory_sanitizers.sh` | internal | rc | no | 3600s |
+| `graph/tests/heavy/run_open_type_query_criterion.sh` | internal | rc | yes | 3600s |
+| `graph/tests/heavy/run_open_type_query_resource_matrix.sh` | internal | rc | yes | 3600s |
+| `graph/tests/heavy/run_open_type_query_resources_docker.sh` | internal | rc | yes | 3600s |
 | `graph/tests/heavy/run_pg_matrix.sh` | maintainer/stable | rc | no | 3600s |
 | `graph/tests/heavy/run_pg_matrix_docker.sh` | maintainer/stable | rc | no | 3600s |
 | `graph/tests/heavy/run_pg_upgrade_matrix.sh` | internal | rc | yes | 3600s |
@@ -104,12 +108,15 @@ exit meanings throughout the pgGraph 1.x compatibility window.
 | `scripts/check_unsafe_allowlist.py` | internal | pr | no | 600s |
 | `scripts/clean_generated_artifacts.sh` | internal | pr | yes | 600s |
 | `scripts/copy_pggraph_package_to_docker_postgres.sh` | internal | pr | no | 600s |
+| `scripts/extract_p9_open_type_criterion.py` | internal | pr | no | 600s |
 | `scripts/inspect_pggraph_artifact.py` | internal | pr | no | 600s |
 | `scripts/install_into_docker_postgres.sh` | internal | pr | yes | 600s |
 | `scripts/lib/pggraph-common.sh` | internal | pr | no | 600s |
 | `scripts/prepare_release_bundle.py` | internal | pr | no | 600s |
 | `scripts/quickstart.sh` | public/stable | pr | no | 600s |
 | `scripts/run_release.py` | internal | pr | no | 600s |
+| `scripts/summarize_p9_open_type_postgres.py` | internal | pr | no | 600s |
+| `scripts/test_p9_open_type_evidence_tools.py` | internal | pr | no | 600s |
 | `scripts/test_release_bundle.py` | internal | pr | no | 600s |
 | `scripts/test_release_validation.py` | internal | pr | no | 600s |
 | `scripts/test_run_release.py` | internal | pr | no | 600s |
@@ -117,6 +124,7 @@ exit meanings throughout the pgGraph 1.x compatibility window.
 | `scripts/verify_release_bundle.py` | internal | pr | no | 600s |
 | `scripts/verify_release_evidence.py` | internal | pr | no | 600s |
 | `scripts/with_disposable_postgres.sh` | internal | pr | no | 600s |
+| `scripts/write_p9_open_type_run_metadata.py` | internal | pr | no | 600s |
 
 The machine-readable source at `release/scripts.json` also records owners,
 tools, inputs, outputs, platforms, CI/release usage, and keep/merge/replace/delete
