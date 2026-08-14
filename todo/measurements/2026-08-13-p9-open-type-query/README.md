@@ -4,6 +4,9 @@ This directory separates the P9 acceptance protocol from the measurements that
 will evaluate it. The exact 65 Criterion cases and all acceptance limits were
 committed in `dd730b8` before any result files existed. The protocol fixes the
 PostgreSQL fixture, warmup, sample, and Linux backend-count matrix.
+The latency fixture also fixes `graph.memory_limit_mb` at 2,048 MiB and
+`graph.query_memory_mb` at 512 MiB so its million-edge projection is measured
+under an explicit bounded allowance instead of the smaller interactive default.
 
 The evidence tooling is committed as a separate checkpoint. After that commit
 is clean, run the following commands from the recorded exact commit:

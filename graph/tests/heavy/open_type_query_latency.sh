@@ -75,13 +75,22 @@ if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --no-default-features
 fi
 export PGHOST PGPORT
-export PGOPTIONS="${PGOPTIONS:-} -c statement_timeout=${STATEMENT_TIMEOUT_MS}"
+export PGOPTIONS="${PGOPTIONS:-} -c statement_timeout=${STATEMENT_TIMEOUT_MS} -c graph.memory_limit_mb=2048 -c graph.query_memory_mb=512"
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 database_created=1
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c "CREATE EXTENSION graph" >/dev/null
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" \
-  -c "ALTER DATABASE \"$DBNAME\" SET graph.auto_load = on" >/dev/null
+  -c "ALTER DATABASE \"$DBNAME\" SET graph.auto_load = on" \
+  -c "ALTER DATABASE \"$DBNAME\" SET graph.memory_limit_mb = 2048" \
+  -c "ALTER DATABASE \"$DBNAME\" SET graph.query_memory_mb = 512" >/dev/null
+effective_limits="$(psql -X -v ON_ERROR_STOP=1 -At -F, -d "$DBNAME" \
+  -c "SELECT current_setting('graph.memory_limit_mb')::int, current_setting('graph.query_memory_mb')::int")"
+if [[ "$effective_limits" != "2048,512" ]]; then
+  echo "effective graph memory limits differ from the declared 2048,512 MiB: $effective_limits" >&2
+  exit 1
+fi
+printf '{"memory_limit_mb":2048,"query_memory_mb":512}\n' >"$OUTPUT_DIR/latency-settings.json"
 
 SAMPLES="$OUTPUT_DIR/postgres-samples.csv"
 ORACLES="$OUTPUT_DIR/postgres-oracles.csv"

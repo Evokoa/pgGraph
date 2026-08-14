@@ -16,6 +16,8 @@
     "pgbench_protocol": "extended",
     "clients": 1,
     "jobs": 1,
+    "memory_limit_mb": 2048,
+    "query_memory_mb": 512,
     "node_count": 131072,
     "directed_edge_count": 1048576,
     "degree": 8,

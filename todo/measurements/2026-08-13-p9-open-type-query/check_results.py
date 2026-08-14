@@ -486,6 +486,17 @@ def main() -> int:
     for (section, field), retained_value in provenance.items():
         if not retained_value or metadata[section].get(field) != retained_value:
             raise ValueError(f"{section}/{field} differs from retained provenance")
+    latency_settings = json.loads(
+        (evidence / "latency-settings.json").read_text(encoding="utf-8")
+    )
+    expected_latency_settings = {
+        "memory_limit_mb": int(protocol["postgres"]["memory_limit_mb"]),
+        "query_memory_mb": int(protocol["postgres"]["query_memory_mb"]),
+    }
+    if latency_settings != expected_latency_settings:
+        raise ValueError("effective PostgreSQL latency settings differ from the protocol")
+    if metadata["postgres"].get("settings") != latency_settings:
+        raise ValueError("PostgreSQL latency settings differ from run metadata")
     retained_docker_version = json.loads(
         (evidence / "docker-version.json").read_text(encoding="utf-8")
     )

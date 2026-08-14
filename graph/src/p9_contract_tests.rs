@@ -633,6 +633,18 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
     );
     assert_eq!(
         protocol
+            .pointer("/postgres/memory_limit_mb")
+            .and_then(serde_json::Value::as_u64),
+        Some(2048)
+    );
+    assert_eq!(
+        protocol
+            .pointer("/postgres/query_memory_mb")
+            .and_then(serde_json::Value::as_u64),
+        Some(512)
+    );
+    assert_eq!(
+        protocol
             .pointer("/resources/backend_counts")
             .and_then(serde_json::Value::as_array)
             .map(Vec::len),
@@ -691,6 +703,8 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "postgres-samples.csv",
         "postgres-log-hashes.csv",
         "latency-postgres-version.txt",
+        "latency-settings.json",
+        "current_setting('graph.memory_limit_mb')",
     ] {
         assert!(
             latency.contains(required),
@@ -750,6 +764,7 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "dd730b8",
         "linux-uname.txt",
         "latency-postgres-version.txt",
+        "latency-settings.json",
         "resource-postgres-version.txt",
         "docker-version.json",
         "run-metadata.json",

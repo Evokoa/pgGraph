@@ -90,6 +90,9 @@ def main() -> int:
         raise ValueError("source changes outside the evidence directory are not allowed")
     linux_kernel = required_text(evidence / "linux-uname.txt")
     postgres_version = required_text(evidence / "latency-postgres-version.txt")
+    latency_settings = json.loads(
+        (evidence / "latency-settings.json").read_text(encoding="utf-8")
+    )
     image_inspect = json.loads(
         (evidence / "docker-image-inspect.json").read_text(encoding="utf-8")
     )
@@ -112,6 +115,7 @@ def main() -> int:
             "command": POSTGRES_COMMAND,
             "version": postgres_version,
             "pgbench": required_text(evidence / "latency-pgbench-version.txt"),
+            "settings": latency_settings,
         },
         "resources": {
             "command": RESOURCE_COMMAND,
