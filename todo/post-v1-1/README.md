@@ -148,7 +148,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P6 | Complete | The existing `EdgeTypeId` is the one production checked authority across logical consumers and v6 adapters; behavior and v6 bytes remain unchanged, and retained evidence selects adaptive 1/2/4-byte physical storage for P7. |
 | P7 | Complete | Runtime topology and rebuilt immutable v7 bases use checked logical IDs with adaptive 1/2/4-byte storage, explicit dictionary policies, v6 read compatibility, and atomic candidate validation. Incremental unseen labels remain in P8. |
 | P8 | Complete | Adaptive v7 mutable segments and a checksummed cumulative dictionary support durable unseen labels. Transaction-local provisional labels preserve exact spelling, filters, RLS completeness, savepoints, resource limits, and base-registry identity without mutating durable state before commit. |
-| P9 | In progress (P9.3 complete) | P9.1 enables adaptive mutable base builds. P9.2 adds bounded filter inputs, paginated inventory, a bounded status preview, and O(1) dynamic-RLS type policy. P9.3 binds explicit dynamic types structurally for GQL/Cypher without scanning source vocabulary. Label-column equality lowering and the full high-cardinality release matrix remain. |
+| P9 | In progress (P9.4 complete) | P9.1 enables adaptive mutable base builds. P9.2 adds bounded filter inputs, paginated inventory, a bounded status preview, and O(1) dynamic-RLS type policy. P9.3 binds explicit dynamic types structurally without scanning source vocabulary. P9.4 lowers eligible label-column equality and adds the exact 254/255 routine matrix plus an opt-in 65,534/65,535/65,536 runner. P9.5 migration, fuzz, PostgreSQL-version, and retained performance evidence remains. |
 | P10 | Not started | The private batch contract validates and types bounded ordered input once, rejects duplicate identities, and proves no per-input DML loop. |
 | P11 | Not started | Set-based node `CREATE`/`MERGE` preserve RLS, constraints, triggers, partitions, ordinality, atomicity, savepoints, and idempotent replay. |
 | P12 | Not started | Set-based relationship `CREATE`/`MERGE` resolve endpoints and identities set-wise, support open labels and parallel edges, and expose same-transaction node-to-edge ingestion. |
@@ -602,13 +602,18 @@ endpoint structure. Typed wildcard paths carry every applicable mapping for
 ACL/RLS post-checks; absent dynamic spellings use a no-match filter and do not
 mutate the registry. Ambiguous mappings fail closed. Dynamic `DETACH DELETE`
 remains rejected until deletion can return and tombstone each row's exact
-authoritative type. Label-column equality lowering, the high-cardinality
-behavior matrix, and retained release evidence remain.
+authoritative type. P9.4 lowers eligible fixed one-hop equality on the
+registered label column to the compact type filter. Its routine PostgreSQL
+matrix covers the 254/255 boundary, exact traversal/path/GQL/Cypher output,
+parallel identities, ACL, FORCE RLS, BYPASSRLS, transaction-local labels, and
+cancellation cleanup. An opt-in runner covers 65,534/65,535/65,536. Migration,
+fuzz/property, PostgreSQL-version, and retained performance evidence remain in
+P9.5.
 
 - Preserve exact `edge_types` filtering and GQL relationship patterns above
   254 and 65,535 labels.
-- Lower eligible registered label-column equality predicates to the same exact
-  type-ID filter rather than hydrating every relationship.
+- Retain the eligible registered label-column equality fast path and its exact
+  type-ID filtering without relationship hydration.
 - Bound label listing/status output or make it explicitly paginated.
 - Complete high-cardinality build/sync/query resource tests, ACL/RLS and
   transaction matrices, fuzz/property evidence, migration/rollback docs,

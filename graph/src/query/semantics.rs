@@ -40,19 +40,50 @@ pub(crate) fn bind(
     let (source_pat, rel_pat, target_pat) = single_outbound_hop(&query.match_)?;
     let source = bind_node(source_pat, catalog)?;
     let target = bind_node(target_pat, catalog)?;
-    let rel_type = require_single_relationship_type(
-        rel_pat,
-        "anonymous relationship types are outside the 1.0 profile; name one registered relationship type after `:`",
-        "relationship type alternation is outside the 1.0 single-pattern profile; use one registered type or a supported wildcard path-variable read",
-    )?;
-    let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
-    let predicate = bind_predicates(
+    let (rel_info, anonymous_dynamic_lookup) = match rel_pat.rel_types.as_slice() {
+        [] => {
+            if rel_pat.var_len.is_some() {
+                return Err(GqlError::unsupported(
+                    rel_pat.span,
+                    "dynamic relationship label equality supports exactly one hop",
+                ));
+            }
+            let label_column = anonymous_relationship_label_column(query.where_.as_ref(), rel_pat)?;
+            (
+                resolve_anonymous_dynamic_relationship(
+                    catalog,
+                    rel_pat,
+                    &source,
+                    &target,
+                    &label_column,
+                )?,
+                true,
+            )
+        }
+        [rel_type] => (
+            resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?,
+            false,
+        ),
+        _ => {
+            return Err(GqlError::unsupported(
+                rel_pat.span,
+                "relationship type alternation is outside the 1.0 single-pattern profile; use one registered type or a supported wildcard path-variable read",
+            ));
+        }
+    };
+    let (predicate, relationship_type_lookup) = bind_predicates(
         query.where_.as_ref(),
         source_pat,
         rel_pat,
         target_pat,
         &source,
         &target,
+        &rel_info,
+    )?;
+    let relationship_type_lookup = lower_dynamic_label_equality_filter(
+        relationship_type_lookup,
+        anonymous_dynamic_lookup,
+        rel_pat.span,
     )?;
     let initial_scope = initial_relationship_scope(rel_pat, target_pat, &source, &target)?;
     let BoundWith {
@@ -78,6 +109,7 @@ pub(crate) fn bind(
             hops: bind_hops(rel_pat)?,
             edge_mapping: rel_info.edge_mapping,
         },
+        relationship_type_lookup,
         target,
         returns,
         distinct_stages,
@@ -87,6 +119,25 @@ pub(crate) fn bind(
         skip: query.skip,
         limit: query.limit,
     })
+}
+
+fn lower_dynamic_label_equality_filter(
+    lookup: Option<ValueExpr>,
+    anonymous_dynamic_lookup: bool,
+    span: Span,
+) -> Result<Option<ValueExpr>, GqlError> {
+    match (anonymous_dynamic_lookup, lookup) {
+        (true, Some(lookup)) => Ok(Some(lookup)),
+        (true, None) => Err(GqlError::unsupported(
+            span,
+            "an anonymous relationship requires equality on its registered label column",
+        )),
+        (false, Some(_)) => Err(GqlError::unsupported(
+            span,
+            "relationship label equality requires an untyped relationship pattern",
+        )),
+        (false, None) => Ok(None),
+    }
 }
 
 fn bind_node_scan(
@@ -2799,14 +2850,21 @@ fn bind_delete_edge(
         rel_info,
         edge_mapping,
     } = bind_delete_edge_mapping(source_pat, rel_pat, target_pat, catalog)?;
-    let predicate = bind_predicates(
+    let (predicate, relationship_type_lookup) = bind_predicates(
         query.where_.as_ref(),
         source_pat,
         rel_pat,
         target_pat,
         &source,
         &target,
+        &rel_info,
     )?;
+    if relationship_type_lookup.is_some() {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "relationship label equality is outside the DELETE profile",
+        ));
+    }
     let scope = initial_relationship_scope(rel_pat, target_pat, &source, &target)?;
     let returns = bind_scoped_returns(&query.return_.items, &scope, &source, &target)?;
     if returns.iter().any(ReturnBinding::is_aggregate) {
@@ -3162,6 +3220,147 @@ fn resolve_relationship(
     }
 }
 
+fn resolve_anonymous_dynamic_relationship(
+    catalog: &impl CatalogSnapshot,
+    rel_pat: &RelPat,
+    source: &BoundNode,
+    target: &BoundNode,
+    label_column: &str,
+) -> Result<RelTypeInfo, GqlError> {
+    let endpoint_matches = |candidate: &RelTypeInfo| match rel_pat.direction {
+        Direction::Out => {
+            candidate.from_table_oid == source.table_oid
+                && candidate.to_table_oid == target.table_oid
+        }
+        Direction::In => {
+            candidate.from_table_oid == target.table_oid
+                && candidate.to_table_oid == source.table_oid
+        }
+        Direction::Undirected => {
+            (candidate.from_table_oid == source.table_oid
+                && candidate.to_table_oid == target.table_oid)
+                || (candidate.from_table_oid == target.table_oid
+                    && candidate.to_table_oid == source.table_oid)
+        }
+    };
+    let mut candidates = Vec::new();
+    for candidate in catalog.rel_types().into_iter().filter(endpoint_matches) {
+        let Some(mapping) = candidate.edge_mapping.as_ref() else {
+            continue;
+        };
+        if mapping.label_column.as_deref() != Some(label_column)
+            || candidates.iter().any(|existing: &RelTypeInfo| {
+                existing
+                    .edge_mapping
+                    .as_ref()
+                    .is_some_and(|existing_mapping| {
+                        existing_mapping.mapping_id == mapping.mapping_id
+                    })
+            })
+        {
+            continue;
+        }
+        candidates.push(candidate);
+    }
+    match candidates.as_slice() {
+        [candidate] => Ok(candidate.clone()),
+        [] => Err(GqlError::unsupported(
+            rel_pat.span,
+            "an anonymous relationship requires one registered dynamic label-column mapping",
+        )),
+        _ => Err(GqlError::bind(
+            rel_pat.span,
+            "anonymous relationship label equality is ambiguous across dynamic relationship mappings",
+        )),
+    }
+}
+
+fn anonymous_relationship_label_column(
+    where_: Option<&Expr>,
+    rel_pat: &RelPat,
+) -> Result<String, GqlError> {
+    let Some(rel_var) = rel_pat.var.as_ref() else {
+        return Err(GqlError::unsupported(
+            rel_pat.span,
+            "dynamic relationship label equality requires a named relationship variable",
+        ));
+    };
+    let mut columns = Vec::new();
+    if let Some(expr) = where_ {
+        collect_relationship_label_equality_columns(expr, &rel_var.text, 0, &mut columns)?;
+    }
+    columns.extend(
+        rel_pat
+            .props
+            .iter()
+            .map(|(property, _)| property.text.clone()),
+    );
+    columns.sort();
+    columns.dedup();
+    match columns.as_slice() {
+        [column] => Ok(column.clone()),
+        [] => Err(GqlError::unsupported(
+            rel_pat.span,
+            "an anonymous relationship requires equality on one registered label column",
+        )),
+        _ => Err(GqlError::bind(
+            rel_pat.span,
+            "an anonymous relationship may reference only one candidate label column",
+        )),
+    }
+}
+
+fn collect_relationship_label_equality_columns(
+    expr: &Expr,
+    rel_var: &str,
+    depth: usize,
+    columns: &mut Vec<String>,
+) -> Result<(), GqlError> {
+    if depth > MAX_BOUND_PREDICATE_DEPTH {
+        return Err(GqlError::syntax(
+            expr_span(expr),
+            "predicate expression is too deeply nested",
+        ));
+    }
+    if let Expr::And { lhs, rhs, .. } = expr {
+        collect_relationship_label_equality_columns(lhs, rel_var, depth + 1, columns)?;
+        collect_relationship_label_equality_columns(rhs, rel_var, depth + 1, columns)?;
+        return Ok(());
+    }
+    let Expr::Compare {
+        lhs,
+        op: CmpOp::Eq,
+        rhs: Some(rhs),
+        ..
+    } = expr
+    else {
+        return Ok(());
+    };
+    if relationship_type_lookup_operand_is_supported(rhs) {
+        if let Some(column) = relationship_property_name(lhs, rel_var) {
+            columns.push(column.to_string());
+            return Ok(());
+        }
+    }
+    if relationship_type_lookup_operand_is_supported(lhs) {
+        if let Some(column) = relationship_property_name(rhs, rel_var) {
+            columns.push(column.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn relationship_property_name<'a>(operand: &'a Operand, rel_var: &str) -> Option<&'a str> {
+    match operand {
+        Operand::Property { var, property, .. } if var.text == rel_var => Some(&property.text),
+        _ => None,
+    }
+}
+
+const fn relationship_type_lookup_operand_is_supported(operand: &Operand) -> bool {
+    matches!(operand, Operand::Literal(_) | Operand::Param { .. })
+}
+
 fn same_relationship_mapping(lhs: &RelTypeInfo, rhs: &RelTypeInfo) -> bool {
     lhs.edge_mapping.as_ref().map(|mapping| mapping.mapping_id)
         == rhs.edge_mapping.as_ref().map(|mapping| mapping.mapping_id)
@@ -3260,12 +3459,6 @@ fn single_outbound_hop(match_: &MatchClause) -> Result<(&NodePat, &RelPat, &Node
             "the 1.0 single-pattern profile supports exactly one relationship in MATCH; use a bounded multi-pattern query or a supported node-only operation",
         ));
     };
-    if !rel.props.is_empty() {
-        return Err(GqlError::unsupported(
-            rel.span,
-            "relationship property maps are implemented in a later read phase",
-        ));
-    }
     Ok((start, rel, target))
 }
 
@@ -3911,10 +4104,17 @@ fn bind_predicates(
     target_pat: &NodePat,
     source: &BoundNode,
     target: &BoundNode,
-) -> Result<Option<Predicate>, GqlError> {
+    rel_info: &RelTypeInfo,
+) -> Result<(Option<Predicate>, Option<ValueExpr>), GqlError> {
     let mut predicates = Vec::new();
+    let mut relationship_type_lookup = None;
     if let Some(expr) = where_ {
-        predicates.push(bind_expr(expr, source, target, 0)?);
+        let (predicate, lookup) =
+            bind_expr_with_relationship_type_lookup(expr, rel_pat, rel_info, source, target, 0)?;
+        if let Some(predicate) = predicate {
+            predicates.push(predicate);
+        }
+        relationship_type_lookup = lookup;
     }
     for (property, value) in &source_pat.props {
         check_predicate_count(&predicates, property.span)?;
@@ -3952,15 +4152,163 @@ fn bind_predicates(
             rhs: Some(bind_operand(value, source, target)?),
         });
     }
-    if !rel_pat.props.is_empty() {
+    for (property, value) in &rel_pat.props {
+        let lookup = bind_inline_relationship_type_lookup(property, value, rel_pat, rel_info)?;
+        merge_relationship_type_lookup(&mut relationship_type_lookup, lookup, property.span)?;
+    }
+    Ok((
+        predicates
+            .into_iter()
+            .reduce(|lhs, rhs| Predicate::And(Box::new(lhs), Box::new(rhs))),
+        relationship_type_lookup,
+    ))
+}
+
+fn bind_expr_with_relationship_type_lookup(
+    expr: &Expr,
+    rel_pat: &RelPat,
+    rel_info: &RelTypeInfo,
+    source: &BoundNode,
+    target: &BoundNode,
+    depth: usize,
+) -> Result<(Option<Predicate>, Option<ValueExpr>), GqlError> {
+    if depth > MAX_BOUND_PREDICATE_DEPTH {
+        return Err(GqlError::syntax(
+            expr_span(expr),
+            "predicate expression is too deeply nested",
+        ));
+    }
+    if let Expr::And { lhs, rhs, .. } = expr {
+        let (lhs_predicate, lhs_lookup) = bind_expr_with_relationship_type_lookup(
+            lhs,
+            rel_pat,
+            rel_info,
+            source,
+            target,
+            depth + 1,
+        )?;
+        let (rhs_predicate, rhs_lookup) = bind_expr_with_relationship_type_lookup(
+            rhs,
+            rel_pat,
+            rel_info,
+            source,
+            target,
+            depth + 1,
+        )?;
+        let predicate = match (lhs_predicate, rhs_predicate) {
+            (Some(lhs), Some(rhs)) => Some(Predicate::And(Box::new(lhs), Box::new(rhs))),
+            (Some(predicate), None) | (None, Some(predicate)) => Some(predicate),
+            (None, None) => None,
+        };
+        let mut lookup = lhs_lookup;
+        if let Some(rhs_lookup) = rhs_lookup {
+            merge_relationship_type_lookup(&mut lookup, rhs_lookup, expr_span(rhs))?;
+        }
+        return Ok((predicate, lookup));
+    }
+    if let Some(lookup) = relationship_type_lookup_from_comparison(expr, rel_pat, rel_info)? {
+        return Ok((None, Some(lookup)));
+    }
+    bind_expr(expr, source, target, depth).map(|predicate| (Some(predicate), None))
+}
+
+fn relationship_type_lookup_from_comparison(
+    expr: &Expr,
+    rel_pat: &RelPat,
+    rel_info: &RelTypeInfo,
+) -> Result<Option<ValueExpr>, GqlError> {
+    let Expr::Compare {
+        lhs,
+        op: CmpOp::Eq,
+        rhs: Some(rhs),
+        span,
+    } = expr
+    else {
+        return Ok(None);
+    };
+    if relationship_label_property(lhs, rel_pat, rel_info) {
+        return bind_relationship_type_lookup_operand(rhs, *span).map(Some);
+    }
+    if relationship_label_property(rhs, rel_pat, rel_info) {
+        return bind_relationship_type_lookup_operand(lhs, *span).map(Some);
+    }
+    Ok(None)
+}
+
+fn relationship_label_property(
+    operand: &Operand,
+    rel_pat: &RelPat,
+    rel_info: &RelTypeInfo,
+) -> bool {
+    let Some(rel_var) = rel_pat.var.as_ref() else {
+        return false;
+    };
+    let Some(label_column) = rel_info
+        .edge_mapping
+        .as_ref()
+        .and_then(|mapping| mapping.label_column.as_deref())
+    else {
+        return false;
+    };
+    matches!(
+        operand,
+        Operand::Property { var, property, .. }
+            if var.text == rel_var.text && property.text == label_column
+    )
+}
+
+fn bind_inline_relationship_type_lookup(
+    property: &ast::Ident,
+    value: &Operand,
+    rel_pat: &RelPat,
+    rel_info: &RelTypeInfo,
+) -> Result<ValueExpr, GqlError> {
+    let Some(label_column) = rel_info
+        .edge_mapping
+        .as_ref()
+        .and_then(|mapping| mapping.label_column.as_deref())
+    else {
         return Err(GqlError::unsupported(
             rel_pat.span,
             "relationship property maps are implemented in a later read phase",
         ));
+    };
+    if property.text != label_column {
+        return Err(GqlError::unsupported(
+            property.span,
+            "only equality on the registered relationship label column can be lowered",
+        ));
     }
-    Ok(predicates
-        .into_iter()
-        .reduce(|lhs, rhs| Predicate::And(Box::new(lhs), Box::new(rhs))))
+    bind_relationship_type_lookup_operand(value, property.span)
+}
+
+fn bind_relationship_type_lookup_operand(
+    operand: &Operand,
+    span: Span,
+) -> Result<ValueExpr, GqlError> {
+    match operand {
+        Operand::Literal(literal) => Ok(ValueExpr::Literal(literal_json(literal))),
+        Operand::Param { name, .. } => Ok(ValueExpr::Param(name.text.clone())),
+        _ => Err(GqlError::unsupported(
+            span,
+            "relationship label equality requires a text literal or parameter",
+        )),
+    }
+}
+
+fn merge_relationship_type_lookup(
+    current: &mut Option<ValueExpr>,
+    next: ValueExpr,
+    span: Span,
+) -> Result<(), GqlError> {
+    if current.is_some() {
+        return Err(GqlError::bind(
+            span,
+            "relationship label equality may be specified only once",
+        ));
+    }
+    *current = Some(next);
+    Ok(())
 }
 
 fn bind_node_predicates(

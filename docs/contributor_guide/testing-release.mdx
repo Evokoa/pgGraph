@@ -83,11 +83,25 @@ Module-local Rust tests cover:
 | `components_jobs.rs` | component functions and job APIs |
 | `maintenance_admin.rs` | sync apply, vacuum, maintenance |
 | `p8_transaction_labels.rs` | transaction-local relationship labels, savepoints, RLS, and replacement guards |
+| `p9_open_types.rs` | open-type width boundaries, exact query output, ACL/RLS, transactions, and cancellation |
 | `named_graphs.rs` | default-graph compatibility and named-graph policy guardrails |
 | `workflow_search_api.rs` | `find`, `expand`, `find_related` |
 | `workflow_relationship_api.rs` | `path`, `connection`, `neighborhood` |
 | `workflow_validation.rs` | argument validation and unsupported modes |
 | `synthetic_release.rs` | synthetic release-gate SQL fixture through pgrx |
+
+The opt-in P9 high-cardinality query boundary uses a dedicated test database:
+
+```bash
+createdb pggraph_open_type_high_cardinality
+cd graph
+DBNAME=pggraph_open_type_high_cardinality \
+  ./tests/heavy/open_type_high_cardinality_query.sh
+```
+
+It builds 65,536 exact relationship spellings and checks the 65,534, 65,535,
+and 65,536 boundaries across traversal, shortest path, GQL, and Cypher. The
+runner rejects database names outside the `pggraph_*` test namespace.
 
 See [SQL Tests](./sql-tests) for the full SQL test inventory and the boundary
 each layer is meant to cover.

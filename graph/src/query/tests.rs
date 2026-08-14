@@ -13,8 +13,8 @@ use super::sqlpgq_adapter::{
     SqlPgqSortItem, SqlPgqSortKey, COMPATIBILITY_MATRIX,
 };
 use super::value::{
-    project_join_rows, project_node_rows, project_rows, project_wildcard_path_rows, HydratedRows,
-    QueryParams,
+    project_join_rows, project_node_rows, project_rows, project_wildcard_path_rows,
+    relationship_type_lookup_text, HydratedRows, QueryParams,
 };
 use crate::edge_store::{EdgeStore, IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder};
 use crate::engine::{EdgeMutation, Engine, MutationKind};
@@ -647,6 +647,153 @@ fn binder_structurally_binds_unseen_dynamic_match() {
         .relationship
         .edge_mapping
         .is_some_and(|mapping| mapping.label_column.as_deref() == Some("rel_type")));
+}
+
+fn dynamic_label_catalog() -> FakeCatalog {
+    FakeCatalog::new()
+        .with_label("users", 10, ["id", "name"])
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "fallback",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+            label_column: Some("rel_type"),
+        })
+}
+
+#[test]
+fn binder_lowers_dynamic_label_equality_to_relationship_type_lookup() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users)-[r]->(v:users) \
+         WHERE r.rel_type = $type AND u.name = 'Ada' RETURN v",
+    )
+    .unwrap();
+    let plan = bind_statement(&ast, &dynamic_label_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::Read(plan) = plan else {
+        panic!("expected relationship read");
+    };
+    assert_eq!(
+        plan.relationship_type_lookup,
+        Some(super::logical_plan::ValueExpr::Param("type".into()))
+    );
+    assert_eq!(plan.relationship.rel_type, "fallback");
+    assert!(plan.predicate.is_some(), "node predicate must remain bound");
+}
+
+#[test]
+fn explain_identifies_dynamic_label_column_lookup_without_parameter_value() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users)-[r]->(v:users) WHERE r.rel_type = $type RETURN v",
+    )
+    .unwrap();
+    let logical = bind_statement(&ast, &dynamic_label_catalog()).unwrap();
+    let super::physical_plan::PhysicalStatement::Read(plan) = lower_statement(logical) else {
+        panic!("expected relationship read");
+    };
+    assert!(explain(&plan).contains("rel=dynamic(rel_type), hydration=edge_row"));
+}
+
+#[test]
+fn binder_lowers_reversed_and_inline_dynamic_label_equalities() {
+    for query in [
+        "MATCH (u:users)-[r]->(v:users) WHERE 'runtime' = r.rel_type RETURN v",
+        "MATCH (u:users)-[r {rel_type: $type}]->(v:users) RETURN v",
+    ] {
+        let ast = crate::gql::parse_statement(query).unwrap();
+        let plan = bind_statement(&ast, &dynamic_label_catalog()).unwrap();
+        let super::logical_plan::LogicalStatement::Read(plan) = plan else {
+            panic!("expected relationship read");
+        };
+        assert!(plan.relationship_type_lookup.is_some());
+        assert!(plan.predicate.is_none());
+    }
+}
+
+#[test]
+fn binder_disambiguates_by_label_column_and_rejects_remaining_ambiguity_or_explicit_type() {
+    let different_column = dynamic_label_catalog().with_mapped_edge(MappedEdgeSpec {
+        rel_type: "other_fallback",
+        from_table_oid: 10,
+        to_table_oid: 10,
+        edge_table_oid: 31,
+        source_column: "user_id",
+        target_column: "friend_id",
+        bidirectional: false,
+        label_column: Some("kind"),
+    });
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users)-[r]->(v:users) WHERE r.rel_type = 'runtime' RETURN v",
+    )
+    .unwrap();
+    let plan = bind_statement(&ast, &different_column).unwrap();
+    let super::logical_plan::LogicalStatement::Read(plan) = plan else {
+        panic!("expected relationship read");
+    };
+    assert_eq!(
+        plan.relationship
+            .edge_mapping
+            .as_ref()
+            .and_then(|mapping| mapping.label_column.as_deref()),
+        Some("rel_type")
+    );
+
+    let ambiguous = different_column.with_mapped_edge(MappedEdgeSpec {
+        rel_type: "third_fallback",
+        from_table_oid: 10,
+        to_table_oid: 10,
+        edge_table_oid: 32,
+        source_column: "user_id",
+        target_column: "friend_id",
+        bidirectional: false,
+        label_column: Some("rel_type"),
+    });
+    let error = bind_statement(&ast, &ambiguous).unwrap_err();
+    assert!(error.to_string().contains("ambiguous"));
+
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users)-[r:fallback]->(v:users) \
+         WHERE r.rel_type = 'runtime' RETURN v",
+    )
+    .unwrap();
+    let error = bind_statement(&ast, &dynamic_label_catalog()).unwrap_err();
+    assert!(error.to_string().contains("untyped relationship pattern"));
+}
+
+#[test]
+fn binder_rejects_variable_length_dynamic_label_equality() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users)-[r*1..2]->(v:users) WHERE r.rel_type = 'runtime' RETURN v",
+    )
+    .unwrap();
+    let error = bind_statement(&ast, &dynamic_label_catalog()).unwrap_err();
+    assert!(error.to_string().contains("exactly one hop"));
+}
+
+#[test]
+fn dynamic_label_lookup_preserves_exact_nonblank_spelling_and_rejects_fallback() {
+    let params = QueryParams::new();
+    let exact = super::logical_plan::ValueExpr::Literal(serde_json::json!(" runtime "));
+    assert_eq!(
+        relationship_type_lookup_text(&exact, &params, "fallback").unwrap(),
+        " runtime "
+    );
+
+    for value in ["", "   ", "fallback"] {
+        let expr = super::logical_plan::ValueExpr::Literal(serde_json::json!(value));
+        assert!(relationship_type_lookup_text(&expr, &params, "fallback").is_err());
+    }
+
+    let at_limit = super::logical_plan::ValueExpr::Literal(serde_json::json!(
+        "x".repeat(crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES)
+    ));
+    assert!(relationship_type_lookup_text(&at_limit, &params, "fallback").is_ok());
+    let over_limit = super::logical_plan::ValueExpr::Literal(serde_json::json!(
+        "x".repeat(crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES + 1)
+    ));
+    assert!(relationship_type_lookup_text(&over_limit, &params, "fallback").is_err());
 }
 
 #[test]

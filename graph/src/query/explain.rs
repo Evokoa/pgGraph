@@ -15,7 +15,14 @@ pub(crate) fn explain(plan: &PhysicalPlan) -> String {
     } else {
         "Expand"
     };
-    let relationship = if plan.edge_mapping.is_some() {
+    let relationship = if plan.relationship_type_lookup.is_some() {
+        let label_column = plan
+            .edge_mapping
+            .as_ref()
+            .and_then(|mapping| mapping.label_column.as_deref())
+            .unwrap_or("<unknown>");
+        format!("dynamic({label_column}), hydration=edge_row")
+    } else if plan.edge_mapping.is_some() {
         format!("{}, hydration=edge_row", plan.rel_type)
     } else {
         plan.rel_type.clone()

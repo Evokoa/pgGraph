@@ -118,6 +118,8 @@ pub(crate) struct PhysicalPlan {
     pub(crate) hops: HopBounds,
     /// Registered edge-row mapping for relationship hydration.
     pub(crate) edge_mapping: Option<EdgeMappingInfo>,
+    /// Optional registered dynamic-label equality lowered to a type lookup.
+    pub(crate) relationship_type_lookup: Option<ValueExpr>,
     /// Target node variable.
     pub(crate) target_var: String,
     /// Target table OID.

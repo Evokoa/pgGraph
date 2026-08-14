@@ -136,9 +136,11 @@ The contract-review direction is:
   traversal hot loop;
 - preserve exact filtering through `graph.traverse(edge_types := ...)` and GQL
   relationship-type patterns for every projected label;
-- bind eligible predicates on a registered relationship label column, such as
-  `WHERE r.relationship_name = $type`, to the same exact type filter instead of
-  hydrating and comparing every relationship row after expansion;
+- bind eligible fixed one-hop predicates on a registered relationship label
+  column, such as `WHERE r.relationship_name = $type`, to the same exact type
+  filter instead of hydrating and comparing every relationship row after
+  expansion; fallback-value, wildcard, and ambiguous mapping shapes remain
+  fail-closed;
 - let incremental sync add a new valid relationship label without requiring a
   full rebuild for each new vocabulary value;
 - keep PostgreSQL constraints, triggers, ACLs, RLS, MVCC, source-row identity,

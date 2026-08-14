@@ -29,15 +29,13 @@ fn p9_mutable_wide_build_uses_adaptive_base_and_segment_formats() {
 }
 
 #[test]
-#[ignore = "P9.4 high-cardinality query matrix"]
 fn p9_queries_filter_exactly_above_both_historical_width_boundaries() {
     let pg_tests = crate_source("src/pg_tests/p9_open_types.rs");
     for gate in [
-        "open_type_255_traversal_paths_and_gql_filter_exactly",
-        "open_type_65536_traversal_paths_and_gql_filter_exactly",
+        "open_type_255_traversal_paths_gql_and_cypher_filter_exactly",
         "open_type_parallel_relationships_preserve_identity_and_exact_output",
         "open_type_dynamic_label_equality_lowers_to_compact_type_filter",
-        "open_type_unknown_label_diagnostics_match_across_query_surfaces",
+        "open_type_absent_and_invalid_label_diagnostics_are_surface_stable",
         "open_type_acl_rls_force_bypass_and_transaction_matrix",
         "open_type_cancellation_cleans_query_state_and_same_backend_retries",
     ] {
@@ -47,12 +45,41 @@ fn p9_queries_filter_exactly_above_both_historical_width_boundaries() {
         );
     }
 
-    for boundary in ["254", "255", "65_535", "65_536"] {
+    for boundary in ["254", "255"] {
         assert!(
             pg_tests.contains(boundary),
-            "P9 query matrix is missing explicit boundary `{boundary}`"
+            "P9 routine query matrix is missing explicit boundary `{boundary}`"
         );
     }
+
+    let heavy = repo_source("graph/tests/heavy/open_type_high_cardinality_query.sh");
+    for boundary in ["65534", "65535", "65536"] {
+        assert!(
+            heavy.contains(boundary),
+            "P9 heavy query matrix is missing explicit boundary `{boundary}`"
+        );
+    }
+    for surface in [
+        "graph.traverse",
+        "graph.shortest_path",
+        "graph.gql",
+        "graph.cypher",
+    ] {
+        assert!(
+            heavy.contains(surface),
+            "P9 heavy query matrix is missing `{surface}`"
+        );
+    }
+
+    let semantics = crate_source("src/query/semantics.rs");
+    assert!(
+        semantics.contains("lower_dynamic_label_equality_filter"),
+        "P9.4 must lower an eligible dynamic label-column equality to the existing compact type filter"
+    );
+    assert!(
+        !semantics.contains("SELECT DISTINCT"),
+        "P9.4 query binding must not enumerate dynamic source vocabulary"
+    );
 }
 
 #[test]

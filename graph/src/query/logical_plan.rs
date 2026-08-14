@@ -98,6 +98,8 @@ pub(crate) struct LogicalPlan {
     pub(crate) source: BoundNode,
     /// Single relationship expansion.
     pub(crate) relationship: BoundRel,
+    /// Optional registered dynamic-label equality lowered to a type lookup.
+    pub(crate) relationship_type_lookup: Option<ValueExpr>,
     /// Target node binding.
     pub(crate) target: BoundNode,
     /// Return slots in requested order.

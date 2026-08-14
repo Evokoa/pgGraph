@@ -339,7 +339,32 @@ fn execute_statement_governed(
     catalog_tables: &[crate::builder::RegisteredTable],
     catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
+    let mut relationship_type_lease = None;
     let statement = match statement {
+        crate::query::physical_plan::PhysicalStatement::Read(mut plan) => {
+            if let Some(lookup) = plan.relationship_type_lookup.as_ref() {
+                check_plan_acl(&plan);
+                let resolved = crate::query::value::relationship_type_lookup_text(
+                    lookup,
+                    params,
+                    &plan.rel_type,
+                )?;
+                let bytes =
+                    crate::resource::ByteCount::from_usize(resolved.len()).ok_or_else(|| {
+                        safety::GraphError::Internal(
+                            "relationship type lookup size does not fit u64".to_string(),
+                        )
+                    })?;
+                relationship_type_lease = Some(
+                    governor
+                        .reserve_memory(crate::resource::ResourcePhase::QueryBlocking, bytes)
+                        .map_err(crate::safety::resource_limit_error)?,
+                );
+                plan.rel_type = resolved.to_string();
+                plan.relationship_type_lookup = None;
+            }
+            crate::query::physical_plan::PhysicalStatement::Read(plan)
+        }
         crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
             check_create_acl(&plan);
             return execute_create_node(&plan, tenant_scope, params, hydrate, catalog_tables);
@@ -350,6 +375,7 @@ fn execute_statement_governed(
         }
         statement => statement,
     };
+    let _relationship_type_lease = relationship_type_lease;
     debug_assert!(statement_uses_projection_matching(&statement));
     match statement {
         crate::query::physical_plan::PhysicalStatement::Read(plan) => {
@@ -1515,6 +1541,7 @@ fn delete_edge_read_plan(
             bidirectional: plan.bidirectional,
             label_column: None,
         }),
+        relationship_type_lookup: None,
         target_var: plan.target_var.clone(),
         target_table_oid: plan.target_table_oid,
         target_label: plan.target_label.clone(),
@@ -4996,6 +5023,7 @@ fn test_recheck_delete_edge_predicate(
                 max: 1,
             },
             edge_mapping: None,
+            relationship_type_lookup: None,
             target_var: "v".to_string(),
             target_table_oid,
             target_label: "target".to_string(),

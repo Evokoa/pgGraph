@@ -417,8 +417,26 @@ For `CREATE`, pgGraph writes the relationship type from the pattern through the
 registered PostgreSQL label column first. Transaction-local projection state
 uses a provisional ID only after that source DML succeeds. Dynamic `DETACH
 DELETE` is rejected until per-row authoritative type tombstones are supported.
-Equality predicates over the registered label column are not yet lowered;
-write the concrete type in the relationship pattern.
+For a fixed one-hop read with one untyped relationship and one structurally
+applicable dynamic mapping, equality on the registered label column lowers to
+the same compact type filter used by an explicit relationship type:
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (a:accounts)-[r]->(b:accounts)
+   WHERE r.relationship_name = $type
+   RETURN b',
+  params := '{"type":"member_of"}'::jsonb,
+  hydrate := false
+);
+```
+
+The equality value must be a nonblank text literal or parameter and must not
+equal the mapping's fallback label. The fallback value is not eligible because
+source `NULL` and blank label-column values also project as that fallback.
+Explicitly typed relationships, `OR`/`NOT`, joins, wildcard path variables,
+and multiple applicable dynamic mappings do not use this lowering.
 
 ```sql
 SELECT row

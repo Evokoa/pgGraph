@@ -113,6 +113,11 @@ pub(crate) fn execute_in_context(
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
+    if plan.relationship_type_lookup.is_some() {
+        return Err(GraphError::Internal(
+            "unresolved relationship type lookup reached graph execution".to_string(),
+        ));
+    }
     let rel_type_id = edge_type_id_for_mapping(engine, &plan.rel_type, plan.edge_mapping.as_ref())?;
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
@@ -2269,6 +2274,7 @@ mod resource_accounting_tests {
                 max: 1,
             },
             edge_mapping: None,
+            relationship_type_lookup: None,
             target_var: "v".to_string(),
             target_table_oid: 10,
             target_label: "nodes".to_string(),

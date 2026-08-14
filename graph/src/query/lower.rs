@@ -271,6 +271,7 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
         direction: plan.relationship.direction,
         hops: plan.relationship.hops,
         edge_mapping: plan.relationship.edge_mapping,
+        relationship_type_lookup: plan.relationship_type_lookup,
         target_var: plan.target.var,
         target_table_oid: plan.target.table_oid,
         target_label: plan.target.label,

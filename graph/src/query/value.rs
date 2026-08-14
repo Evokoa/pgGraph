@@ -125,6 +125,56 @@ pub(crate) fn bounded_identity_lookup_text(
     Ok(identity)
 }
 
+/// Resolve a lowered dynamic relationship-label equality to its canonical
+/// nonblank source spelling.
+pub(crate) fn relationship_type_lookup_text<'a>(
+    expr: &'a ValueExpr,
+    params: &'a QueryParams,
+    fallback_label: &str,
+) -> GraphResult<&'a str> {
+    let value = match expr {
+        ValueExpr::Literal(value) => value,
+        ValueExpr::Param(name) => params.get(name).ok_or_else(|| GraphError::GqlParameter {
+            reason: format!("missing GQL parameter `{name}`"),
+        })?,
+        _ => {
+            return Err(GraphError::Internal(
+                "relationship type lookup was not a literal or parameter".to_string(),
+            ));
+        }
+    };
+    let serde_json::Value::String(value) = value else {
+        return Err(GraphError::GqlExecution {
+            reason: "relationship label equality requires a text value".to_string(),
+        });
+    };
+    if value.len() > crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES {
+        return Err(GraphError::InvalidFilter {
+            reason: format!(
+                "relationship type lookup uses {} UTF-8 bytes; maximum label length is {}",
+                value.len(),
+                crate::edge_type_registry::EdgeTypeRegistry::MAX_EDGE_TYPE_LABEL_BYTES
+            ),
+        });
+    }
+    if value.trim().is_empty() {
+        return Err(GraphError::GqlExecution {
+            reason: "blank relationship label equality is not eligible for type-filter lowering; use the registered fallback type in the relationship pattern"
+                .to_string(),
+        });
+    }
+    if value == fallback_label {
+        return Err(GraphError::GqlExecution {
+            reason: "the registered fallback relationship label is not eligible for compact label-column equality lowering"
+                .to_string(),
+        });
+    }
+    crate::edge_type_registry::EdgeTypeRegistry::validate_query_filter(std::slice::from_ref(
+        value,
+    ))?;
+    Ok(value)
+}
+
 /// Project coordinate matches into canonical JSON rows.
 ///
 /// # Errors
