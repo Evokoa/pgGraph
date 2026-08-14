@@ -80,6 +80,23 @@ def dimensions(benchmark_id: str) -> dict[str, str]:
     return parsed
 
 
+def benchmark_identity(estimates_path: Path, criterion_root: Path) -> tuple[str, bytes]:
+    metadata_path = estimates_path.with_name("benchmark.json")
+    metadata_bytes = metadata_path.read_bytes()
+    metadata = json.loads(metadata_bytes)
+    benchmark_id = metadata.get("full_id")
+    directory_name = metadata.get("directory_name")
+    relative_directory = "/".join(estimates_path.relative_to(criterion_root).parts[:-2])
+    if not isinstance(benchmark_id, str) or not benchmark_id:
+        raise ValueError(f"Criterion benchmark metadata lacks full_id: {metadata_path}")
+    if directory_name != relative_directory:
+        raise ValueError(f"Criterion directory metadata differs for {metadata_path}")
+    components = benchmark_id.split("/")
+    if any(component in ("", ".", "..") for component in components):
+        raise ValueError(f"unsafe Criterion benchmark ID: {benchmark_id}")
+    return benchmark_id, metadata_bytes
+
+
 def expected_dimensions(cases: dict[str, object]) -> set[tuple[tuple[str, str], ...]]:
     criterion = cases["criterion"]
     label_counts = [int(value) for value in criterion["registry_lookup"]["label_count"]]
@@ -235,18 +252,17 @@ def main() -> int:
     benchmark_ids: set[str] = set()
 
     for estimates_path in estimate_files:
-        relative = estimates_path.relative_to(args.criterion_root)
-        benchmark_id = "/".join(relative.parts[:-2])
+        benchmark_id, benchmark_metadata = benchmark_identity(
+            estimates_path, args.criterion_root
+        )
         if benchmark_id in benchmark_ids:
             raise ValueError(f"duplicate benchmark ID: {benchmark_id}")
         benchmark_ids.add(benchmark_id)
         raw_bytes = estimates_path.read_bytes()
-        raw_copy = raw_root / relative
+        raw_copy = raw_root.joinpath(*benchmark_id.split("/")) / "new" / "estimates.json"
         raw_copy.parent.mkdir(parents=True, exist_ok=True)
         raw_copy.write_bytes(raw_bytes)
-        benchmark_metadata = estimates_path.with_name("benchmark.json")
-        if benchmark_metadata.is_file():
-            shutil.copyfile(benchmark_metadata, raw_copy.with_name("benchmark.json"))
+        raw_copy.with_name("benchmark.json").write_bytes(benchmark_metadata)
         hashes.append([benchmark_id, hashlib.sha256(raw_bytes).hexdigest()])
 
         payload = json.loads(raw_bytes)
