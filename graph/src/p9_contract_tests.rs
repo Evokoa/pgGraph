@@ -705,16 +705,28 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "latency-postgres-version.txt",
         "latency-settings.json",
         "current_setting('graph.memory_limit_mb')",
-        "u\\\\:p9_latency_nodes",
-        "r\\\\:type_1",
-        "v\\\\:p9_latency_nodes",
-        "MATCH (u:p9_latency_nodes {id: 1})-[r:type_1]",
+        "replace('MATCH (u@p9_latency_nodes {id: 1})-[r@type_1]",
+        "'@', chr(58)",
     ] {
         assert!(
             latency.contains(required),
             "P9 PostgreSQL latency runner is missing `{required}`"
         );
     }
+    assert_eq!(
+        latency.matches("graph.gql(replace(").count(),
+        2,
+        "P9 pgbench and oracle GQL queries must both hide graph colons from substitution"
+    );
+    assert_eq!(
+        latency.matches("graph.cypher(replace(").count(),
+        2,
+        "P9 pgbench and oracle Cypher queries must both hide graph colons from substitution"
+    );
+    assert!(
+        !latency.contains("\\\\:p9_latency_nodes"),
+        "P9 latency queries must not rely on ineffective pgbench backslash-colon escaping"
+    );
 
     let resource_matrix = repo_source("graph/tests/heavy/run_open_type_query_resource_matrix.sh");
     for required in [
