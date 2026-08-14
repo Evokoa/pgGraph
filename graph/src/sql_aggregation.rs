@@ -459,7 +459,13 @@ pub(crate) fn aggregation_edge_type_filter(
     else {
         return Ok(None);
     };
+    crate::edge_type_registry::EdgeTypeRegistry::validate_query_filter(edge_types)?;
     let mut ids = HashSet::new();
+    ids.try_reserve(edge_types.len()).map_err(|error| {
+        safety::GraphError::Internal(format!(
+            "aggregation edge type filter allocation failed: {error}"
+        ))
+    })?;
     for edge_type in edge_types {
         let Some(type_id) = eng.edge_type_id(edge_type) else {
             return Err(safety::GraphError::InvalidFilter {
@@ -995,6 +1001,26 @@ mod tests {
         assert!(err
             .to_string()
             .contains("expected returned_nodes, chosen_parent_path, or all_possible_paths"));
+    }
+
+    #[test]
+    fn aggregation_edge_type_filter_rejects_unbounded_input_before_lookup() {
+        let engine = Engine::new();
+        let request = AggregationTraversalRequest {
+            starts: Vec::new(),
+            direction: types::TraversalDirection::Out,
+            min_depth: 0,
+            max_depth: 1,
+            edge_types: Some(vec![
+                "unknown".into();
+                crate::edge_type_registry::EdgeTypeRegistry::MAX_QUERY_EDGE_TYPE_FILTERS
+                    + 1
+            ]),
+            node_tables: None,
+        };
+        let error = aggregation_edge_type_filter(&engine, &request).unwrap_err();
+        assert!(matches!(error, safety::GraphError::InvalidFilter { .. }));
+        assert!(error.to_string().contains("maximum"));
     }
 
     #[test]

@@ -273,6 +273,12 @@ The release contract gate regenerates and compares every declaration.
 -- graph::sql_facade::admin::drop_sync_policy CREATE FUNCTION graph."drop_sync_policy"( "policy_id" TEXT ) RETURNS TABLE ( "policy_id" TEXT, "job_id" TEXT, "graph_id" TEXT, "graph_name" TEXT, "dropped" bool ) STRICT LANGUAGE c;
 ```
 
+### `graph.edge_types`
+
+```sql
+-- graph::sql_facade::admin::edge_types CREATE FUNCTION graph."edge_types"( "after_type_id" bigint DEFAULT 0, "max_rows" INT DEFAULT 1000 ) RETURNS TABLE ( "type_id" bigint, "label" TEXT ) STRICT LANGUAGE c;
+```
+
 ### `graph.enable_sync`
 
 ```sql

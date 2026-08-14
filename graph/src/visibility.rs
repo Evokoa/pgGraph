@@ -24,8 +24,24 @@ enum VisibilityState {
     Enforced {
         hidden_nodes: RoaringBitmap,
         hidden_relationships: RoaringBitmap,
-        relationship_rls_edge_types: RoaringBitmap,
+        relationship_type_policy: RelationshipTypePolicy,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum RelationshipTypePolicy {
+    Selected(RoaringBitmap),
+    All,
+}
+
+impl RelationshipTypePolicy {
+    #[inline]
+    fn requires_identity(&self, edge_type: EdgeTypeId) -> bool {
+        match self {
+            Self::Selected(types) => types.contains(edge_type.get()),
+            Self::All => true,
+        }
+    }
 }
 
 /// One query's prepared visibility authority and context factory.
@@ -204,7 +220,13 @@ pub(crate) struct LazyVisibilityCoordinator {
     probe_tables: std::collections::HashSet<u32>,
     policy_rls_tables: std::collections::HashSet<u32>,
     probe_mappings: std::collections::HashSet<u64>,
-    probe_edge_types: std::collections::HashSet<crate::types::EdgeTypeId>,
+    probe_edge_types: LazyRelationshipTypePolicy,
+}
+
+#[derive(Debug)]
+pub(crate) enum LazyRelationshipTypePolicy {
+    Selected(std::collections::HashSet<crate::types::EdgeTypeId>),
+    All,
 }
 
 pub(crate) struct ProvenVisibleNode {
@@ -230,7 +252,7 @@ impl LazyVisibilityCoordinator {
             probe_tables,
             policy_rls_tables,
             std::collections::HashSet::new(),
-            std::collections::HashSet::new(),
+            LazyRelationshipTypePolicy::Selected(std::collections::HashSet::new()),
         )
     }
 
@@ -240,7 +262,7 @@ impl LazyVisibilityCoordinator {
         probe_tables: std::collections::HashSet<u32>,
         policy_rls_tables: std::collections::HashSet<u32>,
         probe_mappings: std::collections::HashSet<u64>,
-        probe_edge_types: std::collections::HashSet<crate::types::EdgeTypeId>,
+        probe_edge_types: LazyRelationshipTypePolicy,
     ) -> Self {
         Self {
             cache: VisibilityStatementCache::new(limits),
@@ -269,7 +291,11 @@ impl LazyVisibilityCoordinator {
     }
 
     pub(crate) fn edge_type_requires_relationship_identity(&self, edge_type: EdgeTypeId) -> bool {
-        self.mode == LazyVisibilityMode::Enforced && self.probe_edge_types.contains(&edge_type)
+        self.mode == LazyVisibilityMode::Enforced
+            && match &self.probe_edge_types {
+                LazyRelationshipTypePolicy::Selected(types) => types.contains(&edge_type),
+                LazyRelationshipTypePolicy::All => true,
+            }
     }
 
     pub(crate) fn prove_visible_node(&self, node_idx: u32) -> GraphResult<ProvenVisibleNode> {
@@ -677,7 +703,19 @@ impl VisibilityScope {
         Self(VisibilityState::Enforced {
             hidden_nodes,
             hidden_relationships,
-            relationship_rls_edge_types,
+            relationship_type_policy: RelationshipTypePolicy::Selected(relationship_rls_edge_types),
+        })
+    }
+
+    pub(crate) fn enforced_all_relationship_types(
+        _proof: &crate::sql_visibility::PreparedVisibilityProof,
+        hidden_nodes: RoaringBitmap,
+        hidden_relationships: RoaringBitmap,
+    ) -> Self {
+        Self(VisibilityState::Enforced {
+            hidden_nodes,
+            hidden_relationships,
+            relationship_type_policy: RelationshipTypePolicy::All,
         })
     }
 
@@ -702,7 +740,7 @@ impl VisibilityScope {
         Self(VisibilityState::Enforced {
             hidden_nodes,
             hidden_relationships,
-            relationship_rls_edge_types,
+            relationship_type_policy: RelationshipTypePolicy::Selected(relationship_rls_edge_types),
         })
     }
 
@@ -726,9 +764,9 @@ impl VisibilityScope {
             VisibilityState::DirectNode(_) => Ok(false),
             VisibilityState::Enforced {
                 hidden_relationships: _,
-                relationship_rls_edge_types,
+                relationship_type_policy,
                 ..
-            } if !relationship_rls_edge_types.contains(edge_type.get()) => Ok(true),
+            } if !relationship_type_policy.requires_identity(edge_type) => Ok(true),
             VisibilityState::Enforced {
                 hidden_relationships,
                 ..
@@ -1061,6 +1099,24 @@ mod tests {
             coordinator.resolve_prepared_batch(&batch),
             Err(GraphError::RlsRelationshipIdentityMissing)
         ));
+    }
+
+    #[test]
+    fn all_relationship_types_matches_explicit_selection_and_covers_untyped_edges() {
+        let mut selected = RoaringBitmap::new();
+        selected.insert(1);
+        selected.insert(255);
+        selected.insert(65_535);
+        let selected = RelationshipTypePolicy::Selected(selected);
+        let all = RelationshipTypePolicy::All;
+        for raw in [1, 255, 65_535] {
+            let edge_type = EdgeTypeId::try_from(raw).unwrap();
+            assert_eq!(
+                selected.requires_identity(edge_type),
+                all.requires_identity(edge_type)
+            );
+        }
+        assert!(all.requires_identity(EdgeTypeId::UNTYPED));
     }
 
     #[test]

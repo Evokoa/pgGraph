@@ -141,7 +141,7 @@
       "GitHub release archive"
     ]
   },
-  "gql_implementation_sha256": "a1df92cef5fca2a427376b632987c49a408b1c10d5e5d333e3bcfc9a9086a8e1",
+  "gql_implementation_sha256": "0e15cef98d51c8748acdc26b2cdc5238b22ae9c86078f45520e6f356683ea351",
   "gql_profile": {
     "assurance_profiles": {
       "read": {
@@ -551,6 +551,7 @@
     "cypher_explain",
     "drop_graph",
     "drop_sync_policy",
+    "edge_types",
     "enable_sync",
     "eq",
     "equals",
@@ -742,7 +743,7 @@
           }
         ],
         "function_patterns": [
-          "^(build|build_graph|build_async_graph|build_status|build_status_for_graph|build_resource_status|load_graph|unload_graph|loaded_graphs|status|memory_profile|resource_status|active_generation_count|projection_status|projection_compact|projection_gc|projection_repair|vacuum|vacuum_graph)$"
+          "^(build|build_graph|build_async_graph|build_status|build_status_for_graph|build_resource_status|load_graph|unload_graph|loaded_graphs|status|edge_types|memory_profile|resource_status|active_generation_count|projection_status|projection_compact|projection_gc|projection_repair|vacuum|vacuum_graph)$"
         ],
         "id": "build_persistence",
         "tests": {
@@ -955,10 +956,10 @@
     "schema_version": 1
   },
   "sql_schema": {
-    "entity_block_count": 168,
-    "function_contract_count": 166,
-    "function_contracts_sha256": "fb4bb1421944a77c645badc1ba4f80c41883f93e80c57316e00d2fd70f470e28",
-    "normalized_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d"
+    "entity_block_count": 169,
+    "function_contract_count": 167,
+    "function_contracts_sha256": "ffeb7c05ecfd8b34deaa8ad74bdfd2a2baaacc16bd3aeb5f5a9cded5ea8ee12a",
+    "normalized_sha256": "3c9957d2f5f7ba3fe1067eb5a22bbd674c3bdbfc906e2080a952e3f3931c02ce"
   },
   "sql_signatures": [
     {
@@ -1136,6 +1137,10 @@
     {
       "declaration": "-- graph::sql_facade::admin::drop_sync_policy CREATE FUNCTION graph.\"drop_sync_policy\"( \"policy_id\" TEXT ) RETURNS TABLE ( \"policy_id\" TEXT, \"job_id\" TEXT, \"graph_id\" TEXT, \"graph_name\" TEXT, \"dropped\" bool ) STRICT LANGUAGE c;",
       "name": "drop_sync_policy"
+    },
+    {
+      "declaration": "-- graph::sql_facade::admin::edge_types CREATE FUNCTION graph.\"edge_types\"( \"after_type_id\" bigint DEFAULT 0, \"max_rows\" INT DEFAULT 1000 ) RETURNS TABLE ( \"type_id\" bigint, \"label\" TEXT ) STRICT LANGUAGE c;",
+      "name": "edge_types"
     },
     {
       "declaration": "-- graph::sql_facade::admin::enable_sync CREATE FUNCTION graph.\"enable_sync\"() RETURNS void STRICT SECURITY DEFINER SET search_path TO pg_catalog, pg_temp LANGUAGE c;",

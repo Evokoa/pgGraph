@@ -2708,6 +2708,21 @@ AS 'MODULE_PATHNAME', 'status_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- src/sql_facade/admin.rs:1389
+-- graph::sql_facade::admin::edge_types
+CREATE  FUNCTION graph."edge_types"(
+	"after_type_id" bigint DEFAULT 0, /* i64 */
+	"max_rows" INT DEFAULT 1000 /* i32 */
+) RETURNS TABLE (
+	"type_id" bigint,  /* i64 */
+	"label" TEXT  /* String */
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'edge_type_page_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- src/sql_facade/admin.rs:2954
 -- graph::sql_facade::admin::add_edge
 CREATE  FUNCTION graph."add_edge"(

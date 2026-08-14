@@ -40,6 +40,9 @@ impl EdgeTypeRegistry {
     pub(crate) const MAX_USER_EDGE_TYPES: usize = 1_000_000;
     pub(crate) const MAX_EDGE_TYPE_LABEL_BYTES: usize = 1_024;
     pub(crate) const MAX_EDGE_TYPE_DICTIONARY_BYTES: usize = 256 * 1024 * 1024;
+    pub(crate) const MAX_QUERY_EDGE_TYPE_FILTERS: usize = 4_096;
+    pub(crate) const MAX_QUERY_EDGE_TYPE_FILTER_BYTES: usize = 4 * 1024 * 1024;
+    pub(crate) const STATUS_EDGE_TYPE_PREVIEW: usize = 64;
 
     pub(crate) fn new() -> Self {
         Self {
@@ -188,6 +191,34 @@ impl EdgeTypeRegistry {
 
     pub(crate) fn as_slice(&self) -> &[String] {
         &self.labels
+    }
+
+    pub(crate) fn validate_query_filter(labels: &[String]) -> GraphResult<()> {
+        if labels.len() > Self::MAX_QUERY_EDGE_TYPE_FILTERS {
+            return Err(GraphError::InvalidFilter {
+                reason: format!(
+                    "edge type filter has {} entries; maximum is {}",
+                    labels.len(),
+                    Self::MAX_QUERY_EDGE_TYPE_FILTERS
+                ),
+            });
+        }
+        let bytes = labels.iter().try_fold(0usize, |total, label| {
+            total
+                .checked_add(label.len())
+                .ok_or_else(|| GraphError::InvalidFilter {
+                    reason: "edge type filter byte count overflows".into(),
+                })
+        })?;
+        if bytes > Self::MAX_QUERY_EDGE_TYPE_FILTER_BYTES {
+            return Err(GraphError::InvalidFilter {
+                reason: format!(
+                    "edge type filter uses {bytes} UTF-8 bytes; maximum is {}",
+                    Self::MAX_QUERY_EDGE_TYPE_FILTER_BYTES
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Stable identity of the exact ordered registry contents.
@@ -542,5 +573,23 @@ mod tests {
             std::iter::once("")
         )
         .is_err());
+    }
+
+    #[test]
+    fn query_filter_policy_enforces_count_and_cumulative_utf8_boundaries() {
+        let at_count = vec![String::new(); EdgeTypeRegistry::MAX_QUERY_EDGE_TYPE_FILTERS];
+        assert!(EdgeTypeRegistry::validate_query_filter(&at_count).is_ok());
+        let over_count = vec![String::new(); EdgeTypeRegistry::MAX_QUERY_EDGE_TYPE_FILTERS + 1];
+        assert!(matches!(
+            EdgeTypeRegistry::validate_query_filter(&over_count),
+            Err(GraphError::InvalidFilter { .. })
+        ));
+        let at_bytes = vec!["x".repeat(EdgeTypeRegistry::MAX_QUERY_EDGE_TYPE_FILTER_BYTES)];
+        assert!(EdgeTypeRegistry::validate_query_filter(&at_bytes).is_ok());
+        let over_bytes = vec!["x".repeat(EdgeTypeRegistry::MAX_QUERY_EDGE_TYPE_FILTER_BYTES + 1)];
+        assert!(matches!(
+            EdgeTypeRegistry::validate_query_filter(&over_bytes),
+            Err(GraphError::InvalidFilter { .. })
+        ));
     }
 }

@@ -1385,6 +1385,43 @@ fn status() -> TableIterator<
     })
 }
 
+/// Return one stable, bounded page of the selected graph's relationship types.
+#[pg_extern(schema = "graph", name = "edge_types")]
+fn edge_type_page(
+    after_type_id: default!(i64, 0),
+    max_rows: default!(i32, 1000),
+) -> TableIterator<'static, (name!(type_id, i64), name!(label, String))> {
+    const MAX_PAGE_ROWS: i32 = 10_000;
+    with_panic_boundary("edge_types()", || {
+        super::runtime::ensure_current_graph().unwrap_or_else(|err| err.report());
+        if after_type_id < 0 || max_rows <= 0 || max_rows > MAX_PAGE_ROWS {
+            safety::GraphError::InvalidFilter {
+                reason: format!(
+                    "edge type page requires after_type_id >= 0 and max_rows in 1..={MAX_PAGE_ROWS}"
+                ),
+            }
+            .report();
+        }
+        let after = u32::try_from(after_type_id).unwrap_or_else(|_| {
+            safety::GraphError::InvalidFilter {
+                reason: "after_type_id exceeds the logical edge type range".into(),
+            }
+            .report()
+        });
+        let rows = ENGINE
+            .with(|engine| {
+                engine
+                    .borrow()
+                    .edge_type_page(after, usize::try_from(max_rows).unwrap_or_default())
+            })
+            .unwrap_or_else(|err| err.report())
+            .into_iter()
+            .map(|(type_id, label)| (i64::from(type_id.get()), label))
+            .collect::<Vec<_>>();
+        TableIterator::new(rows)
+    })
+}
+
 /// Return resource accounting from the most recent successful build.
 #[pg_extern(schema = "graph")]
 fn build_resource_status() -> TableIterator<

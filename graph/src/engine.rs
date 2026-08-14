@@ -397,7 +397,11 @@ impl Engine {
                 })?;
         let edge_type_filter = match edge_types {
             Some(types) => {
+                EdgeTypeRegistry::validate_query_filter(&types)?;
                 let mut set = HashSet::new();
+                set.try_reserve(types.len()).map_err(|error| {
+                    GraphError::Internal(format!("edge type filter allocation failed: {error}"))
+                })?;
                 for label in types {
                     let Some(type_id) = self.edge_type_id(&label) else {
                         return Err(GraphError::InvalidFilter {
@@ -1124,6 +1128,18 @@ impl Engine {
         crate::projection::tx_delta::has_missing_relationship_identity_for_types(active_edge_types)
     }
 
+    pub(crate) fn has_any_missing_relationship_identity(&self) -> bool {
+        !self.relationship_identity_missing_edge_types.is_empty()
+            || self
+                .projection_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.has_any_missing_relationship_identity())
+            || !self
+                .edge_buffer_missing_relationship_identity_edge_types
+                .is_empty()
+            || crate::projection::tx_delta::has_any_missing_relationship_identity()
+    }
+
     pub fn set_catalog_fingerprint(&mut self, catalog_fingerprint: u64) {
         self.catalog_fingerprint = Some(catalog_fingerprint);
     }
@@ -1497,6 +1513,38 @@ impl Engine {
                     type_id,
                 )
             })
+    }
+
+    pub(crate) fn edge_type_page(
+        &self,
+        after_type_id: u32,
+        max_rows: usize,
+    ) -> GraphResult<Vec<(EdgeTypeId, String)>> {
+        if !self.built {
+            return Err(GraphError::NotBuilt);
+        }
+        let start = usize::try_from(after_type_id)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1)
+            .max(1);
+        let end = start.saturating_add(max_rows).min(self.edge_type_count());
+        let mut rows = Vec::new();
+        rows.try_reserve(end.saturating_sub(start))
+            .map_err(|error| {
+                GraphError::Internal(format!("edge type page allocation failed: {error}"))
+            })?;
+        for index in start..end {
+            let type_id =
+                EdgeTypeId::try_from(u32::try_from(index).map_err(|_| {
+                    GraphError::Internal("edge type page index exceeds u32".into())
+                })?)
+                .map_err(|_| GraphError::Internal("edge type page uses sentinel".into()))?;
+            let label = self
+                .edge_type_label(type_id)
+                .ok_or_else(|| GraphError::Internal(format!("edge type {index} has no label")))?;
+            rows.push((type_id, label));
+        }
+        Ok(rows)
     }
 
     pub(crate) fn max_edge_type_label_bytes(&self) -> usize {
@@ -1907,7 +1955,11 @@ impl Engine {
         // Resolve edge type filter
         let edge_type_filter = match edge_types {
             Some(types) => {
+                EdgeTypeRegistry::validate_query_filter(&types)?;
                 let mut set = HashSet::new();
+                set.try_reserve(types.len()).map_err(|error| {
+                    GraphError::Internal(format!("edge type filter allocation failed: {error}"))
+                })?;
                 for t in &types {
                     let Some(type_id) = self.edge_type_id(t) else {
                         return Err(GraphError::InvalidFilter {
@@ -2470,6 +2522,7 @@ impl Engine {
         let Some(edge_types) = edge_types else {
             return Ok(None);
         };
+        EdgeTypeRegistry::validate_query_filter(edge_types)?;
         let mut filter = roaring::RoaringBitmap::new();
         for edge_type in edge_types {
             let Some(type_id) = self.edge_type_id(edge_type) else {
@@ -2652,7 +2705,11 @@ impl Engine {
             sync_status: self.sync_status.to_string(),
             last_build: self.last_build,
             last_vacuum: self.last_vacuum,
-            edge_types: self.edge_type_registry[1..].to_vec(), // skip index 0
+            edge_types: self.edge_type_registry[1..]
+                .iter()
+                .take(EdgeTypeRegistry::STATUS_EDGE_TYPE_PREVIEW)
+                .cloned()
+                .collect(),
             edge_buffer_used: self.edge_buffer.len() as i32,
             has_unidirectional_edges: self.has_unidirectional_edges,
             applied_sync_id: self.applied_sync_id,
@@ -3209,6 +3266,7 @@ mod tests {
         let type_two = roaring::RoaringBitmap::from_iter([2]);
         assert!(engine.has_missing_relationship_identity_for_types(&type_one));
         assert!(!engine.has_missing_relationship_identity_for_types(&type_two));
+        assert!(engine.has_any_missing_relationship_identity());
 
         let missing_overlay = EdgeMutation {
             source: 2,
@@ -3247,6 +3305,21 @@ mod tests {
             })
             .expect("delete missing overlay identity");
         assert!(!engine.has_missing_relationship_identity_for_types(&type_two));
+        assert_eq!(
+            engine.has_any_missing_relationship_identity(),
+            engine.has_missing_relationship_identity_for_types(&roaring::RoaringBitmap::from_iter(
+                [1, 2]
+            ))
+        );
+    }
+
+    #[test]
+    fn edge_type_page_rejects_an_unbuilt_engine() {
+        let engine = Engine::new();
+        assert!(matches!(
+            engine.edge_type_page(0, 1),
+            Err(GraphError::NotBuilt)
+        ));
     }
 
     #[test]

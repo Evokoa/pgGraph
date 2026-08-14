@@ -401,5 +401,18 @@
     "date": "2026-08-13",
     "new_schema_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d",
     "previous_schema_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d"
+  },
+  {
+    "acknowledgement": "p9-bounded-edge-type-inventory",
+    "changed_sections": [
+      "gql_implementation_sha256",
+      "public_sql_functions",
+      "sql_profile",
+      "sql_schema",
+      "sql_signatures"
+    ],
+    "date": "2026-08-13",
+    "new_schema_sha256": "3c9957d2f5f7ba3fe1067eb5a22bbd674c3bdbfc906e2080a952e3f3931c02ce",
+    "previous_schema_sha256": "03fcc62742cc67dfc411b86113472599873a642c2c4954f32dcb26743206742d"
   }
 ]

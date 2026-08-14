@@ -39,7 +39,7 @@
     {
       "id": "build_persistence",
       "function_patterns": [
-        "^(build|build_graph|build_async_graph|build_status|build_status_for_graph|build_resource_status|load_graph|unload_graph|loaded_graphs|status|memory_profile|resource_status|active_generation_count|projection_status|projection_compact|projection_gc|projection_repair|vacuum|vacuum_graph)$"
+        "^(build|build_graph|build_async_graph|build_status|build_status_for_graph|build_resource_status|load_graph|unload_graph|loaded_graphs|status|edge_types|memory_profile|resource_status|active_generation_count|projection_status|projection_compact|projection_gc|projection_repair|vacuum|vacuum_graph)$"
       ],
       "tests": {
         "positive": [{"path": "graph/src/pg_tests/sync_config_build.rs", "symbol": "persisted_direct_build_matches_owned_build_for_public_queries"}],

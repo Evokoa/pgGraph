@@ -33,6 +33,71 @@ fn adaptive_edge_types_above_v6_roundtrip_and_filter_exactly() {
 }
 
 #[pg_test]
+fn open_type_inventory_pages_have_stable_order_without_duplicates() {
+    adaptive_edge_types_above_v6_roundtrip_and_filter_exactly();
+    let first = Spi::get_one::<String>(
+        "SELECT string_agg(type_id::text || ':' || label, ',' ORDER BY type_id)
+           FROM graph.edge_types(after_type_id := 0, max_rows := 2)",
+    )
+    .expect("read first edge type page failed")
+    .unwrap_or_default();
+    let second = Spi::get_one::<String>(
+        "SELECT string_agg(type_id::text || ':' || label, ',' ORDER BY type_id)
+           FROM graph.edge_types(after_type_id := 2, max_rows := 2)",
+    )
+    .expect("read second edge type page failed")
+    .unwrap_or_default();
+    assert_eq!(first, "1:type_1,2:type_10");
+    assert_eq!(second, "3:type_100,4:type_101");
+}
+
+#[pg_test]
+fn open_type_inventory_rejects_unbounded_windows_before_allocation() {
+    adaptive_edge_types_above_v6_roundtrip_and_filter_exactly();
+    assert_eq!(
+        sqlstate_for_error("SELECT * FROM graph.edge_types(max_rows := 10001)").as_deref(),
+        Some("22023")
+    );
+}
+
+#[pg_test]
+fn open_type_query_filters_reject_unbounded_arrays_before_resolution() {
+    adaptive_edge_types_above_v6_roundtrip_and_filter_exactly();
+    assert_eq!(
+        sqlstate_for_error(
+            "SELECT * FROM graph.traverse(
+               'graph_test_users_pgtest'::regclass, 'u1', 1,
+               edge_types := array_fill('type_1'::text, ARRAY[4097]), hydrate := false)"
+        )
+        .as_deref(),
+        Some("22023")
+    );
+    assert_eq!(
+        sqlstate_for_error(
+            "SELECT * FROM graph.shortest_path(
+               'graph_test_users_pgtest'::regclass, 'u1',
+               'graph_test_users_pgtest'::regclass, 'u3', 20, false,
+               array_fill('type_1'::text, ARRAY[4097]))"
+        )
+        .as_deref(),
+        Some("22023")
+    );
+}
+
+#[pg_test]
+fn open_type_status_does_not_materialize_the_complete_dictionary() {
+    adaptive_edge_types_above_v6_roundtrip_and_filter_exactly();
+    let preview = Spi::get_one::<i32>("SELECT cardinality(edge_types) FROM graph.status()")
+        .expect("read bounded status preview failed")
+        .unwrap_or_default();
+    let inventory = Spi::get_one::<i64>("SELECT count(*)::bigint FROM graph.edge_types(0, 1000)")
+        .expect("read complete small inventory failed")
+        .unwrap_or_default();
+    assert_eq!(preview, 64);
+    assert_eq!(inventory, 255);
+}
+
+#[pg_test]
 fn adaptive_edge_type_policy_limits_fail_atomically() {
     reset_and_create_fixtures();
     let oversized = "x".repeat(

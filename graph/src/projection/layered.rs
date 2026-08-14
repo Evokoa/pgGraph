@@ -212,6 +212,10 @@ impl LayeredSnapshot {
         })
     }
 
+    pub(crate) fn has_any_missing_relationship_identity(&self) -> bool {
+        !self.missing_relationship_identity_edge_types.is_empty()
+    }
+
     /// Derive the immutable serving snapshot from validated decoded segments.
     pub(crate) fn build(
         base: &EdgeStore,

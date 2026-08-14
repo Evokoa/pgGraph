@@ -148,7 +148,7 @@ public documentation, retained evidence, and independent Rust review are green.
 | P6 | Complete | The existing `EdgeTypeId` is the one production checked authority across logical consumers and v6 adapters; behavior and v6 bytes remain unchanged, and retained evidence selects adaptive 1/2/4-byte physical storage for P7. |
 | P7 | Complete | Runtime topology and rebuilt immutable v7 bases use checked logical IDs with adaptive 1/2/4-byte storage, explicit dictionary policies, v6 read compatibility, and atomic candidate validation. Incremental unseen labels remain in P8. |
 | P8 | Complete | Adaptive v7 mutable segments and a checksummed cumulative dictionary support durable unseen labels. Transaction-local provisional labels preserve exact spelling, filters, RLS completeness, savepoints, resource limits, and base-registry identity without mutating durable state before commit. |
-| P9 | Not started | SQL traversal, paths, and GQL preserve exact filtering beyond 254 labels; migration, diagnostics, docs, fuzz/property, and performance evidence are complete. |
+| P9 | In progress | P9.1 enables adaptive mutable base builds. P9.2 adds bounded filter inputs, a paginated effective relationship-type inventory, a bounded status preview, and O(1) dynamic-RLS relationship-type policy. Vocabulary-independent GQL/Cypher planning and the full high-cardinality release matrix remain. |
 | P10 | Not started | The private batch contract validates and types bounded ordered input once, rejects duplicate identities, and proves no per-input DML loop. |
 | P11 | Not started | Set-based node `CREATE`/`MERGE` preserve RLS, constraints, triggers, partitions, ordinality, atomicity, savepoints, and idempotent replay. |
 | P12 | Not started | Set-based relationship `CREATE`/`MERGE` resolve endpoints and identities set-wise, support open labels and parallel edges, and expose same-transaction node-to-edge ingestion. |
@@ -591,6 +591,13 @@ the authority for P8.2's independent durable interning. The full public
 high-cardinality path/output matrix remains assigned to P9.
 
 ### P9: Complete open-type query and release behavior
+
+P9.1 removed the obsolete narrow mutable-base guard now that v7 base and
+segment codecs are adaptive. P9.2 bounds relationship-type filter inputs,
+adds paginated `graph.edge_types()` inventory with a 64-entry committed status
+preview, and represents dynamic relationship RLS as an O(1) all-types policy
+without enumerating the vocabulary. Vocabulary-independent GQL/Cypher binding,
+the high-cardinality behavior matrix, and retained release evidence remain.
 
 - Preserve exact `edge_types` filtering and GQL relationship patterns above
   254 and 65,535 labels.

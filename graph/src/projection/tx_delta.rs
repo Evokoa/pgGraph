@@ -945,6 +945,15 @@ pub(crate) fn has_missing_relationship_identity_for_types(
     })
 }
 
+pub(crate) fn has_any_missing_relationship_identity() -> bool {
+    TX_DELTA.with(|delta| {
+        delta
+            .borrow()
+            .as_ref()
+            .is_some_and(|delta| !delta.missing_relationship_identity_edge_types.is_empty())
+    })
+}
+
 /// Resolve a transaction-local relationship source identity.
 pub(crate) fn find_relationship_identity_id(
     base_identity_count: usize,

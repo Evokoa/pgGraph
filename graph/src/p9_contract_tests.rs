@@ -56,24 +56,23 @@ fn p9_queries_filter_exactly_above_both_historical_width_boundaries() {
 }
 
 #[test]
-#[ignore = "P9.2 bounded relationship-type inventory"]
 fn p9_relationship_type_inventory_and_status_are_explicitly_bounded() {
     let admin = crate_source("src/sql_facade/admin.rs");
-    let pg_tests = crate_source("src/pg_tests/p9_open_types.rs");
+    let pg_tests = crate_source("src/pg_tests/maintenance_admin.rs");
     assert!(
         admin.contains("relationship_type_page") || admin.contains("edge_type_page"),
         "P9 needs a bounded or paginated relationship-type inventory owner"
     );
-    for gate in [
-        "open_type_inventory_pages_have_stable_order_without_duplicates",
-        "open_type_inventory_rejects_unbounded_windows_before_allocation",
-        "open_type_status_does_not_materialize_the_complete_dictionary",
-    ] {
-        assert!(
-            pg_tests.contains(&format!("fn {gate}")),
-            "P9 bounded inventory/status coverage is missing `{gate}`"
-        );
-    }
+    let engine = crate_source("src/engine.rs");
+    let registry = crate_source("src/edge_type_registry.rs");
+    assert!(registry.contains("MAX_QUERY_EDGE_TYPE_FILTERS"));
+    assert!(registry.contains("MAX_QUERY_EDGE_TYPE_FILTER_BYTES"));
+    assert!(registry.contains("STATUS_EDGE_TYPE_PREVIEW"));
+    assert!(engine.contains("fn edge_type_page"));
+    assert!(engine.contains("take(EdgeTypeRegistry::STATUS_EDGE_TYPE_PREVIEW)"));
+    assert!(pg_tests.contains("open_type_inventory_pages_have_stable_order_without_duplicates"));
+    assert!(pg_tests.contains("open_type_inventory_rejects_unbounded_windows_before_allocation"));
+    assert!(pg_tests.contains("open_type_status_does_not_materialize_the_complete_dictionary"));
 }
 
 #[test]

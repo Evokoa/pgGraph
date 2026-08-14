@@ -1785,6 +1785,88 @@ fn build_graph_uses_named_graph_catalog() {
 }
 
 #[pg_test]
+fn edge_type_inventory_reconciles_the_selected_named_graph_before_reading_engine_state() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.persist_on_build = on").expect("enable inventory persistence failed");
+    Spi::run("SET graph.auto_load = on").expect("enable inventory auto-load failed");
+    for graph_name in ["inventory_a", "inventory_b"] {
+        Spi::run(&format!(
+            "SELECT graph.create_graph('{}', namespace := 'app')",
+            graph_name
+        ))
+        .expect("create inventory graph failed");
+        Spi::run(&format!(
+            "SELECT graph.set_graph_residency('{}', 'warm', namespace := 'app')",
+            graph_name
+        ))
+        .expect("set inventory graph residency failed");
+        Spi::run(&format!(
+            "SELECT graph.add_table_to_graph(
+                '{}', 'graph_test_users_pgtest'::regclass, 'id', ARRAY['name'],
+                graph_namespace := 'app')",
+            graph_name
+        ))
+        .expect("register inventory nodes failed");
+    }
+    Spi::run(
+        "SELECT graph.add_edge_to_graph(
+            'inventory_a', 'graph_test_friendships_pgtest'::regclass,
+            'user_id', 'graph_test_users_pgtest'::regclass,
+            'friend_id', 'only_a', false, graph_namespace := 'app')",
+    )
+    .expect("register inventory_a edge failed");
+    Spi::run(
+        "SELECT graph.add_edge_to_graph(
+            'inventory_b', 'graph_test_friendships_pgtest'::regclass,
+            'user_id', 'graph_test_users_pgtest'::regclass,
+            'friend_id', 'only_b', false, graph_namespace := 'app')",
+    )
+    .expect("register inventory_b edge failed");
+    Spi::run("SELECT graph.build_graph('inventory_a', graph_namespace := 'app')")
+        .expect("build inventory_a failed");
+    Spi::run("SELECT graph.build_graph('inventory_b', graph_namespace := 'app')")
+        .expect("build inventory_b failed");
+    Spi::run("SELECT graph.set_current_graph('inventory_a', namespace := 'app')")
+        .expect("select inventory_a failed");
+
+    let label = Spi::get_one::<String>(
+        "SELECT label FROM graph.edge_types(after_type_id := 0, max_rows := 1)",
+    )
+        .expect("read reconciled edge type inventory failed")
+        .expect("reconciled edge type inventory was empty");
+    assert_eq!(label, "only_a");
+
+    create_error_sqlstate_helper();
+    Spi::run(
+        "DROP ROLE IF EXISTS graph_inventory_reader;
+         CREATE ROLE graph_inventory_reader;
+         GRANT USAGE ON SCHEMA graph, public TO graph_inventory_reader;
+         GRANT EXECUTE ON FUNCTION public.graph_test_sqlstate(text) TO graph_inventory_reader;
+         SELECT graph.grant_graph(
+           'inventory_a', 'graph_inventory_reader', 'read', namespace := 'app')",
+    )
+    .expect("configure inventory reader failed");
+    Spi::run("SET ROLE graph_inventory_reader").expect("assume inventory reader failed");
+    assert_eq!(
+        Spi::get_one::<String>("SELECT label FROM graph.edge_types()")
+            .expect("read-granted inventory failed")
+            .as_deref(),
+        Some("only_a")
+    );
+    Spi::run("RESET ROLE").expect("reset inventory reader failed");
+    Spi::run("SELECT graph.set_current_graph('inventory_b', namespace := 'app')")
+        .expect("select inventory_b failed");
+    Spi::run("SET ROLE graph_inventory_reader").expect("reassume inventory reader failed");
+    assert_eq!(
+        sqlstate_for_prepared_helper(
+            "SELECT * FROM graph.edge_types(after_type_id := 0, max_rows := 1)"
+        ),
+        Some("22023".into())
+    );
+    Spi::run("RESET ROLE").expect("reset inventory reader after denial failed");
+}
+
+#[pg_test]
 fn persisted_named_graphs_use_distinct_artifact_roots() {
     reset_and_create_fixtures();
     Spi::run("SELECT graph.create_graph('persist_a', namespace := 'app')")

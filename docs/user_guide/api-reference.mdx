@@ -103,6 +103,35 @@ show whether pending sync or transaction-local overlays exist.
 Requires read access to the selected graph. Counts describe the physical
 backend projection and are not filtered by source-table RLS.
 
+`edge_types` is a bounded preview of the first 64 committed relationship types
+in stable numeric-ID order. Use `graph.edge_types()` to page through the
+complete effective dictionary, including transaction-local labels.
+
+### `graph.edge_types()`
+
+```sql
+graph.edge_types(
+  after_type_id bigint DEFAULT 0,
+  max_rows int DEFAULT 1000
+)
+RETURNS TABLE (
+  type_id bigint,
+  label text
+)
+```
+
+Returns relationship types in stable numeric-ID order, starting strictly after
+`after_type_id`. `max_rows` must be between 1 and 10,000. Reuse the last
+returned `type_id` to request the next page. The result includes committed base
+and durable dictionary entries plus transaction-local provisional labels.
+
+Requires read access to the selected graph. Labels are graph metadata and are
+not filtered by source-table RLS.
+
+Relationship-type filter arrays accepted by traversal, path, aggregation, and
+workflow APIs are limited to 4,096 entries and 4 MiB of cumulative UTF-8 label
+data. Inputs above either limit fail before a filter set is allocated.
+
 ### `graph.build_resource_status()`
 
 ```sql

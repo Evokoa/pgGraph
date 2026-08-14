@@ -69,6 +69,7 @@
       "cypher_explain",
       "drop_graph",
       "drop_sync_policy",
+      "edge_types",
       "enable_sync",
       "eq",
       "equals",
