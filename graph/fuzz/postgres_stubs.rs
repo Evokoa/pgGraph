@@ -71,7 +71,6 @@ pg_stub_fn!(
     BackgroundWorkerInitializeConnectionByOid,
     BackgroundWorkerUnblockSignals,
     BlessTupleDesc,
-    CCRandomGenerateBytes,
     CopyErrorData,
     CreateTupleDescCopyConstr,
     DecrTupleDescRefCount,

@@ -540,11 +540,6 @@ impl DeltaSegment {
         ])
     }
 
-    #[cfg(test)]
-    fn encoded_section_lengths(&self) -> GraphResult<[usize; SECTION_COUNT]> {
-        self.encoded_section_lengths_for_width(self.header.edge_type_width)
-    }
-
     fn encoded_section_lengths_for_width(
         &self,
         edge_type_width: EdgeTypeWidth,
@@ -627,32 +622,42 @@ impl DeltaSegment {
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn fuzz_seed_bytes(name: &str) -> Option<Vec<u8>> {
     match name.trim() {
-        "edge" => {
+        "edge" | "edge_one" | "edge_two" | "edge_four" | "edge_v6" => {
+            let type_id = match name.trim() {
+                "edge_two" => 255,
+                "edge_four" => 65_535,
+                _ => 1,
+            };
             let mut segment =
                 DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 1).ok()?;
+            let type_id = EdgeTypeId::try_from(type_id).ok()?;
             segment.edge_inserts.push(SegmentEdge {
                 source: 0,
                 target: 1,
-                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
+                type_id,
                 schema_reversed: false,
                 relationship_id: None,
             });
             segment.edge_deletes.push(SegmentEdge {
                 source: 1,
                 target: 2,
-                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
+                type_id,
                 schema_reversed: false,
                 relationship_id: None,
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source: 0,
                 target: 1,
-                type_id: EdgeTypeId::from_v6_storage(1).expect("fixture type ID is valid v6"),
+                type_id,
                 relationship_id: None,
                 weight: 5,
                 schema_reversed: false,
             });
-            segment.to_bytes().ok()
+            if name.trim() == "edge_v6" {
+                Some(encode_version_6_segment_for_test(&segment))
+            } else {
+                segment.to_bytes().ok()
+            }
         }
         "node" => {
             let mut segment =
@@ -1538,14 +1543,14 @@ pub(crate) fn encode_version_5_segment_for_test(segment: &DeltaSegment) -> Vec<u
     bytes
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzzing"))]
 fn encode_version_6_segment_for_test(segment: &DeltaSegment) -> Vec<u8> {
     let mut legacy = segment.clone();
     legacy.header.version = V6_VERSION;
     legacy.header.edge_type_width = EdgeTypeWidth::One;
     validate_segment(&legacy).expect("v6 test segment is valid");
     let section_lengths = legacy
-        .encoded_section_lengths()
+        .encoded_section_lengths_for_width(EdgeTypeWidth::One)
         .expect("v6 section lengths fit");
     let mut sections = EncodedSections::with_capacities(section_lengths);
     encode_edges(
@@ -1594,6 +1599,7 @@ mod tests {
     use crate::projection::normalize::{
         normalize_committed_mutations, CommittedMutation, MutationBufferLimits, MutationOperation,
     };
+    use proptest::prelude::*;
 
     fn edge_segment_with_type(type_id: u32) -> DeltaSegment {
         let mut segment = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 2, 1)
@@ -1624,6 +1630,42 @@ mod tests {
             let decoded = DeltaSegment::from_bytes(&bytes).expect("adaptive segment decodes");
             assert_eq!(decoded.edge_inserts[0].type_id.get(), type_id);
             assert_eq!(decoded.header.edge_type_width, expected_width);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn open_type_segment_property_roundtrips_widths_and_rejects_sentinels(
+            one_byte_id in 0_u32..=254,
+            two_byte_id in 255_u32..=65_534,
+            four_byte_id in 65_535_u32..u32::MAX,
+        ) {
+            for type_id in [one_byte_id, two_byte_id, four_byte_id] {
+                let segment = edge_segment_with_type(type_id);
+                let bytes = segment.to_bytes()?;
+                let decoded = DeltaSegment::from_bytes(&bytes)?;
+                prop_assert_eq!(decoded.edge_inserts[0].type_id.get(), type_id);
+
+                let expected_width = EdgeTypeWidth::select_for_max_id(
+                    EdgeTypeId::try_from(type_id)
+                        .expect("generated IDs exclude the logical sentinel"),
+                );
+                prop_assert_eq!(decoded.header.edge_type_width, expected_width);
+
+                let section = usize::try_from(read_u64(&bytes, 64)?)
+                    .expect("test artifact offsets fit usize");
+                let mut sentinel = bytes;
+                let physical_offset = section + 8;
+                match expected_width {
+                    EdgeTypeWidth::One => sentinel[physical_offset] = u8::MAX,
+                    EdgeTypeWidth::Two => sentinel[physical_offset..physical_offset + 2]
+                        .copy_from_slice(&u16::MAX.to_le_bytes()),
+                    EdgeTypeWidth::Four => sentinel[physical_offset..physical_offset + 4]
+                        .copy_from_slice(&u32::MAX.to_le_bytes()),
+                }
+                rewrite_checksum(&mut sentinel);
+                prop_assert!(DeltaSegment::from_bytes(&sentinel).is_err());
+            }
         }
     }
 

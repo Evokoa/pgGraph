@@ -3000,6 +3000,7 @@ mod tests {
     //! consistency across build-time and sync-time operations.
 
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn resolution_delta_keeps_post_build_inserts_resolvable() {
@@ -4453,6 +4454,50 @@ mod tests {
         let result = eng.resolve_edge_type_filter(Some(&labels));
 
         assert!(matches!(result, Err(GraphError::InvalidFilter { .. })));
+    }
+
+    proptest! {
+        #[test]
+        fn open_type_filter_property_matches_text_reference_model(
+            generated in proptest::collection::hash_set("[A-Za-z][A-Za-z0-9_]{0,15}", 1..64),
+            positions in proptest::collection::vec(any::<usize>(), 0..96),
+            include_unknown in any::<bool>(),
+        ) {
+            let labels = generated.into_iter().collect::<Vec<_>>();
+            let mut engine = Engine::new();
+            for label in &labels {
+                engine.register_edge_type(label)?;
+            }
+            let reference = labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| (label.as_str(), (index + 1) as u32))
+                .collect::<std::collections::BTreeMap<_, _>>();
+
+            let mut requested = positions
+                .iter()
+                .map(|position| labels[*position % labels.len()].clone())
+                .collect::<Vec<_>>();
+            let expected = requested
+                .iter()
+                .map(|label| reference[label.as_str()])
+                .collect::<std::collections::BTreeSet<_>>();
+            if include_unknown {
+                requested.push("__definitely_absent_open_type__".into());
+                let rejects_unknown = matches!(
+                    engine.resolve_edge_type_filter(Some(&requested)),
+                    Err(GraphError::InvalidFilter { .. })
+                );
+                prop_assert!(rejects_unknown);
+            } else {
+                let actual = engine
+                    .resolve_edge_type_filter(Some(&requested))?
+                    .expect("present filter returns a bitmap")
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                prop_assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]

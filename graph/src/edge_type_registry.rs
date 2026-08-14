@@ -471,6 +471,7 @@ impl std::ops::Deref for EdgeTypeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn registry_preserves_order_and_reuses_o1_ids() {
@@ -591,5 +592,28 @@ mod tests {
             EdgeTypeRegistry::validate_query_filter(&over_bytes),
             Err(GraphError::InvalidFilter { .. })
         ));
+    }
+
+    proptest! {
+        #[test]
+        fn open_type_registry_property_preserves_order_spelling_and_lookup(
+            generated in proptest::collection::hash_set("[A-Za-z][A-Za-z0-9_]{0,31}", 0..128)
+        ) {
+            let ordered = generated.into_iter().collect::<Vec<_>>();
+            let labels = std::iter::once(String::new())
+                .chain(ordered.iter().cloned())
+                .collect::<Vec<_>>();
+            let registry = EdgeTypeRegistry::try_from_labels(labels.clone())?;
+
+            prop_assert_eq!(registry.as_slice(), labels.as_slice());
+            prop_assert_eq!(registry.id(""), Some(EdgeTypeId::UNTYPED));
+            for (index, label) in ordered.iter().enumerate() {
+                let expected = EdgeTypeId::try_from((index + 1) as u32)
+                    .expect("generated registry stays below the logical sentinel");
+                prop_assert_eq!(registry.id(label), Some(expected));
+                prop_assert_eq!(&registry.as_slice()[index + 1], label);
+            }
+            prop_assert_eq!(registry.id("__definitely_absent_open_type__"), None);
+        }
     }
 }

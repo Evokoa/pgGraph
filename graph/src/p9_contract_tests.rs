@@ -130,8 +130,19 @@ fn p9_dynamic_gql_and_cypher_binding_is_independent_of_vocabulary_size() {
 }
 
 #[test]
-#[ignore = "P9.5 migration and PostgreSQL release matrix"]
-fn p9_migration_recovery_diagnostics_and_postgres_matrix_ship_together() {
+#[ignore = "P9.5b activates after compatibility and PostgreSQL-major evidence lands"]
+fn p9_migration_and_rollback_preserve_the_last_good_open_type_generation() {
+    let persistence = crate_source("src/persistence.rs");
+    for gate in [
+        "v6_to_v7_rebuild_migration_keeps_v6_loadable",
+        "v7_candidate_corruption_preserves_current_v6_generation",
+    ] {
+        assert!(
+            persistence.contains(&format!("fn {gate}")),
+            "P9 migration coverage is missing the pure artifact gate `{gate}`"
+        );
+    }
+
     let pg_tests = crate_source("src/pg_tests/p9_open_types.rs");
     for gate in [
         "open_type_v6_to_v7_migration_preserves_last_good_generation",
@@ -143,23 +154,32 @@ fn p9_migration_recovery_diagnostics_and_postgres_matrix_ship_together() {
             "P9 migration/diagnostic coverage is missing `{gate}`"
         );
     }
-
-    let runner = repo_source("graph/tests/heavy/open_type_release_matrix.sh");
-    for version in ["pg14", "pg15", "pg16", "pg17", "pg18"] {
-        assert!(
-            runner.contains(version),
-            "P9 release matrix does not name PostgreSQL `{version}`"
-        );
-    }
-    assert!(
-        runner.contains("open_type_255_traversal_paths_and_gql_filter_exactly")
-            && runner.contains("open_type_65536_traversal_paths_and_gql_filter_exactly"),
-        "P9 PostgreSQL matrix must execute both high-cardinality query boundaries"
-    );
 }
 
 #[test]
-#[ignore = "P9.5 fuzz evidence"]
+#[ignore = "P9.5b activates after the PostgreSQL 14 through 18 release runner lands"]
+fn p9_open_type_diagnostics_and_packages_run_on_postgres_14_through_18() {
+    let runner = repo_source("graph/tests/heavy/open_type_release_matrix.sh");
+    for version in ["14", "15", "16", "17", "18"] {
+        assert!(
+            runner.contains(version),
+            "P9 release matrix does not name PostgreSQL {version}"
+        );
+    }
+    for requirement in [
+        "RUN_PGRX_SQL=1",
+        "RUN_PACKAGE_INSTALL_MATRIX=1",
+        "open_type_255_traversal_paths_gql_and_cypher_filter_exactly",
+        "open_type_policy_and_corruption_errors_have_stable_sqlstate_and_detail",
+    ] {
+        assert!(
+            runner.contains(requirement),
+            "P9 PostgreSQL package/diagnostic matrix is missing `{requirement}`"
+        );
+    }
+}
+
+#[test]
 fn p9_open_type_codecs_and_query_filters_have_property_and_fuzz_evidence() {
     let registry = crate_source("src/edge_type_registry.rs");
     let segment = crate_source("src/projection/segment.rs");
@@ -200,7 +220,7 @@ fn p9_open_type_codecs_and_query_filters_have_property_and_fuzz_evidence() {
 }
 
 #[test]
-#[ignore = "P9.5 retained performance evidence"]
+#[ignore = "P9.5c/d activates after benchmark budgets and retained evidence land"]
 fn p9_retains_reproducible_high_cardinality_query_and_resource_evidence() {
     let cargo = crate_source("Cargo.toml");
     let benchmark = crate_source("benches/open_type_query_bench.rs");

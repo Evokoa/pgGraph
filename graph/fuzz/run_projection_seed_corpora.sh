@@ -11,3 +11,4 @@ fi
 
 cargo +nightly fuzz run load_projection_manifest fuzz/corpus/load_projection_manifest -- -runs=0
 cargo +nightly fuzz run load_projection_segment fuzz/corpus/load_projection_segment -- -runs=0
+cargo +nightly fuzz run load_edge_type_dictionary fuzz/corpus/load_edge_type_dictionary -- -runs=0

@@ -230,7 +230,7 @@ fn read_edge_type_dictionary_artifact_inner(
         .metadata()
         .map_err(|error| dictionary_io("stat", path, error))?
         .len();
-    if manifest_bounds.is_some_and(|(bytes, _)| bytes != file_len) {
+    if manifest_bounds.is_some_and(|(expected, _)| expected != file_len) {
         return Err(dictionary_corrupt(
             "relationship type manifest byte count mismatch",
         ));
@@ -243,63 +243,55 @@ fn read_edge_type_dictionary_artifact_inner(
     let mut header = [0_u8; HEADER_SIZE];
     file.read_exact(&mut header)
         .map_err(|error| dictionary_io("read header", path, error))?;
-    if &header[0..8] != MAGIC {
+    validate_edge_type_dictionary_header(&header, file_len, manifest_bounds)?;
+    let file_len_usize = usize::try_from(file_len)
+        .map_err(|_| dictionary_corrupt("relationship type artifact exceeds usize"))?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(file_len_usize).map_err(|error| {
+        GraphError::Internal(format!(
+            "relationship type decode allocation failed: {error}"
+        ))
+    })?;
+    bytes.resize(file_len_usize, 0);
+    bytes[..HEADER_SIZE].copy_from_slice(&header);
+    file.read_exact(&mut bytes[HEADER_SIZE..])
+        .map_err(|error| dictionary_io("read artifact", path, error))?;
+    let mut trailing = [0_u8; 1];
+    if file
+        .read(&mut trailing)
+        .map_err(|error| dictionary_io("check length", path, error))?
+        != 0
+    {
         return Err(dictionary_corrupt(
-            "invalid relationship type artifact magic",
+            "relationship type artifact grew while reading",
         ));
     }
-    let version = read_u32(&header, 8)?;
-    if version != VERSION {
-        return Err(GraphError::IncompatibleVersion(format!(
-            "relationship type artifact version {version} is unsupported; expected {VERSION}"
-        )));
-    }
-    let count = usize::try_from(read_u32(&header, 12)?)
-        .map_err(|_| dictionary_corrupt("relationship type count exceeds usize"))?;
-    if count == 0 || count > EdgeTypeRegistry::MAX_USER_EDGE_TYPES + 1 {
-        return Err(dictionary_corrupt("relationship type count exceeds policy"));
-    }
-    if manifest_bounds.is_some_and(|(_, expected)| expected as usize != count) {
+    decode_edge_type_dictionary_bytes(&bytes, Some(expected_checksum), manifest_bounds)
+}
+
+fn decode_edge_type_dictionary_bytes(
+    bytes: &[u8],
+    expected_checksum: Option<&str>,
+    manifest_bounds: Option<(u64, u32)>,
+) -> GraphResult<EdgeTypeDictionary> {
+    let file_len = u64::try_from(bytes.len())
+        .map_err(|_| dictionary_corrupt("relationship type artifact exceeds u64"))?;
+    if bytes.len() < HEADER_SIZE {
         return Err(dictionary_corrupt(
-            "relationship type manifest count mismatch",
+            "relationship type artifact is shorter than its header",
         ));
     }
-    let payload_len = usize::try_from(read_u64(&header, 16)?)
-        .map_err(|_| dictionary_corrupt("relationship type payload exceeds usize"))?;
-    if header[28..32] != [0; 4] {
-        return Err(dictionary_corrupt(
-            "relationship type reserved header bytes must be zero",
-        ));
-    }
-    if payload_len > EdgeTypeRegistry::MAX_EDGE_TYPE_DICTIONARY_BYTES {
-        return Err(dictionary_corrupt(
-            "relationship type payload exceeds policy",
-        ));
-    }
-    let offset_bytes = count
-        .checked_add(1)
-        .and_then(|value| value.checked_mul(8))
-        .ok_or_else(|| dictionary_corrupt("relationship type offsets overflow"))?;
+    let header = &bytes[..HEADER_SIZE];
+    let (count, payload_len, offset_bytes) =
+        validate_edge_type_dictionary_header(header, file_len, manifest_bounds)?;
     let expected_len = HEADER_SIZE
         .checked_add(offset_bytes)
         .and_then(|value| value.checked_add(payload_len))
-        .and_then(|value| u64::try_from(value).ok())
         .ok_or_else(|| dictionary_corrupt("relationship type artifact length overflows"))?;
-    if expected_len != file_len {
-        return Err(dictionary_corrupt(
-            "relationship type artifact length mismatch",
-        ));
-    }
-
-    let mut offsets = Vec::new();
-    offsets.try_reserve_exact(offset_bytes).map_err(|error| {
-        GraphError::Internal(format!(
-            "relationship type offset allocation failed: {error}"
-        ))
-    })?;
-    offsets.resize(offset_bytes, 0);
-    file.read_exact(&mut offsets)
-        .map_err(|error| dictionary_io("read offsets", path, error))?;
+    debug_assert_eq!(expected_len, bytes.len());
+    let offsets = bytes
+        .get(HEADER_SIZE..HEADER_SIZE + offset_bytes)
+        .ok_or_else(|| dictionary_corrupt("relationship type offsets are out of bounds"))?;
     let mut previous = 0_usize;
     let mut ranges = Vec::new();
     ranges.try_reserve_exact(count).map_err(|error| {
@@ -308,7 +300,7 @@ fn read_edge_type_dictionary_artifact_inner(
         ))
     })?;
     for index in 0..=count {
-        let offset = usize::try_from(read_u64(&offsets, index * 8)?)
+        let offset = usize::try_from(read_u64(offsets, index * 8)?)
             .map_err(|_| dictionary_corrupt("relationship type offset exceeds usize"))?;
         if offset < previous || offset > payload_len {
             return Err(dictionary_corrupt("relationship type offsets are invalid"));
@@ -327,33 +319,12 @@ fn read_edge_type_dictionary_artifact_inner(
             "relationship type offsets do not reserve slot zero",
         ));
     }
-    let file_len_usize = usize::try_from(file_len)
-        .map_err(|_| dictionary_corrupt("relationship type artifact exceeds usize"))?;
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(file_len_usize).map_err(|error| {
-        GraphError::Internal(format!(
-            "relationship type decode allocation failed: {error}"
-        ))
-    })?;
-    bytes.extend_from_slice(&header);
-    bytes.extend_from_slice(&offsets);
-    bytes.resize(file_len_usize, 0);
     let payload_start = HEADER_SIZE + offset_bytes;
-    file.read_exact(&mut bytes[payload_start..])
-        .map_err(|error| dictionary_io("read payload", path, error))?;
-    let mut trailing = [0_u8; 1];
-    if file
-        .read(&mut trailing)
-        .map_err(|error| dictionary_io("check length", path, error))?
-        != 0
+    let stored_checksum = read_u32(bytes, CHECKSUM_OFFSET)?;
+    let checksum = checksum_bytes(bytes);
+    if stored_checksum != checksum
+        || expected_checksum.is_some_and(|expected| expected != format!("crc32:{checksum:08x}"))
     {
-        return Err(dictionary_corrupt(
-            "relationship type artifact grew while reading",
-        ));
-    }
-    let stored_checksum = read_u32(&bytes, CHECKSUM_OFFSET)?;
-    let checksum = checksum_bytes(&bytes);
-    if stored_checksum != checksum || expected_checksum != format!("crc32:{checksum:08x}") {
         return Err(dictionary_corrupt(
             "relationship type artifact checksum mismatch",
         ));
@@ -378,6 +349,100 @@ fn read_edge_type_dictionary_artifact_inner(
         labels.push(owned);
     }
     EdgeTypeDictionary::try_from_labels(labels)
+}
+
+fn validate_edge_type_dictionary_header(
+    header: &[u8],
+    file_len: u64,
+    manifest_bounds: Option<(u64, u32)>,
+) -> GraphResult<(usize, usize, usize)> {
+    if manifest_bounds.is_some_and(|(expected, _)| expected != file_len) {
+        return Err(dictionary_corrupt(
+            "relationship type manifest byte count mismatch",
+        ));
+    }
+    if &header[0..8] != MAGIC {
+        return Err(dictionary_corrupt(
+            "invalid relationship type artifact magic",
+        ));
+    }
+    let version = read_u32(header, 8)?;
+    if version != VERSION {
+        return Err(GraphError::IncompatibleVersion(format!(
+            "relationship type artifact version {version} is unsupported; expected {VERSION}"
+        )));
+    }
+    let count = usize::try_from(read_u32(header, 12)?)
+        .map_err(|_| dictionary_corrupt("relationship type count exceeds usize"))?;
+    if count == 0 || count > EdgeTypeRegistry::MAX_USER_EDGE_TYPES + 1 {
+        return Err(dictionary_corrupt("relationship type count exceeds policy"));
+    }
+    if manifest_bounds.is_some_and(|(_, expected)| expected as usize != count) {
+        return Err(dictionary_corrupt(
+            "relationship type manifest count mismatch",
+        ));
+    }
+    let payload_len = usize::try_from(read_u64(header, 16)?)
+        .map_err(|_| dictionary_corrupt("relationship type payload exceeds usize"))?;
+    if header[28..32] != [0; 4] {
+        return Err(dictionary_corrupt(
+            "relationship type reserved header bytes must be zero",
+        ));
+    }
+    if payload_len > EdgeTypeRegistry::MAX_EDGE_TYPE_DICTIONARY_BYTES {
+        return Err(dictionary_corrupt(
+            "relationship type payload exceeds policy",
+        ));
+    }
+    let offset_bytes = count
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(8))
+        .ok_or_else(|| dictionary_corrupt("relationship type offsets overflow"))?;
+    let expected_len = HEADER_SIZE
+        .checked_add(offset_bytes)
+        .and_then(|value| value.checked_add(payload_len))
+        .ok_or_else(|| dictionary_corrupt("relationship type artifact length overflows"))?;
+    if expected_len != usize::try_from(file_len).unwrap_or(usize::MAX) {
+        return Err(dictionary_corrupt(
+            "relationship type artifact length mismatch",
+        ));
+    }
+    Ok((count, payload_len, offset_bytes))
+}
+
+/// Decode arbitrary dictionary bytes through the production validation path.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn fuzz_decode_edge_type_dictionary(bytes: &[u8]) -> bool {
+    decode_edge_type_dictionary_bytes(bytes, None, None).is_ok()
+}
+
+/// Return a valid checksummed dictionary seed for the fuzz corpus.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn fuzz_edge_type_dictionary_seed_bytes(name: &str) -> Option<Vec<u8>> {
+    if name.trim() != "basic" {
+        return None;
+    }
+    let labels = ["", "friend", "类型_255"];
+    let payload_len = labels.iter().map(|label| label.len()).sum::<usize>();
+    let offset_bytes = (labels.len() + 1) * 8;
+    let mut bytes = vec![0; HEADER_SIZE];
+    bytes[0..8].copy_from_slice(MAGIC);
+    bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
+    bytes[12..16].copy_from_slice(&(labels.len() as u32).to_le_bytes());
+    bytes[16..24].copy_from_slice(&(payload_len as u64).to_le_bytes());
+    let mut offset = 0_u64;
+    bytes.extend_from_slice(&offset.to_le_bytes());
+    for label in labels {
+        offset = offset.checked_add(label.len() as u64)?;
+        bytes.extend_from_slice(&offset.to_le_bytes());
+    }
+    debug_assert_eq!(bytes.len(), HEADER_SIZE + offset_bytes);
+    for label in labels {
+        bytes.extend_from_slice(label.as_bytes());
+    }
+    let checksum = checksum_bytes(&bytes);
+    bytes[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_le_bytes());
+    Some(bytes)
 }
 
 fn checksum_bytes(bytes: &[u8]) -> u32 {
@@ -573,6 +638,27 @@ mod tests {
         header[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
         fs::write(&path, header).expect("header writes");
         assert!(read_edge_type_dictionary_artifact(&path, "crc32:00000000").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_size_mismatch_rejects_before_reading_oversized_dictionary() {
+        let root = temp_root("edge-type-manifest-size");
+        fs::create_dir_all(&root).expect("root creates");
+        let path = root.join("edge-types.bin");
+        let mut file = fs::File::create(&path).expect("artifact creates");
+        file.write_all(&[0_u8; HEADER_SIZE]).expect("header writes");
+        file.set_len(1_u64 << 30).expect("sparse artifact grows");
+        drop(file);
+
+        let error = read_manifest_edge_type_dictionary_artifact(
+            &path,
+            "crc32:00000000",
+            HEADER_SIZE as u64,
+            1,
+        )
+        .expect_err("manifest mismatch rejects");
+        assert!(error.to_string().contains("manifest byte count mismatch"));
         let _ = fs::remove_dir_all(root);
     }
 

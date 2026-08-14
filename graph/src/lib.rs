@@ -146,6 +146,17 @@ pub mod fuzz_support {
         crate::projection::segment::fuzz_seed_bytes(name)
     }
 
+    /// Decode cumulative relationship-type dictionary bytes without touching
+    /// PostgreSQL or the filesystem. Intended for fuzz targets.
+    pub fn load_edge_type_dictionary(bytes: &[u8]) -> bool {
+        crate::projection::edge_type_dictionary::fuzz_decode_edge_type_dictionary(bytes)
+    }
+
+    /// Return valid cumulative dictionary seed bytes for named corpus tokens.
+    pub fn edge_type_dictionary_seed_bytes(name: &str) -> Option<Vec<u8>> {
+        crate::projection::edge_type_dictionary::fuzz_edge_type_dictionary_seed_bytes(name)
+    }
+
     /// Decode a projection manifest without touching PostgreSQL. Intended for
     /// fuzz targets and unit tests.
     pub fn load_projection_manifest(raw: &str) -> bool {
