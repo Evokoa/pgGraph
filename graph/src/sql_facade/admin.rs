@@ -32,9 +32,13 @@ fn selected_graph_id_for_current_role() -> String {
     security_definer
 )]
 #[search_path(pg_catalog, pg_temp)]
-fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
+fn pending_sync_rows_for_current_role(
+    applied_sync_id: i64,
+    applicable_table_oids: Vec<pgrx::pg_sys::Oid>,
+) -> i64 {
     with_panic_boundary("_pending_sync_rows_for_current_role()", || {
-        crate::sql_sync::pending_sync_rows_direct(applied_sync_id)
+        let oids = applicable_table_oids.into_iter().map(|o| o.as_u32()).collect();
+        crate::sql_sync::pending_sync_rows_direct(applied_sync_id, oids)
             .unwrap_or_else(|err| err.report())
     })
 }

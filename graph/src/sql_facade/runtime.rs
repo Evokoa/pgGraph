@@ -582,7 +582,16 @@ pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
     let disabled = disabled_graph_trigger_count()?;
     let catalog_state = current_catalog_state()?;
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
-    let pending = pending_sync_rows(applied_sync_id)?;
+    let mut table_oids = std::collections::HashSet::new();
+    for table in &catalog_state.0 {
+        table_oids.insert(table.table_oid);
+    }
+    for edge in &catalog_state.1 {
+        table_oids.insert(edge.from_table_oid);
+        table_oids.insert(edge.to_table_oid);
+    }
+    let applicable_table_oids: Vec<u32> = table_oids.into_iter().collect();
+    let pending = pending_sync_rows(applied_sync_id, &applicable_table_oids)?;
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
         eng.refresh_observed_state(disabled, pending, &Ok(catalog_state));
