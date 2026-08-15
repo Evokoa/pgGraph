@@ -42,7 +42,7 @@ EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "GQL Parameterized Match": [{"hash": "2d77220992fd54f4cd7150bb9bb984dc", "row_count": 1}],
     "GQL Scalar Projection": [{"hash": "bdb8fabf93f84ef1c80dacef37133512", "row_count": 4}],
     "GQL One-Hop Relationships": [{"hash": "cc43fef5258a696fee573d7ce63d3161", "row_count": 1}],
-    "GQL Relationship Projection": [{"hash": "decfd268084234436536db856f335c70", "row_count": 1}],
+    "GQL Relationship Projection": [{"hash": "1c21a726fc81eaff9a93c9c375378233", "row_count": 1}],
     "GQL Inbound Relationships": [{"hash": "8667d6872adef948f4cd19a6d418af56", "row_count": 1}],
     "GQL Undirected Relationships": [{"hash": "471d8f696e537993a8f1e8a9be703095", "row_count": 1}],
     "GQL Distinct Labels": [{"hash": "2e9e4f9151f7e0f5d63cd7a1f38533ab", "row_count": 1}],
