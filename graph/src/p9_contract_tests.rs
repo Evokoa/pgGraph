@@ -764,6 +764,7 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "docker cp",
         "docker-image-inspect.json",
         "resource-postgres-version.txt",
+        "export PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin && cd /src/graph && cargo pgrx start pg17",
     ] {
         assert!(
             docker.contains(required),

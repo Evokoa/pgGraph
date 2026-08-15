@@ -32,7 +32,7 @@ docker build \
 
 docker create --name "$CONTAINER_NAME" --user pggraph \
   "$IMAGE" bash -lc \
-  "cd /src/graph && cargo pgrx start pg17 && export PGHOST=localhost PGPORT=28817 && RUN_ID='$RUN_ID' OUTPUT_DIR=/tmp/p9-open-type-resources PG_VERSION_FEATURE=pg17 PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config ./tests/heavy/run_open_type_query_resource_matrix.sh && uname -a > /tmp/p9-open-type-resources/linux-uname.txt && /usr/lib/postgresql/17/bin/pg_config --version > /tmp/p9-open-type-resources/resource-postgres-version.txt && cargo pgrx stop pg17" \
+  "export PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin && cd /src/graph && cargo pgrx start pg17 && export PGHOST=localhost PGPORT=28817 && RUN_ID='$RUN_ID' OUTPUT_DIR=/tmp/p9-open-type-resources PG_VERSION_FEATURE=pg17 PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config ./tests/heavy/run_open_type_query_resource_matrix.sh && uname -a > /tmp/p9-open-type-resources/linux-uname.txt && /usr/lib/postgresql/17/bin/pg_config --version > /tmp/p9-open-type-resources/resource-postgres-version.txt && cargo pgrx stop pg17" \
   >/dev/null
 docker start -a "$CONTAINER_NAME" 2>&1 | tee "$OUTPUT_DIR/docker-resource.log"
 docker cp "$CONTAINER_NAME:/tmp/p9-open-type-resources/." "$OUTPUT_DIR/"
