@@ -65,7 +65,7 @@ PostgreSQL 14 through 18 and preserves the stable 1.0 SQL result shapes.
 - The playground fully qualifies Docker Hub base images for Podman, reuses an
   already-satisfied virtual environment without requiring `sfw`, resolves
   Python shims before venv creation, deduplicates Panama nodes, scopes
-  `statement_timeout`, caches graph initialization, and pins its dataframe
+  `statement_timeout`, caches graph initialization, and pins its data-frame
   stack.
 
 - Query initialization now returns one owned state containing selected-graph
@@ -108,7 +108,7 @@ PostgreSQL 14 through 18 and preserves the stable 1.0 SQL result shapes.
   median and 3.6% p95 change versus the query-start baseline, inside the 5%/10%
   release budget.
 - Relationship-type filtering added no measurable median regression in the
-  recorded fixed-work shortest-path microbenchmark. These measurements are
+  recorded fixed-work shortest-path benchmark. These measurements are
   environment-specific evidence, not universal latency guarantees.
 
 ### Operational Notes

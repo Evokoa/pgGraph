@@ -123,6 +123,10 @@ BEGIN
      WHERE p.oid = c.oid;
 END
 $$;
+ALTER FUNCTION graph.traverse(
+    oid, text, integer, text[], text, oid[], jsonb, text, text, text,
+    boolean, boolean, integer, integer, integer, integer
+) SET work_mem TO '64kB';
 SQL
 
 pg_dump --format=custom --file="$WORKDIR/pre-upgrade.dump" "$DBNAME"
@@ -133,15 +137,29 @@ ALTER EXTENSION graph UPDATE TO '1.1.0';
 DO $$
 DECLARE
     wrong bigint;
+    traverse_settings text[];
 BEGIN
     SELECT count(*) INTO wrong
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'graph'
       AND p.proname IN ('traverse', 'connected_components', 'component_stats')
-      AND (p.prosecdef OR p.proconfig IS NOT NULL);
+      AND (
+          p.prosecdef
+          OR EXISTS (
+              SELECT 1
+              FROM unnest(COALESCE(p.proconfig, ARRAY[]::text[])) AS setting
+              WHERE setting LIKE 'search_path=%'
+          )
+      );
     IF wrong <> 0 THEN
         RAISE EXCEPTION 'updated invoker metadata differs from fresh 1.1';
+    END IF;
+    SELECT p.proconfig INTO traverse_settings
+    FROM pg_proc p
+    WHERE p.oid = 'graph.traverse(oid,text,integer,text[],text,oid[],jsonb,text,text,text,boolean,boolean,integer,integer,integer,integer)'::regprocedure;
+    IF NOT COALESCE(traverse_settings, ARRAY[]::text[]) @> ARRAY['work_mem=64kB'] THEN
+        RAISE EXCEPTION 'update removed an unrelated function setting';
     END IF;
     SELECT count(*) INTO wrong
     FROM public.release_function_contract c

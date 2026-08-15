@@ -82,7 +82,9 @@ trap 'rm -f "${generated_contract_schema}"' EXIT
 cargo pgrx schema --features "$PG_VERSION_FEATURE" --out "$generated_contract_schema"
 ../scripts/check_release_contract.py --schema-file "$generated_contract_schema"
 cargo test --features "$PG_VERSION_FEATURE"
-cargo pgrx test --features "$DEVELOPMENT_FEATURES" "$PG_VERSION_FEATURE"
+# The SQL tests share the default graph and its cross-backend maintenance lock.
+# Run them serially so independent fixtures cannot reject each other with PG006.
+RUST_TEST_THREADS=1 cargo pgrx test --features "$DEVELOPMENT_FEATURES" "$PG_VERSION_FEATURE"
 cargo deny check advisories bans licenses sources
 (cd fuzz && cargo check --bins)
 ./fuzz/run_projection_seed_corpora.sh
