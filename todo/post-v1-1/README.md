@@ -155,6 +155,13 @@ public documentation, retained evidence, and independent Rust review are green.
 | P13 | Not started | `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE` reuse the bounded relation; sync, reload, compaction, cancellation, and concurrency gates are green. |
 | P14 | Not started | Contracts, update/install paths, supported-feature docs, benchmarks, fuzz/property suites, and PostgreSQL 14-18 package matrices pass on one reviewed commit. |
 
+Development is paused at commit `085df27` while `release/1.1` is validated and
+prepared from the completed 1.1 candidate boundary. The interrupted P9.5d
+measurement output is not retained evidence and must be regenerated from one
+later clean development commit before P9 can close. Do not start P10 or resume
+post-1.1 implementation until the release work is explicitly handed back to
+the development line.
+
 ## Phase details
 
 ### P0: Freeze contracts, corpus, and baselines
