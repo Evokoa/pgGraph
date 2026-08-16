@@ -37,6 +37,20 @@ const CURRENT_POINTER_VERSION: u32 = 1;
 const MAX_CURRENT_POINTER_BYTES: usize = 4 * 1024;
 const GOVERNED_MANIFEST_IO_WORKSPACE_BYTES: usize = 16 * 1024;
 
+#[cfg(not(test))]
+thread_local! {
+    static PENDING_HEARTBEAT: std::cell::RefCell<Option<PendingHeartbeat>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(not(test))]
+struct PendingHeartbeat {
+    caller_oid: pgrx::pg_sys::Oid,
+    generation_id: u64,
+    sync_watermark: i64,
+    validation_status: String,
+}
+
 #[cfg(test)]
 thread_local! {
     static FAIL_AFTER_POINTER_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -370,7 +384,12 @@ impl ProjectionManifestStore {
         self.prepare_current_pointer(expected_current)?;
         let json = manifest.to_pretty_json()?;
         let final_path = self.stage_manifest_file(manifest, json.as_bytes())?;
-        if let Err(err) = self.switch_current_generation(manifest.generation_id, expected_current) {
+        let publication = (|| {
+            crate::runtime_state::inject_replacement_fault("before_publication")?;
+            self.switch_current_generation(manifest.generation_id, expected_current)?;
+            crate::runtime_state::inject_replacement_fault("after_publication")
+        })();
+        if let Err(err) = publication {
             self.remove_uncommitted_manifest(&final_path, manifest.generation_id);
             return Err(err);
         }
@@ -395,9 +414,12 @@ impl ProjectionManifestStore {
         let expected_pointer_token = self.current_pointer_token()?;
         let json = manifest.to_pretty_json()?;
         let final_path = self.stage_manifest_file(manifest, json.as_bytes())?;
-        if let Err(err) =
-            self.switch_recovery_generation(manifest.generation_id, expected_pointer_token)
-        {
+        let publication = (|| {
+            crate::runtime_state::inject_replacement_fault("before_publication")?;
+            self.switch_recovery_generation(manifest.generation_id, expected_pointer_token)?;
+            crate::runtime_state::inject_replacement_fault("after_publication")
+        })();
+        if let Err(err) = publication {
             self.remove_uncommitted_manifest(&final_path, manifest.generation_id);
             return Err(err);
         }
@@ -533,7 +555,10 @@ impl ProjectionManifestStore {
             sync_directory(&self.root)?;
             verify_manifest_file_matches(&final_path, manifest, encoded_len)?;
             self.validate_active_references(manifest)?;
-            self.switch_current_generation(manifest.generation_id, expected_current)
+            crate::runtime_state::inject_replacement_fault("before_publication")?;
+            self.switch_current_generation(manifest.generation_id, expected_current)?;
+            crate::runtime_state::inject_replacement_fault("after_publication")?;
+            Ok(())
         })();
         if publication.is_err() {
             let _ = fs::remove_file(&tmp_path);
@@ -622,6 +647,37 @@ impl ProjectionManifestStore {
         }
         self.latest_manifest_path()
             .map(|latest| latest.map(|(generation_id, _)| generation_id))
+    }
+
+    /// Read only the publication generation needed to recover damaged state.
+    ///
+    /// Unlike [`Self::current_generation_id`], this accepts a pointer whose
+    /// referenced manifest is missing or checksum-corrupt. The generation is
+    /// still authoritative for exact candidate cleanup and lets
+    /// `projection_repair()` reach its corruption planner. Callers must not use
+    /// this method to treat the referenced manifest as loadable.
+    pub(crate) fn current_generation_id_for_recovery(&self) -> GraphResult<Option<u64>> {
+        let path = self.current_pointer_path();
+        let Some(raw) = read_bounded_optional_file(
+            &path,
+            MAX_CURRENT_POINTER_BYTES,
+            "read current pointer for recovery",
+        )?
+        else {
+            return self
+                .latest_manifest_path()
+                .map(|latest| latest.map(|(generation_id, _)| generation_id));
+        };
+        let pointer = serde_json::from_slice::<ProjectionCurrentPointer>(&raw).map_err(|err| {
+            manifest_corrupt(format!("current pointer recovery decoding failed: {err}"))
+        })?;
+        if pointer.version != CURRENT_POINTER_VERSION || pointer.generation_id == 0 {
+            return Err(manifest_corrupt(format!(
+                "current pointer is invalid: version={}, generation_id={}",
+                pointer.version, pointer.generation_id
+            )));
+        }
+        Ok(Some(pointer.generation_id))
     }
 
     fn current_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {
@@ -1075,12 +1131,117 @@ impl ProjectionGenerationHeartbeat {
     }
 }
 
+#[cfg(not(test))]
 pub(crate) fn record_loaded_generation_heartbeat(manifest: &ProjectionManifest) -> GraphResult<()> {
-    record_active_generation_heartbeat(
+    validate_status(&manifest.validation_status)?;
+    let caller_oid = crate::catalog::current_role_oid()?;
+    let result = with_pending_generation_heartbeat(
+        PendingHeartbeat {
+            caller_oid,
+            generation_id: manifest.generation_id,
+            sync_watermark: manifest.sync_watermark,
+            validation_status: manifest.validation_status.clone(),
+        },
+        || {
+            pgrx::Spi::get_one::<bool>(
+                "SELECT graph._record_projection_heartbeat_for_current_role()",
+            )
+        },
+    )
+    .map_err(|err| GraphError::Internal(format!("projection heartbeat update failed: {err}")));
+    result?.filter(|recorded| *recorded).ok_or_else(|| {
+        GraphError::Internal("projection heartbeat mediator returned null or false".into())
+    })?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn with_pending_generation_heartbeat<R, F>(pending: PendingHeartbeat, operation: F) -> R
+where
+    F: FnOnce() -> R + std::panic::UnwindSafe,
+{
+    PENDING_HEARTBEAT.with(|slot| {
+        slot.replace(Some(pending));
+    });
+    pgrx::pg_sys::PgTryBuilder::new(operation)
+        .finally(|| {
+            PENDING_HEARTBEAT.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        })
+        .execute()
+}
+
+#[cfg(not(test))]
+pub(crate) fn take_pending_generation_heartbeat(
+) -> GraphResult<(pgrx::pg_sys::Oid, u64, i64, String)> {
+    PENDING_HEARTBEAT
+        .with(|slot| slot.borrow_mut().take())
+        .map(|pending| {
+            (
+                pending.caller_oid,
+                pending.generation_id,
+                pending.sync_watermark,
+                pending.validation_status,
+            )
+        })
+        .ok_or_else(|| GraphError::AclDenied {
+            table: "internal projection heartbeat mediator".to_string(),
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn take_pending_generation_heartbeat(
+) -> GraphResult<(pgrx::pg_sys::Oid, u64, i64, String)> {
+    Err(GraphError::AclDenied {
+        table: "internal projection heartbeat mediator".to_string(),
+    })
+}
+
+#[cfg(all(not(test), feature = "development"))]
+pub(crate) fn test_generation_heartbeat_error_after_arming() -> bool {
+    let caller_oid = crate::catalog::current_role_oid().unwrap_or_else(|err| err.report());
+    pgrx::pg_sys::PgTryBuilder::new(|| {
+        with_pending_generation_heartbeat(
+            PendingHeartbeat {
+                caller_oid,
+                generation_id: u64::MAX,
+                sync_watermark: i64::MAX,
+                validation_status: VALIDATION_STATUS_VALID.to_string(),
+            },
+            || {
+                pgrx::ereport!(
+                    ERROR,
+                    pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                    "injected projection heartbeat cancellation"
+                );
+            },
+        );
+        true
+    })
+    .catch_when(pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |_| false)
+    .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn record_loaded_generation_heartbeat(manifest: &ProjectionManifest) -> GraphResult<()> {
+    record_loaded_generation_heartbeat_direct(
         manifest.generation_id,
-        DEFAULT_ACTIVE_GENERATION_TTL,
         manifest.sync_watermark,
         &manifest.validation_status,
+    )
+}
+
+pub(crate) fn record_loaded_generation_heartbeat_direct(
+    generation_id: u64,
+    sync_watermark: i64,
+    validation_status: &str,
+) -> GraphResult<()> {
+    record_active_generation_heartbeat(
+        generation_id,
+        DEFAULT_ACTIVE_GENERATION_TTL,
+        sync_watermark,
+        validation_status,
     )
 }
 
@@ -1348,6 +1509,13 @@ pub(crate) fn active_generation_count() -> GraphResult<i32> {
 
 #[cfg(not(test))]
 pub(crate) fn active_generation_count() -> GraphResult<i32> {
+    pgrx::Spi::get_one::<i32>("SELECT graph._active_generation_count_for_current_role()")
+        .map_err(|err| GraphError::Internal(format!("projection heartbeat count failed: {err}")))?
+        .ok_or_else(|| GraphError::Internal("projection heartbeat count was null".to_string()))
+}
+
+#[cfg(not(test))]
+pub(crate) fn active_generation_count_direct() -> GraphResult<i32> {
     let graph_id = current_graph_id()?;
     let count = pgrx::Spi::get_one_with_args::<i64>(
         "SELECT count(*)::bigint
@@ -1361,6 +1529,11 @@ pub(crate) fn active_generation_count() -> GraphResult<i32> {
     .map_err(|err| GraphError::Internal(format!("projection heartbeat count failed: {err}")))?
     .unwrap_or(0);
     Ok(count.min(i32::MAX as i64) as i32)
+}
+
+#[cfg(test)]
+pub(crate) fn active_generation_count_direct() -> GraphResult<i32> {
+    Ok(0)
 }
 
 #[cfg(not(test))]
@@ -1426,6 +1599,15 @@ pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
 
 #[cfg(not(test))]
 pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
+    pgrx::Spi::get_one::<bool>("SELECT graph._expire_projection_heartbeats_for_current_role()")
+        .map_err(|err| {
+            GraphError::Internal(format!("projection heartbeat expiration failed: {err}"))
+        })?;
+    Ok(())
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+pub(crate) fn expire_stale_generation_heartbeats_direct() -> GraphResult<()> {
     let graph_id = current_graph_id()?;
     pgrx::Spi::run_with_args(
         "DELETE FROM graph._projection_generations
@@ -1437,13 +1619,18 @@ pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
     .map_err(|err| GraphError::Internal(format!("projection heartbeat expiration failed: {err}")))
 }
 
-#[cfg(not(test))]
+#[cfg(any(not(test), feature = "pg_test"))]
 fn current_graph_id() -> GraphResult<String> {
     crate::catalog::selected_or_default_graph_metadata().map(|graph| graph.graph_id)
 }
 
 #[cfg(test)]
 pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
+    Ok(())
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+pub(crate) fn expire_stale_generation_heartbeats_direct() -> GraphResult<()> {
     Ok(())
 }
 
@@ -1634,6 +1821,82 @@ mod tests {
             .expect("current manifest exists");
 
         assert_eq!(loaded, second);
+    }
+
+    #[cfg(feature = "development")]
+    #[test]
+    fn publication_faults_remove_losers_and_preserve_a_pointer_winner() {
+        let dir = ProjectionArtifactDir::new(
+            "publication_faults_remove_losers_and_preserve_a_pointer_winner",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        store.publish(&first).expect("first publishes");
+
+        let loser = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:loser", 2, 20, 2);
+        crate::runtime_state::arm_replacement_fault("before_publication")
+            .expect("pre-publication fault arms");
+        store
+            .publish_if_current(&loser, Some(1))
+            .expect_err("pre-publication fault rejects");
+        assert!(!store.manifest_path(2).exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(1)
+        );
+
+        let winner = ProjectionManifest::base_only(3, "base.pggraph", "xxh3:winner", 2, 30, 3);
+        crate::runtime_state::arm_replacement_fault("after_publication")
+            .expect("post-publication fault arms");
+        store
+            .publish_if_current(&winner, Some(1))
+            .expect_err("post-publication fault reports ambiguity");
+        assert!(store.manifest_path(3).exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(3)
+        );
+    }
+
+    #[cfg(feature = "development")]
+    #[test]
+    fn governed_prepublication_fault_removes_staged_manifest() {
+        let dir =
+            ProjectionArtifactDir::new("governed_prepublication_fault_removes_staged_manifest");
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        store.publish(&first).expect("first publishes");
+        let candidate = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:next", 2, 20, 2);
+        let governor =
+            crate::resource::ResourceGovernor::new(crate::resource::ResourceLimits::new(
+                crate::resource::MemoryBudget::new(crate::resource::ByteCount::from_bytes(
+                    1_048_576,
+                )),
+                crate::resource::DiskBudget::UNLIMITED,
+                crate::resource::RowCount::UNLIMITED,
+                crate::resource::WorkUnits::UNLIMITED,
+                crate::resource::ElapsedBudget::new(Duration::from_secs(1)),
+            ));
+        crate::runtime_state::arm_replacement_fault("before_publication")
+            .expect("pre-publication fault arms");
+
+        store
+            .publish_governed_if_current(
+                &candidate,
+                Some(1),
+                &governor,
+                crate::resource::ResourcePhase::CompactionMerge,
+                1_048_576,
+            )
+            .expect_err("governed publication fault rejects");
+
+        assert!(!store.manifest_path(2).exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(1)
+        );
     }
 
     #[test]

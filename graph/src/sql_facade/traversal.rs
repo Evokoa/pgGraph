@@ -24,8 +24,7 @@ pub(super) type ShortestPathSqlRow = (
 /// BFS traversal from a seed node.
 ///
 /// See: `docs/user_guide/querying.mdx`
-#[pg_extern(schema = "graph", cost = 1000, security_definer)]
-#[search_path(pg_catalog, pg_temp)]
+#[pg_extern(schema = "graph", cost = 1000)]
 #[allow(
     clippy::too_many_arguments,
     clippy::type_complexity,
@@ -76,9 +75,14 @@ pub(super) fn traverse(
     with_panic_boundary("traverse()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let tenant_scope =
-            resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+            tenant.as_deref(),
+            &query_start.graph,
+            &query_start.tables,
+        )
+        .unwrap_or_else(|err| err.report());
         let (direction, strategy, _uniqueness) = crate::sql_traversal::validate_traverse_options(
             direction,
             tenant_scope.as_deref(),
@@ -106,8 +110,20 @@ pub(super) fn traverse(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let rows =
-            execute_traverse_rows_governed(&request, &governor).unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let rows = execute_traverse_rows_in_context(
+            &request,
+            &context,
+            &query_start.tables,
+            &query_start.filter_columns,
+        )
+        .unwrap_or_else(|err| err.report());
 
         TableIterator::new(rows)
     })
@@ -262,9 +278,14 @@ fn traverse_many(
     with_panic_boundary("traverse_many()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let tenant_scope =
-            resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+            tenant.as_deref(),
+            &query_start.graph,
+            &query_start.tables,
+        )
+        .unwrap_or_else(|err| err.report());
         if start_tables.len() != start_ids.len() {
             safety::GraphError::InvalidFilter {
                 reason: "start_tables and start_ids must have the same length".to_string(),
@@ -282,6 +303,13 @@ fn traverse_many(
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
         let mut candidates = Vec::new();
         for (table, id) in start_tables.into_iter().zip(start_ids) {
             let request = TraverseRequest {
@@ -301,8 +329,13 @@ fn traverse_many(
                 max_nodes,
                 max_frontier,
             };
-            let mut start_candidates = execute_traverse_candidates_governed(&request, &governor)
-                .unwrap_or_else(|err| err.report());
+            let mut start_candidates = execute_traverse_candidates_in_context(
+                &request,
+                &context,
+                &query_start.tables,
+                &query_start.filter_columns,
+            )
+            .unwrap_or_else(|err| err.report());
             candidates.append(&mut start_candidates);
         }
         sort_traverse_candidates_for_many_governed(&mut candidates, &governor)
@@ -310,7 +343,12 @@ fn traverse_many(
         apply_traversal_uniqueness_governed(&mut candidates, uniqueness, &governor)
             .unwrap_or_else(|err| err.report());
         let rows = paginate_and_format_traverse_candidates_governed(
-            candidates, hydrate, row_offset, max_rows, &governor,
+            candidates,
+            hydrate,
+            row_offset,
+            max_rows,
+            &governor,
+            &query_start.tables,
         )
         .unwrap_or_else(|err| err.report());
 
@@ -350,7 +388,8 @@ pub(super) fn shortest_path(
         acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
 
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
@@ -363,6 +402,8 @@ pub(super) fn shortest_path(
             max_depth,
             hydrate,
             &governor,
+            &query_start.tables,
+            &query_start.edges,
         )
         .unwrap_or_else(|err| err.report());
 
@@ -370,6 +411,70 @@ pub(super) fn shortest_path(
     })
 }
 
+#[pg_extern(schema = "graph", name = "shortest_path")]
+#[allow(clippy::type_complexity)]
+fn shortest_path_typed(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    max_depth: i32,
+    hydrate: bool,
+    edge_types: Vec<String>,
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(node_table, pgrx::pg_sys::Oid),
+        name!(node_id, String),
+        name!(edge_label, Option<String>),
+        name!(node, Option<pgrx::JsonB>),
+        name!(node_table_name, String),
+    ),
+> {
+    with_panic_boundary("shortest_path()", || {
+        check_enabled_result().unwrap_or_else(|err| err.report());
+        acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
+        acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let edge_type_filter = ENGINE
+            .with(|engine| engine.borrow().resolve_edge_type_filter(Some(&edge_types)))
+            .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::with_edge_type_filter(
+            &governor,
+            &visibility,
+            edge_type_filter.as_ref(),
+        );
+        let rows = shortest_path_rows_in_context(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            max_depth,
+            hydrate,
+            &context,
+            &query_start.tables,
+        )
+        .unwrap_or_else(|err| err.report());
+        TableIterator::new(rows)
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shortest-path execution keeps SQL coordinates, bounds, budget, and query catalog explicit"
+)]
 pub(super) fn shortest_path_rows_governed(
     source_table: pgrx::pg_sys::Oid,
     source_id: &str,
@@ -378,17 +483,49 @@ pub(super) fn shortest_path_rows_governed(
     max_depth: i32,
     hydrate: bool,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
+    let visibility = crate::sql_visibility::build_visibility_scope(tables, edges, governor)?;
+    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
+    shortest_path_rows_in_context(
+        source_table,
+        source_id,
+        target_table,
+        target_id,
+        max_depth,
+        hydrate,
+        &context,
+        tables,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shortest-path execution keeps SQL coordinates, bounds, context, and query catalog explicit"
+)]
+pub(super) fn shortest_path_rows_in_context(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    max_depth: i32,
+    hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    tables: &[builder::RegisteredTable],
+) -> safety::GraphResult<Vec<ShortestPathSqlRow>> {
+    let governor = context.governor;
     let steps = ENGINE.with(|e| {
-        e.borrow().shortest_path_governed(
+        e.borrow().shortest_path_governed_in_context(
             source_table.to_u32(),
             source_id,
             target_table.to_u32(),
             target_id,
             max_depth,
-            governor,
+            context,
         )
     })?;
+    acl::check_table_acls(steps.iter().map(|step| step.node_table.0))?;
     let output_bytes = steps.iter().try_fold(0usize, |bytes, step| {
         bytes
             .checked_add(std::mem::size_of::<ShortestPathSqlRow>())
@@ -421,7 +558,12 @@ pub(super) fn shortest_path_rows_governed(
         })?;
     for step in steps {
         let node = if hydrate {
-            hydrate_node_governed(step.node_table.0, &step.node_id, governor)?
+            crate::sql_hydration::hydrate_node_governed_with_tables(
+                step.node_table.0,
+                &step.node_id,
+                governor,
+                tables,
+            )?
         } else {
             None
         };
@@ -470,21 +612,33 @@ fn weighted_shortest_path(
         acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
 
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
 
         let governor = ENGINE
             .with(|engine| engine.borrow().query_resource_governor())
             .unwrap_or_else(|err| err.report());
-        let rows = ENGINE.with(|e| {
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let steps = ENGINE.with(|e| {
             let eng = e.borrow();
-            eng.weighted_shortest_path_governed(
+            eng.weighted_shortest_path_governed_in_context(
                 source_table.to_u32(),
                 source_id,
                 target_table.to_u32(),
                 target_id,
-                &governor,
+                &context,
             )
             .unwrap_or_else(|err| err.report())
+        });
+        acl::check_table_acls(steps.iter().map(|step| step.node_table.0))
+            .unwrap_or_else(|err| err.report());
+        let rows = steps
             .into_iter()
             .map(|step| {
                 (
@@ -498,9 +652,82 @@ fn weighted_shortest_path(
                     u64_to_bigint(step.total_cost).unwrap_or_else(|err| err.report()),
                 )
             })
-            .collect::<Vec<_>>()
-        });
+            .collect::<Vec<_>>();
         TableIterator::new(rows)
+    })
+}
+
+#[pg_extern(schema = "graph", name = "weighted_shortest_path")]
+#[allow(clippy::type_complexity)]
+fn weighted_shortest_path_typed(
+    source_table: pgrx::pg_sys::Oid,
+    source_id: &str,
+    target_table: pgrx::pg_sys::Oid,
+    target_id: &str,
+    edge_types: Vec<String>,
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(node_table, pgrx::pg_sys::Oid),
+        name!(node_table_name, String),
+        name!(node_id, String),
+        name!(edge_label, Option<String>),
+        name!(edge_weight, Option<i64>),
+        name!(step_cost, i64),
+        name!(total_cost, i64),
+    ),
+> {
+    with_panic_boundary("weighted_shortest_path()", || {
+        check_enabled();
+        acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
+        acl::check_table_acl(target_table.to_u32()).unwrap_or_else(|err| err.report());
+        let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let governor = ENGINE
+            .with(|engine| engine.borrow().query_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let edge_type_filter = ENGINE
+            .with(|engine| engine.borrow().resolve_edge_type_filter(Some(&edge_types)))
+            .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::with_edge_type_filter(
+            &governor,
+            &visibility,
+            edge_type_filter.as_ref(),
+        );
+        let steps = ENGINE.with(|engine| {
+            engine
+                .borrow()
+                .weighted_shortest_path_governed_in_context(
+                    source_table.to_u32(),
+                    source_id,
+                    target_table.to_u32(),
+                    target_id,
+                    &context,
+                )
+                .unwrap_or_else(|err| err.report())
+        });
+        acl::check_table_acls(steps.iter().map(|step| step.node_table.0))
+            .unwrap_or_else(|err| err.report());
+        TableIterator::new(steps.into_iter().map(|step| {
+            (
+                step.step,
+                pgrx::pg_sys::Oid::from_u32(step.node_table.0),
+                relation_name(step.node_table.0).unwrap_or_else(|err| err.report()),
+                step.node_id,
+                step.edge_label,
+                step.edge_weight.map(i64::from),
+                u64_to_bigint(step.step_cost).unwrap_or_else(|err| err.report()),
+                u64_to_bigint(step.total_cost).unwrap_or_else(|err| err.report()),
+            )
+        }))
     })
 }
 
@@ -530,9 +757,14 @@ fn direct_get_node_rows(
     graph_namespace: Option<&str>,
 ) -> safety::GraphResult<Vec<DirectNodeRow>> {
     check_enabled_result()?;
-    with_named_graph(graph_name, graph_tenant, graph_namespace, || {
-        let tenant_scope = resolve_tenant_scope(tenant)?;
-        let Some(matched) = resolve_direct_node(graph_name, label, id, tenant_scope.as_deref())?
+    with_named_graph(graph_name, graph_tenant, graph_namespace, |query_start| {
+        let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+            tenant,
+            &query_start.graph,
+            &query_start.tables,
+        )?;
+        let Some(matched) =
+            resolve_direct_node(query_start, graph_name, label, id, tenant_scope.as_deref())?
         else {
             return Ok(Vec::new());
         };
@@ -540,7 +772,11 @@ fn direct_get_node_rows(
             return Ok(Vec::new());
         }
         let node = if hydrate {
-            hydrate_node(matched.table_oid, id)?
+            crate::sql_hydration::hydrate_node_with_tables(
+                matched.table_oid,
+                id,
+                &query_start.tables,
+            )?
         } else {
             None
         };
@@ -571,9 +807,14 @@ fn direct_get_neighbors_rows(
     graph_namespace: Option<&str>,
 ) -> safety::GraphResult<Vec<crate::api_types::TraverseRow>> {
     check_enabled_result()?;
-    with_named_graph(graph_name, graph_tenant, graph_namespace, || {
-        let tenant_scope = resolve_tenant_scope(tenant)?;
-        let Some(matched) = resolve_direct_node(graph_name, label, id, tenant_scope.as_deref())?
+    with_named_graph(graph_name, graph_tenant, graph_namespace, |query_start| {
+        let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+            tenant,
+            &query_start.graph,
+            &query_start.tables,
+        )?;
+        let Some(matched) =
+            resolve_direct_node(query_start, graph_name, label, id, tenant_scope.as_deref())?
         else {
             return Ok(Vec::new());
         };
@@ -603,7 +844,22 @@ fn direct_get_neighbors_rows(
             max_nodes: config::MAX_NODES.get(),
             max_frontier: config::MAX_FRONTIER.get(),
         };
-        execute_traverse_rows(&request)
+        let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )?;
+        if !visibility.allows_node(matched.node_idx) {
+            return Ok(Vec::new());
+        }
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        execute_traverse_rows_in_context(
+            &request,
+            &context,
+            &query_start.tables,
+            &query_start.filter_columns,
+        )
     })
 }
 
@@ -611,19 +867,20 @@ fn with_named_graph<T>(
     graph_name: &str,
     graph_tenant: Option<&str>,
     graph_namespace: Option<&str>,
-    action: impl FnOnce() -> safety::GraphResult<T>,
+    action: impl FnOnce(&super::runtime::QueryStartState) -> safety::GraphResult<T>,
 ) -> safety::GraphResult<T> {
-    let graph = catalog::resolve_visible_graph_metadata(graph_name, graph_tenant, graph_namespace)?
-        .ok_or_else(|| safety::GraphError::InvalidFilter {
-            reason: format!("graph '{graph_name}' does not exist"),
-        })?;
-    catalog::require_graph_privilege(&graph, catalog::GraphPrivilege::Read)?;
+    let graph_id = catalog::graph_id_with_privilege_via_definer(
+        graph_name,
+        graph_tenant,
+        graph_namespace,
+        catalog::GraphPrivilege::Read,
+    )?;
     let previous_graph_id = catalog::selected_graph_id()?;
-    catalog::set_selected_graph_id(&graph.graph_id)?;
+    catalog::set_selected_graph_id(&graph_id)?;
     let result = (|| {
         let freshness = current_query_freshness()?;
-        ensure_current_graph_for_query(freshness)?;
-        action()
+        let query_start = ensure_current_graph_for_query(freshness)?;
+        action(&query_start)
     })();
     restore_selected_graph(previous_graph_id)?;
     result
@@ -637,14 +894,13 @@ fn restore_selected_graph(previous_graph_id: Option<String>) -> safety::GraphRes
 }
 
 fn resolve_direct_node(
+    query_start: &super::runtime::QueryStartState,
     graph_name: &str,
     label: &str,
     id: &str,
     tenant: Option<&str>,
 ) -> safety::GraphResult<Option<DirectNodeMatch>> {
-    let graph = catalog::selected_or_default_graph_metadata()?;
-    let (tables, _, _) = catalog::read_catalog_for_graph(&graph.graph_id)?;
-    let table = registered_table_for_label(&tables, label).ok_or_else(|| {
+    let table = registered_table_for_label(&query_start.tables, label).ok_or_else(|| {
         safety::GraphError::InvalidFilter {
             reason: format!("graph '{graph_name}' has no registered node label '{label}'"),
         }
@@ -657,7 +913,7 @@ fn resolve_direct_node(
         tenant_allows_direct_node(&engine, node_idx, tenant).then_some(node_idx)
     });
     Ok(node_idx.map(|node_idx| DirectNodeMatch {
-        graph,
+        graph: query_start.graph.clone(),
         table,
         table_oid,
         node_idx,
@@ -720,10 +976,19 @@ fn aggregate(
     with_panic_boundary("aggregate()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        aggregate_impl(&traversal.0, &aggregations.0, scope, path_limit)
-            .map(pgrx::JsonB)
-            .unwrap_or_else(|err| err.report())
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        aggregate_impl(
+            &traversal.0,
+            &aggregations.0,
+            scope,
+            path_limit,
+            &query_start.tables,
+            &query_start.edges,
+            &query_start.filter_columns,
+        )
+        .map(pgrx::JsonB)
+        .unwrap_or_else(|err| err.report())
     })
 }
 
@@ -742,10 +1007,15 @@ fn path_count_estimate(
     with_panic_boundary("path_count_estimate()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let (count, exact, capped) =
-            path_count_estimate_impl(&traversal.0, crate::config::MAX_EXACT_PATH_COUNT.get())
-                .unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let (count, exact, capped) = path_count_estimate_impl(
+            &traversal.0,
+            crate::config::MAX_EXACT_PATH_COUNT.get(),
+            &query_start.tables,
+            &query_start.edges,
+        )
+        .unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(count, exact, capped)])
     })
 }

@@ -7,9 +7,9 @@ those tables.
 
 ## Supported Release Matrix
 
-pgGraph 1.0 supports PostgreSQL 14 through 18. PostgreSQL 17 is the default
+pgGraph 1.1 supports PostgreSQL 14 through 18. PostgreSQL 17 is the default
 development and playground reference version. Published container images target
-Linux on AMD64 and ARM64, and PGXN carries the verified 1.0.0 source bundle.
+Linux on AMD64 and ARM64, and PGXN carries the verified 1.1.0 source bundle.
 
 A patch release never removes a PostgreSQL major. A minor 1.x release may
 retire a major only after upstream PostgreSQL support ends, with at least one
@@ -79,13 +79,36 @@ SELECT extversion FROM pg_extension WHERE extname = 'graph';
 SELECT * FROM graph.status();
 ```
 
+For the 1.0.0-to-1.1.0 update, use:
+
+```sql
+ALTER EXTENSION graph UPDATE TO '1.1.0';
+SELECT extversion FROM pg_extension WHERE extname = 'graph';
+SELECT * FROM graph.status();
+```
+
+The update preserves the existing SQL signatures, adds relationship-typed
+shortest-path overloads, and changes traversal, connected-components, and
+component-statistics entry points to caller-preserving `SECURITY INVOKER`.
+Existing v6 artifacts remain compatible. If an RLS-active relationship mapping
+lacks a usable durable relationship identity, the query fails closed with
+diagnostic `PG023` until `graph.build()` publishes a replacement.
+
 To move from an alpha release to 1.0, preserve or restore the PostgreSQL source
 tables, install 1.0 cleanly, reapply the reviewed graph registration, and run
 `graph.build()`. Do not reuse alpha extension catalogs or graph files. The
 repository's signed `v0.1.8` migration fixture verifies this source-preserving
 path.
 
-Installing an older binary over 1.0 catalogs or artifacts is unsupported.
+pgGraph 1.1 does not support an in-place SQL downgrade to 1.0.0. Keep the
+pre-upgrade database backup and matching 1.0.0 package until cutover is
+accepted. Rollback restores that backup into a clean database/server using the
+1.0.0 package; do not install an older shared library over 1.1 catalogs or
+artifacts. A logical restore assigns new relation OIDs, so treat the projection
+as derived state: run `graph.reset()`, re-register the restored source tables
+and relationships, and run `graph.build()` before serving graph queries.
+
+Installing an older binary over 1.x catalogs or artifacts is unsupported.
 Binary downgrade is supported only when the target release notes say its
 catalogs and artifacts remain compatible. Otherwise restore the pre-upgrade
 backup and package. pgGraph stops before an irreversible migration when a safe

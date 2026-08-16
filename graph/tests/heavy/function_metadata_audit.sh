@@ -55,8 +55,17 @@ WITH exported AS (
 allowed_security_definer AS (
     SELECT *
     FROM (VALUES
+        ('_active_generation_count_for_current_role', ''),
+        ('_enforce_loaded_graph_quota_for_current_role', 'projected_loaded_graphs bigint'),
+        ('_expire_projection_heartbeats_for_current_role', ''),
+        ('_expire_sync_watermarks_for_current_role', ''),
+        ('_graph_id_for_current_role_with_privilege', 'graph_name text, graph_tenant text, graph_namespace text, privilege text'),
         ('_max_sync_log_id_for_current_role', ''),
-        ('_pending_sync_rows_for_current_role', 'applied_sync_id bigint'),
+        ('_max_sync_log_id_for_query_state', ''),
+        ('_pending_sync_rows_for_current_role', ''),
+        ('_record_sync_watermark_for_current_role', ''),
+        ('_record_projection_heartbeat_for_current_role', ''),
+        ('_require_selected_graph_privilege_for_current_role', 'privilege text'),
         ('_selected_graph_id_for_current_role', ''),
         ('add_edge', 'from_table oid, from_column text, to_table oid, to_column text, label text, bidirectional boolean, weight_column text, label_column text'),
         ('add_edge_to_graph', 'graph_name text, from_table oid, from_column text, to_table oid, to_column text, label text, bidirectional boolean, weight_column text, label_column text, graph_tenant text, graph_namespace text'),
@@ -67,9 +76,9 @@ allowed_security_definer AS (
         ('add_sync_policy', 'graph_name text, schedule_interval_secs bigint, max_sync_lag_rows bigint, enabled boolean, graph_tenant text, graph_namespace text'),
         ('apply_sync', ''),
         ('build', ''),
+        ('build_status', 'build_id text'),
+        ('build_status_for_graph', 'graph_name text, graph_tenant text, graph_namespace text, max_rows integer'),
         ('build_graph', 'graph_name text, force_persist boolean, graph_tenant text, graph_namespace text'),
-        ('component_stats', ''),
-        ('connected_components', ''),
         ('current_graph', ''),
         ('enable_sync', ''),
         ('graph_privileges', 'graph_name text, tenant text, namespace text'),
@@ -94,11 +103,12 @@ allowed_security_definer AS (
         ('set_current_graph', 'graph_name text, tenant text, namespace text'),
         ('set_graph_residency', 'graph_name text, residency text, tenant text, namespace text'),
         ('sync_policy_status', 'graph_name text, graph_tenant text, graph_namespace text, max_rows integer'),
-        ('traverse', 'seed_table oid, seed_id text, max_depth integer, edge_types text[], direction text, node_tables oid[], filter jsonb, tenant text, strategy text, uniqueness text, include_start boolean, hydrate boolean, max_rows integer, row_offset integer, max_nodes integer, max_frontier integer'),
         ('unload_graph', 'graph_name text, tenant text, namespace text'),
         ('vacuum', ''),
         ('vacuum_graph', 'graph_name text, graph_tenant text, graph_namespace text'),
-        ('maintenance', '"concurrently" boolean')
+        ('maintenance', '"concurrently" boolean'),
+        ('maintenance_status', 'job_id text'),
+        ('maintenance_status_for_graph', 'graph_name text, graph_tenant text, graph_namespace text, max_rows integer')
     ) AS allowed(proname, args)
 ),
 generated_sync_definer AS (

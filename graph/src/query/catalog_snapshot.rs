@@ -123,8 +123,15 @@ impl CatalogSnapshotImpl {
     /// resolution fail.
     pub(crate) fn load() -> GraphResult<Self> {
         let (tables, edges, _filter_columns) = read_catalog()?;
-        let labels = load_labels(&tables)?;
-        let rels = load_rels(&tables, &edges)?;
+        Self::from_rows(&tables, &edges)
+    }
+
+    pub(crate) fn from_rows(
+        tables: &[crate::builder::RegisteredTable],
+        edges: &[crate::builder::RegisteredEdge],
+    ) -> GraphResult<Self> {
+        let labels = load_labels(tables)?;
+        let rels = load_rels(tables, edges)?;
         Ok(Self { labels, rels })
     }
 }

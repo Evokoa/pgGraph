@@ -7,11 +7,10 @@ pub(crate) use crate::api_types::{
     BuildJobRow, ComponentNodeRow, MaintenanceJobRow, TraverseRequest,
 };
 pub(crate) use crate::catalog::{
-    catalog_fingerprint, current_catalog_state, insert_registered_edge,
-    insert_registered_edge_for_graph, insert_registered_table, insert_registered_table_for_graph,
-    read_catalog, regclass_text, relation_name, split_catalog_columns, validate_column_exists,
-    validate_edge_endpoint_columns, validate_filter_column_type, validate_registered_table,
-    RegisteredEdgeInsert,
+    catalog_fingerprint, insert_registered_edge, insert_registered_edge_for_graph,
+    insert_registered_table, insert_registered_table_for_graph, read_catalog, regclass_text,
+    relation_name, split_catalog_columns, validate_column_exists, validate_edge_endpoint_columns,
+    validate_filter_column_type, validate_registered_table, RegisteredEdgeInsert,
 };
 pub(crate) use crate::engine::Engine;
 pub(crate) use crate::sql_aggregation::{aggregate_impl, path_count_estimate_impl};
@@ -20,26 +19,24 @@ pub(crate) use crate::sql_build::{
     execute_maintenance_rebuild, execute_vacuum,
 };
 pub(crate) use crate::sql_filters::filter_helper;
-pub(crate) use crate::sql_hydration::{
-    hydrate_node, hydrate_node_governed, hydrate_nodes_governed,
-};
 pub(crate) use crate::sql_jobs::{
     build_job_row, create_build_job, create_maintenance_job, launch_build_worker,
     launch_due_jobs_worker, launch_maintenance_worker, maintenance_job_row, run_build_job,
     run_maintenance_job, update_build_job_failed, update_maintenance_job_failed, JobStatus,
     SchedulerWorkerMetadata, WorkerMetadata,
 };
-pub(crate) use crate::sql_search::{source_table_search_rows_governed, validate_search_request};
+pub(crate) use crate::sql_search::{
+    source_table_search_rows_governed_with_tables, validate_search_request_with_tables,
+};
 pub(crate) use crate::sql_sync::{
-    apply_sync_internal, apply_sync_to_high_watermark, current_sync_mode,
-    disabled_graph_trigger_count, ingest_projection_internal, install_sync_triggers,
-    max_sync_log_id, pending_sync_rows, resolve_tenant_scope,
+    apply_sync_internal, current_sync_mode, disabled_graph_trigger_count,
+    ingest_projection_internal, install_sync_triggers, max_sync_log_id,
 };
 pub(crate) use crate::sql_traversal::{
     apply_traversal_uniqueness_governed, canonical_node_ref_string,
-    execute_traverse_candidates_governed, execute_traverse_rows, execute_traverse_rows_governed,
-    format_path_value, paginate_and_format_traverse_candidates_governed,
-    sort_traverse_candidates_for_many_governed, usize_from_nonnegative,
+    execute_traverse_candidates_in_context, execute_traverse_rows_in_context, format_path_value,
+    paginate_and_format_traverse_candidates_governed, sort_traverse_candidates_for_many_governed,
+    usize_from_nonnegative,
 };
 pub(crate) use crate::{
     acl, builder, catalog, config, connected_components, discover, engine, persistence, safety,
@@ -65,3 +62,10 @@ mod workflow;
 pub(crate) use admin::check_enabled_result;
 #[cfg(feature = "pg_test")]
 pub(crate) use runtime::ensure_current_graph;
+pub(crate) use runtime::reconcile_interrupted_replacement;
+#[cfg(feature = "development")]
+pub(crate) use runtime::record_query_start_catalog_read;
+#[cfg(all(feature = "development", not(test)))]
+pub(crate) use runtime::record_query_start_pending_probe;
+#[cfg(all(feature = "development", feature = "pg_test"))]
+pub(crate) use runtime::{query_start_probe_counts, reset_query_start_probe_counts};

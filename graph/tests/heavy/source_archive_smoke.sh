@@ -57,6 +57,7 @@ git -C "$ROOT_DIR" archive v0.1.8:graph | tar -x -C "$transition_context/alpha-g
 cp -R "$source_root/release/fixtures/alpha-to-v1.0/." "$transition_context/fixture/"
 docker build \
   --build-arg "BASE_IMAGE=pggraph:source-archive-build-${TAG#v}" \
+  --build-arg "GRAPH_VERSION=${TAG#v}" \
   -f "$source_root/graph/tests/heavy/Dockerfile.alpha-transition" \
   -t "pggraph:alpha-transition-${TAG#v}" \
   "$transition_context"

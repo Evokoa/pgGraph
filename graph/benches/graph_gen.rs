@@ -1,7 +1,7 @@
 //! Deterministic graph generator for benchmarks.
 //!
 //! Produces power-law degree distributions similar to real-world graphs
-//! (e.g., Panama Papers: 2M nodes, 5.8M edges ≈ avg degree 2.9).
+//! (e.g., the pinned ICIJ snapshot: 2M nodes, 6.7M directed edges).
 //!
 //! Seed = 42 for all published benchmarks. Reproducible.
 
@@ -87,6 +87,40 @@ pub fn build_benchmark_graph(
         seed,
         num_properties,
     ))
+}
+
+/// Build a bidirectional chain for measuring traversal-depth scaling without
+/// the exponential frontier growth of a power-law graph.
+pub fn build_chain_graph(node_count: u32) -> BenchGraph {
+    assert!(node_count > 0, "chain benchmark requires at least one node");
+
+    let nodes = (0..node_count)
+        .map(|node_idx| GeneratedNode {
+            table_oid: 100,
+            pk: format!("CHAIN-{node_idx}"),
+        })
+        .collect();
+    let mut raw_edges = Vec::with_capacity(node_count.saturating_sub(1) as usize * 2);
+
+    for source in 0..node_count.saturating_sub(1) {
+        let target = source + 1;
+        raw_edges.push(graph::bench_support::RawEdge {
+            source,
+            target,
+            type_id: 1,
+            weight: None,
+            schema_reversed: false,
+        });
+        raw_edges.push(graph::bench_support::RawEdge {
+            source: target,
+            target: source,
+            type_id: 1,
+            weight: None,
+            schema_reversed: true,
+        });
+    }
+
+    build_benchmark_graph_from_fixture(GeneratedBenchmarkGraph { nodes, raw_edges })
 }
 
 /// Build a benchmark graph with one numeric filter column populated at the

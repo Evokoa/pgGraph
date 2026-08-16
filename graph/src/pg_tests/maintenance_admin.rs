@@ -1,4 +1,53 @@
 #[pg_test]
+fn topology_query_entry_points_run_as_invoker() {
+    let unexpected_definers = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM pg_catalog.pg_proc AS proc
+           JOIN pg_catalog.pg_namespace AS namespace
+             ON namespace.oid = proc.pronamespace
+          WHERE namespace.nspname = 'graph'
+            AND proc.proname IN ('traverse', 'connected_components', 'component_stats')
+            AND proc.prosecdef",
+    )
+    .expect("read topology function security metadata failed")
+    .unwrap_or(-1);
+    let unpinned_mediators = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM pg_catalog.pg_proc AS proc
+           JOIN pg_catalog.pg_namespace AS namespace
+             ON namespace.oid = proc.pronamespace
+          WHERE namespace.nspname = 'graph'
+            AND proc.proname IN (
+                '_selected_graph_id_for_current_role',
+                '_active_generation_count_for_current_role',
+                '_enforce_loaded_graph_quota_for_current_role',
+                '_require_selected_graph_privilege_for_current_role',
+                '_graph_id_for_current_role_with_privilege',
+                '_expire_projection_heartbeats_for_current_role',
+                '_expire_sync_watermarks_for_current_role',
+                '_record_sync_watermark_for_current_role',
+                '_record_projection_heartbeat_for_current_role',
+                'build_status',
+                'build_status_for_graph',
+                'maintenance_status',
+                'maintenance_status_for_graph'
+            )
+            AND (
+                NOT proc.prosecdef
+                OR NOT (
+                    COALESCE(proc.proconfig, ARRAY[]::text[])
+                    @> ARRAY['search_path=pg_catalog, pg_temp']
+                )
+            )",
+    )
+    .expect("read catalog mediator security metadata failed")
+    .unwrap_or(-1);
+
+    assert_eq!(unexpected_definers, 0);
+    assert_eq!(unpinned_mediators, 0);
+}
+
+#[pg_test]
 fn sql_trigger_sync_handles_primary_key_changes() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
@@ -856,6 +905,8 @@ fn traverse_auto_sync_opt_in_applies_pending_edge_insert() {
     )
     .expect("insert pending child failed");
 
+    #[cfg(feature = "development")]
+    super::sql_facade::reset_query_start_probe_counts();
     let reaches_root = Spi::get_one::<i64>(
         "SELECT count(*)
              FROM graph.traverse(
@@ -868,11 +919,15 @@ fn traverse_auto_sync_opt_in_applies_pending_edge_insert() {
     )
     .expect("auto-sync traversal failed")
     .unwrap_or(0);
+    #[cfg(feature = "development")]
+    let query_start_counts = super::sql_facade::query_start_probe_counts();
     let pending = Spi::get_one::<i64>("SELECT pending_sync_rows FROM graph.status()")
         .expect("status failed")
         .unwrap_or(-1);
 
     assert_eq!(reaches_root, 1);
+    #[cfg(feature = "development")]
+    assert_eq!(query_start_counts, (1, 3));
     assert_eq!(pending, 0);
     Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
 }
@@ -973,7 +1028,7 @@ fn cross_backend_committed_write_visible_without_full_rebuild() {
 }
 
 #[pg_test]
-fn topology_auto_sync_uses_durable_segments_for_mutable_overlay() {
+fn topology_auto_sync_durable_replay_runs_at_minimum_memory_limit() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable overlay failed");
     Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
@@ -1017,6 +1072,8 @@ fn topology_auto_sync_uses_durable_segments_for_mutable_overlay() {
     Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
         .expect("build durable auto sync graph failed");
     Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run("SET graph.memory_limit_mb = 64")
+        .expect("set minimum supported memory limit failed");
     Spi::run(
         "UPDATE public.graph_test_durable_auto_sync_pgtest
             SET parent_id = 'root'
@@ -1057,6 +1114,7 @@ fn topology_auto_sync_uses_durable_segments_for_mutable_overlay() {
     assert_eq!(reaches_root, 1);
     assert_eq!(edge_buffer_used, 0);
     assert!(segment_count > 0);
+    Spi::run("SET graph.memory_limit_mb = 2048").expect("restore memory limit failed");
     Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
     Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
     Spi::run("SET graph.persist_on_build = off").expect("reset persistence failed");
@@ -1868,6 +1926,84 @@ fn projection_compact_exposes_operator_contract_field_names() {
 }
 
 #[pg_test]
+fn durable_ingest_apply_sync_and_compaction_reconcile_failed_publication() {
+    build_persisted_mutable_friendship_graph();
+    Spi::run("SELECT graph.enable_sync()").expect("enable durable sync failed");
+    let generation_a = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_status()",
+    )
+    .expect("baseline generation query failed")
+    .expect("baseline generation missing");
+    Spi::run(
+        "UPDATE public.graph_test_users_pgtest
+            SET parent_id = 'u1'
+          WHERE id = 'u2'",
+    )
+    .expect("create pending durable edge failed");
+
+    for statement in [
+        "SELECT * FROM graph.ingest_projection()",
+        "SELECT * FROM graph.apply_sync()",
+    ] {
+        Spi::run("SELECT graph._test_arm_replacement_fault('before_publication')")
+            .expect("arm durable publisher fault failed");
+        assert!(sql_raises(statement), "{statement} should fail before publication");
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+                .expect("durable publisher recovery status failed"),
+            Some(2)
+        );
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT manifest_generation FROM graph.projection_status()",
+            )
+            .expect("durable publisher generation query failed"),
+            Some(generation_a),
+            "{statement} must leave generation A current"
+        );
+    }
+
+    let segments = Spi::get_one::<i64>(
+        "SELECT segments_published FROM graph.ingest_projection()",
+    )
+    .expect("successful durable ingest failed")
+    .unwrap_or(0);
+    assert!(segments > 0);
+    let generation_b = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_status()",
+    )
+    .expect("ingested generation query failed")
+    .expect("ingested generation missing");
+    assert!(generation_b > generation_a);
+
+    Spi::run("SELECT graph._test_arm_replacement_fault('before_publication')")
+        .expect("arm compaction publisher fault failed");
+    assert!(sql_raises("SELECT * FROM graph.projection_compact()"));
+    assert_eq!(
+        Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+            .expect("compaction recovery status failed"),
+        Some(2),
+        "compaction failure must not poison the ENGINE borrow state"
+    );
+    assert_eq!(
+        Spi::get_one::<i64>(
+            "SELECT manifest_generation FROM graph.projection_status()",
+        )
+        .expect("compaction generation query failed"),
+        Some(generation_b)
+    );
+    let compacted_generation = Spi::get_one::<i64>(
+        "SELECT manifest_generation FROM graph.projection_compact()",
+    )
+    .expect("successful compaction retry failed")
+    .expect("compaction generation missing");
+    assert!(compacted_generation > generation_b);
+
+    Spi::run("SET graph.persist_on_build = off").expect("restore persistence failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable mode failed");
+}
+
+#[pg_test]
 fn sync_health_distinguishes_tx_delta_edge_buffer_and_durable_projection_pressure() {
     let fixture = setup_projection_status_pressure_fixture(
         "graph_test_projection_sync_health_pressure_pgtest",
@@ -2233,6 +2369,11 @@ fn full_rebuild_restores_valid_projection_generation() {
         .expect("corrupt-generation pointer publishes");
     std::fs::write(&corrupt_manifest, b"{not json").expect("current manifest corruption writes");
 
+    Spi::run("SELECT graph._test_arm_replacement_fault('source_scan')")
+        .expect("arm full-repair source fault failed");
+    assert!(sql_raises("SELECT * FROM graph.projection_repair()"));
+    assert!(!repaired_manifest.exists());
+
     let repaired = Spi::get_one::<bool>(
         "SELECT action = 'full_rebuild'
                 AND generation_id = 9300002
@@ -2356,6 +2497,23 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
         });
     store.publish(&manifest).expect("chunk manifest publishes");
     std::fs::write(&chunk_path, b"corrupt chunk").expect("chunk corruption writes");
+
+    Spi::run("SELECT graph._test_arm_replacement_fault('before_publication')")
+        .expect("arm targeted repair publication fault failed");
+    assert!(sql_raises("SELECT * FROM graph.projection_repair()"));
+    assert_eq!(
+        Spi::get_one::<i64>("SELECT node_count FROM graph.status()")
+            .expect("targeted repair recovery status failed"),
+        Some(2)
+    );
+    assert_eq!(
+        Spi::get_one::<i64>(
+            "SELECT manifest_generation FROM graph.projection_status()",
+        )
+        .expect("targeted repair generation query failed"),
+        Some(chunk_generation as i64)
+    );
+    assert!(!repaired_manifest.exists());
 
     let repaired = Spi::get_one::<bool>(
         "SELECT action = 'targeted_chunk_repair'

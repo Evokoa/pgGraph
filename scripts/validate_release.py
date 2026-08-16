@@ -17,6 +17,9 @@ CARGO_PACKAGE_RE = re.compile(r"^\[package\]\s*(.*?)(?=^\[|\Z)", re.MULTILINE | 
 CARGO_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 ACTION_SHA_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
 IMAGE_DIGEST_RE = re.compile(r"^[^\s@]+(?::[^\s@]+)?@sha256:[0-9a-f]{64}$")
+DOCKER_HUB_LIBRARY_DIGEST_RE = re.compile(
+    r"^docker\.io/library/[^\s/@]+:[^\s@]+@sha256:[0-9a-f]{64}$"
+)
 
 
 def fail(message: str) -> None:
@@ -77,8 +80,11 @@ def validate_release_dependencies() -> None:
     dockerfile = read_text("Dockerfile")
     for name in ("RUST_IMAGE", "POSTGRES_IMAGE"):
         match = re.search(rf"^ARG {name}=([^\s]+)$", dockerfile, re.MULTILINE)
-        if not match or not IMAGE_DIGEST_RE.fullmatch(match.group(1)):
-            fail(f"Dockerfile {name} must be pinned by digest")
+        if not match or not DOCKER_HUB_LIBRARY_DIGEST_RE.fullmatch(match.group(1)):
+            fail(
+                f"Dockerfile {name} must use a fully qualified Docker Hub "
+                "library image pinned by digest"
+            )
     matrix_image = read_text("graph/tests/heavy/Dockerfile.pg-matrix").splitlines()[0]
     if not re.fullmatch(r"FROM\s+[^\s]+@sha256:[0-9a-f]{64}", matrix_image):
         fail("Dockerfile.pg-matrix builder image must be pinned by digest")

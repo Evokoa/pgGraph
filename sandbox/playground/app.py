@@ -48,7 +48,8 @@ def render_result(result: dict) -> None:
 
     elapsed = result.get("elapsed", "unknown")
     if result.get("ok"):
-        st.caption(f"Completed in {elapsed}")
+        completion = st.empty()
+        completion.caption("Rendering query results...")
     else:
         st.caption(f"Failed after {elapsed}")
         st.error(result.get("error", "Query failed."))
@@ -60,10 +61,12 @@ def render_result(result: dict) -> None:
 
     if view == "Raw JSON":
         st.code(json.dumps(result_sets or messages, indent=2, default=str), language="json")
+        completion.caption(f"Completed in {elapsed}")
         return
 
     if not result_sets:
         st.info("\n".join(messages))
+        completion.caption(f"Completed in {elapsed}")
         return
 
     for result_set in result_sets:
@@ -71,21 +74,10 @@ def render_result(result: dict) -> None:
         label = f"Result {result_set['index']} - {result_set['row_count']:,} rows"
         st.caption(label)
         if rows:
-            st.dataframe(rows, use_container_width=True, hide_index=True)
+            st.dataframe(rows, width="stretch", hide_index=True)
         else:
             st.info("No rows returned.")
-
-
-def render_loading_button(slot) -> None:
-    slot.markdown(
-        """
-        <div class="loading-button">
-          <span class="loading-spinner"></span>
-          <span>Running SQL...</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    completion.caption(f"Completed in {elapsed}")
 
 
 def render_main_top() -> None:
@@ -115,16 +107,11 @@ def render_metric_strip(status: dict | None) -> None:
     )
 
 
-def initialize_graph() -> tuple[object, dict]:
-    with st.status("Preparing Panama graph...", expanded=True) as status_box:
-        st.write("Connecting to PostgreSQL and checking the loaded dataset.")
-        config, client = runtime()
-        conn = client.connection()
-        ensure_graph_loaded(conn, config)
-        st.write("Verifying graph catalog registration and build status.")
-        graph_status = fetch_one(conn, "SELECT * FROM graph.status();")
-        status_box.update(label="Panama graph is ready.", state="complete", expanded=False)
-    return conn, graph_status
+@st.cache_resource(show_spinner="Preparing Panama graph...")
+def initialize_graph(connection_generation: int, _connection: object, _config: PlaygroundConfig) -> dict:
+    """Prepare and inspect one PostgreSQL backend connection once."""
+    ensure_graph_loaded(_connection, _config)
+    return fetch_one(_connection, "SELECT * FROM graph.status();")
 
 
 def apply_css() -> None:
@@ -234,31 +221,6 @@ def apply_css() -> None:
           background: #202026;
           color: #fff;
         }
-        .loading-button {
-          width: 100%;
-          min-height: 38px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 10px;
-          border-radius: 8px;
-          border: 1px solid #44444c;
-          background: #202026;
-          color: var(--text);
-          font-size: 14px;
-          font-weight: 600;
-        }
-        .loading-spinner {
-          width: 14px;
-          height: 14px;
-          border: 2px solid #6f6f78;
-          border-top-color: #f4f4f5;
-          border-radius: 999px;
-          animation: pggraph-spin 0.8s linear infinite;
-        }
-        @keyframes pggraph-spin {
-          to { transform: rotate(360deg); }
-        }
         .stTextArea textarea {
           background: #0f0f12 !important;
           color: #f4f4f5 !important;
@@ -337,18 +299,16 @@ def main() -> None:
         st.session_state.result = {}
 
     render_main_top()
-    metrics_slot = st.empty()
-    with metrics_slot.container():
-        render_metric_strip(None)
 
     try:
-        _, status = initialize_graph()
+        config, client = runtime()
+        connection = client.connection()
+        status = initialize_graph(client.connection_generation, connection, config)
     except Exception as exc:
         st.error(f"Could not prepare the playground graph: {type(exc).__name__}: {exc}")
         st.stop()
 
-    with metrics_slot.container():
-        render_metric_strip(status)
+    render_metric_strip(status)
 
     st.subheader(st.session_state.question)
     st.caption(PLAYGROUND_CONTEXT)
@@ -356,19 +316,12 @@ def main() -> None:
     left, right = st.columns(2, gap="large")
     with left:
         editor_sql = st.text_area("SQL", key="editor_sql", height=430)
-        run_button_slot = st.empty()
-        run_clicked = run_button_slot.button("Run SQL", type="primary")
-        if run_clicked:
-            render_loading_button(run_button_slot)
+        run_clicked = st.button("Run SQL", type="primary")
     with right:
         if run_clicked:
             with st.spinner("Running SQL..."):
-                config, client = runtime()
-                connection = client.connection()
-                ensure_graph_loaded(connection, config)
                 statements = st.session_state.statements if editor_sql == st.session_state.catalog_sql else (editor_sql,)
                 st.session_state.result = run_with_error_handling(connection, statements, config)
-            st.rerun()
         render_result(st.session_state.result)
 
 

@@ -37,6 +37,7 @@ pub(crate) fn reserve_jsonb_materialization(
         .map_err(crate::safety::resource_limit_error)
 }
 
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn hydrate_node(
     table_oid: u32,
     node_id: &str,
@@ -45,13 +46,32 @@ pub(crate) fn hydrate_node(
     hydrate_node_governed(table_oid, node_id, &governor)
 }
 
+pub(crate) fn hydrate_node_with_tables(
+    table_oid: u32,
+    node_id: &str,
+    tables: &[crate::builder::RegisteredTable],
+) -> safety::GraphResult<Option<pgrx::JsonB>> {
+    let governor = hydration_governor()?;
+    hydrate_node_governed_with_tables(table_oid, node_id, &governor, tables)
+}
+
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn hydrate_node_governed(
     table_oid: u32,
     node_id: &str,
     governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<Option<pgrx::JsonB>> {
-    let mut workspace = reserve_hydration_workspace(governor, 1, node_id.len())?;
     let (tables, _edges, _filter_columns) = read_catalog()?;
+    hydrate_node_governed_with_tables(table_oid, node_id, governor, &tables)
+}
+
+pub(crate) fn hydrate_node_governed_with_tables(
+    table_oid: u32,
+    node_id: &str,
+    governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
+) -> safety::GraphResult<Option<pgrx::JsonB>> {
+    let mut workspace = reserve_hydration_workspace(governor, 1, node_id.len())?;
     let table = tables
         .iter()
         .find_map(|table| {
@@ -146,6 +166,15 @@ pub(crate) fn hydrate_nodes_governed(
     rows: &[types::TraversalResult],
     governor: &crate::resource::ResourceGovernor,
 ) -> safety::GraphResult<HashMap<(u32, String), pgrx::JsonB>> {
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    hydrate_nodes_governed_with_tables(rows, governor, &tables)
+}
+
+pub(crate) fn hydrate_nodes_governed_with_tables(
+    rows: &[types::TraversalResult],
+    governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
+) -> safety::GraphResult<HashMap<(u32, String), pgrx::JsonB>> {
     let key_bytes = rows.iter().try_fold(0usize, |bytes, row| {
         bytes.checked_add(row.node_id.len()).ok_or_else(|| {
             safety::GraphError::Internal("hydration key size overflowed".to_string())
@@ -164,9 +193,8 @@ pub(crate) fn hydrate_nodes_governed(
     }
 
     let needed_table_oids = ids_by_table.keys().copied().collect::<HashSet<_>>();
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let mut tables_by_oid = HashMap::with_capacity(needed_table_oids.len());
-    for table in &tables {
+    for table in tables {
         let oid = table.table_oid;
         if needed_table_oids.contains(&oid) {
             tables_by_oid.insert(oid, table);
@@ -276,9 +304,10 @@ pub(crate) fn hydrate_nodes_governed(
     Ok(hydrated)
 }
 
-pub(crate) fn visible_node_keys_governed(
+pub(crate) fn visible_node_keys_governed_with_tables(
     ids_by_table: &HashMap<u32, Vec<String>>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<HashSet<(u32, String)>> {
     let (row_count, key_bytes) =
         ids_by_table
@@ -296,7 +325,6 @@ pub(crate) fn visible_node_keys_governed(
             })?;
     let workspace = reserve_hydration_workspace(governor, row_count, key_bytes)?;
     let needed_table_oids = ids_by_table.keys().copied().collect::<HashSet<_>>();
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let tables_by_oid = tables
         .iter()
         .filter(|table| needed_table_oids.contains(&table.table_oid))

@@ -5,21 +5,22 @@ use crate::api_types::{
     TraverseRequest, TraverseRow,
 };
 use crate::catalog::{table_oid_from_name, validate_column_exists};
-use crate::sql_hydration::{hydrate_node_governed, hydrate_nodes_governed};
+use crate::projection::layered::LayeredNeighbors;
+use crate::projection::neighbors::{Neighbor, NeighborSource, OverlayNeighbors};
+use crate::sql_hydration::{hydrate_node_governed_with_tables, hydrate_nodes_governed_with_tables};
 use crate::sql_traversal::{
-    execute_traverse_rows_governed, json_i32_field, json_number_as_f64, json_number_from_f64,
+    execute_traverse_rows_in_context, json_i32_field, json_number_as_f64, json_number_from_f64,
     optional_string_array, parse_node_ref_json_string, path_node_field, required_string_field,
     usize_from_nonnegative,
 };
-use crate::{
-    acl, edge_store, engine, safety, sql_facade::check_enabled_result, types, Engine, ENGINE,
-};
+use crate::{acl, safety, sql_facade::check_enabled_result, types, Engine, ENGINE};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-type OverlayInserts = HashMap<u32, Vec<(u32, u8, bool)>>;
-type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
-type AggregationEdgeOverlay = (OverlayInserts, OverlayDeletes);
+type AggregationEdgeOverlay = (
+    crate::projection::neighbors::EdgeOverlay,
+    crate::projection::neighbors::EdgeOverlay,
+);
 pub(crate) type IndexedPath = Rc<[u32]>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,18 +41,24 @@ pub(crate) fn aggregate_impl(
     aggregations: &serde_json::Value,
     scope: &str,
     path_limit: i32,
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<serde_json::Value> {
     check_enabled_result()?;
+    check_analytics_source_acls(tables, edges)?;
     let request = parse_aggregation_traversal_request(traversal)?;
     let specs = parse_aggregation_specs(aggregations)?;
     let scope = parse_aggregate_scope(scope)?;
     let path_limit = usize_from_nonnegative(path_limit, "path_limit")?;
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    let visibility = crate::sql_visibility::build_visibility_scope(tables, edges, &governor)?;
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
     match scope {
         AggregateScope::ReturnedNodes | AggregateScope::ChosenParentPath => {}
         AggregateScope::AllPossiblePaths => {
             let (paths, _exact, capped) =
-                indexed_paths_for_request_governed(&request, path_limit, &governor)?;
+                indexed_paths_for_request_in_context(&request, path_limit, &context)?;
             if capped {
                 return Err(safety::GraphError::InvalidFilter {
                     reason: format!(
@@ -60,17 +67,23 @@ pub(crate) fn aggregate_impl(
                     ),
                 });
             }
-            return aggregate_indexed_paths_governed(&paths, specs, &governor);
+            return aggregate_indexed_paths_governed(&paths, specs, &governor, tables);
         }
     }
 
-    let rows = execute_aggregation_traversal_governed(&request, path_limit, &governor)?;
+    let rows = execute_aggregation_traversal_governed(
+        &request,
+        path_limit,
+        &context,
+        tables,
+        filter_columns,
+    )?;
     let rows = rows
         .into_iter()
         .filter(|row| row.4 >= request.min_depth)
         .collect::<Vec<_>>();
     let aggregate_rows = if scope.expands_parent_path() {
-        expand_rows_to_parent_path_governed(rows, &governor)?
+        expand_rows_to_parent_path_governed(rows, &governor, tables)?
     } else {
         rows
     };
@@ -146,12 +159,29 @@ pub(crate) fn aggregate_output(
 pub(crate) fn path_count_estimate_impl(
     traversal: &serde_json::Value,
     path_limit: i32,
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<(i64, bool, bool)> {
     check_enabled_result()?;
+    check_analytics_source_acls(tables, edges)?;
     let request = parse_aggregation_traversal_request(traversal)?;
     let path_limit = usize_from_nonnegative(path_limit, "graph.max_exact_path_count")?;
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    path_count_for_request_governed(&request, path_limit, &governor)
+    let visibility = crate::sql_visibility::build_visibility_scope(tables, edges, &governor)?;
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    path_count_for_request_in_context(&request, path_limit, &context)
+}
+
+fn check_analytics_source_acls(
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
+) -> safety::GraphResult<()> {
+    acl::check_table_acls(
+        tables
+            .iter()
+            .map(|table| table.table_oid)
+            .chain(edges.iter().map(|edge| edge.from_table_oid)),
+    )
 }
 
 #[allow(dead_code, reason = "compatibility entry point")]
@@ -160,15 +190,18 @@ pub(crate) fn path_count_for_request(
     path_limit: usize,
 ) -> safety::GraphResult<(i64, bool, bool)> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    path_count_for_request_governed(request, path_limit, &governor)
+    let visibility = crate::visibility::VisibilityScope::Unrestricted;
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    path_count_for_request_in_context(request, path_limit, &context)
 }
 
-fn path_count_for_request_governed(
+fn path_count_for_request_in_context(
     request: &AggregationTraversalRequest,
     path_limit: usize,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
 ) -> safety::GraphResult<(i64, bool, bool)> {
-    let (paths, exact, capped) = indexed_paths_for_request_governed(request, path_limit, governor)?;
+    let (paths, exact, capped) =
+        indexed_paths_for_request_in_context(request, path_limit, context)?;
     if capped || !exact {
         Ok((path_limit as i64, false, true))
     } else {
@@ -182,14 +215,17 @@ pub(crate) fn indexed_paths_for_request(
     path_limit: usize,
 ) -> safety::GraphResult<(Vec<IndexedPath>, bool, bool)> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    indexed_paths_for_request_governed(request, path_limit, &governor)
+    let visibility = crate::visibility::VisibilityScope::Unrestricted;
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    indexed_paths_for_request_in_context(request, path_limit, &context)
 }
 
-fn indexed_paths_for_request_governed(
+fn indexed_paths_for_request_in_context(
     request: &AggregationTraversalRequest,
     path_limit: usize,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
 ) -> safety::GraphResult<(Vec<IndexedPath>, bool, bool)> {
+    let governor = context.governor;
     let edge_limit = path_limit.saturating_add(1);
     let path_width = usize::try_from(request.max_depth.max(0))
         .unwrap_or(usize::MAX)
@@ -234,7 +270,7 @@ fn indexed_paths_for_request_governed(
                 };
                 Ok::<_, safety::GraphError>(maximum.max(degree))
             })?;
-        let overlay_per_frame = eng.edge_buffer.len().saturating_mul(2);
+        let overlay_per_frame = eng.analytics_additional_neighbor_upper_bound(request.direction);
         let scratch_bytes = max_base_degree
             .saturating_add(overlay_per_frame)
             .checked_mul(path_width)
@@ -252,8 +288,13 @@ fn indexed_paths_for_request_governed(
                 eng.estimated_traversal_overlay_clone_bytes()?,
             )
             .map_err(crate::safety::resource_limit_error)?;
+        let layered_neighbors = eng.layered_neighbors()?;
+        let edge_overlays = if layered_neighbors.is_some() {
+            Default::default()
+        } else {
+            aggregation_edge_overlay(&eng)
+        };
         let edge_type_filter = aggregation_edge_type_filter(&eng, request)?;
-        let (overlay_inserts, overlay_deletes) = aggregation_edge_overlay(&eng, request.direction);
         let mut paths = Vec::new();
         let mut seen_paths = HashSet::new();
         for start in &request.starts {
@@ -263,6 +304,9 @@ fn indexed_paths_for_request_governed(
                     table: start.table_oid.to_string(),
                     pk: start.node_id.clone(),
                 })?;
+            if !context.visibility.allows_node(seed) {
+                continue;
+            }
             let mut path = vec![seed];
             enumerate_all_paths_dfs(
                 &eng,
@@ -275,9 +319,9 @@ fn indexed_paths_for_request_governed(
                 edge_limit,
                 edge_type_filter.as_ref(),
                 node_table_filter.as_ref(),
-                &overlay_inserts,
-                &overlay_deletes,
-                governor,
+                &edge_overlays,
+                layered_neighbors.as_ref(),
+                context,
             )?;
             if paths.len() > path_limit {
                 break;
@@ -311,10 +355,11 @@ pub(crate) fn enumerate_all_paths_dfs(
     edge_limit: usize,
     edge_type_filter: Option<&HashSet<u8>>,
     node_table_filter: Option<&HashSet<u32>>,
-    overlay_inserts: &OverlayInserts,
-    overlay_deletes: &OverlayDeletes,
-    governor: &crate::resource::ResourceGovernor,
+    edge_overlays: &AggregationEdgeOverlay,
+    layered_neighbors: Option<&LayeredNeighbors<'_>>,
+    context: &crate::visibility::QueryExecutionContext<'_>,
 ) -> safety::GraphResult<()> {
+    let governor = context.governor;
     governor
         .consume_work(
             crate::resource::ResourcePhase::QueryPaths,
@@ -340,27 +385,34 @@ pub(crate) fn enumerate_all_paths_dfs(
         return Ok(());
     }
 
-    for (neighbor, edge_type) in aggregation_neighbors(
+    for edge in aggregation_neighbors(
         eng,
         current,
         request.direction,
-        overlay_inserts,
-        overlay_deletes,
+        edge_overlays,
+        layered_neighbors,
     ) {
         if paths.len() >= edge_limit {
             return Ok(());
         }
-        if edge_type_filter.is_some_and(|allowed| !allowed.contains(&edge_type)) {
+        if edge_type_filter.is_some_and(|allowed| !allowed.contains(&edge.type_id)) {
             continue;
         }
-        if !eng.node_store.is_active(neighbor) || path.contains(&neighbor) {
+        if !context
+            .visibility
+            .allows_relationship(edge.type_id, edge.relationship_id)?
+            || !context.visibility.allows_node(edge.target)
+            || !eng.node_store.is_active(edge.target)
+            || crate::projection::tx_delta::node_deleted(edge.target)
+            || path.contains(&edge.target)
+        {
             continue;
         }
-        path.push(neighbor);
+        path.push(edge.target);
         enumerate_all_paths_dfs(
             eng,
             request,
-            neighbor,
+            edge.target,
             depth + 1,
             path,
             paths,
@@ -368,9 +420,9 @@ pub(crate) fn enumerate_all_paths_dfs(
             edge_limit,
             edge_type_filter,
             node_table_filter,
-            overlay_inserts,
-            overlay_deletes,
-            governor,
+            edge_overlays,
+            layered_neighbors,
+            context,
         )?;
         path.pop();
     }
@@ -418,123 +470,56 @@ pub(crate) fn aggregation_edge_type_filter(
     Ok(Some(ids))
 }
 
-pub(crate) fn aggregation_edge_overlay(
-    eng: &Engine,
-    direction: types::TraversalDirection,
-) -> AggregationEdgeOverlay {
-    let mut inserts = HashSet::new();
-    let mut deletes = HashSet::new();
-    for mutation in &eng.edge_buffer {
-        for key in oriented_edge_keys(
-            mutation.source,
-            mutation.target,
-            mutation.type_id,
-            direction,
-        ) {
-            match mutation.kind {
-                engine::MutationKind::Insert => {
-                    deletes.remove(&key);
-                    inserts.insert(key);
-                }
-                engine::MutationKind::Delete => {
-                    inserts.remove(&key);
-                    deletes.insert(key);
-                }
-            }
-        }
-    }
-    let mut insert_map: OverlayInserts = HashMap::new();
-    for (source, target, type_id) in inserts {
-        insert_map
-            .entry(source)
-            .or_default()
-            .push((target, type_id, false));
-    }
-    let mut delete_map: OverlayDeletes = HashMap::new();
-    for (source, target, type_id) in deletes {
-        delete_map
-            .entry(source)
-            .or_default()
-            .insert((target, type_id));
-    }
-    (insert_map, delete_map)
-}
-
-pub(crate) fn oriented_edge_keys(
-    source: u32,
-    target: u32,
-    type_id: u8,
-    direction: types::TraversalDirection,
-) -> Vec<(u32, u32, u8)> {
-    match direction {
-        types::TraversalDirection::In => vec![(target, source, type_id)],
-        types::TraversalDirection::Any => {
-            vec![(source, target, type_id), (target, source, type_id)]
-        }
-        types::TraversalDirection::Out => vec![(source, target, type_id)],
-    }
+pub(crate) fn aggregation_edge_overlay(eng: &Engine) -> AggregationEdgeOverlay {
+    (
+        eng.traversal_edge_overlay(types::TraversalDirection::Out),
+        eng.traversal_edge_overlay(types::TraversalDirection::In),
+    )
 }
 
 pub(crate) fn aggregation_neighbors(
     eng: &Engine,
     current: u32,
     direction: types::TraversalDirection,
-    overlay_inserts: &OverlayInserts,
-    overlay_deletes: &OverlayDeletes,
-) -> Vec<(u32, u8)> {
+    edge_overlays: &AggregationEdgeOverlay,
+    layered_neighbors: Option<&LayeredNeighbors<'_>>,
+) -> Vec<Neighbor> {
+    if let Some(layered) = layered_neighbors {
+        return layered
+            .for_direction(direction)
+            .neighbors(current)
+            .collect();
+    }
     let mut neighbors = Vec::new();
     let mut seen = HashSet::new();
     if matches!(
         direction,
         types::TraversalDirection::Out | types::TraversalDirection::Any
     ) {
-        push_base_neighbors(
-            &eng.edge_store,
-            current,
-            overlay_deletes,
-            &mut seen,
-            &mut neighbors,
-        );
+        let source =
+            OverlayNeighbors::new(&eng.edge_store, &(edge_overlays.0).0, &(edge_overlays.0).1);
+        for edge in source.neighbors(current) {
+            if seen.insert((edge.target, edge.type_id, edge.relationship_id)) {
+                neighbors.push(edge);
+            }
+        }
     }
     if matches!(
         direction,
         types::TraversalDirection::In | types::TraversalDirection::Any
     ) {
-        push_base_neighbors(
+        let source = OverlayNeighbors::new(
             &eng.reverse_edge_store,
-            current,
-            overlay_deletes,
-            &mut seen,
-            &mut neighbors,
+            &(edge_overlays.1).0,
+            &(edge_overlays.1).1,
         );
-    }
-    if let Some(inserted) = overlay_inserts.get(&current) {
-        for &(target, type_id, _schema_reversed) in inserted {
-            if seen.insert((target, type_id)) {
-                neighbors.push((target, type_id));
+        for edge in source.neighbors(current) {
+            if seen.insert((edge.target, edge.type_id, edge.relationship_id)) {
+                neighbors.push(edge);
             }
         }
     }
     neighbors
-}
-
-pub(crate) fn push_base_neighbors(
-    edge_store: &edge_store::EdgeStore,
-    current: u32,
-    overlay_deletes: &OverlayDeletes,
-    seen: &mut HashSet<(u32, u8)>,
-    neighbors: &mut Vec<(u32, u8)>,
-) {
-    let (targets, type_ids) = edge_store.neighbors(current);
-    let deleted = overlay_deletes.get(&current);
-    for (&target, &type_id) in targets.iter().zip(type_ids.iter()) {
-        if deleted.is_some_and(|deleted| deleted.contains(&(target, type_id))) {
-            continue;
-        }
-        if seen.insert((target, type_id)) {
-            neighbors.push((target, type_id));
-        }
-    }
 }
 
 #[allow(dead_code, reason = "compatibility entry point")]
@@ -543,16 +528,18 @@ pub(crate) fn aggregate_indexed_paths(
     specs: Vec<AggregateSpec>,
 ) -> safety::GraphResult<serde_json::Value> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    aggregate_indexed_paths_governed(paths, specs, &governor)
+    let (tables, _edges, _filter_columns) = crate::catalog::read_catalog()?;
+    aggregate_indexed_paths_governed(paths, specs, &governor, &tables)
 }
 
 fn aggregate_indexed_paths_governed(
     paths: &[IndexedPath],
     specs: Vec<AggregateSpec>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<serde_json::Value> {
     let coordinates_by_idx = indexed_path_coordinates(paths)?;
-    let hydrated = hydrate_indexed_path_nodes_governed(&coordinates_by_idx, governor)?;
+    let hydrated = hydrate_indexed_path_nodes_governed(&coordinates_by_idx, governor, tables)?;
     let mut accumulators = specs
         .iter()
         .map(|spec| (spec.alias.clone(), AggregateAccumulator::default()))
@@ -596,12 +583,14 @@ fn hydrate_indexed_path_nodes(
     coordinates_by_idx: &HashMap<u32, types::PathCoordinate>,
 ) -> safety::GraphResult<HashMap<u32, HashMap<String, pgrx::JsonB>>> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    hydrate_indexed_path_nodes_governed(coordinates_by_idx, &governor)
+    let (tables, _edges, _filter_columns) = crate::catalog::read_catalog()?;
+    hydrate_indexed_path_nodes_governed(coordinates_by_idx, &governor, &tables)
 }
 
 fn hydrate_indexed_path_nodes_governed(
     coordinates_by_idx: &HashMap<u32, types::PathCoordinate>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<HashMap<u32, HashMap<String, pgrx::JsonB>>> {
     let unique_rows = coordinates_by_idx
         .values()
@@ -613,7 +602,8 @@ fn hydrate_indexed_path_nodes_governed(
             edge_path: Vec::new(),
         })
         .collect::<Vec<_>>();
-    hydrate_nodes_governed(&unique_rows, governor).map(group_hydrated_nodes_by_table)
+    hydrate_nodes_governed_with_tables(&unique_rows, governor, tables)
+        .map(group_hydrated_nodes_by_table)
 }
 
 fn group_hydrated_nodes_by_table(
@@ -668,13 +658,18 @@ pub(crate) fn execute_aggregation_traversal(
     limit: usize,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    execute_aggregation_traversal_governed(request, limit, &governor)
+    let (tables, _edges, filter_columns) = crate::catalog::read_catalog()?;
+    let visibility = crate::visibility::VisibilityScope::Unrestricted;
+    let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+    execute_aggregation_traversal_governed(request, limit, &context, &tables, &filter_columns)
 }
 
 fn execute_aggregation_traversal_governed(
     request: &AggregationTraversalRequest,
     limit: usize,
-    governor: &crate::resource::ResourceGovernor,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    tables: &[crate::builder::RegisteredTable],
+    filter_columns: &[crate::builder::RegisteredFilterColumn],
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let node_tables = request
         .node_tables
@@ -706,7 +701,8 @@ fn execute_aggregation_traversal_governed(
             max_nodes: crate::config::MAX_NODES.get(),
             max_frontier: crate::config::MAX_FRONTIER.get(),
         };
-        let mut start_rows = execute_traverse_rows_governed(&traverse_request, governor)?;
+        let mut start_rows =
+            execute_traverse_rows_in_context(&traverse_request, context, tables, filter_columns)?;
         rows.append(&mut start_rows);
     }
     Ok(rows)
@@ -717,12 +713,14 @@ pub(crate) fn expand_rows_to_parent_path(
     rows: Vec<TraverseRow>,
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
-    expand_rows_to_parent_path_governed(rows, &governor)
+    let (tables, _edges, _filter_columns) = crate::catalog::read_catalog()?;
+    expand_rows_to_parent_path_governed(rows, &governor, &tables)
 }
 
 fn expand_rows_to_parent_path_governed(
     rows: Vec<TraverseRow>,
     governor: &crate::resource::ResourceGovernor,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<TraverseRow>> {
     let output_count = rows.iter().try_fold(0usize, |count, row| {
         let width = row.5 .0.as_array().map_or(0, Vec::len);
@@ -768,7 +766,7 @@ fn expand_rows_to_parent_path_governed(
             let node = if let Some(node) = by_coord.get(&(table_oid, id)) {
                 Some(pgrx::JsonB(node.0.clone()))
             } else {
-                hydrate_node_governed(table_oid, id, governor)?
+                hydrate_node_governed_with_tables(table_oid, id, governor, tables)?
             };
             expanded.push((
                 row.0,
@@ -952,6 +950,23 @@ pub(crate) fn parse_aggregate_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edge_store::{IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder};
+    use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentKind};
+    use crate::resource::{
+        ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceGovernor, ResourceLimits,
+        RowCount, WorkUnits,
+    };
+    use std::time::Duration;
+
+    fn aggregation_governor() -> ResourceGovernor {
+        ResourceGovernor::new(ResourceLimits::bounded(
+            MemoryBudget::new(ByteCount::from_bytes(1_024 * 1_024)),
+            DiskBudget::UNLIMITED,
+            RowCount::UNLIMITED,
+            WorkUnits::new(10_000),
+            ElapsedBudget::new(Duration::from_secs(1)),
+        ))
+    }
 
     #[test]
     fn parse_aggregate_scope_accepts_supported_values() {
@@ -1029,5 +1044,208 @@ mod tests {
                 .map(|node| &node.0),
             Some(&serde_json::json!({ "id": "a", "table": 20 }))
         );
+    }
+
+    #[test]
+    fn exact_path_enumeration_rejects_hidden_relationships_before_recursing() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(100, "A".to_string());
+        engine.node_store.add_node(100, "B".to_string());
+        let mut builder = SortedEdgeStoreBuilder::new(2, false);
+        builder
+            .try_push_identified(IdentifiedRawEdge {
+                edge: RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                relationship_id: 9,
+            })
+            .unwrap();
+        engine.edge_store = builder.finish();
+        engine.reverse_edge_store = engine.edge_store.reversed();
+        engine.built = true;
+        let request = AggregationTraversalRequest {
+            starts: Vec::new(),
+            direction: types::TraversalDirection::Out,
+            min_depth: 0,
+            max_depth: 1,
+            edge_types: None,
+            node_tables: None,
+        };
+        let mut hidden_relationships = roaring::RoaringBitmap::new();
+        hidden_relationships.insert(9);
+        let mut relationship_rls_edge_types = roaring::RoaringBitmap::new();
+        relationship_rls_edge_types.insert(1);
+        let visibility = crate::visibility::VisibilityScope::enforced(
+            roaring::RoaringBitmap::new(),
+            hidden_relationships,
+            relationship_rls_edge_types,
+        );
+        let governor = aggregation_governor();
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let overlays = aggregation_edge_overlay(&engine);
+        let mut path = vec![0];
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+
+        enumerate_all_paths_dfs(
+            &engine, &request, 0, 0, &mut path, &mut paths, &mut seen, 10, None, None, &overlays,
+            None, &context,
+        )
+        .unwrap();
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(&*paths[0], &[0]);
+    }
+
+    #[test]
+    fn exact_path_enumeration_uses_committed_layered_relationship_identities() {
+        let mut engine = Engine::new();
+        for id in ["A", "deleted-base", "inserted-segment"] {
+            engine.node_store.add_node(100, id.to_string());
+        }
+        let mut builder = SortedEdgeStoreBuilder::new(3, false);
+        builder
+            .try_push_identified(IdentifiedRawEdge {
+                edge: RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: None,
+                    schema_reversed: false,
+                },
+                relationship_id: 4,
+            })
+            .unwrap();
+        engine.edge_store = builder.finish();
+        engine.reverse_edge_store = engine.edge_store.reversed();
+        engine.built = true;
+        let mut segment = DeltaSegment::new(
+            SegmentKind::Edge,
+            0,
+            types::TraversalDirection::Out,
+            0,
+            3,
+            1,
+        )
+        .unwrap();
+        segment.edge_deletes.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(4),
+        });
+        segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 2,
+            type_id: 1,
+            schema_reversed: false,
+            relationship_id: Some(9),
+        });
+        let layered = LayeredNeighbors::new(&engine.edge_store, vec![segment]);
+        let request = AggregationTraversalRequest {
+            starts: Vec::new(),
+            direction: types::TraversalDirection::Out,
+            min_depth: 0,
+            max_depth: 1,
+            edge_types: None,
+            node_tables: None,
+        };
+        let mut hidden_relationships = roaring::RoaringBitmap::new();
+        hidden_relationships.insert(9);
+        let mut relationship_rls_edge_types = roaring::RoaringBitmap::new();
+        relationship_rls_edge_types.insert(1);
+        let visibility = crate::visibility::VisibilityScope::enforced(
+            roaring::RoaringBitmap::new(),
+            hidden_relationships,
+            relationship_rls_edge_types,
+        );
+        let governor = aggregation_governor();
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let overlays = aggregation_edge_overlay(&engine);
+        let visible_neighbors = aggregation_neighbors(
+            &engine,
+            0,
+            types::TraversalDirection::Out,
+            &overlays,
+            Some(&layered),
+        );
+        assert_eq!(visible_neighbors.len(), 1);
+        assert_eq!(visible_neighbors[0].target, 2);
+        assert_eq!(visible_neighbors[0].relationship_id, Some(9));
+        let mut path = vec![0];
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+
+        enumerate_all_paths_dfs(
+            &engine,
+            &request,
+            0,
+            0,
+            &mut path,
+            &mut paths,
+            &mut seen,
+            10,
+            None,
+            None,
+            &overlays,
+            Some(&layered),
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(&*paths[0], &[0]);
+    }
+
+    #[test]
+    fn exact_path_enumeration_rejects_transaction_deleted_targets() {
+        crate::projection::tx_delta::clear_for_test();
+        let mut engine = Engine::new();
+        engine.node_store.add_node(100, "A".to_string());
+        engine.node_store.add_node(100, "deleted".to_string());
+        engine.edge_store = crate::edge_store::EdgeStore::from_edges(
+            2,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+                schema_reversed: false,
+            }],
+            false,
+        );
+        engine.reverse_edge_store = engine.edge_store.reversed();
+        engine.built = true;
+        crate::projection::tx_delta::record_deleted_node(1).unwrap();
+        let request = AggregationTraversalRequest {
+            starts: Vec::new(),
+            direction: types::TraversalDirection::Out,
+            min_depth: 0,
+            max_depth: 1,
+            edge_types: None,
+            node_tables: None,
+        };
+        let governor = aggregation_governor();
+        let visibility = crate::visibility::VisibilityScope::Unrestricted;
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let overlays = aggregation_edge_overlay(&engine);
+        let mut path = vec![0];
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+
+        enumerate_all_paths_dfs(
+            &engine, &request, 0, 0, &mut path, &mut paths, &mut seen, 10, None, None, &overlays,
+            None, &context,
+        )
+        .unwrap();
+        crate::projection::tx_delta::clear_for_test();
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(&*paths[0], &[0]);
     }
 }

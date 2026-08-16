@@ -707,7 +707,20 @@ pub(crate) fn graph_quota_usage(
 
 /// Enforces runtime loaded-graph quota policies before loading a graph.
 pub(crate) fn enforce_loaded_graph_quota(projected_loaded_graphs: i64) -> safety::GraphResult<()> {
-    let owner_oid = current_user_oid()?;
+    Spi::get_one_with_args::<bool>(
+        "SELECT graph._enforce_loaded_graph_quota_for_current_role($1)",
+        &[projected_loaded_graphs.into()],
+    )
+    .map_err(|err| graph_catalog_error("enforce loaded graph quota", err))?
+    .filter(|allowed| *allowed)
+    .map(|_| ())
+    .ok_or_else(|| safety::GraphError::Internal("loaded graph quota check returned null".into()))
+}
+
+pub(crate) fn enforce_loaded_graph_quota_for_role(
+    projected_loaded_graphs: i64,
+    owner_oid: pgrx::pg_sys::Oid,
+) -> safety::GraphResult<()> {
     enforce_quota_limit(
         "cluster",
         "",
@@ -878,6 +891,51 @@ pub(crate) fn selected_or_default_graph_metadata_via_definer() -> safety::GraphR
                 reason: format!("selected graph metadata is missing or not visible: {err}"),
             })?;
         metadata_from_first_row(rows, "selected graph definer helper returned no rows")
+    })
+}
+
+/// Enforce a selected-graph privilege through the pinned catalog mediator.
+pub(crate) fn require_selected_graph_privilege_via_definer(
+    privilege: GraphPrivilege,
+) -> safety::GraphResult<()> {
+    let allowed = Spi::get_one_with_args::<bool>(
+        "SELECT graph._require_selected_graph_privilege_for_current_role($1)",
+        &[privilege.as_str().into()],
+    )
+    .map_err(|err| safety::GraphError::AclDenied {
+        table: format!("selected graph ({err})"),
+    })?
+    .unwrap_or(false);
+    if allowed {
+        Ok(())
+    } else {
+        Err(safety::GraphError::AclDenied {
+            table: "selected graph".to_string(),
+        })
+    }
+}
+
+/// Resolve a named graph only when the outer caller has the requested grant.
+pub(crate) fn graph_id_with_privilege_via_definer(
+    graph_name: &str,
+    tenant: Option<&str>,
+    namespace: Option<&str>,
+    privilege: GraphPrivilege,
+) -> safety::GraphResult<String> {
+    Spi::get_one_with_args::<String>(
+        "SELECT graph._graph_id_for_current_role_with_privilege($1, $2, $3, $4)",
+        &[
+            graph_name.into(),
+            tenant.map(str::to_string).into(),
+            namespace.map(str::to_string).into(),
+            privilege.as_str().into(),
+        ],
+    )
+    .map_err(|err| safety::GraphError::AclDenied {
+        table: format!("graph {graph_name} ({err})"),
+    })?
+    .ok_or_else(|| safety::GraphError::AclDenied {
+        table: format!("graph {graph_name}"),
     })
 }
 

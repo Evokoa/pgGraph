@@ -86,6 +86,7 @@ fn build_persisted_and_publish_engine(
             request.projection_mode,
             memory_plan,
         )?;
+        crate::runtime_state::inject_replacement_fault("source_scan")?;
         let direct = crate::persisted_build_pipeline::build_persisted_candidate(
             request.tables,
             request.edges,
@@ -101,6 +102,7 @@ fn build_persisted_and_publish_engine(
                 error,
             )
         })?;
+        crate::runtime_state::inject_replacement_fault("candidate_write")?;
         let manifest =
             crate::projection::recovery::prepare_generation_specific_rebuilt_base_manifest(
                 request.publication_plan,
@@ -131,6 +133,7 @@ fn build_persisted_and_publish_engine(
                 reason: "direct persisted candidate counts changed during validation".into(),
             });
         }
+        crate::runtime_state::inject_replacement_fault("validation")?;
         loaded.set_catalog_fingerprint(request.source_boundary.catalog_fingerprint());
         loaded.record_applied_sync_id(request.source_boundary.sync_watermark());
         loaded.set_projection_mode(request.projection_mode);
@@ -413,7 +416,7 @@ fn execute_build_inner(
         validate_projection_mode_enabled(projection_mode)?;
     }
 
-    acquire_build_lock()?;
+    acquire_build_lock_for_replacement()?;
     match catalog_lock_gate {
         CatalogLockGate::Caller => crate::build_snapshot::lock_catalog()?,
         CatalogLockGate::DiscoveryRegistration => {
@@ -451,6 +454,12 @@ fn execute_build_inner(
             plan_rebuilt_base_publication(&persistence::projection_manifest_root(&path))
         })
         .transpose()?;
+
+    let replacement_recovery_marked = begin_replacement_recovery(
+        &graph.graph_id,
+        memory_plan.unload_existing,
+        publication_plan.as_ref(),
+    )?;
 
     report_progress(progress, build_phase, build_message)?;
     apply_build_memory_plan(memory_plan)?;
@@ -507,6 +516,9 @@ fn execute_build_inner(
         *e.borrow_mut() = new_engine;
     });
     crate::runtime_state::mark_loaded_graph(&graph);
+    if replacement_recovery_marked {
+        crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
+    }
 
     Ok(BuildExecutionResult {
         nodes_loaded,
@@ -560,7 +572,7 @@ pub(crate) fn execute_maintenance_rebuild_with_progress(
 pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumExecutionResult> {
     let start = std::time::Instant::now();
     let graph = selected_or_default_graph_metadata()?;
-    acquire_build_lock()?;
+    acquire_build_lock_for_replacement()?;
     crate::build_snapshot::lock_catalog()?;
     let sync_mode = current_sync_mode()?;
 
@@ -596,7 +608,6 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     )?;
     check_build_acls_result(&tables, &edges)?;
     let memory_plan = guard_build_memory_headroom(&tables, &edges)?;
-    apply_build_memory_plan(memory_plan)?;
     let should_persist = force_persist || config::PERSIST_ON_BUILD.get();
     let publication_plan = should_persist
         .then(|| {
@@ -604,6 +615,12 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
             plan_rebuilt_base_publication(&persistence::projection_manifest_root(&path))
         })
         .transpose()?;
+    let replacement_recovery_marked = begin_replacement_recovery(
+        &graph.graph_id,
+        memory_plan.unload_existing,
+        publication_plan.as_ref(),
+    )?;
+    apply_build_memory_plan(memory_plan)?;
 
     let tombstones_removed = nodes_before - active_before;
     let new_engine = with_build_resources(memory_plan, |governor| {
@@ -658,6 +675,10 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     ENGINE.with(|e| {
         *e.borrow_mut() = new_engine;
     });
+    crate::runtime_state::mark_loaded_graph(&graph);
+    if replacement_recovery_marked {
+        crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
+    }
 
     Ok(VacuumExecutionResult {
         nodes_before,
@@ -682,6 +703,36 @@ pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
         Ok(())
     } else {
         Err(safety::GraphError::BuildLocked)
+    }
+}
+
+/// Acquire writer ownership and reconcile any candidate left by an earlier
+/// PostgreSQL error before a new publisher reserves its generation.
+pub(crate) fn acquire_build_lock_for_replacement() -> safety::GraphResult<()> {
+    acquire_build_lock()?;
+    let graph = selected_or_default_graph_metadata()?;
+    crate::sql_facade::reconcile_interrupted_replacement(&graph)
+}
+
+/// Acquire writer ownership for the repair entry point.
+///
+/// Repair must still run when ordinary serving validation reports a corrupt or
+/// incompatible active artifact. Other reconciliation failures remain fatal.
+pub(crate) fn acquire_build_lock_for_repair() -> safety::GraphResult<()> {
+    acquire_build_lock()?;
+    let graph = selected_or_default_graph_metadata()?;
+    match crate::sql_facade::reconcile_interrupted_replacement(&graph) {
+        Ok(()) => Ok(()),
+        Err(safety::GraphError::CorruptFile { .. })
+        | Err(safety::GraphError::IncompatibleVersion(_)) => {
+            // The repair planner owns recovery from damaged serving metadata.
+            // Do not let a stale marker make its nested rebuild re-enter normal
+            // serving reconciliation. Generation planning still sees and
+            // safely skips any candidate that could not be proven removable.
+            crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
+            Ok(())
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -942,6 +993,72 @@ fn apply_build_memory_plan(plan: BuildMemoryPlan) -> safety::GraphResult<()> {
     Ok(())
 }
 
+fn validate_low_memory_replacement(
+    unload_existing: bool,
+    persisted_available: bool,
+) -> safety::GraphResult<()> {
+    if unload_existing && !persisted_available {
+        return Err(safety::GraphError::InvalidFilter {
+            reason: "graph.low_memory_build cannot evict the current backend graph because no recoverable persisted generation exists; build once with graph.persist_on_build = on, disable low-memory build, or raise graph.memory_limit_mb".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn begin_replacement_recovery(
+    graph_id: &str,
+    unload_existing: bool,
+    publication_plan: Option<&crate::projection::recovery::RebuiltBasePublicationPlan>,
+) -> safety::GraphResult<bool> {
+    if !unload_existing && publication_plan.is_none() {
+        return Ok(false);
+    }
+
+    let path = persistence::graph_file_path_for_uncreated(graph_id)?;
+    let persisted_available = if unload_existing {
+        let root = persistence::projection_manifest_root(&path);
+        matches!(
+            crate::projection::recovery::plan_projection_recovery_for_artifact(
+                &root,
+                Some(&path),
+            )?
+            .action,
+            crate::projection::recovery::ProjectionRecoveryAction::Healthy
+        )
+    } else {
+        false
+    };
+    validate_low_memory_replacement(unload_existing, persisted_available)?;
+    let expected_generation = match publication_plan {
+        Some(plan) => match plan.expected_current_generation() {
+            Some(generation) => Some(generation),
+            None => {
+                let store = crate::projection::manifest::ProjectionManifestStore::new(
+                    persistence::projection_manifest_root(&path),
+                );
+                match store.current_generation_id_for_recovery() {
+                    Ok(generation) => generation,
+                    Err(
+                        safety::GraphError::CorruptFile { .. }
+                        | safety::GraphError::IncompatibleVersion(_),
+                    ) => None,
+                    Err(err) => return Err(err),
+                }
+            }
+        },
+        None => crate::projection::manifest::ProjectionManifestStore::new(
+            persistence::projection_manifest_root(&path),
+        )
+        .current_generation_id()?,
+    };
+    crate::runtime_state::mark_replacement_in_progress(
+        graph_id,
+        expected_generation,
+        publication_plan.map(|plan| plan.generation_id()),
+    );
+    Ok(true)
+}
+
 fn conservative_build_peak_bytes(
     final_graph_bytes: crate::resource::ByteCount,
 ) -> safety::GraphResult<crate::resource::ByteCount> {
@@ -986,42 +1103,6 @@ pub(crate) fn check_build_acls_result(
         acl::check_table_acl(from_oid)?;
         acl::check_table_acl(to_oid)?;
     }
-    check_build_rls_boundary(tables, edges)?;
-    Ok(())
-}
-
-/// Refuses to build over a table with row-level security enabled unless
-/// `graph.allow_rls_tables = on`. Topology-read functions return
-/// coordinates and adjacency from the builder-scoped graph artifact under
-/// table-level ACL only; they do not evaluate row-level security per
-/// calling role. See
-/// `docs/user_guide/administration-and-security.mdx#row-level-security-and-topology-reads`.
-fn check_build_rls_boundary(
-    tables: &[builder::RegisteredTable],
-    edges: &[builder::RegisteredEdge],
-) -> safety::GraphResult<()> {
-    if crate::config::ALLOW_RLS_TABLES.get() {
-        return Ok(());
-    }
-    for table in tables {
-        if acl::table_has_row_security(table.table_oid)? {
-            return Err(safety::GraphError::RlsTopologyBoundary {
-                table: table.table_name.clone(),
-            });
-        }
-    }
-    for edge in edges {
-        if acl::table_has_row_security(edge.from_table_oid)? {
-            return Err(safety::GraphError::RlsTopologyBoundary {
-                table: edge.from_table.clone(),
-            });
-        }
-        if acl::table_has_row_security(edge.to_table_oid)? {
-            return Err(safety::GraphError::RlsTopologyBoundary {
-                table: edge.to_table.clone(),
-            });
-        }
-    }
     Ok(())
 }
 
@@ -1029,8 +1110,8 @@ fn check_build_rls_boundary(
 mod tests {
     use super::{
         build_lock_query_for_graph, cleanup_failed_candidate, conservative_build_peak_bytes,
-        contextualize_internal_candidate_error, parse_graph_uuid, validate_projection_mode_enabled,
-        BUILD_LOCK_CLASS_ID,
+        contextualize_internal_candidate_error, parse_graph_uuid, validate_low_memory_replacement,
+        validate_projection_mode_enabled, BUILD_LOCK_CLASS_ID,
     };
     use crate::config::ProjectionMode;
     use crate::projection::manifest::{ProjectionManifest, ProjectionManifestStore};
@@ -1106,6 +1187,24 @@ mod tests {
     }
 
     #[test]
+    fn failed_publication_cleanup_removes_unpublished_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "pggraph-build-cleanup-unpublished-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("test root creates");
+        let plan = plan_generation_specific_rebuilt_base(&root).expect("publication plans");
+        fs::write(plan.candidate_base_path(), b"candidate").expect("candidate writes");
+
+        cleanup_failed_candidate(&plan);
+
+        assert!(!plan.candidate_base_path().exists());
+        fs::remove_dir_all(&root).expect("test root removes");
+    }
+
+    #[test]
     fn persisted_candidate_context_preserves_typed_resource_errors() {
         let error = crate::safety::GraphError::Oom {
             used_mb: 7,
@@ -1120,6 +1219,27 @@ mod tests {
                 limit_mb: 8
             }
         ));
+    }
+
+    #[test]
+    fn low_memory_replacement_requires_a_recoverable_artifact() {
+        let error = validate_low_memory_replacement(true, false)
+            .expect_err("unrecoverable eviction must fail closed");
+        assert!(matches!(
+            error,
+            crate::safety::GraphError::InvalidFilter { .. }
+        ));
+        assert!(error
+            .to_string()
+            .contains("no recoverable persisted generation exists"));
+    }
+
+    #[test]
+    fn low_memory_replacement_accepts_a_persisted_generation() {
+        validate_low_memory_replacement(true, true)
+            .expect("persisted generation makes eviction recoverable");
+        validate_low_memory_replacement(false, false)
+            .expect("non-evicting replacement does not require persistence");
     }
 
     #[test]

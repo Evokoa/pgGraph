@@ -16,9 +16,10 @@ use crate::node_store::NodeStore;
 #[cfg(test)]
 use crate::projection::neighbors::CsrNeighbors;
 use crate::projection::neighbors::{NeighborSource, WeightedNeighborSource};
-use crate::resource::{ResourceGovernor, ResourceLimitError, ResourcePhase, WorkUnits};
+use crate::resource::{ResourceGovernor, ResourcePhase, WorkUnits};
 use crate::safety::GraphResult;
 use crate::types::{PathStep, TableOid, WeightedPathStep};
+use crate::visibility::{QueryExecutionContext, VisibilityScope};
 
 #[derive(Debug, Clone, Copy)]
 struct ParentStep {
@@ -86,6 +87,8 @@ pub(crate) fn shortest_path_with_neighbors(
             edge_type_registry,
         },
         None,
+        &VisibilityScope::Unrestricted,
+        None,
     )
 }
 
@@ -98,14 +101,33 @@ pub(crate) struct UnweightedPathRequest<'a> {
 }
 
 /// Find an unweighted path while enforcing expansion and elapsed-time limits.
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn shortest_path_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl NeighborSource,
     request: UnweightedPathRequest<'_>,
     governor: &ResourceGovernor,
 ) -> GraphResult<Option<Vec<PathStep>>> {
-    let budget = PathWorkBudget::new(governor);
-    let result = shortest_path_with_neighbors_inner(node_store, neighbors, request, Some(&budget));
+    let visibility = VisibilityScope::Unrestricted;
+    let context = QueryExecutionContext::new(governor, &visibility);
+    shortest_path_with_neighbors_governed_with_context(node_store, neighbors, request, &context)
+}
+
+pub(crate) fn shortest_path_with_neighbors_governed_with_context(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+    request: UnweightedPathRequest<'_>,
+    context: &QueryExecutionContext<'_>,
+) -> GraphResult<Option<Vec<PathStep>>> {
+    let budget = PathWorkBudget::new(context.governor);
+    let result = shortest_path_with_neighbors_inner(
+        node_store,
+        neighbors,
+        request,
+        Some(&budget),
+        context.visibility,
+        context.edge_type_filter,
+    );
     budget.finish(result)
 }
 
@@ -114,7 +136,14 @@ fn shortest_path_with_neighbors_inner(
     neighbors: &impl NeighborSource,
     request: UnweightedPathRequest<'_>,
     budget: Option<&PathWorkBudget<'_>>,
+    visibility: &VisibilityScope,
+    edge_type_filter: Option<&RoaringBitmap>,
 ) -> Option<Vec<PathStep>> {
+    let admission = PathAdmission {
+        budget,
+        visibility,
+        edge_type_filter,
+    };
     let UnweightedPathRequest {
         source,
         target,
@@ -122,7 +151,11 @@ fn shortest_path_with_neighbors_inner(
         has_unidirectional_edges,
         edge_type_registry,
     } = request;
-    if source >= node_store.node_count() || target >= node_store.node_count() {
+    if source >= node_store.node_count()
+        || target >= node_store.node_count()
+        || !visibility.allows_node(source)
+        || !visibility.allows_node(target)
+    {
         return None;
     }
 
@@ -143,7 +176,7 @@ fn shortest_path_with_neighbors_inner(
             target,
             max_depth,
             edge_type_registry,
-            budget,
+            admission,
         );
     }
 
@@ -154,8 +187,15 @@ fn shortest_path_with_neighbors_inner(
         target,
         max_depth,
         edge_type_registry,
-        budget,
+        admission,
     )
+}
+
+#[derive(Clone, Copy)]
+struct PathAdmission<'a, 'governor> {
+    budget: Option<&'a PathWorkBudget<'governor>>,
+    visibility: &'a VisibilityScope,
+    edge_type_filter: Option<&'a RoaringBitmap>,
 }
 
 fn bidirectional_bfs(
@@ -165,7 +205,7 @@ fn bidirectional_bfs(
     target: u32,
     max_depth: i32,
     edge_type_registry: &[String],
-    budget: Option<&PathWorkBudget<'_>>,
+    admission: PathAdmission<'_, '_>,
 ) -> Option<Vec<PathStep>> {
     let mut fwd_visited = RoaringBitmap::new();
     let mut bwd_visited = RoaringBitmap::new();
@@ -217,10 +257,11 @@ fn bidirectional_bfs(
                     break;
                 };
                 for edge in neighbors.neighbors(current) {
-                    if !consume_path_work(budget) {
+                    if !consume_path_work(admission.budget) {
                         return None;
                     }
-                    if !node_store.is_active(edge.target)
+                    if !path_candidate_visible(admission, edge)
+                        || !node_store.is_active(edge.target)
                         || crate::projection::tx_delta::node_deleted(edge.target)
                     {
                         continue;
@@ -261,10 +302,11 @@ fn bidirectional_bfs(
                     break;
                 };
                 for edge in neighbors.neighbors(current) {
-                    if !consume_path_work(budget) {
+                    if !consume_path_work(admission.budget) {
                         return None;
                     }
-                    if !node_store.is_active(edge.target)
+                    if !path_candidate_visible(admission, edge)
+                        || !node_store.is_active(edge.target)
                         || crate::projection::tx_delta::node_deleted(edge.target)
                     {
                         continue;
@@ -377,7 +419,7 @@ fn single_direction_bfs(
     target: u32,
     max_depth: i32,
     edge_type_registry: &[String],
-    budget: Option<&PathWorkBudget<'_>>,
+    admission: PathAdmission<'_, '_>,
 ) -> Option<Vec<PathStep>> {
     let mut visited = RoaringBitmap::new();
     let mut parent = HashMap::new();
@@ -400,10 +442,11 @@ fn single_direction_bfs(
         }
 
         for edge in neighbors.neighbors(current) {
-            if !consume_path_work(budget) {
+            if !consume_path_work(admission.budget) {
                 return None;
             }
-            if visited.contains(edge.target)
+            if !path_candidate_visible(admission, edge)
+                || visited.contains(edge.target)
                 || !node_store.is_active(edge.target)
                 || crate::projection::tx_delta::node_deleted(edge.target)
             {
@@ -498,10 +541,13 @@ pub(crate) fn weighted_shortest_path_with_neighbors(
         target,
         edge_type_registry,
         None,
+        &VisibilityScope::Unrestricted,
+        None,
     )
 }
 
 /// Run Dijkstra while enforcing expansion and elapsed-time limits.
+#[allow(dead_code, reason = "compatibility entry point")]
 pub(crate) fn weighted_shortest_path_with_neighbors_governed(
     node_store: &NodeStore,
     neighbors: &impl WeightedNeighborSource,
@@ -510,7 +556,27 @@ pub(crate) fn weighted_shortest_path_with_neighbors_governed(
     edge_type_registry: &[String],
     governor: &ResourceGovernor,
 ) -> GraphResult<Option<Vec<WeightedPathStep>>> {
-    let budget = PathWorkBudget::new(governor);
+    let visibility = VisibilityScope::Unrestricted;
+    let context = QueryExecutionContext::new(governor, &visibility);
+    weighted_shortest_path_with_neighbors_governed_with_context(
+        node_store,
+        neighbors,
+        source,
+        target,
+        edge_type_registry,
+        &context,
+    )
+}
+
+pub(crate) fn weighted_shortest_path_with_neighbors_governed_with_context(
+    node_store: &NodeStore,
+    neighbors: &impl WeightedNeighborSource,
+    source: u32,
+    target: u32,
+    edge_type_registry: &[String],
+    context: &QueryExecutionContext<'_>,
+) -> GraphResult<Option<Vec<WeightedPathStep>>> {
+    let budget = PathWorkBudget::new(context.governor);
     let result = weighted_shortest_path_with_neighbors_inner(
         node_store,
         neighbors,
@@ -518,10 +584,16 @@ pub(crate) fn weighted_shortest_path_with_neighbors_governed(
         target,
         edge_type_registry,
         Some(&budget),
+        context.visibility,
+        context.edge_type_filter,
     );
     budget.finish(result)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "weighted path execution keeps stores, coordinates, admission, and output labels explicit"
+)]
 fn weighted_shortest_path_with_neighbors_inner(
     node_store: &NodeStore,
     neighbors: &impl WeightedNeighborSource,
@@ -529,8 +601,14 @@ fn weighted_shortest_path_with_neighbors_inner(
     target: u32,
     edge_type_registry: &[String],
     budget: Option<&PathWorkBudget<'_>>,
+    visibility: &VisibilityScope,
+    edge_type_filter: Option<&RoaringBitmap>,
 ) -> Option<Vec<WeightedPathStep>> {
-    if source >= node_store.node_count() || target >= node_store.node_count() {
+    if source >= node_store.node_count()
+        || target >= node_store.node_count()
+        || !visibility.allows_node(source)
+        || !visibility.allows_node(target)
+    {
         return None;
     }
 
@@ -567,6 +645,11 @@ fn weighted_shortest_path_with_neighbors_inner(
                 return None;
             }
             let neighbor = edge.target;
+            if !path_weighted_candidate_visible(budget, visibility, edge)
+                || edge_type_filter.is_some_and(|filter| !filter.contains(u32::from(edge.type_id)))
+            {
+                continue;
+            }
             let edge_weight = edge.weight;
             let edge_cost = u64::from(edge_weight);
             let Some(new_cost) = cost.checked_add(edge_cost) else {
@@ -640,21 +723,68 @@ fn weighted_shortest_path_with_neighbors_inner(
 
 struct PathWorkBudget<'a> {
     governor: &'a ResourceGovernor,
-    error: std::cell::Cell<Option<ResourceLimitError>>,
+    error: std::cell::RefCell<Option<crate::safety::GraphError>>,
 }
 
 impl<'a> PathWorkBudget<'a> {
     fn new(governor: &'a ResourceGovernor) -> Self {
         Self {
             governor,
-            error: std::cell::Cell::new(None),
+            error: std::cell::RefCell::new(None),
         }
     }
 
     fn finish<T>(&self, result: Option<T>) -> GraphResult<Option<T>> {
-        match self.error.get() {
-            Some(error) => Err(crate::safety::resource_limit_error(error)),
+        match self.error.borrow_mut().take() {
+            Some(error) => Err(error),
             None => Ok(result),
+        }
+    }
+
+    fn record_error(&self, error: crate::safety::GraphError) {
+        let mut slot = self.error.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(error);
+        }
+    }
+}
+
+fn path_candidate_visible(
+    admission: PathAdmission<'_, '_>,
+    edge: crate::projection::neighbors::Neighbor,
+) -> bool {
+    match admission
+        .visibility
+        .allows_relationship(edge.type_id, edge.relationship_id)
+    {
+        Ok(allowed) => {
+            allowed
+                && admission.visibility.allows_node(edge.target)
+                && admission
+                    .edge_type_filter
+                    .is_none_or(|filter| filter.contains(u32::from(edge.type_id)))
+        }
+        Err(error) => {
+            if let Some(budget) = admission.budget {
+                budget.record_error(error);
+            }
+            false
+        }
+    }
+}
+
+fn path_weighted_candidate_visible(
+    budget: Option<&PathWorkBudget<'_>>,
+    visibility: &VisibilityScope,
+    edge: crate::projection::neighbors::WeightedNeighbor,
+) -> bool {
+    match visibility.allows_relationship(edge.type_id, edge.relationship_id) {
+        Ok(allowed) => allowed && visibility.allows_node(edge.target),
+        Err(error) => {
+            if let Some(budget) = budget {
+                budget.record_error(error);
+            }
+            false
         }
     }
 }
@@ -667,13 +797,13 @@ fn consume_path_work(budget: Option<&PathWorkBudget<'_>>) -> bool {
         .governor
         .consume_work(ResourcePhase::QueryPaths, WorkUnits::new(1))
     {
-        budget.error.set(Some(error));
+        budget.record_error(crate::safety::resource_limit_error(error));
         return false;
     }
     if budget.governor.work_used().as_u64().is_multiple_of(1_024) {
         crate::resource::check_postgres_interrupts();
         if let Err(error) = budget.governor.check_elapsed(ResourcePhase::QueryPaths) {
-            budget.error.set(Some(error));
+            budget.record_error(crate::safety::resource_limit_error(error));
             return false;
         }
     }
@@ -686,7 +816,7 @@ mod tests {
     //! edge semantics and unreachable-node invariants.
 
     use super::*;
-    use crate::edge_store::RawEdge;
+    use crate::edge_store::{IdentifiedRawEdge, RawEdge, SortedEdgeStoreBuilder};
     use crate::resource::{
         ByteCount, DiskBudget, ElapsedBudget, MemoryBudget, ResourceLimits, RowCount, WorkUnits,
     };
@@ -700,6 +830,265 @@ mod tests {
             WorkUnits::new(work_limit),
             ElapsedBudget::new(Duration::from_secs(1)),
         ))
+    }
+
+    fn identified_store(
+        node_count: u32,
+        has_weights: bool,
+        edges: Vec<(RawEdge, u32)>,
+    ) -> EdgeStore {
+        let mut edges = edges;
+        edges.sort_unstable_by_key(|(edge, _)| {
+            (edge.source, edge.target, edge.type_id, edge.schema_reversed)
+        });
+        let mut builder = SortedEdgeStoreBuilder::new(node_count, has_weights);
+        for (edge, relationship_id) in edges {
+            builder
+                .try_push_identified(IdentifiedRawEdge {
+                    edge,
+                    relationship_id,
+                })
+                .unwrap();
+        }
+        builder.finish()
+    }
+
+    #[test]
+    fn hidden_shorter_path_yields_longer_visible_path() {
+        let mut nodes = NodeStore::new();
+        for idx in 0..5 {
+            nodes.add_node(100, format!("N-{idx}"));
+        }
+        let raw = |source, target| RawEdge {
+            source,
+            target,
+            type_id: 1,
+            weight: None,
+            schema_reversed: false,
+        };
+        let edges = identified_store(
+            5,
+            false,
+            vec![
+                (raw(0, 1), 10),
+                (raw(1, 3), 11),
+                (raw(0, 2), 12),
+                (raw(2, 4), 13),
+                (raw(4, 3), 14),
+            ],
+        );
+        let mut hidden_nodes = RoaringBitmap::new();
+        hidden_nodes.insert(1);
+        let visibility =
+            VisibilityScope::enforced(hidden_nodes, RoaringBitmap::new(), RoaringBitmap::new());
+        let governor = path_governor(1_000);
+        let context = QueryExecutionContext::new(&governor, &visibility);
+        let result = shortest_path_with_neighbors_governed_with_context(
+            &nodes,
+            &CsrNeighbors::new(&edges),
+            UnweightedPathRequest {
+                source: 0,
+                target: 3,
+                max_depth: 5,
+                has_unidirectional_edges: true,
+                edge_type_registry: &["REL".to_string(), "REL".to_string()],
+            },
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["N-0", "N-2", "N-4", "N-3"]
+        );
+    }
+
+    #[test]
+    fn bidirectional_meeting_ignores_hidden_candidate() {
+        let mut nodes = NodeStore::new();
+        for idx in 0..5 {
+            nodes.add_node(100, format!("N-{idx}"));
+        }
+        let raw = |source, target| RawEdge {
+            source,
+            target,
+            type_id: 1,
+            weight: None,
+            schema_reversed: false,
+        };
+        let pairs = [(0, 1), (1, 3), (0, 2), (2, 4), (4, 3)];
+        let mut identified = Vec::new();
+        for (relationship_id, (source, target)) in (20_u32..).zip(pairs) {
+            identified.push((raw(source, target), relationship_id));
+            identified.push((raw(target, source), relationship_id));
+        }
+        let edges = identified_store(5, false, identified);
+        let mut hidden_nodes = RoaringBitmap::new();
+        hidden_nodes.insert(1);
+        let visibility =
+            VisibilityScope::enforced(hidden_nodes, RoaringBitmap::new(), RoaringBitmap::new());
+        let governor = path_governor(1_000);
+        let context = QueryExecutionContext::new(&governor, &visibility);
+        let result = shortest_path_with_neighbors_governed_with_context(
+            &nodes,
+            &CsrNeighbors::new(&edges),
+            UnweightedPathRequest {
+                source: 0,
+                target: 3,
+                max_depth: 5,
+                has_unidirectional_edges: false,
+                edge_type_registry: &["REL".to_string(), "REL".to_string()],
+            },
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["N-0", "N-2", "N-4", "N-3"]
+        );
+    }
+
+    #[test]
+    fn hidden_cheaper_relationship_yields_visible_weighted_path() {
+        let mut nodes = NodeStore::new();
+        for idx in 0..3 {
+            nodes.add_node(100, format!("N-{idx}"));
+        }
+        let weighted = |source, target, weight| RawEdge {
+            source,
+            target,
+            type_id: 1,
+            weight: Some(weight),
+            schema_reversed: false,
+        };
+        let edges = identified_store(
+            3,
+            true,
+            vec![
+                (weighted(0, 1, 1), 10),
+                (weighted(0, 2, 2), 11),
+                (weighted(2, 1, 2), 12),
+            ],
+        );
+        let mut hidden_relationships = RoaringBitmap::new();
+        hidden_relationships.insert(10);
+        let mut rls_edge_types = RoaringBitmap::new();
+        rls_edge_types.insert(1);
+        let visibility =
+            VisibilityScope::enforced(RoaringBitmap::new(), hidden_relationships, rls_edge_types);
+        let governor = path_governor(1_000);
+        let context = QueryExecutionContext::new(&governor, &visibility);
+        let result = weighted_shortest_path_with_neighbors_governed_with_context(
+            &nodes,
+            &edges,
+            0,
+            1,
+            &["REL".to_string(), "REL".to_string()],
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["N-0", "N-2", "N-1"]
+        );
+        assert_eq!(result.last().unwrap().total_cost, 4);
+    }
+
+    #[test]
+    fn edge_type_filters_select_longer_unweighted_and_weighted_paths() {
+        let mut nodes = NodeStore::new();
+        for idx in 0..4 {
+            nodes.add_node(100, format!("N-{idx}"));
+        }
+        let edge = |source, target, type_id, weight| RawEdge {
+            source,
+            target,
+            type_id,
+            weight: Some(weight),
+            schema_reversed: false,
+        };
+        let edges = identified_store(
+            4,
+            true,
+            vec![
+                (edge(0, 3, 1, 1), 10),
+                (edge(0, 1, 2, 2), 11),
+                (edge(1, 2, 2, 2), 12),
+                (edge(2, 3, 2, 2), 13),
+            ],
+        );
+        let mut only_long = RoaringBitmap::new();
+        only_long.insert(2);
+        let governor = path_governor(1_000);
+        let visibility = VisibilityScope::Unrestricted;
+        let context =
+            QueryExecutionContext::with_edge_type_filter(&governor, &visibility, Some(&only_long));
+        let registry = ["".to_string(), "direct".to_string(), "long".to_string()];
+
+        let unweighted = shortest_path_with_neighbors_governed_with_context(
+            &nodes,
+            &CsrNeighbors::new(&edges),
+            UnweightedPathRequest {
+                source: 0,
+                target: 3,
+                max_depth: 5,
+                has_unidirectional_edges: true,
+                edge_type_registry: &registry,
+            },
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+        let weighted = weighted_shortest_path_with_neighbors_governed_with_context(
+            &nodes, &edges, 0, 3, &registry, &context,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            unweighted
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["N-0", "N-1", "N-2", "N-3"]
+        );
+        assert_eq!(
+            weighted
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["N-0", "N-1", "N-2", "N-3"]
+        );
+        assert_eq!(weighted.last().unwrap().total_cost, 6);
+
+        let empty = RoaringBitmap::new();
+        let empty_context =
+            QueryExecutionContext::with_edge_type_filter(&governor, &visibility, Some(&empty));
+        assert!(shortest_path_with_neighbors_governed_with_context(
+            &nodes,
+            &CsrNeighbors::new(&edges),
+            UnweightedPathRequest {
+                source: 0,
+                target: 3,
+                max_depth: 5,
+                has_unidirectional_edges: true,
+                edge_type_registry: &registry,
+            },
+            &empty_context,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]

@@ -277,6 +277,22 @@ impl LayeredSnapshot {
                     }),
             )
     }
+
+    /// Conservative per-node upper bound for durable non-base neighbors.
+    pub(crate) fn additional_neighbor_upper_bound(&self, direction: TraversalDirection) -> usize {
+        fn inserted(map: &HashMap<u32, DurableEdges>) -> usize {
+            map.values().fold(0usize, |total, edges| {
+                total.saturating_add(edges.inserts.len())
+            })
+        }
+        let outgoing = inserted(&self.base_chunk_out).saturating_add(inserted(&self.durable_out));
+        let incoming = inserted(&self.base_chunk_in).saturating_add(inserted(&self.durable_in));
+        match direction {
+            TraversalDirection::Out => outgoing,
+            TraversalDirection::In => incoming,
+            TraversalDirection::Any => outgoing.saturating_add(incoming),
+        }
+    }
 }
 
 /// Source of decoded durable segments for a layered projection snapshot.

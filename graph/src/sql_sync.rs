@@ -27,6 +27,20 @@ use pgrx::prelude::*;
 use std::collections::{HashMap, HashSet};
 use xxhash_rust::xxh3::xxh3_64;
 
+#[cfg(not(test))]
+thread_local! {
+    static PENDING_SYNC_ROW_PROBE: std::cell::RefCell<Option<PendingSyncRowProbe>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(not(test))]
+struct PendingSyncRowProbe {
+    caller_oid: pgrx::pg_sys::Oid,
+    graph_id: String,
+    applied_sync_id: i64,
+    applicable_table_oids: Vec<i32>,
+}
+
 pub(crate) fn current_sync_mode() -> safety::GraphResult<config::SyncMode> {
     match config::parsed_sync_mode() {
         Some(config::SyncMode::Wal) => Err(safety::GraphError::InvalidFilter {
@@ -151,16 +165,119 @@ pub(crate) fn disabled_graph_trigger_count() -> safety::GraphResult<i32> {
 }
 
 pub(crate) fn pending_sync_rows(applied_sync_id: i64) -> safety::GraphResult<i64> {
-    Spi::get_one_with_args::<i64>(
-        "SELECT graph._pending_sync_rows_for_current_role($1)",
-        &[applied_sync_id.into()],
+    let graph = selected_or_default_graph_metadata_via_definer()?;
+    let (tables, edges, _filters) = crate::catalog::read_catalog_for_graph(&graph.graph_id)?;
+    let applicable_table_oids = applicable_table_oids_from_catalog(&tables, &edges);
+    pending_sync_rows_for_query_state(applied_sync_id, &graph.graph_id, &applicable_table_oids)
+}
+
+#[cfg(not(test))]
+pub(crate) fn pending_sync_rows_for_query_state(
+    applied_sync_id: i64,
+    graph_id: &str,
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<i64> {
+    #[cfg(feature = "development")]
+    crate::sql_facade::record_query_start_pending_probe();
+    let caller_oid = crate::catalog::current_role_oid()?;
+    with_pending_sync_row_probe(
+        PendingSyncRowProbe {
+            caller_oid,
+            graph_id: graph_id.to_string(),
+            applied_sync_id,
+            applicable_table_oids: applicable_table_oids.to_vec(),
+        },
+        || Spi::get_one::<i64>("SELECT graph._pending_sync_rows_for_current_role()"),
     )
     .map_err(|e| safety::GraphError::Internal(format!("sync status check failed: {}", e)))?
     .ok_or_else(|| safety::GraphError::Internal("pending sync row count was null".to_string()))
 }
 
-pub(crate) fn pending_sync_rows_direct(applied_sync_id: i64) -> safety::GraphResult<i64> {
-    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+#[cfg(not(test))]
+fn with_pending_sync_row_probe<R, F>(pending: PendingSyncRowProbe, operation: F) -> R
+where
+    F: FnOnce() -> R + std::panic::UnwindSafe,
+{
+    PENDING_SYNC_ROW_PROBE.with(|slot| {
+        slot.replace(Some(pending));
+    });
+    pgrx::pg_sys::PgTryBuilder::new(operation)
+        .finally(|| {
+            PENDING_SYNC_ROW_PROBE.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        })
+        .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn pending_sync_rows_for_query_state(
+    applied_sync_id: i64,
+    _graph_id: &str,
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<i64> {
+    pending_sync_rows_direct(applied_sync_id, applicable_table_oids)
+}
+
+#[cfg(not(test))]
+pub(crate) fn take_pending_sync_row_probe(
+) -> safety::GraphResult<(pgrx::pg_sys::Oid, String, i64, Vec<i32>)> {
+    PENDING_SYNC_ROW_PROBE
+        .with(|slot| slot.borrow_mut().take())
+        .map(|pending| {
+            (
+                pending.caller_oid,
+                pending.graph_id,
+                pending.applied_sync_id,
+                pending.applicable_table_oids,
+            )
+        })
+        .ok_or_else(|| safety::GraphError::AclDenied {
+            table: "internal pending-sync mediator".to_string(),
+        })
+}
+
+#[cfg(all(not(test), feature = "development"))]
+pub(crate) fn test_pending_sync_row_probe_error_after_arming() -> bool {
+    let caller_oid = crate::catalog::current_role_oid().unwrap_or_else(|err| err.report());
+    let graph = selected_or_default_graph_metadata_via_definer().unwrap_or_else(|err| err.report());
+    let (tables, edges, _filters) =
+        crate::catalog::read_catalog_for_graph(&graph.graph_id).unwrap_or_else(|err| err.report());
+    let applicable_table_oids = applicable_table_oids_from_catalog(&tables, &edges);
+    pgrx::pg_sys::PgTryBuilder::new(|| {
+        with_pending_sync_row_probe(
+            PendingSyncRowProbe {
+                caller_oid,
+                graph_id: graph.graph_id,
+                applied_sync_id: 0,
+                applicable_table_oids,
+            },
+            || {
+                pgrx::ereport!(
+                    ERROR,
+                    pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                    "injected pending sync row probe cancellation"
+                );
+            },
+        );
+        true
+    })
+    .catch_when(pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |_| false)
+    .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn take_pending_sync_row_probe(
+) -> safety::GraphResult<(pgrx::pg_sys::Oid, String, i64, Vec<i32>)> {
+    Err(safety::GraphError::AclDenied {
+        table: "internal pending-sync mediator".to_string(),
+    })
+}
+
+pub(crate) fn pending_sync_rows_direct(
+    applied_sync_id: i64,
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<i64> {
     if applicable_table_oids.is_empty() {
         return Ok(0);
     }
@@ -183,6 +300,25 @@ pub(crate) fn pending_sync_rows_direct(applied_sync_id: i64) -> safety::GraphRes
     .map_err(|e| safety::GraphError::Internal(format!("sync status check failed: {}", e)))
 }
 
+pub(crate) fn applicable_table_oids_from_catalog(
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+) -> Vec<i32> {
+    let mut table_oids = tables
+        .iter()
+        .map(|table| table.table_oid)
+        .chain(
+            edges
+                .iter()
+                .flat_map(|edge| [edge.from_table_oid, edge.to_table_oid]),
+        )
+        .filter_map(|oid| i32::try_from(oid).ok())
+        .collect::<Vec<_>>();
+    table_oids.sort_unstable();
+    table_oids.dedup();
+    table_oids
+}
+
 pub(crate) fn max_sync_log_id() -> safety::GraphResult<i64> {
     Spi::get_one::<i64>("SELECT graph._max_sync_log_id_for_current_role()")
         .map_err(|e| safety::GraphError::Internal(format!("sync checkpoint read failed: {}", e)))?
@@ -191,6 +327,41 @@ pub(crate) fn max_sync_log_id() -> safety::GraphResult<i64> {
 
 pub(crate) fn max_sync_log_id_direct() -> safety::GraphResult<i64> {
     let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    max_sync_log_id_direct_for_oids(&applicable_table_oids)
+}
+
+#[cfg(not(test))]
+pub(crate) fn max_sync_log_id_for_query_state(
+    graph_id: &str,
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<i64> {
+    #[cfg(feature = "development")]
+    crate::sql_facade::record_query_start_pending_probe();
+    let caller_oid = crate::catalog::current_role_oid()?;
+    with_pending_sync_row_probe(
+        PendingSyncRowProbe {
+            caller_oid,
+            graph_id: graph_id.to_string(),
+            applied_sync_id: 0,
+            applicable_table_oids: applicable_table_oids.to_vec(),
+        },
+        || Spi::get_one::<i64>("SELECT graph._max_sync_log_id_for_query_state()"),
+    )
+    .map_err(|err| safety::GraphError::Internal(format!("sync checkpoint read failed: {err}")))?
+    .ok_or_else(|| safety::GraphError::Internal("max sync log id was null".to_string()))
+}
+
+#[cfg(test)]
+pub(crate) fn max_sync_log_id_for_query_state(
+    _graph_id: &str,
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<i64> {
+    max_sync_log_id_direct_for_oids(applicable_table_oids)
+}
+
+pub(crate) fn max_sync_log_id_direct_for_oids(
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<i64> {
     if applicable_table_oids.is_empty() {
         return Ok(0);
     }
@@ -205,7 +376,7 @@ pub(crate) fn max_sync_log_id_direct() -> safety::GraphResult<i64> {
                 )
              END",
             None,
-            &[applicable_table_oids.into()],
+            &[applicable_table_oids.to_vec().into()],
         )?;
         Ok::<_, pgrx::spi::SpiError>(result.first().get::<i64>(1)?.unwrap_or(0))
     })
@@ -226,6 +397,11 @@ pub(crate) struct ProjectionIngestStats {
     pub(crate) segments_published: i64,
     pub(crate) sync_watermark: i64,
     apply_stats: SyncApplyStats,
+}
+
+struct ProjectionIngestOutcome {
+    stats: ProjectionIngestStats,
+    query_replay: Option<SyncReplayContext>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,9 +563,49 @@ pub(crate) struct SyncReplayContext {
     edge_source_node_oids: HashMap<u64, u32>,
 }
 
+struct QuerySyncState {
+    graph: crate::catalog::GraphMetadata,
+    replay: SyncReplayContext,
+    catalog_fingerprint: u64,
+    catalog_memory_bound: crate::resource::ByteCount,
+    applicable_table_oids: Vec<i32>,
+}
+
+impl QuerySyncState {
+    fn from_query_start(
+        graph: &crate::catalog::GraphMetadata,
+        tables: &[builder::RegisteredTable],
+        edges: &[builder::RegisteredEdge],
+        filters: &[builder::RegisteredFilterColumn],
+        catalog_fingerprint: u64,
+        applicable_table_oids: &[i32],
+        catalog_memory_bound: crate::resource::ByteCount,
+    ) -> safety::GraphResult<Self> {
+        Ok(Self {
+            graph: graph.clone(),
+            replay: SyncReplayContext::from_catalog(
+                tables.to_vec(),
+                edges.to_vec(),
+                filters.to_vec(),
+            )?,
+            catalog_fingerprint,
+            catalog_memory_bound,
+            applicable_table_oids: applicable_table_oids.to_vec(),
+        })
+    }
+}
+
 impl SyncReplayContext {
     fn load() -> safety::GraphResult<Self> {
         let (tables, edges, filters) = read_catalog()?;
+        Self::from_catalog(tables, edges, filters)
+    }
+
+    fn from_catalog(
+        tables: Vec<builder::RegisteredTable>,
+        edges: Vec<builder::RegisteredEdge>,
+        filters: Vec<builder::RegisteredFilterColumn>,
+    ) -> safety::GraphResult<Self> {
         let mut table_oids = HashMap::new();
 
         for table in &tables {
@@ -490,7 +706,7 @@ fn required_sync_string(value: Option<String>, column: &str) -> safety::GraphRes
 }
 
 pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
-    ensure_engine_loaded_for_apply_sync()?;
+    ensure_engine_loaded_for_apply_sync(None)?;
     let target_sync_id = max_sync_log_id()?;
     apply_sync_to_high_watermark(target_sync_id)
 }
@@ -498,17 +714,75 @@ pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
 pub(crate) fn apply_sync_to_high_watermark(
     target_sync_id: i64,
 ) -> safety::GraphResult<SyncApplyStats> {
-    ensure_engine_loaded_for_apply_sync()?;
+    apply_sync_to_high_watermark_with_state(target_sync_id, None)
+}
+
+pub(crate) fn apply_sync_to_high_watermark_for_query(
+    target_sync_id: i64,
+    graph: &crate::catalog::GraphMetadata,
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    filters: &[builder::RegisteredFilterColumn],
+    catalog_fingerprint: u64,
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<SyncApplyStats> {
+    let catalog_memory_bound = sync_context_memory_upper_bound_from_rows(tables, edges, filters)?;
+    let governor = ENGINE.with(|engine| engine.borrow().query_resource_governor())?;
+    let _catalog_clone_lease = governor
+        .reserve_memory(
+            crate::resource::ResourcePhase::SyncIngest,
+            catalog_memory_bound,
+        )
+        .map_err(crate::safety::resource_limit_error)?;
+    let query_sync = QuerySyncState::from_query_start(
+        graph,
+        tables,
+        edges,
+        filters,
+        catalog_fingerprint,
+        applicable_table_oids,
+        catalog_memory_bound,
+    )?;
+    apply_sync_to_high_watermark_with_state(target_sync_id, Some(query_sync))
+}
+
+fn apply_sync_to_high_watermark_with_state(
+    target_sync_id: i64,
+    mut query_sync: Option<QuerySyncState>,
+) -> safety::GraphResult<SyncApplyStats> {
+    ensure_engine_loaded_for_apply_sync(query_sync.as_ref())?;
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
     ensure_sync_replay_not_pruned(applied_sync_id)?;
-    if should_apply_sync_via_durable_projection() {
-        return apply_sync_via_durable_projection(target_sync_id);
+    if should_apply_sync_via_durable_projection(
+        query_sync
+            .as_ref()
+            .map(|state| state.graph.graph_id.as_str()),
+    ) {
+        return apply_sync_via_durable_projection(target_sync_id, query_sync);
     }
-    let mut stats = apply_sync_until(Some(target_sync_id), config::sync_batch_size())?;
+    let mut stats = match query_sync.as_mut() {
+        Some(state) => apply_sync_until_with_context(
+            Some(target_sync_id),
+            config::sync_batch_size(),
+            &mut state.replay,
+        )?,
+        None => apply_sync_until(Some(target_sync_id), config::sync_batch_size())?,
+    };
 
-    apply_legacy_sync_buffer(&mut stats)?;
+    match query_sync.as_mut() {
+        Some(state) => apply_legacy_sync_buffer_with_context(&mut stats, &mut state.replay)?,
+        None => apply_legacy_sync_buffer(&mut stats)?,
+    }
 
-    let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;
+    let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
+    let pending = match query_sync.as_ref() {
+        Some(state) => pending_sync_rows_for_query_state(
+            applied_sync_id,
+            &state.graph.graph_id,
+            &state.applicable_table_oids,
+        )?,
+        None => pending_sync_rows(applied_sync_id)?,
+    };
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
         eng.record_pending_sync_rows(pending);
@@ -517,8 +791,13 @@ pub(crate) fn apply_sync_to_high_watermark(
     Ok(stats)
 }
 
-fn ensure_engine_loaded_for_apply_sync() -> safety::GraphResult<()> {
-    let graph = selected_or_default_graph_metadata()?;
+fn ensure_engine_loaded_for_apply_sync(
+    query_sync: Option<&QuerySyncState>,
+) -> safety::GraphResult<()> {
+    let graph = match query_sync {
+        Some(state) => state.graph.clone(),
+        None => selected_or_default_graph_metadata()?,
+    };
     if ENGINE.with(|e| e.borrow().built)
         && crate::runtime_state::selected_graph_matches_loaded_slot(&graph.graph_id)
     {
@@ -526,17 +805,25 @@ fn ensure_engine_loaded_for_apply_sync() -> safety::GraphResult<()> {
         return Ok(());
     }
 
-    let graph_path = graph_file_path()?;
+    let graph_path = crate::persistence::graph_file_path_for(&graph.graph_id)?;
     if !persisted_graph_exists(&graph_path)? {
         return Err(safety::GraphError::NotBuilt);
     }
 
     let loaded = load_graph_file(&graph_path)?;
-    install_loaded_engine_for_selected_graph(&graph, loaded)
+    install_loaded_engine_for_selected_graph(
+        &graph,
+        loaded,
+        query_sync.map(|state| state.catalog_fingerprint),
+    )
 }
 
-fn should_apply_sync_via_durable_projection() -> bool {
-    let graph_path = match graph_file_path() {
+fn should_apply_sync_via_durable_projection(graph_id: Option<&str>) -> bool {
+    let graph_path = match graph_id {
+        Some(graph_id) => crate::persistence::graph_file_path_for(graph_id),
+        None => graph_file_path(),
+    };
+    let graph_path = match graph_path {
         Ok(path) => path,
         Err(_) => return false,
     };
@@ -544,18 +831,39 @@ fn should_apply_sync_via_durable_projection() -> bool {
         && ENGINE.with(|e| e.borrow().projection_mode == config::ProjectionMode::MutableOverlay)
 }
 
-fn apply_sync_via_durable_projection(target_sync_id: i64) -> safety::GraphResult<SyncApplyStats> {
+fn apply_sync_via_durable_projection(
+    target_sync_id: i64,
+    query_sync: Option<QuerySyncState>,
+) -> safety::GraphResult<SyncApplyStats> {
+    let query_probe = query_sync.as_ref().map(|state| {
+        (
+            state.graph.graph_id.clone(),
+            state.applicable_table_oids.clone(),
+        )
+    });
     let batch_size = config::sync_batch_size().max(1);
-    let projection =
-        ingest_projection_until_internal(Some(batch_size as i64), None, Some(target_sync_id))?;
-    let mut stats = projection.apply_stats;
+    let mut projection = ingest_projection_until_internal(
+        Some(batch_size as i64),
+        None,
+        Some(target_sync_id),
+        query_sync,
+    )?;
+    let mut stats = projection.stats.apply_stats;
 
-    apply_legacy_sync_buffer(&mut stats)?;
+    match projection.query_replay.as_mut() {
+        Some(context) => apply_legacy_sync_buffer_with_context(&mut stats, context)?,
+        None => apply_legacy_sync_buffer(&mut stats)?,
+    }
 
-    let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;
+    let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
+    let pending = match query_probe.as_ref() {
+        Some((graph_id, applicable_table_oids)) => {
+            pending_sync_rows_for_query_state(applied_sync_id, graph_id, applicable_table_oids)?
+        }
+        None => pending_sync_rows(applied_sync_id)?,
+    };
     ENGINE.with(|e| {
-        let mut eng = e.borrow_mut();
-        eng.record_pending_sync_rows(pending);
+        e.borrow_mut().record_pending_sync_rows(pending);
     });
 
     Ok(stats)
@@ -577,8 +885,11 @@ fn sync_apply_stats_from_entries(entries: &[SyncLogEntry]) -> SyncApplyStats {
 fn install_loaded_engine_for_selected_graph(
     graph: &crate::catalog::GraphMetadata,
     mut loaded: engine::Engine,
+    query_catalog_fingerprint: Option<u64>,
 ) -> safety::GraphResult<()> {
-    if let Ok((tables, edges, filters)) = read_catalog() {
+    if let Some(catalog_fingerprint) = query_catalog_fingerprint {
+        loaded.set_catalog_fingerprint(catalog_fingerprint);
+    } else if let Ok((tables, edges, filters)) = read_catalog() {
         loaded.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filters));
     }
     ENGINE.with(|engine| {
@@ -592,20 +903,26 @@ pub(crate) fn ingest_projection_internal(
     max_rows: Option<i64>,
     max_bytes: Option<i64>,
 ) -> safety::GraphResult<ProjectionIngestStats> {
-    ingest_projection_until_internal(max_rows, max_bytes, None)
+    ingest_projection_until_internal(max_rows, max_bytes, None, None).map(|outcome| outcome.stats)
 }
 
 fn ingest_projection_until_internal(
     max_rows: Option<i64>,
     max_bytes: Option<i64>,
     target_sync_id: Option<i64>,
-) -> safety::GraphResult<ProjectionIngestStats> {
+    mut query_sync: Option<QuerySyncState>,
+) -> safety::GraphResult<ProjectionIngestOutcome> {
     // Serialize the read-current -> allocate -> publish sequence across PostgreSQL
     // backends. Sharing the build/vacuum lock also prevents artifact replacement
     // while a projection generation is being prepared.
-    crate::sql_build::acquire_build_lock()?;
-    let graph = selected_or_default_graph_metadata()?;
-    let graph_path = graph_file_path()?;
+    crate::sql_build::acquire_build_lock_for_replacement()?;
+    let graph = match query_sync.as_ref() {
+        Some(state) => state.graph.clone(),
+        None => selected_or_default_graph_metadata()?,
+    };
+    let query_catalog_fingerprint = query_sync.as_ref().map(|state| state.catalog_fingerprint);
+    let return_query_replay = query_sync.is_some();
+    let graph_path = crate::persistence::graph_file_path_for(&graph.graph_id)?;
     if !persisted_graph_exists(&graph_path)? {
         return Err(safety::GraphError::NotBuilt);
     }
@@ -614,13 +931,21 @@ fn ingest_projection_until_internal(
         .unwrap_or_else(|| config::sync_batch_size().max(1));
     let byte_limit = optional_nonnegative_usize(max_bytes, "max_bytes")?
         .unwrap_or_else(config::max_overlay_memory_bytes);
-    let resident_bytes = crate::ENGINE
+    let engine_resident_bytes = crate::ENGINE
         .with(|engine| {
             crate::resource::ByteCount::from_usize(engine.borrow().estimated_memory_used_bytes())
         })
         .ok_or_else(|| {
             safety::GraphError::Internal("engine residency does not fit u64".to_string())
         })?;
+    let query_start_bytes = query_sync
+        .as_ref()
+        .map_or(crate::resource::ByteCount::ZERO, |state| {
+            state.catalog_memory_bound
+        });
+    let resident_bytes = engine_resident_bytes
+        .checked_add(query_start_bytes)
+        .ok_or_else(sync_normalization_size_overflow)?;
     let row_budget = crate::resource::RowCount::new(u64::try_from(row_limit).map_err(|_| {
         safety::GraphError::Internal("sync row limit does not fit u64".to_string())
     })?);
@@ -631,7 +956,10 @@ fn ingest_projection_until_internal(
             crate::resource::ByteCount::from_bytes(SYNC_PREFLIGHT_FIXED_BYTES as u64),
         )
         .map_err(crate::safety::resource_limit_error)?;
-    let context_bytes = sync_context_memory_upper_bound(&graph.graph_id)?;
+    let context_bytes = match query_sync.as_ref() {
+        Some(state) => state.catalog_memory_bound,
+        None => sync_context_memory_upper_bound(&graph.graph_id)?,
+    };
     let manifest_bytes = sync_manifest_memory_upper_bound(&root)?;
     let context_and_manifest = context_bytes
         .checked_add(manifest_bytes)
@@ -650,9 +978,18 @@ fn ingest_projection_until_internal(
         Some(manifest) => manifest.sync_watermark,
         None => read_sync_checkpoint(&graph_path)?.unwrap_or(0),
     };
-    ensure_sync_writer_barrier_triggers()?;
+    ensure_sync_writer_barrier_triggers(
+        query_sync
+            .as_ref()
+            .map(|state| state.applicable_table_oids.as_slice()),
+    )?;
     acquire_sync_writer_barrier()?;
-    ensure_no_current_transaction_sync_rows(previous_watermark)?;
+    ensure_no_current_transaction_sync_rows(
+        previous_watermark,
+        query_sync
+            .as_ref()
+            .map(|state| state.applicable_table_oids.as_slice()),
+    )?;
     // Read only after taking the exclusive writer barrier. All earlier
     // shared-lock writers have either committed or caused barrier acquisition
     // to fail, and later writers cannot publish sync rows until this
@@ -663,6 +1000,9 @@ fn ingest_projection_until_internal(
         target_sync_id,
         byte_limit,
         &mut memory,
+        query_sync
+            .as_ref()
+            .map(|state| state.applicable_table_oids.as_slice()),
     )?;
     let live_bytes = crate::resource::ByteCount::from_usize(sync_entries_heap_bytes(&entries)?)
         .ok_or_else(|| safety::GraphError::Internal("sync workspace overflowed".to_string()))?;
@@ -681,15 +1021,22 @@ fn ingest_projection_until_internal(
         )
         .map_err(crate::safety::resource_limit_error)?;
     if entries.is_empty() {
-        return Ok(ProjectionIngestStats {
-            sync_watermark: previous_watermark,
-            ..ProjectionIngestStats::default()
+        return Ok(ProjectionIngestOutcome {
+            stats: ProjectionIngestStats {
+                sync_watermark: previous_watermark,
+                ..ProjectionIngestStats::default()
+            },
+            query_replay: query_sync.map(|state| state.replay),
         });
     }
-    ensure_engine_loaded_for_apply_sync()?;
+    ensure_engine_loaded_for_apply_sync(query_sync.as_ref())?;
+    let observed_max_sync_id = match target_sync_id {
+        Some(target_sync_id) => target_sync_id,
+        None => max_sync_log_id()?,
+    };
     let current_artifact_bytes = crate::projection::status::collect_projection_metadata_status(
         &root,
-        max_sync_log_id()?,
+        observed_max_sync_id,
         0,
         config::compaction_threshold(),
     )
@@ -707,7 +1054,10 @@ fn ingest_projection_until_internal(
     // Plan durable identities from the persisted base plus current manifest,
     // never from the serving engine. The latter can contain transaction-local
     // node slots that are intentionally absent from durable artifacts.
-    let mut context = SyncReplayContext::load()?;
+    let mut context = match query_sync.take() {
+        Some(state) => state.replay,
+        None => SyncReplayContext::load()?,
+    };
     let normalization_bytes = sync_normalization_memory_upper_bound(&entries, &context)?
         .checked_add(context_and_manifest)
         .ok_or_else(sync_normalization_size_overflow)?;
@@ -786,6 +1136,11 @@ fn ingest_projection_until_internal(
         .ok_or_else(|| {
             safety::GraphError::Internal("sync candidate residency overflowed".to_string())
         })?;
+    crate::runtime_state::mark_replacement_in_progress(
+        &graph.graph_id,
+        previous.as_ref().map(|manifest| manifest.generation_id),
+        crate::projection::ingest::candidate_generation_id(previous.as_ref(), &rows)?,
+    );
     let (result, validated_engine) = ingester.ingest_committed_rows_with_identities_governed(
         &rows,
         MutationBufferLimits::new(row_limit, byte_limit),
@@ -807,9 +1162,17 @@ fn ingest_projection_until_internal(
             )
         })?;
         validated_engine.record_applied_sync_id(stats.sync_watermark);
-        install_loaded_engine_for_selected_graph(&graph, validated_engine)?;
+        install_loaded_engine_for_selected_graph(
+            &graph,
+            validated_engine,
+            query_catalog_fingerprint,
+        )?;
     }
-    Ok(stats)
+    crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
+    Ok(ProjectionIngestOutcome {
+        stats,
+        query_replay: return_query_replay.then_some(context),
+    })
 }
 
 fn sync_entries_heap_bytes(entries: &[SyncLogEntry]) -> safety::GraphResult<usize> {
@@ -902,6 +1265,84 @@ fn sync_context_memory_upper_bound(
         safety::GraphError::Internal(format!("sync catalog resource preflight failed: {err}"))
     })?;
     sync_context_bound_from_counts(row_count, text_bytes)
+}
+
+fn sync_context_memory_upper_bound_from_rows(
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    filters: &[builder::RegisteredFilterColumn],
+) -> safety::GraphResult<crate::resource::ByteCount> {
+    let row_count = tables
+        .len()
+        .checked_add(edges.len())
+        .and_then(|count| count.checked_add(filters.len()))
+        .ok_or_else(sync_normalization_size_overflow)?;
+    let table_bytes = tables.iter().try_fold(0usize, |total, table| {
+        let id_bytes = checked_catalog_text_bytes(table.id_columns.columns().iter())?;
+        let property_bytes = checked_catalog_text_bytes(table.columns.iter())?;
+        let row_bytes = table
+            .table_name
+            .len()
+            .checked_add(id_bytes)
+            .and_then(|bytes| bytes.checked_add(property_bytes))
+            .and_then(|bytes| {
+                bytes.checked_add(table.tenant_column.as_ref().map_or(0, String::len))
+            })
+            .ok_or_else(sync_normalization_size_overflow)?;
+        total
+            .checked_add(row_bytes)
+            .ok_or_else(sync_normalization_size_overflow)
+    })?;
+    let edge_bytes = edges.iter().try_fold(0usize, |total, edge| {
+        let source_key_bytes =
+            checked_catalog_text_bytes(edge.source_key_columns.columns().iter())?;
+        let row_bytes = [
+            edge.from_table.len(),
+            edge.from_column.len(),
+            edge.to_table.len(),
+            edge.to_column.len(),
+            edge.label.len(),
+            edge.weight_column.as_ref().map_or(0, String::len),
+            edge.label_column.as_ref().map_or(0, String::len),
+            source_key_bytes,
+        ]
+        .into_iter()
+        .try_fold(0usize, |bytes, part| bytes.checked_add(part))
+        .ok_or_else(sync_normalization_size_overflow)?;
+        total
+            .checked_add(row_bytes)
+            .ok_or_else(sync_normalization_size_overflow)
+    })?;
+    let filter_bytes = filters.iter().try_fold(0usize, |total, filter| {
+        let row_bytes = filter
+            .table_name
+            .len()
+            .checked_add(filter.column_name.len())
+            .and_then(|bytes| bytes.checked_add(filter.column_type.len()))
+            .ok_or_else(sync_normalization_size_overflow)?;
+        total
+            .checked_add(row_bytes)
+            .ok_or_else(sync_normalization_size_overflow)
+    })?;
+    let text_bytes = table_bytes
+        .checked_add(edge_bytes)
+        .and_then(|bytes| bytes.checked_add(filter_bytes))
+        .and_then(|bytes| bytes.checked_add(row_count.saturating_mul(8)))
+        .ok_or_else(sync_normalization_size_overflow)?;
+    sync_context_bound_from_counts(
+        i64::try_from(row_count).map_err(|_| sync_normalization_size_overflow())?,
+        i64::try_from(text_bytes).map_err(|_| sync_normalization_size_overflow())?,
+    )
+}
+
+fn checked_catalog_text_bytes<'a>(
+    mut values: impl Iterator<Item = &'a String>,
+) -> safety::GraphResult<usize> {
+    values.try_fold(0usize, |bytes, value| {
+        bytes
+            .checked_add(value.len())
+            .ok_or_else(sync_normalization_size_overflow)
+    })
 }
 
 fn sync_context_bound_from_counts(
@@ -1093,19 +1534,34 @@ pub(crate) fn apply_sync_until(
     target_sync_id: Option<i64>,
     batch_size: usize,
 ) -> safety::GraphResult<SyncApplyStats> {
+    let mut context = SyncReplayContext::load()?;
+    apply_sync_until_with_context(target_sync_id, batch_size, &mut context)
+}
+
+fn apply_sync_until_with_context(
+    target_sync_id: Option<i64>,
+    batch_size: usize,
+    context: &mut SyncReplayContext,
+) -> safety::GraphResult<SyncApplyStats> {
     let batch_size = batch_size.max(1);
     let mut stats = SyncApplyStats::default();
-    let mut context = SyncReplayContext::load()?;
+    let applicable_table_oids = context.applicable_table_oids();
 
     loop {
         let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
-        let log_entries = read_sync_log_entries_after(applied_sync_id, batch_size, target_sync_id)?;
+        let log_entries = read_sync_log_entries_after_internal(
+            applied_sync_id,
+            batch_size,
+            target_sync_id,
+            None,
+            Some(&applicable_table_oids),
+        )?;
         if log_entries.is_empty() {
             break;
         }
-        guard_edge_buffer_capacity_for_sync(&context, &log_entries)?;
+        guard_edge_buffer_capacity_for_sync(context, &log_entries)?;
         for entry in log_entries {
-            apply_sync_log_entry_with_context(&entry, &mut stats, &mut context)?;
+            apply_sync_log_entry_with_context(&entry, &mut stats, context)?;
             ENGINE.with(|e| {
                 e.borrow_mut().record_applied_sync_id(entry.id);
             });
@@ -1157,8 +1613,13 @@ pub(crate) fn acquire_sync_writer_barrier() -> safety::GraphResult<()> {
     Ok(())
 }
 
-fn ensure_sync_writer_barrier_triggers() -> safety::GraphResult<()> {
-    let missing = sync_writer_barrier_trigger_gap_count()?;
+fn ensure_sync_writer_barrier_triggers(
+    applicable_table_oids: Option<&[i32]>,
+) -> safety::GraphResult<()> {
+    let missing = match applicable_table_oids {
+        Some(oids) => sync_writer_barrier_trigger_gap_count_for_oids(oids)?,
+        None => sync_writer_barrier_trigger_gap_count()?,
+    };
     if missing == 0 {
         return Ok(());
     }
@@ -1176,6 +1637,12 @@ pub(crate) fn sync_writer_barrier_triggers_current() -> safety::GraphResult<bool
 
 fn sync_writer_barrier_trigger_gap_count() -> safety::GraphResult<i64> {
     let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    sync_writer_barrier_trigger_gap_count_for_oids(&applicable_table_oids)
+}
+
+fn sync_writer_barrier_trigger_gap_count_for_oids(
+    applicable_table_oids: &[i32],
+) -> safety::GraphResult<i64> {
     if applicable_table_oids.is_empty() {
         return Ok(0);
     }
@@ -1209,7 +1676,7 @@ fn sync_writer_barrier_trigger_gap_count() -> safety::GraphResult<i64> {
                 HAVING count(DISTINCT trigger.tgname) = 4
                    AND bool_and(position($2 IN pg_get_functiondef(function.oid)) > 0)
           )",
-        &[applicable_table_oids.into(), expected_lock.into()],
+        &[applicable_table_oids.to_vec().into(), expected_lock.into()],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!(
@@ -1275,13 +1742,26 @@ pub(crate) fn acquire_sync_writer_barrier() -> safety::GraphResult<()> {
 }
 
 #[cfg(feature = "pg_test")]
-pub(crate) fn ensure_no_current_transaction_sync_rows(_after_id: i64) -> safety::GraphResult<()> {
+pub(crate) fn ensure_no_current_transaction_sync_rows(
+    _after_id: i64,
+    _applicable_table_oids: Option<&[i32]>,
+) -> safety::GraphResult<()> {
     Ok(())
 }
 
 #[cfg(not(feature = "pg_test"))]
-pub(crate) fn ensure_no_current_transaction_sync_rows(after_id: i64) -> safety::GraphResult<()> {
-    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+pub(crate) fn ensure_no_current_transaction_sync_rows(
+    after_id: i64,
+    applicable_table_oids: Option<&[i32]>,
+) -> safety::GraphResult<()> {
+    let loaded_oids;
+    let applicable_table_oids = match applicable_table_oids {
+        Some(oids) => oids,
+        None => {
+            loaded_oids = SyncReplayContext::load()?.applicable_table_oids();
+            &loaded_oids
+        }
+    };
     let has_current_rows = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (
              SELECT 1
@@ -1290,7 +1770,7 @@ pub(crate) fn ensure_no_current_transaction_sync_rows(after_id: i64) -> safety::
                AND table_oid::oid::integer = ANY($2::int4[])
                AND xid = txid_current()
          )",
-        &[after_id.into(), applicable_table_oids.into()],
+        &[after_id.into(), applicable_table_oids.to_vec().into()],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("current transaction sync check failed: {err}"))
@@ -1301,12 +1781,13 @@ pub(crate) fn ensure_no_current_transaction_sync_rows(after_id: i64) -> safety::
         .ok_or(safety::GraphError::BuildLocked)
 }
 
+#[cfg(feature = "pg_test")]
 pub(crate) fn read_sync_log_entries_after(
     applied_sync_id: i64,
     limit: usize,
     high_watermark: Option<i64>,
 ) -> safety::GraphResult<Vec<SyncLogEntry>> {
-    read_sync_log_entries_after_internal(applied_sync_id, limit, high_watermark, None)
+    read_sync_log_entries_after_internal(applied_sync_id, limit, high_watermark, None, None)
 }
 
 fn read_sync_log_entries_after_bounded(
@@ -1315,12 +1796,14 @@ fn read_sync_log_entries_after_bounded(
     high_watermark: Option<i64>,
     max_bytes: usize,
     memory: &mut crate::resource::ResourceLease<'_>,
+    applicable_table_oids: Option<&[i32]>,
 ) -> safety::GraphResult<Vec<SyncLogEntry>> {
     read_sync_log_entries_after_internal(
         applied_sync_id,
         limit,
         high_watermark,
         Some((max_bytes, memory)),
+        applicable_table_oids,
     )
 }
 
@@ -1329,11 +1812,19 @@ fn read_sync_log_entries_after_internal(
     limit: usize,
     high_watermark: Option<i64>,
     bounded: Option<(usize, &mut crate::resource::ResourceLease<'_>)>,
+    applicable_table_oids: Option<&[i32]>,
 ) -> safety::GraphResult<Vec<SyncLogEntry>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let applicable_table_oids = SyncReplayContext::load()?.applicable_table_oids();
+    let loaded_oids;
+    let applicable_table_oids = match applicable_table_oids {
+        Some(oids) => oids,
+        None => {
+            loaded_oids = SyncReplayContext::load()?.applicable_table_oids();
+            &loaded_oids
+        }
+    };
     if applicable_table_oids.is_empty() {
         return Ok(Vec::new());
     }
@@ -1343,11 +1834,11 @@ fn read_sync_log_entries_after_internal(
             applied_sync_id,
             limit,
             high_watermark,
-            &applicable_table_oids,
+            applicable_table_oids,
             max_bytes,
             memory,
         )?;
-        return read_sync_log_entries_by_ids(&ids, &applicable_table_oids);
+        return read_sync_log_entries_by_ids(&ids, applicable_table_oids);
     }
     Spi::connect(|client| {
         let rows = client
@@ -1455,7 +1946,7 @@ fn read_sync_log_entry_plan_after(
             &[
                 applied_sync_id.into(),
                 limit.into(),
-                applicable_table_oids.into(),
+                applicable_table_oids.to_vec().into(),
                 high_watermark.into(),
             ],
         );
@@ -3046,8 +3537,15 @@ fn row_u32_value(row: &serde_json::Value, column: &str) -> Option<safety::GraphR
 }
 
 pub(crate) fn apply_legacy_sync_buffer(stats: &mut SyncApplyStats) -> safety::GraphResult<()> {
-    let batch_size = config::sync_batch_size();
     let mut context = SyncReplayContext::load()?;
+    apply_legacy_sync_buffer_with_context(stats, &mut context)
+}
+
+fn apply_legacy_sync_buffer_with_context(
+    stats: &mut SyncApplyStats,
+    context: &mut SyncReplayContext,
+) -> safety::GraphResult<()> {
+    let batch_size = config::sync_batch_size();
     let max_legacy_id = max_legacy_sync_id()?;
     let mut after_id = 0;
 
@@ -3074,7 +3572,7 @@ pub(crate) fn apply_legacy_sync_buffer(stats: &mut SyncApplyStats) -> safety::Gr
                     old_row: None,
                     new_row: None,
                 };
-                apply_sync_log_entry_with_context(&entry, stats, &mut context)?;
+                apply_sync_log_entry_with_context(&entry, stats, context)?;
                 applied_ids.push(entry.id);
                 Ok::<_, safety::GraphError>(())
             })();
@@ -3234,14 +3732,28 @@ fn tenant_from_row(row: &serde_json::Value, tenant_column: &str) -> Option<Strin
     row_text_value(row, tenant_column)
 }
 
-pub(crate) fn resolve_tenant_scope(
+pub(crate) fn resolve_tenant_scope_for_query(
     explicit_tenant: Option<&str>,
+    graph: &crate::catalog::GraphMetadata,
+    tables: &[builder::RegisteredTable],
 ) -> safety::GraphResult<Option<String>> {
-    let graph_tenant = selected_or_default_graph_metadata_via_definer()
-        .ok()
-        .and_then(|graph| graph.tenant)
-        .map(|tenant| tenant.trim().to_string())
+    let graph_tenant = graph
+        .tenant
+        .as_deref()
+        .map(str::trim)
         .filter(|tenant| !tenant.is_empty());
+    resolve_tenant_scope_from_state(
+        explicit_tenant,
+        graph_tenant,
+        tables.iter().any(|table| table.tenant_column.is_some()),
+    )
+}
+
+fn resolve_tenant_scope_from_state(
+    explicit_tenant: Option<&str>,
+    graph_tenant: Option<&str>,
+    has_tenanted_tables: bool,
+) -> safety::GraphResult<Option<String>> {
     if let Some(tenant) = explicit_tenant
         .map(str::trim)
         .filter(|tenant| !tenant.is_empty())
@@ -3255,15 +3767,12 @@ pub(crate) fn resolve_tenant_scope(
         // tenant to come from the trusted session-setting path instead,
         // which only a deployment-controlled connection setup (not the
         // query text itself) can set.
-        if graph_tenant.is_none()
-            && config::ENFORCE_TENANT_SCOPE.get()
-            && graph_has_tenanted_tables()?
-        {
+        if graph_tenant.is_none() && config::ENFORCE_TENANT_SCOPE.get() && has_tenanted_tables {
             return Err(safety::GraphError::InvalidFilter {
                 reason: "explicit tenant arguments are not accepted for tenant_column-registered graphs while graph.enforce_tenant_scope is on; set the trusted session tenant via graph.tenant_setting instead of passing tenant as a query argument".to_string(),
             });
         }
-        ensure_tenant_matches_graph_scope(tenant, graph_tenant.as_deref())?;
+        ensure_tenant_matches_graph_scope(tenant, graph_tenant)?;
         return Ok(Some(tenant.to_string()));
     }
 
@@ -3281,16 +3790,16 @@ pub(crate) fn resolve_tenant_scope(
             safety::GraphError::Internal(format!("tenant session setting read failed: {}", e))
         })?;
         if !session_tenant.trim().is_empty() {
-            ensure_tenant_matches_graph_scope(session_tenant.trim(), graph_tenant.as_deref())?;
+            ensure_tenant_matches_graph_scope(session_tenant.trim(), graph_tenant)?;
             return Ok(Some(session_tenant));
         }
     }
 
     if let Some(graph_tenant) = graph_tenant {
-        return Ok(Some(graph_tenant));
+        return Ok(Some(graph_tenant.to_string()));
     }
 
-    if config::ENFORCE_TENANT_SCOPE.get() && graph_has_tenanted_tables()? {
+    if config::ENFORCE_TENANT_SCOPE.get() && has_tenanted_tables {
         return Err(safety::GraphError::InvalidFilter {
             reason: "tenant scope is required for registered tables with tenant_column; pass tenant or configure graph.tenant_setting".to_string(),
         });
@@ -3316,11 +3825,6 @@ fn ensure_tenant_matches_graph_scope(
     Ok(())
 }
 
-pub(crate) fn graph_has_tenanted_tables() -> safety::GraphResult<bool> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
-    Ok(tables.iter().any(|table| table.tenant_column.is_some()))
-}
-
 // ─── Sync-log retention ──────────────────────────────────────────────
 //
 // `graph._sync_log` durable rows are never pruned by any other path in this
@@ -3342,6 +3846,19 @@ pub(crate) fn graph_has_tenanted_tables() -> safety::GraphResult<bool> {
 /// need different staleness windows in the future.
 const SYNC_WATERMARK_HEARTBEAT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+#[cfg(not(test))]
+thread_local! {
+    static PENDING_SYNC_WATERMARK: std::cell::Cell<Option<PendingSyncWatermark>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct PendingSyncWatermark {
+    caller_oid: pgrx::pg_sys::Oid,
+    applied_sync_id: i64,
+}
+
 /// Prune is only worth recommending once the log has grown meaningfully
 /// past what has been safely applied everywhere; a handful of pending rows
 /// is normal steady-state, not something an operator needs to act on.
@@ -3352,7 +3869,86 @@ const SYNC_LOG_PRUNE_RECOMMENDATION_THRESHOLD_ROWS: i64 = 10_000;
 /// diagnostics (`graph.status()`, `graph.sync_health()`) or advances via
 /// sync replay; the heartbeat only needs to be current enough that
 /// `sync_log_retention_floor` does not treat this backend as gone.
+#[cfg(not(test))]
 pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::GraphResult<()> {
+    let caller_oid = crate::catalog::current_role_oid()?;
+    let result = with_pending_sync_watermark(
+        PendingSyncWatermark {
+            caller_oid,
+            applied_sync_id,
+        },
+        || Spi::get_one::<bool>("SELECT graph._record_sync_watermark_for_current_role()"),
+    )
+    .map_err(|err| {
+        safety::GraphError::Internal(format!("sync watermark heartbeat update failed: {err}"))
+    });
+    result?.filter(|recorded| *recorded).ok_or_else(|| {
+        safety::GraphError::Internal(
+            "sync watermark heartbeat mediator returned null or false".to_string(),
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn with_pending_sync_watermark<R, F>(pending: PendingSyncWatermark, operation: F) -> R
+where
+    F: FnOnce() -> R + std::panic::UnwindSafe,
+{
+    PENDING_SYNC_WATERMARK.with(|slot| slot.set(Some(pending)));
+    pgrx::pg_sys::PgTryBuilder::new(operation)
+        .finally(|| PENDING_SYNC_WATERMARK.with(|slot| slot.set(None)))
+        .execute()
+}
+
+#[cfg(not(test))]
+pub(crate) fn take_pending_sync_watermark() -> safety::GraphResult<(pgrx::pg_sys::Oid, i64)> {
+    PENDING_SYNC_WATERMARK
+        .with(std::cell::Cell::take)
+        .map(|pending| (pending.caller_oid, pending.applied_sync_id))
+        .ok_or_else(|| safety::GraphError::AclDenied {
+            table: "internal sync watermark mediator".to_string(),
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn take_pending_sync_watermark() -> safety::GraphResult<(pgrx::pg_sys::Oid, i64)> {
+    Err(safety::GraphError::AclDenied {
+        table: "internal sync watermark mediator".to_string(),
+    })
+}
+
+#[cfg(all(not(test), feature = "development"))]
+pub(crate) fn test_sync_watermark_error_after_arming() -> bool {
+    let caller_oid = crate::catalog::current_role_oid().unwrap_or_else(|err| err.report());
+    pgrx::pg_sys::PgTryBuilder::new(|| {
+        with_pending_sync_watermark(
+            PendingSyncWatermark {
+                caller_oid,
+                applied_sync_id: i64::MAX,
+            },
+            || {
+                pgrx::ereport!(
+                    ERROR,
+                    pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                    "injected sync watermark cancellation"
+                );
+            },
+        );
+        true
+    })
+    .catch_when(pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |_| false)
+    .execute()
+}
+
+#[cfg(test)]
+pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::GraphResult<()> {
+    record_sync_watermark_heartbeat_direct(applied_sync_id)
+}
+
+pub(crate) fn record_sync_watermark_heartbeat_direct(
+    applied_sync_id: i64,
+) -> safety::GraphResult<()> {
     let graph_id = selected_or_default_graph_metadata()?.graph_id;
     let ttl_micros = i64::try_from(SYNC_WATERMARK_HEARTBEAT_TTL.as_micros()).map_err(|_| {
         safety::GraphError::Internal("sync watermark heartbeat TTL is too large".to_string())
@@ -3382,6 +3978,17 @@ pub(crate) fn record_sync_watermark_heartbeat(applied_sync_id: i64) -> safety::G
 /// backend that disconnected without cleanup stops blocking pruning once
 /// its heartbeat's `expires_at` has passed.
 pub(crate) fn expire_stale_sync_watermarks() -> safety::GraphResult<()> {
+    Spi::get_one::<bool>("SELECT graph._expire_sync_watermarks_for_current_role()").map_err(
+        |err| {
+            safety::GraphError::Internal(format!(
+                "sync watermark heartbeat expiration failed: {err}"
+            ))
+        },
+    )?;
+    Ok(())
+}
+
+pub(crate) fn expire_stale_sync_watermarks_direct() -> safety::GraphResult<()> {
     let graph_id = selected_or_default_graph_metadata()?.graph_id;
     Spi::run_with_args(
         "DELETE FROM graph._sync_watermarks
@@ -3610,9 +4217,10 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_sync_log_retention_floor, guard_standalone_endpoint_lifecycle,
-        intern_sync_relationship_identity, is_sync_log_prune_recommended, parse_sync_op,
-        parse_sync_properties, projected_vec_capacity, required_sync_i64, required_sync_string,
+        applicable_table_oids_from_catalog, compute_sync_log_retention_floor,
+        guard_standalone_endpoint_lifecycle, intern_sync_relationship_identity,
+        is_sync_log_prune_recommended, parse_sync_op, parse_sync_properties,
+        projected_vec_capacity, required_sync_i64, required_sync_string,
         resize_sync_preflight_memory, resolve_unique_endpoint, sync_context_bound_from_counts,
         sync_normalization_memory_upper_bound, tenant_change_from_entry,
         validate_sync_input_row_sizes, ParsedSyncRows, PreparedProjectionEntry,
@@ -3641,6 +4249,36 @@ mod tests {
 
         assert!(matches!(err, GraphError::Internal(_)));
         assert!(err.to_string().contains("unsupported operation 'X'"));
+    }
+
+    #[test]
+    fn applicable_table_oids_are_catalog_derived_sorted_and_deduplicated() {
+        let tables = vec![RegisteredTable {
+            table_oid: 42,
+            table_name: "public.nodes".to_string(),
+            id_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
+            columns: PropertyColumns::from_columns(Vec::new()),
+            tenant_column: None,
+        }];
+        let edges = vec![RegisteredEdge {
+            mapping_id: 7,
+            from_table_oid: 84,
+            from_table: "public.edges".to_string(),
+            from_column: "from_id".to_string(),
+            source_key_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
+            to_table_oid: 42,
+            to_table: "public.nodes".to_string(),
+            to_column: "to_id".to_string(),
+            label: "linked".to_string(),
+            bidirectional: false,
+            weight_column: None,
+            label_column: None,
+        }];
+
+        assert_eq!(
+            applicable_table_oids_from_catalog(&tables, &edges),
+            vec![42, 84]
+        );
     }
 
     #[test]

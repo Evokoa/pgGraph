@@ -27,17 +27,29 @@ fn cypher(
     with_panic_boundary("cypher()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let tenant_scope = resolve_tenant_scope(None).unwrap_or_else(|err| err.report());
-        let statement = build_statement(query)
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+            None,
+            &query_start.graph,
+            &query_start.tables,
+        )
+        .unwrap_or_else(|err| err.report());
+        let statement = build_statement_from_query_start(query, &query_start)
             .unwrap_or_else(|err| gql::gql_error_to_graph_error(err).report());
         let params = gql::gql_params(params).unwrap_or_else(|err| err.report());
-        let rows: Vec<_> =
-            gql::execute_statement(statement, tenant_scope.as_deref(), &params, hydrate)
-                .unwrap_or_else(|err| err.report())
-                .into_iter()
-                .map(|row| (pgrx::JsonB(row),))
-                .collect();
+        let rows: Vec<_> = gql::execute_statement(
+            statement,
+            tenant_scope.as_deref(),
+            &params,
+            hydrate,
+            &query_start.tables,
+            &query_start.edges,
+        )
+        .unwrap_or_else(|err| err.report())
+        .into_iter()
+        .map(|row| (pgrx::JsonB(row),))
+        .collect();
         TableIterator::new(rows)
     })
 }
@@ -66,5 +78,18 @@ fn build_statement(
     let span = ast.span();
     let catalog = crate::query::catalog_snapshot::CatalogSnapshotImpl::load()
         .map_err(|err| crate::gql::errors::GqlError::bind(span, err.to_string()))?;
+    crate::cypher::lower::lower_statement(&ast, &catalog)
+}
+
+fn build_statement_from_query_start(
+    query: &str,
+    query_start: &super::runtime::QueryStartState,
+) -> Result<crate::query::physical_plan::PhysicalStatement, crate::gql::errors::GqlError> {
+    let ast = crate::cypher::parse_statement(query)?;
+    let catalog = crate::query::catalog_snapshot::CatalogSnapshotImpl::from_rows(
+        &query_start.tables,
+        &query_start.edges,
+    )
+    .map_err(|err| crate::gql::errors::GqlError::bind(ast.span(), err.to_string()))?;
     crate::cypher::lower::lower_statement(&ast, &catalog)
 }

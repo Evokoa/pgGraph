@@ -12,6 +12,7 @@ so these sections remain explicit.
 
 | Release history |
 |---|
+| [v1.1.0](#v1-1-0-pggraph-caller-scoped-rls-and-safe-replacement) |
 | [v1.0.0](#v1-0-0-pggraph-production-release) |
 | [v0.1.8](#v0-1-8-named-graphs-and-production-release-hardening) |
 | [v0.1.7](#v0-1-7-durable-projection-operations) |
@@ -22,6 +23,102 @@ so these sections remain explicit.
 | [v0.1.2](#v0-1-2-alpha-hardening-follow-up) |
 | [v0.1.1](#v0-1-1-alpha-hardening-critical-paths) |
 | [v0.1.0](#v0-1-0-initial-alpha) |
+
+## v1.1.0: pgGraph Caller-Scoped RLS And Safe Replacement
+
+pgGraph 1.1 makes PostgreSQL source-table RLS authoritative for graph topology,
+hardens projection replacement against cancellation, reduces query-start
+catalog work, and adds relationship-typed shortest paths. It supports
+PostgreSQL 14 through 18 and preserves the stable 1.0 SQL result shapes.
+
+### Security Changes
+
+- `graph.traverse()`, `graph.connected_components()`, and
+  `graph.component_stats()` now execute as `SECURITY INVOKER`. Hydration and
+  later source-table visibility probes see the outer application role.
+- Selected/named-graph catalog access remains behind pinned, caller-authorizing
+  `SECURITY DEFINER` mediators. No Rust user-ID switching is used.
+- Runtime status rows are filtered to readable graphs. Selected-graph artifact
+  and build-resource telemetry requires graph `admin`; cluster generation and
+  backend resource telemetry requires graph-schema administration.
+- Raw build and maintenance job tables no longer grant `PUBLIC` reads. Their
+  status APIs use pinned caller-authorizing mediators, and heartbeat mediators
+  no longer accept caller-supplied generations or watermarks.
+- Status counts remain physical projection totals. They are not
+  source-table-RLS-filtered query results.
+- Every topology-producing surface enforces caller visibility before topology
+  becomes observable. Hidden seeds and targets behave as nonexistent; hidden
+  intermediates and relationship rows do
+  not affect reachability, paths, costs, components, statistics, aggregation,
+  GQL/Cypher matching, or mapped-write target selection.
+- `graph.rls_mode = 'enforce'` is the default. The superuser-only
+  `legacy_bypass` value is a temporary compatibility escape hatch.
+  `graph.allow_rls_tables` remains accepted as a deprecated no-op.
+
+### Reliability And Query Startup
+
+- Build, vacuum, maintenance rebuild, compaction, repair, and durable sync
+  ingestion publish only a fully validated generation. Cancellation before
+  publication retains the previous generation and reconciles or removes only
+  the recorded unpublished candidate. Persisted low-memory replacement first
+  proves that the serving generation is reloadable.
+- The playground fully qualifies Docker Hub base images for Podman, reuses an
+  already-satisfied virtual environment without requiring `sfw`, resolves
+  Python shims before venv creation, deduplicates Panama nodes, scopes
+  `statement_timeout`, caches graph initialization, and pins its data-frame
+  stack.
+
+- Query initialization now returns one owned state containing selected-graph
+  metadata, registered tables and relationships, filter columns, catalog
+  fingerprint and drift status, sync mode, and applicable source relation
+  OIDs.
+- Pending-sync and high-watermark checks consume that state through
+  caller/graph-bound, cancellation-safe mediators. Automatic pending-sync
+  replay also reuses it for log reads, durable ingestion, legacy replay, and
+  fingerprint installation instead of loading the registration catalog again.
+  Per-statement ACL, schema-drift, freshness, and sync checks remain enabled.
+
+### Paths And Compatibility
+
+- New overloads restrict unweighted and weighted shortest paths by
+  `edge_types text[]`. Existing four-, five-, and six-argument calls retain
+  their meaning, including legacy calls with an untyped `NULL` in the
+  `max_depth` position.
+- The `1.0.0 -> 1.1.0` extension update preserves extension catalogs, source
+  rows, function ownership, explicit grants, existing signatures, and result
+  shapes. Existing v6 artifacts load without a blanket rebuild.
+- An RLS-active relationship mapping whose artifact lacks a usable durable
+  source identity fails closed with SQLSTATE `55000`, diagnostic `PG023`, and a
+  rebuild hint. A successful `graph.build()` repairs that targeted compatibility
+  condition.
+- In-place downgrade is not supported. Rollback restores the pre-upgrade
+  PostgreSQL backup with the matching 1.0.0 package; installing a 1.0 shared
+  library over 1.1 catalogs or artifacts is unsafe and unsupported. After a
+  logical restore, reset and re-register the source relations and rebuild the
+  derived projection because relation OIDs are database-local.
+
+### Performance
+
+- Query startup reuses one selected-graph/catalog state throughout freshness,
+  tenant, filter, hydration, and sync decisions. The fixed-work query-start
+  benchmark reduced median traversal setup latency by 21.5% versus the 1.0
+  baseline.
+- On the no-RLS path, visibility construction returns before source-row scans
+  or graph-sized bitmap allocation. The unrestricted visibility benchmark measured a 1.5%
+  median and 3.6% p95 change versus the query-start baseline, inside the 5%/10%
+  release budget.
+- Relationship-type filtering added no measurable median regression in the
+  recorded fixed-work shortest-path benchmark. These measurements are
+  environment-specific evidence, not universal latency guarantees.
+
+### Operational Notes
+
+- A mapped artifact is copied into a private anonymous mapping in each backend.
+  Its physical pages are not shared across backends through the OS page cache;
+  plan resident memory as artifact size multiplied by concurrent loaded
+  backends plus query and maintenance workspace.
+- See [Versioning And Compatibility](./user_guide/versioning-and-compatibility)
+  for the exact update, rebuild, and backup-restore rollback procedure.
 
 ## v1.0.0: pgGraph Production Release
 

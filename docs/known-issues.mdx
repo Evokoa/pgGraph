@@ -1,6 +1,6 @@
 # Known Issues
 
-This page lists known user-visible limitations in pgGraph 1.0. See
+This page lists known user-visible limitations in pgGraph 1.1. See
 [Release Notes](./release-notes) for resolved issues and
 [Roadmap](./roadmap) for planned expansion.
 
@@ -20,25 +20,14 @@ health, retry, and failure guidance in
 
 ## Access Control
 
-### Topology reads are builder-scoped, not row-level-security-filtered
+### RLS protects results, not every timing or resource side channel
 
-`graph.traverse()`, `graph.shortest_path()`, `graph.weighted_shortest_path()`,
-and the connected-component functions read the built graph artifact rather
-than issuing a fresh SQL scan per call. They check table-level `SELECT`
-privilege before returning results, but they do not evaluate row-level
-security policies against the calling role, so a role with table-level
-`SELECT` can receive coordinates, path membership, and reachability for rows
-its own row-level security policy would hide from a direct `SELECT`.
-`graph.search()` re-queries source-table properties as the caller and is not
-affected.
-
-`graph.build()` fails closed on this by default: registering a table with row
-security enabled requires the explicit acknowledgment
-`graph.allow_rls_tables = on` (SQLSTATE `55000`, diagnostic `PG021`, otherwise).
-This turns the boundary above into a deliberate operator decision rather than
-a silent one; it does not add row-level filtering to topology reads. See
-[Row-Level Security And Topology Reads](/user_guide/administration-and-security#row-level-security-and-topology-reads)
-for the full boundary and mitigation guidance.
+pgGraph 1.1 excludes caller-hidden node and relationship identities before
+they can affect observable topology. The resource governor may still charge
+projection entries examined while constructing or applying that visibility
+boundary. The supported contract is PostgreSQL-like result and topology
+visibility; pgGraph does not claim formal timing or resource-exhaustion
+noninterference between roles with different policies.
 
 ### Tenant scope requires the session-setting path under enforcement
 
@@ -54,6 +43,40 @@ See [Tenant Scope](/user_guide/administration-and-security#tenant-scope) for
 the full boundary and mitigation guidance.
 
 ## Query Compatibility
+
+### GQL writes accept one parameter object per call
+
+The 1.0 mapped GQL write profile creates, merges, updates, or deletes one node
+or relationship per `graph.gql()` call. It does not expose a multi-row mutation
+or `UNWIND` write surface. An adapter that calls `graph.gql()` once per item
+therefore pays repeated client round trips and parse, bind, ACL, and SPI work.
+
+For bulk ingestion in 1.0, write registered PostgreSQL source tables directly
+with set-based DML, commit, and apply sync once:
+
+```sql
+BEGIN;
+
+INSERT INTO app.entities (id, name)
+VALUES
+  ('n-1', 'Ada'),
+  ('n-2', 'Grace')
+ON CONFLICT (id) DO UPDATE
+SET name = EXCLUDED.name;
+
+COMMIT;
+
+SELECT * FROM graph.apply_sync();
+```
+
+PostgreSQL remains authoritative for constraints, triggers, ACLs, RLS, MVCC,
+and partition routing. In persisted `mutable_overlay` mode, committed edge
+changes become durable projection segments after sync without a full graph
+rebuild. Applications with the default pending-sync query freshness may let the
+next topology read catch up instead of calling `graph.apply_sync()` explicitly.
+
+A bounded, set-based graph mutation API is the proposed
+[post-1.1 roadmap direction](/roadmap#proposed-post-1-1-focus-bounded-batched-mutations).
 
 ### GQL and openCypher support are bounded profiles
 

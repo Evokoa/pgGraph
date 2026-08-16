@@ -511,6 +511,13 @@ subtransactions: releasing a savepoint retains its transaction-local graph
 overlay, while rolling it back restores the overlay visible before that
 savepoint. Multi-row graph writes and creating new
 PostgreSQL schema objects from GQL are not part of this release's GQL subset.
+For bulk ingestion in 1.0, use set-based DML against the registered PostgreSQL
+source tables, commit, and call `graph.apply_sync()` once. This avoids
+application-level one-row call loops while retaining PostgreSQL constraints,
+triggers, ACLs, RLS, MVCC, and incremental mutable-overlay sync. See the
+[current limitation and workaround](/known-issues#gql-writes-accept-one-parameter-object-per-call)
+and the proposed
+[batched mutation design](/contributor_guide/batched-graph-mutations).
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
 planning stages without executing the query. Node-only matches constrained by
@@ -679,6 +686,21 @@ Traversal applies graph traversal limits first, then table filters and
 hydration filters, then sorts by depth, node table, and node ID for a single
 root before applying `row_offset` and `max_rows`. Multi-start traversal sorts by
 root table, root ID, depth, node table, and node ID before pagination.
+
+Source-table ACLs and RLS are applied before projected topology becomes
+observable. A hidden seed or target behaves as nonexistent, a hidden
+intermediate blocks visible nodes behind it, and a hidden relationship row
+cannot connect otherwise visible endpoints. Shortest-path selection therefore
+returns the best caller-visible path, or no path. Component sizes, statistics,
+path counts, and aggregates are computed from caller-visible topology rather
+than post-filtering unrestricted results. Hydrated and coordinate-only forms
+use the same visibility boundary.
+
+Visibility is evaluated against source rows at query time, while topology still
+comes from the synchronized projection. Newly committed rows or relationships
+do not become traversable until trigger sync is applied, the selected freshness
+mode catches up, or the graph is rebuilt. The visible result is the intersection
+of that projected snapshot and the caller's current source-row visibility.
 
 `uniqueness := 'node_global'` returns each reached node at most once across the
 merged multi-start result set. When more than one root reaches the same node,
@@ -884,6 +906,23 @@ FROM graph.shortest_path(
 );
 ```
 
+Restrict an unweighted path to one or more relationship types by using the
+seven-argument overload. The type array is last so legacy calls that pass an
+untyped `NULL` for `max_depth` remain unambiguous:
+
+```sql
+SELECT *
+FROM graph.shortest_path(
+  'public.users'::regclass,
+  'u1',
+  'public.users'::regclass,
+  'u9',
+  20,
+  true,
+  ARRAY['friend', 'member_of']::text[]
+);
+```
+
 Weighted shortest path:
 
 ```sql
@@ -895,6 +934,24 @@ FROM graph.weighted_shortest_path(
   'd'
 );
 ```
+
+The weighted overload accepts the type array as its fifth argument:
+
+```sql
+SELECT *
+FROM graph.weighted_shortest_path(
+  'public.places'::regclass,
+  'a',
+  'public.places'::regclass,
+  'd',
+  ARRAY['road', 'rail']::text[]
+);
+```
+
+An empty array matches no relationships. Unknown relationship labels fail with
+SQLSTATE `22023` and diagnostic `PG005`. Type filters compose with caller RLS:
+hidden nodes and relationship rows remain unavailable even when their label is
+included.
 
 Unweighted shortest path includes pending trigger-sync edge overlays after
 `graph.apply_sync()`. Weighted shortest path requires merged weighted CSR data;
@@ -932,6 +989,11 @@ SELECT * FROM graph.isolated_nodes(max_rows := 100);
 Component functions touch the whole graph. Run them on a read replica or during
 controlled windows for large production graphs.
 </Callout>
+
+Component identifiers and pagination are derived after caller visibility is
+applied. Two callers with different RLS policies can therefore observe
+different component membership, sizes, rankings, isolated nodes, and page
+contents from the same physical projection.
 
 ## Hydration
 

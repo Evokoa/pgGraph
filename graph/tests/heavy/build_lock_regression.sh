@@ -62,6 +62,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+generation_artifact_count() {
+  find "$1" -maxdepth 1 -type f \( \
+    -name 'projection-generation-*' -o \
+    -name 'relationship-identities-*' \
+  \) | wc -l | tr -d ' '
+}
+
 if [[ -z "$PG_CONFIG" ]]; then
   if [[ -x "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" ]]; then
     PG_CONFIG="/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
@@ -73,7 +80,7 @@ if [[ -z "$PG_CONFIG" ]]; then
   fi
 fi
 
-cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE" --no-default-features
+cargo pgrx install --pg-config "$PG_CONFIG" --features "$PG_VERSION_FEATURE development" --no-default-features
 dropdb --if-exists "$DBNAME" >/dev/null 2>&1 || true
 createdb "$DBNAME"
 
@@ -879,6 +886,28 @@ if ! grep -q "Another graph maintenance operation or registered source transacti
 fi
 
 set +e
+psql -X --set=VERBOSITY=verbose -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SET statement_timeout = '5s'; SELECT * FROM graph.projection_compact();" \
+  >"$WORKDIR/concurrent-compaction.log" 2>&1
+compaction_status=$?
+set -e
+if [[ "$compaction_status" -eq 0 ]]; then
+  echo "concurrent graph.projection_compact() succeeded while graph.build() held the lock"
+  cat "$WORKDIR/concurrent-compaction.log"
+  exit 1
+fi
+if ! grep -q "55P03" "$WORKDIR/concurrent-compaction.log"; then
+  echo "concurrent graph.projection_compact() did not report 55P03"
+  cat "$WORKDIR/concurrent-compaction.log"
+  exit 1
+fi
+if ! grep -q "Another graph maintenance operation or registered source transaction is active" "$WORKDIR/concurrent-compaction.log"; then
+  echo "concurrent graph.projection_compact() did not report the BuildLocked message"
+  cat "$WORKDIR/concurrent-compaction.log"
+  exit 1
+fi
+
+set +e
 wait "$OWNER_PID"
 owner_status=$?
 set -e
@@ -893,6 +922,288 @@ if [[ "$failure_count" -ne 3 ]]; then
 fi
 if [[ -e "$graph_tmp_path" ]]; then
   echo "temporary graph artifact remained after concurrent owner build: $graph_tmp_path"
+  exit 1
+fi
+
+generation_a="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT manifest_generation FROM graph.projection_status()")"
+count_a="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT node_count FROM graph.load_graph('default')")"
+if [[ ! "$count_a" =~ ^[0-9]+$ || "$count_a" -le 0 ]]; then
+  echo "cancelled replacement baseline has unexpected node count: $count_a"
+  exit 1
+fi
+query_a="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT node_id || '|' || (node->>'name') FROM graph.traverse('public.graph_lock_slow_nodes'::regclass, '1', 0, hydrate := true)")"
+if [[ "$query_a" != "1|node-1" ]]; then
+  echo "cancelled replacement baseline query returned unexpected result: $query_a"
+  exit 1
+fi
+artifact_root="$(dirname "$graph_path")"
+generation_artifact_count_a="$(generation_artifact_count "$artifact_root")"
+
+psql -X -qAt "$DBNAME" >"$WORKDIR/compaction-timeout.log" 2>&1 <<'SQL'
+\set ON_ERROR_STOP on
+SELECT 'resident-before|' || node_count FROM graph.load_graph('default');
+SELECT graph._test_arm_replacement_fault('compaction_wait');
+SET statement_timeout = '100ms';
+\set ON_ERROR_STOP off
+SELECT * FROM graph.projection_compact();
+\set ON_ERROR_STOP on
+SET statement_timeout = 0;
+SELECT 'same-generation|' || manifest_generation FROM graph.projection_status();
+SELECT 'same-count|' || node_count FROM graph.status();
+SELECT 'same-query|' || node_id || '|' || (node->>'name')
+FROM graph.traverse('public.graph_lock_slow_nodes'::regclass, '1', 0, hydrate := true);
+SQL
+if ! grep -q "canceling statement due to statement timeout" "$WORKDIR/compaction-timeout.log"; then
+  echo "projection compaction did not reach the statement-timeout cancellation path"
+  cat "$WORKDIR/compaction-timeout.log"
+  exit 1
+fi
+if ! grep -qx "resident-before|$count_a" "$WORKDIR/compaction-timeout.log" ||
+  ! grep -qx "same-generation|$generation_a" "$WORKDIR/compaction-timeout.log" ||
+  ! grep -qx "same-count|$count_a" "$WORKDIR/compaction-timeout.log" ||
+  ! grep -qx "same-query|$query_a" "$WORKDIR/compaction-timeout.log"; then
+  echo "cancelled projection compaction did not preserve generation A and backend usability"
+  cat "$WORKDIR/compaction-timeout.log"
+  exit 1
+fi
+
+expected_replacement_count=$((count_a + 2))
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "INSERT INTO public.graph_lock_slow_nodes VALUES ('200001', 'node-200001')" >/dev/null
+
+psql -X -qAt "$DBNAME" >"$WORKDIR/statement-timeout-replacement.log" 2>&1 <<'SQL'
+\set ON_ERROR_STOP off
+SET graph.persist_on_build = on;
+SET graph.low_memory_build = on;
+SET graph.memory_limit_mb = 512;
+SELECT 'resident-before|' || node_count FROM graph.load_graph('default');
+SET statement_timeout = '250ms';
+SELECT * FROM graph.build();
+\set ON_ERROR_STOP on
+SET statement_timeout = 0;
+SELECT 'same-generation|' || manifest_generation FROM graph.projection_status();
+SELECT 'same-count|' || node_count FROM graph.status();
+SELECT 'same-query|' || node_id || '|' || (node->>'name')
+FROM graph.traverse('public.graph_lock_slow_nodes'::regclass, '1', 0, hydrate := true);
+SQL
+if ! grep -qx "resident-before|$count_a" "$WORKDIR/statement-timeout-replacement.log"; then
+  echo "statement-timeout backend did not load generation A before replacement"
+  cat "$WORKDIR/statement-timeout-replacement.log"
+  exit 1
+fi
+if ! grep -q "low-memory build unloading current backend graph" "$WORKDIR/statement-timeout-replacement.log"; then
+  echo "statement-timeout replacement did not exercise resident low-memory eviction"
+  cat "$WORKDIR/statement-timeout-replacement.log"
+  exit 1
+fi
+if ! grep -q "canceling statement due to statement timeout" "$WORKDIR/statement-timeout-replacement.log"; then
+  echo "replacement build did not reach the statement-timeout cancellation path"
+  cat "$WORKDIR/statement-timeout-replacement.log"
+  exit 1
+fi
+if ! grep -qx "same-generation|$generation_a" "$WORKDIR/statement-timeout-replacement.log"; then
+  echo "same backend did not retain generation A after statement-timeout cancellation"
+  cat "$WORKDIR/statement-timeout-replacement.log"
+  exit 1
+fi
+if ! grep -qx "same-count|$count_a" "$WORKDIR/statement-timeout-replacement.log"; then
+  echo "same backend did not reload generation A counts after low-memory cancellation"
+  cat "$WORKDIR/statement-timeout-replacement.log"
+  exit 1
+fi
+if ! grep -qx "same-query|$query_a" "$WORKDIR/statement-timeout-replacement.log"; then
+  echo "same backend query result changed after statement-timeout cancellation"
+  cat "$WORKDIR/statement-timeout-replacement.log"
+  exit 1
+fi
+fresh_timeout_state="$(psql -X -qAt -F '|' -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT manifest_generation, (SELECT node_count FROM graph.load_graph('default')) FROM graph.projection_status()")"
+if [[ "$fresh_timeout_state" != "$generation_a|$count_a" ]]; then
+  echo "fresh backend did not retain generation A after statement-timeout cancellation: $fresh_timeout_state"
+  exit 1
+fi
+fresh_timeout_query="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT node_id || '|' || (node->>'name') FROM graph.traverse('public.graph_lock_slow_nodes'::regclass, '1', 0, hydrate := true)")"
+if [[ "$fresh_timeout_query" != "$query_a" ]]; then
+  echo "fresh backend query result changed after statement-timeout cancellation: $fresh_timeout_query"
+  exit 1
+fi
+if [[ "$(generation_artifact_count "$artifact_root")" != "$generation_artifact_count_a" ]]; then
+  echo "statement-timeout replacement left unpublished generation artifacts"
+  find "$artifact_root" -maxdepth 1 -type f -print
+  exit 1
+fi
+
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "INSERT INTO public.graph_lock_slow_nodes VALUES ('200002', 'node-200002')" >/dev/null
+generation_artifact_count_before="$(generation_artifact_count "$artifact_root")"
+candidate_base_count_before="$(find "$artifact_root" -maxdepth 1 -type f \
+  -name 'projection-generation-*-base.pggraph' | wc -l | tr -d ' ')"
+psql -X -qAt "$DBNAME" >"$WORKDIR/backend-cancel-replacement.log" 2>&1 <<'SQL' &
+\set ON_ERROR_STOP off
+SET application_name = 'pggraph-cancelled-replacement';
+SET graph.persist_on_build = on;
+SET graph.low_memory_build = on;
+SET graph.memory_limit_mb = 512;
+SELECT 'resident-before|' || node_count FROM graph.load_graph('default');
+SELECT * FROM graph.build();
+\set ON_ERROR_STOP on
+SELECT 'same-generation|' || manifest_generation FROM graph.projection_status();
+SELECT 'same-count|' || node_count FROM graph.status();
+SELECT 'same-query|' || node_id || '|' || (node->>'name')
+FROM graph.traverse('public.graph_lock_slow_nodes'::regclass, '1', 0, hydrate := true);
+SQL
+PUBLISH_PID=$!
+
+cancel_pid=""
+for _ in $(seq 1 200); do
+  cancel_pid="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c \
+    "SELECT pid FROM pg_stat_activity WHERE application_name = 'pggraph-cancelled-replacement' AND query LIKE '%graph.build%' AND state = 'active' LIMIT 1")"
+  if [[ -n "$cancel_pid" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ -z "$cancel_pid" ]]; then
+  echo "could not observe replacement backend before pg_cancel_backend()"
+  cat "$WORKDIR/backend-cancel-replacement.log"
+  exit 1
+fi
+candidate_observed=""
+for _ in $(seq 1 400); do
+  candidate_count="$(find "$artifact_root" -maxdepth 1 -type f \
+    -name 'projection-generation-*-base.pggraph' | wc -l | tr -d ' ')"
+  if [[ "$candidate_count" -gt "$candidate_base_count_before" ]]; then
+    candidate_observed="yes"
+    break
+  fi
+  sleep 0.025
+done
+if [[ -z "$candidate_observed" ]]; then
+  echo "replacement candidate was not observed before pg_cancel_backend()"
+  cat "$WORKDIR/backend-cancel-replacement.log"
+  exit 1
+fi
+psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT pg_cancel_backend($cancel_pid)" | grep -qx "t"
+wait "$PUBLISH_PID"
+PUBLISH_PID=""
+if ! grep -qx "resident-before|$count_a" "$WORKDIR/backend-cancel-replacement.log"; then
+  echo "pg_cancel_backend backend did not load generation A before replacement"
+  cat "$WORKDIR/backend-cancel-replacement.log"
+  exit 1
+fi
+if ! grep -q "low-memory build unloading current backend graph" "$WORKDIR/backend-cancel-replacement.log"; then
+  echo "pg_cancel_backend replacement did not exercise resident low-memory eviction"
+  cat "$WORKDIR/backend-cancel-replacement.log"
+  exit 1
+fi
+if ! grep -q "canceling statement due to user request" "$WORKDIR/backend-cancel-replacement.log"; then
+  echo "replacement build did not report pg_cancel_backend() cancellation"
+  cat "$WORKDIR/backend-cancel-replacement.log"
+  exit 1
+fi
+if ! grep -qx "same-generation|$generation_a" "$WORKDIR/backend-cancel-replacement.log"; then
+  echo "same backend did not retain generation A after pg_cancel_backend()"
+  cat "$WORKDIR/backend-cancel-replacement.log"
+  exit 1
+fi
+if ! grep -qx "same-count|$count_a" "$WORKDIR/backend-cancel-replacement.log"; then
+  echo "same backend did not retain generation A counts after pg_cancel_backend()"
+  cat "$WORKDIR/backend-cancel-replacement.log"
+  exit 1
+fi
+if ! grep -qx "same-query|$query_a" "$WORKDIR/backend-cancel-replacement.log"; then
+  echo "same backend query result changed after pg_cancel_backend()"
+  cat "$WORKDIR/backend-cancel-replacement.log"
+  exit 1
+fi
+
+fresh_cancel_state="$(psql -X -qAt -F '|' -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT manifest_generation, (SELECT node_count FROM graph.load_graph('default')) FROM graph.projection_status()")"
+if [[ "$fresh_cancel_state" != "$generation_a|$count_a" ]]; then
+  echo "fresh backend did not retain generation A after pg_cancel_backend(): $fresh_cancel_state"
+  exit 1
+fi
+fresh_cancel_query="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT node_id || '|' || (node->>'name') FROM graph.traverse('public.graph_lock_slow_nodes'::regclass, '1', 0, hydrate := true)")"
+if [[ "$fresh_cancel_query" != "$query_a" ]]; then
+  echo "fresh backend query result changed after pg_cancel_backend(): $fresh_cancel_query"
+  exit 1
+fi
+if [[ "$(generation_artifact_count "$artifact_root")" != "$generation_artifact_count_before" ]]; then
+  echo "pg_cancel_backend replacement left unpublished generation artifacts"
+  find "$artifact_root" -maxdepth 1 -type f -print
+  exit 1
+fi
+
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "INSERT INTO public.graph_lock_slow_nodes VALUES ('200003', 'node-200003')" >/dev/null
+expected_replacement_count=$((expected_replacement_count + 1))
+expected_retry_generation=$((generation_a + 1))
+candidate_base_count_before_retry="$(find "$artifact_root" -maxdepth 1 -type f \
+  -name 'projection-generation-*-base.pggraph' | wc -l | tr -d ' ')"
+psql -X -qAt "$DBNAME" >"$WORKDIR/immediate-retry-replacement.log" 2>&1 <<'SQL' &
+\set ON_ERROR_STOP off
+SET application_name = 'pggraph-immediate-retry-replacement';
+SET graph.persist_on_build = on;
+SET graph.low_memory_build = on;
+SET graph.memory_limit_mb = 512;
+SELECT 'resident-before|' || node_count FROM graph.load_graph('default');
+SELECT * FROM graph.build();
+\set ON_ERROR_STOP on
+SET graph.low_memory_build = off;
+SELECT * FROM graph.build();
+SELECT 'retry-generation|' || manifest_generation FROM graph.projection_status();
+SELECT 'retry-count|' || node_count FROM graph.status();
+SELECT 'retry-query|' || node_id || '|' || (node->>'name')
+FROM graph.traverse('public.graph_lock_slow_nodes'::regclass, '1', 0, hydrate := true);
+SQL
+PUBLISH_PID=$!
+
+retry_cancel_pid=""
+for _ in $(seq 1 200); do
+  retry_cancel_pid="$(psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" -c \
+    "SELECT pid FROM pg_stat_activity WHERE application_name = 'pggraph-immediate-retry-replacement' AND query LIKE '%graph.build%' AND state = 'active' LIMIT 1")"
+  if [[ -n "$retry_cancel_pid" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ -z "$retry_cancel_pid" ]]; then
+  echo "could not observe immediate-retry backend before cancellation"
+  cat "$WORKDIR/immediate-retry-replacement.log"
+  exit 1
+fi
+retry_candidate_observed=""
+for _ in $(seq 1 400); do
+  retry_candidate_count="$(find "$artifact_root" -maxdepth 1 -type f \
+    -name 'projection-generation-*-base.pggraph' | wc -l | tr -d ' ')"
+  if [[ "$retry_candidate_count" -gt "$candidate_base_count_before_retry" ]]; then
+    retry_candidate_observed="yes"
+    break
+  fi
+  sleep 0.025
+done
+if [[ -z "$retry_candidate_observed" ]]; then
+  echo "immediate-retry candidate was not observed before cancellation"
+  cat "$WORKDIR/immediate-retry-replacement.log"
+  exit 1
+fi
+psql -X -qAt -v ON_ERROR_STOP=1 "$DBNAME" \
+  -c "SELECT pg_cancel_backend($retry_cancel_pid)" | grep -qx "t"
+wait "$PUBLISH_PID"
+PUBLISH_PID=""
+
+if ! grep -q "canceling statement due to user request" "$WORKDIR/immediate-retry-replacement.log" ||
+  ! grep -qx "retry-generation|$expected_retry_generation" "$WORKDIR/immediate-retry-replacement.log" ||
+  ! grep -qx "retry-count|$expected_replacement_count" "$WORKDIR/immediate-retry-replacement.log" ||
+  ! grep -qx "retry-query|$query_a" "$WORKDIR/immediate-retry-replacement.log"; then
+  echo "immediate retry did not reconcile candidate B before publishing the next generation"
+  cat "$WORKDIR/immediate-retry-replacement.log"
   exit 1
 fi
 

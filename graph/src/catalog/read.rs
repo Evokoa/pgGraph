@@ -22,6 +22,8 @@ pub(crate) fn read_catalog_for_graph(
     Vec<builder::RegisteredEdge>,
     Vec<builder::RegisteredFilterColumn>,
 )> {
+    #[cfg(feature = "development")]
+    crate::sql_facade::record_query_start_catalog_read();
     let mut tables = Vec::new();
     let mut edges = Vec::new();
     let mut filter_columns = Vec::new();
@@ -422,11 +424,6 @@ pub(crate) fn catalog_fingerprint(
         filter.column_type.hash(&mut hasher);
     }
     hasher.finish()
-}
-
-pub(crate) fn current_catalog_state() -> safety::GraphResult<(u64, Option<String>)> {
-    let (tables, edges, filter_columns) = read_catalog()?;
-    current_catalog_state_from_rows(&tables, &edges, &filter_columns)
 }
 
 pub(crate) fn current_catalog_state_from_rows(

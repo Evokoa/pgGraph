@@ -1,0 +1,277 @@
+# Batched Graph Mutations
+
+<Callout type="info">
+This page is a proposed 1.1 design, not part of the frozen 1.0 SQL or GQL
+contract. Function names and signatures remain subject to contract review until
+implementation evidence is generated.
+</Callout>
+
+## Problem
+
+The 1.0 GQL write profile accepts one parameter object and mutates one mapped
+node or relationship per call. Batch-oriented ingestion systems already collect
+many nodes and relationships before writing them. Calling `graph.gql()` once per
+item creates application-to-PostgreSQL round trips and repeated parse, bind, ACL,
+and SPI work.
+
+The immutable base CSR is not the problem. In persisted `mutable_overlay` mode,
+committed source-table changes already become durable projection segments after
+sync without a full graph rebuild. The missing capability is a bounded public
+write surface that turns one static graph mutation shape plus many parameter
+objects into set-based PostgreSQL DML.
+
+## Decision Summary
+
+The proposed 1.1 direction is:
+
+- add a bounded `gql_batch` write function in the `graph` schema;
+- accept one static mapped GQL write and a JSONB array of parameter objects;
+- parse and bind the graph statement once;
+- lower the parameter array to a typed input relation that preserves input
+  order;
+- issue set-based PostgreSQL DML per mapped table and operation phase, rather
+  than one SPI statement per input row;
+- preserve PostgreSQL constraints, triggers, ACLs, RLS, MVCC, partition routing,
+  and source-row identity;
+- preflight graph resource and transaction-delta capacity before authoritative
+  DML;
+- apply the resulting projection changes incrementally, without rebuilding the
+  base graph after each batch.
+
+This belongs in the existing query, SQL facade, projection-delta, and sync
+modules. It does not justify a new crate, background worker, or second durable
+write store.
+
+## Current 1.0 Path
+
+Applications that need bulk ingestion today should write the registered
+PostgreSQL source tables with ordinary multi-row `INSERT`, `INSERT ... SELECT`,
+`UPDATE ... FROM`, or `DELETE ... USING` statements. Trigger sync records those
+source changes, and `graph.apply_sync()` publishes them to the active
+projection. This path is efficient and remains supported after a batch graph
+API is added.
+
+The proposed API adds graph mapping ergonomics for adapters that should not need
+to know each registered table and column layout. It does not replace direct
+PostgreSQL DML.
+
+## Proposed SQL Contract
+
+The contract-review target is:
+
+```sql
+"graph"."gql_batch"(
+  query text,
+  param_sets jsonb,
+  hydrate boolean DEFAULT true
+)
+RETURNS TABLE (
+  input_ordinal bigint,
+  row jsonb
+)
+```
+
+Example:
+
+```sql
+SELECT input_ordinal, row
+FROM "graph"."gql_batch"(
+  query := '
+    MERGE (n:entities {id: $id, name: $name})
+    ON CREATE SET n.status = $status
+    ON MATCH SET n.name = $name
+    RETURN n.id AS id
+  ',
+  param_sets := '[
+    {"id":"n-1","name":"Ada","status":"new"},
+    {"id":"n-2","name":"Grace","status":"new"}
+  ]'::jsonb,
+  hydrate := false
+);
+```
+
+The initial contract is deliberately narrower than general `UNWIND`:
+
+- `query` must bind to one supported mapped write shape;
+- every batch uses one static node label or relationship type;
+- adapters group heterogeneous inputs by static query and mapping;
+- `param_sets` must be a JSON array of objects;
+- every referenced parameter must be present and type-compatible in every
+  object;
+- output order follows the input ordinality;
+- an empty array returns no rows;
+- duplicate effective source identities in one batch are rejected before DML;
+- any row failure aborts the whole SQL statement and produces no partial graph
+  delta.
+
+`cypher_batch` in the `graph` schema and general-purpose `UNWIND` are not
+required for the first slice. They should be added only if compatibility demand
+is measured and they can lower to the same batch plan without creating a second
+executor.
+
+## Execution Shape
+
+<ProcessTree title="One batched mapped write">
+  <ProcessStep title="Validate input">
+    - require a JSONB array of parameter objects
+    - enforce input row and byte limits
+    - reject missing parameters and duplicate effective identities
+  </ProcessStep>
+  <ProcessStep title="Plan once">
+    - parse one GQL statement
+    - bind one static mapping
+    - check operation-specific ACL requirements
+  </ProcessStep>
+  <ProcessStep title="Build a typed input relation">
+    - preserve JSON array ordinality
+    - cast values using registered PostgreSQL column types
+    - resolve tenant and source identities before mutation
+  </ProcessStep>
+  <ProcessStep title="Execute set-based PostgreSQL DML">
+    - lock affected source rows in stable table-and-primary-key order
+    - use INSERT SELECT, UPDATE FROM, DELETE USING, and ON CONFLICT
+    - let PostgreSQL enforce RLS, constraints, triggers, and partition routing
+  </ProcessStep>
+  <ProcessStep title="Publish graph deltas">
+    - re-read authoritative trigger-adjusted result rows
+    - record transaction-local projection changes in input order
+    - let durable trigger sync publish committed changes to other backends
+  </ProcessStep>
+</ProcessTree>
+
+The number of authoritative DML statements must grow with mapping groups and
+required operation phases, not with input row count. Moving the tight loop from
+an application client into a Rust loop that still runs one SPI statement per row
+does not satisfy this design.
+
+## Write Semantics By Slice
+
+| Slice | Set-based PostgreSQL shape | Required graph behavior |
+|---|---|---|
+| Node `CREATE` | `INSERT ... SELECT` from the typed input relation | Preflight the maximum added-node delta, preserve ordinality, and return authoritative inserted rows |
+| Node `MERGE` | `INSERT ... ON CONFLICT ... DO UPDATE` using registered identity | Reject duplicate batch identities, distinguish inserted and matched rows internally, and preserve `ON CREATE`/`ON MATCH` semantics |
+| Relationship `CREATE` and `MERGE` | Resolve and lock endpoints set-wise, then use `INSERT ... SELECT` with registered relationship identity conflict handling | Preserve relationship source identity, dynamic-label checks, bidirectional delta accounting, same-transaction visibility, and retry-safe upsert semantics |
+| Node `SET` and `REMOVE` | `UPDATE ... FROM` the typed input relation | Recheck predicates at the write boundary and refresh registered filter values from authoritative rows |
+| Relationship `DELETE` | `DELETE ... USING` resolved relationship identities | Delete only registered source rows, preserving parallel relationships with equal endpoints and type |
+| Node `DETACH DELETE` | Set-based incident-edge deletes followed by node delete | Use stable lock/delete ordering and abort the complete statement if any mapped incident relationship is unsafe |
+
+Node `CREATE`, node `MERGE`, relationship `CREATE`, and relationship `MERGE` are
+the first delivery slice because they remove the ingestion bottleneck.
+Relationship `MERGE` is a new mapped-write vertical slice: it must use a
+registered relationship primary or unique identity and must not infer identity
+from endpoints alone. Update and delete shapes must reuse the same typed batch
+relation and resource contract rather than introducing operation-specific batch
+APIs.
+
+## Transaction And Concurrency Contract
+
+- A batch call is one atomic PostgreSQL statement. Callers may combine node and
+  relationship batches in one explicit transaction.
+- Node batches run before dependent relationship batches when both are present
+  in an ingestion transaction.
+- Savepoint rollback removes every transaction-local delta created after that
+  savepoint.
+- Capacity for the worst-case node and edge delta is checked before source DML.
+- Existing registered unique constraints arbitrate concurrent `MERGE` and
+  `CREATE` races.
+- A stable `(table_oid, primary_key)` lock order prevents input ordering from
+  creating avoidable deadlocks.
+- Trigger-modified rows are re-read before output and delta publication.
+- A constraint, RLS, trigger, timeout, cancellation, or resource failure aborts
+  the complete batch.
+
+There is no `continue_on_error` mode in the initial contract. Per-row partial
+success would complicate constraint, trigger, savepoint, and projection-delta
+semantics and would make retries harder to reason about.
+
+`MERGE` is the retry-safe ingestion operation. Replaying the same node or
+relationship `MERGE` batch must converge through its registered source identity.
+`CREATE` retains ordinary PostgreSQL insert semantics and may raise a unique
+violation when replayed. pgGraph does not silently retry a batch after an
+ambiguous client disconnect; adapters that need safe replay use `MERGE` and keep
+their stable source identities.
+
+## Resource Contract
+
+The implementation must add a dedicated input-row limit for batch writes. The
+name, default, and range are frozen with the SQL contract, after benchmark
+evidence establishes a safe default. The effective limit is also bounded by:
+
+- `graph.max_tx_delta_nodes`;
+- `graph.max_tx_delta_edges`;
+- query memory and elapsed-time budgets;
+- PostgreSQL `statement_timeout`;
+- JSONB input and returned-row memory accounting.
+
+Large batches fail before authoritative DML when their worst-case graph delta
+cannot fit. The executor must check cancellation and elapsed-time budgets while
+validating input, resolving identities, producing output, and recording deltas.
+
+## Security Contract
+
+Batch execution is security-invoker behavior. It must:
+
+- perform the same table privilege checks as the corresponding single-row GQL
+  write;
+- execute generated DML as the calling role;
+- allow PostgreSQL RLS, column types, constraints, triggers, and partition
+  routing to decide each source-row write;
+- use only catalog-resolved table and column identifiers in generated SQL;
+- bind values as data rather than interpolating JSON text into SQL;
+- retain tenant enforcement and write-boundary predicate rechecks.
+
+Batching must never become a path around the 1.0 source-of-truth or security
+contracts.
+
+## Test-Driven Delivery
+
+Implementation starts with failing tests in these vertical slices:
+
+1. Contract and validation tests for arrays, empty input, ordinality, parameter
+   shape, type conversion, duplicate identities, and input limits.
+2. Parser/binder/lowering tests proving one static plan is reused for all
+   parameter objects.
+3. PostgreSQL integration tests for node `CREATE` and `MERGE`, including
+   defaults, generated columns, partitions, constraints, user triggers, RLS,
+   tenant scope, rollback, and idempotent replay.
+4. Relationship `CREATE` and `MERGE` integration tests for endpoint resolution,
+   registered relationship identity, replay, parallel edges, dynamic labels,
+   composite keys, bidirectional mappings, and same-transaction node-to-edge
+   ingestion.
+5. Update and delete integration tests for write-boundary rechecks, trigger
+   changes, detach ordering, savepoints, and all-or-nothing failure.
+6. Cross-backend sync, durable segment, reload, compaction, and crash-recovery
+   tests proving no full rebuild is required after each batch.
+7. Concurrent overlapping `MERGE`, create/delete races, cancellation, and
+   resource-exhaustion tests.
+8. PostgreSQL 14 through 18 release-matrix and packaging evidence.
+
+Parser and JSON parameter handling remain fuzz targets. Batch identity grouping
+and ordinal/result reconstruction should receive property tests for
+order-independence of source effects and order-preservation of returned rows.
+
+## Performance Acceptance
+
+The 1.1 release evidence must include:
+
+- an ingestion fixture with thousands of nodes and relationships;
+- the existing repeated `graph.gql()` path as the comparison baseline;
+- batch size, mapping-group count, source DML statement count, throughput,
+  latency, peak RSS/PSS, WAL volume, sync lag, and compaction state;
+- proof that source DML statement count is proportional to mapping groups and
+  operation phases rather than rows;
+- a reviewed regression threshold recorded before release-candidate testing.
+
+The feature is not complete merely because it uses one client call. It is
+complete when the authoritative PostgreSQL work is set-based and the benchmark
+shows the expected reduction in repeated planning, SPI, and round-trip cost.
+
+## Scope Boundary
+
+This design batches mapped graph mutations. It does not implement or maintain an
+embedding/vector index. A system that writes both graph data and embeddings must
+continue to use its configured vector backend for vector updates. pgGraph owns
+only the PostgreSQL-derived graph projection and its incremental sync lifecycle.
+For vector and embedding indexing, search, and hybrid retrieval inside
+PostgreSQL, see Evokoa's
+[pgContext](https://github.com/evokoa/pgcontext) project.

@@ -30,6 +30,18 @@ The exact supported surfaces are documented in the
 [GQL 1.0 profile](/user_guide/gql-profile), and
 [Versioning And Compatibility](/user_guide/versioning-and-compatibility).
 
+## 1.1 Security And Reliability Baseline
+
+The 1.1 release adds caller-scoped source-table RLS across every
+topology-producing surface, cancellation-safe generation replacement,
+authorized operational telemetry, deduplicated query-start catalog work, a
+portable and deterministic playground, and relationship-typed shortest-path
+overloads. Those are shipped baseline behavior, not future roadmap items.
+
+The 1.0 SQL and GQL profiles remain the named compatibility profiles because
+1.1 extends rather than replaces them. Future work must preserve the 1.1 RLS,
+publication, caller-identity, and PostgreSQL source-of-truth guarantees.
+
 ## 1.0 Production Baseline
 
 The 1.0 release established these ongoing release requirements:
@@ -45,10 +57,128 @@ The 1.0 release established these ongoing release requirements:
 Future 1.x work does not weaken these outcomes. New query syntax, analytics
 breadth, and architecture expansion remain post-1.0 directions.
 
-## Post-1.0 Direction
+## Proposed Post-1.1 Focus: Bounded Batched Mutations
+
+This proposed post-1.1 delivery track is a set-based batch-write surface for
+ingestion adapters. The 1.0 projection can already apply committed source
+changes incrementally; this work removes the need for adapters to call
+`graph.gql()` once per node or relationship.
+
+The contract-review target is `gql_batch(query, param_sets, hydrate)` in the
+`graph` schema.
+One static mapped write is parsed and bound once, while a JSONB array of
+parameter objects becomes a typed input relation that preserves input order.
+PostgreSQL then performs set-based DML per mapping group and operation phase. A
+Rust loop that still issues one SPI statement per input row does not satisfy
+the delivery track.
+
+| Delivery gate | Required outcome |
+|---|---|
+| Ingestion operations | Batched mapped node and relationship `CREATE`/`MERGE` ship first; relationship `MERGE` uses registered source identity, while `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE` reuse the same batch relation and resource contract. |
+| PostgreSQL authority | Constraints, triggers, ACLs, RLS, MVCC, partition routing, tenant scope, and registered source identity match the single-row write behavior. |
+| Atomicity and concurrency | A batch is all-or-nothing, savepoint-safe, bounded before DML, duplicate identities are deterministic, affected rows lock in stable order, and replayed `MERGE` batches are idempotent. |
+| Projection freshness | Transaction-local results and committed trigger sync become visible without a per-batch full rebuild; durable mutable-overlay segments, reload, and compaction are covered. |
+| Resource governance | Batch input rows and bytes, transaction deltas, returned rows, memory, work, cancellation, and elapsed time are bounded with stable diagnostics. |
+| Performance evidence | Source DML statement count scales with mapping groups and operation phases rather than rows, with a published comparison against repeated `graph.gql()` calls. |
+| Release evidence | Parser/binder, SQL integration, ACL/RLS, transaction, concurrency, sync/reload, fuzz/property, documentation, packaging, and PostgreSQL 14–18 matrix evidence are complete. |
+
+The detailed design, delivery slices, and acceptance criteria are in
+[Batched Graph Mutations](/contributor_guide/batched-graph-mutations).
+This work does not make pgGraph an embedding/vector index; vector maintenance
+remains outside the pgGraph graph-projection boundary. For vector and embedding
+indexing, search, and hybrid retrieval inside PostgreSQL, see
+[pgContext](https://github.com/evokoa/pgcontext).
+
+## Proposed Post-1.1 Track: Open-Vocabulary Relationship Types
+
+This proposed post-1.1 delivery track addresses ingestion systems whose
+relationship types come from data rather than a closed application dictionary.
+For example, an LLM may emit `works_at`, `founded`, `acquired_by`, or
+`co_authored_with` as free-form structured output. These values must remain
+filterable during traversal instead of becoming opaque relationship properties.
+
+### Current 1.1 Boundary
+
+The 1.1 engine stores relationship-label IDs as `u8`. ID 0 is untyped and ID
+255 is reserved, so each graph can use 254 user-facing relationship labels.
+`label_column` interns every distinct nonempty source value into this registry.
+A build or sync path that needs another ID fails with SQLSTATE `54000` and
+diagnostic `PG004`.
+
+All type-aware topology paths use the same registry. This includes
+`graph.traverse(edge_types := ...)`, GQL relationship-type matching, path
+reconstruction, projection deltas, and persisted CSR data. The 1.0 GQL profile
+does not support relationship-property predicates such as
+`WHERE r.relationship_name = $type`. Registering one static label and storing
+the exact type in the source edge table therefore makes pgGraph traversal
+type-blind to that exact value.
+
+### Proposed Outcome
+
+The target is a resource-governed open vocabulary, not a literally unbounded
+allocation. Source relationship strings remain authoritative in PostgreSQL,
+while pgGraph assigns checked compact IDs for exact topology filtering.
+
+The contract-review direction is:
+
+- replace the production `u8` relationship type with one checked `LabelId`
+  across CSR stores, traversal, paths, overlays, sync segments, compaction, and
+  persistence;
+- select a `u32` or width-adaptive `u8`/`u16`/`u32` representation from measured
+  memory, artifact-size, and traversal results; do not select `u16` alone unless
+  its public capacity satisfies the open-vocabulary contract;
+- intern each distinct source string once and compare `LabelId` values in the
+  traversal hot loop;
+- preserve exact filtering through `graph.traverse(edge_types := ...)` and GQL
+  relationship-type patterns for every projected label;
+- bind eligible predicates on a registered relationship label column, such as
+  `WHERE r.relationship_name = $type`, to the same exact type filter instead of
+  hydrating and comparing every relationship row after expansion;
+- let incremental sync add a new valid relationship label without requiring a
+  full rebuild for each new vocabulary value;
+- keep PostgreSQL constraints, triggers, ACLs, RLS, MVCC, source-row identity,
+  and source label values authoritative.
+
+No physical representation is truly unlimited. The public contract will state
+explicit count, byte, label-length, build, sync, and query budgets. Exceeding a
+configured resource budget will return a typed diagnostic instead of wrapping
+an ID, exhausting a backend, or silently grouping unrelated types.
+
+| Delivery gate | Required outcome |
+|---|---|
+| Capacity contract | One production `LabelId` wrapper owns checked conversion, reserved values, and the documented maximum. Unit and boundary tests cover the selected widths and overflow behavior. |
+| Exact query semantics | SQL traversal and supported GQL patterns return the same reachability for exact dynamic types. A relationship-label property predicate lowers to the exact type filter when its mapping is eligible. |
+| Build and sync | Bounded dictionary construction handles high-cardinality labels, and committed inserts or label changes converge through sync without losing source spelling or relationship identity. |
+| Artifact migration | A versioned artifact stores the selected label width and dictionary. Upgrade documentation requires a safe rebuild where in-place compatibility is not possible, and rollback retains the last valid generation. |
+| Resource governance | Label count, dictionary bytes, individual label length, build spill, sync growth, query work, and output remain under explicit policies with stable diagnostics. |
+| Performance evidence | Benchmarks compare the 1.0 `u8` CSR, candidate widened representations, and indexed PostgreSQL recursion across label cardinality, selectivity, degree, and depth. Results report latency, throughput, RSS/PSS, and artifact size. |
+| Regression gate | Exact-type CSR traversal must remain within an approved regression threshold for representative hot workloads before a wider representation becomes the default. |
+| Release evidence | Parser/binder, traversal, artifact, sync/reload, compaction, transaction, ACL/RLS, fuzz/property, documentation, packaging, and PostgreSQL 14–18 matrix evidence are complete. |
+
+### Supported Guidance Until This Track Ships
+
+Applications should choose the current path by required semantics:
+
+| Need | Recommended 1.1 path |
+|---|---|
+| Exact relationship types fit within 254 labels | Register the exact source value with `label_column` and filter with `edge_types` or a concrete GQL relationship type. |
+| Family-level traversal is sufficient | Store a bounded semantic family in a separate `graph_label` column, register that column, and retain the exact `relationship_name` in PostgreSQL. Prefer meaningful families such as `employment`, `ownership`, or `collaboration` over hash buckets. |
+| Exact free-form type is required at every hop | Normalize the string once to a PostgreSQL relationship-type ID and use a bounded recursive SQL query that filters the ID before each expansion. Index `(relationship_type_id, source_id) INCLUDE (target_id)` and the reverse direction when required. |
+| Most traffic targets a stable hot set | Keep hot exact types as pgGraph labels, map the long tail to a semantic or `other` label, and use indexed recursive SQL for exact long-tail traversals. Measure the crossover with `EXPLAIN (ANALYZE, BUFFERS)`. |
+| Exact fixed or explicitly bounded GQL patterns justify a topology change | Represent each relationship row as a node with `relationship_name` as a node property and connect it to source and target nodes with static relationship types. This doubles graph hops and is not equivalent to general variable-depth relationship-type traversal. |
+
+Hash or coarse buckets followed by result filtering are not exact for multi-hop
+queries. Traversal may reach a node through a different same-bucket type, and a
+later filter cannot undo that reachability. Buckets are appropriate only when
+the bucket itself has useful graph meaning or the caller accepts candidate-set
+semantics.
+
+## Post-1.1 Direction
 
 | Area | Direction |
 |---|---|
+| Batched writes | Add bounded, set-based mapped mutations for ingestion adapters without weakening PostgreSQL source-of-truth, security, transaction, or resource contracts. |
+| Open relationship types | Replace the 254-label ceiling with a checked, resource-governed `LabelId` design and preserve exact SQL/GQL type filtering for data-driven relationship vocabularies. |
 | ISO GQL | Add applicable ISO/IEC 39075:2024 features in vertical slices, each with parser, binder, executor, conformance, ACL/RLS, transaction, resource, and documentation evidence. |
 | Costed streaming runtime | Develop canonical typed binding-table IR, statistics, cost/resource planning, alternative physical plans, streaming operators, and spillable blocking work. |
 | PostgreSQL 19 and SQL/PGQ | Consume native property-graph definitions without duplicate registration and maintain a separate SQL/PGQ conformance matrix for `GRAPH_TABLE`. |

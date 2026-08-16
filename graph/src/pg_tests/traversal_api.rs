@@ -640,8 +640,9 @@ fn edge_and_weighted_path_v1_acceptance() {
     .expect("weighted signature inspection failed")
     .unwrap_or(false);
     let weighted_shape = Spi::get_one::<bool>(
-        "SELECT pg_get_function_result(p.oid) =
+        "SELECT bool_and(pg_get_function_result(p.oid) =
                     'TABLE(step integer, node_table oid, node_table_name text, node_id text, edge_label text, edge_weight bigint, step_cost bigint, total_cost bigint)'
+                )
              FROM pg_proc p
              JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE n.nspname = 'graph'
@@ -660,6 +661,73 @@ fn edge_and_weighted_path_v1_acceptance() {
     )
     .expect("weighted empty path inspection failed")
     .unwrap_or(-1);
+    let typed_unweighted = Spi::get_one::<String>(
+        "SELECT string_agg(node_id, '->' ORDER BY step)
+           FROM graph.shortest_path(
+             'graph_test_weighted_nodes_pgtest'::regclass, 'a',
+             'graph_test_weighted_nodes_pgtest'::regclass, 'd',
+             5, false, ARRAY['expensive', 'route']::text[]
+           )",
+    )
+    .expect("typed unweighted path failed")
+    .unwrap_or_default();
+    let typed_weighted = Spi::get_one::<String>(
+        "SELECT string_agg(node_id, '->' ORDER BY step)
+           FROM graph.weighted_shortest_path(
+             'graph_test_weighted_nodes_pgtest'::regclass, 'a',
+             'graph_test_weighted_nodes_pgtest'::regclass, 'd',
+             ARRAY['expensive', 'route']::text[]
+           )",
+    )
+    .expect("typed weighted path failed")
+    .unwrap_or_default();
+    let recursive_typed = Spi::get_one::<String>(
+        "WITH RECURSIVE paths(node_id, path, depth) AS (
+             SELECT 'a'::text, ARRAY['a']::text[], 0
+             UNION ALL
+             SELECT e.dst, p.path || e.dst, p.depth + 1
+             FROM paths p
+             JOIN public.graph_test_weighted_edges_pgtest e ON e.src = p.node_id
+             WHERE coalesce(nullif(e.rel_type, ''), 'route') = ANY(ARRAY['expensive', 'route']::text[])
+               AND NOT e.dst = ANY(p.path)
+               AND p.depth < 5
+           )
+           SELECT array_to_string(path, '->')
+           FROM paths
+           WHERE node_id = 'd'
+           ORDER BY depth
+           LIMIT 1",
+    )
+    .expect("typed recursive SQL comparison failed")
+    .unwrap_or_default();
+    let empty_typed_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.shortest_path(
+             'graph_test_weighted_nodes_pgtest'::regclass, 'a',
+             'graph_test_weighted_nodes_pgtest'::regclass, 'd',
+             5, false, ARRAY[]::text[]
+           )",
+    )
+    .expect("empty typed path failed")
+    .unwrap_or(-1);
+    let overloads_present = Spi::get_one::<bool>(
+        "SELECT to_regprocedure('graph.shortest_path(oid,text,oid,text,integer,boolean)') IS NOT NULL
+            AND to_regprocedure('graph.shortest_path(oid,text,oid,text,integer,boolean,text[])') IS NOT NULL
+            AND to_regprocedure('graph.weighted_shortest_path(oid,text,oid,text)') IS NOT NULL
+            AND to_regprocedure('graph.weighted_shortest_path(oid,text,oid,text,text[])') IS NOT NULL",
+    )
+    .expect("shortest-path overload inspection failed")
+    .unwrap_or(false);
+    let legacy_null_rows = Spi::get_one::<i64>(
+        "SELECT count(*)
+           FROM graph.shortest_path(
+             'graph_test_weighted_nodes_pgtest'::regclass, 'a',
+             'graph_test_weighted_nodes_pgtest'::regclass, 'd',
+             NULL
+           )",
+    )
+    .expect("legacy NULL max_depth call became ambiguous")
+    .unwrap_or(-1);
 
     assert_eq!(weighted, "a->c->d:2");
     assert_eq!(weighted_steps, "0:a:<start>:<start>:0:2,1:c:route:1:1:2,2:d:cheap:1:2:2");
@@ -671,6 +739,12 @@ fn edge_and_weighted_path_v1_acceptance() {
     assert!(no_weight_param);
     assert!(weighted_shape);
     assert_eq!(no_weighted_path_rows, 0);
+    assert_eq!(typed_unweighted, "a->b->d");
+    assert_eq!(typed_weighted, "a->b->d");
+    assert_eq!(recursive_typed, typed_unweighted);
+    assert_eq!(empty_typed_rows, 0);
+    assert!(overloads_present);
+    assert_eq!(legacy_null_rows, 0);
 }
 
 #[pg_test]

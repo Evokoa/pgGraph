@@ -29,6 +29,24 @@ DOCKER_HELP = """If you need to install Docker, see:
 
 GRAPH_BUSY_DIAGNOSTIC = "pgGraph diagnostic: PG006"
 GRAPH_BUILD_WAIT_SECONDS = 600
+PANAMA_TRANSFORM_VERSION = 2
+PANAMA_DEEP_TRAVERSAL_SEED = "240210352"
+PANAMA_DEEP_TRAVERSAL_DEPTH = 19
+PANAMA_DEEP_PATH_TARGET = "240470265"
+PANAMA_DEEP_PATH_LENGTH = 45
+PANAMA_DEEP_PATH_MAX_DEPTH = 48
+PANAMA_NODE_LABEL_PRIORITY = {
+    "entities": 0,
+    "officers": 1,
+    "addresses": 2,
+    "intermediaries": 3,
+    "others": 4,
+}
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_RELEASE_DATASETS = json.loads(
+    (REPOSITORY_ROOT / "release" / "gates.json").read_text(encoding="utf-8")
+)["datasets"]
 
 
 @dataclass(frozen=True)
@@ -53,11 +71,11 @@ DATASETS = {
     "panama": DatasetSpec(
         key="panama",
         name="Panama Papers / ICIJ Offshore Leaks",
-        url="https://offshoreleaks-data.icij.org/offshoreleaks/csv/full-oldb.LATEST.zip",
-        archive_name="full-oldb.LATEST.zip",
-        compressed_size="73 MB",
+        url=_RELEASE_DATASETS["panama"]["source"],
+        archive_name="icij-offshore-leaks-2026-07-29.zip",
+        compressed_size="72 MB",
         uncompressed_size="626 MB",
-        expected_sha256="a2e37e8b878c12fb8f946d4e85026a4ae9026dc866b1aa925730bc1b50e52914",
+        expected_sha256=_RELEASE_DATASETS["panama"]["archive_sha256"],
     ),
     "ldbc": DatasetSpec(
         key="ldbc",
@@ -333,17 +351,21 @@ def csv_writer(path: Path, fieldnames: list[str]) -> tuple[object, csv.DictWrite
     return handle, writer
 
 
-def extract_panama(archive_path: Path, work_dir: Path) -> Path:
+def panama_node_label(path: Path) -> str:
+    return path.stem.replace("nodes-", "").replace("nodes_", "").replace("nodes", "node") or "node"
+
+
+def extract_panama(archive_path: Path, work_dir: Path, archive_digest: str) -> Path:
     extract_dir = work_dir / "raw"
     marker = extract_dir / ".extracted"
-    if marker.exists():
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == archive_digest:
         return extract_dir
     if extract_dir.exists():
         shutil.rmtree(extract_dir)
     extract_dir.mkdir(parents=True)
     with zipfile.ZipFile(archive_path) as archive:
         archive.extractall(extract_dir)
-    marker.write_text(datetime.now(timezone.utc).isoformat() + "\n", encoding="utf-8")
+    marker.write_text(archive_digest + "\n", encoding="utf-8")
     return extract_dir
 
 
@@ -437,16 +459,53 @@ def stream_edge_file(
 def transform_panama(archive_path: Path, work_dir: Path) -> dict[str, object]:
     normalized_dir = work_dir / "normalized"
     metadata_path = normalized_dir / "metadata.json"
+    archive_digest = sha256(archive_path)
     if metadata_path.exists():
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            metadata = {}
+        if (
+            metadata.get("archive_sha256") == archive_digest
+            and metadata.get("transform_version") == PANAMA_TRANSFORM_VERSION
+            and (normalized_dir / "nodes.csv").is_file()
+            and (normalized_dir / "edges.csv").is_file()
+        ):
+            return metadata
+    if normalized_dir.exists():
+        shutil.rmtree(normalized_dir)
 
-    raw_dir = extract_panama(archive_path, work_dir)
-    node_files = [path for path in raw_dir.rglob("*.csv") if path.name.lower().startswith("nodes")]
+    raw_dir = extract_panama(archive_path, work_dir, archive_digest)
+    node_files = sorted(
+        (path for path in raw_dir.rglob("*.csv") if path.name.lower().startswith("nodes")),
+        key=lambda path: (
+            PANAMA_NODE_LABEL_PRIORITY.get(
+                panama_node_label(path),
+                len(PANAMA_NODE_LABEL_PRIORITY),
+            ),
+            path.as_posix(),
+        ),
+    )
     edge_files = find_files(raw_dir, "relationship")
     if not node_files or not edge_files:
         raise RuntimeError("Panama archive did not contain expected nodes*.csv and relationships*.csv files.")
 
     node_ids: set[str] = set()
+    duplicate_node_ids: set[str] = set()
+    for path in node_files:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            for row in csv.DictReader(handle):
+                node_id = first_value(row, "node_id", "id", "_id")
+                if not node_id:
+                    continue
+                if node_id in node_ids:
+                    duplicate_node_ids.add(node_id)
+                else:
+                    node_ids.add(node_id)
+
+    duplicate_payloads: dict[str, tuple[str, ...]] = {}
+    duplicate_sources: dict[str, str] = {}
+    duplicate_node_row_count = 0
     node_count = 0
     node_handle, node_writer = csv_writer(
         normalized_dir / "nodes.csv",
@@ -454,25 +513,41 @@ def transform_panama(archive_path: Path, work_dir: Path) -> dict[str, object]:
     )
     try:
         for path in node_files:
-            label = path.stem.replace("nodes-", "").replace("nodes_", "").replace("nodes", "node") or "node"
+            label = panama_node_label(path)
             with path.open(newline="", encoding="utf-8-sig") as handle:
                 for row in csv.DictReader(handle):
                     node_id = first_value(row, "node_id", "id", "_id")
                     if not node_id:
                         continue
-                    node_ids.add(node_id)
-                    node_count += 1
-                    node_writer.writerow(
-                        {
-                            "node_id": node_id,
-                            "label": label,
-                            "name": first_value(row, "name"),
-                            "countries": first_value(row, "countries"),
-                            "country_codes": first_value(row, "country_codes"),
-                            "source_id": first_value(row, "sourceID", "source_id"),
-                            "valid_until": first_value(row, "valid_until"),
-                        }
+                    node = {
+                        "node_id": node_id,
+                        "label": label,
+                        "name": first_value(row, "name"),
+                        "countries": first_value(row, "countries"),
+                        "country_codes": first_value(row, "country_codes"),
+                        "source_id": first_value(row, "sourceID", "source_id"),
+                        "valid_until": first_value(row, "valid_until"),
+                    }
+                    payload = tuple(
+                        node[column]
+                        for column in ("name", "countries", "country_codes", "source_id", "valid_until")
                     )
+                    if node_id in duplicate_node_ids:
+                        existing_payload = duplicate_payloads.get(node_id)
+                        if existing_payload is not None:
+                            if existing_payload != payload:
+                                source = duplicate_sources[node_id]
+                                duplicate = str(path.relative_to(raw_dir))
+                                raise RuntimeError(
+                                    f"Panama node_id {node_id!r} has conflicting values in "
+                                    f"{source!r} and {duplicate!r}."
+                                )
+                            duplicate_node_row_count += 1
+                            continue
+                        duplicate_payloads[node_id] = payload
+                        duplicate_sources[node_id] = str(path.relative_to(raw_dir))
+                    node_count += 1
+                    node_writer.writerow(node)
     finally:
         node_handle.close()
 
@@ -508,7 +583,11 @@ def transform_panama(archive_path: Path, work_dir: Path) -> dict[str, object]:
         edge_handle.close()
 
     metadata = {
+        "transform_version": PANAMA_TRANSFORM_VERSION,
+        "archive_sha256": archive_digest,
         "node_count": node_count,
+        "duplicate_node_id_count": len(duplicate_node_ids),
+        "duplicate_node_row_count": duplicate_node_row_count,
         "edge_count": edge_count,
         "seed_start": seed_start,
         "seed_end": seed_end,
@@ -1028,6 +1107,37 @@ FROM warm, graph.status() s
             WorkloadQuery("entity_search", "Which Panama entities mention Mossack in a registered searchable field?", "SELECT * FROM graph.search('name', 'Mossack', table_filter := 'panama.nodes'::regclass, mode := 'contains', max_rows := 25, hydrate := false)"),
             WorkloadQuery("traverse_depth_2", "What is the two-hop neighborhood around a high-degree Panama node?", f"SELECT * FROM graph.traverse('panama.nodes'::regclass, {sql_literal(seed)}, 2, hydrate := false, max_rows := 500)"),
             WorkloadQuery("shortest_path", "Can pgGraph find the direct path between a high-degree Panama seed and one adjacent target?", f"SELECT * FROM graph.shortest_path('panama.nodes'::regclass, {sql_literal(seed)}, 'panama.nodes'::regclass, {sql_literal(target)}, max_depth := 4, hydrate := false)"),
+            WorkloadQuery(
+                "traverse_depth_19",
+                "How quickly can pgGraph traverse all 19 levels of a sparse Panama investigation path without hitting a work cap?",
+                f"""SELECT depth,
+       count(*) AS nodes_at_depth,
+       bool_or(capped) AS capped
+FROM graph.traverse(
+  'panama.nodes'::regclass,
+  {sql_literal(PANAMA_DEEP_TRAVERSAL_SEED)},
+  {PANAMA_DEEP_TRAVERSAL_DEPTH},
+  hydrate := false,
+  max_rows := 1000,
+  max_nodes := 1000,
+  max_frontier := 500
+)
+GROUP BY depth
+ORDER BY depth""",
+            ),
+            WorkloadQuery(
+                "shortest_path_depth_45",
+                f"How quickly can pgGraph recover a verified {PANAMA_DEEP_PATH_LENGTH}-hop path across a 91,168-node Panama component?",
+                f"""SELECT *
+FROM graph.shortest_path(
+  'panama.nodes'::regclass,
+  {sql_literal(PANAMA_DEEP_TRAVERSAL_SEED)},
+  'panama.nodes'::regclass,
+  {sql_literal(PANAMA_DEEP_PATH_TARGET)},
+  max_depth := {PANAMA_DEEP_PATH_MAX_DEPTH},
+  hydrate := false
+)""",
+            ),
             WorkloadQuery(
                 "gql_one_hop_scalar",
                 "What is the GQL overhead for a one-hop scalar projection over the built graph?",

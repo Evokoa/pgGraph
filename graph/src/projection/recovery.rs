@@ -4,6 +4,7 @@
 //! deciding whether the projection can keep running, needs targeted chunk
 //! repair, or must be rebuilt from PostgreSQL source tables by the SQL layer.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,7 @@ use crate::persistence::{
 use crate::projection::chunk::{
     repair_corrupt_base_chunks, BaseChunkRewriteResult, BaseChunkSource,
 };
+use crate::projection::identity::read_manifest_identity_artifact;
 use crate::projection::layered::{ManifestSegmentProvider, SegmentProvider};
 use crate::projection::manifest::{
     manifest_file_name, parse_manifest_file_name, ManifestFileRef, ProjectionManifest,
@@ -115,6 +117,21 @@ pub(crate) fn plan_projection_recovery_for_artifact(
     if graph_path.is_some() {
         let current_base_path = root.join(&manifest.base_artifact_path);
         if let Err(err) = validate_manifest_base_metadata(&current_base_path, &manifest) {
+            return Ok(ProjectionRecoveryPlan::rebuild(
+                Some(manifest.generation_id),
+                err.to_string(),
+            ));
+        }
+    }
+
+    if let Some(reference) = &manifest.relationship_identities {
+        let identity_path = root.join(&reference.path);
+        if let Err(err) = read_manifest_identity_artifact(
+            &identity_path,
+            &reference.checksum,
+            reference.bytes,
+            reference.entry_count,
+        ) {
             return Ok(ProjectionRecoveryPlan::rebuild(
                 Some(manifest.generation_id),
                 err.to_string(),
@@ -562,7 +579,7 @@ fn latest_known_generation(root: &Path) -> GraphResult<Option<u64>> {
             continue;
         };
         let generation_id = parse_manifest_file_name(&file_name)
-            .or_else(|| parse_rebuilt_base_generation(&file_name))
+            .or_else(|| parse_candidate_artifact_generation(&file_name))
             .or_else(|| {
                 file_name
                     .split_once(".invalid-")
@@ -577,18 +594,176 @@ fn latest_known_generation(root: &Path) -> GraphResult<Option<u64>> {
     Ok(latest)
 }
 
-fn parse_rebuilt_base_generation(file_name: &str) -> Option<u64> {
-    const PREFIX: &str = "projection-generation-";
-    const SUFFIX: &str = "-base.pggraph";
-    let base_name = file_name
-        .strip_suffix(".sync")
-        .or_else(|| file_name.strip_suffix(".projection_mode"))
-        .unwrap_or(file_name);
-    let generation = base_name.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
-    if generation.len() != 20 || !generation.bytes().all(|byte| byte.is_ascii_digit()) {
+fn parse_candidate_artifact_generation(file_name: &str) -> Option<u64> {
+    let generation = if let Some(suffix) = file_name.strip_prefix("projection-generation-") {
+        let (generation, remainder) = suffix.split_at_checked(20)?;
+        if !remainder.starts_with('-')
+            && !remainder.starts_with(".json")
+            && !remainder.starts_with(".tmp-")
+        {
+            return None;
+        }
+        generation
+    } else if let Some(suffix) = file_name.strip_prefix("relationship-identities-") {
+        let (generation, remainder) = suffix.split_at_checked(20)?;
+        if !remainder.starts_with(".bin") {
+            return None;
+        }
+        generation
+    } else {
+        return None;
+    };
+    if !generation.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     generation.parse().ok()
+}
+
+/// Remove one generation candidate proven unpublished by an unchanged pointer.
+///
+/// This is the cancellation recovery path for work that crossed PostgreSQL's
+/// error boundary before ordinary Rust cleanup could run. The caller must hold
+/// the graph's PostgreSQL build advisory lock so another publisher cannot be
+/// constructing the same reusable candidate generation. The publication lock
+/// makes the current-generation comparison and cleanup one atomic decision.
+/// Files referenced by every other manifest are always protected; only the
+/// recorded unpublished generation and its private artifacts are eligible for
+/// removal.
+pub(crate) fn cleanup_interrupted_replacement(
+    root: &Path,
+    expected_current: Option<u64>,
+    candidate_generation: Option<u64>,
+) -> GraphResult<usize> {
+    let store = ProjectionManifestStore::new(root);
+    let _publication_lock = store.acquire_publication_lock()?;
+    if store.current_generation_id_for_recovery()? != expected_current {
+        return Ok(0);
+    }
+
+    let Some(candidate_generation) = candidate_generation else {
+        return Ok(0);
+    };
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => {
+            return Err(GraphError::Internal(format!(
+                "projection replacement cleanup read artifact directory failed for {}: {err}",
+                root.display()
+            )));
+        }
+    };
+    let mut manifests = Vec::new();
+    let mut candidate_artifacts = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            GraphError::Internal(format!(
+                "projection replacement cleanup read artifact entry failed for {}: {err}",
+                root.display()
+            ))
+        })?;
+        if !entry
+            .file_type()
+            .map_err(|err| {
+                GraphError::Internal(format!(
+                    "projection replacement cleanup read file type failed for {}: {err}",
+                    entry.path().display()
+                ))
+            })?
+            .is_file()
+        {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Some(generation_id) = parse_manifest_file_name(&file_name) {
+            let manifest = fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|raw| ProjectionManifest::from_json(&raw).ok())
+                .filter(|manifest| manifest.generation_id == generation_id);
+            manifests.push((generation_id, entry.path(), manifest));
+        } else if let Some(generation_id) = parse_candidate_artifact_generation(&file_name) {
+            candidate_artifacts.push((generation_id, entry.path()));
+        }
+    }
+
+    let mut protected = BTreeSet::new();
+    for (generation_id, _, manifest) in &manifests {
+        if *generation_id != candidate_generation {
+            if let Some(manifest) = manifest {
+                insert_active_manifest_references(root, manifest, &mut protected)?;
+            }
+        }
+    }
+
+    let mut candidates = BTreeSet::new();
+    for (generation_id, manifest_path, manifest) in &manifests {
+        if *generation_id != candidate_generation {
+            continue;
+        }
+        candidates.insert(manifest_path.clone());
+        if let Some(manifest) = manifest {
+            insert_active_manifest_references(root, manifest, &mut candidates)?;
+        }
+    }
+    candidates.extend(
+        candidate_artifacts
+            .into_iter()
+            .filter(|(generation_id, _)| *generation_id == candidate_generation)
+            .map(|(_, path)| path),
+    );
+
+    let mut removed = 0usize;
+    for candidate in candidates.difference(&protected) {
+        match fs::remove_file(candidate) {
+            Ok(()) => removed = removed.saturating_add(1),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(GraphError::Internal(format!(
+                    "projection replacement cleanup failed for {}: {err}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn insert_active_manifest_references(
+    root: &Path,
+    manifest: &ProjectionManifest,
+    paths: &mut BTreeSet<PathBuf>,
+) -> GraphResult<()> {
+    let base = crate::projection::manifest::resolve_manifest_reference(
+        root,
+        &manifest.base_artifact_path,
+    )?;
+    paths.insert(base.clone());
+    for suffix in [".sync", ".projection_mode"] {
+        let mut sidecar = base.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        paths.insert(PathBuf::from(sidecar));
+    }
+    if let Some(identities) = &manifest.relationship_identities {
+        paths.insert(crate::projection::manifest::resolve_manifest_reference(
+            root,
+            &identities.path,
+        )?);
+    }
+    for segment in &manifest.segments {
+        paths.insert(crate::projection::manifest::resolve_manifest_reference(
+            root,
+            &segment.path,
+        )?);
+    }
+    for chunk in &manifest.base_chunks {
+        paths.insert(crate::projection::manifest::resolve_manifest_reference(
+            root,
+            &chunk.path,
+        )?);
+    }
+    Ok(())
 }
 
 /// Move the latest final manifest aside so a full rebuild can reload safely.
@@ -710,10 +885,123 @@ fn now_unix_micros() -> GraphResult<i64> {
 mod tests {
     use super::*;
     use crate::projection::chunk::EdgeStoreChunkSource;
-    use crate::projection::manifest::{ManifestChunkRef, ManifestSegmentRef};
+    use crate::projection::identity::{write_identity_artifact, RelationshipIdentityDictionary};
+    use crate::projection::manifest::{ManifestChunkRef, ManifestIdentityRef, ManifestSegmentRef};
     use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentKind};
     use crate::projection::test_fixtures::{edge_store_from_tuples, ProjectionArtifactDir};
     use crate::types::TraversalDirection;
+
+    #[test]
+    fn interrupted_replacement_cleanup_removes_only_newer_unpublished_files() {
+        let dir = ProjectionArtifactDir::new(
+            "interrupted_replacement_cleanup_removes_only_newer_unpublished_files",
+        );
+        let current_base = dir.path().join("base.pggraph");
+        write_file(current_base.clone(), b"current");
+        let shared_segment = dir.path().join("shared.pggraph-delta");
+        write_file(shared_segment.clone(), b"shared");
+        let mut current = base_manifest(1);
+        current
+            .segments
+            .push(segment_ref(dir.path(), &shared_segment, "crc32:shared"));
+        let store = ProjectionManifestStore::new(dir.path());
+        store.publish(&current).expect("current publishes");
+
+        let candidate_base = dir
+            .path()
+            .join("projection-generation-00000000000000000002-base.pggraph");
+        write_file(candidate_base.clone(), b"candidate");
+        let candidate_sync = dir
+            .path()
+            .join("projection-generation-00000000000000000002-base.pggraph.sync");
+        write_file(candidate_sync.clone(), b"1");
+        let candidate_segment = dir
+            .path()
+            .join("projection-generation-00000000000000000002-segment-00000000.pggraph-delta");
+        write_file(candidate_segment.clone(), b"segment");
+        let candidate_chunk = dir
+            .path()
+            .join("projection-generation-00000000000000000002-base-chunk-00000000.pggraph-chunk");
+        write_file(candidate_chunk.clone(), b"chunk");
+        let candidate_temp = dir
+            .path()
+            .join("projection-generation-00000000000000000002.tmp-cancelled");
+        write_file(candidate_temp.clone(), b"partial manifest");
+        let candidate_identities = dir
+            .path()
+            .join("relationship-identities-00000000000000000002.bin");
+        write_file(candidate_identities.clone(), b"identities");
+        let mut candidate = ProjectionManifest::base_only(
+            2,
+            candidate_base
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("candidate name is UTF-8"),
+            "crc32:candidate",
+            graph_artifact_version(),
+            1,
+            2,
+        );
+        candidate.segments = current.segments.clone();
+        let candidate_manifest = store.manifest_path(2);
+        fs::write(
+            &candidate_manifest,
+            candidate.to_pretty_json().expect("candidate encodes"),
+        )
+        .expect("candidate manifest writes");
+
+        let removed = cleanup_interrupted_replacement(dir.path(), Some(1), Some(2))
+            .expect("interrupted candidate cleans up");
+
+        assert_eq!(removed, 7);
+        assert!(current_base.exists());
+        assert!(shared_segment.exists());
+        assert!(!candidate_base.exists());
+        assert!(!candidate_sync.exists());
+        assert!(!candidate_segment.exists());
+        assert!(!candidate_chunk.exists());
+        assert!(!candidate_temp.exists());
+        assert!(!candidate_identities.exists());
+        assert!(!candidate_manifest.exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn interrupted_replacement_cleanup_preserves_a_candidate_that_won_publication() {
+        let dir = ProjectionArtifactDir::new(
+            "interrupted_replacement_cleanup_preserves_a_candidate_that_won_publication",
+        );
+        write_file(dir.path().join("base.pggraph"), b"current");
+        let store = ProjectionManifestStore::new(dir.path());
+        store.publish(&base_manifest(1)).expect("current publishes");
+        let next_base = dir.path().join("next.pggraph");
+        write_file(next_base.clone(), b"next");
+        let next = ProjectionManifest::base_only(
+            2,
+            "next.pggraph",
+            "crc32:next",
+            graph_artifact_version(),
+            1,
+            2,
+        );
+        store
+            .publish_if_current(&next, Some(1))
+            .expect("next publishes");
+
+        let removed = cleanup_interrupted_replacement(dir.path(), Some(1), Some(2))
+            .expect("published candidate is inspected");
+
+        assert_eq!(removed, 0);
+        assert!(next_base.exists());
+        assert!(store.manifest_path(2).exists());
+        assert_eq!(
+            store.current_generation_id().expect("current reads"),
+            Some(2)
+        );
+    }
 
     #[test]
     fn load_corrupt_active_segment_repairs_or_rebuilds() {
@@ -736,6 +1024,45 @@ mod tests {
 
         assert_eq!(plan.action, ProjectionRecoveryAction::FullRebuild);
         assert_eq!(plan.generation_id, Some(1));
+    }
+
+    #[test]
+    fn corrupt_relationship_identity_artifact_requires_full_rebuild() {
+        let dir = ProjectionArtifactDir::new(
+            "corrupt_relationship_identity_artifact_requires_full_rebuild",
+        );
+        write_file(dir.path().join("base.pggraph"), b"base");
+        let identity_path = dir
+            .path()
+            .join("relationship-identities-00000000000000000001.bin");
+        let dictionary = RelationshipIdentityDictionary::try_from_identities(vec![None])
+            .expect("empty identity dictionary validates");
+        let (checksum, bytes) = write_identity_artifact(dir.path(), &identity_path, &dictionary)
+            .expect("identity artifact writes");
+        let mut manifest = base_manifest(1);
+        manifest.relationship_identities = Some(ManifestIdentityRef {
+            path: identity_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("identity path is UTF-8")
+                .to_string(),
+            checksum,
+            bytes,
+            entry_count: 1,
+        });
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+        write_file(&identity_path, b"corrupt");
+
+        let plan = plan_projection_recovery(dir.path()).expect("recovery plans");
+
+        assert_eq!(plan.action, ProjectionRecoveryAction::FullRebuild);
+        assert_eq!(plan.generation_id, Some(1));
+        assert!(plan
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("relationship identity")));
     }
 
     #[test]

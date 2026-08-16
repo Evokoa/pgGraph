@@ -34,11 +34,16 @@ Use `--yes` for non-interactive dataset download approval:
 sandbox/run_benchmarks.sh all --yes
 ```
 
+The harness reuses `sandbox/benchmark/.venv` without a package-manager command
+when every active exact pin is already satisfied. If a dependency must be
+installed or changed, the harness requires `sfw` and does not fall back to a
+direct pip invocation.
+
 The script prints the known download sizes before fetching data:
 
 | Dataset | Source | Compressed | Uncompressed |
 |---|---|---:|---:|
-| Panama Papers / ICIJ Offshore Leaks | `https://offshoreleaks-data.icij.org/offshoreleaks/csv/full-oldb.LATEST.zip` | 73 MB | 626 MB |
+| Panama Papers / ICIJ Offshore Leaks | [pgGraph benchmark snapshot](https://github.com/Evokoa/pgGraph/releases/tag/benchmark-data-icij-2026-07-29) | 72 MB | 626 MB |
 | LDBC SNB Interactive SF1 CsvBasic LongDateFormatter | `https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvBasic-LongDateFormatter.tar.zst` | 230 MB | unknown |
 
 Generated archives, extracted files, normalized CSVs, virtualenvs, and benchmark
@@ -107,10 +112,18 @@ read both build time and the cold query timings.
 
 ### Panama Papers
 
-The Panama loader uses the real public ICIJ Offshore Leaks CSV export. It loads
-all `nodes-*.csv` files and `relationships.csv`, creates normalized
-`panama.nodes` and `panama.edges` tables, enforces endpoint foreign keys, and
-registers the graph with dynamic edge labels from the source relationship type.
+The Panama loader uses the real public ICIJ Offshore Leaks CSV export generated
+on 2026-07-29. pgGraph mirrors the unchanged ZIP and the applicable ICIJ data
+license notices in a tag-pinned benchmark release, then verifies the archive's
+SHA-256 checksum before extraction. It loads all `nodes-*.csv` files and
+`relationships.csv`, creates normalized `panama.nodes` and `panama.edges`
+tables, enforces endpoint foreign keys, and registers the graph with dynamic
+edge labels from the source relationship type.
+
+ICIJ may repeat a node ID across category files when the same record has more
+than one role. The normalizer uses a fixed category precedence, emits one row
+when the projected values agree, and fails rather than silently choosing a row
+when the values conflict.
 
 The normalized table intentionally keeps a compact set of fields needed for
 graph search and traversal: label, name, countries, country codes, source ID,
@@ -123,6 +136,10 @@ The current workload asks:
 - Which Panama entities mention Mossack in a registered searchable field?
 - What is the two-hop neighborhood around a high-degree Panama node?
 - Can pgGraph find the direct path between a high-degree seed and one adjacent target?
+- How quickly can pgGraph traverse all 19 levels of a sparse investigation path
+  without hitting a work cap?
+- How quickly can pgGraph recover a verified 45-hop path across a 91,168-node
+  connected component?
 - What is the overhead of a one-hop `graph.gql()` scalar projection?
 - What is the overhead of returning hydrated GQL node objects?
 - What is the overhead of returning coordinate-only GQL node objects?
@@ -198,3 +215,8 @@ These benchmarks call Rust engine types directly. They do not start PostgreSQL
 and do not exercise pgrx, SPI, SQL wrappers, ACL checks, source-row hydration,
 artifact loading, or client connection overhead. Use them when changing engine
 data structures, traversal behavior, filter-index storage, or overlay traversal.
+
+The `bfs_traverse` group measures frontier growth on deterministic power-law
+graphs up to the two-million-node Panama scale. The `bfs_deep_chain` group
+separately measures depth scaling at 16, 64, 256, and 1,024 levels while holding
+the frontier width to one node.

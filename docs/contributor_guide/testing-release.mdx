@@ -426,9 +426,10 @@ hashes; operational examples with volatile job IDs or timings compare row
 counts. Independent query failures do not stop the catalog sweep, so one run
 reports every example that needs attention.
 
-The gate verifies the 2025-03-31 Panama archive checksum and uses the
-playground's documented 512 MiB query-memory profile. An upstream dataset change
-therefore fails at preparation instead of silently rewriting expected hashes.
+The gate verifies the tag-pinned 2026-07-29 Panama benchmark archive checksum
+and uses the playground's documented 512 MiB query-memory profile. An archive
+replacement therefore fails at preparation instead of silently rewriting
+expected hashes.
 
 ```bash
 cd graph
@@ -626,11 +627,11 @@ The protected package workflow does not publish the external Evokoa Homebrew
 tap. After the signed GitHub release exists, the tap owner performs a separate
 handoff:
 
-1. Update the formula to the signed 1.0.0 source archive URL and exact SHA-256.
+1. Update the formula to the signed 1.1.0 source archive URL and exact SHA-256.
 2. Run `brew audit --strict --online pggraph`, `brew style pggraph`, and
    `brew test pggraph` in the tap repository.
 3. Install into PostgreSQL 17, query `pg_extension`, and verify the reported
-   extension version is `1.0.0`.
+   extension version is `1.1.0`.
 4. Announce Homebrew availability only after the formula commit and checksum
    are reviewed. A delayed tap update does not change PGXN/GHCR release bytes.
 

@@ -5,7 +5,7 @@
     "check": "npm run mdx && npm run render && npm run spell",
     "mdx": "node scripts/check-mdx.mjs",
     "render": "node scripts/check-rendered-mdx.mjs",
-    "spell": "cspell --no-progress --show-suggestions '**/*.mdx' '../README.md'"
+    "spell": "cspell --no-progress --show-suggestions '**/*.mdx' '**/*.md' '../README.md'"
   },
   "devDependencies": {
     "@mdx-js/mdx": "3.1.1",

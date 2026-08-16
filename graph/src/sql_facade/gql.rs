@@ -134,10 +134,16 @@ fn gql(
     with_panic_boundary("gql()", || {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
-        let tenant_scope = resolve_tenant_scope(None).unwrap_or_else(|err| err.report());
-        let statement =
-            build_statement(query).unwrap_or_else(|err| gql_error_to_graph_error(err).report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let tenant_scope = crate::sql_sync::resolve_tenant_scope_for_query(
+            None,
+            &query_start.graph,
+            &query_start.tables,
+        )
+        .unwrap_or_else(|err| err.report());
+        let statement = build_statement_from_query_start(query, &query_start)
+            .unwrap_or_else(|err| gql_error_to_graph_error(err).report());
         let params = gql_params(params).unwrap_or_else(|err| err.report());
         let governor = gql_query_governor().unwrap_or_else(|err| err.report());
         let rows: Vec<_> = execute_statement_governed(
@@ -146,6 +152,8 @@ fn gql(
             &params,
             hydrate,
             &governor,
+            &query_start.tables,
+            &query_start.edges,
         )
         .unwrap_or_else(|err| err.report())
         .into_iter()
@@ -173,6 +181,33 @@ fn build_statement(
         .map_err(|err| crate::gql::errors::GqlError::bind(span, err.to_string()))?;
     let logical = crate::query::semantics::bind_statement(&ast, &catalog)?;
     Ok(crate::query::lower::lower_statement(logical))
+}
+
+fn build_statement_from_query_start(
+    query: &str,
+    query_start: &super::runtime::QueryStartState,
+) -> Result<crate::query::physical_plan::PhysicalStatement, crate::gql::errors::GqlError> {
+    let ast = crate::gql::parse_statement(query)?;
+    let catalog = crate::query::catalog_snapshot::CatalogSnapshotImpl::from_rows(
+        &query_start.tables,
+        &query_start.edges,
+    )
+    .map_err(|err| crate::gql::errors::GqlError::bind(statement_span(&ast), err.to_string()))?;
+    let logical = crate::query::semantics::bind_statement(&ast, &catalog)?;
+    Ok(crate::query::lower::lower_statement(logical))
+}
+
+fn statement_span(ast: &crate::gql::ast::Statement) -> crate::gql::errors::Span {
+    match ast {
+        crate::gql::ast::Statement::Read(query) => query.span,
+        crate::gql::ast::Statement::Create(query) => query.span,
+        crate::gql::ast::Statement::CreateRelationship(query) => query.span,
+        crate::gql::ast::Statement::Merge(query) => query.span,
+        crate::gql::ast::Statement::Set(query) => query.span,
+        crate::gql::ast::Statement::Remove(query) => query.span,
+        crate::gql::ast::Statement::Delete(query) => query.span,
+        crate::gql::ast::Statement::DetachDelete(query) => query.span,
+    }
 }
 
 fn check_plan_acl(plan: &crate::query::physical_plan::PhysicalPlan) {
@@ -269,9 +304,19 @@ pub(super) fn execute_statement(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
+    catalog_tables: &[crate::builder::RegisteredTable],
+    catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     let governor = gql_query_governor()?;
-    execute_statement_governed(statement, tenant_scope, params, hydrate, &governor)
+    execute_statement_governed(
+        statement,
+        tenant_scope,
+        params,
+        hydrate,
+        &governor,
+        catalog_tables,
+        catalog_edges,
+    )
 }
 
 fn gql_query_governor() -> safety::GraphResult<crate::resource::ResourceGovernor> {
@@ -291,24 +336,33 @@ fn execute_statement_governed(
     params: &crate::query::value::QueryParams,
     hydrate: bool,
     governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
+    catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
+    let visibility = if statement_uses_projection_matching(&statement) {
+        crate::sql_visibility::build_visibility_scope(catalog_tables, catalog_edges, governor)?
+    } else {
+        crate::visibility::VisibilityScope::Unrestricted
+    };
+    let context = crate::visibility::QueryExecutionContext::new(governor, &visibility);
     match statement {
         crate::query::physical_plan::PhysicalStatement::Read(plan) => {
             check_plan_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_governed(
+                crate::query::execute::execute_in_context(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
-                    governor,
+                    &context,
                 )
             })?;
-            ensure_gql_rows_visible(&matches, governor)?;
+            ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
             ensure_gql_relationship_rows_visible(&matches, &plan, governor)?;
             let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::requires_hydration(&plan, hydrate),
                 governor,
+                catalog_tables,
             )?;
             let hydrated_relationships =
                 hydrate_gql_relationship_rows_governed(&matches, &plan, hydrate, governor)?;
@@ -325,19 +379,20 @@ fn execute_statement_governed(
         crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
             check_node_scan_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_node_scan_governed(
+                crate::query::execute::execute_node_scan_in_context(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
                     params,
-                    governor,
+                    &context,
                 )
             })?;
-            ensure_gql_node_rows_visible(&matches, governor)?;
+            ensure_gql_node_rows_visible(&matches, governor, catalog_tables)?;
             let hydrated = hydrate_gql_node_rows_governed(
                 &matches,
                 crate::query::value::node_scan_requires_hydration(&plan, hydrate),
                 governor,
+                catalog_tables,
             )?;
             crate::query::value::project_node_rows_governed(
                 matches, &plan, &hydrated, params, hydrate, governor,
@@ -346,19 +401,20 @@ fn execute_statement_governed(
         crate::query::physical_plan::PhysicalStatement::JoinRead(plan) => {
             check_join_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_join_governed(
+                crate::query::execute::execute_join_in_context(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
-                    governor,
+                    &context,
                 )
             })?;
-            ensure_gql_rows_visible(&matches, governor)?;
+            ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
             ensure_gql_join_relationship_rows_visible(&matches, &plan, governor)?;
             let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::join_requires_hydration(&plan, hydrate),
                 governor,
+                catalog_tables,
             )?;
             crate::query::value::project_join_rows_governed(
                 matches, &plan, &hydrated, params, hydrate, governor,
@@ -367,19 +423,20 @@ fn execute_statement_governed(
         crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
             check_wildcard_path_acl(&plan);
             let matches = ENGINE.with(|engine| {
-                crate::query::execute::execute_wildcard_path_governed(
+                crate::query::execute::execute_wildcard_path_in_context(
                     &engine.borrow(),
                     &plan,
                     tenant_scope,
-                    governor,
+                    &context,
                 )
             })?;
-            ensure_gql_rows_visible(&matches, governor)?;
+            ensure_gql_rows_visible(&matches, governor, catalog_tables)?;
             ensure_gql_wildcard_relationship_rows_visible(&matches, &plan, governor)?;
             let hydrated = hydrate_gql_rows_governed(
                 &matches,
                 crate::query::value::wildcard_path_requires_hydration(&plan, hydrate),
                 governor,
+                catalog_tables,
             )?;
             crate::query::value::project_wildcard_path_rows_governed(
                 matches, &plan, &hydrated, params, hydrate, governor,
@@ -387,33 +444,80 @@ fn execute_statement_governed(
         }
         crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
             check_create_acl(&plan);
-            execute_create_node(&plan, tenant_scope, params, hydrate)
+            execute_create_node(&plan, tenant_scope, params, hydrate, catalog_tables)
         }
         crate::query::physical_plan::PhysicalStatement::CreateRelationship(plan) => {
             check_create_relationship_acl(&plan);
-            execute_create_relationship(&plan, tenant_scope, params, hydrate)
+            execute_create_relationship(
+                &plan,
+                tenant_scope,
+                params,
+                hydrate,
+                &context,
+                catalog_tables,
+            )
         }
         crate::query::physical_plan::PhysicalStatement::MergeNode(plan) => {
             check_merge_acl(&plan);
-            execute_merge_node(&plan, tenant_scope, params, hydrate)
+            execute_merge_node(&plan, tenant_scope, params, hydrate, catalog_tables)
         }
         crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
             check_set_acl(&plan);
-            execute_set_property(&plan, tenant_scope, params, hydrate)
+            execute_set_property(
+                &plan,
+                tenant_scope,
+                params,
+                hydrate,
+                &context,
+                catalog_tables,
+            )
         }
         crate::query::physical_plan::PhysicalStatement::RemoveProperty(plan) => {
             check_remove_acl(&plan);
-            execute_remove_property(&plan, tenant_scope, params, hydrate)
+            execute_remove_property(
+                &plan,
+                tenant_scope,
+                params,
+                hydrate,
+                &context,
+                catalog_tables,
+            )
         }
         crate::query::physical_plan::PhysicalStatement::DeleteEdge(plan) => {
             check_delete_acl(&plan);
-            execute_delete_edge(&plan, tenant_scope, params, hydrate)
+            execute_delete_edge(
+                &plan,
+                tenant_scope,
+                params,
+                hydrate,
+                &context,
+                catalog_tables,
+                catalog_edges,
+            )
         }
         crate::query::physical_plan::PhysicalStatement::DetachDeleteNode(plan) => {
             check_detach_delete_acl(&plan);
-            execute_detach_delete_node(&plan, tenant_scope, params, hydrate)
+            execute_detach_delete_node(
+                &plan,
+                tenant_scope,
+                params,
+                hydrate,
+                &context,
+                catalog_tables,
+                catalog_edges,
+            )
         }
     }
+}
+
+fn statement_uses_projection_matching(
+    statement: &crate::query::physical_plan::PhysicalStatement,
+) -> bool {
+    !matches!(
+        statement,
+        crate::query::physical_plan::PhysicalStatement::CreateNode(_)
+            | crate::query::physical_plan::PhysicalStatement::MergeNode(_)
+    )
 }
 
 fn execute_create_node(
@@ -421,10 +525,11 @@ fn execute_create_node(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL CREATE")?;
     crate::projection::tx_delta::ensure_write_capacity(1, 0, 0)?;
-    let insert = insert_mapped_node(plan, tenant_scope, params)?;
+    let insert = insert_mapped_node(plan, tenant_scope, params, catalog_tables)?;
     let base_node_count = ENGINE.with(|engine| engine.borrow().node_store.node_count());
     crate::projection::tx_delta::record_added_node_indexed(
         plan.table_oid,
@@ -440,6 +545,8 @@ fn execute_create_relationship(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL relationship CREATE")?;
     crate::projection::tx_delta::ensure_write_capacity(
@@ -449,8 +556,20 @@ fn execute_create_relationship(
     )?;
     let source_scan = create_relationship_node_scan(plan, true);
     let target_scan = create_relationship_node_scan(plan, false);
-    let source = matched_create_relationship_endpoint(&source_scan, tenant_scope, params)?;
-    let target = matched_create_relationship_endpoint(&target_scan, tenant_scope, params)?;
+    let source = matched_create_relationship_endpoint(
+        &source_scan,
+        tenant_scope,
+        params,
+        context,
+        catalog_tables,
+    )?;
+    let target = matched_create_relationship_endpoint(
+        &target_scan,
+        tenant_scope,
+        params,
+        context,
+        catalog_tables,
+    )?;
     lock_and_recheck_node_write(
         plan.source_table_oid,
         &plan.source_label,
@@ -459,6 +578,7 @@ fn execute_create_relationship(
         params,
         tenant_scope,
         "GQL relationship CREATE",
+        catalog_tables,
     )?;
     if plan.source_var != plan.target_var || source.node.node_id != target.node.node_id {
         lock_and_recheck_node_write(
@@ -469,6 +589,7 @@ fn execute_create_relationship(
             params,
             tenant_scope,
             "GQL relationship CREATE",
+            catalog_tables,
         )?;
     }
     let created =
@@ -486,6 +607,8 @@ fn execute_create_relationship(
         &target.node.node_id,
         created,
         hydrate,
+        context.governor,
+        catalog_tables,
     )
 }
 
@@ -494,9 +617,10 @@ fn execute_merge_node(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL MERGE")?;
-    let merged = merge_mapped_node(plan, tenant_scope, params)?;
+    let merged = merge_mapped_node(plan, tenant_scope, params, catalog_tables)?;
     if merged.created {
         let base_node_count = ENGINE.with(|engine| engine.borrow().node_store.node_count());
         crate::projection::tx_delta::record_added_node_indexed(
@@ -521,14 +645,27 @@ fn execute_set_property(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL SET")?;
     crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
     let scan = set_property_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            &scan,
+            tenant_scope,
+            params,
+            context,
+        )
     })?;
-    let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
+    let hydrated = hydrate_gql_node_rows_governed(
+        &matches,
+        scan.predicate.is_some(),
+        context.governor,
+        catalog_tables,
+    )?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
     let [row] = matches.as_slice() else {
         return Err(safety::GraphError::GqlExecution {
@@ -539,7 +676,13 @@ fn execute_set_property(
             ),
         });
     };
-    let updated = update_mapped_property(plan, &row.node.node_id, params, tenant_scope)?;
+    let updated = update_mapped_property(
+        plan,
+        &row.node.node_id,
+        params,
+        tenant_scope,
+        catalog_tables,
+    )?;
     update_filter_index_for_property(
         plan.table_oid,
         &updated.node_id,
@@ -554,14 +697,27 @@ fn execute_remove_property(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL REMOVE")?;
     crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
     let scan = remove_property_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            &scan,
+            tenant_scope,
+            params,
+            context,
+        )
     })?;
-    let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
+    let hydrated = hydrate_gql_node_rows_governed(
+        &matches,
+        scan.predicate.is_some(),
+        context.governor,
+        catalog_tables,
+    )?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
     let [row] = matches.as_slice() else {
         return Err(safety::GraphError::GqlExecution {
@@ -572,7 +728,13 @@ fn execute_remove_property(
             ),
         });
     };
-    let updated = remove_mapped_property(plan, &row.node.node_id, params, tenant_scope)?;
+    let updated = remove_mapped_property(
+        plan,
+        &row.node.node_id,
+        params,
+        tenant_scope,
+        catalog_tables,
+    )?;
     update_filter_index_for_property(
         plan.table_oid,
         &updated.node_id,
@@ -644,13 +806,27 @@ fn execute_detach_delete_node(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    catalog_tables: &[crate::builder::RegisteredTable],
+    catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL DETACH DELETE")?;
     let scan = detach_delete_node_scan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope, params)
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            &scan,
+            tenant_scope,
+            params,
+            context,
+        )
     })?;
-    let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
+    let hydrated = hydrate_gql_node_rows_governed(
+        &matches,
+        scan.predicate.is_some(),
+        context.governor,
+        catalog_tables,
+    )?;
     let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
     let [row] = matches.as_slice() else {
         return Err(safety::GraphError::GqlExecution {
@@ -680,10 +856,11 @@ fn execute_detach_delete_node(
         params,
         tenant_scope,
         "GQL DETACH DELETE",
+        catalog_tables,
     )?;
-    let deleted_edges = delete_incident_edge_rows(plan, &row.node.node_id)?;
+    let deleted_edges = delete_incident_edge_rows(plan, &row.node.node_id, catalog_edges)?;
     crate::projection::tx_delta::ensure_write_capacity(1, deleted_edges.delta_count(), 0)?;
-    let deleted = delete_mapped_node_row(plan, &row.node.node_id)?;
+    let deleted = delete_mapped_node_row(plan, &row.node.node_id, catalog_tables)?;
     for edge in deleted_edges.edges {
         record_detach_deleted_edge_delta(&edge)?;
     }
@@ -696,6 +873,9 @@ fn execute_delete_edge(
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
     hydrate: bool,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    catalog_tables: &[crate::builder::RegisteredTable],
+    catalog_edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     ensure_mutable_projection("GQL DELETE")?;
     crate::projection::tx_delta::ensure_write_capacity(
@@ -705,11 +885,18 @@ fn execute_delete_edge(
     )?;
     let read_plan = delete_edge_read_plan(plan);
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute(&engine.borrow(), &read_plan, tenant_scope)
+        crate::query::execute::execute_in_context(
+            &engine.borrow(),
+            &read_plan,
+            tenant_scope,
+            context,
+        )
     })?;
-    let hydrated = hydrate_gql_rows(
+    let hydrated = hydrate_gql_rows_governed(
         &matches,
         crate::query::value::requires_hydration(&read_plan, hydrate),
+        context.governor,
+        catalog_tables,
     )?;
     let matches = crate::query::value::filter_rows(matches, &read_plan, &hydrated, params)?;
     let [row] = matches.as_slice() else {
@@ -722,12 +909,14 @@ fn execute_delete_edge(
         });
     };
     let matched = matched_edge_ids(row, plan)?;
-    lock_and_recheck_edge_write(&read_plan, row, params, tenant_scope)?;
+    lock_and_recheck_edge_write(&read_plan, row, params, tenant_scope, catalog_tables)?;
     delete_mapped_edge_row(
         plan,
         &matched.source_id,
         &matched.target_id,
         &matched.source_key,
+        catalog_tables,
+        catalog_edges,
     )?;
     record_deleted_edge_delta(
         plan,
@@ -819,11 +1008,24 @@ fn matched_create_relationship_endpoint(
     scan: &crate::query::physical_plan::PhysicalNodeScan,
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
+    context: &crate::visibility::QueryExecutionContext<'_>,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<crate::query::execute::GqlNodeRow> {
     let matches = ENGINE.with(|engine| {
-        crate::query::execute::execute_node_scan(&engine.borrow(), scan, tenant_scope, params)
+        crate::query::execute::execute_node_scan_in_context(
+            &engine.borrow(),
+            scan,
+            tenant_scope,
+            params,
+            context,
+        )
     })?;
-    let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
+    let hydrated = hydrate_gql_node_rows_governed(
+        &matches,
+        scan.predicate.is_some(),
+        context.governor,
+        catalog_tables,
+    )?;
     let matches = crate::query::value::filter_node_rows(matches, scan, &hydrated, params)?;
     let [row] = matches.as_slice() else {
         return Err(safety::GraphError::GqlExecution {
@@ -928,8 +1130,8 @@ fn insert_mapped_node(
     plan: &crate::query::physical_plan::PhysicalCreateNode,
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<CreatedNode> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
         .find(|table| table.table_oid == plan.table_oid)
@@ -1177,8 +1379,8 @@ fn merge_mapped_node(
     plan: &crate::query::physical_plan::PhysicalMergeNode,
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<MergedNode> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
         .find(|table| table.table_oid == plan.table_oid)
@@ -1199,7 +1401,7 @@ fn merge_mapped_node(
         identity_values.clone(),
         tenant_scope,
     )? {
-        return apply_merge_match_branch(plan, locked, params, tenant_scope);
+        return apply_merge_match_branch(plan, locked, params, tenant_scope, tables);
     }
 
     let insert_values =
@@ -1224,7 +1426,7 @@ fn merge_mapped_node(
     .ok_or_else(|| safety::GraphError::GqlExecution {
         reason: format!("GQL MERGE could not find or insert `{}` node", plan.label),
     })?;
-    apply_merge_match_branch(plan, locked, params, tenant_scope)
+    apply_merge_match_branch(plan, locked, params, tenant_scope, tables)
 }
 
 fn apply_merge_match_branch(
@@ -1232,6 +1434,7 @@ fn apply_merge_match_branch(
     locked: MergedNode,
     params: &crate::query::value::QueryParams,
     tenant_scope: Option<&str>,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<MergedNode> {
     if let Some(on_match) = &plan.on_match {
         let set_plan = crate::query::physical_plan::PhysicalSetProperty {
@@ -1243,7 +1446,8 @@ fn apply_merge_match_branch(
             value: on_match.value.clone(),
             returns: Vec::new(),
         };
-        let updated = update_mapped_property(&set_plan, &locked.node_id, params, tenant_scope)?;
+        let updated =
+            update_mapped_property(&set_plan, &locked.node_id, params, tenant_scope, tables)?;
         return Ok(MergedNode {
             node_id: updated.node_id,
             tenant: locked.tenant,
@@ -1514,6 +1718,10 @@ fn validate_merge_identity(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "write recheck needs the matched identity, predicate, caller scope, and query catalog"
+)]
 fn lock_and_recheck_node_write(
     table_oid: u32,
     label: &str,
@@ -1522,8 +1730,9 @@ fn lock_and_recheck_node_write(
     params: &crate::query::value::QueryParams,
     tenant_scope: Option<&str>,
     operation: &str,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<LockedNodeRow> {
-    let locked = lock_node_coordinate(table_oid, node_id, tenant_scope, operation)?;
+    let locked = lock_node_coordinate(table_oid, node_id, tenant_scope, operation, tables)?;
     let scan = crate::query::physical_plan::PhysicalNodeScan {
         optional: false,
         var: String::new(),
@@ -1564,6 +1773,7 @@ fn lock_and_recheck_edge_write(
     row: &crate::query::execute::GqlRow,
     params: &crate::query::value::QueryParams,
     tenant_scope: Option<&str>,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<()> {
     let Some(target) = row.target.as_ref() else {
         return Err(safety::GraphError::GqlExecution {
@@ -1573,12 +1783,36 @@ fn lock_and_recheck_edge_write(
     let source_key = (plan.source_table_oid, row.source.node_id.as_str());
     let target_key = (plan.target_table_oid, target.node_id.as_str());
     let (source, target) = if source_key <= target_key {
-        let source = lock_node_coordinate(source_key.0, source_key.1, tenant_scope, "GQL DELETE")?;
-        let target = lock_node_coordinate(target_key.0, target_key.1, tenant_scope, "GQL DELETE")?;
+        let source = lock_node_coordinate(
+            source_key.0,
+            source_key.1,
+            tenant_scope,
+            "GQL DELETE",
+            tables,
+        )?;
+        let target = lock_node_coordinate(
+            target_key.0,
+            target_key.1,
+            tenant_scope,
+            "GQL DELETE",
+            tables,
+        )?;
         (source, target)
     } else {
-        let target = lock_node_coordinate(target_key.0, target_key.1, tenant_scope, "GQL DELETE")?;
-        let source = lock_node_coordinate(source_key.0, source_key.1, tenant_scope, "GQL DELETE")?;
+        let target = lock_node_coordinate(
+            target_key.0,
+            target_key.1,
+            tenant_scope,
+            "GQL DELETE",
+            tables,
+        )?;
+        let source = lock_node_coordinate(
+            source_key.0,
+            source_key.1,
+            tenant_scope,
+            "GQL DELETE",
+            tables,
+        )?;
         (source, target)
     };
     let hydrated = [
@@ -1609,8 +1843,8 @@ fn lock_node_coordinate(
     node_id: &str,
     tenant_scope: Option<&str>,
     operation: &str,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<LockedNodeRow> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
         .find(|table| table.table_oid == table_oid)
@@ -1721,8 +1955,8 @@ fn update_mapped_property(
     node_id: &str,
     params: &crate::query::value::QueryParams,
     tenant_scope: Option<&str>,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<UpdatedNode> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
         .find(|table| table.table_oid == plan.table_oid)
@@ -1741,6 +1975,7 @@ fn update_mapped_property(
         params,
         tenant_scope,
         "GQL SET",
+        tables,
     )?;
     let value = write_value_json(&plan.value, params)?;
     let values = serde_json::json!({ &plan.property: value });
@@ -1837,8 +2072,8 @@ fn remove_mapped_property(
     node_id: &str,
     params: &crate::query::value::QueryParams,
     tenant_scope: Option<&str>,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<UpdatedNode> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
         .find(|table| table.table_oid == plan.table_oid)
@@ -1857,6 +2092,7 @@ fn remove_mapped_property(
         params,
         tenant_scope,
         "GQL REMOVE",
+        tables,
     )?;
     let pk_expr = primary_key_expr("src", &table.id_columns);
     let assignment = remove_property_assignment(&plan.property);
@@ -1951,8 +2187,8 @@ fn remove_mapped_property(
 fn delete_mapped_node_row(
     plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
     node_id: &str,
+    tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<DeletedNode> {
-    let (tables, _edges, _filter_columns) = read_catalog()?;
     let table = tables
         .iter()
         .find(|table| table.table_oid == plan.table_oid)
@@ -2023,8 +2259,8 @@ fn delete_mapped_node_row(
 fn delete_incident_edge_rows(
     plan: &crate::query::physical_plan::PhysicalDetachDeleteNode,
     node_id: &str,
+    edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<DeletedIncidentEdges> {
-    let (_tables, edges, _filter_columns) = read_catalog()?;
     let mut deleted = Vec::new();
     for incident in &plan.incident_edges {
         let edge = edges
@@ -2152,8 +2388,9 @@ fn delete_mapped_edge_row(
     source_id: &str,
     target_id: &str,
     source_key: &str,
+    tables: &[crate::builder::RegisteredTable],
+    edges: &[crate::builder::RegisteredEdge],
 ) -> safety::GraphResult<()> {
-    let (tables, edges, _filter_columns) = read_catalog()?;
     let edge = edges
         .iter()
         .find(|edge| {
@@ -2728,13 +2965,22 @@ fn project_created_relationship(
     target_id: &str,
     created: CreatedRelationship,
     hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<Vec<serde_json::Value>> {
     let mut output = serde_json::Map::new();
     for slot in &plan.returns {
         match slot {
             crate::query::physical_plan::ReturnSlot::Node { side, name } => {
-                let value =
-                    created_relationship_node_value(plan, *side, source_id, target_id, hydrate)?;
+                let value = created_relationship_node_value(
+                    plan,
+                    *side,
+                    source_id,
+                    target_id,
+                    hydrate,
+                    governor,
+                    catalog_tables,
+                )?;
                 output.insert(name.clone(), value);
             }
             crate::query::physical_plan::ReturnSlot::Relationship { name } => {
@@ -2749,7 +2995,13 @@ fn project_created_relationship(
                 name,
             } => {
                 let value = created_relationship_node_property(
-                    plan, *side, source_id, target_id, property,
+                    plan,
+                    *side,
+                    source_id,
+                    target_id,
+                    property,
+                    governor,
+                    catalog_tables,
                 )?;
                 output.insert(name.clone(), value);
             }
@@ -2981,14 +3233,20 @@ fn created_relationship_node_value(
     source_id: &str,
     target_id: &str,
     hydrate: bool,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<serde_json::Value> {
     let (table_oid, label, node_id) =
         created_relationship_node_parts(plan, side, source_id, target_id)?;
     let mut node = if hydrate {
-        hydrate_required_node(&crate::query::execute::GqlNodeCoordinate {
-            table_oid,
-            node_id: node_id.to_string(),
-        })?
+        hydrate_required_node_governed(
+            &crate::query::execute::GqlNodeCoordinate {
+                table_oid,
+                node_id: node_id.to_string(),
+            },
+            governor,
+            catalog_tables,
+        )?
         .as_object()
         .cloned()
         .unwrap_or_default()
@@ -3015,13 +3273,19 @@ fn created_relationship_node_property(
     source_id: &str,
     target_id: &str,
     property: &str,
+    governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<serde_json::Value> {
     let (table_oid, _, node_id) =
         created_relationship_node_parts(plan, side, source_id, target_id)?;
-    let row = hydrate_required_node(&crate::query::execute::GqlNodeCoordinate {
-        table_oid,
-        node_id: node_id.to_string(),
-    })?;
+    let row = hydrate_required_node_governed(
+        &crate::query::execute::GqlNodeCoordinate {
+            table_oid,
+            node_id: node_id.to_string(),
+        },
+        governor,
+        catalog_tables,
+    )?;
     Ok(row_property_value(&row, property))
 }
 
@@ -3208,13 +3472,15 @@ fn hydrate_gql_rows(
     needed: bool,
 ) -> safety::GraphResult<crate::query::value::HydratedRows> {
     let governor = gql_query_governor()?;
-    hydrate_gql_rows_governed(rows, needed, &governor)
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    hydrate_gql_rows_governed(rows, needed, &governor, &tables)
 }
 
 fn hydrate_gql_rows_governed(
     rows: &[crate::query::execute::GqlRow],
     needed: bool,
     governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<crate::query::value::HydratedRows> {
     let mut hydrated = crate::query::value::HydratedRows::new();
     if !needed {
@@ -3230,7 +3496,7 @@ fn hydrate_gql_rows_governed(
             if hydrated.contains_key(&key) {
                 continue;
             }
-            let node = hydrate_required_node_governed(coordinate, governor)?;
+            let node = hydrate_required_node_governed(coordinate, governor, catalog_tables)?;
             hydrated.insert(key, node);
         }
     }
@@ -3245,6 +3511,7 @@ fn hydrate_gql_rows_governed(
 fn ensure_gql_rows_visible(
     rows: &[crate::query::execute::GqlRow],
     governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<()> {
     let (coordinate_count, key_bytes) =
         rows.iter()
@@ -3285,7 +3552,11 @@ fn ensure_gql_rows_visible(
                 .push(coordinate.node_id.clone());
         }
     }
-    let visible = crate::sql_hydration::visible_node_keys_governed(&ids_by_table, governor)?;
+    let visible = crate::sql_hydration::visible_node_keys_governed_with_tables(
+        &ids_by_table,
+        governor,
+        catalog_tables,
+    )?;
     let hidden = ids_by_table
         .into_iter()
         .flat_map(|(table_oid, ids)| ids.into_iter().map(move |node_id| (table_oid, node_id)))
@@ -3302,6 +3573,7 @@ fn ensure_gql_rows_visible(
 fn ensure_gql_node_rows_visible(
     rows: &[crate::query::execute::GqlNodeRow],
     governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<()> {
     let mut visible_rows = rows.iter().filter(|row| !row.optional_null);
     let row_count = visible_rows.clone().count();
@@ -3319,7 +3591,11 @@ fn ensure_gql_node_rows_visible(
             .or_default()
             .push(row.node.node_id.clone());
     }
-    let visible = crate::sql_hydration::visible_node_keys_governed(&ids_by_table, governor)?;
+    let visible = crate::sql_hydration::visible_node_keys_governed_with_tables(
+        &ids_by_table,
+        governor,
+        catalog_tables,
+    )?;
     if ids_by_table
         .into_iter()
         .flat_map(|(table_oid, ids)| ids.into_iter().map(move |node_id| (table_oid, node_id)))
@@ -3651,13 +3927,15 @@ fn hydrate_gql_node_rows(
     needed: bool,
 ) -> safety::GraphResult<crate::query::value::HydratedRows> {
     let governor = gql_query_governor()?;
-    hydrate_gql_node_rows_governed(rows, needed, &governor)
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    hydrate_gql_node_rows_governed(rows, needed, &governor, &tables)
 }
 
 fn hydrate_gql_node_rows_governed(
     rows: &[crate::query::execute::GqlNodeRow],
     needed: bool,
     governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<crate::query::value::HydratedRows> {
     let mut hydrated = crate::query::value::HydratedRows::new();
     if !needed {
@@ -3671,7 +3949,7 @@ fn hydrate_gql_node_rows_governed(
         if hydrated.contains_key(&key) {
             continue;
         }
-        let node = hydrate_required_node_governed(&row.node, governor)?;
+        let node = hydrate_required_node_governed(&row.node, governor, catalog_tables)?;
         hydrated.insert(key, node);
     }
     Ok(hydrated)
@@ -3947,17 +4225,20 @@ fn hydrate_required_node(
     coordinate: &crate::query::execute::GqlNodeCoordinate,
 ) -> safety::GraphResult<serde_json::Value> {
     let governor = gql_query_governor()?;
-    hydrate_required_node_governed(coordinate, &governor)
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    hydrate_required_node_governed(coordinate, &governor, &tables)
 }
 
 fn hydrate_required_node_governed(
     coordinate: &crate::query::execute::GqlNodeCoordinate,
     governor: &crate::resource::ResourceGovernor,
+    catalog_tables: &[crate::builder::RegisteredTable],
 ) -> safety::GraphResult<serde_json::Value> {
-    crate::sql_hydration::hydrate_node_governed(
+    crate::sql_hydration::hydrate_node_governed_with_tables(
         coordinate.table_oid,
         &coordinate.node_id,
         governor,
+        catalog_tables,
     )?
     .map(|json| json.0)
     .ok_or_else(|| safety::GraphError::GqlExecution {
@@ -4132,8 +4413,15 @@ fn test_recheck_delete_edge_predicate(
             join_relationships: None,
             join_path_relationships: None,
         };
-        lock_and_recheck_edge_write(&plan, &row, &crate::query::value::QueryParams::new(), None)
-            .unwrap_or_else(|err| err.report());
+        let (tables, _edges, _filter_columns) = read_catalog().unwrap_or_else(|err| err.report());
+        lock_and_recheck_edge_write(
+            &plan,
+            &row,
+            &crate::query::value::QueryParams::new(),
+            None,
+            &tables,
+        )
+        .unwrap_or_else(|err| err.report());
         true
     })
 }

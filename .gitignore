@@ -41,6 +41,9 @@ graph/fuzz/target/
 node_modules/
 **/__pycache__/
 
+# Temporary local release artifacts
+.temporary_files/
+
 # pgrx / PostgreSQL regression tests
 **/tests/pg_regress/results/
 **/tests/pg_regress/regression.diffs
@@ -76,3 +79,4 @@ sandbox/playground/.venv/
 .direnv/
 .pgrx/
 .nix-cargo/
+.pggraph-v1.0-source.tar.gz

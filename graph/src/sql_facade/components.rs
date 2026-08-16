@@ -9,8 +9,7 @@ use super::*;
 ///
 /// Returns one row per node with its component ID and component size.
 /// This is a global O(V+E) algorithm — it touches every node and edge.
-#[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, pg_temp)]
+#[pg_extern(schema = "graph")]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -31,15 +30,32 @@ fn connected_components() -> Result<
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        acl::check_table_acls(
+            query_start
+                .tables
+                .iter()
+                .map(|table| table.table_oid)
+                .chain(query_start.edges.iter().map(|edge| edge.from_table_oid)),
+        )
+        .unwrap_or_else(|err| err.report());
+
+        let governor = ENGINE
+            .with(|e| e.borrow().analytics_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
-            let governor = eng
-                .analytics_resource_governor()
-                .unwrap_or_else(|err| err.report());
             let cc_result = eng
-                .connected_components_governed(&governor)
+                .connected_components_governed_in_context(&context)
                 .unwrap_or_else(|err| err.report());
 
             let output_bytes = cc_result
@@ -86,8 +102,7 @@ fn connected_components() -> Result<
 ///
 /// Returns a single row with component count, largest component size, isolated
 /// node count, and total active node count.
-#[pg_extern(schema = "graph", security_definer)]
-#[search_path(pg_catalog, pg_temp)]
+#[pg_extern(schema = "graph")]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -108,15 +123,31 @@ fn component_stats() -> Result<
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        acl::check_table_acls(
+            query_start
+                .tables
+                .iter()
+                .map(|table| table.table_oid)
+                .chain(query_start.edges.iter().map(|edge| edge.from_table_oid)),
+        )
+        .unwrap_or_else(|err| err.report());
+        let governor = ENGINE
+            .with(|e| e.borrow().analytics_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
 
         let result = ENGINE.with(|e| {
             let eng = e.borrow();
-            let governor = eng
-                .analytics_resource_governor()
-                .unwrap_or_else(|err| err.report());
             let cc_result = eng
-                .connected_components_governed(&governor)
+                .connected_components_governed_in_context(&context)
                 .unwrap_or_else(|err| err.report());
 
             // Count isolated nodes (component_size == 1)
@@ -125,7 +156,7 @@ fn component_stats() -> Result<
                 .values()
                 .filter(|&&v| v == 1)
                 .count() as i32;
-            let active = eng.node_store.active_count() as i32;
+            let active = cc_result.component_sizes.values().copied().sum::<u32>() as i32;
 
             (
                 cc_result.num_components as i32,
@@ -163,15 +194,31 @@ fn components(
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        acl::check_table_acls(
+            query_start
+                .tables
+                .iter()
+                .map(|table| table.table_oid)
+                .chain(query_start.edges.iter().map(|edge| edge.from_table_oid)),
+        )
+        .unwrap_or_else(|err| err.report());
+        let governor = ENGINE
+            .with(|e| e.borrow().analytics_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
 
         let rows = ENGINE.with(|e| {
             let eng = e.borrow();
-            let governor = eng
-                .analytics_resource_governor()
-                .unwrap_or_else(|err| err.report());
             let cc_result = eng
-                .connected_components_governed(&governor)
+                .connected_components_governed_in_context(&context)
                 .unwrap_or_else(|err| err.report());
             let row_offset =
                 usize_from_nonnegative(row_offset, "row_offset").unwrap_or_else(|err| err.report());
@@ -306,19 +353,35 @@ fn isolated_nodes(
         check_enabled_result().unwrap_or_else(|err| err.report());
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         let freshness = current_query_freshness().unwrap_or_else(|err| err.report());
-        ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        let query_start =
+            ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
+        acl::check_table_acls(
+            query_start
+                .tables
+                .iter()
+                .map(|table| table.table_oid)
+                .chain(query_start.edges.iter().map(|edge| edge.from_table_oid)),
+        )
+        .unwrap_or_else(|err| err.report());
         let row_offset =
             usize_from_nonnegative(row_offset, "row_offset").unwrap_or_else(|err| err.report());
         let max_rows =
             usize_from_nonnegative(max_rows, "max_rows").unwrap_or_else(|err| err.report());
 
-        let (page, governor) = ENGINE.with(|e| {
+        let governor = ENGINE
+            .with(|e| e.borrow().analytics_resource_governor())
+            .unwrap_or_else(|err| err.report());
+        let visibility = crate::sql_visibility::build_visibility_scope(
+            &query_start.tables,
+            &query_start.edges,
+            &governor,
+        )
+        .unwrap_or_else(|err| err.report());
+        let context = crate::visibility::QueryExecutionContext::new(&governor, &visibility);
+        let page = ENGINE.with(|e| {
             let eng = e.borrow();
-            let governor = eng
-                .analytics_resource_governor()
-                .unwrap_or_else(|err| err.report());
             let cc_result = eng
-                .connected_components_governed(&governor)
+                .connected_components_governed_in_context(&context)
                 .unwrap_or_else(|err| err.report());
             let page_bytes = max_rows
                 .checked_mul(
@@ -344,9 +407,9 @@ fn isolated_nodes(
             )
             .unwrap_or_else(|err| err.report());
             page_lease.retain_until_governor_drop();
-            (page, governor)
+            page
         });
-        let rows = hydrate_component_page_governed(page, hydrate, &governor)
+        let rows = hydrate_component_page_governed(page, hydrate, &governor, &query_start.tables)
             .unwrap_or_else(|err| err.report());
 
         Ok(TableIterator::new(rows))

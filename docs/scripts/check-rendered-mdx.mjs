@@ -15,7 +15,7 @@ async function mdxFiles(directory) {
     if (entry.name === 'node_modules') continue;
     const path = join(directory, entry.name);
     if (entry.isDirectory()) files.push(...await mdxFiles(path));
-    else if (entry.name.endsWith('.mdx')) files.push(path);
+    else if (entry.name.endsWith('.mdx') || entry.name.endsWith('.md')) files.push(path);
   }
   return files;
 }

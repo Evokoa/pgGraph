@@ -838,6 +838,33 @@ fn next_generation_id(
     )
 }
 
+/// Return the generation a SQL caller should record before ingestion starts.
+///
+/// This mirrors the ingester's committed-row and watermark filters so
+/// cancellation cleanup records the exact candidate even when upgrading a
+/// compatibility artifact that has no projection manifest yet.
+pub(crate) fn candidate_generation_id(
+    previous: Option<&ProjectionManifest>,
+    rows: &[ProjectionSyncRow],
+) -> GraphResult<Option<u64>> {
+    let previous_watermark = previous.map_or(0, |manifest| manifest.sync_watermark);
+    let row_generation = rows
+        .iter()
+        .filter(|row| row.committed)
+        .filter(|row| i64::try_from(row.sync_id).is_ok_and(|id| id > previous_watermark))
+        .map(|row| row.generation_id)
+        .max();
+    match (previous, row_generation) {
+        (_, None) => Ok(None),
+        (None, Some(generation)) => Ok(Some(generation.max(1))),
+        (Some(manifest), Some(_)) => manifest
+            .generation_id
+            .checked_add(1)
+            .map(Some)
+            .ok_or_else(|| GraphError::Internal("projection generation id overflowed".into())),
+    }
+}
+
 fn validate_ingestion_limits<'a>(
     rows: impl IntoIterator<Item = &'a ProjectionSyncRow>,
     limits: MutationBufferLimits,
@@ -1215,8 +1242,44 @@ fn now_unix_micros() -> GraphResult<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::graph_artifact_version;
     use crate::projection::manifest::ProjectionManifestStore;
     use crate::projection::test_fixtures::ProjectionArtifactDir;
+
+    #[test]
+    fn compatibility_ingest_records_source_generation_as_candidate() {
+        let mut first = edge_row(1, 0, 1, None, MutationOperation::InsertEdge);
+        first.generation_id = 7;
+        let mut ignored = edge_row(2, 1, 2, None, MutationOperation::InsertEdge);
+        ignored.generation_id = 11;
+        ignored.committed = false;
+
+        assert_eq!(
+            candidate_generation_id(None, &[first, ignored]).expect("candidate generation plans"),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn manifest_ingest_records_next_generation_after_watermark() {
+        let mut previous = ProjectionManifest::base_only(
+            7,
+            "base.pggraph",
+            "crc32:base",
+            graph_artifact_version(),
+            1,
+            9,
+        );
+        previous.sync_watermark = 5;
+        let before_watermark = edge_row(5, 0, 1, None, MutationOperation::InsertEdge);
+        let after_watermark = edge_row(6, 1, 2, None, MutationOperation::InsertEdge);
+
+        assert_eq!(
+            candidate_generation_id(Some(&previous), &[before_watermark, after_watermark])
+                .expect("candidate generation plans"),
+            Some(8)
+        );
+    }
 
     #[test]
     fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {

@@ -137,6 +137,7 @@ def docker_dependencies() -> list[Dependency]:
             if not match:
                 continue
             image, tag = match.groups()
+            image = image.removeprefix("docker.io/library/")
             # Docker updates need tag/digest review, so this script reports but
             # does not rewrite Dockerfile base image references automatically.
             deps.append(Dependency("docker", image, tag, dockerfile, False))

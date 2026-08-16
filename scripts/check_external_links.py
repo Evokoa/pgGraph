@@ -12,7 +12,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = [ROOT / "README.md", ROOT / "README_zh.md", *sorted((ROOT / "docs").rglob("*.mdx"))]
+DOC_SOURCES = sorted(
+    path
+    for pattern in ("*.mdx", "*.md")
+    for path in (ROOT / "docs").rglob(pattern)
+    if "node_modules" not in path.parts
+)
+SOURCES = [ROOT / "README.md", ROOT / "README_zh.md", *DOC_SOURCES]
 URL_RE = re.compile(r"https?://[^\s)>'\"]+")
 SKIP_PREFIXES = (
     "https://img.shields.io/",

@@ -178,44 +178,55 @@ table `SELECT` permissions.
 role, so row-level security policies on the underlying tables apply exactly as
 they would to a direct `SELECT`.
 
-`graph.traverse()`, `graph.shortest_path()`, `graph.weighted_shortest_path()`,
-and the connected-component functions read the built graph artifact instead of
-issuing a fresh SQL scan. That artifact is constructed once by whoever ran
-`graph.build()` — typically an owning or elevated role — from every row the
-builder could see, and it is not re-filtered per calling role afterward. These
-functions check table-level `SELECT` privilege (`PG002`) before returning
-results, but they do not evaluate row-level security policies against the
-calling role.
+The 1.1 topology APIs build one statement-scoped
+visibility scope after freshness handling. For each registered source relation
+where PostgreSQL says RLS applies to the outer caller, pgGraph scans
+caller-visible source keys and intersects them with projected node and
+relationship identities. Hidden seeds and targets behave as nonexistent, and
+hidden nodes or relationship rows are rejected before they affect
+reachability, path selection, weighted costs, limits, or hydration. This covers
+single- and multi-seed BFS/DFS, inbound traversal, search-derived traversal,
+`get_neighbors()`, `expand()`, `find_related()`, `neighborhood()`, shortest
+paths, weighted shortest paths, and the direct `path()` and `connection()`
+wrappers.
 
-By default (`graph.allow_rls_tables = off`), `graph.build()` refuses to
-register any table that has row-level security enabled
-(`relrowsecurity`/`relforcerowsecurity`) with SQLSTATE `55000` and diagnostic
-`PG021`, for both node tables and edge endpoint tables. This makes the
-exposure above a deliberate, acknowledged operator decision instead of a
-silent one: building over an RLS-enabled table requires explicitly setting
-`graph.allow_rls_tables = on` first.
+`graph.build()` now accepts RLS-enabled node and relationship source tables by
+default. `graph.allow_rls_tables` remains registered for 1.x configuration
+compatibility but is a deprecated no-op. `graph.rls_mode = 'enforce'` is the
+default. A superuser can select `legacy_bypass` as a temporary compatibility
+escape hatch; table ACL checks still apply.
 
-<Callout type="warning">
-Setting `graph.allow_rls_tables = on` does not add row-level filtering to
-topology reads — it only lets `graph.build()` proceed over an RLS-enabled
-table. Once acknowledged, a role with table-level `SELECT` but no row-level
-access to a specific row can still receive that row's `node_id`/`node_table`
-coordinate, its position in a traversal or path, and whether it is reachable
-from another node, through `graph.traverse()`, `graph.shortest_path()`,
-`graph.weighted_shortest_path()`, and the component functions. Requesting
-`hydrate := true` re-checks the source row through SQL as the caller and
-omits or nulls the hydrated payload when row-level security denies it, but
-the coordinate itself is still returned by these functions.
-</Callout>
+The same visibility scope is used by components, aggregation, GQL/Cypher,
+derived workflows, path enumeration, and topology-producing mapped-write
+matching. PostgreSQL DML then rechecks source-table RLS, ACLs, constraints, and
+triggers before a mapped write commits.
 
-If your access-control model requires row-level security to extend to graph
-topology, keep `graph.allow_rls_tables = off` and do not register RLS-enabled
-tables. If you do acknowledge and build over one, do not grant `EXECUTE` on
-`graph.traverse()`, `graph.shortest_path()`, `graph.weighted_shortest_path()`,
-or the component functions to roles that should not see the full topology the
-graph was built from. Treat a built graph as a single artifact reflecting the
-builder's row visibility, not a per-caller-filtered view, and restrict which
-roles can query it accordingly.
+An RLS-active projected relationship must carry its durable source-row
+identity. A legacy artifact that lacks that identity fails closed with SQLSTATE
+`55000`, diagnostic `PG023`, and a rebuild-required hint.
+
+## Query Identity And Telemetry Authorization
+
+In pgGraph 1.1 query entry points execute as the PostgreSQL caller. Source-table
+SQL used for hydration and visibility checks therefore sees the application
+role and its normal ACL/RLS environment. pgGraph does not switch Rust user IDs.
+Selected-graph resolution and private catalog maintenance use small
+`SECURITY DEFINER` mediators that capture the outer role, pin `search_path` to
+`pg_catalog, pg_temp`, and enforce graph grants before accessing internal
+catalogs.
+
+Operational status reports physical projection state; their counts are not
+RLS-filtered query results. `graph.status()`, build/maintenance job status,
+`graph.loaded_graphs()`, and `graph.graph_runtime_status()` require read access
+to every graph row they expose. `graph.projection_status()` and
+`graph.build_resource_status()` require selected-graph `admin` access.
+Cluster-wide generation counts and backend-local resource telemetry require a
+graph-schema administrator (superuser or a role with `CREATE` on schema
+`graph`).
+
+Build and maintenance job status uses pinned catalog-only mediators that
+capture the outer caller and authorize the selected or named graph. The raw
+job tables are not a supported authorization bypass.
 
 ## Internal Catalog Tables
 
@@ -227,6 +238,8 @@ job, sync, and projection metadata tables:
 graph._graphs
 graph._graph_grants
 graph._graph_quotas
+graph._build_jobs
+graph._maintenance_jobs
 graph._jobs
 graph._job_runs
 graph._sync_policies
@@ -296,8 +309,9 @@ operators to distinguish pgGraph conditions that share a standard SQLSTATE.
 | `0A000` | `PG018` | Unsupported graph operation | Use a supported query shape or merge pending overlays before retrying |
 | `54000` | `PG019` | Overlay limit exceeded | Commit or roll back the transaction, or raise the relevant overlay GUC |
 | `55000` | `PG020` | Extension disabled | `SET graph.enabled = on` |
-| `55000` | `PG021` | Row-level security topology boundary | Review the RLS/topology boundary, then `SET graph.allow_rls_tables = on` to acknowledge and build anyway |
+| `55000` | `PG021` | Legacy 1.0 row-level security build boundary | Upgrade to the 1.1 behavior; `graph.allow_rls_tables` is retained only as a no-op compatibility setting |
 | `55000` | `PG022` | Sync replay position predates a prune | Run `graph.build()` or `graph.vacuum()` for a fresh consistent base, then resume normal sync |
+| `55000` | `PG023` | RLS relationship identity missing | Rebuild the projection so every relationship has a durable source-row identity |
 | `XX000` | `PG000` | Internal error | Report with full message and reproduction |
 
 ## Disable Query Functions

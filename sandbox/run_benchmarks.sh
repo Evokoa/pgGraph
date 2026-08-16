@@ -7,6 +7,8 @@ VENV_DIR="${SANDBOX_DIR}/benchmark/.venv"
 
 # shellcheck source=common/docker.sh
 source "${SANDBOX_DIR}/common/docker.sh"
+# shellcheck source=common/python.sh
+source "${SANDBOX_DIR}/common/python.sh"
 
 DATASET="${1:-all}"
 PG_PORT="${PGGRAPH_PG_PORT:-55432}"
@@ -42,16 +44,12 @@ require_docker
 ensure_pggraph_image "${ROOT_DIR}" "${IMAGE_NAME}"
 ensure_pggraph_container "${CONTAINER_NAME}" "${IMAGE_NAME}" "${PG_PORT}"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Error: python3 is required to run benchmarks." >&2
-  exit 1
-fi
-
 BENCHMARK_PYTHON=""
 for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
   if command -v "${candidate}" >/dev/null 2>&1; then
-    if "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
-      BENCHMARK_PYTHON="$(command -v "${candidate}")"
+    candidate_path="$(command -v "${candidate}")"
+    if "${candidate_path}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+      BENCHMARK_PYTHON="$(pggraph_resolve_python "${candidate_path}")"
       break
     fi
   fi
@@ -72,18 +70,9 @@ if [ ! -d "${VENV_DIR}" ]; then
   "${BENCHMARK_PYTHON}" -m venv "${VENV_DIR}"
 fi
 
-if ! command -v sfw >/dev/null 2>&1; then
-  echo "Error: sfw is required before benchmark dependencies can be installed." >&2
-  echo "Install sfw, or provision sandbox/benchmark/.venv from requirements.txt ahead of time." >&2
-  exit 1
-fi
-
-run_venv_pip() {
-  PATH="${VENV_DIR}/bin:${PATH}" sfw pip "$@"
-}
-
-run_venv_pip install --upgrade pip >/dev/null
-run_venv_pip install -r "${SANDBOX_DIR}/benchmark/requirements.txt"
+pggraph_prepare_venv_requirements \
+  "${VENV_DIR}" \
+  "${SANDBOX_DIR}/benchmark/requirements.txt"
 
 "${VENV_DIR}/bin/python" "${SANDBOX_DIR}/common/run_benchmarks.py" \
   --dataset "${DATASET}" \

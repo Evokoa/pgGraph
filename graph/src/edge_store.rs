@@ -557,6 +557,23 @@ impl EdgeStore {
         }
     }
 
+    /// Clone the owning metadata for an mmap-backed store.
+    ///
+    /// The returned snapshot shares the immutable mapping and can therefore
+    /// outlive a backend-local [`RefCell`](std::cell::RefCell) borrow without
+    /// copying the CSR arrays. Owned build-time stores deliberately return
+    /// `None` so callers cannot accidentally duplicate a large graph.
+    pub(crate) fn mapped_snapshot(&self) -> Option<Self> {
+        let EdgeBacking::Mmap { arrays } = &self.backing else {
+            return None;
+        };
+        Some(Self {
+            backing: EdgeBacking::Mmap {
+                arrays: arrays.clone(),
+            },
+        })
+    }
+
     /// Build a CSR EdgeStore from unsorted raw edges.
     #[cfg(test)]
     pub fn from_edges(node_count: u32, edges: Vec<RawEdge>, has_weights: bool) -> Self {

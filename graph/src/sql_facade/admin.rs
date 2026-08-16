@@ -28,13 +28,80 @@ fn selected_graph_id_for_current_role() -> String {
 
 #[pg_extern(
     schema = "graph",
+    name = "_require_selected_graph_privilege_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn require_selected_graph_privilege_for_current_role(privilege: &str) -> bool {
+    with_panic_boundary(
+        "_require_selected_graph_privilege_for_current_role()",
+        || {
+            let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+            let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+                .unwrap_or_else(|err| err.report());
+            let privilege =
+                catalog::GraphPrivilege::try_from(privilege).unwrap_or_else(|err| err.report());
+            catalog::require_graph_privilege_for_role(&graph, privilege, caller_oid)
+                .unwrap_or_else(|err| err.report());
+            true
+        },
+    )
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_graph_id_for_current_role_with_privilege",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn graph_id_for_current_role_with_privilege(
+    graph_name: &str,
+    graph_tenant: default!(Option<&str>, "NULL"),
+    graph_namespace: default!(Option<&str>, "NULL"),
+    privilege: default!(&str, "'read'"),
+) -> String {
+    with_panic_boundary("_graph_id_for_current_role_with_privilege()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = resolve_graph_for_registration_for_role(
+            graph_name,
+            graph_tenant,
+            graph_namespace,
+            caller_oid,
+        );
+        let privilege =
+            catalog::GraphPrivilege::try_from(privilege).unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(&graph, privilege, caller_oid)
+            .unwrap_or_else(|err| err.report());
+        graph.graph_id
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
     name = "_pending_sync_rows_for_current_role",
     security_definer
 )]
 #[search_path(pg_catalog, pg_temp)]
-fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
+fn pending_sync_rows_for_current_role() -> i64 {
     with_panic_boundary("_pending_sync_rows_for_current_role()", || {
-        crate::sql_sync::pending_sync_rows_direct(applied_sync_id)
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        let (pending_caller_oid, pending_graph_id, applied_sync_id, applicable_table_oids) =
+            crate::sql_sync::take_pending_sync_row_probe().unwrap_or_else(|err| err.report());
+        if pending_caller_oid != caller_oid || pending_graph_id != graph.graph_id {
+            safety::GraphError::AclDenied {
+                table: "internal pending-sync mediator".to_string(),
+            }
+            .report();
+        }
+        crate::sql_sync::pending_sync_rows_direct(applied_sync_id, &applicable_table_oids)
             .unwrap_or_else(|err| err.report())
     })
 }
@@ -48,6 +115,193 @@ fn pending_sync_rows_for_current_role(applied_sync_id: i64) -> i64 {
 fn max_sync_log_id_for_current_role() -> i64 {
     with_panic_boundary("_max_sync_log_id_for_current_role()", || {
         crate::sql_sync::max_sync_log_id_direct().unwrap_or_else(|err| err.report())
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_max_sync_log_id_for_query_state",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn max_sync_log_id_for_query_state() -> i64 {
+    with_panic_boundary("_max_sync_log_id_for_query_state()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        let (pending_caller_oid, pending_graph_id, _applied_sync_id, applicable_table_oids) =
+            crate::sql_sync::take_pending_sync_row_probe().unwrap_or_else(|err| err.report());
+        if pending_caller_oid != caller_oid || pending_graph_id != graph.graph_id {
+            safety::GraphError::AclDenied {
+                table: "internal sync-checkpoint mediator".to_string(),
+            }
+            .report();
+        }
+        crate::sql_sync::max_sync_log_id_direct_for_oids(&applicable_table_oids)
+            .unwrap_or_else(|err| err.report())
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_expire_projection_heartbeats_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn expire_projection_heartbeats_for_current_role() -> bool {
+    with_panic_boundary("_expire_projection_heartbeats_for_current_role()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        crate::projection::manifest::expire_stale_generation_heartbeats_direct()
+            .unwrap_or_else(|err| err.report());
+        true
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_expire_sync_watermarks_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn expire_sync_watermarks_for_current_role() -> bool {
+    with_panic_boundary("_expire_sync_watermarks_for_current_role()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        crate::sql_sync::expire_stale_sync_watermarks_direct().unwrap_or_else(|err| err.report());
+        true
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_record_sync_watermark_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn record_sync_watermark_for_current_role() -> bool {
+    with_panic_boundary("_record_sync_watermark_for_current_role()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        let (pending_caller_oid, applied_sync_id) =
+            crate::sql_sync::take_pending_sync_watermark().unwrap_or_else(|err| err.report());
+        if pending_caller_oid != caller_oid {
+            safety::GraphError::AclDenied {
+                table: "internal sync watermark mediator".to_string(),
+            }
+            .report();
+        }
+        crate::sql_sync::record_sync_watermark_heartbeat_direct(applied_sync_id)
+            .unwrap_or_else(|err| err.report());
+        true
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_record_projection_heartbeat_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn record_projection_heartbeat_for_current_role() -> bool {
+    with_panic_boundary("_record_projection_heartbeat_for_current_role()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        let (pending_caller_oid, generation_id, sync_watermark, validation_status) =
+            crate::projection::manifest::take_pending_generation_heartbeat()
+                .unwrap_or_else(|err| err.report());
+        if pending_caller_oid != caller_oid {
+            safety::GraphError::AclDenied {
+                table: "internal projection heartbeat mediator".to_string(),
+            }
+            .report();
+        }
+        crate::projection::manifest::record_loaded_generation_heartbeat_direct(
+            generation_id,
+            sync_watermark,
+            &validation_status,
+        )
+        .unwrap_or_else(|err| err.report());
+        true
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_active_generation_count_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn active_generation_count_for_current_role() -> i32 {
+    with_panic_boundary("_active_generation_count_for_current_role()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        crate::projection::manifest::active_generation_count_direct()
+            .unwrap_or_else(|err| err.report())
+    })
+}
+
+#[pg_extern(
+    schema = "graph",
+    name = "_enforce_loaded_graph_quota_for_current_role",
+    security_definer
+)]
+#[search_path(pg_catalog, pg_temp)]
+fn enforce_loaded_graph_quota_for_current_role(projected_loaded_graphs: i64) -> bool {
+    with_panic_boundary("_enforce_loaded_graph_quota_for_current_role()", || {
+        let caller_oid = catalog::current_role_oid().unwrap_or_else(|err| err.report());
+        let graph = catalog::selected_or_default_graph_metadata_for_role(caller_oid)
+            .unwrap_or_else(|err| err.report());
+        catalog::require_graph_privilege_for_role(
+            &graph,
+            catalog::GraphPrivilege::Read,
+            caller_oid,
+        )
+        .unwrap_or_else(|err| err.report());
+        catalog::enforce_loaded_graph_quota_for_role(projected_loaded_graphs, caller_oid)
+            .unwrap_or_else(|err| err.report());
+        true
     })
 }
 
@@ -1140,6 +1394,8 @@ fn build_resource_status() -> TableIterator<
     ),
 > {
     with_panic_boundary("build_resource_status()", || {
+        catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Admin)
+            .unwrap_or_else(|err| err.report());
         let status = refreshed_engine_status().unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             status.build_resource_budget_bytes,
@@ -1169,6 +1425,7 @@ fn resource_status() -> TableIterator<
     ),
 > {
     with_panic_boundary("resource_status()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
         let rows = crate::resource::last_operation_snapshot()
             .into_iter()
             .map(|snapshot| {
@@ -1191,6 +1448,7 @@ fn resource_status() -> TableIterator<
 #[pg_extern(schema = "graph")]
 fn active_generation_count() -> i32 {
     with_panic_boundary("active_generation_count()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
         crate::projection::manifest::expire_stale_generation_heartbeats()
             .unwrap_or_else(|err| err.report());
         crate::projection::manifest::active_generation_count().unwrap_or_else(|err| err.report())
@@ -1240,6 +1498,8 @@ fn projection_status() -> TableIterator<
     ),
 > {
     with_panic_boundary("projection_status()", || {
+        catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Admin)
+            .unwrap_or_else(|err| err.report());
         let s = projection_status_snapshot().unwrap_or_else(|err| err.report());
         TableIterator::new(vec![(
             s.manifest_generation,
@@ -1301,6 +1561,7 @@ fn projection_compact(
 > {
     with_panic_boundary("projection_compact()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
+        crate::sql_build::acquire_build_lock_for_replacement().unwrap_or_else(|err| err.report());
         let max_rows =
             validate_positive_i32(max_rows, "max_rows").unwrap_or_else(|err| err.report());
         let max_segments =
@@ -1325,6 +1586,8 @@ fn projection_compact(
             .load_latest_current()
             .unwrap_or_else(|err| err.report())
             .unwrap_or_else(|| safety::GraphError::NotBuilt.report());
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
         reload_persisted_engine_with_projection(&artifact).unwrap_or_else(|err| err.report());
         let resident_bytes = ENGINE
             .with(|engine| {
@@ -1346,20 +1609,36 @@ fn projection_compact(
             max_elapsed: Duration::from_secs(60),
             dirty_chunk_segment_threshold,
         };
-        let result = ENGINE
-            .with(|engine| {
-                let eng = engine.borrow();
-                crate::projection::compact::compact_generation(
-                    &root,
-                    &previous,
-                    &eng.edge_store,
-                    budgets,
+        crate::runtime_state::mark_replacement_in_progress(
+            &graph.graph_id,
+            Some(previous.generation_id),
+            previous.generation_id.checked_add(1),
+        );
+        // `compact_generation` polls PostgreSQL interrupts. Keep no RefCell
+        // guard alive across that boundary: a PostgreSQL ERROR may bypass Rust
+        // destructors, leaving the backend-local ENGINE permanently borrowed.
+        let base = ENGINE
+            .with(|engine| engine.borrow().edge_store.mapped_snapshot())
+            .unwrap_or_else(|| {
+                safety::GraphError::Internal(
+                    "projection compaction requires the reloaded mmap-backed edge store"
+                        .to_string(),
                 )
+                .report()
+            });
+        // SAFETY: `compact_generation` only reads the snapshot and projection
+        // files. It does not mutate graph runtime state or clear/replace the
+        // backend-local snapshot slot that owns `base`.
+        let result = unsafe {
+            crate::runtime_state::with_replacement_edge_snapshot(base, |base| {
+                crate::projection::compact::compact_generation(&root, &previous, base, budgets)
             })
-            .unwrap_or_else(|err| err.report());
+        }
+        .unwrap_or_else(|err| err.report());
         if result.manifest.generation_id != previous.generation_id {
             reload_persisted_engine_with_projection(&artifact).unwrap_or_else(|err| err.report());
         }
+        crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
         TableIterator::new(vec![(
             saturating_i64(result.manifest.generation_id),
             saturating_i32(result.segments_compacted),
@@ -1434,7 +1713,9 @@ fn projection_repair() -> TableIterator<
 > {
     with_panic_boundary("projection_repair()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        crate::sql_build::acquire_build_lock().unwrap_or_else(|err| err.report());
+        crate::sql_build::acquire_build_lock_for_repair().unwrap_or_else(|err| err.report());
+        let graph =
+            catalog::selected_or_default_graph_metadata().unwrap_or_else(|err| err.report());
         let artifact = crate::persistence::graph_file_path().unwrap_or_else(|err| err.report());
         let root = crate::persistence::projection_manifest_root(&artifact);
         let plan = crate::projection::recovery::plan_projection_recovery_for_artifact(
@@ -1448,6 +1729,16 @@ fn projection_repair() -> TableIterator<
         let mut rebuilt = false;
         let mut chunks_rewritten = 0;
         let reason = plan.reason.clone();
+
+        if plan.action == crate::projection::recovery::ProjectionRecoveryAction::TargetedChunkRepair
+        {
+            crate::runtime_state::mark_replacement_in_progress(
+                &graph.graph_id,
+                plan.generation_id,
+                plan.generation_id
+                    .and_then(|generation| generation.checked_add(1)),
+            );
+        }
 
         match plan.action {
             crate::projection::recovery::ProjectionRecoveryAction::NoProjection
@@ -1486,6 +1777,8 @@ fn projection_repair() -> TableIterator<
             }
         }
 
+        crate::runtime_state::clear_replacement_recovery_for(&graph.graph_id);
+
         TableIterator::new(vec![(
             projection_recovery_action_text(action).to_string(),
             generation_id.map(saturating_i64),
@@ -1505,6 +1798,12 @@ fn run_full_projection_rebuild_repair(
     execute_maintenance_rebuild(true)?;
     let store = crate::projection::manifest::ProjectionManifestStore::new(root);
     if !store.manifest_path(next_generation).is_file() {
+        let graph = catalog::selected_or_default_graph_metadata()?;
+        crate::runtime_state::mark_replacement_in_progress(
+            &graph.graph_id,
+            store.current_generation_id()?,
+            Some(next_generation),
+        );
         crate::projection::recovery::publish_rebuilt_base_manifest(artifact, max_sync_log_id()?)?;
     }
     let manifest = store.load_latest_current()?.ok_or_else(|| {
@@ -1552,6 +1851,7 @@ fn projection_recovery_action_text(
 }
 
 fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::GraphResult<()> {
+    let graph = catalog::selected_or_default_graph_metadata()?;
     let resident = ENGINE
         .with(|engine| {
             crate::resource::ByteCount::from_usize(engine.borrow().estimated_memory_used_bytes())
@@ -1563,6 +1863,7 @@ fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::Gr
     ENGINE.with(|engine| {
         *engine.borrow_mut() = loaded;
     });
+    crate::runtime_state::mark_loaded_graph(&graph);
     Ok(())
 }
 
@@ -1792,22 +2093,17 @@ fn run_scheduled_maintenance() -> TableIterator<
 fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> {
     crate::projection::manifest::expire_stale_generation_heartbeats()?;
     crate::sql_sync::expire_stale_sync_watermarks()?;
-    let graph = catalog::selected_or_default_graph_metadata()?;
-    super::runtime::clear_loaded_graph_if_mismatched(&graph.graph_id);
-    let disabled_trigger_count = disabled_graph_trigger_count()?;
-    let catalog_state = current_catalog_state();
+    let sync_mode = super::runtime::refresh_current_graph_status()?;
     let applied_sync_id = ENGINE.with(|e| e.borrow().applied_sync_id);
-    let pending = pending_sync_rows(applied_sync_id)?;
     // Only register a watermark heartbeat when the graph actually
     // participates in trigger sync; a manual-mode graph's applied_sync_id
     // never advances past 0, and a heartbeat there would be meaningless.
-    if crate::sql_sync::current_sync_mode()? == config::SyncMode::Trigger {
+    if sync_mode == config::SyncMode::Trigger {
         crate::sql_sync::record_sync_watermark_heartbeat(applied_sync_id)?;
     }
 
     ENGINE.with(|e| {
-        let mut eng = e.borrow_mut();
-        eng.refresh_observed_state(disabled_trigger_count, pending, &catalog_state);
+        let eng = e.borrow();
         if let Some(manifest) = eng.projection_manifest_full.as_ref() {
             crate::projection::manifest::record_loaded_generation_heartbeat(manifest)?;
         }
@@ -2319,7 +2615,8 @@ fn build_with_mode(
 
 /// Return durable build-job status, or backend-local status for the zero UUID
 /// used by synchronous builds.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2343,7 +2640,9 @@ fn build_status(
     ),
 > {
     with_panic_boundary("build_status()", || {
-        let selected_graph_id = catalog::selected_or_default_graph_metadata()
+        catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Read)
+            .unwrap_or_else(|err| err.report());
+        let selected_graph_id = catalog::selected_or_default_graph_metadata_via_definer()
             .unwrap_or_else(|err| err.report())
             .graph_id;
         if let Some(row) = build_job_row(build_id).unwrap_or_else(|err| err.report()) {
@@ -2364,9 +2663,14 @@ fn build_status(
                 row.error,
             )]);
         }
+        const SYNCHRONOUS_BUILD_ID: &str = "00000000-0000-0000-0000-000000000000";
         let status = ENGINE.with(|e| {
             let eng = e.borrow();
-            if eng.built {
+            if build_id == SYNCHRONOUS_BUILD_ID
+                && eng.built
+                && crate::runtime_state::loaded_graph_id().as_deref()
+                    == Some(selected_graph_id.as_str())
+            {
                 JobStatus::Completed.as_str()
             } else {
                 "not_found"
@@ -2386,6 +2690,30 @@ fn build_status(
             None,
         )])
     })
+}
+
+#[cfg(all(not(test), feature = "development"))]
+#[pg_extern(schema = "graph", name = "_test_sync_heartbeat_error_after_arming")]
+fn test_sync_heartbeat_error_after_arming() -> bool {
+    crate::sql_sync::test_sync_watermark_error_after_arming()
+}
+
+#[cfg(all(not(test), feature = "development"))]
+#[pg_extern(
+    schema = "graph",
+    name = "_test_pending_sync_row_probe_error_after_arming"
+)]
+fn test_pending_sync_row_probe_error_after_arming() -> bool {
+    crate::sql_sync::test_pending_sync_row_probe_error_after_arming()
+}
+
+#[cfg(all(not(test), feature = "development"))]
+#[pg_extern(
+    schema = "graph",
+    name = "_test_projection_heartbeat_error_after_arming"
+)]
+fn test_projection_heartbeat_error_after_arming() -> bool {
+    crate::projection::manifest::test_generation_heartbeat_error_after_arming()
 }
 
 #[allow(
@@ -2426,7 +2754,8 @@ fn build_not_found_status(
 }
 
 /// Return recent durable build jobs for a named graph.
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -2457,22 +2786,27 @@ fn build_status_for_graph(
     ),
 > {
     with_panic_boundary("build_status_for_graph()", || {
-        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        let graph_id = catalog::graph_id_with_privilege_via_definer(
+            graph_name,
+            graph_tenant,
+            graph_namespace,
+            catalog::GraphPrivilege::Read,
+        )
+        .unwrap_or_else(|err| err.report());
         let limit = max_rows.clamp(1, 500);
         let rows = Spi::connect(|client| {
             let selected = client.select(
-                "SELECT b.build_id, b.graph_id::text, g.graph_name, b.status,
+                "SELECT b.build_id, b.graph_id::text, $3::text, b.status,
                         b.nodes_loaded, b.edges_loaded, b.build_time_ms,
                         b.memory_used_mb, b.sync_mode, b.projection_mode,
                         b.progress_phase, b.progress_message, b.started_at,
                         b.finished_at, b.error
                    FROM graph._build_jobs b
-                   JOIN graph._graphs g ON g.graph_id = b.graph_id
                   WHERE b.graph_id = $1::uuid
                   ORDER BY b.created_at DESC
                   LIMIT $2",
                 None,
-                &[graph.graph_id.into(), limit.into()],
+                &[graph_id.into(), limit.into(), graph_name.into()],
             )?;
             let mut out = Vec::new();
             for row in selected {
@@ -5923,7 +6257,8 @@ fn maintenance_graph(
     })
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -5947,7 +6282,9 @@ fn maintenance_status(
     ),
 > {
     with_panic_boundary("maintenance_status()", || {
-        let selected_graph_id = catalog::selected_or_default_graph_metadata()
+        catalog::require_selected_graph_privilege_via_definer(catalog::GraphPrivilege::Read)
+            .unwrap_or_else(|err| err.report());
+        let selected_graph_id = catalog::selected_or_default_graph_metadata_via_definer()
             .unwrap_or_else(|err| err.report())
             .graph_id;
         if let Some(job_id) = job_id {
@@ -6049,7 +6386,8 @@ fn maintenance_not_found_status(
     )])
 }
 
-#[pg_extern(schema = "graph")]
+#[pg_extern(schema = "graph", security_definer)]
+#[search_path(pg_catalog, pg_temp)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
@@ -6078,21 +6416,26 @@ fn maintenance_status_for_graph(
     ),
 > {
     with_panic_boundary("maintenance_status_for_graph()", || {
-        let graph = resolve_graph_for_registration(graph_name, graph_tenant, graph_namespace);
+        let graph_id = catalog::graph_id_with_privilege_via_definer(
+            graph_name,
+            graph_tenant,
+            graph_namespace,
+            catalog::GraphPrivilege::Read,
+        )
+        .unwrap_or_else(|err| err.report());
         let limit = max_rows.clamp(1, 500);
         let rows = Spi::connect(|client| {
             let selected = client.select(
-                "SELECT m.job_id, m.graph_id::text, g.graph_name, m.status,
+                "SELECT m.job_id, m.graph_id::text, $3::text, m.status,
                         m.sync_rows_applied, m.nodes_after, m.edges_after,
                         m.vacuum_time_ms, m.progress_phase, m.progress_message,
                         m.started_at, m.finished_at, m.error
                    FROM graph._maintenance_jobs m
-                   JOIN graph._graphs g ON g.graph_id = m.graph_id
                   WHERE m.graph_id = $1::uuid
                   ORDER BY m.created_at DESC
                   LIMIT $2",
                 None,
-                &[graph.graph_id.into(), limit.into()],
+                &[graph_id.into(), limit.into(), graph_name.into()],
             )?;
             let mut out = Vec::new();
             for row in selected {
@@ -6159,6 +6502,15 @@ fn test_error_unwind() -> bool {
 #[pg_extern(schema = "graph", name = "_test_error_unwind_observed")]
 fn test_error_unwind_observed() -> bool {
     safety::test_error_unwind_observed()
+}
+
+#[cfg(feature = "development")]
+#[pg_extern(schema = "graph", name = "_test_arm_replacement_fault")]
+fn test_arm_replacement_fault(stage: &str) -> bool {
+    with_panic_boundary("_test_arm_replacement_fault()", || {
+        crate::runtime_state::arm_replacement_fault(stage).unwrap_or_else(|err| err.report());
+        true
+    })
 }
 
 #[cfg(feature = "development")]

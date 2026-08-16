@@ -300,7 +300,7 @@ fn prepare_sync_boundary(sync_mode: config::SyncMode, operation: &str) -> safety
             let current_barrier = sql_sync::sync_writer_barrier_triggers_current()?;
             if current_barrier {
                 sql_sync::acquire_sync_writer_barrier()?;
-                sql_sync::ensure_no_current_transaction_sync_rows(0)?;
+                sql_sync::ensure_no_current_transaction_sync_rows(0, None)?;
             }
             let installed = sql_sync::install_sync_triggers()?;
             pgrx::warning!(
@@ -313,7 +313,7 @@ fn prepare_sync_boundary(sync_mode: config::SyncMode, operation: &str) -> safety
     };
     if !writer_barrier_held {
         sql_sync::acquire_sync_writer_barrier()?;
-        sql_sync::ensure_no_current_transaction_sync_rows(0)?;
+        sql_sync::ensure_no_current_transaction_sync_rows(0, None)?;
     }
     Ok(())
 }

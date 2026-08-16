@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.0.0-16a34a?style=flat-square" alt="Version 1.0.0">
+    <img src="https://img.shields.io/badge/version-1.1.0-16a34a?style=flat-square" alt="Version 1.1.0">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -100,7 +100,7 @@ scripts/quickstart.sh
 ```
 
 The signed multi-architecture release image is
-`ghcr.io/evokoa/pggraph:1.0.0`. Verify its published digest before deployment.
+`ghcr.io/evokoa/pggraph:1.1.0`. Verify its published digest before deployment.
 
 Verify the extensions are loaded (uses `psql` inside the container, so you
 don't need a local PostgreSQL client):
@@ -135,7 +135,7 @@ psql -d postgres -c "CREATE EXTENSION graph;"
 psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';"
 ```
 
-The formula installs pgGraph 1.0.0 from the signed release bundle.
+The formula installs pgGraph 1.1.0 from the signed release bundle.
 
 To build from source or run the full interactive demo instead, use the included
 quickstart script. It starts a disposable Docker-backed PostgreSQL database,
@@ -190,7 +190,7 @@ WSL2 or Git Bash with Docker Desktop. It is not a native PowerShell or Command
 Prompt script.
 
 Docker images are published for PostgreSQL 14 through 18. Tags without a
-PostgreSQL major, such as `1.0.0` and `latest`, use the default PostgreSQL 17
+PostgreSQL major, such as `1.1.0` and `latest`, use the default PostgreSQL 17
 image.
 PostgreSQL 13 is no longer an official support target after upstream EOL, though
 the legacy `pg13` pgrx feature remains available on a best-effort basis. The
@@ -198,7 +198,7 @@ PostgreSQL major version of the extension package must match the target server.
 
 ## PGXN Source Installation
 
-PGXN provides the verified source ZIP from the signed 1.0.0 release bundle.
+PGXN provides the verified source ZIP from the signed 1.1.0 release bundle.
 Because pgGraph is a Rust/pgrx extension, building from source requires the Rust
 toolchain.
 
@@ -286,13 +286,16 @@ structure.
   typed `FilterIndex` values, tenant bitmaps, active bits, and sync overlays.
 - **Read-only artifact mapping.** Persisted `.pggraph` artifacts are written
   atomically. When a new Postgres backend spins up, it validates the artifact
-  and maps immutable forward graph arrays and the resolution index read-only.
-  The operating system page cache can then share those physical pages across
-  isolated PostgreSQL backends without copying the base graph into each
-  backend's Rust heap. This is not a replacement for PostgreSQL's buffer pool:
-  PostgreSQL remains responsible for table storage, WAL, MVCC, durability, and
-  crash recovery, while pgGraph's artifact is derived state that can be rebuilt
-  from source tables.
+  and copies it into a backend-local anonymous mapping before exposing immutable
+  forward graph arrays and the resolution index through read-only views. The
+  private snapshot prevents a concurrent write or truncation of the source file
+  from invalidating live Rust references. It also means each backend that loads
+  a graph retains approximately one artifact-sized private snapshot; base graph
+  pages are not shared across backends through the operating system page cache.
+  This is not a replacement for PostgreSQL's buffer pool: PostgreSQL remains
+  responsible for table storage, WAL, MVCC, durability, and crash recovery,
+  while pgGraph's artifact is derived state that can be rebuilt from source
+  tables.
 - **Predictable and safe.** Unbounded graph expansion can crash a database.
   pgGraph includes explicit circuit breakers: depth limits, visited-node
   tracking, frontier limits, pagination, and strict OOM/memory safeguards.
