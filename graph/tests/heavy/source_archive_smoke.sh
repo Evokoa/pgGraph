@@ -3,6 +3,8 @@ set -euo pipefail
 
 PG_VERSIONS="${PG_VERSIONS:-14 15 16 17 18}"
 RUN_PUBLIC_EXAMPLES="${RUN_PUBLIC_EXAMPLES:-1}"
+QUICKSTART_PORT="${PGGRAPH_QUICKSTART_PORT:-55433}"
+PLAYGROUND_PORT="${PGGRAPH_PLAYGROUND_PORT:-55434}"
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/pggraph-source-archive.XXXXXX")"
 VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/graph/Cargo.toml" | head -1)"
@@ -15,7 +17,7 @@ cleanup() {
   docker rm -f "$playground_container" >/dev/null 2>&1 || true
   if [[ -n "$source_root" ]]; then
     PGGRAPH_QUICKSTART_IMAGE="$runtime_image" \
-      PGGRAPH_QUICKSTART_PORT=55433 \
+      PGGRAPH_QUICKSTART_PORT="$QUICKSTART_PORT" \
       COMPOSE_PROJECT_NAME=pggraph_source_archive \
       "$source_root/scripts/quickstart.sh" clean >/dev/null 2>&1 || true
   fi
@@ -66,22 +68,22 @@ if [[ "$RUN_PUBLIC_EXAMPLES" == "1" ]]; then
   docker build --build-arg PG_MAJOR=17 -t "$runtime_image" "$source_root"
 
   PGGRAPH_QUICKSTART_IMAGE="$runtime_image" \
-    PGGRAPH_QUICKSTART_PORT=55433 \
+    PGGRAPH_QUICKSTART_PORT="$QUICKSTART_PORT" \
     COMPOSE_PROJECT_NAME=pggraph_source_archive \
     "$source_root/scripts/quickstart.sh" quickstart
   PGGRAPH_QUICKSTART_IMAGE="$runtime_image" \
-    PGGRAPH_QUICKSTART_PORT=55433 \
+    PGGRAPH_QUICKSTART_PORT="$QUICKSTART_PORT" \
     COMPOSE_PROJECT_NAME=pggraph_source_archive \
     "$source_root/scripts/quickstart.sh" clean
 
   PGGRAPH_IMAGE_NAME="$runtime_image" \
     PGGRAPH_CONTAINER_NAME="$playground_container" \
-    PGGRAPH_PG_PORT=55434 \
+    PGGRAPH_PG_PORT="$PLAYGROUND_PORT" \
     PGGRAPH_PLAYGROUND_YES=1 \
     "$source_root/graph/tests/heavy/playground_release_gate.sh"
   PGGRAPH_IMAGE_NAME="$runtime_image" \
     PGGRAPH_CONTAINER_NAME="$playground_container" \
-    PGGRAPH_PG_PORT=55434 \
+    PGGRAPH_PG_PORT="$PLAYGROUND_PORT" \
     PGGRAPH_PLAYGROUND_YES=1 \
     PGGRAPH_PLAYGROUND_MODE=mutable \
     "$source_root/graph/tests/heavy/playground_release_gate.sh"
