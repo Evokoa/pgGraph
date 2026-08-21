@@ -103,7 +103,7 @@ psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" \
 CREATE EXTENSION IF NOT EXISTS graph;
 SET graph.persist_on_build = on;
 SET graph.sync_mode = 'manual';
-SELECT graph.reset();
+SELECT graph.reset(true);
 CREATE TABLE public.open_type_resource_nodes (id integer PRIMARY KEY);
 INSERT INTO public.open_type_resource_nodes SELECT value FROM generate_series(1, :node_count) value;
 CREATE TABLE public.open_type_resource_edges (

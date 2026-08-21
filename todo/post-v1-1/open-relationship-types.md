@@ -13,11 +13,12 @@ four-byte type sections and continues to read v6 artifacts. Rebuilt
 `csr_readonly` graphs can therefore exceed 254 user-facing labels under the
 documented count and byte policies.
 
-The remaining narrow boundary is the mutable segment codec. Wide mutable bases
-are rejected before publication, and sync accepts only labels already present
-in the loaded dictionary. P8 owns adaptive segment persistence and governed
-incremental dictionary growth. P9 owns the complete query/listing/release
-matrix and final public feature closure.
+P8 extends the adaptive representation through mutable segments, cumulative
+dictionary publication, committed unseen-label sync, and transaction-local
+provisional labels with savepoint semantics. P9 adds bounded inventory and
+filters, structural dynamic-type binding, eligible registered label-column
+equality lowering, compatibility and fuzz coverage, and the retained
+query/resource evidence required for final public feature closure.
 
 Open vocabulary means a checked, explicitly bounded dictionary large enough for
 data-driven relationship types. It does not mean unlimited backend memory or an
@@ -68,9 +69,9 @@ This preserves current edge density for ordinary graphs instead of adding
 three bytes per directed edge and per backend's anonymous artifact mapping.
 The loader exposes a typed `EdgeTypeId` view/iterator rather than `&[u8]`.
 
-Mutable segment and transaction-delta records may store fixed `u32` label IDs
-to keep mutation logic simple. Their exact record sizes and all memory/disk
-accounting must be updated together.
+Mutable segments use the adaptive physical width. Transaction deltas keep
+checked logical IDs and provisional label spellings in backend-local state;
+their exact sizes participate in governed memory accounting.
 
 ## Persistence and migration
 
@@ -84,8 +85,8 @@ accounting must be updated together.
   and garbage collector.
 - Publish base/segments/dictionary/manifest atomically under the existing
   per-graph writer lock.
-- P8 will decode older segment fixtures through checked widening and emit the
-  adaptive segment format after migration.
+- Older segment fixtures decode through checked widening; new publication emits
+  the adaptive segment format.
 
 ## Incremental and transaction-local labels
 

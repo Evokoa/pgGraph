@@ -109,11 +109,13 @@ fn production_unrestricted_execution_requires_a_sealed_preparation_proof() {
     );
     let cargo = crate_source("Cargo.toml");
     assert!(cargo.contains("benchmarks = []"));
-    assert_eq!(
-        cargo
-            .matches("required-features = [\"benchmarks\"]")
-            .count(),
-        2
+    let benchmark_targets = cargo.split("[[bench]]").skip(1).collect::<Vec<_>>();
+    assert!(
+        !benchmark_targets.is_empty()
+            && benchmark_targets
+                .iter()
+                .all(|target| target.contains("required-features = [\"benchmarks\"]")),
+        "every benchmark target must require the benchmark-only feature"
     );
 }
 

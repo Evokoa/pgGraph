@@ -106,10 +106,11 @@ and `graph.loaded_graphs()` reports zero or one row for the current backend.
 artifact checks for operator-facing residency/status inspection.
 
 Compatibility SQL calls such as `graph.add_table()`, `graph.build()`,
-`graph.status()`, `graph.traverse()`, and `graph.reset()` resolve the selected
-graph, or the default graph when no graph has been selected. The default graph
-behavior remains available while named graph identity is explicit in catalogs,
-jobs, artifacts, runtime loading, sync replay, and projection metadata.
+`graph.status()`, `graph.traverse()`, and both `graph.reset()` forms resolve the
+selected graph, or the default graph when no graph has been selected. The
+default graph behavior remains available while named graph identity is explicit
+in catalogs, jobs, artifacts, runtime loading, sync replay, and projection
+metadata.
 
 The default graph identity is intentionally explicit in the Rust policy layer:
 the compatibility graph is named `default`, uses the `public` graph namespace,
@@ -126,7 +127,7 @@ from paths, backend globals, or session state.
 | `NodeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | The store owns its mapping independently of engine field/drop order |
 | Forward and inbound `EdgeStore` mapped mode | Validated ranges with an `Arc` to the immutable snapshot | Each store owns its mapping independently of engine field/drop order |
 | `FilterIndex` after load | Mapped base plus `Engine` heap deltas | Graph-sized typed values and lexical dictionaries stay mapped; post-load changes are sparse |
-| `edge_type_registry` after load | `Engine` heap | Bounded labels are decoded from their v6 section |
+| `edge_type_registry` after load | `Engine` heap | Bounded labels are decoded from the v6 inline section or the v7 cumulative dictionary |
 | Relationship identities after load | Mapped base plus `Engine` heap suffix | Source identity descriptors and keys stay mapped; later identities extend them without copying the base |
 | `ResolutionIndex` mapped mode | Byte range inside the immutable snapshot | The engine retains an `Arc` for resolution lookup and accounting |
 | Durable base generations, manifests, segments, and chunks | Files in each graph's artifact root | Shared through the filesystem and retained by graph-scoped active-generation metadata |
@@ -146,7 +147,7 @@ The system supports multiple isolated named graphs within the same database. Thi
 | Sync | `graph._sync_log` and `graph._sync_buffer` are global source-table streams; replay, status, and query freshness filter `_sync_log` through the selected graph's registered table OIDs. |
 | Projection generations | `graph._projection_generations` is keyed by `graph_id` so active-generation heartbeats and GC protection are graph-local. |
 | Discovery | `graph.auto_discover()` and `graph.auto_discover_tables()` target a named graph or the selected/default graph. |
-| Reset | `graph.reset()` clears the backend-local engine and removes files for the selected graph's artifact root. |
+| Reset | `graph.reset()` clears the backend-local engine and removes files for the selected graph's artifact root while preserving registrations; `graph.reset(true)` also clears that selected graph's registrations. |
 
 Named-graph changes moved each of these components from implicit global state to explicit graph-scoped inputs while preserving the default-graph SQL workflow for backward compatibility.
 

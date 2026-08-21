@@ -123,7 +123,7 @@ each layer is meant to cover.
 The pgrx SQL tests need a PostgreSQL installation for the target major version
 and a pgrx test cluster. They do not need preloaded application tables or
 external datasets. Test fixtures in `src/pg_tests/common.rs` create and drop
-their own source tables, call `graph.reset()`, register graph metadata, and
+their own source tables, call `graph.reset(true)`, register graph metadata, and
 build the graph inside the test database.
 
 Install PostgreSQL and ensure the matching `pg_config` is available. Examples:

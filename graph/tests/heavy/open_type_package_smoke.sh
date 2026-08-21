@@ -18,7 +18,7 @@ createdb "$DBNAME"
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL'
 CREATE EXTENSION graph;
 SET graph.persist_on_build = on;
-SELECT graph.reset();
+SELECT graph.reset(true);
 
 CREATE TABLE public.open_type_nodes (id text PRIMARY KEY);
 INSERT INTO public.open_type_nodes VALUES ('u1'), ('u2'), ('u3');

@@ -282,8 +282,9 @@ structure.
   scans.
 - **A tight traversal loop.** SQL-facing calls resolve coordinates, labels,
   filters, and tenant scopes before entering the traversal loop. Once inside,
-  the engine streams CSR neighbors, checking compact `u8` edge-label IDs,
-  typed `FilterIndex` values, tenant bitmaps, active bits, and sync overlays.
+  the engine streams CSR neighbors, checking compact logical `EdgeTypeId`
+  values from adaptive one-, two-, or four-byte storage, typed `FilterIndex`
+  values, tenant bitmaps, active bits, and sync overlays.
 - **Read-only artifact mapping.** Persisted `.pggraph` artifacts are written
   atomically. When a new Postgres backend spins up, it validates the artifact
   and copies it into a backend-local anonymous mapping before exposing immutable

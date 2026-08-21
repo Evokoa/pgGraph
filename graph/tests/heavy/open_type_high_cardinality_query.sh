@@ -11,7 +11,7 @@ psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS graph;
 SET graph.persist_on_build = off;
 SET graph.sync_mode = 'manual';
-SELECT graph.reset();
+SELECT graph.reset(true);
 DROP TABLE IF EXISTS public.p9_edges;
 DROP TABLE IF EXISTS public.p9_nodes;
 

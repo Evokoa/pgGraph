@@ -107,32 +107,33 @@ cumulative dictionary and matching segments as one validated generation.
 `label_column` interns every distinct nonempty source value into this registry.
 A build that exceeds the public count, label, or dictionary-byte policy fails
 with SQLSTATE `54000` and diagnostic `PG004`. Committed incremental sync accepts
-valid unseen labels; transaction-local provisional labels remain a P8.3 item.
+valid unseen labels. Transaction-local mapped relationship writes use
+provisional labels that preserve exact spelling and obey savepoint rollback.
 
 All type-aware topology paths use the same registry. This includes
 `graph.traverse(edge_types := ...)`, GQL relationship-type matching, path
-reconstruction, projection deltas, and persisted CSR data. The 1.0 GQL profile
-does not support relationship-property predicates such as
-`WHERE r.relationship_name = $type`. Registering one static label and storing
-the exact type in the source edge table therefore makes pgGraph traversal
-type-blind to that exact value.
+reconstruction, projection deltas, and persisted CSR data. General
+relationship-property expressions remain outside the supported GQL profile,
+but eligible fixed one-hop equality on a registered relationship label column,
+such as `WHERE r.relationship_name = $type`, lowers to the same exact compact
+type filter. A static fallback label without `label_column` remains type-blind
+to the source column's exact value.
 
 ### Delivery Outcome
 
-The target is a resource-governed open vocabulary, not a literally unbounded
+The delivered contract is a resource-governed open vocabulary, not a literally unbounded
 allocation. Source relationship strings remain authoritative in PostgreSQL,
 while pgGraph assigns checked compact IDs for exact topology filtering.
 
-The contract-review direction is:
+The 1.2 contract is:
 
 - keep one checked logical `EdgeTypeId` across traversal, paths, overlays,
   sync, compaction, and query execution, with raw IDs confined to named storage
   adapters;
-- use the measured width-adaptive `u8`/`u16`/`u32` representation selected in
-  P6: one-byte sections through 254 user labels, two-byte sections through
-  65,534, then four-byte sections. P7 implements that physical format while
-  logical IDs remain `u32`;
-- intern each distinct source string once and compare `LabelId` values in the
+- use the width-adaptive `u8`/`u16`/`u32` representation selected in P6:
+  one-byte sections through 254 user labels, two-byte sections through 65,534,
+  then four-byte sections, while logical IDs remain `u32`;
+- intern each distinct source string once and compare `EdgeTypeId` values in the
   traversal hot loop;
 - preserve exact filtering through `graph.traverse(edge_types := ...)` and GQL
   relationship-type patterns for every projected label;
@@ -146,14 +147,14 @@ The contract-review direction is:
 - keep PostgreSQL constraints, triggers, ACLs, RLS, MVCC, source-row identity,
   and source label values authoritative.
 
-No physical representation is truly unlimited. The public contract will state
+No physical representation is truly unlimited. The public contract states
 explicit count, byte, label-length, build, sync, and query budgets. Exceeding a
 configured resource budget will return a typed diagnostic instead of wrapping
 an ID, exhausting a backend, or silently grouping unrelated types.
 
 | Delivery gate | Required outcome |
 |---|---|
-| Capacity contract | One production `LabelId` wrapper owns checked conversion, reserved values, and the documented maximum. Unit and boundary tests cover the selected widths and overflow behavior. |
+| Capacity contract | One production `EdgeTypeId` wrapper owns checked conversion, reserved values, and the documented maximum. Unit and boundary tests cover the selected widths and overflow behavior. |
 | Exact query semantics | SQL traversal and supported GQL patterns return the same reachability for exact dynamic types. A relationship-label property predicate lowers to the exact type filter when its mapping is eligible. |
 | Build and sync | Bounded dictionary construction handles high-cardinality labels, and committed inserts or label changes converge through sync without losing source spelling or relationship identity. |
 | Artifact migration | A versioned artifact stores the selected label width and dictionary. Upgrade documentation requires a safe rebuild where in-place compatibility is not possible, and rollback retains the last valid generation. |
@@ -162,18 +163,18 @@ an ID, exhausting a backend, or silently grouping unrelated types.
 | Regression gate | Exact-type CSR traversal must remain within an approved regression threshold for representative hot workloads before a wider representation becomes the default. |
 | Release evidence | Parser/binder, traversal, artifact, sync/reload, compaction, transaction, ACL/RLS, fuzz/property, documentation, packaging, and PostgreSQL 14–18 matrix evidence are complete. |
 
-### Supported Guidance at the P7 Cut Line
+### Supported 1.2 Guidance
 
 Applications should choose the current path by required semantics:
 
 | Need | Recommended path |
 |---|---|
-| Exact relationship types are known at rebuild time | Use a `csr_readonly` projection with `label_column`; v7 selects one, two, or four bytes and exact `edge_types`/GQL filters remain available. |
-| A durable mutable projection needs more than 254 labels | Use trigger-backed committed sync; P8.2 publishes the cumulative dictionary and adaptive segments atomically. Transaction-local unseen labels remain deferred to P8.3. |
-| Incremental ingestion introduces unseen labels | Apply committed sync under the graph writer lock. Count, per-label, dictionary, memory, and artifact limits remain enforced. |
+| Exact relationship types are known at rebuild time | Register the authoritative source type column as `label_column`; v7 selects one, two, or four bytes and exact `edge_types`/GQL filters remain available. |
+| A durable mutable projection needs more than 254 labels | Use `mutable_overlay` with trigger-backed committed sync. The cumulative dictionary and adaptive segments publish atomically, and mapped transaction-local writes can introduce provisional labels safely. |
+| Incremental ingestion introduces unseen labels | Apply committed sync under the graph writer lock. Valid labels are interned without a full rebuild; count, per-label, dictionary, memory, and artifact limits remain enforced. |
 | Family-level traversal is sufficient | Store a bounded semantic family in a separate `graph_label` column, register that column, and retain the exact `relationship_name` in PostgreSQL. Prefer meaningful families such as `employment`, `ownership`, or `collaboration` over hash buckets. |
-| Exact free-form type is required at every hop | Normalize the string once to a PostgreSQL relationship-type ID and use a bounded recursive SQL query that filters the ID before each expansion. Index `(relationship_type_id, source_id) INCLUDE (target_id)` and the reverse direction when required. |
-| Most traffic targets a stable hot set | Keep hot exact types as pgGraph labels, map the long tail to a semantic or `other` label, and use indexed recursive SQL for exact long-tail traversals. Measure the crossover with `EXPLAIN (ANALYZE, BUFFERS)`. |
+| Exact free-form type is required at every hop | Register the source relationship type as `label_column`, then use `edge_types` in traversal/path APIs or explicit relationship types in GQL/Cypher. Filtering resolves text once and compares compact IDs during expansion. |
+| The vocabulary exceeds a documented resource limit | Partition the graph by a meaningful tenant/domain boundary, or use bounded recursive SQL with `(relationship_type_id, source_id) INCLUDE (target_id)` and the reverse index. Do not hash unrelated types into a traversal label when exact reachability matters. |
 | Exact fixed or explicitly bounded GQL patterns justify a topology change | Represent each relationship row as a node with `relationship_name` as a node property and connect it to source and target nodes with static relationship types. This doubles graph hops and is not equivalent to general variable-depth relationship-type traversal. |
 
 Hash or coarse buckets followed by result filtering are not exact for multi-hop
@@ -182,18 +183,17 @@ later filter cannot undo that reachability. Buckets are appropriate only when
 the bucket itself has useful graph meaning or the caller accepts candidate-set
 semantics.
 
-## Post-1.1 Direction
+## Post-1.2 Direction
 
-P7 ships adaptive rebuilt immutable bases. P8.1 adds adaptive mutable segment
-storage and the durable cumulative-dictionary format. P8.2 atomically interns
-unseen labels from committed durable sync and publishes their dictionary with
-the matching segments. P8.3 owns transaction-local/savepoint label state. P9
-owns the full query, listing, release-matrix, and public feature closure.
+The 1.2 line includes adaptive rebuilt bases and mutable segments, atomic
+cumulative-dictionary publication for committed unseen labels,
+transaction-local/savepoint label state, bounded inventory and filters, and
+the supported exact GQL/Cypher query forms.
 
 | Area | Direction |
 |---|---|
 | Batched writes | Add bounded, set-based mapped mutations for ingestion adapters without weakening PostgreSQL source-of-truth, security, transaction, or resource contracts. |
-| Open relationship types | Replace the 254-label ceiling with a checked, resource-governed `LabelId` design and preserve exact SQL/GQL type filtering for data-driven relationship vocabularies. |
+| Relationship query coverage | Extend relationship-property syntax only in bounded vertical slices that preserve exact compact-type semantics and PostgreSQL source authority. |
 | ISO GQL | Add applicable ISO/IEC 39075:2024 features in vertical slices, each with parser, binder, executor, conformance, ACL/RLS, transaction, resource, and documentation evidence. |
 | Costed streaming runtime | Develop canonical typed binding-table IR, statistics, cost/resource planning, alternative physical plans, streaming operators, and spillable blocking work. |
 | PostgreSQL 19 and SQL/PGQ | Consume native property-graph definitions without duplicate registration and maintain a separate SQL/PGQ conformance matrix for `GRAPH_TABLE`. |

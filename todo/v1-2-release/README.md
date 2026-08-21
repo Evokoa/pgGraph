@@ -24,7 +24,7 @@ commit.
 |---|---|---|
 | V12.1 relationship discovery | Complete | Schema-wide and targeted discovery produce one binary mapping for supported junction tables, infer conventional dynamic label columns, preserve exact endpoint identity, and avoid inventing endpoints from composite or multi-way foreign keys. |
 | V12.2 registration reset | Complete | A backward-compatible reset option clears all selected-graph registration mappings without changing zero-argument projection-reset behavior, and stale-registration `PG000` recovery is covered. |
-| V12.3 open-type closure | Not started | P9.5d retained Criterion, SQL latency, Linux resource, compatibility, and metadata outputs pass the precommitted budgets from one clean checkpoint; public docs match shipped behavior and limits. |
+| V12.3 open-type closure | In progress | P9.5d retained Criterion, SQL latency, Linux resource, compatibility, and metadata outputs pass the precommitted budgets from one clean checkpoint; public docs match shipped behavior and limits. |
 | V12.4 release closure | Not started | Version and upgrade surfaces name 1.2.0; install/upgrade, PostgreSQL 14-18, package, documentation, and release gates pass from the reviewed release commit. |
 
 ## V12.1 Evidence

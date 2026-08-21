@@ -138,7 +138,7 @@ oracle_sql() {
 for label_count in 254 65536; do
   psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" \
     -v label_count="$label_count" -v node_count="$NODE_COUNT" -v degree="$DEGREE" <<'SQL'
-SELECT graph.reset();
+SELECT graph.reset(true);
 DROP TABLE IF EXISTS public.p9_latency_edges;
 DROP TABLE IF EXISTS public.p9_latency_nodes;
 CREATE TABLE public.p9_latency_nodes (id integer PRIMARY KEY);
