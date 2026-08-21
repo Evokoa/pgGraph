@@ -1,0 +1,613 @@
+warning: function `to_traversal_results` is never used
+    --> src/bfs.rs:1792:8
+     |
+1792 | pub fn to_traversal_results(
+     |        ^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `finish` is never used
+   --> src/path_finder.rs:196:19
+    |
+128 | impl ResumableSingleDirectionBfs {
+    | -------------------------------- method in this implementation
+...
+196 |     pub(crate) fn finish(
+    |                   ^^^^^^
+
+warning: method `finish` is never used
+   --> src/path_finder.rs:312:19
+    |
+254 | impl ResumableBidirectionalBfs {
+    | ------------------------------ method in this implementation
+...
+312 |     pub(crate) fn finish(
+    |                   ^^^^^^
+
+warning: method `finish` is never used
+    --> src/path_finder.rs:1457:19
+     |
+1397 | impl ResumableDijkstra {
+     | ---------------------- method in this implementation
+...
+1457 |     pub(crate) fn finish(
+     |                   ^^^^^^
+
+warning: `graph` (lib) generated 4 warnings
+    Finished `bench` profile [optimized] target(s) in 0.30s
+     Running benches/open_type_query_bench.rs (target/release/deps/open_type_query_bench-ead40ae6ae4ef214)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=first/encoding=adapt...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=first/encoding=adapt...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=first/encoding=adapt...: Collecting 30 samples in estimated 5.0000 s (616M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=first/encoding=adapt...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=first/encoding=adapt...
+                        time:   [8.0784 ns 8.0898 ns 8.1004 ns]
+Found 5 outliers among 30 measurements (16.67%)
+  2 (6.67%) low severe
+  3 (10.00%) low mild
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=last/encoding=adapti...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=last/encoding=adapti...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=last/encoding=adapti...: Collecting 30 samples in estimated 5.0000 s (602M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=last/encoding=adapti...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=last/encoding=adapti...
+                        time:   [8.2110 ns 8.2261 ns 8.2392 ns]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=missing/encoding=ada...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=missing/encoding=ada...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=missing/encoding=ada...: Collecting 30 samples in estimated 5.0000 s (557M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=missing/encoding=ada...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=254/request=missing/encoding=ada...
+                        time:   [8.9509 ns 8.9797 ns 9.0090 ns]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) low mild
+  1 (3.33%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=first/encoding=adapt...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=first/encoding=adapt...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=first/encoding=adapt...: Collecting 30 samples in estimated 5.0000 s (616M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=first/encoding=adapt...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=first/encoding=adapt...
+                        time:   [8.0592 ns 8.0897 ns 8.1202 ns]
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=last/encoding=adapti...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=last/encoding=adapti...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=last/encoding=adapti...: Collecting 30 samples in estimated 5.0000 s (603M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=last/encoding=adapti...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=last/encoding=adapti...
+                        time:   [8.2180 ns 8.2355 ns 8.2521 ns]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=missing/encoding=ada...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=missing/encoding=ada...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=missing/encoding=ada...: Collecting 30 samples in estimated 5.0000 s (558M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=missing/encoding=ada...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=255/request=missing/encoding=ada...
+                        time:   [8.9380 ns 8.9754 ns 9.0256 ns]
+Found 3 outliers among 30 measurements (10.00%)
+  1 (3.33%) low mild
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=first/encoding=ada...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=first/encoding=ada...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=first/encoding=ada...: Collecting 30 samples in estimated 5.0000 s (613M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=first/encoding=ada...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=first/encoding=ada...
+                        time:   [8.0855 ns 8.1105 ns 8.1345 ns]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=last/encoding=adap...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=last/encoding=adap...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=last/encoding=adap...: Collecting 30 samples in estimated 5.0000 s (536M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=last/encoding=adap...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=last/encoding=adap...
+                        time:   [9.1538 ns 9.1794 ns 9.2002 ns]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=missing/encoding=a...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=missing/encoding=a...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=missing/encoding=a...: Collecting 30 samples in estimated 5.0000 s (557M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=missing/encoding=a...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65534/request=missing/encoding=a...
+                        time:   [8.9427 ns 8.9765 ns 9.0094 ns]
+Found 5 outliers among 30 measurements (16.67%)
+  4 (13.33%) high mild
+  1 (3.33%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=first/encoding=ada...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=first/encoding=ada...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=first/encoding=ada...: Collecting 30 samples in estimated 5.0000 s (617M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=first/encoding=ada...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=first/encoding=ada...
+                        time:   [8.0742 ns 8.0926 ns 8.1127 ns]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=last/encoding=adap...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=last/encoding=adap...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=last/encoding=adap...: Collecting 30 samples in estimated 5.0000 s (540M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=last/encoding=adap...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=last/encoding=adap...
+                        time:   [9.2121 ns 9.2360 ns 9.2618 ns]
+Found 4 outliers among 30 measurements (13.33%)
+  3 (10.00%) high mild
+  1 (3.33%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=missing/encoding=a...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=missing/encoding=a...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=missing/encoding=a...: Collecting 30 samples in estimated 5.0000 s (544M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=missing/encoding=a...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65535/request=missing/encoding=a...
+                        time:   [9.1858 ns 9.2132 ns 9.2542 ns]
+Found 4 outliers among 30 measurements (13.33%)
+  1 (3.33%) high mild
+  3 (10.00%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=first/encoding=ada...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=first/encoding=ada...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=first/encoding=ada...: Collecting 30 samples in estimated 5.0000 s (617M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=first/encoding=ada...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=first/encoding=ada...
+                        time:   [8.0566 ns 8.0814 ns 8.1124 ns]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=last/encoding=adap...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=last/encoding=adap...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=last/encoding=adap...: Collecting 30 samples in estimated 5.0000 s (541M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=last/encoding=adap...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=last/encoding=adap...
+                        time:   [9.1998 ns 9.2318 ns 9.2731 ns]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=missing/encoding=a...
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=missing/encoding=a...: Warming up for 3.0000 s
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=missing/encoding=a...: Collecting 30 samples in estimated 5.0000 s (559M iterations)
+Benchmarking open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=missing/encoding=a...: Analyzing
+open_type_registry_lookup/query_surface=registry_lookup/label_count=65536/request=missing/encoding=a...
+                        time:   [8.9693 ns 9.0184 ns 9.0865 ns]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high mild
+
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=empty/enco...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=empty/enco...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=empty/enco...: Collecting 20 samples in estimated 5.0000 s (940M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=empty/enco...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=empty/enco...
+                        time:   [5.3024 ns 5.3109 ns 5.3189 ns]
+                        thrpt:  [188.01 Melem/s 188.29 Melem/s 188.59 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=one_exact/...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=one_exact/...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=one_exact/...: Collecting 20 samples in estimated 5.0000 s (85M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=one_exact/...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=one_exact/...
+                        time:   [57.875 ns 58.675 ns 59.402 ns]
+                        thrpt:  [16.835 Melem/s 17.043 Melem/s 17.279 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=bounded_40...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=bounded_40...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=bounded_40...: Collecting 20 samples in estimated 5.0004 s (1.0M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=bounded_40...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=254/request_shape=bounded_40...
+                        time:   [4.9414 µs 4.9632 µs 4.9899 µs]
+                        thrpt:  [50.903 Melem/s 51.177 Melem/s 51.403 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=first/encoding=adap...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=first/encoding=adap...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=first/encoding=adap...: Collecting 20 samples in estimated 5.0000 s (75M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=first/encoding=adap...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=254/request=first/encoding=adap...
+                        time:   [57.819 ns 58.115 ns 58.495 ns]
+                        thrpt:  [4.3423 Gelem/s 4.3706 Gelem/s 4.3930 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=last/encoding=adapt...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=last/encoding=adapt...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=last/encoding=adapt...: Collecting 20 samples in estimated 5.0000 s (85M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=last/encoding=adapt...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=254/request=last/encoding=adapt...
+                        time:   [58.419 ns 58.784 ns 59.266 ns]
+                        thrpt:  [4.2857 Gelem/s 4.3209 Gelem/s 4.3479 Gelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=missing/encoding=ad...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=missing/encoding=ad...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=missing/encoding=ad...: Collecting 20 samples in estimated 5.0000 s (114M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=missing/encoding=ad...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=254/request=missing/encoding=ad...
+                        time:   [43.566 ns 43.726 ns 43.907 ns]
+                        thrpt:  [5.7849 Gelem/s 5.8089 Gelem/s 5.8303 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=32_labels/encoding=...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=32_labels/encoding=...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=32_labels/encoding=...: Collecting 20 samples in estimated 5.0001 s (7.3M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=254/request=32_labels/encoding=...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=254/request=32_labels/encoding=...
+                        time:   [684.14 ns 685.86 ns 688.05 ns]
+                        thrpt:  [369.16 Melem/s 370.34 Melem/s 371.27 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=empty/enco...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=empty/enco...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=empty/enco...: Collecting 20 samples in estimated 5.0000 s (934M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=empty/enco...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=empty/enco...
+                        time:   [5.3142 ns 5.3264 ns 5.3390 ns]
+                        thrpt:  [187.30 Melem/s 187.74 Melem/s 188.18 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=one_exact/...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=one_exact/...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=one_exact/...: Collecting 20 samples in estimated 5.0000 s (85M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=one_exact/...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=one_exact/...
+                        time:   [57.906 ns 58.214 ns 58.593 ns]
+                        thrpt:  [17.067 Melem/s 17.178 Melem/s 17.269 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=bounded_40...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=bounded_40...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=bounded_40...: Collecting 20 samples in estimated 5.0009 s (989k iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=bounded_40...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=255/request_shape=bounded_40...
+                        time:   [5.0406 µs 5.0506 µs 5.0624 µs]
+                        thrpt:  [50.372 Melem/s 50.489 Melem/s 50.589 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=first/encoding=adap...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=first/encoding=adap...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=first/encoding=adap...: Collecting 20 samples in estimated 5.0000 s (86M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=first/encoding=adap...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=255/request=first/encoding=adap...
+                        time:   [57.577 ns 57.941 ns 58.543 ns]
+                        thrpt:  [4.3558 Gelem/s 4.4010 Gelem/s 4.4288 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=last/encoding=adapt...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=last/encoding=adapt...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=last/encoding=adapt...: Collecting 20 samples in estimated 5.0000 s (86M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=last/encoding=adapt...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=255/request=last/encoding=adapt...
+                        time:   [58.208 ns 58.626 ns 59.221 ns]
+                        thrpt:  [4.3059 Gelem/s 4.3496 Gelem/s 4.3808 Gelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=missing/encoding=ad...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=missing/encoding=ad...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=missing/encoding=ad...: Collecting 20 samples in estimated 5.0000 s (114M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=missing/encoding=ad...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=255/request=missing/encoding=ad...
+                        time:   [43.874 ns 44.029 ns 44.192 ns]
+                        thrpt:  [5.7702 Gelem/s 5.7917 Gelem/s 5.8121 Gelem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=32_labels/encoding=...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=32_labels/encoding=...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=32_labels/encoding=...: Collecting 20 samples in estimated 5.0001 s (7.2M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=255/request=32_labels/encoding=...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=255/request=32_labels/encoding=...
+                        time:   [684.53 ns 686.54 ns 688.32 ns]
+                        thrpt:  [370.47 Melem/s 371.43 Melem/s 372.52 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=empty/en...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=empty/en...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=empty/en...: Collecting 20 samples in estimated 5.0000 s (938M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=empty/en...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=empty/en...
+                        time:   [5.2975 ns 5.3072 ns 5.3202 ns]
+                        thrpt:  [187.96 Melem/s 188.42 Melem/s 188.77 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=one_exac...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=one_exac...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=one_exac...: Collecting 20 samples in estimated 5.0000 s (82M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=one_exac...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=one_exac...
+                        time:   [59.322 ns 59.883 ns 60.320 ns]
+                        thrpt:  [16.578 Melem/s 16.699 Melem/s 16.857 Melem/s]
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=bounded_...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=bounded_...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=bounded_...: Collecting 20 samples in estimated 5.0008 s (43k iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=bounded_...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65534/request_shape=bounded_...
+                        time:   [114.66 µs 115.10 µs 115.81 µs]
+                        thrpt:  [35.367 Melem/s 35.586 Melem/s 35.724 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=first/encoding=ad...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=first/encoding=ad...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=first/encoding=ad...: Collecting 20 samples in estimated 5.0000 s (84M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=first/encoding=ad...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=first/encoding=ad...
+                        time:   [58.455 ns 58.808 ns 59.241 ns]
+                        thrpt:  [69.142 Gelem/s 69.651 Gelem/s 70.071 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=last/encoding=ada...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=last/encoding=ada...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=last/encoding=ada...: Collecting 20 samples in estimated 5.0000 s (84M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=last/encoding=ada...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=last/encoding=ada...
+                        time:   [59.159 ns 59.447 ns 59.791 ns]
+                        thrpt:  [68.505 Gelem/s 68.902 Gelem/s 69.237 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low severe
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=missing/encoding=...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=missing/encoding=...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=missing/encoding=...: Collecting 20 samples in estimated 5.0000 s (113M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=missing/encoding=...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=missing/encoding=...
+                        time:   [44.154 ns 44.370 ns 44.657 ns]
+                        thrpt:  [91.722 Gelem/s 92.315 Gelem/s 92.767 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=32_labels/encodin...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=32_labels/encodin...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=32_labels/encodin...: Collecting 20 samples in estimated 5.0001 s (7.3M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=32_labels/encodin...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65534/request=32_labels/encodin...
+                        time:   [684.20 ns 686.73 ns 691.35 ns]
+                        thrpt:  [5.9246 Gelem/s 5.9645 Gelem/s 5.9866 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=empty/en...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=empty/en...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=empty/en...: Collecting 20 samples in estimated 5.0000 s (939M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=empty/en...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=empty/en...
+                        time:   [5.3112 ns 5.3251 ns 5.3470 ns]
+                        thrpt:  [187.02 Melem/s 187.79 Melem/s 188.28 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=one_exac...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=one_exac...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=one_exac...: Collecting 20 samples in estimated 5.0000 s (83M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=one_exac...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=one_exac...
+                        time:   [59.369 ns 59.727 ns 60.183 ns]
+                        thrpt:  [16.616 Melem/s 16.743 Melem/s 16.844 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=bounded_...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=bounded_...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=bounded_...: Collecting 20 samples in estimated 5.0107 s (44k iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=bounded_...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65535/request_shape=bounded_...
+                        time:   [114.01 µs 114.67 µs 115.68 µs]
+                        thrpt:  [35.408 Melem/s 35.721 Melem/s 35.926 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=first/encoding=ad...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=first/encoding=ad...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=first/encoding=ad...: Collecting 20 samples in estimated 5.0000 s (86M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=first/encoding=ad...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=first/encoding=ad...
+                        time:   [57.841 ns 58.166 ns 58.508 ns]
+                        thrpt:  [70.007 Gelem/s 70.420 Gelem/s 70.815 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=last/encoding=ada...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=last/encoding=ada...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=last/encoding=ada...: Collecting 20 samples in estimated 5.0000 s (85M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=last/encoding=ada...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=last/encoding=ada...
+                        time:   [58.946 ns 59.350 ns 59.788 ns]
+                        thrpt:  [68.509 Gelem/s 69.015 Gelem/s 69.488 Gelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=missing/encoding=...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=missing/encoding=...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=missing/encoding=...: Collecting 20 samples in estimated 5.0000 s (114M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=missing/encoding=...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=missing/encoding=...
+                        time:   [44.077 ns 44.263 ns 44.491 ns]
+                        thrpt:  [92.064 Gelem/s 92.537 Gelem/s 92.929 Gelem/s]
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) low mild
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=32_labels/encodin...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=32_labels/encodin...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=32_labels/encodin...: Collecting 20 samples in estimated 5.0001 s (7.2M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=32_labels/encodin...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65535/request=32_labels/encodin...
+                        time:   [693.18 ns 698.69 ns 705.77 ns]
+                        thrpt:  [5.8036 Gelem/s 5.8624 Gelem/s 5.9090 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=empty/en...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=empty/en...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=empty/en...: Collecting 20 samples in estimated 5.0000 s (933M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=empty/en...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=empty/en...
+                        time:   [5.3234 ns 5.3436 ns 5.3810 ns]
+                        thrpt:  [185.84 Melem/s 187.14 Melem/s 187.85 Melem/s]
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) high mild
+  1 (5.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=one_exac...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=one_exac...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=one_exac...: Collecting 20 samples in estimated 5.0000 s (85M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=one_exac...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=one_exac...
+                        time:   [57.734 ns 58.098 ns 58.483 ns]
+                        thrpt:  [17.099 Melem/s 17.212 Melem/s 17.321 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=bounded_...
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=bounded_...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=bounded_...: Collecting 20 samples in estimated 5.0232 s (43k iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=bounded_...: Analyzing
+open_type_filter_resolution/query_surface=filter_resolution/label_count=65536/request_shape=bounded_...
+                        time:   [115.20 µs 115.98 µs 116.84 µs]
+                        thrpt:  [35.055 Melem/s 35.316 Melem/s 35.557 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=first/encoding=ad...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=first/encoding=ad...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=first/encoding=ad...: Collecting 20 samples in estimated 5.0000 s (87M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=first/encoding=ad...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=first/encoding=ad...
+                        time:   [57.140 ns 58.935 ns 61.195 ns]
+                        thrpt:  [66.933 Gelem/s 69.501 Gelem/s 71.683 Gelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=last/encoding=ada...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=last/encoding=ada...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=last/encoding=ada...: Collecting 20 samples in estimated 5.0000 s (87M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=last/encoding=ada...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=last/encoding=ada...
+                        time:   [57.839 ns 58.165 ns 58.637 ns]
+                        thrpt:  [69.854 Gelem/s 70.420 Gelem/s 70.817 Gelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=missing/encoding=...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=missing/encoding=...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=missing/encoding=...: Collecting 20 samples in estimated 5.0000 s (112M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=missing/encoding=...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=missing/encoding=...
+                        time:   [43.464 ns 43.998 ns 44.524 ns]
+                        thrpt:  [91.995 Gelem/s 93.095 Gelem/s 94.238 Gelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=32_labels/encodin...
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=32_labels/encodin...: Warming up for 3.0000 s
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=32_labels/encodin...: Collecting 20 samples in estimated 5.0001 s (7.4M iterations)
+Benchmarking open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=32_labels/encodin...: Analyzing
+open_type_filter_resolution/query_surface=filter_request/label_count=65536/request=32_labels/encodin...
+                        time:   [674.00 ns 677.31 ns 681.36 ns]
+                        thrpt:  [6.0115 Gelem/s 6.0474 Gelem/s 6.0772 Gelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1/depth=4/csr_direction...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1/depth=4/csr_direction...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1/depth=4/csr_direction...: Collecting 20 samples in estimated 5.0000 s (15M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1/depth=4/csr_direction...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1/depth=4/csr_direction...
+                        time:   [321.16 ns 322.63 ns 324.76 ns]
+                        thrpt:  [12.317 Melem/s 12.398 Melem/s 12.455 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=1/csr_direction...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=1/csr_direction...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=1/csr_direction...: Collecting 20 samples in estimated 5.0000 s (12M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=1/csr_direction...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=1/csr_direction...
+                        time:   [409.68 ns 410.93 ns 412.58 ns]
+                        thrpt:  [19.390 Melem/s 19.468 Melem/s 19.527 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction...: Collecting 20 samples in estimated 5.0000 s (3.7M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction...
+                        time:   [1.3891 µs 1.4207 µs 1.4527 µs]
+                        thrpt:  [22.028 Melem/s 22.524 Melem/s 23.036 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=all_matched/degree=8/depth=4/csr_directi...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=all_matched/degree=8/depth=4/csr_directi...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=all_matched/degree=8/depth=4/csr_directi...: Collecting 20 samples in estimated 5.0002 s (3.4M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=all_matched/degree=8/depth=4/csr_directi...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=all_matched/degree=8/depth=4/csr_directi...
+                        time:   [1.4668 µs 1.4724 µs 1.4777 µs]
+                        thrpt:  [21.655 Melem/s 21.733 Melem/s 21.817 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=half_of_32/degree=8/depth=4/csr_directio...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=half_of_32/degree=8/depth=4/csr_directio...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=half_of_32/degree=8/depth=4/csr_directio...: Collecting 20 samples in estimated 5.0002 s (4.8M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=half_of_32/degree=8/depth=4/csr_directio...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=half_of_32/degree=8/depth=4/csr_directio...
+                        time:   [1.0484 µs 1.0562 µs 1.0624 µs]
+                        thrpt:  [30.121 Melem/s 30.296 Melem/s 30.521 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction... #2
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction... #2: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction... #2: Collecting 20 samples in estimated 5.0002 s (3.8M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction... #2: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=4/csr_direction... #2
+                        time:   [1.3298 µs 1.3386 µs 1.3478 µs]
+                        thrpt:  [23.742 Melem/s 23.905 Melem/s 24.064 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=none_matched/degree=8/depth=4/csr_direct...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=none_matched/degree=8/depth=4/csr_direct...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=none_matched/degree=8/depth=4/csr_direct...: Collecting 20 samples in estimated 5.0000 s (28M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=none_matched/degree=8/depth=4/csr_direct...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=none_matched/degree=8/depth=4/csr_direct...
+                        time:   [189.35 ns 193.03 ns 195.40 ns]
+                        thrpt:  [163.77 Melem/s 165.78 Melem/s 169.00 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=one_of_32/degree=8/depth=4/csr_direction...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=one_of_32/degree=8/depth=4/csr_direction...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=one_of_32/degree=8/depth=4/csr_direction...: Collecting 20 samples in estimated 5.0000 s (16M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=one_of_32/degree=8/depth=4/csr_direction...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=one_of_32/degree=8/depth=4/csr_direction...
+                        time:   [312.03 ns 313.41 ns 314.75 ns]
+                        thrpt:  [101.67 Melem/s 102.10 Melem/s 102.55 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=16/csr_directio...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=16/csr_directio...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=16/csr_directio...: Collecting 20 samples in estimated 5.0003 s (1.1M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=16/csr_directio...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=8/depth=16/csr_directio...
+                        time:   [4.7279 µs 4.7506 µs 4.7790 µs]
+                        thrpt:  [26.784 Melem/s 26.944 Melem/s 27.074 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=64/depth=4/csr_directio...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=64/depth=4/csr_directio...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=64/depth=4/csr_directio...: Collecting 20 samples in estimated 5.0000 s (584k iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=64/depth=4/csr_directio...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=64/depth=4/csr_directio...
+                        time:   [8.5271 µs 8.5974 µs 8.6618 µs]
+                        thrpt:  [29.555 Melem/s 29.776 Melem/s 30.022 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1024/depth=4/csr_direct...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1024/depth=4/csr_direct...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1024/depth=4/csr_direct...: Collecting 20 samples in estimated 5.0156 s (31k iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1024/depth=4/csr_direct...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=254/selectivity=no_filter/degree=1024/depth=4/csr_direct...
+                        time:   [163.49 µs 164.30 µs 165.15 µs]
+                        thrpt:  [24.802 Melem/s 24.929 Melem/s 25.053 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=255/selectivity=no_filter/degree=8/depth=4/csr_direction...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=255/selectivity=no_filter/degree=8/depth=4/csr_direction...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=255/selectivity=no_filter/degree=8/depth=4/csr_direction...: Collecting 20 samples in estimated 5.0001 s (3.8M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=255/selectivity=no_filter/degree=8/depth=4/csr_direction...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=255/selectivity=no_filter/degree=8/depth=4/csr_direction...
+                        time:   [1.3429 µs 1.3599 µs 1.3779 µs]
+                        thrpt:  [23.223 Melem/s 23.530 Melem/s 23.829 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65534/selectivity=no_filter/degree=8/depth=4/csr_directi...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65534/selectivity=no_filter/degree=8/depth=4/csr_directi...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65534/selectivity=no_filter/degree=8/depth=4/csr_directi...: Collecting 20 samples in estimated 5.0002 s (3.7M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65534/selectivity=no_filter/degree=8/depth=4/csr_directi...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=65534/selectivity=no_filter/degree=8/depth=4/csr_directi...
+                        time:   [1.3383 µs 1.3437 µs 1.3497 µs]
+                        thrpt:  [23.708 Melem/s 23.814 Melem/s 23.911 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65535/selectivity=no_filter/degree=8/depth=4/csr_directi...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65535/selectivity=no_filter/degree=8/depth=4/csr_directi...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65535/selectivity=no_filter/degree=8/depth=4/csr_directi...: Collecting 20 samples in estimated 5.0001 s (3.6M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65535/selectivity=no_filter/degree=8/depth=4/csr_directi...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=65535/selectivity=no_filter/degree=8/depth=4/csr_directi...
+                        time:   [1.3504 µs 1.3558 µs 1.3624 µs]
+                        thrpt:  [23.489 Melem/s 23.603 Melem/s 23.697 Melem/s]
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65536/selectivity=no_filter/degree=8/depth=4/csr_directi...
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65536/selectivity=no_filter/degree=8/depth=4/csr_directi...: Warming up for 3.0000 s
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65536/selectivity=no_filter/degree=8/depth=4/csr_directi...: Collecting 20 samples in estimated 5.0001 s (3.7M iterations)
+Benchmarking open_type_bfs/query_surface=bfs/label_count=65536/selectivity=no_filter/degree=8/depth=4/csr_directi...: Analyzing
+open_type_bfs/query_surface=bfs/label_count=65536/selectivity=no_filter/degree=8/depth=4/csr_directi...
+                        time:   [1.3549 µs 1.3641 µs 1.3779 µs]
+                        thrpt:  [23.224 Melem/s 23.458 Melem/s 23.618 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe

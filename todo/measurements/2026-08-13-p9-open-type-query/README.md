@@ -41,12 +41,32 @@ python3 todo/measurements/2026-08-13-p9-open-type-query/check_results.py \
   --budget-commit dd730b8
 ```
 
-Criterion measures internal production Rust seams. The PostgreSQL runner
+The `cargo bench` Criterion run measures internal production Rust seams. The PostgreSQL runner
 measures the public SQL surfaces with same-backend warmups. The resource runner
 measures real PostgreSQL backend RSS and Linux PSS inside Docker. These are
 different evidence domains and their artifact-byte fields are not interchangeable.
 
-No retained-result claim is made at this checkpoint. A later clean measurement
-commit will add raw inputs, normalized summaries, exact host/toolchain metadata,
-and run `check_results.py`. If a predeclared budget fails, P9 remains open and
-the adverse result is retained without changing the budget.
+## Retained result
+
+Exact commit: `a07b662523180685af3bc65cbb56921a38fe21ec`.
+
+The deterministic checker passed all budgets frozen at `dd730b8`, verified the
+measurement commit's ancestry, and reconciled every raw input with its summary:
+65 Criterion cases, eight PostgreSQL cases, and Linux resource runs with 1, 4,
+and 8 backends. The 65,536-label resource fixture retained distinct real
+PostgreSQL PIDs and nonzero PSS for every backend. Its 8-to-1 total query PSS
+ratio was 5.86x and its baseline-subtracted ratio was 6.36x, both below the
+9.0x limit. The immutable projection used 54.7 bytes per directed edge, below
+the 64-byte limit.
+
+The `open_type_query_resources.sh` resource image was built from `git archive`
+for the exact commit. The
+retained metadata binds its image revision and source-archive SHA-256 to that
+commit. Each query-phase sample was accepted only while every exact backend PID
+reported the marked traversal statement as active.
+
+The first Criterion capture overlapped the PostgreSQL and Docker producers. One
+case produced a 21.1% confidence-interval width against the frozen 20% limit,
+so that attempt was inconclusive. Its raw and normalized outputs remain under
+`attempts/a07b662-parallel-inconclusive/`. The retained result is the complete
+65-case serial rerun from the same exact commit; no budget was changed.

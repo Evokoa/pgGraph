@@ -24,7 +24,7 @@ commit.
 |---|---|---|
 | V12.1 relationship discovery | Complete | Schema-wide and targeted discovery produce one binary mapping for supported junction tables, infer conventional dynamic label columns, preserve exact endpoint identity, and avoid inventing endpoints from composite or multi-way foreign keys. |
 | V12.2 registration reset | Complete | A backward-compatible reset option clears all selected-graph registration mappings without changing zero-argument projection-reset behavior, and stale-registration `PG000` recovery is covered. |
-| V12.3 open-type closure | In progress | P9.5d retained Criterion, SQL latency, Linux resource, compatibility, and metadata outputs pass the precommitted budgets from one clean checkpoint; public docs match shipped behavior and limits. |
+| V12.3 open-type closure | Complete | P9.5d retained Criterion, SQL latency, Linux resource, compatibility, and metadata outputs pass the precommitted budgets from one clean checkpoint; public docs match shipped behavior and limits. |
 | V12.4 release closure | Not started | Version and upgrade surfaces name 1.2.0; install/upgrade, PostgreSQL 14-18, package, documentation, and release gates pass from the reviewed release commit. |
 
 ## V12.1 Evidence
@@ -52,3 +52,20 @@ commit.
 - Strict Clippy, rustfmt, and `git diff --check` pass.
 - A fresh independent Rust review reported no findings after the ACL,
   generated-contract, and executable-quickstart remediations.
+
+## V12.3 Evidence
+
+- Exact measurement commit:
+  `a07b662523180685af3bc65cbb56921a38fe21ec`.
+- The P9 reconciler verified ancestry and raw-to-summary integrity, and passed
+  every budget frozen at `dd730b8`: 65 Criterion cases, eight PostgreSQL
+  latency cases, and Linux resource runs for 1, 4, and 8 backends.
+- The 65,536-label Linux fixture retained one real PostgreSQL PID per backend
+  with nonzero PSS. Its 8-to-1 total and baseline-subtracted query PSS ratios
+  were 5.86x and 6.36x against 9.0x limits; its immutable artifact used 54.7
+  bytes per directed edge against a 64-byte limit.
+- The resource image is commit-labeled and built from the retained
+  source-archive digest. Query samples require every exact backend PID to be
+  active in the marked traversal statement.
+- The four retained-evidence Rust contracts are active rather than ignored and
+  re-run the lineage, case-matrix, raw-summary, and budget checks.

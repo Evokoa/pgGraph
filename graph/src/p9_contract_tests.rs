@@ -850,7 +850,6 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
 }
 
 #[test]
-#[ignore = "P9.5d activates after the committed tooling produces retained Criterion evidence"]
 fn p9_retained_criterion_results_reconcile_all_predeclared_cases() {
     let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
     let estimates = retained_delimited_rows(
@@ -939,7 +938,6 @@ fn p9_retained_criterion_results_reconcile_all_predeclared_cases() {
 }
 
 #[test]
-#[ignore = "P9.5d activates after the committed tooling produces retained PostgreSQL evidence"]
 fn p9_retained_postgres_results_cover_low_and_high_cardinality_surfaces() {
     let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
     let samples = retained_delimited_rows(
@@ -1029,7 +1027,6 @@ fn p9_retained_postgres_results_cover_low_and_high_cardinality_surfaces() {
 }
 
 #[test]
-#[ignore = "P9.5d activates after the committed tooling produces retained Linux resource evidence"]
 fn p9_retained_linux_resources_use_real_backend_pids_and_nonzero_pss() {
     let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");
     let samples = retained_delimited_rows(
@@ -1129,7 +1126,6 @@ fn p9_retained_linux_resources_use_real_backend_pids_and_nonzero_pss() {
 }
 
 #[test]
-#[ignore = "P9.5d activates after all retained evidence reconciles against predeclared budgets"]
 fn p9_retained_metadata_and_checker_reconcile_budgets_and_lineage() {
     const BUDGET_COMMIT: &str = "dd730b8";
     let evidence = repo_path("todo/measurements/2026-08-13-p9-open-type-query");

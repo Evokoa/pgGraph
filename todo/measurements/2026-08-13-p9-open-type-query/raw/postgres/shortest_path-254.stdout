@@ -1,0 +1,13 @@
+pgbench (17.9 (Homebrew), server 17.10)
+transaction type: ../todo/measurements/2026-08-13-p9-open-type-query/raw/postgres/shortest_path-254.sql
+scaling factor: 1
+query mode: extended
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+number of transactions per client: 50
+number of transactions actually processed: 50/50
+number of failed transactions: 0 (0.000%)
+latency average = 39.472 ms
+initial connection time = 43.116 ms
+tps = 25.334645 (without initial connection time)

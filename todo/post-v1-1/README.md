@@ -148,17 +148,16 @@ public documentation, retained evidence, and independent Rust review are green.
 | P6 | Complete | The existing `EdgeTypeId` is the one production checked authority across logical consumers and v6 adapters; behavior and v6 bytes remain unchanged, and retained evidence selects adaptive 1/2/4-byte physical storage for P7. |
 | P7 | Complete | Runtime topology and rebuilt immutable v7 bases use checked logical IDs with adaptive 1/2/4-byte storage, explicit dictionary policies, v6 read compatibility, and atomic candidate validation. Incremental unseen labels remain in P8. |
 | P8 | Complete | Adaptive v7 mutable segments and a checksummed cumulative dictionary support durable unseen labels. Transaction-local provisional labels preserve exact spelling, filters, RLS completeness, savepoints, resource limits, and base-registry identity without mutating durable state before commit. |
-| P9 | In progress (P9.5d evidence tooling checkpoint) | P9.1 enables adaptive mutable base builds. P9.2 adds bounded filter inputs, paginated inventory, a bounded status preview, and O(1) dynamic-RLS type policy. P9.3 binds explicit dynamic types structurally without scanning source vocabulary. P9.4 lowers eligible label-column equality and adds the exact width-boundary query matrix. P9.5a adds property and fuzz evidence; P9.5b proves genuine v6/v7 compatibility and source plus packaged behavior on PostgreSQL 14–18. P9.5c freezes the exact benchmark/resource cases and budgets before measurement. P9.5d now has committed producers and a deterministic reconciler; retained results must come from a later clean commit and pass the frozen budgets. |
+| P9 | Complete | Adaptive open relationship types build and sync durably, bind and filter exactly through traversal/GQL/Cypher, remain v6 read compatible, and pass the PostgreSQL 14–18 compatibility matrix. P9.5d retains 65 Criterion cases, eight PostgreSQL cases, and 1/4/8-backend Linux resource evidence from exact commit `a07b662523180685af3bc65cbb56921a38fe21ec`; all budgets frozen at `dd730b8` pass. |
 | P10 | Not started | The private batch contract validates and types bounded ordered input once, rejects duplicate identities, and proves no per-input DML loop. |
 | P11 | Not started | Set-based node `CREATE`/`MERGE` preserve RLS, constraints, triggers, partitions, ordinality, atomicity, savepoints, and idempotent replay. |
 | P12 | Not started | Set-based relationship `CREATE`/`MERGE` resolve endpoints and identities set-wise, support open labels and parallel edges, and expose same-transaction node-to-edge ingestion. |
 | P13 | Not started | `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE` reuse the bounded relation; sync, reload, compaction, cancellation, and concurrency gates are green. |
 | P14 | Not started | Contracts, update/install paths, supported-feature docs, benchmarks, fuzz/property suites, and PostgreSQL 14-18 package matrices pass on one reviewed commit. |
 
-Development resumed on `dev` after the 1.1 release. The interrupted P9.5d
-measurement output is not retained evidence; P9 closes only after fresh results
-from one later clean development commit pass the precommitted budgets. P10-P14
-remain outside the 1.2 release program.
+Development resumed on `dev` after the 1.1 release. Fresh P9.5d results from
+exact commit `a07b662523180685af3bc65cbb56921a38fe21ec` pass the precommitted budgets
+and close P9. P10-P14 remain outside the 1.2 release program.
 
 ## Phase details
 

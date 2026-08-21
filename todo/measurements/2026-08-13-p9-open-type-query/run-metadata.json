@@ -1,0 +1,106 @@
+{
+  "budget_commit": "dd730b8",
+  "capture_host": {
+    "machine": "arm64",
+    "release": "25.5.0",
+    "system": "Darwin"
+  },
+  "criterion": {
+    "benchmark_command": "cargo +1.96.0 bench --features 'pg17 benchmarks' --bench open_type_query_bench",
+    "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+    "command": "./graph/tests/heavy/run_open_type_query_criterion.sh",
+    "run_log_sha256": "54f19e5c085958c0dcb53d3b5e615a0117cbfb5fba9f8266ecf615b5bb083ea8",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)"
+  },
+  "git_status_clean": true,
+  "measurement_commit": "a07b662523180685af3bc65cbb56921a38fe21ec",
+  "postgres": {
+    "command": "./graph/tests/heavy/open_type_query_latency.sh",
+    "pgbench": "pgbench (PostgreSQL) 17.9 (Homebrew)",
+    "settings": {
+      "memory_limit_mb": 2048,
+      "query_memory_mb": 512
+    },
+    "version": "PostgreSQL 17.9 (Homebrew)"
+  },
+  "resources": {
+    "command": "./graph/tests/heavy/run_open_type_query_resources_docker.sh",
+    "docker": {
+      "Client": {
+        "ApiVersion": "1.51",
+        "Arch": "arm64",
+        "BuildTime": "Fri Jul 25 11:33:03 2025",
+        "Context": "desktop-linux",
+        "DefaultAPIVersion": "1.51",
+        "GitCommit": "980b856",
+        "GoVersion": "go1.24.5",
+        "Os": "darwin",
+        "Version": "28.3.3"
+      },
+      "Server": {
+        "ApiVersion": "1.51",
+        "Arch": "arm64",
+        "BuildTime": "2025-07-25T11:35:32.000000000+00:00",
+        "Components": [
+          {
+            "Details": {
+              "ApiVersion": "1.51",
+              "Arch": "arm64",
+              "BuildTime": "Fri Jul 25 11:35:32 2025",
+              "Experimental": "false",
+              "GitCommit": "bea959c",
+              "GoVersion": "go1.24.5",
+              "KernelVersion": "6.10.14-linuxkit",
+              "MinAPIVersion": "1.24",
+              "Os": "linux"
+            },
+            "Name": "Engine",
+            "Version": "28.3.3"
+          },
+          {
+            "Details": {
+              "GitCommit": "05044ec0a9a75232cad458027ca83437aae3f4da"
+            },
+            "Name": "containerd",
+            "Version": "1.7.27"
+          },
+          {
+            "Details": {
+              "GitCommit": "v1.2.5-0-g59923ef"
+            },
+            "Name": "runc",
+            "Version": "1.2.5"
+          },
+          {
+            "Details": {
+              "GitCommit": "de40ad0"
+            },
+            "Name": "docker-init",
+            "Version": "0.19.0"
+          }
+        ],
+        "GitCommit": "bea959c",
+        "GoVersion": "go1.24.5",
+        "KernelVersion": "6.10.14-linuxkit",
+        "MinAPIVersion": "1.24",
+        "Os": "linux",
+        "Platform": {
+          "Name": "Docker Desktop 4.45.0 (203075)"
+        },
+        "Version": "28.3.3"
+      }
+    },
+    "docker_build_log_sha256": "ccaa9025bef742043aade0429496164548d4e99e08f39e215f3dcae0cd711397",
+    "docker_resource_log_sha256": "78e590b3067733692fb3f79c98c25543ee1cb77e78376542975c2e3bfeabc00a",
+    "image_id": "sha256:d8fa22dabb52355ba42442cb839f089b74902521942b4a6bd2b3620679c64fa7",
+    "image_revision": "a07b662523180685af3bc65cbb56921a38fe21ec",
+    "kernel": "Linux 721477199ae2 6.10.14-linuxkit #1 SMP Thu Aug 14 19:26:13 UTC 2025 aarch64 GNU/Linux",
+    "os": "Linux",
+    "postgres": "PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2)",
+    "repo_digests": [
+      "pggraph@sha256:d8fa22dabb52355ba42442cb839f089b74902521942b4a6bd2b3620679c64fa7"
+    ],
+    "source_archive_sha256": "0239bd6e15b3bc56bbed66d60395b5989758350d718204bdbcdd691b71599285"
+  },
+  "schema_version": 1
+}

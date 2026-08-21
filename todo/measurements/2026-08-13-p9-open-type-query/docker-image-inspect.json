@@ -1,0 +1,93 @@
+[
+    {
+        "Id": "sha256:d8fa22dabb52355ba42442cb839f089b74902521942b4a6bd2b3620679c64fa7",
+        "RepoTags": [
+            "pggraph:p9-open-type-resources-a07b66252318"
+        ],
+        "RepoDigests": [
+            "pggraph@sha256:d8fa22dabb52355ba42442cb839f089b74902521942b4a6bd2b3620679c64fa7"
+        ],
+        "Parent": "",
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-08-21T02:36:57.45196538Z",
+        "DockerVersion": "",
+        "Author": "",
+        "Architecture": "arm64",
+        "Os": "linux",
+        "Size": 1391165407,
+        "GraphDriver": {
+            "Data": null,
+            "Name": "overlayfs"
+        },
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:84779591fc57aec53d6ea41b81ecda94b4246d98a671768e35b93d0e59937bb6",
+                "sha256:1a300d7ba41c0e1d8cc2cdbe1a2d853b84062a9c3871bb9acec03f2bb6fb66a4",
+                "sha256:f28dfcac8971c89facb6efb8523905973b1c3eff2b1fad7f6b294ca9d8a967b2",
+                "sha256:483ee8bf286eb9514f4b3439f518c3d7aab294d57cc6ce2c81e5444c04282e72",
+                "sha256:bf5a8aa096dc92e07cd17e61cf72d04f0bf2696191a635d64fffa986a040f992",
+                "sha256:30439f9546240d00720f1ea6913ee16357400fe965b0a74b03b4d79086984be8",
+                "sha256:ba0abc08e99f4288095fa2ca6f9b94ffd89f622d8319d470f34fee0243e74899",
+                "sha256:3f1955559de292bbfed0c0759bcb16923d8c612bbf491c52430aff9348fcb405",
+                "sha256:721d79392460f93a5a26af5ea131f7be69c405586fcc7ffbeab61bcc5186fb43",
+                "sha256:127fa3719dbe957c0a09b3f870485d66ef9ee45b80277bbcefcfd79a1f2d767c",
+                "sha256:3cf76a102f6e704d6061c9b0c16cbf21659bda5a5fdd4f8e5c181cfc35a37183",
+                "sha256:244f14d60a9b23f27ebfcec13bd0a1d8361b33d970eddae3329601ee9ac82380",
+                "sha256:d92c2ab7d04910d7a78042a6afa2a6a5b963296a656a2f98ddc6eeddf4992d6b",
+                "sha256:25d4c3d294c60ddeda56c1a2b1c1304cfc2f4e9ed8417f2a9a39ecbde5be3db7",
+                "sha256:f5c93262bfdc71419223a187fb17b127a6b09b49cd88973f65d6b3495bb134ad",
+                "sha256:571a4d86e45e67902b2bd89bbda650efff393e5edb6423605dc313dcc60cb3d5",
+                "sha256:08ade6a49a717a71e3fad8a2d692afc2751d215ac29a42d82357af0ce5ddc55c",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-08-21T02:37:33.241042632Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:d8fa22dabb52355ba42442cb839f089b74902521942b4a6bd2b3620679c64fa7",
+            "size": 856
+        },
+        "Config": {
+            "Cmd": [
+                "bash"
+            ],
+            "Entrypoint": null,
+            "Env": [
+                "PATH=/usr/local/cargo/bin:/home/pggraph/.cargo/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "RUSTUP_HOME=/home/pggraph/.rustup",
+                "CARGO_HOME=/home/pggraph/.cargo",
+                "RUST_VERSION=1.96.0",
+                "CARGO_NET_RETRY=5",
+                "CARGO_HTTP_TIMEOUT=300",
+                "CARGO_HTTP_MULTIPLEXING=false",
+                "USER=pggraph",
+                "LOGNAME=pggraph"
+            ],
+            "Labels": {
+                "org.opencontainers.image.revision": "a07b662523180685af3bc65cbb56921a38fe21ec",
+                "org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust"
+            },
+            "OnBuild": null,
+            "Shell": [
+                "/bin/bash",
+                "-o",
+                "pipefail",
+                "-c"
+            ],
+            "User": "pggraph",
+            "Volumes": null,
+            "WorkingDir": "/src/graph"
+        }
+    }
+]
