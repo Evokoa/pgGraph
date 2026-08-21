@@ -353,9 +353,15 @@ registered tables, edges, and filter columns. Both forms require graph-admin
 privileges; neither changes PostgreSQL source tables or registrations belonging
 to another graph.
 
+| Call | Projection and artifacts | Registrations | Source tables | Other graphs |
+|---|---|---|---|---|
+| `graph.reset()` | Cleared for the selected graph | Preserved | Unchanged | Unchanged |
+| `graph.reset(true)` | Cleared for the selected graph | Cleared for the selected graph | Unchanged | Unchanged |
+
 <Callout type="error">
 Both reset forms remove the selected graph's persisted artifact root. The source
 tables remain unchanged, but graph queries for that graph need a rebuild or a
 new persisted artifact before they can run again. After `graph.reset(true)`,
-registration must also be reapplied before the rebuild.
+reapply the table, edge, and filter registrations before calling
+`graph.build()`.
 </Callout>

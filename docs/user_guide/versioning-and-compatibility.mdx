@@ -94,6 +94,16 @@ Existing v6 graph artifacts remain readable without a blanket rebuild. New
 builds and mutable segments use adaptive v7 type storage; rebuild when you want
 the base artifact itself to carry more than 254 relationship types.
 
+<Callout type="info">
+The update does not clear registrations. The existing `graph.reset()` call
+still clears only the selected graph's projection and artifacts. Use
+`graph.reset(true)` when you intentionally need to clear its registrations,
+such as when stale relation OIDs produce `PG000`. Reapply every required
+registration before calling `graph.build()`. See
+[Stale Registration Produces PG000](/user_guide/troubleshooting#stale-registration-produces-pg000)
+for the recovery sequence.
+</Callout>
+
 The historical 1.0.0-to-1.1.0 update uses:
 
 ```sql

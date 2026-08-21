@@ -58,9 +58,19 @@ registrations. PostgreSQL 14 through 18 remain supported.
 - Composite foreign keys, repeated endpoint columns, alternate unique-key
   references, and three-or-more-endpoint tables are left for explicit mapping
   instead of being guessed into incorrect graph edges.
-- `graph.reset()` remains projection-only. `graph.reset(true)` additionally
-  clears the selected graph's table, edge, and filter registrations while
-  preserving PostgreSQL source rows and other named graphs.
+
+### Registration-Clearing Reset
+
+- The new `graph.reset(boolean)` overload provides a direct recovery path for
+  stale registrations. `graph.reset(true)` clears the selected graph's
+  projection, artifacts, tables, edges, and filter registrations.
+- The zero-argument `graph.reset()` call remains projection-only and preserves
+  registrations for a rebuild.
+- Neither form modifies PostgreSQL source tables or other named graphs. After
+  `graph.reset(true)`, reapply the selected graph's registrations before
+  calling `graph.build()`.
+- See [Stale Registration Produces PG000](/user_guide/troubleshooting#stale-registration-produces-pg000)
+  for the recovery sequence.
 
 ### Upgrade, Artifacts, And Rollback
 

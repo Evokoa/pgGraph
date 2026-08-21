@@ -31,6 +31,41 @@ Use `::regclass` for table arguments to `graph.add_table()`,
 `graph.add_edge()`, traversal, path, search, and related APIs. PostgreSQL also
 validates that the named relation exists when it resolves the cast.
 
+## Stale Registration Produces PG000
+
+Symptom:
+
+```text
+SQLSTATE XX000
+DETAIL: pgGraph diagnostic: PG000
+registered source relation OID ... no longer exists; re-register it
+```
+
+This error can occur after a registered table is dropped and recreated, or
+after a logical restore assigns new PostgreSQL relation OIDs. The selected
+graph still refers to the old relation identity.
+
+Clear the selected graph's derived state and stale registrations, then reapply
+the reviewed registration SQL:
+
+```sql
+SELECT graph.reset(true);
+
+SELECT graph.add_table(...);
+SELECT graph.add_edge(...);
+-- Reapply graph.add_filter_column(...) calls when used.
+
+SELECT * FROM graph.build();
+```
+
+`graph.reset(true)` does not modify PostgreSQL source tables or other named
+graphs. It does clear every registration for the selected graph, so reapply all
+required table, edge, and filter registrations before `graph.build()`.
+
+Use this recovery only when the `PG000` message identifies a stale registered
+relation or relation OID. For another `PG000` internal error, keep the full
+message and reproduction details and report the issue.
+
 ## Graph Not Built
 
 Symptom:

@@ -104,6 +104,13 @@ The rest of this page assumes you are inside that `psql` session.
 
 Paste this whole block into `psql`:
 
+<Callout type="info">
+`graph.reset(true)` removes any existing projection and registration mappings
+for the selected graph, giving this example a clean start. It does not modify
+the PostgreSQL source tables or other named graphs. Use `graph.reset()` when
+you want to rebuild while preserving registrations.
+</Callout>
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS graph;
 SELECT graph.reset(true);
