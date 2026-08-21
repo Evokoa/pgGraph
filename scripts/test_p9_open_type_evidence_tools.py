@@ -86,6 +86,7 @@ def main() -> int:
         ROOT / "scripts/extract_p9_open_type_criterion.py",
         ROOT / "scripts/summarize_p9_open_type_postgres.py",
         ROOT / "scripts/write_p9_open_type_run_metadata.py",
+        ROOT / "scripts/verify_p9_measurement_source.py",
         EVIDENCE / "check_results.py",
     ):
         subprocess.run(["python3", str(script), "--help"], check=True, capture_output=True)

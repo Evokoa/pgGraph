@@ -392,10 +392,15 @@ fn p9_open_type_query_benchmark_and_linux_backend_resource_runner_are_declared()
         "ARTIFACT_BYTES",
         "projection_artifact_bytes",
         "query-started",
+        "query-go",
         "query-done",
+        "active_query_count",
+        "pggraph-resource-query-active",
         "pg_stat_activity",
         "state = 'active'",
-        "query LIKE '%graph.traverse%'",
+        "control_count query-done",
+        "sample_phase query",
+        "PERFORM pg_sleep(0.01)",
         "max_query_total_pss_bytes",
         "query_minus_idle_total_pss_bytes",
         "label_count",
@@ -760,6 +765,9 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
     for required in [
         "phase = :'phase';",
         "phase = 'query-go'",
+        "active_query_count",
+        "pggraph-resource-query-active",
+        "activity.state = 'active'",
         "PERFORM pg_sleep(0.01)",
         "if [[ \"$done_count\" -ne 0 ]]",
     ] {
@@ -768,10 +776,7 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
             "P9 resource probe is missing `{required}`"
         );
     }
-    assert!(
-        !resource_probe.contains("pg_stat_activity"),
-        "P9 resource sampling must not depend on pg_stat_activity query text"
-    );
+    assert!(resource_probe.contains("active_count=\"$(active_query_count)\""));
 
     let docker = repo_source("graph/tests/heavy/run_open_type_query_resources_docker.sh");
     for required in [
@@ -784,6 +789,9 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "export PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin",
         "CARGO_TARGET_DIR=/tmp/pggraph-target",
         "cd /src/graph && cargo pgrx start pg17",
+        "git -C \"$ROOT_DIR\" archive --format=tar \"$RUN_ID\"",
+        "--build-arg SOURCE_COMMIT=\"$RUN_ID\"",
+        "source-archive.sha256",
     ] {
         assert!(
             docker.contains(required),
@@ -819,6 +827,8 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
         "resource-postgres-version.txt",
         "docker-version.json",
         "run-metadata.json",
+        "source-archive.sha256",
+        "image revision differs from measurement commit",
     ] {
         assert!(
             metadata_writer.contains(required),

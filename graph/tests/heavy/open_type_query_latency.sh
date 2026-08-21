@@ -2,6 +2,10 @@
 set -euo pipefail
 shopt -s nullglob
 
+GRAPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$GRAPH_DIR/.." && pwd)"
+RUN_ID="${RUN_ID:?RUN_ID is required}"
+
 DBNAME="${DBNAME:-pggraph_open_type_latency}"
 if [[ ! "$DBNAME" =~ ^pggraph_[A-Za-z0-9_]+$ ]]; then
   echo "DBNAME must match ^pggraph_[A-Za-z0-9_]+$" >&2
@@ -53,6 +57,11 @@ if [[ ! -x "$PGBENCH" ]]; then
   echo "pgbench is unavailable at $PGBENCH" >&2
   exit 2
 fi
+
+python3 "$REPO_ROOT/scripts/verify_p9_measurement_source.py" \
+  --repo-root "$REPO_ROOT" \
+  --evidence-dir "$OUTPUT_DIR" \
+  --measurement-commit "$RUN_ID"
 
 cleanup() {
   if [[ "$database_created" -eq 1 ]]; then

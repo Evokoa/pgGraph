@@ -5,6 +5,12 @@ GRAPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "$GRAPH_DIR/.." && pwd)"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$REPO_ROOT/todo/measurements/2026-08-13-p9-open-type-query}"
 CRITERION_ROOT="$GRAPH_DIR/target/criterion"
+RUN_ID="${RUN_ID:?RUN_ID is required}"
+
+python3 "$REPO_ROOT/scripts/verify_p9_measurement_source.py" \
+  --repo-root "$REPO_ROOT" \
+  --evidence-dir "$EVIDENCE_DIR" \
+  --measurement-commit "$RUN_ID"
 
 mkdir -p "$EVIDENCE_DIR"
 EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd)"

@@ -161,7 +161,7 @@ for backend in $(seq 1 "$BACKEND_COUNT"); do
     printf "DO \$wait\$ BEGIN WHILE NOT EXISTS (SELECT 1 FROM public.open_type_resource_control WHERE worker = 0 AND phase = 'query') LOOP PERFORM pg_sleep(0.05); END LOOP; END \$wait\$;\n"
     printf "INSERT INTO public.open_type_resource_control VALUES (%s, 'query-started');\n" "$backend"
     printf "DO \$wait\$ BEGIN WHILE NOT EXISTS (SELECT 1 FROM public.open_type_resource_control WHERE worker = 0 AND phase = 'query-go') LOOP PERFORM pg_sleep(0.01); END LOOP; END \$wait\$;\n"
-    printf "DO \$query\$ DECLARE round_no integer; BEGIN FOR round_no IN 1..%s LOOP PERFORM count(*) FROM graph.traverse('public.open_type_resource_nodes'::regclass, '1', %s, hydrate := false); PERFORM pg_sleep(0.01); END LOOP; END \$query\$;\n" "$QUERY_ROUNDS" "$DEPTH"
+    printf "DO \$query\$ DECLARE round_no integer; BEGIN PERFORM 1 /* pggraph-resource-query-active */; FOR round_no IN 1..%s LOOP PERFORM count(*) FROM graph.traverse('public.open_type_resource_nodes'::regclass, '1', %s, hydrate := false); PERFORM pg_sleep(0.01); END LOOP; END \$query\$;\n" "$QUERY_ROUNDS" "$DEPTH"
     printf "INSERT INTO public.open_type_resource_control VALUES (%s, 'query-done');\n" "$backend"
     printf 'SELECT pg_sleep(2);\n'
   } >"$sql_file"
@@ -220,6 +220,25 @@ control_count() {
     | psql -X -v ON_ERROR_STOP=1 -At -d "$DBNAME" -v phase="$phase"
 }
 
+active_query_count() {
+  local pid_values=""
+  for backend in $(seq 1 "$BACKEND_COUNT"); do
+    local backend_pid
+    backend_pid="$(tr -d '[:space:]' <"$WORKDIR/backend-${backend}.pid")"
+    if [[ ! "$backend_pid" =~ ^[0-9]+$ ]]; then
+      echo "invalid backend PID while checking the active query window" >&2
+      exit 1
+    fi
+    [[ -n "$pid_values" ]] && pid_values+=","
+    pid_values+="($backend_pid)"
+  done
+  printf '%s\n' \
+    "WITH expected(pid) AS (VALUES $pid_values)" \
+    "SELECT count(*) FROM expected JOIN pg_catalog.pg_stat_activity activity USING (pid)" \
+    "WHERE activity.state = 'active' AND activity.query LIKE '%pggraph-resource-query-active%';" \
+    | psql -X -v ON_ERROR_STOP=1 -At -d "$DBNAME"
+}
+
 for _ in $(seq 1 10); do
   sample_phase idle
   sleep 0.1
@@ -252,11 +271,23 @@ if [[ "${started_count:-0}" -ne "$BACKEND_COUNT" ]]; then
 fi
 psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" \
   -c "INSERT INTO public.open_type_resource_control VALUES (0, 'query-go')" >/dev/null
-sleep 0.05
+for _ in $(seq 1 300); do
+  active_count="$(active_query_count)"
+  [[ "$active_count" -eq "$BACKEND_COUNT" ]] && break
+  sleep 0.01
+done
+if [[ "${active_count:-0}" -ne "$BACKEND_COUNT" ]]; then
+  echo "resource runner timed out waiting for every backend to enter the marked traversal statement" >&2
+  exit 1
+fi
 query_samples=0
 for _ in $(seq 1 10); do
   done_count="$(control_count query-done)"
   if [[ "$done_count" -ne 0 ]]; then
+    break
+  fi
+  active_count="$(active_query_count)"
+  if [[ "$active_count" -ne "$BACKEND_COUNT" ]]; then
     break
   fi
   sample_phase query

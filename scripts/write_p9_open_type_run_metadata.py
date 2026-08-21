@@ -99,6 +99,16 @@ def main() -> int:
     if not isinstance(image_inspect, list) or len(image_inspect) != 1:
         raise ValueError("Docker image inspection must contain exactly one image")
     image = image_inspect[0]
+    image_revision = (image.get("Config", {}).get("Labels") or {}).get(
+        "org.opencontainers.image.revision"
+    )
+    if image_revision != head:
+        raise ValueError("Docker resource image revision differs from measurement commit")
+    source_archive_sha256 = required_text(evidence / "source-archive.sha256")
+    if len(source_archive_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in source_archive_sha256
+    ):
+        raise ValueError("source archive SHA-256 is invalid")
     metadata = {
         "schema_version": 1,
         "budget_commit": BUDGET_COMMIT,
@@ -124,6 +134,8 @@ def main() -> int:
             "postgres": required_text(evidence / "resource-postgres-version.txt"),
             "docker": json.loads((evidence / "docker-version.json").read_text(encoding="utf-8")),
             "image_id": image["Id"],
+            "image_revision": image_revision,
+            "source_archive_sha256": source_archive_sha256,
             "repo_digests": image.get("RepoDigests") or [],
             "docker_build_log_sha256": sha256(evidence / "docker-build.log"),
             "docker_resource_log_sha256": sha256(evidence / "docker-resource.log"),

@@ -16,11 +16,13 @@ The evidence tooling is committed as a separate checkpoint. After that commit
 is clean, run the following commands from the recorded exact commit:
 
 ```bash
+RUN_ID=<full-exact-commit> \
 EVIDENCE_DIR=todo/measurements/2026-08-13-p9-open-type-query \
 ./graph/tests/heavy/run_open_type_query_criterion.sh
 
 cd graph
 PG_VERSION_FEATURE=pg17 \
+RUN_ID=<full-exact-commit> \
 OUTPUT_DIR=../todo/measurements/2026-08-13-p9-open-type-query \
 ./tests/heavy/open_type_query_latency.sh
 cd ..
