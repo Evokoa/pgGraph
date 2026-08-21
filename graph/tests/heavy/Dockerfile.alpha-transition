@@ -1,5 +1,6 @@
-ARG BASE_IMAGE=pggraph:source-archive-build-1.0.0
+ARG BASE_IMAGE=pggraph:source-archive-build-1.2.0
 FROM ${BASE_IMAGE}
+ARG GRAPH_VERSION=1.2.0
 
 USER pggraph
 COPY --chown=pggraph:pggraph alpha-graph/ /src/alpha/graph/
@@ -32,8 +33,8 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
       --no-default-features --features pg17; \
     cargo pgrx start pg17; \
     test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$DBNAME" -c 'SELECT count(*) FROM release_fixture_people')" = "3"; \
-    psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c "CREATE EXTENSION graph VERSION '1.0.0';"; \
+    psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -c "CREATE EXTENSION graph VERSION '${GRAPH_VERSION}';"; \
     psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -f /src/fixture/register.sql; \
     psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" -f /src/fixture/verify.sql; \
-    test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$DBNAME" -c "SELECT extversion FROM pg_extension WHERE extname = 'graph'")" = "1.0.0"; \
+    test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$DBNAME" -c "SELECT extversion FROM pg_extension WHERE extname = 'graph'")" = "${GRAPH_VERSION}"; \
     cargo pgrx stop pg17
