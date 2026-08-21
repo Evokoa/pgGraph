@@ -143,6 +143,14 @@ SELECT * FROM graph.auto_discover('public');
 `graph.auto_discover('public')` registers discovered source tables, discovers
 foreign keys between them, and builds the graph.
 
+Binary junction tables with two distinct single-column foreign keys to
+single-column primary keys are registered as one relationship rather than two
+independent foreign-key edges. A surrogate-key relationship table with that
+endpoint shape and a conventional type column such as `relationship_name` is
+also inferred as one dynamic relationship mapping. Preview or register
+manually when your schema does not follow those conventions; see
+[Schema Registration](/user_guide/schema-registration#auto-discovery).
+
 If you want to limit discovery to specific tables, use
 `graph.auto_discover_tables()`:
 

@@ -193,6 +193,24 @@ fn reset_and_create_fixtures() {
     Spi::run("SET graph.mutable_enabled = off").expect("reset mutable_enabled failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_junction_pgtest CASCADE")
         .expect("drop junction failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_typed_junction_pgtest CASCADE")
+        .expect("drop typed junction failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_relationship_sources_pgtest CASCADE")
+        .expect("drop relationship sources failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_composite_fk_child_pgtest CASCADE")
+        .expect("drop composite FK child failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_composite_fk_parent_pgtest CASCADE")
+        .expect("drop composite FK parent failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_three_way_junction_pgtest CASCADE")
+        .expect("drop three-way junction failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_ambiguous_typed_edge_pgtest CASCADE")
+        .expect("drop ambiguous typed edge failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_alternate_key_edge_pgtest CASCADE")
+        .expect("drop alternate-key edge failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_alternate_key_node_pgtest CASCADE")
+        .expect("drop alternate-key node failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_duplicate_endpoint_pgtest CASCADE")
+        .expect("drop duplicate endpoint failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_friendships_pgtest CASCADE")
         .expect("drop friendships failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_companies_pgtest CASCADE")

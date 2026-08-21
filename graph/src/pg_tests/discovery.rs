@@ -69,7 +69,7 @@ fn auto_discover_classifies_junction_tables_as_edges() {
     .expect("insert junction failed");
 
     // Use discover_schema() directly to test classification without triggering build()
-    let (tables, _edges, discoveries) =
+    let (tables, edges, discoveries) =
         crate::discover::discover_schema("public").expect("discover_schema failed");
 
     // Junction table should NOT appear as a registered table (node)
@@ -94,6 +94,237 @@ fn auto_discover_classifies_junction_tables_as_edges() {
         "junction",
         "junction table should have item_type 'junction'"
     );
+
+    let junction_edges = edges
+        .iter()
+        .filter(|edge| edge.from_table.contains("graph_test_junction_pgtest"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        junction_edges.len(),
+        1,
+        "a two-endpoint junction must register as one relationship edge"
+    );
+    assert_eq!(junction_edges[0].from_column, "user_id");
+    assert_eq!(junction_edges[0].to_column, "friend_id");
+}
+
+#[pg_test]
+fn auto_discover_classifies_typed_surrogate_key_junction_as_dynamic_edge() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name) VALUES ('shared', 'Wrong source');
+         CREATE TABLE public.graph_test_relationship_sources_pgtest (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL
+         );
+         INSERT INTO public.graph_test_relationship_sources_pgtest VALUES ('shared', 'Right source');
+         CREATE TABLE public.graph_test_typed_junction_pgtest (
+                id                TEXT PRIMARY KEY,
+                source_id         TEXT NOT NULL REFERENCES public.graph_test_relationship_sources_pgtest(id),
+                target_id         TEXT NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+                relationship_name VARCHAR(255) NOT NULL
+            )",
+    )
+    .expect("create typed junction failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_typed_junction_pgtest
+             (id, source_id, target_id, relationship_name)
+         VALUES ('r1', 'shared', 'u2', 'co_authored_with')",
+    )
+    .expect("insert typed junction failed");
+
+    let (tables, edges, discoveries) =
+        crate::discover::discover_schema("public").expect("discover_schema failed");
+
+    assert!(
+        !tables
+            .iter()
+            .any(|table| table.table_name.contains("graph_test_typed_junction_pgtest")),
+        "a conventional typed relationship table must not be registered as a node"
+    );
+    assert!(discoveries.iter().any(|item| {
+        item.item_type == "junction" && item.item_name == "graph_test_typed_junction_pgtest"
+    }));
+
+    let typed_edges = edges
+        .iter()
+        .filter(|edge| {
+            edge.from_table
+                .contains("graph_test_typed_junction_pgtest")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(typed_edges.len(), 1);
+    assert_eq!(typed_edges[0].from_column, "source_id");
+    assert_eq!(typed_edges[0].to_column, "target_id");
+    assert_eq!(
+        typed_edges[0].label_column.as_deref(),
+        Some("relationship_name")
+    );
+
+    Spi::run(
+        "SELECT * FROM graph.auto_discover_tables(
+             ARRAY[
+                 'graph_test_users_pgtest'::regclass,
+                 'graph_test_relationship_sources_pgtest'::regclass,
+                 'graph_test_typed_junction_pgtest'::regclass
+             ]
+         )",
+    )
+    .expect("targeted typed-junction discovery failed");
+    let registered = Spi::get_one::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM graph.registered_edges()
+             WHERE from_table LIKE '%graph_test_typed_junction_pgtest'
+               AND from_column = 'source_id'
+               AND to_column = 'target_id'
+               AND label_column = 'relationship_name'
+         )",
+    )
+    .expect("read typed-junction registration failed")
+    .unwrap_or(false);
+    let projected_type = Spi::get_one::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM graph.edge_types()
+             WHERE label = 'co_authored_with'
+         )",
+    )
+    .expect("read discovered dynamic relationship type failed")
+    .unwrap_or(false);
+    assert!(registered);
+    assert!(projected_type);
+
+    let reached_expected_target = Spi::get_one::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM graph.traverse(
+                 'graph_test_relationship_sources_pgtest'::regclass,
+                 'shared',
+                 1,
+                 edge_types := ARRAY['co_authored_with'],
+                 direction := 'out',
+                 include_start := false,
+                 hydrate := false
+             )
+             WHERE node_table = 'graph_test_users_pgtest'::regclass
+               AND node_id = 'u2'
+         )",
+    )
+    .expect("traverse discovered typed relationship failed")
+    .unwrap_or(false);
+    assert!(
+        reached_expected_target,
+        "build must bind the source endpoint through its declared foreign key"
+    );
+}
+
+#[pg_test]
+fn auto_discover_does_not_invent_relationships_from_composite_or_three_way_fks() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "CREATE TABLE public.graph_test_composite_fk_parent_pgtest (
+             tenant_id TEXT NOT NULL,
+             id TEXT NOT NULL,
+             PRIMARY KEY (tenant_id, id)
+         );
+         CREATE TABLE public.graph_test_composite_fk_child_pgtest (
+             tenant_id TEXT NOT NULL,
+             id TEXT NOT NULL,
+             PRIMARY KEY (tenant_id, id),
+             FOREIGN KEY (tenant_id, id)
+                 REFERENCES public.graph_test_composite_fk_parent_pgtest(tenant_id, id)
+         );
+         CREATE TABLE public.graph_test_three_way_junction_pgtest (
+             first_id TEXT NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+             second_id TEXT NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+             third_id TEXT NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+             PRIMARY KEY (first_id, second_id, third_id)
+         )",
+    )
+    .expect("create unsupported relationship shapes failed");
+
+    let (tables, edges, discoveries) =
+        crate::discover::discover_schema("public").expect("discover_schema failed");
+    assert!(tables.iter().any(|table| {
+        table
+            .table_name
+            .contains("graph_test_composite_fk_child_pgtest")
+    }));
+    assert!(!edges.iter().any(|edge| {
+        edge.from_table
+            .contains("graph_test_composite_fk_child_pgtest")
+    }));
+    assert!(!discoveries.iter().any(|item| {
+        item.item_type == "junction"
+            && item.item_name == "graph_test_three_way_junction_pgtest"
+    }));
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| {
+                edge.from_table
+                    .contains("graph_test_three_way_junction_pgtest")
+            })
+            .count(),
+        3,
+        "three-way tables retain ordinary FK discovery instead of an invented binary mapping"
+    );
+}
+
+#[pg_test]
+fn auto_discover_rejects_ambiguous_or_non_primary_endpoint_inference() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "CREATE TABLE public.graph_test_duplicate_endpoint_pgtest (
+             id TEXT PRIMARY KEY
+         );
+         INSERT INTO public.graph_test_duplicate_endpoint_pgtest VALUES ('u1');
+         CREATE TABLE public.graph_test_ambiguous_typed_edge_pgtest (
+             id TEXT PRIMARY KEY,
+             endpoint_id TEXT NOT NULL,
+             relationship_name TEXT NOT NULL,
+             FOREIGN KEY (endpoint_id) REFERENCES public.graph_test_users_pgtest(id),
+             FOREIGN KEY (endpoint_id) REFERENCES public.graph_test_duplicate_endpoint_pgtest(id)
+         );
+         CREATE TABLE public.graph_test_alternate_key_node_pgtest (
+             id TEXT PRIMARY KEY,
+             external_key TEXT NOT NULL UNIQUE
+         );
+         CREATE TABLE public.graph_test_alternate_key_edge_pgtest (
+             id TEXT PRIMARY KEY,
+             source_external_key TEXT NOT NULL
+                 REFERENCES public.graph_test_alternate_key_node_pgtest(external_key),
+             target_id TEXT NOT NULL REFERENCES public.graph_test_users_pgtest(id),
+             relationship_name TEXT NOT NULL
+         )",
+    )
+    .expect("create ambiguous endpoint fixtures failed");
+
+    let (tables, edges, discoveries) =
+        crate::discover::discover_schema("public").expect("discover_schema failed");
+    for table_name in [
+        "graph_test_ambiguous_typed_edge_pgtest",
+        "graph_test_alternate_key_edge_pgtest",
+    ] {
+        assert!(
+            tables
+                .iter()
+                .any(|table| table.table_name.contains(table_name)),
+            "{table_name} must remain a node/manual-registration shape"
+        );
+        assert!(!discoveries
+            .iter()
+            .any(|item| item.item_type == "junction" && item.item_name == table_name));
+        assert!(!edges.iter().any(|edge| {
+            edge.from_table.contains(table_name) && edge.label_column.is_some()
+        }));
+    }
+    assert!(!edges.iter().any(|edge| {
+        edge.from_table
+            .contains("graph_test_alternate_key_edge_pgtest")
+            && edge.from_column == "source_external_key"
+    }));
 }
 
 #[pg_test]

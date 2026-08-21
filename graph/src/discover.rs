@@ -8,6 +8,9 @@
 //! - **Composite entities** (≥1 PK column is not a FK) → registered as nodes with
 //!   a typed primary-key column set. The builder generates
 //!   `jsonb_build_array(col1::text, col2::text)::text` as the PK string.
+//! - **Typed relationship tables** with a surrogate key, exactly two foreign
+//!   keys, and a conventional relationship-type text column are registered as
+//!   one dynamic edge mapping rather than as nodes.
 //!
 //! See: `docs/user_guide/schema-registration.mdx`
 
@@ -35,6 +38,7 @@ struct DiscoveredTable {
     pk_columns: Vec<String>,
     id_is_primary: bool,
     text_columns: Vec<String>,
+    relationship_label_column: Option<String>,
 }
 
 /// Auto-discover tables and foreign keys from a schema.
@@ -56,6 +60,8 @@ pub fn discover_schema(
     // AND junction table classification)
     let schema_fks = discover_foreign_keys(schema_name)?;
 
+    let mut relationship_oids = HashSet::new();
+
     // Step 3: Classify each table
     for table in &discovered_tables {
         if table.pk_columns.is_empty() {
@@ -63,7 +69,16 @@ pub fn discover_schema(
             continue;
         }
 
-        if table.pk_columns.len() == 1 {
+        let table_oid = required_table_oid(table)?;
+        let label_column = dynamic_relationship_label_column(table);
+        let is_typed_relationship = table.pk_columns.len() == 1
+            && label_column.is_some()
+            && has_binary_endpoint_shape(table_oid, &schema_fks);
+
+        if is_typed_relationship {
+            relationship_oids.insert(table_oid);
+            discoveries.push(relationship_discovery(table, label_column));
+        } else if table.pk_columns.len() == 1 {
             // Single-column PK tables are registered as node tables.
             let id_column = table.pk_columns[0].clone();
             discoveries.push(DiscoveryResult {
@@ -97,8 +112,7 @@ pub fn discover_schema(
             );
 
             if is_junction {
-                // Junction table: all PK cols are FKs — register FK edges from this table
-                // (the FK edges are already picked up in Step 4 below, so just log a NOTICE)
+                relationship_oids.insert(table_oid);
                 pgrx::notice!(
                     "graph: table '{}' has composite PK ({}) where all columns are foreign keys — treated as a junction table (edges only, not a node)",
                     table.table_name,
@@ -141,8 +155,31 @@ pub fn discover_schema(
         }
     }
 
-    // Step 4: Register FK relationships as edges
-    for fk in &schema_fks {
+    // Step 4: Register junction/relationship tables as one edge per endpoint
+    // pair, then register ordinary foreign keys independently.
+    for relationship_oid in &relationship_oids {
+        let table = discovered_tables
+            .iter()
+            .find(|table| table.table_oid == Some(*relationship_oid))
+            .ok_or_else(|| {
+                GraphError::Internal(format!(
+                    "relationship discovery lost table OID {}",
+                    relationship_oid
+                ))
+            })?;
+        register_relationship_edges(
+            table,
+            &schema_fks,
+            dynamic_relationship_label_column(table),
+            &mut edges,
+            &mut discoveries,
+        )?;
+    }
+
+    for fk in schema_fks.iter().filter(|fk| {
+        fk.from_oid
+            .is_none_or(|from_oid| !relationship_oids.contains(&from_oid))
+    }) {
         let label = edge_label(&fk.from_column);
 
         discoveries.push(DiscoveryResult {
@@ -189,14 +226,23 @@ pub fn discover_table_set(
     let selected_oids = table_oids.iter().copied().collect::<HashSet<_>>();
     let discovered_tables = discover_tables_by_oid(table_oids)?;
     let selected_fks = discover_foreign_keys_for_tables(table_oids)?;
-    let mut junction_oids = HashSet::new();
+    let mut relationship_oids = HashSet::new();
 
     for table in &discovered_tables {
         if let Some(column) = tenant_column {
             validate_column_exists(required_table_oid(table)?, column)?;
         }
 
-        if table.pk_columns.len() == 1 {
+        let table_oid = required_table_oid(table)?;
+        let label_column = dynamic_relationship_label_column(table);
+        let is_typed_relationship = table.pk_columns.len() == 1
+            && label_column.is_some()
+            && has_binary_endpoint_shape(table_oid, &selected_fks);
+
+        if is_typed_relationship {
+            relationship_oids.insert(table_oid);
+            discoveries.push(relationship_discovery(table, label_column));
+        } else if table.pk_columns.len() == 1 {
             let id_column = table.pk_columns[0].clone();
             discoveries.push(DiscoveryResult {
                 item_type: "table".to_string(),
@@ -216,7 +262,7 @@ pub fn discover_table_set(
                 &selected_fks,
             )
         {
-            junction_oids.insert(required_table_oid(table)?);
+            relationship_oids.insert(table_oid);
             pgrx::notice!(
                 "graph: table '{}' has composite PK ({}) where all columns are foreign keys — treated as a junction table (edges only, not a node)",
                 table.table_name,
@@ -251,34 +297,23 @@ pub fn discover_table_set(
         }
     }
 
-    for junction_oid in &junction_oids {
-        let junction_fks = selected_fks
+    for relationship_oid in &relationship_oids {
+        let table = discovered_tables
             .iter()
-            .filter(|fk| fk.from_oid == Some(*junction_oid))
-            .collect::<Vec<_>>();
-        let Some(first_fk) = junction_fks.first() else {
-            continue;
-        };
-        for fk in junction_fks.iter().skip(1) {
-            let label = edge_label(&fk.from_column);
-            discoveries.push(DiscoveryResult {
-                item_type: "edge".to_string(),
-                item_name: format!(
-                    "{}.{} → {}.{}",
-                    first_fk.from_table, first_fk.from_column, fk.to_table, fk.from_column
-                ),
-                details: format!("label={}, bidirectional=true", label),
-            });
-            edges.push(registered_edge(
-                *junction_oid,
-                regclass_text(*junction_oid)?,
-                &first_fk.from_column,
-                required_fk_oid(fk.to_oid, "junction target")?,
-                regclass_text(required_fk_oid(fk.to_oid, "junction target")?)?,
-                &fk.from_column,
-                &fk.from_column,
-            ));
-        }
+            .find(|table| table.table_oid == Some(*relationship_oid))
+            .ok_or_else(|| {
+                GraphError::Internal(format!(
+                    "relationship discovery lost table OID {}",
+                    relationship_oid
+                ))
+            })?;
+        register_relationship_edges(
+            table,
+            &selected_fks,
+            dynamic_relationship_label_column(table),
+            &mut edges,
+            &mut discoveries,
+        )?;
     }
 
     for fk in selected_fks
@@ -292,7 +327,7 @@ pub fn discover_table_set(
         })
         .filter(|fk| {
             fk.from_oid
-                .is_none_or(|from_oid| !junction_oids.contains(&from_oid))
+                .is_none_or(|from_oid| !relationship_oids.contains(&from_oid))
         })
     {
         let label = edge_label(&fk.from_column);
@@ -388,6 +423,8 @@ fn discover_tables_with_pks(schema_name: &str) -> GraphResult<Vec<DiscoveredTabl
     let mut discovered = Vec::new();
     for (table_oid, table_name, pk_columns) in table_map {
         let text_columns = discover_text_columns(schema_name, &table_name, &pk_columns)?;
+        let relationship_label_column =
+            discover_dynamic_relationship_label_column(schema_name, &table_name)?;
         discovered.push(DiscoveredTable {
             table_oid: Some(table_oid),
             schema_name: schema_name.to_string(),
@@ -395,6 +432,7 @@ fn discover_tables_with_pks(schema_name: &str) -> GraphResult<Vec<DiscoveredTabl
             pk_columns,
             id_is_primary: true,
             text_columns,
+            relationship_label_column,
         });
     }
 
@@ -439,6 +477,46 @@ fn discover_text_columns(
     Ok(columns)
 }
 
+fn discover_dynamic_relationship_label_column(
+    schema_name: &str,
+    table_name: &str,
+) -> GraphResult<Option<String>> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT column_name::text
+                   FROM information_schema.columns
+                  WHERE table_schema = $1
+                    AND table_name = $2
+                    AND lower(column_name) IN (
+                        'relationship_name', 'relationship_type', 'edge_type', 'rel_type'
+                    )
+                    AND data_type IN ('text', 'character varying')
+                  ORDER BY CASE lower(column_name)
+                      WHEN 'relationship_name' THEN 1
+                      WHEN 'relationship_type' THEN 2
+                      WHEN 'edge_type' THEN 3
+                      WHEN 'rel_type' THEN 4
+                      ELSE 5
+                  END
+                  LIMIT 1",
+                None,
+                &[schema_name.into(), table_name.into()],
+            )
+            .map_err(|error| {
+                GraphError::Internal(format!(
+                    "relationship label-column discovery failed: {error}"
+                ))
+            })?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        row.get::<String>(1).map_err(|error| {
+            GraphError::Internal(format!("relationship label-column read failed: {error}"))
+        })
+    })
+}
+
 /// Discover all foreign key relationships in a schema.
 fn discover_foreign_keys(schema_name: &str) -> GraphResult<Vec<DiscoveredFk>> {
     let fk_query = "SELECT
@@ -456,7 +534,14 @@ fn discover_foreign_keys(schema_name: &str) -> GraphResult<Vec<DiscoveredFk>> {
          JOIN pg_catalog.unnest(c.confkey) WITH ORDINALITY AS fk_to(attnum, n) ON fk_to.n = fk_from.n
          JOIN pg_catalog.pg_attribute from_attr ON from_attr.attrelid = c.conrelid AND from_attr.attnum = fk_from.attnum
          JOIN pg_catalog.pg_attribute to_attr ON to_attr.attrelid = c.confrelid AND to_attr.attnum = fk_to.attnum
+         JOIN pg_catalog.pg_index to_primary
+           ON to_primary.indrelid = c.confrelid
+          AND to_primary.indisprimary
+          AND to_primary.indnkeyatts = 1
+          AND to_attr.attnum = ANY(to_primary.indkey::smallint[])
          WHERE c.contype = 'f'
+           AND pg_catalog.cardinality(c.conkey) = 1
+           AND pg_catalog.cardinality(c.confkey) = 1
            AND from_namespace.nspname = $1
          ORDER BY c.conrelid, c.oid, fk_from.n";
 
@@ -581,6 +666,8 @@ fn discover_tables_by_oid(table_oids: &[u32]) -> GraphResult<Vec<DiscoveredTable
     for oid in table_oids {
         let (schema_name, table_name, id_is_primary, pk_columns) = discover_identifier(*oid)?;
         let text_columns = discover_text_columns(&schema_name, &table_name, &pk_columns)?;
+        let relationship_label_column =
+            discover_dynamic_relationship_label_column(&schema_name, &table_name)?;
         tables.push(DiscoveredTable {
             table_oid: Some(*oid),
             schema_name,
@@ -588,6 +675,7 @@ fn discover_tables_by_oid(table_oids: &[u32]) -> GraphResult<Vec<DiscoveredTable
             pk_columns,
             id_is_primary,
             text_columns,
+            relationship_label_column,
         });
     }
     Ok(tables)
@@ -668,7 +756,14 @@ fn discover_foreign_keys_for_tables(table_oids: &[u32]) -> GraphResult<Vec<Disco
          JOIN unnest(c.confkey) WITH ORDINALITY AS fk_to(attnum, n) ON fk_to.n = fk_from.n
          JOIN pg_catalog.pg_attribute from_attr ON from_attr.attrelid = c.conrelid AND from_attr.attnum = fk_from.attnum
          JOIN pg_catalog.pg_attribute to_attr ON to_attr.attrelid = c.confrelid AND to_attr.attnum = fk_to.attnum
+         JOIN pg_catalog.pg_index to_primary
+           ON to_primary.indrelid = c.confrelid
+          AND to_primary.indisprimary
+          AND to_primary.indnkeyatts = 1
+          AND to_attr.attnum = ANY(to_primary.indkey::smallint[])
          WHERE c.contype = 'f'
+           AND pg_catalog.cardinality(c.conkey) = 1
+           AND pg_catalog.cardinality(c.confkey) = 1
            AND c.conrelid::bigint = ANY($1::int8[])
            AND c.confrelid::bigint = ANY($1::int8[])
          ORDER BY c.conrelid, c.oid, fk_from.n";
@@ -796,6 +891,99 @@ fn registered_edge(
     }
 }
 
+fn outgoing_foreign_keys(table_oid: u32, foreign_keys: &[DiscoveredFk]) -> Vec<&DiscoveredFk> {
+    let mut outgoing = foreign_keys
+        .iter()
+        .filter(|foreign_key| foreign_key.from_oid == Some(table_oid))
+        .collect::<Vec<_>>();
+    outgoing.sort_by_key(|foreign_key| endpoint_order(&foreign_key.from_column));
+    outgoing
+}
+
+fn has_binary_endpoint_shape(table_oid: u32, foreign_keys: &[DiscoveredFk]) -> bool {
+    let outgoing = outgoing_foreign_keys(table_oid, foreign_keys);
+    outgoing.len() == 2 && outgoing[0].from_column != outgoing[1].from_column
+}
+
+fn endpoint_order(column: &str) -> u8 {
+    match column.to_ascii_lowercase().as_str() {
+        "source_id" | "from_id" | "start_id" | "subject_id" => 0,
+        "target_id" | "to_id" | "end_id" | "object_id" => 2,
+        _ => 1,
+    }
+}
+
+fn dynamic_relationship_label_column(table: &DiscoveredTable) -> Option<&str> {
+    table.relationship_label_column.as_deref()
+}
+
+fn relationship_discovery(table: &DiscoveredTable, label_column: Option<&str>) -> DiscoveryResult {
+    let details = label_column.map_or_else(
+        || {
+            format!(
+                "composite pk=[{}], all columns are FKs — registered as edges",
+                table.pk_columns.join(", ")
+            )
+        },
+        |column| {
+            format!(
+                "two foreign-key endpoints, dynamic label column={} — registered as an edge",
+                column
+            )
+        },
+    );
+    DiscoveryResult {
+        item_type: "junction".to_string(),
+        item_name: table.table_name.clone(),
+        details,
+    }
+}
+
+fn register_relationship_edges(
+    table: &DiscoveredTable,
+    foreign_keys: &[DiscoveredFk],
+    label_column: Option<&str>,
+    edges: &mut Vec<RegisteredEdge>,
+    discoveries: &mut Vec<DiscoveryResult>,
+) -> GraphResult<()> {
+    let table_oid = required_table_oid(table)?;
+    let relationship_fks = outgoing_foreign_keys(table_oid, foreign_keys);
+    let Some(source_fk) = relationship_fks.first() else {
+        return Ok(());
+    };
+
+    for target_fk in relationship_fks.iter().skip(1) {
+        let label = edge_label(&target_fk.from_column);
+        let label_details = label_column
+            .map(|column| format!(", label_column={column}"))
+            .unwrap_or_default();
+        discoveries.push(DiscoveryResult {
+            item_type: "edge".to_string(),
+            item_name: format!(
+                "{}.{} → {}.{}",
+                source_fk.from_table,
+                source_fk.from_column,
+                target_fk.to_table,
+                target_fk.from_column
+            ),
+            details: format!("label={}, bidirectional=true{}", label, label_details),
+        });
+        let target_oid = required_fk_oid(target_fk.to_oid, "relationship target")?;
+        let mut edge = registered_edge(
+            table_oid,
+            regclass_text(table_oid)?,
+            &source_fk.from_column,
+            target_oid,
+            regclass_text(target_oid)?,
+            &target_fk.from_column,
+            &target_fk.from_column,
+        );
+        edge.label_column = label_column.map(ToString::to_string);
+        edges.push(edge);
+    }
+    Ok(())
+}
+
 fn required_table_oid(table: &DiscoveredTable) -> GraphResult<u32> {
     table.table_oid.ok_or_else(|| {
         GraphError::Internal(format!(
@@ -834,10 +1022,16 @@ fn classify_as_junction(
         .map(|fk| fk.from_column.as_str())
         .collect();
 
-    // Check if every PK column is also a FK source column
-    pk_columns
+    // Only a two-endpoint relationship has an unambiguous binary graph shape.
+    fk_source_columns
         .iter()
-        .all(|pk_col| fk_source_columns.contains(&pk_col.as_str()))
+        .copied()
+        .collect::<HashSet<_>>()
+        .len()
+        == 2
+        && pk_columns
+            .iter()
+            .all(|pk_col| fk_source_columns.contains(&pk_col.as_str()))
 }
 
 #[cfg(test)]
@@ -845,7 +1039,10 @@ mod tests {
     //! Covers schema discovery classification, especially junction-table
     //! detection from primary-key and foreign-key relationships.
 
-    use super::{classify_as_junction, edge_label, registered_edge, DiscoveredFk};
+    use super::{
+        classify_as_junction, dynamic_relationship_label_column, edge_label, outgoing_foreign_keys,
+        registered_edge, DiscoveredFk, DiscoveredTable,
+    };
 
     fn fk(from_table: &str, from_column: &str, to_table: &str, to_column: &str) -> DiscoveredFk {
         DiscoveredFk {
@@ -882,6 +1079,27 @@ mod tests {
         assert!(!classify_as_junction(
             None,
             "order_lines",
+            &pk_columns,
+            &schema_fks
+        ));
+    }
+
+    #[test]
+    fn classify_as_junction_rejects_non_binary_endpoint_sets() {
+        let pk_columns = vec![
+            "first_id".to_string(),
+            "second_id".to_string(),
+            "third_id".to_string(),
+        ];
+        let schema_fks = vec![
+            fk("memberships", "first_id", "nodes", "id"),
+            fk("memberships", "second_id", "nodes", "id"),
+            fk("memberships", "third_id", "nodes", "id"),
+        ];
+
+        assert!(!classify_as_junction(
+            None,
+            "memberships",
             &pk_columns,
             &schema_fks
         ));
@@ -961,6 +1179,45 @@ mod tests {
         assert!(edge.bidirectional);
         assert_eq!(edge.weight_column, None);
         assert_eq!(edge.label_column, None);
+    }
+
+    #[test]
+    fn typed_relationship_conventions_select_label_and_endpoint_direction() {
+        let table = DiscoveredTable {
+            table_oid: Some(11),
+            schema_name: "public".to_string(),
+            table_name: "relationships".to_string(),
+            pk_columns: vec!["id".to_string()],
+            id_is_primary: true,
+            text_columns: vec!["note".to_string(), "relationship_name".to_string()],
+            relationship_label_column: Some("relationship_name".to_string()),
+        };
+        let foreign_keys = vec![
+            DiscoveredFk {
+                from_oid: Some(11),
+                from_table: "relationships".to_string(),
+                from_column: "target_id".to_string(),
+                to_oid: Some(12),
+                to_table: "nodes".to_string(),
+                to_column: "id".to_string(),
+            },
+            DiscoveredFk {
+                from_oid: Some(11),
+                from_table: "relationships".to_string(),
+                from_column: "source_id".to_string(),
+                to_oid: Some(12),
+                to_table: "nodes".to_string(),
+                to_column: "id".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            dynamic_relationship_label_column(&table),
+            Some("relationship_name")
+        );
+        let ordered = outgoing_foreign_keys(11, &foreign_keys);
+        assert_eq!(ordered[0].from_column, "source_id");
+        assert_eq!(ordered[1].from_column, "target_id");
     }
 
     #[test]

@@ -349,6 +349,31 @@ calls `graph.build()` unless `build := false`.
 SELECT * FROM graph.auto_discover('public');
 ```
 
+Auto-discovery treats a composite-primary-key table with exactly two
+single-column foreign-key constraints, where both key columns are foreign-key
+sources and both constraints reference single-column primary keys, as a
+relationship table. That two-endpoint junction produces one edge mapping, not
+one edge per foreign key. Composite foreign keys and references to alternate
+unique keys are not split or guessed into endpoints. Tables with three or more
+endpoints retain ordinary table and foreign-key discovery; preview the result
+and register them manually when they represent hyperedges rather than entities.
+
+It also recognizes the common open-vocabulary relationship shape: a table with
+one surrogate primary key, exactly two outgoing foreign keys, and a text column
+named `relationship_name`, `relationship_type`, `edge_type`, or `rel_type`.
+That table is registered as one edge mapping and the conventional text column
+becomes its dynamic `label_column`. Endpoint names `source_id`, `from_id`,
+`start_id`, and `subject_id` take source precedence; `target_id`, `to_id`,
+`end_id`, and `object_id` take target precedence. Otherwise PostgreSQL catalog
+foreign-key order is used.
+
+The conventional label may be `text` or any width of `varchar`; its type is
+discovered independently of the narrower property-column heuristic. This
+convention is deliberately narrow. Use `graph.preview_discover_tables()` to
+inspect inferred mappings, and register manually when a two-FK table is a node
+entity, repeats one endpoint column, references an alternate unique key, or
+needs different direction, weight, tenant, or label semantics.
+
 `graph.auto_discover_tables()` limits discovery to selected tables and FK edges
 between only those tables:
 

@@ -21,7 +21,7 @@ use std::time::Instant;
 use pgrx::prelude::*;
 
 use crate::build_spool::{create_node_lookup_spool, NodeLookupBatch};
-use crate::catalog::{estimated_table_rows, sql_table_name_from_oid};
+use crate::catalog::{estimated_table_rows, foreign_key_target_table_oid, sql_table_name_from_oid};
 use crate::config::BuildScanMode;
 use crate::edge_store::{
     IdentifiedRawEdge, RawEdge, RelationshipId, RelationshipIdentity, SortedEdgeStoreBuilder,
@@ -531,7 +531,14 @@ pub(crate) fn build_graph_with_governor(
         } else {
             None
         };
-        let from_oid = Some(edge.from_table_oid);
+        let from_oid = if tables
+            .iter()
+            .any(|table| table.table_oid == edge.from_table_oid)
+        {
+            Some(edge.from_table_oid)
+        } else {
+            foreign_key_target_table_oid(edge.from_table_oid, &edge.from_column)?
+        };
         let to_oid = Some(edge.to_table_oid);
         let fk_style_source = from_oid.and_then(|_| {
             tables
