@@ -254,6 +254,7 @@ psql -X -v ON_ERROR_STOP=1 -d "$DBNAME" \
   -c "INSERT INTO public.open_type_resource_control VALUES (0, 'query-go')" >/dev/null
 PID_LIST="$(for backend in $(seq 1 "$BACKEND_COUNT"); do tr -d '[:space:]' <"$WORKDIR/backend-${backend}.pid"; done | paste -sd, -)"
 query_samples=0
+max_active_count=0
 for _ in $(seq 1 6000); do
   done_count="$(control_count query-done)"
   if [[ "$done_count" -eq "$BACKEND_COUNT" ]]; then
@@ -261,6 +262,9 @@ for _ in $(seq 1 6000); do
   fi
   active_count="$(psql -X -v ON_ERROR_STOP=1 -At -d "$DBNAME" \
     -c "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid = ANY (ARRAY[$PID_LIST]) AND state = 'active' AND query LIKE '%graph.traverse%'")"
+  if (( active_count > max_active_count )); then
+    max_active_count="$active_count"
+  fi
   if [[ "$active_count" -eq "$BACKEND_COUNT" ]]; then
     sample_phase query
     query_samples=$((query_samples + 1))
@@ -269,7 +273,8 @@ for _ in $(seq 1 6000); do
 done
 done_count="$(control_count query-done)"
 if [[ "$done_count" -ne "$BACKEND_COUNT" || "$query_samples" -eq 0 ]]; then
-  echo "resource runner did not capture a synchronized query-phase sample" >&2
+  echo "resource runner did not capture a synchronized query-phase sample (done=$done_count, samples=$query_samples, max_active=$max_active_count)" >&2
+  cat "$WORKDIR"/backend-*.out >&2
   exit 1
 fi
 
