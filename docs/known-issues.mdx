@@ -1,6 +1,6 @@
 # Known Issues
 
-This page lists known user-visible limitations in pgGraph 1.1. See
+This page lists known user-visible limitations in pgGraph 1.2. See
 [Release Notes](./release-notes) for resolved issues and
 [Roadmap](./roadmap) for planned expansion.
 
@@ -22,7 +22,7 @@ health, retry, and failure guidance in
 
 ### RLS protects results, not every timing or resource side channel
 
-pgGraph 1.1 excludes caller-hidden node and relationship identities before
+pgGraph 1.2 excludes caller-hidden node and relationship identities before
 they can affect observable topology. The resource governor may still charge
 projection entries examined while constructing or applying that visibility
 boundary. The supported contract is PostgreSQL-like result and topology

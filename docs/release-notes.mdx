@@ -12,6 +12,7 @@ so these sections remain explicit.
 
 | Release history |
 |---|
+| [v1.2.0](#v1-2-0-pggraph-open-vocabulary-relationship-types) |
 | [v1.1.0](#v1-1-0-pggraph-caller-scoped-rls-and-safe-replacement) |
 | [v1.0.0](#v1-0-0-pggraph-production-release) |
 | [v0.1.8](#v0-1-8-named-graphs-and-production-release-hardening) |
@@ -23,6 +24,66 @@ so these sections remain explicit.
 | [v0.1.2](#v0-1-2-alpha-hardening-follow-up) |
 | [v0.1.1](#v0-1-1-alpha-hardening-critical-paths) |
 | [v0.1.0](#v0-1-0-initial-alpha) |
+
+## v1.2.0: pgGraph Open-Vocabulary Relationship Types
+
+pgGraph 1.2 removes the historical 254-label graph ceiling for
+LLM-generated and other open-vocabulary relationship types while keeping
+compact physical storage and explicit resource limits. It also makes typed
+relationship tables safer to discover and adds a clean recovery path for stale
+registrations. PostgreSQL 14 through 18 remain supported.
+
+### Open Relationship Types
+
+- Relationship types now use a checked logical `EdgeTypeId(u32)`. A graph may
+  contain up to 1,000,000 distinct types, with a 1,024-byte UTF-8 limit per
+  label and a 256 MiB cumulative dictionary limit.
+- New v7 bases and mutable segments select one-, two-, or four-byte type
+  storage, so graphs with small vocabularies retain byte-sized edge type IDs.
+- Trigger-backed committed `graph.apply_sync()` interns valid unseen labels
+  and publishes the updated dictionary without requiring a full rebuild.
+- `traverse`, shortest paths, explicit GQL/Cypher relationship types, and
+  eligible `WHERE r.relationship_name = $x` predicates use exact compact type
+  filters. Absent types return no match; ambiguous endpoint mappings fail
+  closed.
+- `graph.edge_types()` pages the complete effective dictionary in stable ID
+  order. `graph.status()` keeps a bounded 64-entry preview. Type-filter arrays
+  are limited to 4,096 entries and 4 MiB before allocation.
+
+### Registration And Discovery
+
+- Auto-discovery recognizes supported binary relationship tables as one edge
+  mapping, including surrogate-key tables with conventional dynamic label
+  columns such as `relationship_name`.
+- Composite foreign keys, repeated endpoint columns, alternate unique-key
+  references, and three-or-more-endpoint tables are left for explicit mapping
+  instead of being guessed into incorrect graph edges.
+- `graph.reset()` remains projection-only. `graph.reset(true)` additionally
+  clears the selected graph's table, edge, and filter registrations while
+  preserving PostgreSQL source rows and other named graphs.
+
+### Upgrade, Artifacts, And Rollback
+
+- The `1.1.0 -> 1.2.0` extension update is additive: it installs
+  `graph.edge_types()` and `graph.reset(boolean)` without replacing existing
+  function objects or changing their owners and explicit grants.
+- Existing v6 artifacts remain readable without a blanket rebuild. New builds
+  publish v7 artifacts. Rebuild when the base artifact itself must represent
+  more than 254 relationship types.
+- In-place downgrade is not supported. A 1.1 binary cannot read 1.2 v7
+  artifacts and must not be installed over 1.2 catalogs. Rollback restores the
+  pre-upgrade PostgreSQL backup with the matching 1.1.0 package, then rebuilds
+  derived graph state from the restored source tables.
+
+### Validation And Performance
+
+- Retained exact-commit evidence covers 65 Criterion cases, eight PostgreSQL
+  latency cases, and Linux resource runs at 1, 4, and 8 backends.
+- The 65,536-label fixture used 54.7 bytes per directed edge against a
+  64-byte budget. Its measured 8-to-1 total and baseline-subtracted query PSS
+  ratios were 5.86x and 6.36x against 9.0x limits.
+- These measurements verify the release budgets in the recorded environment;
+  they are not universal latency or memory guarantees.
 
 ## v1.1.0: pgGraph Caller-Scoped RLS And Safe Replacement
 
@@ -65,7 +126,7 @@ PostgreSQL 14 through 18 and preserves the stable 1.0 SQL result shapes.
 - The playground fully qualifies Docker Hub base images for Podman, reuses an
   already-satisfied virtual environment without requiring `sfw`, resolves
   Python shims before venv creation, deduplicates Panama nodes, scopes
-  `statement_timeout`, caches graph initialization, and pins its dataframe
+  `statement_timeout`, caches graph initialization, and pins its data-frame
   stack.
 
 - Query initialization now returns one owned state containing selected-graph
@@ -108,7 +169,7 @@ PostgreSQL 14 through 18 and preserves the stable 1.0 SQL result shapes.
   median and 3.6% p95 change versus the query-start baseline, inside the 5%/10%
   release budget.
 - Relationship-type filtering added no measurable median regression in the
-  recorded fixed-work shortest-path microbenchmark. These measurements are
+  recorded fixed-work shortest-path microbenchmarking test. These measurements are
   environment-specific evidence, not universal latency guarantees.
 
 ### Operational Notes

@@ -141,6 +141,7 @@ ARG RUN_CRASH_MATRIX=0
 ARG RUN_RUNTIME_RESOURCES=0
 ARG RUN_PG_UPGRADE_MATRIX=0
 ARG RUN_V1_UPDATE_ARTIFACT_ROLLBACK=0
+ARG RUN_V1_2_UPDATE_ARTIFACT_ROLLBACK=0
 ARG PROFILE_TIMEOUT_SECONDS=600
 
 # Linux test executables retain PostgreSQL backend references from the extension
@@ -190,6 +191,26 @@ RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
             DBNAME="pggraph_v1_1_update_pg${pg}" \
             V1_SOURCE_ARCHIVE=/tmp/pggraph-v1.0-source.tar.gz \
             ./tests/heavy/v1_1_update_artifact_rollback.sh; \
+            cargo pgrx stop "pg${pg}"; \
+        done; \
+    fi
+
+RUN --mount=type=cache,target=/home/pggraph/.cargo/registry,uid=1000,gid=1000 \
+    --mount=type=cache,target=/src/graph/target,uid=1000,gid=1000 \
+    --mount=type=secret,id=v1_1_source_aa,required=false,uid=1000 \
+    --mount=type=secret,id=v1_1_source_ab,required=false,uid=1000 \
+    --mount=type=secret,id=v1_1_source_ac,required=false,uid=1000 \
+    if [[ "${RUN_V1_2_UPDATE_ARTIFACT_ROLLBACK}" == "1" ]]; then \
+        cat /run/secrets/v1_1_source_aa /run/secrets/v1_1_source_ab /run/secrets/v1_1_source_ac \
+            > /tmp/pggraph-v1.1-source.tar.gz; \
+        for pg in ${PG_VERSIONS}; do \
+            cargo pgrx start "pg${pg}"; \
+            export PGHOST=localhost PGPORT="288${pg}"; \
+            PG_CONFIG="/usr/lib/postgresql/${pg}/bin/pg_config" \
+            PG_VERSION_FEATURE="pg${pg}" \
+            DBNAME="pggraph_v1_2_update_pg${pg}" \
+            V1_1_SOURCE_ARCHIVE=/tmp/pggraph-v1.1-source.tar.gz \
+            ./tests/heavy/v1_2_update_artifact_rollback.sh; \
             cargo pgrx stop "pg${pg}"; \
         done; \
     fi

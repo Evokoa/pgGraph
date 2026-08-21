@@ -190,7 +190,7 @@
       "command": ["./tests/heavy/run_pg_matrix_docker.sh"],
       "cwd": "graph",
       "timeout_seconds": 14400,
-      "environment": {"IMAGE": "pggraph:v1-update-artifact-rollback", "PG_VERSIONS": "14 15 16 17 18", "RUN_RUST_TESTS": "0", "RUN_PGRX_SQL": "0", "RUN_GQL_WRITE_MATRIX": "0", "RUN_DURABLE_PROJECTION_MATRIX": "0", "RUN_PACKAGE_INSTALL_MATRIX": "0", "RUN_CRASH_MATRIX": "0", "RUN_RUNTIME_RESOURCES": "0", "RUN_PG_UPGRADE_MATRIX": "0", "RUN_V1_UPDATE_ARTIFACT_ROLLBACK": "1"},
+      "environment": {"IMAGE": "pggraph:v1-update-artifact-rollback", "PG_VERSIONS": "14 15 16 17 18", "RUN_RUST_TESTS": "0", "RUN_PGRX_SQL": "0", "RUN_GQL_WRITE_MATRIX": "0", "RUN_DURABLE_PROJECTION_MATRIX": "0", "RUN_PACKAGE_INSTALL_MATRIX": "0", "RUN_CRASH_MATRIX": "0", "RUN_RUNTIME_RESOURCES": "0", "RUN_PG_UPGRADE_MATRIX": "0", "RUN_V1_2_UPDATE_ARTIFACT_ROLLBACK": "1"},
       "depends_on": ["package-install-matrix"],
       "thresholds": {"failed_updates": 0, "failed_artifact_loads": 0, "failed_restore_rollbacks": 0},
       "exclusive_resources": ["docker", "cargo-target", "pgrx-cluster", "postgres-port"]

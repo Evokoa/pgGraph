@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-1.1.0-16a34a?style=flat-square" alt="Version 1.1.0">
+    <img src="https://img.shields.io/badge/version-1.2.0-16a34a?style=flat-square" alt="Version 1.2.0">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -96,7 +96,7 @@ cd pggraph
 scripts/quickstart.sh
 ```
 
-签名的多架构镜像是 `ghcr.io/evokoa/pggraph:1.1.0`；部署前应验证其
+签名的多架构镜像是 `ghcr.io/evokoa/pggraph:1.2.0`；部署前应验证其
 digest。
 
 默认数据库是 `graph`，已预配置 `pg_cron` 和维护定时任务。
@@ -117,7 +117,7 @@ psql -h localhost -U postgres -d graph
 ## Homebrew 安装
 
 [Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) 是
-PostgreSQL 17 的便捷安装渠道。该 tap 的公式使用已签名的 1.1.0 release
+PostgreSQL 17 的便捷安装渠道。该 tap 的公式使用已签名的 1.2.0 release
 bundle。
 
 ```bash
@@ -179,13 +179,13 @@ scripts/quickstart.sh playground panama mutable
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。
 
 PostgreSQL 14 到 18 均有已发布的 Docker 镜像。未带 PostgreSQL 主版本的
-tag（例如 `1.1.0` 和 `latest`）使用默认 PostgreSQL 17 镜像。PostgreSQL
+tag（例如 `1.2.0` 和 `latest`）使用默认 PostgreSQL 17 镜像。PostgreSQL
 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按
 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
 
 ## PGXN 源码安装
 
-PGXN 提供已签名 1.1.0 release bundle 中的已验证源码 ZIP。因为 pgGraph
+PGXN 提供已签名 1.2.0 release bundle 中的已验证源码 ZIP。因为 pgGraph
 是一个 Rust/pgrx 扩展，从源码构建需要 Rust 工具链。
 
 ### 前置要求

@@ -7,9 +7,9 @@ those tables.
 
 ## Supported Release Matrix
 
-pgGraph 1.1 supports PostgreSQL 14 through 18. PostgreSQL 17 is the default
+pgGraph 1.2 supports PostgreSQL 14 through 18. PostgreSQL 17 is the default
 development and playground reference version. Published container images target
-Linux on AMD64 and ARM64, and PGXN carries the verified 1.1.0 source bundle.
+Linux on AMD64 and ARM64, and PGXN carries the verified 1.2.0 source bundle.
 
 A patch release never removes a PostgreSQL major. A minor 1.x release may
 retire a major only after upstream PostgreSQL support ends, with at least one
@@ -79,7 +79,22 @@ SELECT extversion FROM pg_extension WHERE extname = 'graph';
 SELECT * FROM graph.status();
 ```
 
-For the 1.0.0-to-1.1.0 update, use:
+For the 1.1.0-to-1.2.0 update, use:
+
+```sql
+ALTER EXTENSION graph UPDATE TO '1.2.0';
+SELECT extversion FROM pg_extension WHERE extname = 'graph';
+SELECT * FROM graph.status();
+```
+
+The update adds the paginated `graph.edge_types()` inventory and the
+registration-clearing `graph.reset(boolean)` overload. Existing SQL objects,
+owners, explicit grants, source rows, and registrations remain unchanged.
+Existing v6 graph artifacts remain readable without a blanket rebuild. New
+builds and mutable segments use adaptive v7 type storage; rebuild when you want
+the base artifact itself to carry more than 254 relationship types.
+
+The historical 1.0.0-to-1.1.0 update uses:
 
 ```sql
 ALTER EXTENSION graph UPDATE TO '1.1.0';
@@ -100,13 +115,17 @@ tables, install 1.0 cleanly, reapply the reviewed graph registration, and run
 repository's signed `v0.1.8` migration fixture verifies this source-preserving
 path.
 
-pgGraph 1.1 does not support an in-place SQL downgrade to 1.0.0. Keep the
-pre-upgrade database backup and matching 1.0.0 package until cutover is
-accepted. Rollback restores that backup into a clean database/server using the
-1.0.0 package; do not install an older shared library over 1.1 catalogs or
+pgGraph 1.2 does not support an in-place SQL downgrade to 1.1.0. Keep the
+pre-upgrade database backup and matching 1.1.0 package until cutover is
+accepted. Rollback restores that backup into a clean database or server using
+the 1.1.0 package; do not install a 1.1 shared library over 1.2 catalogs or v7
 artifacts. A logical restore assigns new relation OIDs, so treat the projection
-as derived state: run `graph.reset(true)`, re-register the restored source tables
-and relationships, and run `graph.build()` before serving graph queries.
+as derived state: on the restored 1.1 installation run `graph.reset()`,
+re-register the restored source tables and relationships, and run
+`graph.build()` before serving graph queries.
+
+The same backup-restore rule applies to the historical 1.1.0-to-1.0.0
+rollback, using the matching 1.0.0 package and zero-argument `graph.reset()`.
 
 Installing an older binary over 1.x catalogs or artifacts is unsupported.
 Binary downgrade is supported only when the target release notes say its

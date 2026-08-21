@@ -38,6 +38,7 @@ HOST_MUTATING = {
     "graph/tests/heavy/rls_large_table_baseline.sh",
     "graph/tests/heavy/phase3_update_smoke.sh",
     "graph/tests/heavy/v1_1_update_artifact_rollback.sh",
+    "graph/tests/heavy/v1_2_update_artifact_rollback.sh",
 }
 LINUX_ONLY = {
     "graph/tests/heavy/open_type_query_resources.sh",
@@ -90,6 +91,16 @@ TOOL_OVERRIDES = {
     ],
     "graph/tests/heavy/phase3_update_smoke.sh": ["bash", "cargo-pgrx", "psql", "createdb", "dropdb"],
     "graph/tests/heavy/v1_1_update_artifact_rollback.sh": [
+        "bash",
+        "cargo-pgrx",
+        "psql",
+        "pg_dump",
+        "pg_restore",
+        "createdb",
+        "dropdb",
+        "dropuser",
+    ],
+    "graph/tests/heavy/v1_2_update_artifact_rollback.sh": [
         "bash",
         "cargo-pgrx",
         "psql",
