@@ -161,7 +161,7 @@ for backend in $(seq 1 "$BACKEND_COUNT"); do
     printf "DO \$wait\$ BEGIN WHILE NOT EXISTS (SELECT 1 FROM public.open_type_resource_control WHERE worker = 0 AND phase = 'query') LOOP PERFORM pg_sleep(0.05); END LOOP; END \$wait\$;\n"
     printf "INSERT INTO public.open_type_resource_control VALUES (%s, 'query-started');\n" "$backend"
     printf "DO \$wait\$ BEGIN WHILE NOT EXISTS (SELECT 1 FROM public.open_type_resource_control WHERE worker = 0 AND phase = 'query-go') LOOP PERFORM pg_sleep(0.01); END LOOP; END \$wait\$;\n"
-    printf "DO \$query\$ DECLARE round_no integer; BEGIN FOR round_no IN 1..%s LOOP PERFORM count(*) FROM graph.traverse('public.open_type_resource_nodes'::regclass, '1', %s, hydrate := false); END LOOP; END \$query\$;\n" "$QUERY_ROUNDS" "$DEPTH"
+    printf "DO \$query\$ DECLARE round_no integer; BEGIN FOR round_no IN 1..%s LOOP PERFORM count(*) FROM graph.traverse('public.open_type_resource_nodes'::regclass, '1', %s, hydrate := false); PERFORM pg_sleep(0.01); END LOOP; END \$query\$;\n" "$QUERY_ROUNDS" "$DEPTH"
     printf "INSERT INTO public.open_type_resource_control VALUES (%s, 'query-done');\n" "$backend"
     printf 'SELECT pg_sleep(2);\n'
   } >"$sql_file"

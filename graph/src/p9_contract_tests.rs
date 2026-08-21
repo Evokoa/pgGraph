@@ -757,7 +757,11 @@ fn p9_open_type_measurement_tooling_is_declared_before_results() {
     }
 
     let resource_probe = repo_source("graph/tests/heavy/open_type_query_resources.sh");
-    for required in ["phase = :'phase';", "phase = 'query-go'"] {
+    for required in [
+        "phase = :'phase';",
+        "phase = 'query-go'",
+        "PERFORM pg_sleep(0.01)",
+    ] {
         assert!(
             resource_probe.contains(required),
             "P9 resource probe is missing `{required}`"
